@@ -242,6 +242,8 @@
 - 無人での進行を優先しつつsecret exposureを最小化する。専用local hostでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentがtask scope内で`sudo -n`を使う。恒久方針は[credential方針](../security/credentials.md)を正本とする。
 - 現在の既定profileは`trusted-solo-development`とし、外部contribution実行時とrelease時の要件を分離する。使っていないprofileの要件は現在の開発をblockしない。
 - main agentは調査・実装を直接行える。subagentは並列化、分離、専門的contextに効果がある場合だけ任意に使い、subagent利用や特定の`codex exec`実行方式を完了条件にしない。
+- 各Phaseは受入条件、検証、plan/history closeout後に、そのPhaseだけを必要最小限のcommitへ整理してcurrent GitHub branchへ
+  pushする。次Phaseの変更を同じcommitへ混ぜず、共有済み履歴の書換えやforce pushを行わない。
 - 作業単位は独立してreview・rollbackしやすい範囲とするが、細分化、immutable identity、独立review、全matrix実行を各draft checkpointの完了条件にしない。draft、integration、release/push、docs-onlyのlaneと実行手順は`AGENTS.md`を正本とする。
 - AIがhard gate、独立review必須化、広範/GPU再実行、security boundary、reuse制限、blocking stage、作業単位の追加分割、immutable evidence拡張を提案する場合、明示的なユーザー承認まではorigin・scope・cost・expiryを持つnonblocking proposalとして扱う。
 - 受入条件は作業単位の開始時に固定する。実際のcorrectness/security defectはblockerにできるが、review中に新しく作られたprocess要件は承認なしに遡及適用しない。
@@ -299,6 +301,12 @@
 18. Gemma4またはQwen3.5のMoEへ対応する。
 19. 残りの初期バージョン機能を実装する。
 20. 人間がREADMEを整備し、発表する。
+
+Phase 12のMI300Xを管理できない期間は、Phase番号と依存関係を維持したままPhase 13以降のlocal-only workを
+先行できる。現在のGitHub CI不整合は製品Phaseを繰り下げず、Phase 12待機中のremediation subphase
+`Phase 12R`としてPhase 13より先に修復する。実行順序、停止条件、Gemma 4後の共通RDNA性能bridge、枯渇防止tailは
+[Phase 12待機中のローカル先行実行キュー](active/2026/08/11-20/phase12-wait-local-forward-queue.md)を正とする。
+Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` candidateを再buildする。
 
 ## Phase概要と進捗
 
@@ -404,6 +412,8 @@
   読み替えない。
 - daily/weekly artifactは30日、release evidenceは90日保持する。性能は観測値であり、
   承認済み閾値がないためhard gateにしない。
+- Phase 12Rでself-hosted GPU jobのautomatic triggerを廃止した。profile定義はlocal daily/weekly/release controllerの正本として
+  維持し、GitHub lifecycle workflowはmanual control-planeだけを受け付ける。
 - 計画は[Phase 7 archive](archive/2026/08/11-20/phase7-ci-cd-expansion.md)、詳細は
   [Phase 7 history](../history/2026/08/11-20/phase7-ci-cd-expansion.md)を正とする。
 
@@ -473,6 +483,17 @@
   6〜8時間のintegration/performanceを別sessionにし、必要な場合だけ追加4時間を別日に使う。
 - 詳細は[Phase 12 active plan](active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
 
+### Phase 12R: CI portability repairとlocal/remote verification整理（完了）
+
+- GitHub-hosted CIをtracked checkoutだけで完結するH0〜H3 portability/compile laneとして修復し、実GPU、model、
+  llama.cpp実体比較、性能はtrusted local laneへ分離する。
+- current H0のC++ format、Git管理外llama reference依存、Rust dependency closure driftと、public-runtime/RMSNorm H3の
+  hipBLAS/hipBLASLt link不足、self-hosted GPU push pendingを修正する。
+- Phase 12の完了やMI300X PASSを意味せず、既存Phase 13〜20は繰り下げない。
+- tracked-only H0/H1/H2、hipBLAS/hipBLASLtを含むH3 link、manual self-hosted trigger、registry-driven local entrypointを
+  2026-08-15に実装した。core/public-runtime/RMSNorm H3のcanonical両targetはcompile-only PASSであり、GPU PASSではない。
+- 詳細は[Phase 12R archive](archive/2026/08/11-20/phase12r-ci-portability-repair.md)を正とする。
+
 ### Phase 13: モデル非依存prepared execution制御（計画済み）
 
 - Phase 9で`QwenExecutionCore`内へ実装したprepared operation再利用、same-stream segment owner、
@@ -481,10 +502,30 @@
   参照せず同じ制御を利用できることを確認し、Phase 14のGemma 4 adapterが再実装せず利用できる境界を固定する。
 - 詳細は[Phase 13 active plan](active/2026/08/11-20/phase13-model-neutral-execution-control.md)を正とする。
 
+### Phase 14: google/gemma-4-12B Dense text-only（計画済み）
+
+- Phase 13のmodel-neutral executorへ二つ目のproduction model adapterとして接続し、Qwen固有のwait/cache制御を
+  複製しない。
+- immutable model lock、architecture inventory、weight/graph、固有semantic op、R9700 full model、V620 bounded
+  evidence、CLI/OpenAI serviceを順に実装する。
+- 詳細は[Phase 14 active plan](active/2026/08/11-20/phase14-gemma4-dense.md)を正とする。
+
+### Phase 15: Weight NVFP4（計画済み）
+
+- Phase 14後にQwen/Gemmaのfresh profileと共通RDNA2/RDNA4最適化bridgeを行ってから着手する。
+- weight-only NVFP4としてvalue、block scale、tensor scale、packingをencoding/sidecar/loader/providerへ保持し、
+  native、packed-dequant、emulation、converted pathを区別する。
+- 詳細は[Phase 15 active plan](active/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 11まで完了した。次はPhase 12のMI300X実機確認であり、モデル非依存prepared execution制御は
-  Phase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。
+- Phase 12Rまで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、モデル非依存prepared execution制御は
+  Phase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。MI300Xを管理できない現在の実行対象は
+  Phase 13のモデル非依存prepared execution制御とする。
+- MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
+  Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
+  verification境界を修復する。Gemma 4完了をgoal終端にせず、進捗が早い場合はPhase 16〜18の詳細計画と
+  local-only実装へ続ける。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで
@@ -497,7 +538,7 @@
   non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
   [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。
 - H3 required昇格はnon-requiredのまま観測し、20回以上・7日以上の条件を満たした時点で
-  昇格だけをreviewする。Phase 4〜6をblockしない。
+  昇格だけをreviewする。Phase 12Rでcurrent H3 linkとtrigger境界を修復したがrequiredへ昇格していない。
 - 現行運用はtrusted-solo-developmentとし、draft/integration/release/docs-onlyの扱いは
   `AGENTS.md`を正とする。過去のcheckpoint固有運用を現行gateへ読み替えない。
 

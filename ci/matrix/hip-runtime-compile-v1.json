@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
   "schema_version": "hip-runtime-compile-v1",
   "matrix_id": "hip-runtime-compile-v1",
-  "revision": 3,
+  "revision": 4,
   "toolchain_id": "rocm-7.14.0",
   "container": {
     "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "5d6759949367f82e597edaf34a1650c8ebe4eca905db60e4ad748e70c75842ec"
+        "sha256": "660831575635834511f11e8f95a9ca28e818502145ba38a7cf64eabb36a0db60"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
       }
     ],
-    "source_set_sha256": "67ecd6e5e5d88d3c92fbe5391e5f236e5617d0a020a9953da3f10853fdc5fbaf"
+    "source_set_sha256": "441edc48a3de418c7d24d90ee35a2aba047200491081963f3fe8095dcbca0eed"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -239,7 +239,7 @@
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
-        "sha256": "6c1dcb863b45c23fecbe4a86576e379fec8be828587c153cad71933484143329"
+        "sha256": "cac2d590d274bfa4611a976771842008b9bd3dea74bb103fde48b45f88b784e9"
       },
       {
         "path": "native/hip/src/matmul_api.hpp",
@@ -247,11 +247,11 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "c571e4385af1f924cd2bfce6b1c0e4dd7aaea80cf4ee315e6af9765dd04d6f0b"
+        "sha256": "60dfc915c8a0ffb63584a7ce506c49258e2fdc58473eafcf56e0d7153e45c907"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "b66a6f625ba31d18e8ed05724f087a2cd35704ead9a8f70ac4db178e88d451db"
+        "sha256": "753d30182bc924d5bd6c52ccdb2a1e85c77bdeda9e63036a59b987e8d6b38c26"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
@@ -259,7 +259,7 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "5d6759949367f82e597edaf34a1650c8ebe4eca905db60e4ad748e70c75842ec"
+        "sha256": "660831575635834511f11e8f95a9ca28e818502145ba38a7cf64eabb36a0db60"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -275,14 +275,14 @@
       },
       {
         "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-        "sha256": "cca0bd490f89a0f865d2b7858f44a58bf842ce1ba768a4196ea0db644faa17cf"
+        "sha256": "29d39747fdce2d643c190cb5d8acde37a2dfcfe4bbe85dbff6b5fb06603feaf6"
       },
       {
         "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
         "sha256": "4d5a1899942f00886059f89aaa9391da16e38249a443f164c98377b85a7be4df"
       }
     ],
-    "source_set_sha256": "4409eed04a56f2659a610f61b1623edb718624023ad282aa9bf0142b25144cd0"
+    "source_set_sha256": "4da9492cb5d0bd5816aec1c1bac3b30c3325c0943fbbc67debc2d38063ff9b3c"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
@@ -500,7 +500,9 @@
             "none",
             "-o",
             "{build_dir}/public-runtime-{target}.elf",
-            "/opt/rocm/lib/libamdhip64.so"
+            "/opt/rocm/lib/libamdhip64.so",
+            "/opt/rocm/lib/libhipblas.so",
+            "/opt/rocm/lib/libhipblaslt.so"
           ]
         ]
       },
@@ -691,7 +693,9 @@
             "none",
             "-o",
             "{build_dir}/public-runtime-{target}.elf",
-            "/opt/rocm/lib/libamdhip64.so"
+            "/opt/rocm/lib/libamdhip64.so",
+            "/opt/rocm/lib/libhipblas.so",
+            "/opt/rocm/lib/libhipblaslt.so"
           ]
         ]
       },

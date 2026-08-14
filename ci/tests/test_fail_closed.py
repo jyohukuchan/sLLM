@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
 
 import run_host_suite as host_runner  # noqa: E402
+import run_local_verification as local_verification  # noqa: E402
 from common import ContractError  # noqa: E402
 from network_guard import (  # noqa: E402
     IsolationPlan,
@@ -49,6 +50,32 @@ class FailClosedTests(unittest.TestCase):
     def test_invalid_schema_state_zero_collection_and_aggregate_gates_fail(self) -> None:
         # Includes local-development reports being rejected by strict aggregate.
         run()
+
+
+class LocalVerificationEntrypointTests(unittest.TestCase):
+    def test_registered_rows_are_host_only_and_registry_driven(self) -> None:
+        rows = local_verification.registered_rows(ROOT, local_verification.HOST_ROWS)
+        self.assertEqual(tuple(rows), local_verification.HOST_ROWS)
+        self.assertEqual(rows["h0"]["suite_ids"], json.loads((ROOT / "ci/matrix/host-v1.json").read_text())["rows"][0]["suite_ids"])
+
+    def test_gpu_model_and_unknown_rows_are_rejected(self) -> None:
+        for value in ("g1", "h0,g1", "h0,h0"):
+            with self.subTest(value=value), self.assertRaises(ContractError):
+                local_verification.parse_rows(value)
+
+    def test_mode_specific_commands_do_not_claim_immutable_dirty_evidence(self) -> None:
+        dirty = local_verification.row_command(
+            ROOT, ROOT / ".local-artifacts/test", "h0", strict=False, candidate_sha=None, run_id="test"
+        )
+        self.assertIn("--allow-dirty-local", dirty)
+        self.assertNotIn("--strict-ci", dirty)
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        strict = local_verification.row_command(
+            ROOT, ROOT / ".local-artifacts/test", "h0", strict=True, candidate_sha=sha, run_id="test"
+        )
+        self.assertIn("--strict-ci", strict)
+        self.assertNotIn("--allow-dirty-local", strict)
+        self.assertEqual(strict.count(sha), 3)
 
 
 class RunnerIdentityTests(unittest.TestCase):

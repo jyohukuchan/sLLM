@@ -45,6 +45,7 @@ LLVM_TOOLS = {
 EXPECTED_FEATURES = {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0}
 LOGICAL_KERNEL = "rmsnorm.baseline.wave32.v1"
 DEVICE_SYMBOL = "sllm_rmsnorm_baseline_wave32_v1"
+SECONDARY_DEVICE_SYMBOL = "sllm_rmsnorm_baseline_wave64_v1"
 HOST_BUNDLE_ID = "host-x86_64-unknown-linux-gnu-"
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -259,7 +260,8 @@ def expected_build_commands() -> list[list[str]]:
             *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_API_SOURCE_PATHS if path != "native/hip/src/rmsnorm_api.cpp"],
             "-x", "hip",
             *[f"{{repo}}/{path}" for path in public_h3.PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS if path != "native/hip/src/rmsnorm_kernel.hip.cpp"],
-            "-x", "none", "-o", "{build_dir}/host-bundle-{target}.elf", "/opt/rocm/lib/libamdhip64.so",
+            "-x", "none", "-o", "{build_dir}/host-bundle-{target}.elf",
+            *public_h3.PUBLIC_RUNTIME_LINK_LIBRARIES,
         ],
     ]
 
@@ -274,7 +276,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
     expected_top = {"$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "toolchain_id", "container", "workflow", "source_sets", "source_symbol_map", "public_abi_symbols", "logical_kernel", "device_symbol", "case_manifest", "rows"}
     if set(matrix) != expected_top:
         raise ContractError("RMSNorm matrix has missing or unknown top-level fields")
-    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 2:
+    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 3:
         raise ContractError("RMSNorm matrix identity is invalid")
     if matrix["suite_id"] != "h3-rmsnorm-compile-only" or matrix["tier"] != "tier_h3_rmsnorm" or matrix["toolchain_id"] != "rocm-7.14.0":
         raise ContractError("RMSNorm matrix suite/tier/toolchain is not fixed")
@@ -519,10 +521,10 @@ def inspect_device(path: Path, output: str, row: dict[str, Any]) -> dict[str, An
     flags = re.findall(r"(?m)^\s*Flags\s+\[\s*\(0x([0-9a-fA-F]+)\)", header)
     targets = re.findall(r"(?m)^\s*amdhsa\.target:\s*(\S+)\s*$", output)
     waves = re.findall(r"(?m)^\s*\.wavefront_size:\s*(\d+)\s*$", output)
-    if len(abi) != 1 or len(flags) != 1 or len(targets) != 1 or len(waves) != 1:
-        raise ContractError("device ELF does not prove exactly one ABI, e_flags, target, and wavefront")
+    if len(abi) != 1 or len(flags) != 1 or len(targets) != 1 or len(waves) != 2:
+        raise ContractError("device ELF does not prove one ABI/e_flags/target and two RMSNorm kernels")
     observed_flags = f"0x{int(flags[0], 16):08x}"
-    if abi[0] != "4" or observed_flags != E_FLAGS[row["target"]] or targets[0] != f"amdgcn-amd-amdhsa--{row['target']}" or waves[0] != "32":
+    if abi[0] != "4" or observed_flags != E_FLAGS[row["target"]] or targets[0] != f"amdgcn-amd-amdhsa--{row['target']}" or set(waves) != {"32"}:
         raise ContractError("device ELF target/V6/wave32/e_flags mismatch")
     value = int(flags[0], 16)
     xnack = {0x000: "unsupported", 0x100: "any", 0x200: "off", 0x300: "on"}.get(value & 0x300)
@@ -534,11 +536,16 @@ def inspect_device(path: Path, output: str, row: dict[str, Any]) -> dict[str, An
     if sections.get(".text", 0) < 1:
         raise ContractError("device ELF has no non-empty .text")
     names = symbol_names(output)
-    relevant = [name for name in names if name == DEVICE_SYMBOL or name.startswith(DEVICE_SYMBOL + ".") or name.startswith("sllm_")]
-    kd = [name for name in relevant if name == DEVICE_SYMBOL + ".kd"]
-    if relevant.count(DEVICE_SYMBOL) != 1 or len(kd) != 1 or any(name not in {DEVICE_SYMBOL, DEVICE_SYMBOL + ".kd"} for name in relevant):
-        raise ContractError("device ELF does not contain exactly the RMSNorm kernel and .kd symbols")
-    return {"format": "ELF64", "machine": "AMDGPU", "target": row["target"], "ei_abiversion": 4, "e_flags": observed_flags, "code_object_version": "V6", "wavefront_size": 32, "features": features, "sections": {".text": sections[".text"], ".kd": 1}, "symbols": [{"name": DEVICE_SYMBOL, "defined": True}, {"name": DEVICE_SYMBOL + ".kd", "defined": True}], "source_attribution": "rmsnorm_kernel.hip.cpp"}
+    expected_symbols = {
+        DEVICE_SYMBOL,
+        DEVICE_SYMBOL + ".kd",
+        SECONDARY_DEVICE_SYMBOL,
+        SECONDARY_DEVICE_SYMBOL + ".kd",
+    }
+    relevant = [name for name in names if name.startswith("sllm_")]
+    if set(relevant) != expected_symbols or any(relevant.count(name) != 1 for name in expected_symbols):
+        raise ContractError("device ELF does not contain exactly both RMSNorm kernels and .kd symbols")
+    return {"format": "ELF64", "machine": "AMDGPU", "target": row["target"], "ei_abiversion": 4, "e_flags": observed_flags, "code_object_version": "V6", "wavefront_size": 32, "features": features, "sections": {".text": sections[".text"], ".kd": 2}, "symbols": [{"name": name, "defined": True} for name in sorted(expected_symbols)], "source_attribution": "rmsnorm_kernel.hip.cpp"}
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:

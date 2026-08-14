@@ -149,13 +149,19 @@ KERNEL_SYMBOLS = (
     "sllm_kv_state_bf16_to_f16_token_major_v2",
     "sllm_linear_attention_causal_conv_silu_v1",
     "sllm_linear_attention_recurrent_gated_norm_v1",
+    "sllm_matmul_bf16_fp32_decode_v3",
+    "sllm_matmul_bf16_fp32_decode_wave64_v1",
+    "sllm_matmul_bf16_fp32_tiled16_v2",
     "sllm_matmul_bf16_fp32_v1",
+    "sllm_matmul_bf16_to_fp8_outer_v1",
+    "sllm_matmul_fp8_outer_emulation_v1",
     "sllm_rmsnorm_baseline_wave32_v1",
+    "sllm_rmsnorm_baseline_wave64_v1",
 )
 INTERNAL_RUNTIME_SYMBOLS = ("sllm_hip_kv_view_readback",)
 CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL = (
     "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138"
-    "__device_stub__causal_attention_kernelEPKtS2_S2_Ptjmmm"
+    "__device_stub__causal_attention_kernelEPKtS2_S2_Ptjmmmjjj"
 )
 EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "__hipPopCallConfiguration",
@@ -163,6 +169,7 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "__hipRegisterFatBinary",
     "__hipRegisterFunction",
     "__hipUnregisterFatBinary",
+    "hipDeviceGetAttribute",
     "hipEventCreateWithFlags",
     "hipEventDestroy",
     "hipEventElapsedTime",
@@ -175,12 +182,37 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "hipGetLastError",
     "hipLaunchKernel",
     "hipMalloc",
+    "hipMemAddressFree",
+    "hipMemAddressReserve",
+    "hipMemCreate",
+    "hipMemGetAllocationGranularity",
+    "hipMemGetInfo",
+    "hipMemMap",
+    "hipMemRelease",
+    "hipMemSetAccess",
+    "hipMemUnmap",
     "hipMemcpyAsync",
     "hipMemset",
     "hipSetDevice",
     "hipStreamCreateWithFlags",
     "hipStreamDestroy",
     "hipStreamSynchronize",
+    "hipblasCreate",
+    "hipblasDestroy",
+    "hipblasGemmEx",
+    "hipblasLtCreate",
+    "hipblasLtDestroy",
+    "hipblasLtMatmul",
+    "hipblasLtMatmulAlgoGetHeuristic",
+    "hipblasLtMatmulDescCreate",
+    "hipblasLtMatmulDescDestroy",
+    "hipblasLtMatmulDescSetAttribute",
+    "hipblasLtMatmulPreferenceCreate",
+    "hipblasLtMatmulPreferenceDestroy",
+    "hipblasLtMatmulPreferenceSetAttribute",
+    "hipblasLtMatrixLayoutCreate",
+    "hipblasLtMatrixLayoutDestroy",
+    "hipblasSetStream",
 )
 _MAX_SYMBOL_DIAGNOSTIC_ITEMS = 16
 _MAX_SYMBOL_DIAGNOSTIC_NAME_LENGTH = 96
@@ -662,6 +694,26 @@ def check_direct_compile_sources(repo: Path, matrix: dict[str, Any]) -> dict[str
     )
 
 
+PUBLIC_RUNTIME_LINK_LIBRARIES = (
+    "/opt/rocm/lib/libamdhip64.so",
+    "/opt/rocm/lib/libhipblas.so",
+    "/opt/rocm/lib/libhipblaslt.so",
+)
+
+
+def validate_native_link_contract(cmake_text: str) -> None:
+    expected = """if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+        target_link_libraries(sllm_hip_stub PRIVATE
+            \"${ROCM_PATH}/lib/libhipblas.so\"
+            \"${ROCM_PATH}/lib/libhipblaslt.so\"
+        )
+    endif()"""
+    if expected not in cmake_text:
+        raise RuntimeContractError(
+            "native public-runtime link contract must include hipBLAS then hipBLASLt"
+        )
+
+
 def expected_build_commands() -> list[list[str]]:
     """Return the exact five argv templates for one generic public-runtime row."""
 
@@ -705,17 +757,18 @@ def expected_build_commands() -> list[list[str]]:
             "-x", "hip",
             *[f"{{repo}}/{path}" for path in PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS if path != "native/hip/src/rmsnorm_kernel.hip.cpp"],
             "-x", "none",
-            "-o", "{build_dir}/public-runtime-{target}.elf", "/opt/rocm/lib/libamdhip64.so",
+            "-o", "{build_dir}/public-runtime-{target}.elf", *PUBLIC_RUNTIME_LINK_LIBRARIES,
         ],
     ]
 
 
 def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    validate_native_link_contract((repo / "native/hip/CMakeLists.txt").read_text(encoding="utf-8"))
     matrix = read_json(repo / "ci/matrix/hip-runtime-compile-v1.json")
     toolchain = read_json(repo / "ci/toolchains/rocm-7.14.0.json")
     if set(matrix) != {"$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"}:
         raise RuntimeContractError("public-runtime matrix has missing or unknown top-level fields")
-    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 3:
+    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 4:
         raise RuntimeContractError("public-runtime matrix identity is invalid")
     if matrix.get("toolchain_id") != "rocm-7.14.0" or matrix.get("targets") != list(TARGETS):
         raise RuntimeContractError("public-runtime matrix is not bound to ROCm 7.14.0 and the exact two targets")

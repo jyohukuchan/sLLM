@@ -2365,9 +2365,8 @@ bool matmul_prepare_execute_and_negative_contract() {
     std::cerr << "matmul dispatch mismatch completion=" << completion
               << " backend=" << info.backend
               << " dispatch_count=" << info.dispatch_count
-              << " kernel_id=" << info.kernel_id
-              << " grid=" << info.grid_size_x << " mkn=" << info.m << ","
-              << info.k << "," << info.n
+              << " kernel_id=" << info.kernel_id << " grid=" << info.grid_size_x
+              << " mkn=" << info.m << "," << info.k << "," << info.n
               << " launches=" << fake_hip::matmul_launch_calls() << "\n";
     return false;
   }
@@ -3328,43 +3327,41 @@ bool kv_capability_selected_contiguous_resident_contract() {
   create_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED;
   create_info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
   Error error;
-  bool valid = expect_status(
-                   sllm_kv_state_create(context, &create_info, &state,
-                                        &error.sink),
-                   SLLM_STATUS_OK, "capability-selected contiguous KV create",
-                   error) &&
-               state != nullptr;
+  bool valid =
+      expect_status(
+          sllm_kv_state_create(context, &create_info, &state, &error.sink),
+          SLLM_STATUS_OK, "capability-selected contiguous KV create", error) &&
+      state != nullptr;
 
   sllm_kv_view_info_t view_info{};
   view_info.struct_size = sizeof(view_info);
   view_info.abi_version = SLLM_HIP_ABI_VERSION;
   view_info.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
-  valid = valid &&
-          expect_status(sllm_kv_state_query(state, &view_info, &error.sink),
-                        SLLM_STATUS_OK,
-                        "capability-selected contiguous KV query", error) &&
-          view_info.memory_kind ==
-              SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
-          view_info.capacity_tokens == capacity &&
-          view_info.physical_page_bytes == bytes_per_token &&
-          view_info.tokens_per_page == 1U &&
-          view_info.mapped_token_capacity == capacity &&
-          view_info.committed_bytes_per_plane == plane_bytes;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_query(state, &view_info, &error.sink),
+                    SLLM_STATUS_OK, "capability-selected contiguous KV query",
+                    error) &&
+      view_info.memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
+      view_info.capacity_tokens == capacity &&
+      view_info.physical_page_bytes == bytes_per_token &&
+      view_info.tokens_per_page == 1U &&
+      view_info.mapped_token_capacity == capacity &&
+      view_info.committed_bytes_per_plane == plane_bytes;
 
-  valid = valid &&
-          expect_status(sllm_kv_state_release(&state, &error.sink),
-                        SLLM_STATUS_OK,
-                        "capability-selected contiguous KV release", error) &&
-          state == nullptr &&
-          fake_hip::live_allocations() == baseline_allocations;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_release(&state, &error.sink), SLLM_STATUS_OK,
+                    "capability-selected contiguous KV release", error) &&
+      state == nullptr && fake_hip::live_allocations() == baseline_allocations;
 
   create_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
-  valid = valid &&
-          expect_status(sllm_kv_state_create(context, &create_info, &state,
-                                             &error.sink),
-                        SLLM_STATUS_UNSUPPORTED,
-                        "explicit virtual KV without VMM", error) &&
-          state == nullptr;
+  valid =
+      valid &&
+      expect_status(
+          sllm_kv_state_create(context, &create_info, &state, &error.sink),
+          SLLM_STATUS_UNSUPPORTED, "explicit virtual KV without VMM", error) &&
+      state == nullptr;
   return valid && release_context(&context);
 }
 

@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json",
   "schema_version": "rmsnorm-h3-compile-v1",
   "matrix_id": "rmsnorm-h3-compile-v1",
-  "revision": 2,
+  "revision": 3,
   "suite_id": "h3-rmsnorm-compile-only",
   "tier": "tier_h3_rmsnorm",
   "toolchain_id": "rocm-7.14.0",
@@ -19,7 +19,7 @@
   },
   "workflow": {
     "path": ".github/workflows/rmsnorm-h3-compile.yml",
-    "sha256": "34b8f8137d7a289e2cc420636c4de95c4728b50dabad93dc5bc293cdcc71f88c"
+    "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
   },
   "source_sets": {
     "device": {
@@ -35,14 +35,14 @@
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "sha256": "cca0bd490f89a0f865d2b7858f44a58bf842ce1ba768a4196ea0db644faa17cf"
+          "sha256": "29d39747fdce2d643c190cb5d8acde37a2dfcfe4bbe85dbff6b5fb06603feaf6"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
           "sha256": "4d5a1899942f00886059f89aaa9391da16e38249a443f164c98377b85a7be4df"
         }
       ],
-      "source_set_sha256": "bb0bd35b5934b41440262951adc0915d02b1201befd011602ca0d54c80bb611b"
+      "source_set_sha256": "f4c310ba08ef6cb69b5b6dc9b09fa3791883d101f323207b52a829e340a234da"
     },
     "host_abi": {
       "canonical_order": [
@@ -54,7 +54,7 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "5d6759949367f82e597edaf34a1650c8ebe4eca905db60e4ad748e70c75842ec"
+          "sha256": "660831575635834511f11e8f95a9ca28e818502145ba38a7cf64eabb36a0db60"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -69,7 +69,7 @@
           "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"
         }
       ],
-      "source_set_sha256": "6783aa4606cfd4a636319e9d3550d9a7934e61c2e4938edf64c64708c2814f80"
+      "source_set_sha256": "84230c9fbd84515bca58d4ae28709277ae59bccb69404729254d9c3bbd29a0a9"
     },
     "binding_build": {
       "canonical_order": [
@@ -123,7 +123,7 @@
       "files": [
         {
           "path": "ci/schema/rmsnorm-h3-compile-v1.schema.json",
-          "sha256": "0212c4622aa69feed53f28e8e84cdbf6cba64689cc5f6fd88c88a56f211e2446"
+          "sha256": "4e51ab175e14d44a1df22ad0d0b618deb89275e07fe511f366575082891ac574"
         },
         {
           "path": "ci/schema/rmsnorm-h3-artifact-v1.schema.json",
@@ -139,19 +139,19 @@
         },
         {
           "path": "ci/tools/validate_rmsnorm_h3_contracts.py",
-          "sha256": "df0dcaeaa6ab8b2ade42611bda72ae91340171707cd2dcb8010188ec118320b7"
+          "sha256": "f5416456f3da7bd7133d9e140b935e21a11bf96edf57974c0abc0c1c58f54824"
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "5d0651cd5e66cc82ed0ba600b41dbe7e5ee91633d449175adb19d95bbed811ad"
+          "sha256": "9bce6b858a95efe4693b00697f33a0563f3de45241a9ddfd03fc93f6b0e6e36b"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "347ec8c73a98d55625e58c3c87b5fc0536981de56f40ee7cba0353a399bb12bf"
+          "sha256": "5b2c8dfb60a5c365f57e9a0eabeb95961cda1e4e5872d72dc8467f7d49a42c95"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "7c0ed7c566e19cf2982508581b0493c5152fceba6b812cd377960348c02b3fd3"
+          "sha256": "f52887190dfef4bfdc990e4ea581731d0a37b9920679bac21ff08f0380ab7e9b"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -167,7 +167,7 @@
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_runner.py",
-          "sha256": "c4a857db7ade100653865906a792562514280b9ec58ead337c8c4db4b6b2d934"
+          "sha256": "295a4e73510e93fa21dc34c76dbd541a1ae7eea6a163475e0399c93773ef0052"
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_aggregate.py",
@@ -175,10 +175,10 @@
         },
         {
           "path": ".github/workflows/rmsnorm-h3-compile.yml",
-          "sha256": "34b8f8137d7a289e2cc420636c4de95c4728b50dabad93dc5bc293cdcc71f88c"
+          "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "f9ae81675a3ae5b41b8bfbc6e11967d360ee80e1ac8cbf86450b011c1f81c73e"
+      "source_set_sha256": "6522a5bd87998b80d66cf036b3af4a6f9a3ffdf5e48d601849b4f26d5797015d"
     }
   },
   "source_symbol_map": [
@@ -413,7 +413,9 @@
             "none",
             "-o",
             "{build_dir}/host-bundle-{target}.elf",
-            "/opt/rocm/lib/libamdhip64.so"
+            "/opt/rocm/lib/libamdhip64.so",
+            "/opt/rocm/lib/libhipblas.so",
+            "/opt/rocm/lib/libhipblaslt.so"
           ]
         ]
       },
@@ -579,7 +581,9 @@
             "none",
             "-o",
             "{build_dir}/host-bundle-{target}.elf",
-            "/opt/rocm/lib/libamdhip64.so"
+            "/opt/rocm/lib/libamdhip64.so",
+            "/opt/rocm/lib/libhipblas.so",
+            "/opt/rocm/lib/libhipblaslt.so"
           ]
         ]
       },

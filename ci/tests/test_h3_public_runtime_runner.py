@@ -912,9 +912,11 @@ class H3PublicRuntimeRunnerTests(unittest.TestCase):
 
                 def wait_for_marker() -> None:
                     deadline = time.monotonic() + 3
-                    while not marker.exists() and time.monotonic() < deadline:
+                    while time.monotonic() < deadline:
+                        if marker.exists() and ":" in marker.read_text(encoding="ascii"):
+                            return
                         time.sleep(0.005)
-                    self.assertTrue(marker.exists(), "bind BaseException root did not publish identities")
+                    self.fail("bind BaseException root did not publish identities")
 
                 def bind_then_raise(pid: int, baseline: set[runner.ProcessIdentity] | frozenset[runner.ProcessIdentity]) -> runner.ProcessIdentity:
                     nonlocal root_pid, child_pid
@@ -2485,10 +2487,19 @@ Sections [
                 "/tmp/private-build/rmsnorm-kernel-" + target + ".o",
                 "/tmp/private-build/rmsnorm-api-" + target + ".o",
             ])
+            self.assertEqual(commands[-1][-3:], list(runner.PUBLIC_RUNTIME_LINK_LIBRARIES))
             self.assertNotIn(str(ROOT / "native/hip/src/rmsnorm_api.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/embedding_api.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/linear_attention_kernel.hip.cpp"), commands[-1])
             self.assertFalse(any("./" in token or "--run" in token for command in commands for token in command))
+
+    def test_native_link_contract_rejects_missing_hipblas_dependency(self) -> None:
+        cmake = (ROOT / "native/hip/CMakeLists.txt").read_text(encoding="utf-8")
+        runner.validate_native_link_contract(cmake)
+        for library in ("libhipblas.so", "libhipblaslt.so"):
+            with self.subTest(library=library):
+                with self.assertRaises(runner.RuntimeContractError):
+                    runner.validate_native_link_contract(cmake.replace(library, "missing.so", 1))
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ except ImportError as exc:  # pragma: no cover - CI must fail closed
 try:
     from run_rmsnorm_h3_compile import (
         DEVICE_SYMBOL,
+        SECONDARY_DEVICE_SYMBOL,
         E_FLAGS,
         LOGICAL_KERNEL,
         PUBLIC_ABI_SYMBOLS,
@@ -41,6 +42,7 @@ try:
 except ImportError:  # pragma: no cover - package import path
     from ci.tools.run_rmsnorm_h3_compile import (  # type: ignore[no-redef]
         DEVICE_SYMBOL,
+        SECONDARY_DEVICE_SYMBOL,
         E_FLAGS,
         LOGICAL_KERNEL,
         PUBLIC_ABI_SYMBOLS,
@@ -218,7 +220,16 @@ def _validate_row(root: Path, row_id: str, repo: Path, expected_sha: str | None,
     if metadata["host_elf"]["bundles"] != [f"hipv4-amdgcn-amd-amdhsa--{target_name}", "host-x86_64-unknown-linux-gnu-"] or metadata["host_elf"]["machine"] != "X86_64":
         raise ContractError(f"{row_id} host ELF bundle or machine evidence is not exact")
     device_evidence = metadata["device_code_object"]
-    if device_evidence["target"] != target_name or device_evidence["e_flags"] != E_FLAGS[target_name] or device_evidence["code_object_version"] != "V6" or device_evidence["wavefront_size"] != 32 or device_evidence["features"] != {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0} or device_evidence["symbols"] != [{"name": DEVICE_SYMBOL, "defined": True}, {"name": DEVICE_SYMBOL + ".kd", "defined": True}]:
+    expected_device_symbols = [
+        {"name": name, "defined": True}
+        for name in sorted({
+            DEVICE_SYMBOL,
+            DEVICE_SYMBOL + ".kd",
+            SECONDARY_DEVICE_SYMBOL,
+            SECONDARY_DEVICE_SYMBOL + ".kd",
+        })
+    ]
+    if device_evidence["target"] != target_name or device_evidence["e_flags"] != E_FLAGS[target_name] or device_evidence["code_object_version"] != "V6" or device_evidence["wavefront_size"] != 32 or device_evidence["features"] != {"xnack": "unsupported", "sramecc": "unsupported", "generic_processor_version": 0} or device_evidence["symbols"] != expected_device_symbols:
         raise ContractError(f"{row_id} device ELF identity/symbol evidence is not exact")
     return report
 

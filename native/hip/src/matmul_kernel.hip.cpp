@@ -44,9 +44,9 @@ __device__ __forceinline__ float e4m3fn_to_float(const uint8_t bits) noexcept {
   const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & UINT8_C(0x0f));
   const uint8_t mantissa = static_cast<uint8_t>(bits & UINT8_C(0x07));
   if (exponent == 0U) {
-    return mantissa == 0U ? copysignf(0.0F, sign)
-                          : sign * static_cast<float>(mantissa) *
-                                ldexpf(1.0F, -9);
+    return mantissa == 0U
+               ? copysignf(0.0F, sign)
+               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -9);
   }
   if (exponent == UINT8_C(0x0f) && mantissa == UINT8_C(0x07)) {
     return NAN;
@@ -78,14 +78,15 @@ __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) noexcept {
   const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
   const float lower_error = value - e4m3fn_to_float(lower);
   const float upper_error = e4m3fn_to_float(upper) - value;
-  const bool select_upper = upper_error < lower_error ||
-                            (upper_error == lower_error &&
-                             (upper & UINT8_C(1)) == 0U &&
-                             (lower & UINT8_C(1)) != 0U);
+  const bool select_upper =
+      upper_error < lower_error ||
+      (upper_error == lower_error && (upper & UINT8_C(1)) == 0U &&
+       (lower & UINT8_C(1)) != 0U);
   return static_cast<uint8_t>(sign | (select_upper ? upper : lower));
 }
 
-__device__ __forceinline__ float e4m3fnuz_to_float(const uint8_t bits) noexcept {
+__device__ __forceinline__ float
+e4m3fnuz_to_float(const uint8_t bits) noexcept {
   if (bits == UINT8_C(0x80)) {
     return NAN;
   }
@@ -125,10 +126,10 @@ __device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) noexcept {
   const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
   const float lower_error = value - e4m3fnuz_to_float(lower);
   const float upper_error = e4m3fnuz_to_float(upper) - value;
-  const bool select_upper = upper_error < lower_error ||
-                            (upper_error == lower_error &&
-                             (upper & UINT8_C(1)) == 0U &&
-                             (lower & UINT8_C(1)) != 0U);
+  const bool select_upper =
+      upper_error < lower_error ||
+      (upper_error == lower_error && (upper & UINT8_C(1)) == 0U &&
+       (lower & UINT8_C(1)) != 0U);
   const uint8_t selected = select_upper ? upper : lower;
   return negative && selected != 0U
              ? static_cast<uint8_t>(selected | UINT8_C(0x80))
@@ -137,18 +138,19 @@ __device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) noexcept {
 
 } // namespace
 
-extern "C" __global__ __launch_bounds__(256, 1) void
-sllm_matmul_bf16_to_fp8_outer_v1(const uint16_t *const activation,
-                                 uint8_t *const quantized, float *const scales,
-                                 const uint64_t m, const uint64_t k,
-                                 const uint32_t fnuz) {
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_bf16_to_fp8_outer_v1(
+    const uint16_t *const activation, uint8_t *const quantized,
+    float *const scales, const uint64_t m, const uint64_t k,
+    const uint32_t fnuz) {
   const uint64_t row = blockIdx.x;
   if (row >= m) {
     return;
   }
   float maximum = 0.0F;
   for (uint64_t column = threadIdx.x; column < k; column += blockDim.x) {
-    maximum = fmaxf(maximum, fabsf(bf16_to_float(activation[row * k + column])));
+    maximum =
+        fmaxf(maximum, fabsf(bf16_to_float(activation[row * k + column])));
   }
   __shared__ float reductions[256];
   reductions[threadIdx.x] = maximum;
@@ -173,8 +175,8 @@ sllm_matmul_bf16_to_fp8_outer_v1(const uint16_t *const activation,
   }
 }
 
-extern "C" __global__ __launch_bounds__(256, 1) void
-sllm_matmul_fp8_outer_emulation_v1(
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_fp8_outer_emulation_v1(
     const uint8_t *const activation, const float *const activation_scales,
     const uint8_t *const weight, const float *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
@@ -188,12 +190,12 @@ sllm_matmul_fp8_outer_emulation_v1(
   const uint64_t column = index - row * n;
   float accumulator = 0.0F;
   for (uint64_t inner = 0U; inner < k; ++inner) {
-    accumulator = fmaf(e4m3fn_to_float(activation[row * k + inner]),
-                       e4m3fn_to_float(weight[column * k + inner]),
-                       accumulator);
+    accumulator =
+        fmaf(e4m3fn_to_float(activation[row * k + inner]),
+             e4m3fn_to_float(weight[column * k + inner]), accumulator);
   }
-  output[index] = float_to_bf16_rne_bits(
-      accumulator * activation_scales[row] * weight_scales[column]);
+  output[index] = float_to_bf16_rne_bits(accumulator * activation_scales[row] *
+                                         weight_scales[column]);
 }
 
 #pragma clang fp contract(off)
@@ -263,9 +265,10 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_tiled16_v2(
 // fusion machinery are deliberately not imported; this kernel retains sLLM's
 // BF16 input/output and FP32 accumulation contract.
 template <uint32_t WaveWidth, uint32_t WaveCount>
-__device__ __forceinline__ void matmul_bf16_decode_body(
-    const uint16_t *const activation, const uint16_t *const weight,
-    uint16_t *const output, const uint64_t k, const uint64_t n) {
+__device__ __forceinline__ void
+matmul_bf16_decode_body(const uint16_t *const activation,
+                        const uint16_t *const weight, uint16_t *const output,
+                        const uint64_t k, const uint64_t n) {
   const uint64_t column = blockIdx.x;
   if (column >= n) {
     return;
@@ -336,11 +339,11 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_wave64_v1(
 }
 
 namespace sllm_matmul_kernel {
-hipError_t launch_fp8_quantize(
-    const uint16_t *const activation, uint8_t *const quantized,
-    float *const scales, const uint64_t m, const uint64_t k,
-    const bool fnuz,
-    const hipStream_t stream) noexcept {
+hipError_t launch_fp8_quantize(const uint16_t *const activation,
+                               uint8_t *const quantized, float *const scales,
+                               const uint64_t m, const uint64_t k,
+                               const bool fnuz,
+                               const hipStream_t stream) noexcept {
   hipLaunchKernelGGL(sllm_matmul_bf16_to_fp8_outer_v1,
                      dim3(static_cast<uint32_t>(m)), dim3(kWorkgroupSize), 0U,
                      stream, activation, quantized, scales, m, k,
@@ -348,18 +351,19 @@ hipError_t launch_fp8_quantize(
   return hipGetLastError();
 }
 
-hipError_t launch_fp8_emulation(
-    const uint8_t *const activation, const float *const activation_scales,
-    const uint8_t *const weight, const float *const weight_scales,
-    uint16_t *const output, const uint64_t m, const uint64_t k,
-    const uint64_t n, const hipStream_t stream) noexcept {
+hipError_t launch_fp8_emulation(const uint8_t *const activation,
+                                const float *const activation_scales,
+                                const uint8_t *const weight,
+                                const float *const weight_scales,
+                                uint16_t *const output, const uint64_t m,
+                                const uint64_t k, const uint64_t n,
+                                const hipStream_t stream) noexcept {
   const uint64_t elements = m * n;
-  const uint32_t blocks = static_cast<uint32_t>(
-      (elements + kWorkgroupSize - 1U) / kWorkgroupSize);
+  const uint32_t blocks =
+      static_cast<uint32_t>((elements + kWorkgroupSize - 1U) / kWorkgroupSize);
   hipLaunchKernelGGL(sllm_matmul_fp8_outer_emulation_v1, dim3(blocks),
                      dim3(kWorkgroupSize), 0U, stream, activation,
-                     activation_scales, weight, weight_scales, output, m, k,
-                     n);
+                     activation_scales, weight, weight_scales, output, m, k, n);
   return hipGetLastError();
 }
 

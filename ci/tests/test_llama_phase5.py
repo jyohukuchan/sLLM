@@ -44,6 +44,19 @@ class LlamaPhase5ContractTests(unittest.TestCase):
         self.assertEqual(document["source_commit"], runner.PINNED_COMMIT)
         self.assertEqual(document["sequence_lengths"], [1, 17, 255, 256, 257, 1024, 32])
 
+    def test_tracked_contract_does_not_require_local_reference_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            runner, "REFERENCE_PATH", Path(directory) / "missing-llama.cpp"
+        ):
+            matrix, _, _, _ = runner.load_matrix()
+        self.assertEqual(matrix["llama"]["commit"], runner.PINNED_COMMIT)
+
+    def test_explicit_local_reference_verification_fails_closed_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            runner, "REFERENCE_PATH", Path(directory) / "missing-llama.cpp"
+        ), self.assertRaises(runner.ContractError):
+            runner.load_matrix(verify_reference=True)
+
     def test_matrix_is_closed_over_direct_recipes_and_devices(self) -> None:
         self.assertEqual(len(self.matrix["rows"]), 14)
         self.assertEqual(

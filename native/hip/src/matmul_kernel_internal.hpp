@@ -22,10 +22,13 @@ constexpr const char *kDecodeWave64DeviceSymbol =
     "sllm_matmul_bf16_fp32_decode_wave64_v1";
 constexpr const char *kHipBlasLogicalKernelId = "matmul.hipblas.gemm_ex.v2";
 constexpr const char *kHipBlasDeviceSymbol = "hipblasGemmEx";
-constexpr const char *kFp8NativeLogicalKernelId = "matmul.fp8.outer.hipblaslt.v1";
+constexpr const char *kFp8NativeLogicalKernelId =
+    "matmul.fp8.outer.hipblaslt.v1";
 constexpr const char *kFp8NativeDeviceSymbol = "hipblasLtMatmul";
-constexpr const char *kFp8EmulationLogicalKernelId = "matmul.fp8.outer.byte_decode.v1";
-constexpr const char *kFp8EmulationDeviceSymbol = "sllm_matmul_fp8_outer_emulation_v1";
+constexpr const char *kFp8EmulationLogicalKernelId =
+    "matmul.fp8.outer.byte_decode.v1";
+constexpr const char *kFp8EmulationDeviceSymbol =
+    "sllm_matmul_fp8_outer_emulation_v1";
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
@@ -51,17 +54,16 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
        std::strcmp(target, "gfx942") == 0)) {
     return KernelVariant::HipBlas;
   }
-  return m == 1U
-             ? (target != nullptr && std::strcmp(target, "gfx942") == 0
-                    ? KernelVariant::DecodeReductionWave64
-                    : KernelVariant::DecodeReduction)
-             : KernelVariant::PrefillTiled16;
+  return m == 1U ? (target != nullptr && std::strcmp(target, "gfx942") == 0
+                        ? KernelVariant::DecodeReductionWave64
+                        : KernelVariant::DecodeReduction)
+                 : KernelVariant::PrefillTiled16;
 }
 
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
-  return variant == KernelVariant::Fp8Native ? kFp8NativeLogicalKernelId
+  return variant == KernelVariant::Fp8Native      ? kFp8NativeLogicalKernelId
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationLogicalKernelId
-         : variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
+         : variant == KernelVariant::HipBlas      ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64LogicalKernelId
          : variant == KernelVariant::DecodeReduction
@@ -72,9 +74,9 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 }
 
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
-  return variant == KernelVariant::Fp8Native ? kFp8NativeDeviceSymbol
+  return variant == KernelVariant::Fp8Native      ? kFp8NativeDeviceSymbol
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationDeviceSymbol
-         : variant == KernelVariant::HipBlas ? kHipBlasDeviceSymbol
+         : variant == KernelVariant::HipBlas      ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64DeviceSymbol
          : variant == KernelVariant::DecodeReduction
@@ -105,8 +107,7 @@ hipError_t launch(const uint16_t *activation, const uint16_t *weight,
                   KernelVariant variant, hipStream_t stream) noexcept;
 
 hipError_t launch_fp8_quantize(const uint16_t *activation, uint8_t *quantized,
-                               float *scales, uint64_t m, uint64_t k,
-                               bool fnuz,
+                               float *scales, uint64_t m, uint64_t k, bool fnuz,
                                hipStream_t stream) noexcept;
 
 hipError_t launch_fp8_emulation(const uint8_t *activation,

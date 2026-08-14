@@ -33,6 +33,13 @@ class SemanticG1ManifestValidatorTests(unittest.TestCase):
         self.assertNotIn("--tree-oid", steps[3]["run"])
         self.assertEqual(steps[4]["with"]["path"].splitlines(), list(manifests.SEMANTIC_G1_UPLOAD_PATHS))
         self.assertNotIn("**", steps[4]["with"]["path"])
+        self.assertEqual(manifests._workflow_trigger(self.document), {"workflow_dispatch": None})
+
+    def test_self_hosted_push_trigger_is_rejected(self) -> None:
+        mutated = copy.deepcopy(self.document)
+        mutated[True]["push"] = {"branches": ["main"]}
+        with self.assertRaisesRegex(manifests.ContractError, "explicit workflow_dispatch only"):
+            manifests.validate_workflow(self.workflow, mutated)
 
     def test_tree_oid_argv_append_is_rejected(self) -> None:
         mutated = copy.deepcopy(self.document)

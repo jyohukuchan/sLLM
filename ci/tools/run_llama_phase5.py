@@ -44,7 +44,8 @@ MATRIX_PATH = ROOT / "ci/matrix/llama-phase5-v1.json"
 SCHEMA_PATH = ROOT / "ci/schema/llama-phase5-v1.schema.json"
 DIRECT_MATRIX_PATH = ROOT / "ci/matrix/engine-performance-direct-v1.json"
 DIRECT_AGGREGATE_SCHEMA_PATH = ROOT / "ci/schema/engine-performance-aggregate-v1.schema.json"
-REFERENCE_PATH = ROOT / "reference/llama.cpp"
+TRACKED_REFERENCE_PATH = ROOT / "reference/llama.cpp"
+REFERENCE_PATH = TRACKED_REFERENCE_PATH
 WRAPPER_SOURCE = ROOT / "ci/tools/llama_phase5_wrapper.cpp"
 PINNED_COMMIT = "f5919bf458ef190468b5c329bb293f8a54a1e69c"
 PINNED_TREE = "e9b6173953477054a4068884aa5fc9aeef6475e8"
@@ -433,10 +434,18 @@ def direct_source_identity() -> tuple[dict[str, Any], str]:
     return direct, digest
 
 
-def load_matrix() -> tuple[dict[str, Any], str, dict[str, Any], str]:
+def load_matrix(*, verify_reference: bool = False) -> tuple[dict[str, Any], str, dict[str, Any], str]:
     matrix, _, matrix_digest = read_json(MATRIX_PATH, "llama Phase 5 matrix", 8 * 1024 * 1024)
     schema_validate(matrix, "matrix", "llama Phase 5 matrix")
-    source = reference_identity()
+    expected_source = {
+        "repository": "https://github.com/ggml-org/llama.cpp",
+        "commit": PINNED_COMMIT,
+        "reference_path": "reference/llama.cpp",
+        "source_tree": PINNED_TREE,
+    }
+    if matrix.get("llama") != expected_source:
+        fail("llama matrix source identity does not match the tracked source lock")
+    source = reference_identity() if verify_reference else {"commit": PINNED_COMMIT, "tree": PINNED_TREE}
     direct, direct_digest = direct_source_identity()
     if matrix["llama"]["commit"] != source["commit"] or matrix["llama"]["source_tree"] != source["tree"]:
         fail("llama matrix source identity does not match the pinned checkout")
@@ -594,7 +603,7 @@ def expected_conversion_identity(source_tree: str = PINNED_TREE) -> dict[str, An
         },
         "source": {
             "repository": "https://github.com/ggml-org/llama.cpp",
-            "path": str(REFERENCE_PATH.resolve()),
+            "path": str(TRACKED_REFERENCE_PATH.resolve()),
             "commit": PINNED_COMMIT,
             "tree": source_tree,
             "checkout": "detached",
@@ -1552,6 +1561,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group(required=True)
     modes.add_argument("--contract-only", "--test-contract", action="store_true")
+    modes.add_argument("--verify-reference", action="store_true")
     modes.add_argument("--build-only", action="store_true")
     modes.add_argument("--build-all", action="store_true")
     modes.add_argument("--run-row")
@@ -1576,6 +1586,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.verify_reference:
+            matrix, matrix_digest, _direct, _direct_digest = load_matrix(verify_reference=True)
+            print(json.dumps({"state": "PASS", "matrix_id": matrix["matrix_id"], "matrix_sha256": matrix_digest, "reference_commit": PINNED_COMMIT, "reference_tree": PINNED_TREE}, sort_keys=True, separators=(",", ":")))
+            return 0
         if args.contract_only:
             matrix, matrix_digest, direct, direct_digest = load_matrix()
             print(json.dumps({"state": "PASS", "matrix_id": matrix["matrix_id"], "matrix_sha256": matrix_digest, "direct_matrix_sha256": direct_digest, "source_direct_matrix_sha256": {"recorded": matrix["source_direct_matrix"]["sha256"], "actual": direct_digest, "pending": False}, "source_commit": PINNED_COMMIT, "sequence_lengths": [len(item["input_token_ids"]) for item in direct["token_sequences"]]}, sort_keys=True, separators=(",", ":")))

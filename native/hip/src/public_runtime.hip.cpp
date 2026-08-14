@@ -31,8 +31,8 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
-#include <memory>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -200,8 +200,8 @@ struct Fp8LtPlan;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
                               float *activation_scales,
-                              const float *weight_scales, uint32_t fp8_dtype, uint64_t m,
-                              uint64_t k, uint64_t n) noexcept;
+                              const float *weight_scales, uint32_t fp8_dtype,
+                              uint64_t m, uint64_t k, uint64_t n) noexcept;
 void destroy_fp8_lt_plan(Fp8LtPlan *plan) noexcept;
 hipError_t launch_fp8_lt_plan(Fp8LtPlan *plan, const uint8_t *activation,
                               const uint8_t *weight, uint16_t *output,
@@ -325,11 +325,13 @@ struct KvVmmPlane final {
 
   hipError_t reserve_contiguous(const uint64_t logical,
                                 const uint64_t page) noexcept {
-    if (logical == 0U || page == 0U || logical > std::numeric_limits<std::size_t>::max()) {
+    if (logical == 0U || page == 0U ||
+        logical > std::numeric_limits<std::size_t>::max()) {
       return hipErrorInvalidValue;
     }
     void *candidate = nullptr;
-    const hipError_t status = hipMalloc(&candidate, static_cast<std::size_t>(logical));
+    const hipError_t status =
+        hipMalloc(&candidate, static_cast<std::size_t>(logical));
     if (status != hipSuccess) {
       return status;
     }
@@ -414,7 +416,8 @@ struct KvVmmPlane final {
 
   hipError_t release_checked() noexcept {
     if (contiguous) {
-      const hipError_t status = address == nullptr ? hipSuccess : hipFree(address);
+      const hipError_t status =
+          address == nullptr ? hipSuccess : hipFree(address);
       address = nullptr;
       logical_bytes = 0U;
       reservation_bytes = 0U;
@@ -504,18 +507,17 @@ struct KvState final : QuarantineNode {
                          head_dim_value * UINT64_C(2))),
         mapped_token_capacity(std::min(
             capacity_value,
-            key_plane.mapped_bytes /
-                (static_cast<uint64_t>(head_count_value) * head_dim_value *
-                 UINT64_C(2)))),
+            key_plane.mapped_bytes / (static_cast<uint64_t>(head_count_value) *
+                                      head_dim_value * UINT64_C(2)))),
         committed_bytes_per_plane(
             std::min(key_plane.mapped_bytes, value_plane.mapped_bytes)),
         memory_kind(key_plane.contiguous
                         ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
                         : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS),
-        accounting(),
-        published_length(0U), generation(0U), transition_token(0U),
-        transition_start(0U), transition_count(0U), transition_end(0U),
-        commit_allowed(false), view_count(0U), release_active(false) {}
+        accounting(), published_length(0U), generation(0U),
+        transition_token(0U), transition_start(0U), transition_count(0U),
+        transition_end(0U), commit_allowed(false), view_count(0U),
+        release_active(false) {}
 };
 
 struct KvView final : QuarantineNode {
@@ -815,8 +817,7 @@ struct ElementwisePlan final : QuarantineNode {
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
         argmax_metadata(), embedding(false), matmul(false), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -826,8 +827,7 @@ struct ElementwisePlan final : QuarantineNode {
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
         argmax_metadata(), embedding(true), matmul(false), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
                   Buffer *const weight_value, Buffer *const output_value,
@@ -837,8 +837,7 @@ struct ElementwisePlan final : QuarantineNode {
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
         argmax_metadata(), embedding(false), matmul(true), argmax(false),
         matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
                   Buffer *const output_value,
@@ -848,8 +847,7 @@ struct ElementwisePlan final : QuarantineNode {
         embedding_metadata(), matmul_metadata(),
         argmax_metadata(metadata_value), embedding(false), matmul(false),
         argmax(true), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr),
-        release_active(false), in_flight(false) {}
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ~ElementwisePlan() {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1783,11 +1781,10 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  const bool wave64 = arch_name != nullptr &&
-                      std::strncmp(arch_name, "gfx942", 6U) == 0;
-  info->kernel_id = wave64
-                        ? SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE64_V1
-                        : SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1;
+  const bool wave64 =
+      arch_name != nullptr && std::strncmp(arch_name, "gfx942", 6U) == 0;
+  info->kernel_id = wave64 ? SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE64_V1
+                           : SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1;
   info->workgroup_size_x = SLLM_HIP_RMSNORM_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(row_count);
   info->row_count = row_count;
@@ -1798,11 +1795,10 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
       info->kernel_symbol, SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX,
       wave64 ? ::sllm_rmsnorm_kernel::kWave64LogicalKernelId
              : ::sllm_rmsnorm_kernel::kLogicalKernelId);
-  sllm_public_runtime::copy_fixed_string(info->device_symbol,
-                                         SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
-                                         wave64
-                                             ? ::sllm_rmsnorm_kernel::kWave64DeviceSymbol
-                                             : ::sllm_rmsnorm_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
+      wave64 ? ::sllm_rmsnorm_kernel::kWave64DeviceSymbol
+             : ::sllm_rmsnorm_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -1920,12 +1916,12 @@ void destroy_fp8_lt_plan(Fp8LtPlan *const plan) noexcept {
   delete plan;
 }
 
-hipError_t create_fp8_lt_plan(
-    const hipblasLtHandle_t handle, Fp8LtPlan **const plan_output,
-    float *const activation_scales,
-    const float *const weight_scales, const uint32_t fp8_dtype,
-    const uint64_t m, const uint64_t k,
-    const uint64_t n) noexcept {
+hipError_t create_fp8_lt_plan(const hipblasLtHandle_t handle,
+                              Fp8LtPlan **const plan_output,
+                              float *const activation_scales,
+                              const float *const weight_scales,
+                              const uint32_t fp8_dtype, const uint64_t m,
+                              const uint64_t k, const uint64_t n) noexcept {
   if (handle == nullptr || plan_output == nullptr ||
       (fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
        fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ)) {
@@ -1954,15 +1950,14 @@ hipError_t create_fp8_lt_plan(
   const hipblasOperation_t trans_a = HIPBLAS_OP_T;
   const hipblasOperation_t trans_b = HIPBLAS_OP_N;
   const hipDataType fp8_library_dtype =
-      fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ
-          ? HIP_R_8F_E4M3_FNUZ
-          : HIP_R_8F_E4M3;
-  if (failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a,
-          sizeof(trans_a))) ||
-      failed(hipblasLtMatmulDescSetAttribute(
-          plan->operation, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b,
-          sizeof(trans_b)))) {
+      fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ ? HIP_R_8F_E4M3_FNUZ
+                                                  : HIP_R_8F_E4M3;
+  if (failed(hipblasLtMatmulDescSetAttribute(plan->operation,
+                                             HIPBLASLT_MATMUL_DESC_TRANSA,
+                                             &trans_a, sizeof(trans_a))) ||
+      failed(hipblasLtMatmulDescSetAttribute(plan->operation,
+                                             HIPBLASLT_MATMUL_DESC_TRANSB,
+                                             &trans_b, sizeof(trans_b)))) {
     destroy_fp8_lt_plan(plan.release());
     return hipErrorUnknown;
   }
@@ -2016,8 +2011,8 @@ hipError_t create_fp8_lt_plan(
     } else {
       int solution_count = 0;
       if (failed(hipblasLtMatmulAlgoGetHeuristic(
-              plan->handle, plan->operation, plan->a, plan->b, plan->c,
-              plan->d, preference, 1, &heuristic, &solution_count)) ||
+              plan->handle, plan->operation, plan->a, plan->b, plan->c, plan->d,
+              preference, 1, &heuristic, &solution_count)) ||
           solution_count != 1 || heuristic.state != HIPBLAS_STATUS_SUCCESS ||
           heuristic.workspaceSize != 0U) {
         cleanup_preference();
@@ -2033,19 +2028,20 @@ hipError_t create_fp8_lt_plan(
   return hipSuccess;
 }
 
-hipError_t launch_fp8_lt_plan(
-    Fp8LtPlan *const plan, const uint8_t *const activation,
-    const uint8_t *const weight, uint16_t *const output,
-    const hipStream_t stream) noexcept {
+hipError_t launch_fp8_lt_plan(Fp8LtPlan *const plan,
+                              const uint8_t *const activation,
+                              const uint8_t *const weight,
+                              uint16_t *const output,
+                              const hipStream_t stream) noexcept {
   if (plan == nullptr) {
     return hipErrorInvalidHandle;
   }
   const float alpha = 1.0F;
   const float beta = 0.0F;
-  const hipblasStatus_t launch = hipblasLtMatmul(
-      plan->handle, plan->operation, &alpha, weight, plan->a, activation,
-      plan->b, &beta, output, plan->c, output, plan->d, &plan->algorithm,
-      nullptr, 0U, stream);
+  const hipblasStatus_t launch =
+      hipblasLtMatmul(plan->handle, plan->operation, &alpha, weight, plan->a,
+                      activation, plan->b, &beta, output, plan->c, output,
+                      plan->d, &plan->algorithm, nullptr, 0U, stream);
   return launch == HIPBLAS_STATUS_SUCCESS ? hipSuccess : hipErrorUnknown;
 }
 #endif
@@ -2062,13 +2058,14 @@ void initialize_matmul_dispatch_info(
   info->info_version = SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  const auto variant = metadata.fp8_outer
-                           ? ((std::strcmp(arch_name, "gfx1201") == 0 ||
-                               std::strcmp(arch_name, "gfx942") == 0)
-                                  ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
-                                  : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
-                           : ::sllm_matmul_kernel::select_variant(
-                                 metadata.m, metadata.k, metadata.n, arch_name);
+  const auto variant =
+      metadata.fp8_outer
+          ? ((std::strcmp(arch_name, "gfx1201") == 0 ||
+              std::strcmp(arch_name, "gfx942") == 0)
+                 ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
+                 : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
+          : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
+                                                 metadata.n, arch_name);
   info->dispatch_count = metadata.fp8_outer ? 2U : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
@@ -3984,7 +3981,8 @@ sllm_context_create(const sllm_context_create_info_t *const info,
           lt_status != HIPBLAS_STATUS_SUCCESS) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "hipBLAS/hipBLASLt handle creation failed for the native matmul registry");
+            "hipBLAS/hipBLASLt handle creation failed for the native matmul "
+            "registry");
       }
     }
 #endif
@@ -6649,9 +6647,8 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
     }
     const uint32_t selected_memory_kind =
         info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
-            ? (vmm_supported != 0
-                   ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
-                   : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT)
+            ? (vmm_supported != 0 ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+                                  : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT)
             : info->memory_kind;
     if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
       key_status = hipSuccess;
@@ -6685,17 +6682,18 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
         key_status = hipErrorUnknown;
       } else if (selected_memory_kind ==
                  SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
-        key_status = key_plane.reserve_contiguous(allocation_bytes,
-                                                  bytes_per_token);
+        key_status =
+            key_plane.reserve_contiguous(allocation_bytes, bytes_per_token);
       } else {
-        key_status = key_plane.reserve(allocation_bytes, reservation_bytes,
-                                       page_bytes);
+        key_status =
+            key_plane.reserve(allocation_bytes, reservation_bytes, page_bytes);
       }
     }
     if (key_status != hipSuccess) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, key_status, "reserve selected KV K buffer");
+      return hip_failure(error_sink, key_status,
+                         "reserve selected KV K buffer");
     }
     const hipError_t value_status =
         sllm_public_runtime::FaultInjector::consume(
@@ -7453,7 +7451,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
-    const int expected_wavefront = std::strcmp(arch_name, "gfx942") == 0 ? 64 : 32;
+    const int expected_wavefront =
+        std::strcmp(arch_name, "gfx942") == 0 ? 64 : 32;
     if (properties.warpSize != expected_wavefront) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,

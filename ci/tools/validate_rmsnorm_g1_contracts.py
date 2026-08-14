@@ -130,7 +130,7 @@ ARTIFACT_SCHEMA = "ci/schema/rmsnorm-semantic-g1-artifact-v1.schema.json"
 REPORT_SCHEMA = "ci/schema/rmsnorm-semantic-g1-report-v1.schema.json"
 AGGREGATE_SCHEMA = "ci/schema/rmsnorm-semantic-g1-aggregate-v1.schema.json"
 WORKFLOW_PATH = ".github/workflows/semantic-rmsnorm-g1.yml"
-SEMANTIC_G1_WORKFLOW_SHA256 = "a1c0cc85334445c14c15b5be43e979f587a4f2bd8cb8b53690603b65939770fc"
+SEMANTIC_G1_WORKFLOW_SHA256 = "219e853b2f1a39f349be8f035f551e8a102c8630493e4e777d58e89e7ea4713b"
 _SEMANTIC_G1_UPLOAD_ROOT = "${{ env.RUN_ROOT }}/rmsnorm-semantic-g1-aggregate-${{ github.run_id }}-${{ github.run_attempt }}"
 SEMANTIC_G1_RESPONSE_UPLOAD_PATHS = tuple(
     f"{_SEMANTIC_G1_UPLOAD_ROOT}/rows/{row_id}/raw/case-{order}{suffix}"

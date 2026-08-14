@@ -60,6 +60,28 @@ Exit codes are:
 
 Required rows prohibit `SKIP` and `QUARANTINED`. Zero selected tests, unknown tests or markers, dirty or mismatched strict identity, missing reports, network-isolation failure, resource/output breach, and CPU fallback are failures. The row-wide limits are versioned in `ci/matrix/host-v1.json`.
 
+The registry-driven local entry point runs any selected subset without copying suite IDs. It refuses
+GPU-, model-, or network-dependent suites. Running all three rows also creates the local aggregate:
+
+```bash
+python3 ci/tools/run_local_verification.py --list
+python3 ci/tools/run_local_verification.py \
+  --rows h0,h1,h2 \
+  --output-root .local-artifacts/ci/local-draft \
+  --allow-dirty-local
+```
+
+Use `--strict` only from a clean checkout. The wrapper binds reviewed, tested, and workflow identity
+to `HEAD`; a dirty run remains `local-development, immutable=false`.
+
+The tracked Phase 5 llama.cpp contract uses the pinned source-lock metadata and fixtures, so H0 does
+not require the ignored `reference/llama.cpp` checkout. A local source audit remains fail-closed and
+explicit:
+
+```bash
+python3 ci/tools/run_llama_phase5.py --verify-reference
+```
+
 ## G0 trusted-local preflight
 
 G0 is not part of CPU host CI and never allocates, copies, dispatches, or runs a kernel. Its private native observer links against the pinned HIP runtime and calls identity APIs only. The runner resolves the canonical device from AMD-SMI's exact BDF, uses that HIP id only as a visibility routing hint, and then requires the observer to see exactly one device with the versioned BDF, UUID, target, product, runtime version, and resolved HIP/ROCr libraries. It also records read-only AMD-SMI/sysfs health and process facts before and after observation. The contract validates `/opt/rocm` 7.14.0, the staged H3 artifact and sidecar hashes, the immutable metadata's declared artifact path versus the staged artifact path, reliable ordered pre/post health/process facts, and zero allocation/copy/kernel/dispatch counts. The temporary observer binary is removed before the report is finalized; only its source/build provenance and hash remain in evidence.
@@ -145,19 +167,17 @@ python3 ci/tools/local_hygiene.py --output .local-artifacts/ci/local-hygiene.jso
 
 `.github/workflows/host-required.yml` runs H0, H1, and H2 as independent GitHub-hosted CPU jobs with hard timeouts of 8, 10, and 8 minutes. It checks out `github.sha` without persisted credentials, installs the hash-locked host environment before testing, and invokes every row in strict identity mode. The `host-required` job always runs and is the stable branch-protection check. Official actions are pinned to complete commit SHAs. The workflow does not use a self-hosted or GPU runner and does not run H3.
 
-`.github/workflows/phase7-lifecycle.yml` is the scheduled and release lifecycle entry point. Its
-versioned source of truth is `ci/matrix/phase7-ci-profiles-v1.json`:
+`.github/workflows/phase7-lifecycle.yml` is a manual control-plane entry point. Its versioned profile
+source remains `ci/matrix/phase7-ci-profiles-v1.json`:
 
-- `daily` runs at `17 18 * * *` UTC and selects the canonical V620 `gfx1030` and R9700 `gfx1201`
-  short correctness/performance observations. V620 returned to the daily set after its GIMPS workload ended.
-- `weekly` runs at `47 18 * * 6` UTC and selects the two canonical tuples, H0/H1/H2, and all ten
-  explicit compatibility compile targets.
-- `release` is selected by `workflow_dispatch` or a published release and uses the release retention
-  and blocking policy.
+- `daily` selects the canonical V620 `gfx1030` and R9700 `gfx1201` short observation profile.
+- `weekly` selects the two canonical tuples, H0/H1/H2, and all ten explicit compatibility targets.
+- `release` uses the release retention and blocking policy.
 
-Profile selection and compatibility compilation run on GitHub-hosted workers. GPU rows require the
-trusted labels `self-hosted`, `sllm-semantic-g1`, and `rocm-7.14`; public pull requests never enter
-that path. Scheduled artifacts are retained for 30 days and release evidence for 90 days. The
+Manual profile selection and compatibility compilation run on GitHub-hosted workers. GPU rows require
+the trusted labels `self-hosted`, `sllm-semantic-g1`, and `rocm-7.14`; push, pull request, schedule,
+and release events cannot enter that path. Local trusted execution is authoritative for daily/weekly
+GPU operation. Weekly artifacts are retained for 30 days and release evidence for 90 days. The
 performance lane is observational until an independently justified threshold is approved, so a
 metric delta alone is not a lifecycle failure. GPU PASS still requires the exact tuple, numerical
 result, no fallback, health, and cleanup checks.
@@ -179,3 +199,10 @@ The compile-only runner validates one exact target at a time and deletes its gen
 reporting. A successful compile must not be described as runtime or hardware compatibility. The GPU
 observation controller reuses the Phase 5 direct-engine runner and emits only a compact bounded
 summary; raw traces and generated binaries are not uploaded.
+
+The canonical public-runtime H3 workflow stays GitHub-hosted and non-required for `gfx1030` and
+`gfx1201`. Its final link closure is ordered as `libamdhip64.so`, `libhipblas.so`, then
+`libhipblaslt.so`; compile/link/code-object inspection is not GPU execution. The dedicated RMSNorm H3
+workflow reuses that link closure but additionally fixes the wave32/wave64 registration and dedicated
+artifact schema, so it is retained as a manual regression fixture. `semantic-rmsnorm-g1.yml` is also
+manual-only and never runs from a normal push.

@@ -33,6 +33,7 @@ class RmsNormH3RunnerTests(unittest.TestCase):
             self.assertNotIn("gfx1201", command)
             self.assertTrue(all("{" not in token and "}" not in token for token in command))
         self.assertIn("--hip-link", commands[-1])
+        self.assertEqual(commands[-1][-3:], list(runner.public_h3.PUBLIC_RUNTIME_LINK_LIBRARIES))
         self.assertIn("-rtlib=compiler-rt", " ".join(commands[-1]).replace("--rtlib=", "-rtlib="))
 
     def test_process_cleanup_and_nonzero_fail_closed(self) -> None:

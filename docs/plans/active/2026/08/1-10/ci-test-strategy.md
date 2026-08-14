@@ -196,14 +196,15 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 | --- | --- | --- | --- |
 | `pull_request` / `merge_group` | external-contribution lane。現在はinactive・nonblocking | 直接使用しない | 将来の外部貢献向け。trusted-soloの完了条件ではない |
 | maintainerによる信頼済み実行 | draft/integrationの影響範囲に応じて実行 | laneに応じたG0〜G3 | default trusted-solo-development。初期は専用local host、将来は隔離・使い捨てrunner |
-| protected `main` push | integration/releaseの影響範囲に応じて実行 | final relevant matrix | release/push laneの適用確認 |
-| daily schedule | smoke | 利用可能なcanonical tuple一覧 | health、flaky、短い性能観測 |
-| weekly schedule | full host | 利用可能な明示tuple一覧 | broad correctness、compatibility、性能履歴 |
-| protected release | full host | release対象の全明示tuple | release lane。明示的に有効化した場合だけblocking |
+| protected `main` push | GitHub-hosted H0/H1/H2とbounded H3 compile | 自動実行しない | release/push laneのportable host/build確認 |
+| trusted local daily | 影響範囲のhost row | canonical 2 tuple | health、flaky、短い性能観測 |
+| trusted local weekly | full host | 明示tuple一覧 | broad correctness、compatibility、性能履歴 |
+| manual release | full host/compile | release対象の全明示tuple | release lane。明示的に有効化した場合だけblocking |
 
 - public forkのPR codeを永続self-hosted runnerで実行しない。
 - `pull_request_target`はmetadata/label等に限定し、PR headをcheckoutして実行しない。
 - GPU workflowはdefault branch上の定義だけを使う。
+- self-hosted GPU jobを含むGitHub workflowは`workflow_dispatch`だけを受け付け、push、PR、merge group、schedule、releaseから自動起動しない。
 - runnerは可能ならVM passthrough、次にdevice ACLを限定したcontainer、最後に専用bare metalの順で隔離する。
 - visibility環境変数をsecurity boundaryにしない。
 - GPU runnerは原則1 jobごとのephemeral/JIT登録とし、終了後に外部controllerがprocess確認、診断保存、rebootまたはreimageを行う。

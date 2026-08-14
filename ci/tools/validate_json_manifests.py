@@ -46,14 +46,12 @@ H3_RMSNORM_MATRIX = "ci/matrix/rmsnorm-h3-compile-v1.json"
 H3_RMSNORM_WORKFLOW_PATH = ".github/workflows/rmsnorm-h3-compile.yml"
 H3_RMSNORM_WORKFLOW_NAME = "h3-rmsnorm-compile-only (non-required)"
 H3_RMSNORM_WORKFLOW_TRIGGER = {
-    "pull_request": None,
-    "push": {"branches": ["main"]},
     "workflow_dispatch": None,
 }
 SEMANTIC_G1_WORKFLOW_PATH = ".github/workflows/semantic-rmsnorm-g1.yml"
 SEMANTIC_G1_WORKFLOW_NAME = "semantic-rmsnorm-g1"
-SEMANTIC_G1_WORKFLOW_SHA256 = "a1c0cc85334445c14c15b5be43e979f587a4f2bd8cb8b53690603b65939770fc"
-SEMANTIC_G1_WORKFLOW_TRIGGER = {"push": {"branches": ["main"]}, "workflow_dispatch": None}
+SEMANTIC_G1_WORKFLOW_SHA256 = "219e853b2f1a39f349be8f035f551e8a102c8630493e4e777d58e89e7ea4713b"
+SEMANTIC_G1_WORKFLOW_TRIGGER = {"workflow_dispatch": None}
 SEMANTIC_G1_ACTIONS = {
     "checkout": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
     "upload": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -680,6 +678,23 @@ def _validate_exact_public_runtime_actions(path: Path, jobs: dict[str, object]) 
 def _require_trigger(path: Path, document: dict[str, object]) -> None:
     if "on" not in document and True not in document:
         raise ContractError(f"{path.relative_to(ROOT)}: workflow trigger `on` is missing")
+
+
+def _validate_self_hosted_trigger(path: Path, document: dict[str, object]) -> None:
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+    uses_self_hosted = any(
+        isinstance(job, dict)
+        and isinstance(job.get("runs-on"), list)
+        and "self-hosted" in job["runs-on"]
+        for job in jobs.values()
+    )
+    automatic = {"push", "pull_request", "pull_request_target", "merge_group", "schedule", "release"}
+    if uses_self_hosted and automatic.intersection(_workflow_trigger(document)):
+        raise ContractError(
+            f"{path.relative_to(ROOT)}: self-hosted workflow must be explicit workflow_dispatch only"
+        )
 
 
 def validate_host_workflow(path: Path, document: dict[str, object]) -> list[str]:
@@ -1329,10 +1344,6 @@ def validate_phase7_workflow(path: Path, document: dict[str, object]) -> list[st
     profile, _compatibility = validate_contracts(ROOT)
     workflow = profile["workflow"]
     expected_trigger = {
-        "schedule": [
-            {"cron": workflow["daily_cron"]},
-            {"cron": workflow["weekly_cron"]},
-        ],
         "workflow_dispatch": {
             "inputs": {
                 "profile": {
@@ -1343,7 +1354,6 @@ def validate_phase7_workflow(path: Path, document: dict[str, object]) -> list[st
                 }
             }
         },
-        "release": {"types": [workflow["release_event"]]},
     }
     if document.get("name") != PHASE7_WORKFLOW_NAME:
         raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 workflow name drifted")
@@ -1438,6 +1448,8 @@ def validate_phase7_workflow(path: Path, document: dict[str, object]) -> list[st
 
 def validate_workflow(path: Path, document: dict[str, object]) -> list[str]:
     """Dispatch to the host-required or independent H3 workflow profile."""
+
+    _validate_self_hosted_trigger(path, document)
 
     if path.name == "h3-compile.yml" or document.get("name") == "h3-compile-only (non-required)":
         return validate_h3_workflow(path, document)

@@ -17,10 +17,10 @@ __device__ __forceinline__ float wave_sum(float value) noexcept {
 }
 
 template <unsigned int WaveWidth, unsigned int WaveCount>
-__device__ __forceinline__ void rmsnorm_body(
-    const uint16_t *const activation, const uint16_t *const raw_scale,
-    uint16_t *const output, const uint32_t normalized_size,
-    const float epsilon) noexcept {
+__device__ __forceinline__ void
+rmsnorm_body(const uint16_t *const activation, const uint16_t *const raw_scale,
+             uint16_t *const output, const uint32_t normalized_size,
+             const float epsilon) noexcept {
   __shared__ float wave_sums[WaveCount];
   __shared__ float inverse_rms;
   const unsigned int lane = threadIdx.x % WaveWidth;

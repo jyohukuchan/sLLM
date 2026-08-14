@@ -1,9 +1,6 @@
 name: semantic-rmsnorm-g1
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
