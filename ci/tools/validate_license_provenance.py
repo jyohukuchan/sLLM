@@ -38,6 +38,7 @@ def main() -> int:
         sampling_tests = ROOT / "crates/sllm-core/tests/sampling_contract.rs"
         retained_license = ROOT / "docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt"
         expected_source_hash = "0965ba54bc21bad846f050143b4f8034129b03c6180d950790500a104ecb8013"
+        import_commit = "b3fbfdccda87628b94d1440df1bf25707cd93c35"
         for marker in (
             "llama-cpp-profile-v1-sampling-001",
             "llama-cpp-profile-v1-sampling-tests-001",
@@ -46,17 +47,17 @@ def main() -> int:
             "2aecff90e7bb4b8c09e32ae3dab24d41ca2138f0",
             expected_source_hash,
             "431b4892ddd431c5933c1188ff446d58362a686e24535baf1b5b7d9b0f580079",
-            "pending-until-A3-import-commit",
+            import_commit,
         ):
             if marker not in text:
-                errors.append(f"THIRD_PARTY_NOTICES.md is missing A3 import marker: {marker}")
+                errors.append(f"THIRD_PARTY_NOTICES.md is missing required import marker: {marker}")
         if sampling.exists():
             source_text = sampling.read_text(encoding="utf-8")
             if "THIRD_PARTY_NOTICES.md#llama-cpp-profile-v1-sampling-001" not in source_text:
                 errors.append("sampling source is missing its provenance header")
             observed = hashlib.sha256(sampling.read_bytes()).hexdigest()
-            if "pending-until-A3-import-commit" in text and observed != expected_source_hash:
-                errors.append("pending A3 sampling import bytes differ from imported_sha256")
+            if observed != expected_source_hash:
+                errors.append("A3 sampling import bytes differ from imported_sha256")
         else:
             errors.append("A3 sampling import source is missing")
         if sampling_tests.exists():
@@ -64,8 +65,8 @@ def main() -> int:
             if "THIRD_PARTY_NOTICES.md#llama-cpp-profile-v1-sampling-tests-001" not in test_text:
                 errors.append("sampling contract tests are missing their provenance header")
             observed = hashlib.sha256(sampling_tests.read_bytes()).hexdigest()
-            if "pending-until-A3-import-commit" in text and observed != "431b4892ddd431c5933c1188ff446d58362a686e24535baf1b5b7d9b0f580079":
-                errors.append("pending A3 sampling test bytes differ from imported_sha256")
+            if observed != "431b4892ddd431c5933c1188ff446d58362a686e24535baf1b5b7d9b0f580079":
+                errors.append("A3 sampling test bytes differ from imported_sha256")
         else:
             errors.append("A3 sampling contract tests are missing")
         if not retained_license.exists() or hashlib.sha256(retained_license.read_bytes()).hexdigest() != "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d":

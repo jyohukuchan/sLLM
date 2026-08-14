@@ -35,7 +35,7 @@ reuse:
     - Added fail-closed handling for NaN, infinite logits, empty mass, overflow, and parameter ranges.
     - Preserved the temperature-zero device Argmax path without a host logits readback.
 import:
-  commit: pending-until-A3-import-commit
+  commit: b3fbfdccda87628b94d1440df1bf25707cd93c35
 ```
 
 ## llama-cpp-profile-v1-sampling-tests-001
@@ -71,7 +71,7 @@ reuse:
     - Limited cases to the profile-v1 sampler and rewrote them as Rust unit tests.
     - Added non-aligned vocabulary, both parameter boundaries, NaN/Inf, deterministic random injection, and stable tie cases.
 import:
-  commit: pending-until-A3-import-commit
+  commit: b3fbfdccda87628b94d1440df1bf25707cd93c35
 ```
 
 ## llama-cpp-profile-v1-http-tests-001
@@ -123,5 +123,5 @@ reuse:
     - Adapted disconnect and bearer-authentication ideas to the bounded Rust scheduler without importing llama.cpp server or harness structure.
     - Added strict unsupported-field, type, size, queue, cancellation, and mid-stream terminal-error cases required by the sLLM profile.
 import:
-  commit: pending-until-A6-import-commit
+  commit: b3fbfdccda87628b94d1440df1bf25707cd93c35
 ```

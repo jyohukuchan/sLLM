@@ -30,8 +30,8 @@ A3で`src/llama-sampler.cpp`のprofile v1 subsetを`crates/sllm-core/src/samplin
 `tests/test-sampling.cpp`のtiny-logit/boundary ideaをRust unit/integration testへadaptedした。local source header、
 upstream URL/commit/blob、imported SHA-256、copyright/license、reuse mode、変更内容を
 [`THIRD_PARTY_NOTICES.md`](../../THIRD_PARTY_NOTICES.md)へ記録し、upstream MIT licenseも保持した。
-開発中のためnoticeのimport commitは`pending-until-A3-import-commit`であり、release/push laneでは実commitへ
-解決する。
+noticeのimport commitは実際にlocal bytesを導入した
+`b3fbfdccda87628b94d1440df1bf25707cd93c35`へ確定した。
 
 ## A6 actual HTTP test adaptation
 
@@ -40,4 +40,4 @@ request/response/usage/finish、SSE順序/終端、body negative caseだけを
 `tests/fixtures/openai_chat_profile_v1.json`と`crates/sllm-server/tests/http_contract.rs`へadaptした。
 llama.cpp固有fieldとC++ server architectureは持ち込んでいない。exact blob、source/local SHA-256、変更内容、
 MIT license、reuse modeはrepository rootの`THIRD_PARTY_NOTICES.md`に別noticeとして記録した。import commitは
-`pending-until-A6-import-commit`であり、release/push laneで実commitへ解決する。
+実際にlocal bytesを導入した`b3fbfdccda87628b94d1440df1bf25707cd93c35`へ確定した。
