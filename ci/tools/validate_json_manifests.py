@@ -706,12 +706,17 @@ def validate_host_workflow(path: Path, document: dict[str, object]) -> list[str]
         raise ContractError(f"{path.relative_to(ROOT)}: workflow name is missing")
     _require_trigger(path, document)
     warnings: list[str] = []
+    minimum_timeouts = {"h0": 15, "h1": 10, "h2": 8}
     for row_id in ("h0", "h1", "h2"):
         job = jobs[row_id]
         if not isinstance(job, dict) or not isinstance(job.get("steps"), list) or not job.get("runs-on"):
             raise ContractError(f"{path.relative_to(ROOT)}: {row_id} has invalid runner/steps structure")
         if not isinstance(job.get("timeout-minutes"), int) or job["timeout-minutes"] <= 0:
             raise ContractError(f"{path.relative_to(ROOT)}: {row_id} has invalid timeout")
+        if job["timeout-minutes"] < minimum_timeouts[row_id]:
+            raise ContractError(
+                f"{path.relative_to(ROOT)}: {row_id} timeout is below its hosted portability minimum"
+            )
         runs = [step.get("run", "") for step in job["steps"] if isinstance(step, dict)]
         joined = "\n".join(value for value in runs if isinstance(value, str))
         if "ci/tools/run_host_suite.py --row " not in joined:
@@ -810,13 +815,22 @@ def validate_h3_workflow(path: Path, document: dict[str, object]) -> list[str]:
     aggregate = jobs["h3-aggregate"]
     if not isinstance(aggregate, dict) or aggregate.get("needs") != ["h3-gfx1030", "h3-gfx1201"] or aggregate.get("if") != "${{ always() }}":
         raise ContractError(f"{path.relative_to(ROOT)}: H3 aggregate needs/always structure is invalid")
-    if aggregate.get("runs-on") != "ubuntu-24.04" or aggregate.get("timeout-minutes") != 2 or aggregate.get("permissions") != {"contents": "read"}:
+    if aggregate.get("runs-on") != "ubuntu-24.04" or aggregate.get("timeout-minutes") != 5 or aggregate.get("permissions") != {"contents": "read"}:
         raise ContractError(f"{path.relative_to(ROOT)}: H3 aggregate runner/permissions are invalid")
-    aggregate_runs = "\n".join(step.get("run", "") for step in aggregate.get("steps", []) if isinstance(step, dict) and isinstance(step.get("run"), str))
+    aggregate_steps = aggregate.get("steps", [])
+    if (
+        not isinstance(aggregate_steps, list)
+        or not aggregate_steps
+        or not isinstance(aggregate_steps[0], dict)
+        or aggregate_steps[0].get("with")
+        != {"ref": "${{ github.sha }}", "fetch-depth": 1, "persist-credentials": False}
+    ):
+        raise ContractError(f"{path.relative_to(ROOT)}: H3 aggregate must use a shallow immutable checkout")
+    aggregate_runs = "\n".join(step.get("run", "") for step in aggregate_steps if isinstance(step, dict) and isinstance(step.get("run"), str))
     for fragment in ("ci/tools/aggregate_h3_results.py", "--needs-json", "--artifact-dir", "--output-dir", "--strict-ci", "--run-id", "--run-attempt", "--expected-reviewed-sha", "--expected-tested-sha", "--expected-workflow-sha"):
         if fragment not in aggregate_runs:
             raise ContractError(f"{path.relative_to(ROOT)}: H3 aggregate is missing {fragment}")
-    aggregate_paths = "\n".join(str(step.get("with", {}).get("path", "")) for step in aggregate.get("steps", []) if isinstance(step, dict) and isinstance(step.get("with"), dict))
+    aggregate_paths = "\n".join(str(step.get("with", {}).get("path", "")) for step in aggregate_steps if isinstance(step, dict) and isinstance(step.get("with"), dict))
     if ".local-artifacts/h3-aggregate/aggregate.json" not in aggregate_paths or ".local-artifacts/h3-aggregate/aggregate.json.sha256" not in aggregate_paths:
         raise ContractError(f"{path.relative_to(ROOT)}: H3 aggregate report/sidecar is not uploaded")
     _validate_action_pins(path, jobs)

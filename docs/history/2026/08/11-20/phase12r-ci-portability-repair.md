@@ -51,4 +51,16 @@
 - testing文書、CI・テスト方針、main plan、forward queueをmanual self-hosted/local GPU境界へ同期し、本planをarchiveした。
 - Phase単位のcommit/push境界を適用し、Phase 13へgreenなhost portability baselineとregistry-driven local entrypointを渡す。
 
+## 2026-08-15: push後のhosted timeout修正
+
+- candidate `17598aa92623279056cb6182f7d1dc34a8d643da`ではpublic-runtime H3、host H1/H2、core H3の
+  `gfx1030`/`gfx1201`行が成功した一方、run `31823482223`のH0とrun `31823482332`のH3 aggregateが
+  job timeoutでcancelされた。test failure、compile failure、link failureではない。
+- H0はtoolchain/dependency setupに約3分42秒、H0 suiteに4分31秒を要し、従来の8分上限ではsuite完了前に
+  cancelされた。hosted runnerのcold setupを含む上限を15分へ広げ、validatorがこれ未満への退行を拒否するようにした。
+- H3 aggregateはfull-history checkout中に従来の2分上限へ到達した。aggregateは現在のimmutable candidateだけを
+  必要とするためcheckoutを`fetch-depth: 1`へ縮小し、上限を5分へ広げた。validatorはshallow immutable checkoutと
+  5分上限を正本契約として検査する。
+- `validate_json_manifests.py`、H3 workflow/aggregate focused 10件、Python compile/static、diff checkをPASSした。
+
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase12r-ci-portability-repair.md)

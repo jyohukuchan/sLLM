@@ -415,6 +415,15 @@ class H3AggregateContractTests(unittest.TestCase):
         host_path = ROOT / ".github/workflows/host-required.yml"
         validate_h3_workflow(h3_path, documents[h3_path])
 
+        h3 = copy.deepcopy(documents[h3_path])
+        h3["jobs"]["h3-aggregate"]["timeout-minutes"] = 2
+        with self.assertRaises(CommonContractError):
+            validate_h3_workflow(h3_path, h3)
+        h3 = copy.deepcopy(documents[h3_path])
+        h3["jobs"]["h3-aggregate"]["steps"][0]["with"]["fetch-depth"] = 0
+        with self.assertRaises(CommonContractError):
+            validate_h3_workflow(h3_path, h3)
+
         git_mount = "--mount \"type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly\" \\\n"
         for mutation in (
             ("dst=/output", "dst=/output,rw"),
@@ -435,6 +444,10 @@ class H3AggregateContractTests(unittest.TestCase):
                 validate_h3_workflow(h3_path, invalid_h3)
 
         validate_host_workflow(host_path, documents[host_path])
+        host = copy.deepcopy(documents[host_path])
+        host["jobs"]["h0"]["timeout-minutes"] = 14
+        with self.assertRaises(CommonContractError):
+            validate_host_workflow(host_path, host)
         host = copy.deepcopy(documents[host_path])
         host["jobs"]["host-required"]["needs"].append("h3-gfx1030")
         with self.assertRaises(CommonContractError):
