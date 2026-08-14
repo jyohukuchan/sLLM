@@ -90,9 +90,14 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 | Lifecycle | Ubuntu | Kernel | ROCm | GPU と artifact 条件 | 備考 |
 | --- | --- | --- | --- | --- | --- |
 | `experimental` | 24.04.4 LTS | GA 6.8 | build/runtime とも 7.14.0 | GPU、target、features ごとに個別 tuple | 主開発候補。現時点では sLLM 実機検証結果なし |
+| `planned` | Hot Aisleで選択可能な24.04 LTS image | provider imageの実測値 | build/runtime 7.14.0を要求 | MI300X x1、exact `gfx942`、feature付きtarget別artifact | Phase 12で完全tupleを取得する。VMのvirtualization方式を含む |
 | `planned` | 26.04 LTS | GA 7.0 | 7.14.0 | GPU、target、features ごとに個別 tuple | 将来検証候補 |
 
 - Ubuntu 24.04.4 LTS、GA kernel 6.8、ROCm 7.14.0 の組み合わせを主系統候補とする。具体的な driver、GPU、target/features、dynamic library path まで確定した tuple だけを evidence の対象にする。
+- Hot Aisle MI300X VMはPhase 12の一時的な実機tuple候補である。公開hardware仕様からOS point release、kernel、
+  amdgpu、ROCm、partition、VMM、dynamic library pathを推測せず、最初のpreflightで取得する。provider imageが
+  project標準と異なる場合、driverを無断交換せず、同releaseのself-contained ROCm user-space rootが成立するかを
+  先に確認する。成立しないtupleを別releaseへのsilent fallbackでPASSにしない。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、sLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 

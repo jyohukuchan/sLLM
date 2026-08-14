@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-13
+> 最終更新: 2026-08-14
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
 
@@ -100,6 +100,24 @@ sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 - model storage encoding、sLLM kernel input、hipBLASLt datatypeが異なる場合は明示的に変換し、FNUZとOCP payloadを再解釈しない。
 
 このcontractは初期FP8実装の計画であって、現在の実機検証結果ではない。hipBLASLt表だけをhardware全体の対応根拠にせず、hardware mappingとlibrary queryの両方を満たしたproblemだけdispatchする。
+
+### Phase 10〜12の計画contract
+
+- Phase 10はexact `gfx1201`でOCP E4M3 native W8A8、exact `gfx1030`で明示的なW8A8 emulationまたは
+  BF16 conversionを実装する。RDNA2 pathをnative FP8と表記しない。
+- Phase 11はexact `gfx942`、wave64、FNUZ FP8へ移植し、model storageのE4M3FNをload時に数値変換する。
+  `gfx9-4-generic`やOCP/FNUZ payloadのraw reinterpretを使わない。
+- AMDの公開MI300X llama.cpp例は`gfx942:sramecc+:xnack-`、wave64、VMMなしを報告している。この情報は
+  sLLMのHot Aisle VM実測ではないため`vendor-published observation`として扱い、Phase 12 preflightで
+  `hipDeviceAttributeVirtualMemoryManagementSupported`を再取得する。
+- VMMなしのtargetには、同じtoken-major FP16 K/Vとattention ABIを使う`contiguous-resident` KV providerを
+  capabilityで明示選択する。VMM対応targetのvAttentionを廃止せず、Paged Attentionへ暗黙に切り替えない。
+- Hot Aisle MI300X x1の結果は、完全なVM/software tuple、single GPU、実行したop/model/shapeだけへ限定する。
+  MI300A/MI325X、multi-GPU、bare metalへ自動的に一般化しない。
+
+詳細な実装・実機順は[Phase 10](../plans/active/2026/08/11-20/phase10-fp8-w8a8.md)、
+[Phase 11](../plans/active/2026/08/11-20/phase11-cdna3-port.md)、
+[Phase 12](../plans/active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
 
 ## 製品別evidence
 

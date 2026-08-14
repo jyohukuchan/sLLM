@@ -13,6 +13,12 @@
 - 通常iterationはmicro/O0/O1、canonical両GPU・2B/9B・llama.cpp・serviceはintegrationまたは意味変更時に
   限定した。未承認の性能倍率やparityはhard gateにしていない。
 
+## 2026-08-14: 後続Phase 13の挿入
+
+- Phase 9完了後のユーザー指示により、モデル非依存prepared execution制御を新しいPhase 13として挿入した。
+- 上記のPhase 9計画時点の番号は履歴として維持するが、現在のGemma 4はPhase 14、Weight NVFP4はPhase 15、
+  以降の旧Phase 15〜19もPhase 16〜20へ一段繰り下げられた。
+
 ## 2026-08-14: A0 gap accounting
 
 - Phase 8 short-oddを開始baselineに固定した。V620はTTFT/E2E `1.0987/9.6533 s`、prefill/decode
@@ -108,7 +114,7 @@
   ないため将来taskのままとした。
 - 残差の主因はmemory-bound M=1 matvecとhost launch/owner traversalである。production HIP Graphまたは
   native command-list replay、gate/up+SiLU等のMLP fusionはPhase 10をblockしない共通backlogとして残し、
-  Weight NVFP4のPhase 14開始前にfresh profileで再評価する。
+  Weight NVFP4の現在のPhase 15開始前にfresh profileで再評価する。
 
 ## Reviewとcloseout
 

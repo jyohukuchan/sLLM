@@ -9,7 +9,7 @@
 Phase 8で大幅に改善したQwen3.5 BF16単一request pathを、model本体のFP8 W8A8を追加する前に
 構造から最適化する。主対象は数値形式に依存しないdecode graph/segment実行、host completion境界、
 M=1 matvec dispatch、Qwen3.5 GDNと周辺fusionである。BF16だけの一時的な高速化ではなく、Phase 10の
-FP8とPhase 14のWeight NVFP4が同じ高速な実行骨格を利用できる状態を作る。
+FP8と当時計画のPhase 14 Weight NVFP4が同じ高速な実行骨格を利用できる状態を作る。
 
 llama.cppと同じmodel revision、target、dtype、token条件で差を測り、既にAMD/HIPで成立している小さな
 実装単位は積極的に直接reuseする。llama.cpp全体のgraph/runtimeは移植せず、sLLMのRust service、semantic
@@ -33,6 +33,10 @@ op、vAttention KV ownership、scheduler、versioned ABI、transactional state/e
 | 17 | Gemma4またはQwen3.5 MoE | 16 |
 | 18 | 残りの初期version機能 | 17 |
 | 19 | 人間によるREADME整備・発表 | 18 |
+
+この表はPhase 9計画時点の決定を記録する。2026-08-14にモデル非依存prepared execution制御を新しい
+Phase 13として挿入したため、現在のGemma 4はPhase 14、Weight NVFP4はPhase 15、以降はPhase 20まで
+一段繰り下げられている。現在の順序は`docs/plans/main-plan.md`を正とする。
 
 ## 開始時点の事実
 
@@ -259,7 +263,7 @@ rocprof traceはA0と支配要因が変わったcheckpointの代表sampleだけ�
 - Phase 9完了時にllama.cppとの差が残る場合は、kernel time、host wait/idle、launch、memory bandwidth、
   provider、graph coverageのどこに残るかを定量化する。Phase 10にはFP8固有最適化だけを混ぜ、未解決の
   dtype非依存問題は別backlogとして明示する。
-- Phase 14 Weight NVFP4開始前に最新profileで支配要因を再確認する。これはPhase 9中の広範再測定を
+- 現在のPhase 15 Weight NVFP4開始前に最新profileで支配要因を再確認する。これはPhase 9中の広範再測定を
   増やす条件ではなく、古いbottleneck判断のまま新形式を増やさないための短いcheckpointである。
 
 ## Rollbackと再計画

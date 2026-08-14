@@ -287,13 +287,18 @@
    - RDNA2。
 11. FP8/BF16実装をCDNA3へ移植する。
 12. MI300X単体でCDNA3実機確認を行う。
-13. google/gemma-4-12Bへ対応する。
-14. Weight NVFP4へ対応する。
-15. KV cache FP8/NVFP4へ対応する。
-16. MTP、visionへ対応する。
-17. Gemma4またはQwen3.5のMoEへ対応する。
-18. 残りの初期バージョン機能を実装する。
-19. 人間がREADMEを整備し、発表する。
+13. モデル非依存のprepared execution制御へ移行する。
+   - `QwenExecutionCore`に残るprepared semantic cache、same-stream segment owner、completion集約を
+     model-neutralなexecution plan/transition層へ抽出する。
+   - Qwen固有graph、attention preprocess、GDN、model stateはadapter側に残し、共通制御へ混ぜない。
+   - model-neutral fixtureと既存Qwen pathで、別model adapterが同じ高速な実行骨格を利用できることを確認する。
+14. google/gemma-4-12Bへ対応する。
+15. Weight NVFP4へ対応する。
+16. KV cache FP8/NVFP4へ対応する。
+17. MTP、visionへ対応する。
+18. Gemma4またはQwen3.5のMoEへ対応する。
+19. 残りの初期バージョン機能を実装する。
+20. 人間がREADMEを整備し、発表する。
 
 ## Phase概要と進捗
 
@@ -436,14 +441,56 @@
 - 詳細は[Phase 9 archive](archive/2026/08/11-20/phase9-engine-structural-optimization.md)、判断と実績は
   [Phase 9 history](../history/2026/08/11-20/phase9-engine-structural-optimization.md)を正とする。
 
+### Phase 10: model本体FP8 W8A8（計画済み）
+
+- verified Qwen3.5-4B BF16 lockからblock 128の再現可能な開発用OCP E4M3派生lockを作り、weight/activation
+  FP8、FP32 accumulation、BF16 outputのlinear contractを実装する。
+- RDNA4 exact `gfx1201`はnative FP8 provider、RDNA2 exact `gfx1030`はW8A8 emulationと明示BF16 conversionを
+  別providerとして扱う。RDNA2 pathをnative FP8と表記せず、改善したproviderだけproduction defaultへ昇格する。
+- 公式Qwen3.5 FP8は27B以上が中心であるため、小型第三者checkpointを基準にせず、公式27B FP8はPhase 12の
+  追加interop spotとする。
+- 詳細は[Phase 10 active plan](active/2026/08/11-20/phase10-fp8-w8a8.md)を正とする。
+
+### Phase 11: FP8/BF16のCDNA3移植（計画済み）
+
+- exact `gfx942`、wave64へBF16 kernel/providerを移植し、OCP E4M3FN model storageをVRAM load時に
+  E4M3FNUZへ数値変換してhipBLASLt FNUZ providerへ渡す。generic targetやraw byte reinterpretを使わない。
+- MI300XではVMMなしが想定されるため、opaque KV/attention契約を維持する`contiguous-resident` providerを
+  追加する。VMM対応targetのvAttentionは維持し、Paged Attentionへの選定変更やsilent fallbackは行わない。
+- Phase 11は`gfx942` artifact、runner、oracle、model lockを実機実行可能なcandidateへ仕上げる。実機PASSと
+  性能値はPhase 12で取得する。
+- 詳細は[Phase 11 active plan](active/2026/08/11-20/phase11-cdna3-port.md)を正とする。
+
+### Phase 12: Hot Aisle MI300X単体実機確認（計画済み）
+
+- Hot AisleのMI300X x1 Small VMを用い、exact `gfx942`のBF16/FNUZ FP8、wave64、contiguous-resident KV、
+  4B/9B model、service、性能、llama.cpp比較をfail-closedに確認する。
+- 192 GB HBM3の一台で現行single GPU/batch 1の検証には十分である。multi-GPU、Infinity Fabric、RCCL/RDMA、
+  bare-metal固有挙動、別CDNA3 SKUは証拠範囲外とする。
+- 利用時間はclean candidateで合計10〜12 GPU時間、現実的な上限16時間とする。2〜3時間のpreflightと
+  6〜8時間のintegration/performanceを別sessionにし、必要な場合だけ追加4時間を別日に使う。
+- 詳細は[Phase 12 active plan](active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
+
+### Phase 13: モデル非依存prepared execution制御（計画済み）
+
+- Phase 9で`QwenExecutionCore`内へ実装したprepared operation再利用、same-stream segment owner、
+  completion集約、transactional publication境界を、model固有graphから独立した共通execution層へ移す。
+- Qwen3.5は最初のadapterとして同じ意味・性能pathを維持する。model-neutral fixtureでQwen symbolや固定shapeを
+  参照せず同じ制御を利用できることを確認し、Phase 14のGemma 4 adapterが再実装せず利用できる境界を固定する。
+- 詳細は[Phase 13 active plan](active/2026/08/11-20/phase13-model-neutral-execution-control.md)を正とする。
+
 ## 現在の状態と次の作業
 
 - Phase 9まで完了した。次はPhase 10のmodel本体FP8 W8A8であり、CDNA3移植はPhase 11、MI300X実機確認は
-  Phase 12、Gemma 4はPhase 13、Weight NVFP4はPhase 14とする。
+  Phase 12、モデル非依存prepared execution制御はPhase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。
 - Phase 9でdtype非依存のcompletion/segment骨格とtarget別BF16 providerを固定した。Phase 10はこの境界を
-  再利用してFP8 encoding、weight layout、kernel/providerを追加する。Phase 14開始前にもfresh profileで
+  再利用してFP8 encoding、weight layout、kernel/providerを追加する。Phase 13でモデル非依存層へ抽出し、
+  Phase 15開始前にもfresh profileで
   memory-bound matvec、production graph/command-list、MLP fusionの優先順位を再確認する。RDNA4 FA3-likeは
   attentionが支配要因になった時の非blocking follow-upとして別管理する。
+- Phase 11はMI300XのVMMなしを前提に`contiguous-resident` KV providerを用意し、Phase 12はHot Aisle MI300X x1
+  Small VMを標準10〜12 GPU時間、上限16時間の二回構成で検証する。単一VMの性能証拠をmulti-GPU、bare metal、
+  MI300A/MI325Xへ一般化しない。
 - Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の
   non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
   [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。
