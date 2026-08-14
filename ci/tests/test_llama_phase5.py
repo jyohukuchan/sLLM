@@ -51,6 +51,19 @@ class LlamaPhase5ContractTests(unittest.TestCase):
             matrix, _, _, _ = runner.load_matrix()
         self.assertEqual(matrix["llama"]["commit"], runner.PINNED_COMMIT)
 
+    def test_tracked_conversion_identity_is_repository_relative(self) -> None:
+        conversion = self.matrix["conversion"]
+        self.assertEqual(conversion["source"]["path"], "reference/llama.cpp")
+        self.assertEqual(
+            conversion["tool"]["path"],
+            "reference/llama.cpp/convert_hf_to_gguf.py",
+        )
+        self.assertEqual(
+            conversion["arguments"][1],
+            "reference/llama.cpp/convert_hf_to_gguf.py",
+        )
+        self.assertNotIn(str(ROOT.resolve()), json.dumps(conversion, sort_keys=True))
+
     def test_explicit_local_reference_verification_fails_closed_when_missing(self) -> None:
         with tempfile.TemporaryDirectory() as directory, patch.object(
             runner, "REFERENCE_PATH", Path(directory) / "missing-llama.cpp"

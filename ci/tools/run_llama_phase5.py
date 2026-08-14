@@ -46,12 +46,14 @@ DIRECT_MATRIX_PATH = ROOT / "ci/matrix/engine-performance-direct-v1.json"
 DIRECT_AGGREGATE_SCHEMA_PATH = ROOT / "ci/schema/engine-performance-aggregate-v1.schema.json"
 TRACKED_REFERENCE_PATH = ROOT / "reference/llama.cpp"
 REFERENCE_PATH = TRACKED_REFERENCE_PATH
+TRACKED_REFERENCE_ID = "reference/llama.cpp"
+TRACKED_CONVERTER_ID = "reference/llama.cpp/convert_hf_to_gguf.py"
 WRAPPER_SOURCE = ROOT / "ci/tools/llama_phase5_wrapper.cpp"
 PINNED_COMMIT = "f5919bf458ef190468b5c329bb293f8a54a1e69c"
 PINNED_TREE = "e9b6173953477054a4068884aa5fc9aeef6475e8"
 MODEL_SHA256 = "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045"
 WRAPPER_SOURCE_SHA256 = "43e7db595d5cc739021af6285b41b5bcf3d26d6bd25e4af70e0bf2732248296e"
-SCHEMA_SHA256 = "2fed4ab03759c8c21a10dc4313f07d21ed44eeb0f1e73b59b5647796c58f48fe"
+SCHEMA_SHA256 = "8f02692c0e3e3cb85bbf749bcb3c81a06cb43f5e71541142f8e59330fb6fc6f6"
 DIRECT_MATRIX_REVISION = 4
 DIRECT_MATRIX_SHA256 = "fb0fab31e6c9b21a78e023bf9739a4363470e7a7df0f0898d0d878131e50cb78"
 DIRECT_AGGREGATE_SCHEMA_SHA256 = "e2d9802887b6f8773657b3863f93502509b73a18ae678df13659f23ea6c9946f"
@@ -603,20 +605,20 @@ def expected_conversion_identity(source_tree: str = PINNED_TREE) -> dict[str, An
         },
         "source": {
             "repository": "https://github.com/ggml-org/llama.cpp",
-            "path": str(TRACKED_REFERENCE_PATH.resolve()),
+            "path": TRACKED_REFERENCE_ID,
             "commit": PINNED_COMMIT,
             "tree": source_tree,
             "checkout": "detached",
             "clean": True,
         },
         "tool": {
-            "path": str(CONVERTER_PATH.resolve()),
+            "path": TRACKED_CONVERTER_ID,
             "sha256": CONVERTER_SHA256,
             "commit": PINNED_COMMIT,
             "tree": source_tree,
         },
         "arguments": [
-            "python3", str(CONVERTER_PATH.resolve()), str(MODEL_SNAPSHOT_PATH.resolve()), "--outfile", str(CONVERSION_OUTPUT_PATH.resolve()),
+            "python3", TRACKED_CONVERTER_ID, str(MODEL_SNAPSHOT_PATH.resolve()), "--outfile", str(CONVERSION_OUTPUT_PATH.resolve()),
             "--outtype", "bf16", "--no-mtp",
         ],
         "duration_seconds": CONVERSION_DURATION_SECONDS,
@@ -624,6 +626,19 @@ def expected_conversion_identity(source_tree: str = PINNED_TREE) -> dict[str, An
         "gguf": {"architecture": "qwen35", "name": SOURCE_MODEL_REVISION, "file_type": 32, "quantization_version": 2, "tensor_count": 426, "mtp_tensor_count": 0},
         "toolchain": {"rocm_root": str(ROCM_ROOT), "rocm_version": ROCM_VERSION, "compiler_path": str(COMPILER), "compiler_realpath": ROCM_COMPILER_REALPATH, "compiler_version": ROCM_COMPILER_VERSION},
     }
+
+
+def runtime_conversion_arguments() -> list[str]:
+    return [
+        "python3",
+        str(CONVERTER_PATH.resolve()),
+        str(MODEL_SNAPSHOT_PATH.resolve()),
+        "--outfile",
+        str(CONVERSION_OUTPUT_PATH.resolve()),
+        "--outtype",
+        "bf16",
+        "--no-mtp",
+    ]
 
 
 def validate_conversion_manifest(path: Path, source_lock: Mapping[str, Any], model: Path) -> dict[str, Any]:
@@ -657,7 +672,7 @@ def validate_conversion_manifest(path: Path, source_lock: Mapping[str, Any], mod
         fail("conversion manifest converter identity is stale")
     if sha256_file(CONVERTER_PATH, "llama.cpp conversion tool") != CONVERTER_SHA256:
         fail("conversion tool is stale or tampered")
-    expected_args = expected_conversion_identity(source["tree"])["arguments"]
+    expected_args = runtime_conversion_arguments()
     expected_dry_run_args = expected_args + ["--dry-run"]
     if conversion["run"]["args"] != expected_args or conversion["dry_run"]["args"] != expected_dry_run_args or conversion["run"]["result"] != "PASS" or conversion["dry_run"]["result"] != "PASS" or conversion["dry_run"]["output_created"] is not False:
         fail("conversion manifest arguments or PASS status are stale")

@@ -34,19 +34,19 @@
     },
     "source": {
       "repository": "https://github.com/ggml-org/llama.cpp",
-      "path": "/home/homelab1/coding-local/sLLM/reference/llama.cpp",
+      "path": "reference/llama.cpp",
       "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
       "tree": "e9b6173953477054a4068884aa5fc9aeef6475e8",
       "checkout": "detached",
       "clean": true
     },
     "tool": {
-      "path": "/home/homelab1/coding-local/sLLM/reference/llama.cpp/convert_hf_to_gguf.py",
+      "path": "reference/llama.cpp/convert_hf_to_gguf.py",
       "sha256": "8f1bed9466221e57e434caa7ee720abe1569deb6bc2fe5a65da950ea66c8e737",
       "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
       "tree": "e9b6173953477054a4068884aa5fc9aeef6475e8"
     },
-    "arguments": ["python3", "/home/homelab1/coding-local/sLLM/reference/llama.cpp/convert_hf_to_gguf.py", "/home/homelab1/.cache/sllm/models/Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "--outfile", "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/qwen3.5-4b-bf16-no-mtp.gguf", "--outtype", "bf16", "--no-mtp"],
+    "arguments": ["python3", "reference/llama.cpp/convert_hf_to_gguf.py", "/home/homelab1/.cache/sllm/models/Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "--outfile", "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/qwen3.5-4b-bf16-no-mtp.gguf", "--outtype", "bf16", "--no-mtp"],
     "duration_seconds": 27.04,
     "output": {
       "path": "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/qwen3.5-4b-bf16-no-mtp.gguf",

@@ -69,5 +69,12 @@
   `native/hip/src/kv_state_kernel.hip.cpp`の1箇所を18で整形し、public-runtimeとRMSNorm H3のhash chainを同期した。
 - 修正後local H0はcollected/selected `512/512`を198.801秒でPASSした。H3 public/RMSNorm focused contract 36件、
   matrix/manifest、Python compile/static、Markdown link、diff checkもPASSした。
+- clang-format修正candidate `b0b415145d7e38734c00f7a5ff2ec576a3afeed0`ではcore H3 run `31826417214`と
+  public-runtime H3 run `31826417258`がPASSした。host run `31826417247`はclean checkoutだけでllama Phase 5
+  contract 49件のclass setupが失敗し、local checkoutでは再現しなかった。
+- tracked conversion identityがcurrent checkoutのabsolute `ROOT`を埋め込んでいたことをtracked-only一時worktreeで
+  再現した。tracked matrix/schemaのllama sourceとconverter pathをrepository-relativeへ正規化し、実conversion manifestの
+  absolute runtime path検査は`runtime_conversion_arguments()`へ分離した。local llama focused 49件と修正後H0
+  collected/selected `513/513`を198.192秒でPASSした。
 
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase12r-ci-portability-repair.md)
