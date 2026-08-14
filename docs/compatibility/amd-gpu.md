@@ -140,6 +140,21 @@ PASSし、actual public runtimeのvirtual-contiguous KVも1023/1024/1025 token�
 他SKU/tuple、Paged Attention production backendを証明しない。実測値、identity、再検討条件は
 [KV memory decision](../architecture/kv-memory.md)を正とする。
 
+### 2026-08-14 Phase 8 BF16 optimized-path evidence
+
+同じlocal tupleのcanonical V620 `gfx1030` / R9700 `gfx1201`で、BF16 activation/weight、FP32
+accumulation、BF16 RNE outputのMatmul registryと、vAttention上のFA2-style causal attentionを実行した。
+Matmulはfrozen numerical manifestの5形状を含む17 caseでspecial classification、exact target、provider ID、
+fallbackなし、cleanup 0をPASSした。M=1,K=2560,N=9216はV620でcustom workgroup reduction、R9700で
+hipBLAS GEMMExを選び、weight copy/workspaceは0である。hipBLASの採用は`gfx1201`のM=1,K/N>=1024に
+限定し、V620や別RDNA4 SKUへ一般化しない。
+
+causal attentionはhead dim 256の協調dot reductionとonline softmaxを使い、prefill M=1/3/17/37、
+committed KV 1023/1024/1025、NaN/+Inf classificationを含む16 caseで独立oracleをPASSした。
+virtual-contiguous FP16 K/V、opaque owner、GQA mappingはPhase 6契約と同じである。これはproduction
+FA2-style scopeの`project-verified`であり、upstream FA2/CKの同等性能、Paged Attention、FA3/4、
+他targetを証明しない。RDNA4向けFA3-likeはPhase 8完了をblockしない将来taskである。
+
 Phase 6 A6ではQwen3.5-4B lock
 `sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae`を使い、canonical
 V620/R9700の各UUIDだけを`ROCR_VISIBLE_DEVICES`で可視化して論理device 0へ接続した。両targetで

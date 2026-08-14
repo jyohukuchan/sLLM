@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase8-bf16-numerics-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "contract_id", "locked_before_optimized_gpu_output", "matmul", "attention", "approval"],
+  "properties": {
+    "schema_version": {"const": "phase8-bf16-numerics-v1"},
+    "contract_id": {"const": "phase8-bf16-fast-path-numerics-v1"},
+    "locked_before_optimized_gpu_output": {"const": true},
+    "matmul": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_dtype", "weight_dtype", "accumulation_dtype", "output_dtype", "reference", "finite_rule", "fp32_unit_roundoff", "gamma_reduction_terms", "special_values", "required_shapes", "required_value_classes"],
+      "properties": {
+        "input_dtype": {"const": "BF16"}, "weight_dtype": {"const": "BF16"}, "accumulation_dtype": {"const": "F32"}, "output_dtype": {"const": "BF16"},
+        "reference": {"type": "string", "minLength": 1}, "finite_rule": {"type": "string", "minLength": 1},
+        "fp32_unit_roundoff": {"const": 5.960464477539063e-8}, "gamma_reduction_terms": {"const": "k"},
+        "special_values": {"type": "object", "additionalProperties": false, "required": ["nan_input", "same_sign_infinity", "opposite_sign_infinity"], "properties": {"nan_input": {"const": "NaN output"}, "same_sign_infinity": {"const": "same-sign infinity output"}, "opposite_sign_infinity": {"const": "NaN output"}}},
+        "required_shapes": {"type": "array", "minItems": 5, "items": {"type": "object", "additionalProperties": false, "required": ["m", "k", "n"], "properties": {"m": {"type": "integer", "minimum": 1}, "k": {"type": "integer", "minimum": 1}, "n": {"type": "integer", "minimum": 1}}}},
+        "required_value_classes": {"const": ["zero", "subnormal", "large_finite", "nan", "positive_infinity", "negative_infinity"]}
+      }
+    },
+    "attention": {
+      "type": "object", "additionalProperties": false,
+      "required": ["query_dtype", "kv_dtype", "accumulation_dtype", "output_dtype", "reference", "absolute_tolerance", "comparison", "required_query_counts", "required_kv_boundaries"],
+      "properties": {"query_dtype": {"const": "BF16"}, "kv_dtype": {"const": "F16"}, "accumulation_dtype": {"const": "F32"}, "output_dtype": {"const": "BF16"}, "reference": {"type": "string", "minLength": 1}, "absolute_tolerance": {"const": 0.016}, "comparison": {"type": "string", "minLength": 1}, "required_query_counts": {"const": [1, 3, 17, 37]}, "required_kv_boundaries": {"const": [1023, 1024, 1025]}}
+    },
+    "approval": {"type": "object", "additionalProperties": false, "required": ["authority", "reason"], "properties": {"authority": {"const": "Phase 8 active plan"}, "reason": {"type": "string", "minLength": 1}}}
+  }
+}

@@ -8,9 +8,9 @@
 namespace sllm_causal_attention_kernel {
 
 constexpr const char *kLogicalKernelId =
-    "causal_attention.stable_softmax_gqa.v1";
+    "causal_attention.online_softmax_gqa.v2";
 constexpr const char *kDeviceSymbol =
-    "sllm_causal_attention_stable_softmax_gqa_v1";
+    "sllm_causal_attention_online_softmax_gqa_v2";
 
 hipError_t launch(const uint16_t *query, const uint16_t *key,
                   const uint16_t *value, uint16_t *output, uint32_t query_count,

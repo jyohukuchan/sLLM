@@ -16,7 +16,7 @@ use crate::execution::{
     BoundSemanticOp, CausalAttentionSubmission, ExecutionBuffer, ExecutionError, ExecutionQueue,
     ExecutionSession, ExecutionState, KvState, KvStateAppendSubmission, LinearAttentionBindings,
     LinearAttentionState, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
-    Submission,
+    PreparedOperation, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 use crate::kv_state::{CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateDescriptor};
@@ -593,6 +593,7 @@ struct QwenExecutionCore {
     scales: BTreeMap<usize, CachedScale>,
     completion_timeout: Duration,
     audit: Mutex<DispatchAuditAccumulator>,
+    prepared_semantics: Mutex<BTreeMap<(String, u64), PreparedOperation>>,
     lifecycle: Arc<RequestLifecycle>,
     committed_length: u64,
     last_output: Option<QwenExecutionOutput>,
@@ -933,6 +934,7 @@ impl QwenExecutionCore {
             scales,
             completion_timeout: resident.completion_timeout,
             audit: Mutex::new(DispatchAuditAccumulator::default()),
+            prepared_semantics: Mutex::new(BTreeMap::new()),
             lifecycle: Arc::new(RequestLifecycle::new()),
             committed_length: 0,
             last_output: None,
@@ -1017,6 +1019,7 @@ impl QwenExecutionCore {
             scales,
             completion_timeout,
             audit: Mutex::new(DispatchAuditAccumulator::default()),
+            prepared_semantics: Mutex::new(BTreeMap::new()),
             lifecycle: Arc::new(RequestLifecycle::new()),
             committed_length: 0,
             last_output: None,
@@ -1353,8 +1356,13 @@ impl QwenExecutionCore {
         let input_bindings = self.bind_many(node.inputs(), token_count, AccessMode::Read)?;
         let output_bindings = self.bind_many(node.outputs(), token_count, AccessMode::Write)?;
         let kind = descriptor.kind();
-        let mut submission =
-            self.submit_semantic(node.label(), descriptor, input_bindings, output_bindings)?;
+        let mut submission = self.submit_semantic(
+            node.label(),
+            descriptor,
+            input_bindings,
+            output_bindings,
+            Some(token_count),
+        )?;
         wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
         self.record_dispatch(submission.dispatch())?;
         if kind != SemanticOpKind::Argmax {
@@ -1412,7 +1420,10 @@ impl QwenExecutionCore {
         )?;
         let inputs = self.bind_many(node.inputs(), execution.token_count, AccessMode::Read)?;
         let outputs = self.bind_many(node.outputs(), execution.token_count, AccessMode::Write)?;
-        let mut submission = self.submit_semantic(node.label(), descriptor, inputs, outputs)?;
+        // Position is part of this descriptor, so decode steps with the same
+        // token count are not interchangeable prepared operations.
+        let mut submission =
+            self.submit_semantic(node.label(), descriptor, inputs, outputs, None)?;
         wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
         self.record_dispatch(submission.dispatch())?;
         let _ = execution.layer;
@@ -1588,6 +1599,7 @@ impl QwenExecutionCore {
         descriptor: SemanticOpDescriptor,
         inputs: Vec<OwnedTensorBinding>,
         outputs: Vec<OwnedTensorBinding>,
+        cache_token_count: Option<u64>,
     ) -> Result<Submission, QwenExecutionError> {
         match self.session.supports(&descriptor) {
             PrepareSupport::Supported => {}
@@ -1597,8 +1609,29 @@ impl QwenExecutionCore {
                 }));
             }
         }
-        let operation = Arc::new(BoundSemanticOp::new(Arc::new(descriptor), inputs, outputs)?);
-        let prepared = self.session.prepare(operation)?;
+        let cache_key = cache_token_count.map(|token_count| (label.to_owned(), token_count));
+        let cached = match &cache_key {
+            Some(key) => self
+                .prepared_semantics
+                .lock()
+                .map_err(|_| QwenExecutionError::Poisoned)?
+                .get(key)
+                .cloned(),
+            None => None,
+        };
+        let prepared = if let Some(prepared) = cached {
+            prepared
+        } else {
+            let operation = Arc::new(BoundSemanticOp::new(Arc::new(descriptor), inputs, outputs)?);
+            let prepared = self.session.prepare(operation)?;
+            if let Some(key) = cache_key {
+                self.prepared_semantics
+                    .lock()
+                    .map_err(|_| QwenExecutionError::Poisoned)?
+                    .insert(key, prepared.clone());
+            }
+            prepared
+        };
         Ok(self.session.submit(&prepared, &self.queue)?)
     }
 
@@ -3580,6 +3613,7 @@ mod tests {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
             vec![101, 102, 103],
             vec![104],
+            vec![105],
         ]));
         let (mut core, source) = provisioned_core(Arc::clone(&recorder));
 
@@ -3662,15 +3696,37 @@ mod tests {
             assert_eq!(state.snapshot(core.session.as_ref()).unwrap().length(), 4);
         }
 
+        let prepares_before_second_decode = recorder
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("prepare:"))
+            .count();
+        let second_decode = core.decode(11).expect("second decode succeeds");
+        assert_eq!(second_decode.token_ids(), &[105]);
+        assert_eq!(second_decode.committed_length(), 5);
+        let prepares_after_second_decode = recorder
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("prepare:"))
+            .count();
+        assert_eq!(
+            prepares_after_second_decode - prepares_before_second_decode,
+            8,
+            "only the position-dependent attention preprocess nodes are re-prepared"
+        );
+
         let preprocess = recorder.preprocess();
-        assert_eq!(preprocess.len(), 16);
+        assert_eq!(preprocess.len(), 24);
         assert!(
             preprocess[..8]
                 .iter()
                 .all(|entry| { *entry == (AttentionPreprocessPositionMode::Prefill, 0, 3) })
         );
-        assert!(preprocess[8..].iter().all(|entry| {
+        assert!(preprocess[8..16].iter().all(|entry| {
             *entry == (AttentionPreprocessPositionMode::DecodeContinuation, 3, 1)
+        }));
+        assert!(preprocess[16..].iter().all(|entry| {
+            *entry == (AttentionPreprocessPositionMode::DecodeContinuation, 4, 1)
         }));
         let events = recorder.events();
         let linear = events

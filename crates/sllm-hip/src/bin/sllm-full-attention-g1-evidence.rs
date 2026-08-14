@@ -23,9 +23,9 @@ const Q_HEADS: usize = 16;
 const KV_HEADS: usize = 4;
 const HEAD_DIM: usize = 256;
 const WORKGROUP_SIZE: u32 = 256;
-const KERNEL_ID: u32 = sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1;
-const KERNEL_SYMBOL: &str = "causal_attention.stable_softmax_gqa.v1";
-const DEVICE_SYMBOL: &str = "sllm_causal_attention_stable_softmax_gqa_v1";
+const KERNEL_ID: u32 = sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2;
+const KERNEL_SYMBOL: &str = "causal_attention.online_softmax_gqa.v2";
+const DEVICE_SYMBOL: &str = "sllm_causal_attention_online_softmax_gqa_v2";
 
 #[derive(Clone, Copy, Debug)]
 struct Case {
@@ -36,7 +36,7 @@ struct Case {
 
 // Non-Cartesian coverage: prefill M boundaries plus decode prefixes. The
 // prefill M=1/start=0 case is also the decode-prefix-zero boundary.
-const CASES: [Case; 10] = [
+const CASES: [Case; 16] = [
     Case {
         id: "prefill-m1",
         m: 1,
@@ -50,6 +50,11 @@ const CASES: [Case; 10] = [
     Case {
         id: "prefill-m17",
         m: 17,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m37",
+        m: 37,
         start_position: 0,
     },
     Case {
@@ -87,6 +92,31 @@ const CASES: [Case; 10] = [
         m: 1,
         start_position: 257,
     },
+    Case {
+        id: "decode-kv1023",
+        m: 1,
+        start_position: 1022,
+    },
+    Case {
+        id: "decode-kv1024",
+        m: 1,
+        start_position: 1023,
+    },
+    Case {
+        id: "decode-kv1025",
+        m: 1,
+        start_position: 1024,
+    },
+    Case {
+        id: "special-query-nan",
+        m: 1,
+        start_position: 0,
+    },
+    Case {
+        id: "special-value-pos-inf",
+        m: 1,
+        start_position: 0,
+    },
 ];
 
 #[derive(Debug)]
@@ -102,6 +132,7 @@ struct CaseEvidence {
     start_position: u64,
     committed_kv_length: u64,
     numerical_match: bool,
+    max_abs_error: f64,
     nonuniform_softmax_checked: bool,
     subnormal_score_contribution_checked: bool,
     causal_visibility_match: bool,
@@ -205,6 +236,39 @@ fn bf16_to_f32(value: u16) -> f32 {
     f32::from_bits(u32::from(value) << 16)
 }
 
+fn f64_to_bf16_rne(value: f64) -> u16 {
+    if value.is_nan() {
+        return if value.is_sign_negative() {
+            0xffc0
+        } else {
+            0x7fc0
+        };
+    }
+    if value == f64::INFINITY {
+        return 0x7f80;
+    }
+    if value == f64::NEG_INFINITY {
+        return 0xff80;
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            0x8000
+        } else {
+            0x0000
+        };
+    }
+    let magnitude = value.abs();
+    let exponent = magnitude.log2().floor() as i32;
+    let quantum_exponent = if exponent < -126 { -133 } else { exponent - 7 };
+    let quantum = 2.0_f64.powi(quantum_exponent);
+    let rounded = (magnitude / quantum).round_ties_even() * quantum;
+    float_to_bf16_rne(if value.is_sign_negative() {
+        -(rounded as f32)
+    } else {
+        rounded as f32
+    })
+}
+
 fn f16_to_f32(value: u16) -> f32 {
     let sign = u32::from(value & 0x8000) << 16;
     let exponent = u32::from((value >> 10) & 0x1f);
@@ -268,7 +332,9 @@ fn input_v_words(token_count: usize, seed: u64) -> Vec<u16> {
     let mut words = vec![0_u16; token_count * KV_HEADS * HEAD_DIM];
     for token in 0..token_count {
         for head in 0..KV_HEADS {
-            let value = 1.0 + token as f32 + head as f32 + (seed % 2) as f32;
+            // Keep adjacent KV heads distinct after BF16 rounding even at the
+            // 1023/1024/1025 committed-length boundaries.
+            let value = 1.0 + token as f32 + head as f32 * 32.0 + (seed % 2) as f32;
             let word = float_to_bf16_rne(value);
             for dimension in 0..HEAD_DIM {
                 words[(token * KV_HEADS + head) * HEAD_DIM + dimension] = word;
@@ -381,13 +447,13 @@ fn scalar_oracle(
             let mut scores = Vec::with_capacity((position + 1) as usize);
             for key_position in 0..=position {
                 let key_offset = (key_position as usize * KV_HEADS + kv_head) * HEAD_DIM;
-                let mut dot = 0.0_f32;
-                let mut dot_without_subnormal_lane = 0.0_f32;
+                let mut dot = 0.0_f64;
+                let mut dot_without_subnormal_lane = 0.0_f64;
                 for dimension in 0..HEAD_DIM {
-                    let product = bf16_to_f32(query_words[query_offset + dimension])
-                        * f16_to_f32(sllm_hip::bf16_to_f16_bits(
+                    let product = f64::from(bf16_to_f32(query_words[query_offset + dimension]))
+                        * f64::from(f16_to_f32(sllm_hip::bf16_to_f16_bits(
                             key_words[key_offset + dimension],
-                        ));
+                        )));
                     dot += product;
                     if dimension != 2 {
                         dot_without_subnormal_lane += product;
@@ -399,23 +465,25 @@ fn scalar_oracle(
                     score.to_bits() != score_without_subnormal_lane.to_bits();
                 scores.push(score);
             }
-            let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
             nonuniform_softmax_checked |= scores
                 .windows(2)
                 .any(|pair| pair[0].to_bits() != pair[1].to_bits());
-            let mut denominator = 0.0_f32;
+            let mut denominator = 0.0_f64;
             for score in &scores {
                 denominator += (*score - maximum).exp();
             }
             for dimension in 0..HEAD_DIM {
-                let mut accumulation = 0.0_f32;
+                let mut accumulation = 0.0_f64;
                 for (index, score) in scores.iter().enumerate() {
                     let value_offset = (index * KV_HEADS + kv_head) * HEAD_DIM + dimension;
                     let probability = (*score - maximum).exp() / denominator;
                     accumulation += probability
-                        * f16_to_f32(sllm_hip::bf16_to_f16_bits(value_words[value_offset]));
+                        * f64::from(f16_to_f32(sllm_hip::bf16_to_f16_bits(
+                            value_words[value_offset],
+                        )));
                 }
-                output[query_offset + dimension] = float_to_bf16_rne(accumulation);
+                output[query_offset + dimension] = f64_to_bf16_rne(accumulation);
             }
         }
     }
@@ -472,7 +540,10 @@ fn run_case(
         append_tokens(session, queue, &state, &prefix_key, &prefix_value, 0)?;
     }
     let key_words = input_k_words(case.m, case.start_position);
-    let value_words = input_v_words(case.m, seed + 2);
+    let mut value_words = input_v_words(case.m, seed + 2);
+    if case.id == "special-value-pos-inf" {
+        value_words.fill(0x7f80);
+    }
     append_tokens(
         session,
         queue,
@@ -484,7 +555,12 @@ fn run_case(
     let snapshot = state
         .snapshot(session)
         .map_err(|error| format!("KV snapshot failed: {error}"))?;
-    let query_words = input_q_words(case.m);
+    let mut query_words = input_q_words(case.m);
+    if case.id == "special-query-nan" {
+        for head in 0..Q_HEADS {
+            query_words[head * HEAD_DIM] = 0x7fc1;
+        }
+    }
     let query_bytes = words_to_bytes(&query_words);
     let query_buffer = session
         .allocate(query_bytes.len() as u64)
@@ -547,13 +623,34 @@ fn run_case(
         .chunks_exact(2)
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
-    let numerical_match = actual == expected;
+    let mut numerical_match = actual.len() == expected.len();
+    let mut max_abs_error = 0.0_f64;
+    for (&observed_word, &reference_word) in actual.iter().zip(&expected) {
+        let observed = f64::from(bf16_to_f32(observed_word));
+        let reference = f64::from(bf16_to_f32(reference_word));
+        let matches = if reference.is_nan() {
+            observed.is_nan()
+        } else if reference.is_infinite() {
+            observed == reference
+        } else if observed.is_finite() {
+            let error = (observed - reference).abs();
+            max_abs_error = max_abs_error.max(error);
+            error <= 0.016
+        } else {
+            false
+        };
+        numerical_match &= matches;
+    }
     let causal_visibility_match = snapshot.length() == committed_length;
-    let gqa_mapping_match = actual
-        .chunks_exact(HEAD_DIM)
-        .step_by(Q_HEADS)
-        .zip(actual.chunks_exact(HEAD_DIM).skip(4).step_by(Q_HEADS))
-        .any(|(left, right)| left != right);
+    let gqa_mapping_match = if case.id.starts_with("special-") {
+        numerical_match
+    } else {
+        actual
+            .chunks_exact(HEAD_DIM)
+            .step_by(Q_HEADS)
+            .zip(actual.chunks_exact(HEAD_DIM).skip(4).step_by(Q_HEADS))
+            .any(|(left, right)| left != right)
+    };
     drop(readback);
     drop(state);
     drop(query_buffer);
@@ -564,6 +661,7 @@ fn run_case(
         start_position: case.start_position,
         committed_kv_length: committed_length,
         numerical_match,
+        max_abs_error,
         nonuniform_softmax_checked,
         subnormal_score_contribution_checked,
         causal_visibility_match,
@@ -640,6 +738,7 @@ fn run(config: &Config) -> Report {
                     .any(|case| case.nonuniform_softmax_checked && case.numerical_match),
                 fp16_subnormal_affects_score: cases
                     .iter()
+                    .filter(|case| !case.id.starts_with("special-"))
                     .all(|case| case.subnormal_score_contribution_checked),
                 final_bf16_rne_checked: cases.iter().all(|case| case.numerical_match),
                 gqa_heads_checked: cases.iter().all(|case| case.gqa_mapping_match),
@@ -748,9 +847,17 @@ mod tests {
 
     #[test]
     fn boundary_case_set_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 10);
+        assert_eq!(CASES.len(), 16);
+        assert!(CASES.iter().any(|case| case.m == 37));
         assert!(CASES.iter().any(|case| case.m == 257));
         assert!(CASES.iter().any(|case| case.start_position == 257));
+        for committed_length in [1023, 1024, 1025] {
+            assert!(CASES.iter().any(|case| {
+                case.start_position + u64::try_from(case.m).unwrap() == committed_length
+            }));
+        }
+        assert!(CASES.iter().any(|case| case.id == "special-query-nan"));
+        assert!(CASES.iter().any(|case| case.id == "special-value-pos-inf"));
         assert!(CASES.iter().all(|case| case.m > 0));
     }
 
@@ -761,6 +868,14 @@ mod tests {
         assert_eq!(float_to_bf16_rne(f32::INFINITY), 0x7f80);
         assert_eq!(float_to_bf16_rne(f32::NEG_INFINITY), 0xff80);
         assert_eq!(float_to_bf16_rne(f32::from_bits(0x7fc1_2345)), 0x7fc1);
+    }
+
+    #[test]
+    fn f64_oracle_rounds_directly_to_bf16() {
+        assert_eq!(f64_to_bf16_rne(1.0 + 2.0_f64.powi(-8)), 0x3f80);
+        assert_eq!(f64_to_bf16_rne(1.0 + 3.0 * 2.0_f64.powi(-8)), 0x3f82);
+        assert_eq!(f64_to_bf16_rne(3.0 * 2.0_f64.powi(-134)), 0x0002);
+        assert!(bf16_to_f32(f64_to_bf16_rne(f64::NAN)).is_nan());
     }
 
     #[test]

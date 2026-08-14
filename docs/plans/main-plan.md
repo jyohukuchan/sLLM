@@ -396,12 +396,29 @@
 - 計画は[Phase 7 archive](archive/2026/08/11-20/phase7-ci-cd-expansion.md)、詳細は
   [Phase 7 history](../history/2026/08/11-20/phase7-ci-cd-expansion.md)を正とする。
 
+### Phase 8: BF16単一リクエスト最適化（完了）
+
+- frozen float64 numerical oracle、BF16 Matmul registry、M>1 tiled/M=1 reduction kernel、R9700大形状の
+  target-specific hipBLAS、vAttention上のFA2-style online softmax、prepared semantic cacheを実装した。
+  baseline kernel、checkpoint weight layout、opaque KV owner、virtual-contiguous FP16 K/Vは維持した。
+- canonical V620 `gfx1030` / R9700 `gfx1201`でMatmul 17 case、attention 16 case、4B O2 7 case、
+  2B/9B spot、fixed llama.cpp、OpenAI non-stream/SSEをPASSした。全runはHIP-only、fallbackなし、
+  ECC 0、terminal cleanup 0である。
+- short-oddのPhase 5比はV620でTTFT 7.550→1.110秒、prefill 2.253→15.391 tok/s、E2E
+  25.838→9.656秒、R9700で2.878→0.683秒、5.921→25.108 tok/s、12.445→8.881秒となった。
+  llama.cppとの差はE2Eで約20.4/26.9倍残り、dispatch graph、fusion、decode GEMV、host orchestrationを
+  後続性能backlogとする。
+- 今回のattention実装はユーザー指示どおりFA2-styleだけとした。RDNA4向けFA3-likeは同じvAttention・
+  数値・shape契約でFA2と比較する非blockingな将来タスクとして維持し、Phase 9をblockしない。
+- 計画は[Phase 8 archive](archive/2026/08/11-20/phase8-bf16-optimization.md)、詳細は
+  [Phase 8 history](../history/2026/08/11-20/phase8-bf16-optimization.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 7まで完了した。詳細evidenceをこの文書へ重複掲載せず、対応するarchive/historyを正とする。
-- Phase 7は定期・releaseのprofile選択、trusted runner境界、10 exact targetのcompile-only compatibility、
-  既存Phase 5 runnerの短時間GPU観測への再利用まで完了した。次はPhase 8のBF16最適化だが、
-  active planと受入条件は未固定である。
+- Phase 8まで完了した。詳細evidenceをこの文書へ重複掲載せず、対応するarchive/historyを正とする。
+- 開発順序の次はPhase 9のmodel本体FP8 W8A8である。Phase 9 active planと受入条件は未固定であり、
+  RDNA4を先に成立させてからRDNA2へ適用する。Phase 8の残差性能backlogとRDNA4 FA3-likeは
+  非blocking follow-upとして別管理する。
 - Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の
   non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
   [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。

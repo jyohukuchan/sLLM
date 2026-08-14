@@ -20,6 +20,9 @@
 #include "rmsnorm_kernel_internal.hpp"
 
 #include <hip/hip_runtime.h>
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+#include <hipblas/hipblas.h>
+#endif
 
 #include <array>
 #include <atomic>
@@ -93,6 +96,7 @@ namespace sllm_matmul_kernel {
 hipError_t launch(const uint16_t *const activation,
                   const uint16_t *const weight, uint16_t *const output,
                   const uint64_t m, const uint64_t k, const uint64_t n,
+                  const KernelVariant /*variant*/,
                   const hipStream_t stream) noexcept {
   return fake_hip::matmul_launch(activation, weight, output, m, k, n, stream);
 }
@@ -212,11 +216,29 @@ struct Context final : QuarantineNode {
   bool release_active;
   std::atomic<bool> poisoned;
   uint64_t next_dispatch_id;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+  hipblasHandle_t matmul_blas_handle;
+  std::mutex matmul_blas_mutex;
+#endif
 
   explicit Context(const uint32_t device)
       : QuarantineNode(HandleKind::Context), device_index(device), accounting(),
         accounting_mutex(), release_active(false), poisoned(false),
-        next_dispatch_id(1U) {}
+        next_dispatch_id(1U)
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        ,
+        matmul_blas_handle(nullptr), matmul_blas_mutex()
+#endif
+  {
+  }
+
+  ~Context() {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (matmul_blas_handle != nullptr) {
+      (void)hipblasDestroy(matmul_blas_handle);
+    }
+#endif
+  }
 };
 
 struct Queue final : QuarantineNode {
@@ -1775,11 +1797,12 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1;
+  const auto variant = ::sllm_matmul_kernel::select_variant(
+      metadata.m, metadata.k, metadata.n, arch_name);
+  info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(
-      (metadata.output_elements + SLLM_HIP_MATMUL_WORKGROUP_SIZE - 1U) /
-      SLLM_HIP_MATMUL_WORKGROUP_SIZE);
+  info->grid_size_x =
+      ::sllm_matmul_kernel::grid_size_x(variant, metadata.m, metadata.n);
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   info->m = metadata.m;
@@ -1788,10 +1811,10 @@ void initialize_matmul_dispatch_info(
   info->output_elements = metadata.output_elements;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX,
-      ::sllm_matmul_kernel::kLogicalKernelId);
-  sllm_public_runtime::copy_fixed_string(info->device_symbol,
-                                         SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX,
-                                         ::sllm_matmul_kernel::kDeviceSymbol);
+      ::sllm_matmul_kernel::logical_kernel_id(variant));
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX,
+      ::sllm_matmul_kernel::device_symbol(variant));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -3677,6 +3700,17 @@ sllm_context_create(const sllm_context_create_info_t *const info,
       return hip_failure(error_sink, set_status, "hipSetDevice");
     }
     std::unique_ptr<Context> candidate(new Context(info->device_index));
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (std::strcmp(properties.gcnArchName, "gfx1201") == 0) {
+      const hipblasStatus_t blas_status =
+          hipblasCreate(&candidate->matmul_blas_handle);
+      if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "hipBLAS handle creation failed for the gfx1201 matmul registry");
+      }
+    }
+#endif
     {
       std::lock_guard<std::mutex> lock(registry_mutex);
       uintptr_t token = 0U;

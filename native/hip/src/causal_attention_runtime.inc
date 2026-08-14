@@ -1,25 +1,20 @@
 namespace {
 
 class CausalAttentionExecuteScopeGuard final {
- public:
-  CausalAttentionExecuteScopeGuard(KvState* const state, Queue* const queue,
+public:
+  CausalAttentionExecuteScopeGuard(KvState *const state, Queue *const queue,
                                    const CausalAttentionBuffers buffers,
-                                   std::unique_ptr<Completion>* const candidate,
-                                   NativeEventGuard* const event_guard,
-                                   sllm_error_sink_t* const sink) noexcept
-      : state_(state),
-        queue_(queue),
-        buffers_(buffers),
-        candidate_(candidate),
-        event_guard_(event_guard),
-        sink_(sink),
-        token_(0U),
+                                   std::unique_ptr<Completion> *const candidate,
+                                   NativeEventGuard *const event_guard,
+                                   sllm_error_sink_t *const sink) noexcept
+      : state_(state), queue_(queue), buffers_(buffers), candidate_(candidate),
+        event_guard_(event_guard), sink_(sink), token_(0U),
         phase_(Phase::Reserved) {}
 
-  CausalAttentionExecuteScopeGuard(const CausalAttentionExecuteScopeGuard&) =
+  CausalAttentionExecuteScopeGuard(const CausalAttentionExecuteScopeGuard &) =
       delete;
-  CausalAttentionExecuteScopeGuard& operator=(
-      const CausalAttentionExecuteScopeGuard&) = delete;
+  CausalAttentionExecuteScopeGuard &
+  operator=(const CausalAttentionExecuteScopeGuard &) = delete;
 
   ~CausalAttentionExecuteScopeGuard() { cleanup(); }
 
@@ -30,54 +25,53 @@ class CausalAttentionExecuteScopeGuard final {
   }
   void disarm() noexcept { phase_ = Phase::Disarmed; }
 
- private:
+private:
   enum class Phase : uint8_t { Reserved, Candidate, Registered, Disarmed };
 
   void cleanup() noexcept {
     switch (phase_) {
-      case Phase::Reserved:
-        (void)rollback_reserved_causal_attention(state_, queue_, buffers_,
-                                                 sink_);
-        break;
-      case Phase::Candidate:
-        if (candidate_ != nullptr && candidate_->get() != nullptr) {
-          (void)rollback_unpublished_submission(
-              *candidate_, *event_guard_,
-              "causal attention unwound before completion registration", sink_);
-        } else {
-          state_->context->poisoned.store(true);
-        }
-        break;
-      case Phase::Registered:
-        if (candidate_ != nullptr && candidate_->get() != nullptr) {
-          (void)cleanup_failed_submission(
-              *candidate_, token_, hipErrorUnknown,
-              "causal attention unwound after completion registration", queue_,
-              sink_);
-        } else {
-          state_->context->poisoned.store(true);
-        }
-        break;
-      case Phase::Disarmed:
-        break;
+    case Phase::Reserved:
+      (void)rollback_reserved_causal_attention(state_, queue_, buffers_, sink_);
+      break;
+    case Phase::Candidate:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)rollback_unpublished_submission(
+            *candidate_, *event_guard_,
+            "causal attention unwound before completion registration", sink_);
+      } else {
+        state_->context->poisoned.store(true);
+      }
+      break;
+    case Phase::Registered:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)cleanup_failed_submission(
+            *candidate_, token_, hipErrorUnknown,
+            "causal attention unwound after completion registration", queue_,
+            sink_);
+      } else {
+        state_->context->poisoned.store(true);
+      }
+      break;
+    case Phase::Disarmed:
+      break;
     }
     phase_ = Phase::Disarmed;
   }
 
-  KvState* const state_;
-  Queue* const queue_;
+  KvState *const state_;
+  Queue *const queue_;
   CausalAttentionBuffers buffers_;
-  std::unique_ptr<Completion>* const candidate_;
-  NativeEventGuard* const event_guard_;
-  sllm_error_sink_t* const sink_;
+  std::unique_ptr<Completion> *const candidate_;
+  NativeEventGuard *const event_guard_;
+  sllm_error_sink_t *const sink_;
   uintptr_t token_;
   Phase phase_;
 };
 
-bool causal_intervals_overlap(const Buffer* const left_buffer,
+bool causal_intervals_overlap(const Buffer *const left_buffer,
                               const uint64_t left_start,
                               const uint64_t left_end,
-                              const Buffer* const right_buffer,
+                              const Buffer *const right_buffer,
                               const uint64_t right_start,
                               const uint64_t right_end) noexcept {
   return left_buffer == right_buffer && left_start < right_end &&
@@ -85,8 +79,8 @@ bool causal_intervals_overlap(const Buffer* const left_buffer,
 }
 
 sllm_status_t validate_causal_attention_dispatch_info(
-    const sllm_causal_attention_dispatch_info_t* const info,
-    sllm_error_sink_t* const sink) noexcept {
+    const sllm_causal_attention_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
   if (info == nullptr || info->struct_size != sizeof(*info)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ARGUMENT,
@@ -109,11 +103,10 @@ sllm_status_t validate_causal_attention_dispatch_info(
 }
 
 void fill_causal_attention_dispatch_info(
-    sllm_causal_attention_dispatch_info_t* const info,
+    sllm_causal_attention_dispatch_info_t *const info,
     const uint64_t dispatch_id,
-    const sllm_causal_attention::DescriptorMetadata& metadata,
-    const uint32_t kv_heads,
-    const char* const arch_name) noexcept {
+    const sllm_causal_attention::DescriptorMetadata &metadata,
+    const uint32_t kv_heads, const char *const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -123,7 +116,7 @@ void fill_causal_attention_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1;
+  info->kernel_id = SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2;
   info->workgroup_size_x = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
   info->grid_size_x =
       static_cast<uint32_t>(metadata.query_count * metadata.query.q_heads);
@@ -146,15 +139,15 @@ void fill_causal_attention_dispatch_info(
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
-}  // namespace
+} // namespace
 
 extern "C" sllm_status_t sllm_causal_attention_execute(
-    const sllm_context_t* const raw_context,
-    const sllm_queue_t* const raw_queue,
-    const sllm_causal_attention_desc_t* const descriptor,
-    sllm_completion_t** const completion_output,
-    sllm_causal_attention_dispatch_info_t* const dispatch_info,
-    sllm_error_sink_t* const error_sink) noexcept {
+    const sllm_context_t *const raw_context,
+    const sllm_queue_t *const raw_queue,
+    const sllm_causal_attention_desc_t *const descriptor,
+    sllm_completion_t **const completion_output,
+    sllm_causal_attention_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (completion_output != nullptr) {
       *completion_output = nullptr;
@@ -184,11 +177,11 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
       return descriptor_status;
     }
 
-    Context* context = nullptr;
-    Queue* queue = nullptr;
-    KvState* state = nullptr;
-    Buffer* query = nullptr;
-    Buffer* output = nullptr;
+    Context *context = nullptr;
+    Queue *queue = nullptr;
+    KvState *state = nullptr;
+    Buffer *query = nullptr;
+    Buffer *output = nullptr;
     uint64_t dispatch_id = 0U;
     {
       std::lock_guard<std::mutex> registry_lock(registry_mutex);
@@ -386,23 +379,23 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
           candidate, token, timing_record_status,
           "hipEventRecord causal attention timing start", queue, error_sink);
     }
-    const auto byte_pointer = [](Buffer* const buffer,
-                                 const uint64_t offset) -> void* {
-      return static_cast<char*>(buffer->device_pointer) +
+    const auto byte_pointer = [](Buffer *const buffer,
+                                 const uint64_t offset) -> void * {
+      return static_cast<char *>(buffer->device_pointer) +
              static_cast<std::size_t>(offset);
     };
-    const uint16_t* const query_pointer = static_cast<const uint16_t*>(
+    const uint16_t *const query_pointer = static_cast<const uint16_t *>(
         byte_pointer(query, metadata.query.byte_offset));
-    uint16_t* const output_pointer = static_cast<uint16_t*>(
+    uint16_t *const output_pointer = static_cast<uint16_t *>(
         byte_pointer(output, metadata.output.byte_offset));
     const hipError_t launch_status = ::sllm_causal_attention_kernel::launch(
         query_pointer,
-        static_cast<const uint16_t*>(state->key_buffer->device_pointer),
-        static_cast<const uint16_t*>(state->value_buffer->device_pointer),
+        static_cast<const uint16_t *>(state->key_buffer->device_pointer),
+        static_cast<const uint16_t *>(state->value_buffer->device_pointer),
         output_pointer, static_cast<uint32_t>(metadata.query_count),
         state->capacity_tokens, metadata.start_position,
-        metadata.expected_kv_length, metadata.query.q_heads,
-        state->head_count, state->head_dim, queue->stream);
+        metadata.expected_kv_length, metadata.query.q_heads, state->head_count,
+        state->head_dim, queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -419,7 +412,7 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
     }
     fill_causal_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
                                         state->head_count, arch_name);
-    *completion_output = reinterpret_cast<sllm_completion_t*>(token);
+    *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();
     return SLLM_STATUS_OK;

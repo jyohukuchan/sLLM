@@ -20,10 +20,7 @@ use sllm_hip::HipBackend;
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 const HIP_BACKEND: u32 = 1;
-const MATMUL_KERNEL_ID: u32 = 1;
 const WORKGROUP_SIZE: u32 = 256;
-const KERNEL_SYMBOL: &str = "matmul.bf16_fp32.v1";
-const DEVICE_SYMBOL: &str = "sllm_matmul_bf16_fp32_v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaseShape {
@@ -34,20 +31,44 @@ struct CaseShape {
 
 // Keep the boundary coverage broad without taking the Cartesian product of
 // all M/K/N values.  K=5 is retained as a small non-boundary reduction case.
-const CASES: [CaseShape; 13] = [
+const CASES: [CaseShape; 17] = [
     CaseShape { m: 1, k: 1, n: 1 },
     CaseShape { m: 1, k: 3, n: 17 },
     CaseShape { m: 3, k: 17, n: 3 },
     CaseShape { m: 17, k: 3, n: 1 },
-    CaseShape { m: 1, k: 255, n: 3 },
+    CaseShape {
+        m: 1,
+        k: 255,
+        n: 17,
+    },
     CaseShape { m: 1, k: 256, n: 3 },
     CaseShape { m: 1, k: 257, n: 3 },
+    CaseShape {
+        m: 3,
+        k: 256,
+        n: 31,
+    },
     CaseShape { m: 3, k: 5, n: 255 },
     CaseShape { m: 3, k: 5, n: 256 },
     CaseShape { m: 3, k: 5, n: 257 },
     CaseShape { m: 255, k: 3, n: 1 },
     CaseShape { m: 256, k: 3, n: 1 },
     CaseShape { m: 257, k: 3, n: 1 },
+    CaseShape {
+        m: 17,
+        k: 257,
+        n: 33,
+    },
+    CaseShape {
+        m: 37,
+        k: 1025,
+        n: 65,
+    },
+    CaseShape {
+        m: 1,
+        k: 2560,
+        n: 9216,
+    },
 ];
 
 #[derive(Debug)]
@@ -71,7 +92,10 @@ struct CaseEvidence {
     grid_size_x: u32,
     kernel_symbol: String,
     device_symbol: String,
+    kernel_elapsed_ns: u64,
     exact_match: bool,
+    numerical_match: bool,
+    max_abs_error: f64,
 }
 
 #[derive(Serialize)]
@@ -174,7 +198,11 @@ fn shape_element_count(shape: CaseShape) -> Result<(usize, usize, usize), String
     Ok((activation, weight, output))
 }
 
-const ORDINARY_FINITE: [u16; 6] = [0x3f80, 0xbf80, 0x3fc0, 0xc020, 0x4000, 0x7f00];
+// 0x5c00 is deliberately large but leaves enough FP32 exponent headroom even
+// when both operands use it and all 1025 required products have the same
+// sign. A near-maximum BF16 would turn this finite tolerance case into an
+// FP32 product or reduction overflow case.
+const ORDINARY_FINITE: [u16; 6] = [0x3f80, 0xbf80, 0x3fc0, 0xc020, 0x4000, 0x5c00];
 const SPECIAL_VALUES: [u16; 8] = [
     0x0000, // +0
     0x8000, // -0
@@ -188,6 +216,15 @@ const SPECIAL_VALUES: [u16; 8] = [
 
 fn make_operands(shape: CaseShape, case_index: usize) -> Result<(Vec<u16>, Vec<u16>), String> {
     let (activation_count, weight_count, _) = shape_element_count(shape)?;
+    if shape.k > 1025 || shape.n > 1024 {
+        let activation = (0..activation_count)
+            .map(|index| ORDINARY_FINITE[index % 5])
+            .collect();
+        let weight = (0..weight_count)
+            .map(|index| ORDINARY_FINITE[(index * 3 + 1) % 5])
+            .collect();
+        return Ok((activation, weight));
+    }
     let mut activation = (0..activation_count)
         .map(|index| ORDINARY_FINITE[(index * 17 + case_index) % ORDINARY_FINITE.len()])
         .collect::<Vec<_>>();
@@ -199,7 +236,7 @@ fn make_operands(shape: CaseShape, case_index: usize) -> Result<(Vec<u16>, Vec<u
         // Keep the weight finite while covering all special activation values,
         // avoiding an indeterminate zero-times-infinity product.
         for row in 0..shape.m {
-            activation[row] = SPECIAL_VALUES[(row + case_index) % SPECIAL_VALUES.len()];
+            activation[row * shape.k] = SPECIAL_VALUES[(row + case_index) % SPECIAL_VALUES.len()];
         }
         if shape.k == 1 {
             weight.fill(0x3f80);
@@ -218,26 +255,147 @@ fn make_operands(shape: CaseShape, case_index: usize) -> Result<(Vec<u16>, Vec<u
                 SPECIAL_VALUES[(column + case_index + 2) % SPECIAL_VALUES.len()];
         }
     }
+    if shape == (CaseShape { m: 1, k: 256, n: 3 }) {
+        // One explicit opposite-infinity reduction fixes the NaN output
+        // classification promised by the frozen numerical manifest.
+        activation[0] = 0x7f80;
+        activation[1] = 0xff80;
+        weight[0] = 0x3f80;
+        weight[1] = 0x3f80;
+    }
     Ok((activation, weight))
 }
 
-/// Independent scalar oracle.  The product is materialized before the add,
-/// and reductions always visit k in ascending order.
+fn f64_to_bf16_rne(value: f64) -> u16 {
+    if value.is_nan() {
+        return if value.is_sign_negative() {
+            0xffc0
+        } else {
+            0x7fc0
+        };
+    }
+    if value == f64::INFINITY {
+        return 0x7f80;
+    }
+    if value == f64::NEG_INFINITY {
+        return 0xff80;
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            0x8000
+        } else {
+            0x0000
+        };
+    }
+
+    let magnitude = value.abs();
+    let exponent = magnitude.log2().floor() as i32;
+    let quantum_exponent = if exponent < -126 { -133 } else { exponent - 7 };
+    let quantum = 2.0_f64.powi(quantum_exponent);
+    let rounded = (magnitude / quantum).round_ties_even() * quantum;
+    let signed = if value.is_sign_negative() {
+        -rounded
+    } else {
+        rounded
+    };
+    float_to_bf16_rne(signed as f32)
+}
+
+/// Independent exact-input oracle. BF16 operands and their products are
+/// exactly representable in f64; reductions visit k in ascending order and
+/// are rounded once to BF16 at the output boundary.
 #[inline(never)]
-fn scalar_matmul_oracle(shape: CaseShape, activation: &[u16], weight: &[u16]) -> Vec<u16> {
-    let mut output = Vec::with_capacity(shape.m * shape.n);
+fn scalar_matmul_oracle(
+    shape: CaseShape,
+    activation: &[u16],
+    weight: &[u16],
+) -> (Vec<f64>, Vec<u16>) {
+    let mut exact = Vec::with_capacity(shape.m * shape.n);
+    let mut rounded = Vec::with_capacity(shape.m * shape.n);
     for row in 0..shape.m {
         for column in 0..shape.n {
-            let mut accumulator = 0.0_f32;
+            let mut accumulator = 0.0_f64;
             for reduction in 0..shape.k {
-                let product = bf16_to_float(activation[row * shape.k + reduction])
-                    * bf16_to_float(weight[column * shape.k + reduction]);
+                let product = f64::from(bf16_to_float(activation[row * shape.k + reduction]))
+                    * f64::from(bf16_to_float(weight[column * shape.k + reduction]));
                 accumulator += product;
             }
-            output.push(float_to_bf16_rne(accumulator));
+            exact.push(accumulator);
+            rounded.push(f64_to_bf16_rne(accumulator));
         }
     }
-    output
+    (exact, rounded)
+}
+
+fn compare_phase8_numerics(
+    shape: CaseShape,
+    activation: &[u16],
+    weight: &[u16],
+    exact_reference: &[f64],
+    actual: &[u8],
+) -> Result<f64, String> {
+    let actual_words = actual
+        .chunks_exact(2)
+        .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+        .collect::<Vec<_>>();
+    if actual_words.len() != exact_reference.len() {
+        return Err("matmul numerical comparison length mismatch".to_owned());
+    }
+    let unit_roundoff = 2.0_f64.powi(-24);
+    let gamma = shape.k as f64 * unit_roundoff / (1.0 - shape.k as f64 * unit_roundoff);
+    let mut max_abs_error = 0.0_f64;
+    for row in 0..shape.m {
+        for column in 0..shape.n {
+            let index = row * shape.n + column;
+            let reference = exact_reference[index];
+            let actual_word = actual_words[index];
+            let observed = f64::from(bf16_to_float(actual_word));
+            if reference.is_nan() {
+                if !observed.is_nan() {
+                    return Err("matmul NaN classification mismatch".to_owned());
+                }
+                continue;
+            }
+            if reference.is_infinite() {
+                if observed != reference {
+                    return Err(format!(
+                        "matmul infinity classification mismatch at row {row} column {column}: reference={reference} observed={observed}"
+                    ));
+                }
+                continue;
+            }
+            let rounded_reference = bf16_to_float(f64_to_bf16_rne(reference));
+            if rounded_reference.is_infinite() {
+                if observed != f64::from(rounded_reference) {
+                    return Err("matmul finite-overflow classification mismatch".to_owned());
+                }
+                continue;
+            }
+            if !observed.is_finite() {
+                return Err("matmul finite result became non-finite".to_owned());
+            }
+            let mut sum_abs_products = 0.0_f64;
+            for reduction in 0..shape.k {
+                sum_abs_products += f64::from(bf16_to_float(activation[row * shape.k + reduction]))
+                    .abs()
+                    * f64::from(bf16_to_float(weight[column * shape.k + reduction])).abs();
+            }
+            let half_ulp = if reference == 0.0 || reference.abs() < 2.0_f64.powi(-126) {
+                2.0_f64.powi(-134)
+            } else {
+                let exponent = reference.abs().log2().floor() as i32;
+                2.0_f64.powi(exponent - 8)
+            };
+            let error = (observed - reference).abs();
+            max_abs_error = max_abs_error.max(error);
+            if error > gamma * sum_abs_products + half_ulp {
+                return Err(format!(
+                    "matmul output exceeds frozen Phase 8 bound at row {row} column {column}"
+                ));
+            }
+        }
+    }
+    Ok(max_abs_error)
 }
 
 fn wait_success(
@@ -260,13 +418,42 @@ fn validate_dispatch(
         .m
         .checked_mul(shape.n)
         .ok_or_else(|| "output element count overflowed usize".to_owned())?;
-    let expected_grid = u32::try_from(output_elements.div_ceil(WORKGROUP_SIZE as usize))
-        .map_err(|_| "matmul grid size does not fit u32".to_owned())?;
+    let forced_baseline = env::var("SLLM_MATMUL_FORCE_BASELINE").as_deref() == Ok("1");
+    let (expected_kernel, expected_grid, expected_symbol, expected_device_symbol) =
+        if forced_baseline {
+            (
+                1,
+                output_elements.div_ceil(WORKGROUP_SIZE as usize) as u32,
+                "matmul.bf16_fp32.v1",
+                "sllm_matmul_bf16_fp32_v1",
+            )
+        } else if shape.m == 1 && shape.k >= 1024 && shape.n >= 1024 && target == "gfx1201" {
+            (
+                4,
+                shape.n as u32,
+                "matmul.hipblas.gemm_ex.decode.v1",
+                "hipblasGemmEx",
+            )
+        } else if shape.m == 1 {
+            (
+                3,
+                shape.n as u32,
+                "matmul.bf16_fp32.decode.v2",
+                "sllm_matmul_bf16_fp32_decode_v2",
+            )
+        } else {
+            (
+                2,
+                shape.n.div_ceil(16) as u32,
+                "matmul.bf16_fp32.tiled16.v2",
+                "sllm_matmul_bf16_fp32_tiled16_v2",
+            )
+        };
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
         || dispatch.dispatch_count != 1
-        || dispatch.kernel_id != MATMUL_KERNEL_ID
+        || dispatch.kernel_id != expected_kernel
         || dispatch.workgroup_size_x != WORKGROUP_SIZE
         || dispatch.grid_size_x != expected_grid
         || dispatch.row_count != shape.m as u64
@@ -274,8 +461,8 @@ fn validate_dispatch(
         || dispatch.backend != HIP_BACKEND
         || dispatch.fallback_allowed
         || dispatch.fallback_used
-        || dispatch.kernel_symbol != KERNEL_SYMBOL
-        || dispatch.device_symbol != DEVICE_SYMBOL
+        || dispatch.kernel_symbol != expected_symbol
+        || dispatch.device_symbol != expected_device_symbol
         || dispatch.target != target
     {
         return Err(format!(
@@ -294,7 +481,8 @@ fn run_case(
     target: &str,
 ) -> Result<CaseEvidence, String> {
     let (activation_words, weight_words) = make_operands(shape, case_index)?;
-    let expected_words = scalar_matmul_oracle(shape, &activation_words, &weight_words);
+    let (exact_reference, expected_words) =
+        scalar_matmul_oracle(shape, &activation_words, &weight_words);
     let activation_bytes = words_to_bytes(&activation_words);
     let weight_bytes = words_to_bytes(&weight_words);
     let output_bytes = words_to_bytes(&expected_words);
@@ -370,6 +558,10 @@ fn run_case(
         .map_err(|error| format!("matmul submit failed: {error}"))?;
     validate_dispatch(submission.dispatch(), shape, target)?;
     wait_success(submission.wait(WAIT_TIMEOUT), "matmul completion")?;
+    let kernel_elapsed_ns = submission
+        .kernel_elapsed_ns()
+        .map_err(|error| format!("matmul kernel timing failed: {error}"))?
+        .ok_or_else(|| "HIP matmul did not publish GPU kernel timing".to_owned())?;
     let dispatch = submission.dispatch().clone();
     let mut readback = submission
         .start_output_readback(0)
@@ -385,12 +577,14 @@ fn run_case(
             shape.m, shape.k, shape.n
         ));
     }
-    if actual != output_bytes {
-        return Err(format!(
-            "matmul BF16 oracle mismatch for M={} K={} N={}",
-            shape.m, shape.k, shape.n
-        ));
-    }
+    let exact_match = actual == output_bytes;
+    let max_abs_error = compare_phase8_numerics(
+        shape,
+        &activation_words,
+        &weight_words,
+        &exact_reference,
+        &actual,
+    )?;
 
     Ok(CaseEvidence {
         m: shape.m,
@@ -406,7 +600,10 @@ fn run_case(
         grid_size_x: dispatch.grid_size_x,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        exact_match: true,
+        kernel_elapsed_ns,
+        exact_match,
+        numerical_match: true,
+        max_abs_error,
     })
 }
 
@@ -502,22 +699,36 @@ mod tests {
     }
 
     #[test]
-    fn scalar_oracle_uses_ascending_k_and_separate_product_add() {
+    fn scalar_oracle_accumulates_exact_bf16_products_in_f64() {
         let shape = CaseShape { m: 1, k: 3, n: 1 };
         let one = float_to_bf16_rne(1.0);
         let large = float_to_bf16_rne(16_777_216.0);
         let negative_large = float_to_bf16_rne(-16_777_216.0);
-        let ascending_sensitive =
+        let (ascending_exact, ascending_rounded) =
             scalar_matmul_oracle(shape, &[large, one, negative_large], &[one, one, one]);
-        let cancellation_first =
+        let (cancellation_exact, cancellation_rounded) =
             scalar_matmul_oracle(shape, &[large, negative_large, one], &[one, one, one]);
-        assert_eq!(ascending_sensitive, vec![0x0000]);
-        assert_eq!(cancellation_first, vec![0x3f80]);
+        assert_eq!(ascending_exact, vec![1.0]);
+        assert_eq!(cancellation_exact, vec![1.0]);
+        assert_eq!(ascending_rounded, vec![0x3f80]);
+        assert_eq!(cancellation_rounded, vec![0x3f80]);
+    }
+
+    #[test]
+    fn f64_to_bf16_rne_handles_ties_subnormals_and_overflow() {
+        assert_eq!(f64_to_bf16_rne(1.0 + 2.0_f64.powi(-8)), 0x3f80);
+        assert_eq!(f64_to_bf16_rne(1.0 + 3.0 * 2.0_f64.powi(-8)), 0x3f82);
+        assert_eq!(f64_to_bf16_rne(2.0_f64.powi(-134)), 0x0000);
+        assert_eq!(f64_to_bf16_rne(3.0 * 2.0_f64.powi(-134)), 0x0002);
+        assert_eq!(
+            f64_to_bf16_rne((2.0 - 2.0_f64.powi(-8)) * 2.0_f64.powi(127)),
+            0x7f80
+        );
     }
 
     #[test]
     fn required_case_coverage_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 13);
+        assert_eq!(CASES.len(), 17);
         assert!(CASES.iter().any(|case| case.m == 1));
         assert!(CASES.iter().any(|case| case.m == 3));
         assert!(CASES.iter().any(|case| case.m == 17));
@@ -531,6 +742,31 @@ mod tests {
             assert!(CASES.iter().any(|case| case.m == boundary));
             assert!(CASES.iter().any(|case| case.k == boundary));
             assert!(CASES.iter().any(|case| case.n == boundary));
+        }
+        for required in [
+            CaseShape { m: 1, k: 1, n: 1 },
+            CaseShape {
+                m: 1,
+                k: 255,
+                n: 17,
+            },
+            CaseShape {
+                m: 3,
+                k: 256,
+                n: 31,
+            },
+            CaseShape {
+                m: 17,
+                k: 257,
+                n: 33,
+            },
+            CaseShape {
+                m: 37,
+                k: 1025,
+                n: 65,
+            },
+        ] {
+            assert!(CASES.contains(&required));
         }
         for shape in CASES {
             assert!(shape.m > 0 && shape.k > 0 && shape.n > 0);
@@ -551,7 +787,18 @@ mod tests {
         for word in SPECIAL_VALUES {
             assert!(activation_values.contains(&word) || weight_values.contains(&word));
         }
-        assert!(activation_values.contains(&0x7f00));
-        assert!(weight_values.contains(&0x7f00));
+        assert!(activation_values.contains(&0x5c00));
+        assert!(weight_values.contains(&0x5c00));
+
+        let row_shape = CaseShape { m: 3, k: 17, n: 3 };
+        let (row_activation, _) = make_operands(row_shape, 2).unwrap();
+        for row in 0..row_shape.m {
+            assert!(SPECIAL_VALUES.contains(&row_activation[row * row_shape.k]));
+        }
+
+        let shape = CaseShape { m: 1, k: 256, n: 3 };
+        let (activation, weight) = make_operands(shape, 5).unwrap();
+        let (exact, _) = scalar_matmul_oracle(shape, &activation, &weight);
+        assert!(exact[0].is_nan());
     }
 }

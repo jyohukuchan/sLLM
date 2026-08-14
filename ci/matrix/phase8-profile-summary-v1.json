@@ -1,0 +1,280 @@
+{
+  "schema_version": "phase8-profile-summary-v1",
+  "profile_id": "qwen35-4b-bf16-single-request-phase8-v1",
+  "recorded_at": "2026-08-14",
+  "candidate": {
+    "base_commit": "915c1c48511aa099a1560bc3afc6ed01301a4361",
+    "base_tree": "0b97a5b40893205bd7ad8688ab2e4eb50034c5b1",
+    "state": "dirty-integration-candidate",
+    "model_lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "rocm": "7.14.0",
+    "llvm_major": 23,
+    "wavefront_size": 32
+  },
+  "protocol": {
+    "batch_size": 1,
+    "warmups": 3,
+    "measured": 10,
+    "correctness_control_requests": 1,
+    "rocprof_scope": "one focused full-attention runner; raw traces are local-only",
+    "matmul_workspace_bytes": 0
+  },
+  "targets": [
+    {
+      "target": "gfx1030",
+      "product": "AMD Radeon Pro V620",
+      "short_odd": {
+        "input_tokens": 17,
+        "output_tokens": 17,
+        "baseline": {
+          "ttft_seconds_median": 7.55,
+          "e2e_seconds_median": 25.838,
+          "prefill_tokens_per_second_median": 2.253,
+          "decode_tokens_per_second_median": 0.876
+        },
+        "phase8": {
+          "ttft_seconds_median": 1.09873475,
+          "e2e_seconds_median": 9.65332349,
+          "prefill_tokens_per_second_median": 15.555081819067265,
+          "decode_tokens_per_second_median": 1.8760524454234915,
+          "fallback_used": false,
+          "cleanup_terminal_zero": true,
+          "submissions_per_request": 7956,
+          "kernels_per_request": 8364,
+          "resident_vram_bytes": 8411592192,
+          "peak_vram_bytes": 8540569292,
+          "raw_report_sha256": "60c5a2d8e45d8b09cb052b3f748e73f2cf07b86870f85e2ed269b93527319675"
+        }
+      },
+      "surrogate_32x32": {
+        "ttft_seconds_median": 1.072207784,
+        "e2e_seconds_median": 17.6170983235,
+        "prefill_tokens_per_second_median": 30.034459730299023,
+        "decode_tokens_per_second_median": 1.874325186396002,
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "submissions_per_request": 14976,
+        "kernels_per_request": 15744,
+        "resident_vram_bytes": 8411592192,
+        "peak_vram_bytes": 8608921472,
+        "raw_report_sha256": "6689f7c9b61ebac694dc6806267dfc243d131168837d7e303a5540c5a574ef4d"
+      },
+      "focused_attention": {
+        "online_softmax_calls": 10,
+        "online_softmax_total_ns": 28459865,
+        "online_softmax_average_ns": 2845986.5,
+        "kv_kernel_calls": 14,
+        "kv_kernel_average_ns": 18134,
+        "copy_calls": 24,
+        "copy_average_ns": 7695
+      },
+      "decode_matmul_1x2560x9216": {
+        "custom_kernel_ns": 381645,
+        "hipblas_steady_state_ns": 1814845,
+        "selected_provider": "custom-wave-reduction",
+        "selected_kernel_id": 3
+      }
+    },
+    {
+      "target": "gfx1201",
+      "product": "AMD Radeon AI PRO R9700",
+      "short_odd": {
+        "input_tokens": 17,
+        "output_tokens": 17,
+        "baseline": {
+          "ttft_seconds_median": 2.878,
+          "e2e_seconds_median": 12.445,
+          "prefill_tokens_per_second_median": 5.921,
+          "decode_tokens_per_second_median": 1.674
+        },
+        "phase8": {
+          "ttft_seconds_median": 0.683373641,
+          "e2e_seconds_median": 8.8907367425,
+          "prefill_tokens_per_second_median": 25.10172797625555,
+          "decode_tokens_per_second_median": 1.9513821885073428,
+          "fallback_used": false,
+          "cleanup_terminal_zero": true,
+          "submissions_per_request": 7956,
+          "kernels_per_request": 8364,
+          "resident_vram_bytes": 8411592192,
+          "peak_vram_bytes": 8540569292,
+          "raw_report_sha256": "6565b3d7d8b4be9a9ebdca2ec3de9f663f202d9947a8a14a95d4486b87d1ee71"
+        }
+      },
+      "surrogate_32x32": {
+        "ttft_seconds_median": 0.7098664195,
+        "e2e_seconds_median": 16.594770976,
+        "prefill_tokens_per_second_median": 45.48794549285742,
+        "decode_tokens_per_second_median": 1.95261051394142,
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "submissions_per_request": 14976,
+        "kernels_per_request": 15744,
+        "resident_vram_bytes": 8411592192,
+        "peak_vram_bytes": 8608921472,
+        "raw_report_sha256": "1fdc1cb2f87689442a6e2fdc28a82324a814d74f54ced910deb89f227ee060f7"
+      },
+      "focused_attention": {
+        "online_softmax_calls": 10,
+        "online_softmax_total_ns": 6848614,
+        "online_softmax_average_ns": 684861.4,
+        "kv_kernel_calls": 14,
+        "kv_kernel_average_ns": 12214,
+        "copy_calls": 24,
+        "copy_average_ns": 5482
+      },
+      "decode_matmul_1x2560x9216": {
+        "custom_kernel_ns": 117642,
+        "hipblas_steady_state_ns": 45751,
+        "hipblas_first_call_ns": 965936097,
+        "selected_provider": "hipblas-gemm-ex",
+        "selected_kernel_id": 4
+      }
+    }
+  ],
+  "selection": {
+    "prefill": "custom tiled16 on both targets",
+    "decode_gfx1030": "custom wave reduction for all registered M=1 shapes",
+    "decode_gfx1201": "hipBLAS GEMMEx for M=1,K>=1024,N>=1024; custom wave reduction otherwise",
+    "host_wait_batching": "measured but not selected because it did not improve gfx1201 and regressed/noised gfx1030",
+    "prepared_plan_cache": "selected for stable label+token_count semantics; position-dependent attention preprocess is excluded"
+  },
+  "integration": {
+    "builds": [
+      {
+        "target": "gfx1030",
+        "semantic_tree": "1a352a9e5f334c29068b03606737c52a57dca02e",
+        "binary_sha256": "00937214cd2da3a6986377cfb8c8aae2d19f54f59140458eb0cce21e97738213",
+        "manifest_sha256": "757b18b3257d4cb0870e24c011fd94c782a4c1e050665ee7b03c700a1605bd22"
+      },
+      {
+        "target": "gfx1201",
+        "semantic_tree": "1a352a9e5f334c29068b03606737c52a57dca02e",
+        "binary_sha256": "995c85d800141644838a6bdce42b862151b0685795f68d63766dfb5c1665206e",
+        "manifest_sha256": "aaedb134e7c37ac80ee5656f98871784f76ea5940744f2ded0c75a30baedc271"
+      }
+    ],
+    "model_spot_checks": [
+      {
+        "model": "Qwen3.5-2B",
+        "target": "gfx1030",
+        "ttft_seconds_median": 0.804764615,
+        "e2e_seconds_median": 7.0443548415,
+        "prefill_tokens_per_second_median": 21.211471656099096,
+        "decode_tokens_per_second_median": 2.565064561418558,
+        "raw_report_sha256": "cd8beb91db5eaba96f1df147b5fb1a2bb67d69b3e2ad1e894b868d183fc62207"
+      },
+      {
+        "model": "Qwen3.5-2B",
+        "target": "gfx1201",
+        "ttft_seconds_median": 0.413076541,
+        "e2e_seconds_median": 6.589272119,
+        "prefill_tokens_per_second_median": 41.46948793222208,
+        "decode_tokens_per_second_median": 2.5921915671767577,
+        "raw_report_sha256": "8db8f31b04b34181485820e6ae8149c3a364a6538453fd9c70e31648f790b146"
+      },
+      {
+        "model": "Qwen3.5-9B",
+        "target": "gfx1030",
+        "ttft_seconds_median": 1.17898892,
+        "e2e_seconds_median": 9.727424295,
+        "prefill_tokens_per_second_median": 14.492029696810441,
+        "decode_tokens_per_second_median": 1.874779127525517,
+        "raw_report_sha256": "780d35c41185a736a7af3daaf648d8663adadbfdffe57bd5887e39cea9d48396"
+      },
+      {
+        "model": "Qwen3.5-9B",
+        "target": "gfx1201",
+        "ttft_seconds_median": 0.8273322765,
+        "e2e_seconds_median": 9.041857599,
+        "prefill_tokens_per_second_median": 20.692226430314165,
+        "decode_tokens_per_second_median": 1.9503991800360632,
+        "raw_report_sha256": "d58d0d57a4922929e50fef5e91303d587d0a78f90da3dadd4e339fc93fbfc5f6"
+      }
+    ],
+    "llama_cpp_short_odd": [
+      {
+        "target": "gfx1030",
+        "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+        "ttft_seconds_median": 0.082284902,
+        "e2e_seconds_median": 0.4727804225,
+        "prefill_tokens_per_second_median": 208.0750050270876,
+        "decode_tokens_per_second_median": 41.00401974516577,
+        "raw_report_sha256": "9bfd2295e90e5cd41a04c62badaa8cc5298bfff3f5fbdf04c9c1a5830669e0b3"
+      },
+      {
+        "target": "gfx1201",
+        "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+        "ttft_seconds_median": 0.02463295,
+        "e2e_seconds_median": 0.3309201265,
+        "prefill_tokens_per_second_median": 706.7666832189,
+        "decode_tokens_per_second_median": 52.27143024607773,
+        "raw_report_sha256": "a862fedad473680fc056fc49589588fbd277aa6f2d947adb50a4a505687a7e41"
+      }
+    ],
+    "openai_service": [
+      {
+        "target": "gfx1030",
+        "result": "PASS",
+        "official_client_version": "2.44.0",
+        "non_stream": true,
+        "sse": true,
+        "disconnect_recovery": true,
+        "capacity_boundaries": [1023, 1024, 1025],
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "raw_report_sha256": "5bc6b2bfc7af105870199d7319863158883b7f201dafe78d0e3f3b24e3b2272f"
+      },
+      {
+        "target": "gfx1201",
+        "result": "PASS",
+        "official_client_version": "2.44.0",
+        "non_stream": true,
+        "sse": true,
+        "disconnect_recovery": true,
+        "capacity_boundaries": [1023, 1024, 1025],
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "raw_report_sha256": "763567d5580e0246abb3656cad67dfd4452bd6c4f52c9c5192847dc52464d4e3"
+      }
+    ],
+    "o2": {
+      "protocol": "canonical seven cases; one correctness control, three warmups, ten measured; concurrent isolated canonical GPUs",
+      "health": {
+        "pre_metric_sha256": "e241cf71f7c7ca7b051736b2378e2c5faa972c7aa2e814c69d8d9ee375414f98",
+        "post_metric_sha256": "eee563269f72d3d6eb18d36a73aa451158a5a2c5804d3f829dd020b9ee8c4636",
+        "pre_process_sha256": "109ae561bd38a16df03d9a360d6960385112827187893ea5af9f7564aaaf727e",
+        "post_process_sha256": "109ae561bd38a16df03d9a360d6960385112827187893ea5af9f7564aaaf727e",
+        "ecc_zero": true,
+        "processes_terminal_zero": true,
+        "vram_returned_to_pre_run_baseline": true
+      },
+      "targets": [
+        {
+          "target": "gfx1030",
+          "cases": [
+            {"case": "minimum", "input_tokens": 1, "output_tokens": 1, "ttft_s": 0.5396967005, "e2e_s": 0.5443444065, "prefill_tps": 1.8699466433450045, "decode_tps": null, "tpot_s": null, "resident_bytes": 8411592192, "peak_bytes": 8467660300, "workspace_peak_bytes": 4491276, "submissions": 468, "kernels": 492, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "bf6deac4c8edf45ba8e85d80758597728654c583607a90c8e29ce6be4ee2001e"},
+            {"case": "short-odd", "input_tokens": 17, "output_tokens": 17, "ttft_s": 1.110360703, "e2e_s": 9.65642007, "prefill_tps": 15.391440063402415, "decode_tps": 1.872814608047623, "tpot_s": 0.5341674785, "resident_bytes": 8411592192, "peak_bytes": 8540569292, "workspace_peak_bytes": 76351692, "submissions": 7956, "kernels": 8364, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "7f47f2d0d7e6cda52e1dc3bbecdb71d02b891a5ca79e9ac17ec5ab11e618e028"},
+            {"case": "boundary-255", "input_tokens": 255, "output_tokens": 64, "ttft_s": 2.9679694145, "e2e_s": 37.1448011235, "prefill_tps": 86.36219307598364, "decode_tps": 1.844790809168579, "tpot_s": 0.5420355365, "resident_bytes": 8411592192, "peak_bytes": 9618831860, "workspace_peak_bytes": 1145275380, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "971778884c9fc6a41a1dc92a9a8a667dd7a1a8ef143a405d2040df6597a33332"},
+            {"case": "boundary-256", "input_tokens": 256, "output_tokens": 64, "ttft_s": 2.9768539355, "e2e_s": 37.1251761715, "prefill_tps": 86.44496548829014, "decode_tps": 1.8454829009195204, "tpot_s": 0.5417041225, "resident_bytes": 8411592192, "peak_bytes": 9623355904, "workspace_peak_bytes": 1149766656, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "1bd62c4af51db491c3366b458679b7a66e822d30bb5fdf8a8d66df48b8fce525"},
+            {"case": "boundary-257", "input_tokens": 257, "output_tokens": 64, "ttft_s": 3.1555230155, "e2e_s": 37.3314835705, "prefill_tps": 81.84634863508208, "decode_tps": 1.845302603896605, "tpot_s": 0.541905395, "resident_bytes": 8411592192, "peak_bytes": 9627879948, "workspace_peak_bytes": 1154257932, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "34b3d6597c40c90447fc39259f57e124110fef06d8ca2789d0bf6bb1d49373ad"},
+            {"case": "prefill-long", "input_tokens": 1024, "output_tokens": 128, "ttft_s": 10.8259572285, "e2e_s": 82.917464952, "prefill_tps": 94.7336098228294, "decode_tps": 1.7621375264521855, "tpot_s": 0.567433519, "resident_bytes": 8411592192, "peak_bytes": 13099918848, "workspace_peak_bytes": 4599066624, "submissions": 59904, "kernels": 62976, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "785fe5c21e4c7f750147cb790f9315433b56c4ebcaf591442a40d3678bb6305b"},
+            {"case": "decode-long", "input_tokens": 32, "output_tokens": 256, "ttft_s": 1.059575289, "e2e_s": 137.628594245, "prefill_tps": 30.388735058063382, "decode_tps": 1.8670398232443515, "tpot_s": 0.534449161, "resident_bytes": 8411592192, "peak_bytes": 8616261504, "workspace_peak_bytes": 143720832, "submissions": 119808, "kernels": 125952, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "c69e05feb5e687df66ce4298a2a387e98c9f7e0cb388e545245b643ca2d86a66"}
+          ]
+        },
+        {
+          "target": "gfx1201",
+          "cases": [
+            {"case": "minimum", "input_tokens": 1, "output_tokens": 1, "ttft_s": 0.5185761275, "e2e_s": 0.524194489, "prefill_tps": 1.9470568092041014, "decode_tps": null, "tpot_s": null, "resident_bytes": 8411592192, "peak_bytes": 8467660300, "workspace_peak_bytes": 4491276, "submissions": 468, "kernels": 492, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "2bf6a796e58bd5f662212383439b0ae22de4c870dc8b0cd665c9674d73d461b6"},
+            {"case": "short-odd", "input_tokens": 17, "output_tokens": 17, "ttft_s": 0.682729303, "e2e_s": 8.881030538, "prefill_tps": 25.108252907021217, "decode_tps": 1.9533868077726946, "tpot_s": 0.5113649135, "resident_bytes": 8411592192, "peak_bytes": 8540569292, "workspace_peak_bytes": 76351692, "submissions": 7956, "kernels": 8364, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "bb74c34dfb6554343b24bcc9791a20e466b24f6f7d413979c147acae054634f1"},
+            {"case": "boundary-255", "input_tokens": 255, "output_tokens": 64, "ttft_s": 2.295798883, "e2e_s": 34.5507816145, "prefill_tps": 111.87196836093815, "decode_tps": 1.9544965408613044, "tpot_s": 0.5112697555, "resident_bytes": 8411592192, "peak_bytes": 9618831860, "workspace_peak_bytes": 1145275380, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "107ff72dc6a7fe4ceb0b4a4a0ca14af9aad129aa8040df694563f576259198e2"},
+            {"case": "boundary-256", "input_tokens": 256, "output_tokens": 64, "ttft_s": 2.299478535, "e2e_s": 34.5497749355, "prefill_tps": 112.13081810588956, "decode_tps": 1.9550257723966378, "tpot_s": 0.5111207785, "resident_bytes": 8411592192, "peak_bytes": 9623355904, "workspace_peak_bytes": 1149766656, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "309b70d7eea107b0a9c8bca47281ecc08a03d6272490de32a85ed181d386e0f1"},
+            {"case": "boundary-257", "input_tokens": 257, "output_tokens": 64, "ttft_s": 2.471587494, "e2e_s": 34.7899126365, "prefill_tps": 104.66520821440683, "decode_tps": 1.9509906468070581, "tpot_s": 0.5115239355, "resident_bytes": 8411592192, "peak_bytes": 9627879948, "workspace_peak_bytes": 1154257932, "submissions": 29952, "kernels": 31488, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "41e3e2ce7fd4b9e100fde168581c1c1cdb528f373f1c7aa26fb34c42f8cc319c"},
+            {"case": "prefill-long", "input_tokens": 1024, "output_tokens": 128, "ttft_s": 8.2341859175, "e2e_s": 74.301432442, "prefill_tps": 124.61231818821487, "decode_tps": 1.9234859772080957, "tpot_s": 0.519667293, "resident_bytes": 8411592192, "peak_bytes": 13099918848, "workspace_peak_bytes": 4599066624, "submissions": 59904, "kernels": 62976, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "c66cea0e5adc190e8e808940fa217539fee65b4dbebe433a185241327e07579d"},
+            {"case": "decode-long", "input_tokens": 32, "output_tokens": 256, "ttft_s": 0.709574169, "e2e_s": 131.1562486135, "prefill_tps": 45.5067895795424, "decode_tps": 1.9549614671005697, "tpot_s": 0.511157791, "resident_bytes": 8411592192, "peak_bytes": 8616261504, "workspace_peak_bytes": 143720832, "submissions": 119808, "kernels": 125952, "fallback_used": false, "cleanup_terminal_zero": true, "raw_sha256": "633719bb7ef757247f33c92e4aa7590b3a3cbb4c85acb7c9bddb87e693360da2"}
+          ]
+        }
+      ]
+    }
+  }
+}

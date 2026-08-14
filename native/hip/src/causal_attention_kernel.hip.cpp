@@ -63,15 +63,6 @@ __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
   return static_cast<uint16_t>(upper);
 }
 
-__device__ float score(const uint16_t *const query, const uint16_t *const key,
-                       const uint32_t head_dim) noexcept {
-  float dot = 0.0F;
-  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
-    dot += bf16_to_f32(query[dimension]) * f16_to_f32(key[dimension]);
-  }
-  return dot * rsqrtf(static_cast<float>(head_dim));
-}
-
 #pragma clang fp contract(off)
 __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     const uint16_t *const query, const uint16_t *const key,
@@ -96,49 +87,53 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
   uint16_t *const output_row = output + row * q_heads * head_dim +
                                static_cast<uint64_t>(query_head) * head_dim;
 
-  __shared__ float maximum;
-  __shared__ float denominator;
-  __shared__ float probability;
-  if (threadIdx.x == 0U) {
-    maximum = -std::numeric_limits<float>::infinity();
-    for (uint64_t key_position = 0U; key_position <= query_position;
-         ++key_position) {
-      maximum = fmaxf(
-          maximum,
-          score(query_row, key + (key_position * kv_heads + kv_head) * head_dim,
-                head_dim));
-    }
-    denominator = 0.0F;
-    for (uint64_t key_position = 0U; key_position <= query_position;
-         ++key_position) {
-      const float value_score =
-          score(query_row, key + (key_position * kv_heads + kv_head) * head_dim,
-                head_dim);
-      denominator += expf(value_score - maximum);
-    }
+  const uint32_t dimension = threadIdx.x;
+  __shared__ float reductions[SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE];
+  __shared__ float rescale;
+  __shared__ float contribution;
+  __shared__ float running_maximum;
+  __shared__ float running_denominator;
+  if (dimension == 0U) {
+    running_maximum = -std::numeric_limits<float>::infinity();
+    running_denominator = 0.0F;
   }
   __syncthreads();
 
-  const uint32_t dimension = threadIdx.x;
   float accumulation = 0.0F;
   for (uint64_t key_position = 0U; key_position <= query_position;
        ++key_position) {
-    if (threadIdx.x == 0U) {
-      probability =
-          expf(score(query_row,
-                     key + (key_position * kv_heads + kv_head) * head_dim,
-                     head_dim) -
-               maximum) /
-          denominator;
+    const uint64_t key_base = (key_position * kv_heads + kv_head) * head_dim;
+    reductions[dimension] = dimension < head_dim
+                                ? bf16_to_f32(query_row[dimension]) *
+                                      f16_to_f32(key[key_base + dimension])
+                                : 0.0F;
+    __syncthreads();
+    for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
+         stride != 0U; stride >>= 1U) {
+      if (dimension < stride) {
+        reductions[dimension] += reductions[dimension + stride];
+      }
+      __syncthreads();
+    }
+    if (dimension == 0U) {
+      const float current_score =
+          reductions[0] * rsqrtf(static_cast<float>(head_dim));
+      const float next_maximum = fmaxf(running_maximum, current_score);
+      rescale = expf(running_maximum - next_maximum);
+      contribution = expf(current_score - next_maximum);
+      running_denominator = running_denominator * rescale + contribution;
+      running_maximum = next_maximum;
     }
     __syncthreads();
-    accumulation +=
-        probability *
-        f16_to_f32(
-            value[(key_position * kv_heads + kv_head) * head_dim + dimension]);
+    if (dimension < head_dim) {
+      accumulation = accumulation * rescale +
+                     contribution * f16_to_f32(value[key_base + dimension]);
+    }
     __syncthreads();
   }
-  output_row[dimension] = f32_to_bf16_rne(accumulation);
+  if (dimension < head_dim) {
+    output_row[dimension] = f32_to_bf16_rne(accumulation / running_denominator);
+  }
 }
 
 } // namespace

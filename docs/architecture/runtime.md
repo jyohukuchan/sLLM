@@ -98,6 +98,18 @@ registry は責務の異なる三層に分ける。
 
 op descriptor は kernel 名ではなく、演算の意味、shape、layout、数値要件を記述する。backend は capability query で descriptor を受理できるか返し、prepare 時に具体的な kernel を選ぶ。実行開始後に不足 capability が判明する構成を避ける。
 
+Phase 8のBF16 Matmul registryは、数値比較用baseline、M>1の16x16 tiled kernel、M=1のworkgroup
+reductionを区別する。canonical `gfx1201`だけはM=1、K/Nとも1024以上のprevalidated shapeで
+`hipblasGemmEx`を選び、`gfx1030`は同shapeでも実測で遅いためcustom reductionを選ぶ。library pathは
+`[M,K] x [N,K]^T`をoperand transposeで表し、checkpoint weightを転置・複製しない。hipBLAS handleは
+native context lifetimeで一度だけ作り、workspaceは0 bytes、provider error後のbaseline fallbackはない。
+dispatch evidenceはprovider別kernel ID/symbol、shape、exact target、fallback flag、GPU event時間を保持する。
+
+Qwen requestはlabelとtoken countが同じsemantic descriptor/bindingのprepared operationをrequest lifetimeで
+再利用する。positionを含むattention preprocessは同じM=1でも別stepで交換可能ではないためcacheしない。
+同一streamのhost wait batchingはPhase 8で測定したが採用targetで改善せず、default executionは既存の
+transactional wait/state publication境界を維持する。
+
 ## DType と量子化 encoding
 
 `DType` は BF16、FP16、FP8 など、要素の物理 scalar format を表す。量子化の scale、grouping、packing、codebook、tensor ごとの付加 metadata は `DType` に詰め込まず、独立した quantization encoding descriptor として表す。これにより、同じ低精度 storage dtype に複数の量子化方式を対応づけたり、weight、activation、KV cache で異なる encoding 制約を表現できる。
@@ -109,6 +121,11 @@ MVP の Qwen3.5-4B は BF16 の unquantized encoding だけを実装する。そ
 KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期方式はHIP VMMのvirtual-contiguous FP16 KVで、storage layoutはtoken-major `[capacity, kv_heads, head_dim]`である。create時に最大logical capacityのVAをreserveし、append前に必要なK/V physical pageだけをcommitする。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。
 
 schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。contiguous pointerはnative backend内だけでattention kernelへ渡す。このためvAttention上でもcontiguous-KV FlashAttention系kernelを利用でき、上位APIを変更せず将来paged/block layoutへ切り替えられる。Paged Attention production backendと量子化layoutは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
+
+Phase 8のproduction causal attentionは、Qwen3.5のhead dim 256を一workgroupで協調reductionし、scoreの
+再計算とthread-0 softmaxを一pass online softmaxへ置き換えたFA2-style pathである。opaque KV owner、
+virtual-contiguous FP16 K/V pointer、token-major layout、GQA mappingは変更しない。これはupstream
+FlashAttention-2そのもの、Paged Attention、RDNA4向けFA3-likeをclaimしない。FA3-likeは別の将来taskである。
 
 ## Generation service境界
 

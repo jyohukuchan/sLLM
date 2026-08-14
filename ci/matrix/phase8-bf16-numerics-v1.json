@@ -1,0 +1,43 @@
+{
+  "schema_version": "phase8-bf16-numerics-v1",
+  "contract_id": "phase8-bf16-fast-path-numerics-v1",
+  "locked_before_optimized_gpu_output": true,
+  "matmul": {
+    "input_dtype": "BF16",
+    "weight_dtype": "BF16",
+    "accumulation_dtype": "F32",
+    "output_dtype": "BF16",
+    "reference": "float64 sum of exactly decoded BF16 products followed by BF16 RNE",
+    "finite_rule": "abs(actual-reference) <= gamma_k*sum_abs_products + bf16_half_ulp(reference)",
+    "fp32_unit_roundoff": 5.960464477539063e-8,
+    "gamma_reduction_terms": "k",
+    "special_values": {
+      "nan_input": "NaN output",
+      "same_sign_infinity": "same-sign infinity output",
+      "opposite_sign_infinity": "NaN output"
+    },
+    "required_shapes": [
+      {"m": 1, "k": 1, "n": 1},
+      {"m": 1, "k": 255, "n": 17},
+      {"m": 3, "k": 256, "n": 31},
+      {"m": 17, "k": 257, "n": 33},
+      {"m": 37, "k": 1025, "n": 65}
+    ],
+    "required_value_classes": ["zero", "subnormal", "large_finite", "nan", "positive_infinity", "negative_infinity"]
+  },
+  "attention": {
+    "query_dtype": "BF16",
+    "kv_dtype": "F16",
+    "accumulation_dtype": "F32",
+    "output_dtype": "BF16",
+    "reference": "float64 causal softmax and value reduction followed by BF16 RNE",
+    "absolute_tolerance": 0.016,
+    "comparison": "finite outputs require abs(actual-reference) <= absolute_tolerance; NaN and infinity classifications must match",
+    "required_query_counts": [1, 3, 17, 37],
+    "required_kv_boundaries": [1023, 1024, 1025]
+  },
+  "approval": {
+    "authority": "Phase 8 active plan",
+    "reason": "locked before the optimized kernels were built or executed; same-candidate tolerance expansion is forbidden"
+  }
+}

@@ -2350,13 +2350,14 @@ bool matmul_prepare_execute_and_negative_contract() {
           SLLM_STATUS_OK, "matmul execute", error) ||
       completion == nullptr || info.backend != SLLM_BACKEND_HIP ||
       info.dispatch_count != 1U ||
-      info.kernel_id != SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1 ||
+      info.kernel_id != SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2 ||
       info.workgroup_size_x != SLLM_HIP_MATMUL_WORKGROUP_SIZE ||
       info.grid_size_x != 1U || info.m != 3U || info.k != 5U || info.n != 7U ||
       info.output_elements != 21U || info.fallback_allowed != 0U ||
       info.fallback_used != 0U ||
-      std::strcmp(info.kernel_symbol, "matmul.bf16_fp32.v1") != 0 ||
-      std::strcmp(info.device_symbol, "sllm_matmul_bf16_fp32_v1") != 0 ||
+      std::strcmp(info.kernel_symbol, "matmul.bf16_fp32.tiled16.v2") != 0 ||
+      std::strcmp(info.device_symbol, "sllm_matmul_bf16_fp32_tiled16_v2") !=
+          0 ||
       std::strcmp(info.gcn_arch_name, "gfx1201") != 0 ||
       fake_hip::matmul_launch_calls() != 1U ||
       fake_hip::matmul_last_m() != 3U || fake_hip::matmul_last_k() != 5U ||
@@ -2997,7 +2998,7 @@ bool causal_attention_numerical_gqa_and_lifetime_contract() {
                      SLLM_STATUS_OK, "causal execute", error) ||
       completion == nullptr || info.backend != SLLM_BACKEND_HIP ||
       info.dispatch_count != 1U ||
-      info.kernel_id != SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1 ||
+      info.kernel_id != SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2 ||
       info.workgroup_size_x != 256U || info.grid_size_x != query_count * 16U ||
       info.query_count != query_count || info.start_position != 0U ||
       info.committed_kv_length != query_count || info.q_heads != 16U ||
@@ -3005,9 +3006,9 @@ bool causal_attention_numerical_gqa_and_lifetime_contract() {
       info.scale_denominator != 16U || info.fallback_allowed != 0U ||
       info.fallback_used != 0U ||
       std::strcmp(info.kernel_symbol,
-                  "causal_attention.stable_softmax_gqa.v1") != 0 ||
+                  "causal_attention.online_softmax_gqa.v2") != 0 ||
       std::strcmp(info.device_symbol,
-                  "sllm_causal_attention_stable_softmax_gqa_v1") != 0 ||
+                  "sllm_causal_attention_online_softmax_gqa_v2") != 0 ||
       std::strcmp(info.gcn_arch_name, "gfx1201") != 0 ||
       fake_hip::causal_attention_launch_calls() != 1U) {
     return false;

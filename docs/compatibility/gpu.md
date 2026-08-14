@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-13
+> 最終更新: 2026-08-14
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1に加え、Phase 6 A0のHIP VMM reserve/map/remapとcontiguous-pointer数値probeを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tuple、full modelやproduction採用へ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized pathを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 

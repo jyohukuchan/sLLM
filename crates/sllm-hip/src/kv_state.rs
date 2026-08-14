@@ -1018,7 +1018,7 @@ fn validate_causal_attention_info(
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count != 1
-        || info.kernel_id != sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1
+        || info.kernel_id != sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2
         || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
         || Some(info.grid_size_x) != expected_grid
         || info.query_count != query_count
@@ -1030,8 +1030,8 @@ fn validate_causal_attention_info(
         || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
         || info.fallback_allowed != 0
         || info.fallback_used != 0
-        || c_string(&info.kernel_symbol) != "causal_attention.stable_softmax_gqa.v1"
-        || c_string(&info.device_symbol) != "sllm_causal_attention_stable_softmax_gqa_v1"
+        || c_string(&info.kernel_symbol) != "causal_attention.online_softmax_gqa.v2"
+        || c_string(&info.device_symbol) != "sllm_causal_attention_online_softmax_gqa_v2"
         || info.reserved != [0; 8]
         || committed_kv_length > descriptor.capacity()
         || expected_target.is_some_and(|expected| expected != target)

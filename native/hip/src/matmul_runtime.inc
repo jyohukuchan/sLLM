@@ -405,9 +405,45 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         byte_pointer(plan->input1, plan->matmul_metadata.weight.byte_offset));
     uint16_t *const output = static_cast<uint16_t *>(
         byte_pointer(plan->output, plan->matmul_metadata.output.byte_offset));
-    const hipError_t launch_status = ::sllm_matmul_kernel::launch(
-        activation, weight, output, plan->matmul_metadata.m,
-        plan->matmul_metadata.k, plan->matmul_metadata.n, queue->stream);
+    const auto variant = ::sllm_matmul_kernel::select_variant(
+        plan->matmul_metadata.m, plan->matmul_metadata.k,
+        plan->matmul_metadata.n, arch_name);
+    hipError_t launch_status = hipSuccess;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlasDecode) {
+      if (plan->context->matmul_blas_handle == nullptr) {
+        launch_status = hipErrorInvalidHandle;
+      } else {
+        std::lock_guard<std::mutex> blas_lock(plan->context->matmul_blas_mutex);
+        const float alpha = 1.0F;
+        const float beta = 0.0F;
+        const hipblasStatus_t stream_status =
+            hipblasSetStream(plan->context->matmul_blas_handle, queue->stream);
+        const hipblasStatus_t blas_status =
+            stream_status == HIPBLAS_STATUS_SUCCESS
+                ? hipblasGemmEx(
+                      plan->context->matmul_blas_handle, HIPBLAS_OP_T,
+                      HIPBLAS_OP_N, static_cast<int>(plan->matmul_metadata.n),
+                      static_cast<int>(plan->matmul_metadata.m),
+                      static_cast<int>(plan->matmul_metadata.k), &alpha, weight,
+                      HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.k),
+                      activation, HIPBLAS_R_16B,
+                      static_cast<int>(plan->matmul_metadata.k), &beta, output,
+                      HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.n),
+                      HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT)
+                : stream_status;
+        if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+          launch_status = hipErrorUnknown;
+        }
+      }
+    } else
+#endif
+    {
+      launch_status = ::sllm_matmul_kernel::launch(
+          activation, weight, output, plan->matmul_metadata.m,
+          plan->matmul_metadata.k, plan->matmul_metadata.n, variant,
+          queue->stream);
+    }
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,

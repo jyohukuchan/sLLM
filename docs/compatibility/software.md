@@ -183,6 +183,35 @@ prefill 2.246 token/s、decode 0.863 token/s、E2E 26.110 s、resident/peak VRAM
 これは観測pathの再現性であり、immutable release evidence、性能優位性、長時間安定性を証明しない。
 software lifecycleは`experimental`のままとする。
 
+### 2026-08-14 Phase 8 BF16 optimized-path evidence
+
+同じlocal tupleとcanonical V620 `gfx1030` / R9700 `gfx1201`で、Qwen3.5-4B BF16の
+single-request optimized pathを実行した。target別binaryはROCm 7.14.0 rootだけをloadし、Matmulの
+BF16 input/weight・FP32 accumulation・BF16 output、vAttentionのvirtual-contiguous FP16 K/V上の
+FA2-style online softmax、exact target、fallbackなし、ECC 0、process cleanupを確認した。Matmulの
+実model decode形状M=1,K=2560,N=9216はV620でcustom wave reduction、R9700でcontext-lifetimeの
+`hipblasGemmEx`を選択する。後者もcheckpoint weightの転置・複製とlibrary workspaceを必要としない。
+
+4B short-odd 17/17の3 warmup + 10 measured中央値は、V620がTTFT 1.099 s、prefill
+15.555 token/s、decode 1.876 token/s、E2E 9.653 s、R9700がTTFT 0.683 s、prefill
+25.102 token/s、decode 1.951 token/s、E2E 8.891 sだった。resident VRAMは両targetとも
+8,411,592,192 bytes、peakは8,540,569,292 bytesである。2B/9B spot checkとOpenAI-compatible
+non-stream/SSEも同じtupleでHIP-only、fallbackなし、cleanup 0をPASSした。これは該当local tupleの
+project evidenceであり、別shape/model、multi-request、別ROCm/kernel tuple、長時間安定性へ一般化しない。
+software lifecycleは`experimental`のままとし、詳細identityと全caseは
+[Phase 8 history](../history/2026/08/11-20/phase8-bf16-optimization.md)を正とする。
+
+同じtarget別binaryのcanonical O2はminimum、short-odd、255/256/257、prefill-long、decode-longの
+7 caseを各GPUで3 warmup + 10 measured実行し、14/14 reportをPASSした。prefill-long中央値はV620が
+94.734 prefill / 1.762 decode token/s、R9700が124.612 / 1.923 token/s、decode-longはV620が
+30.389 / 1.867 token/s、R9700が45.507 / 1.955 token/sだった。pre/post ECC 0、GPU process 0、
+VRAM baseline復帰を確認した。float64 oracle修正版のMatmul 17 caseとattention 16 caseも両targetで
+再PASSし、fixtureのFP32 overflowとrow stride誤りをkernel defectと誤分類しないよう修正した。
+
+Phase 8のproduction attentionはFA2-styleだけである。RDNA4 `gfx1200`/`gfx1201`向けの
+FlashAttention-3-like pathは将来のtarget-specific比較課題であり、このevidenceやPhase 8完了条件には
+含めない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

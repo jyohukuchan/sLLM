@@ -706,6 +706,9 @@ pub trait ExecutionSessionAdapter: Send + Sync {
 pub trait ExecutionSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        Ok(None)
+    }
     fn start_output_readback(
         &mut self,
         access: &ExecutionAdapterAccess<'_>,
@@ -2943,6 +2946,16 @@ impl Submission {
         let state = self.inner.wait(timeout)?;
         self.completion_state = state;
         Ok(state)
+    }
+
+    /// Backend event timing for the submitted kernel, when available.  The
+    /// submission must have reached a terminal state; host-only adapters may
+    /// return `None` and must not fabricate GPU time.
+    pub fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        if self.completion_state != ExecutionState::Success {
+            return Err(ExecutionError::NotReady);
+        }
+        self.inner.kernel_elapsed_ns()
     }
 
     pub fn start_output_readback(

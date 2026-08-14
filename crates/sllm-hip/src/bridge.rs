@@ -871,6 +871,17 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
         }
     }
+
+    fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
+        match self {
+            Self::RmsNorm(submission) => submission.kernel_elapsed_ns(),
+            Self::Elementwise(submission) => submission.kernel_elapsed_ns(),
+            Self::Embedding(submission) => submission.kernel_elapsed_ns(),
+            Self::Matmul(submission) => submission.kernel_elapsed_ns(),
+            Self::Argmax(submission) => submission.kernel_elapsed_ns(),
+            Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
+        }
+    }
 }
 
 struct HipSubmission {
@@ -891,6 +902,13 @@ impl ExecutionSubmissionAdapter for HipSubmission {
         self.submission
             .wait(timeout)
             .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        self.submission
+            .kernel_elapsed_ns()
+            .map(Some)
             .map_err(map_async_error)
     }
 

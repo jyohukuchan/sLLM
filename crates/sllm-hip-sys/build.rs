@@ -648,6 +648,9 @@ fn main() {
             runtime_rocm_lib.display()
         );
         println!("cargo:rustc-link-lib=dylib=amdhip64");
+        if public_runtime_enabled {
+            println!("cargo:rustc-link-lib=dylib=hipblas");
+        }
     }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         println!("cargo:rustc-link-lib=dylib=stdc++");
@@ -1051,6 +1054,9 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_DECODE_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MATMUL_WORKGROUP_SIZE);\n\
