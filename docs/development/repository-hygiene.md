@@ -47,15 +47,17 @@ untracked、ignored data、worktree、remote同期はGitHub-hosted H0ではな�
 | non-ignored untracked data | 256 MiB | 1 GiB |
 | checkout内のignored/generated data | 10 GiB | 20 GiB |
 | `.git`を除くcheckout全体 | 20 GiB | 30 GiB |
-| registered worktree | 3 | 4超 |
+| registered worktree | 9個以上で整理を促す | 個数だけでは停止しない |
 
 - model weightはcheckout外の検証済みcacheへ置く。
 - G2等のmodel sliceは検証済みread-only cacheから実行時に抽出し、`.local-artifacts/model-slices/`等のlocal-only領域へ一時保存する。raw sliceをGit、GitHub Actions artifact、JSON reportへ埋め込まず、lock fingerprint、tensor、byte range、recipe、size、SHA-256、短いsummaryだけを追跡する。
 - `reference/`のsource mirrorは登録したrepositoryと固定commitをmanifestへ記録し、生成物やmodelを混在させない。
-- 上限超過時はsize、file count、上位directoryをread-onlyで報告し、自動削除しない。
+- 容量・file countの上限超過時はsize、file count、上位directoryをread-onlyで報告し、自動削除しない。
+- 有効なworktreeは並行開発やclean evidence取得に必要なため、個数だけでcommit、push、handoffを停止しない。
+  9個以上は整理を促すadvisory warningとし、終了statusをfailureにしない。
 - `git worktree prune --dry-run --verbose`でstale registrationを検出する。
-- missing/invalid worktree pathは即時報告する。
-- clean、unlocked、非mainで14日間活動のないworktreeはstale候補として報告する。dirty worktreeは自動削除しない。
+- missing/invalid worktree pathはprune候補として警告するが、それだけで作業を停止しない。
+- clean、unlocked、非mainで14日間活動のないworktreeはcleanup候補として警告する。dirty worktreeは自動削除しない。
 
 ## commitとremote同期
 
@@ -75,4 +77,5 @@ Phase 1で次を追加した。
 - 両commandはfile size、file count、worktree、branch activity、ahead/behindを含むJSON summaryを出力する。
 - 恒久的なcommandと出力先は[host build and test entry points](testing.md)を正とする。
 
-これらのcommandは上限超過を報告して非zero終了するが、dirty worktree、未追跡file、ignored artifactを削除しない。
+これらのcommandは容量やremote同期の停止条件を超えた場合だけ非zero終了する。worktree数、missing/prunable
+registration、stale候補はadvisory warningとして報告し、dirty worktree、未追跡file、ignored artifactを削除しない。

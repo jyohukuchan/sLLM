@@ -22,6 +22,8 @@ WARN_IGNORED = 10 * 1024 * 1024 * 1024
 FAIL_IGNORED = 20 * 1024 * 1024 * 1024
 WARN_CHECKOUT = 20 * 1024 * 1024 * 1024
 FAIL_CHECKOUT = 30 * 1024 * 1024 * 1024
+WARN_WORKTREES = 8
+STALE_WORKTREE_DAYS = 14
 
 
 def git(args: list[str], repo: Path) -> str:
@@ -64,6 +66,26 @@ def file_stats(repo: Path) -> dict[str, int]:
     return stats
 
 
+def classify_worktrees(
+    records: list[dict[str, object]], prune_candidates: list[str]
+) -> tuple[list[str], list[str]]:
+    """Classify advisory worktree hygiene without making count a hard gate."""
+
+    warnings: list[str] = []
+    if len(records) > WARN_WORKTREES:
+        warnings.append(
+            f"registered worktrees exceed advisory threshold {WARN_WORKTREES}: {len(records)}"
+        )
+    for record in records:
+        path = str(record["path"])
+        if record["exists"] is not True:
+            warnings.append(f"registered worktree path is missing; prune candidate: {path}")
+        elif record["stale_candidate"] is True:
+            warnings.append(f"inactive clean worktree is a cleanup candidate: {path}")
+    warnings.extend(f"prunable worktree metadata: {line}" for line in prune_candidates)
+    return warnings, []
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", type=Path, default=ROOT)
@@ -99,16 +121,20 @@ def main() -> int:
         timestamp = int(timestamp_text) if timestamp_text.isdigit() else None
         age_days = (now - timestamp) / 86400 if timestamp is not None else None
         locked = "locked" in fields
-        stale = bool(exists and branch != "main" and dirty is False and not locked and age_days is not None and age_days > 14)
+        stale = bool(
+            exists
+            and branch != "main"
+            and dirty is False
+            and not locked
+            and age_days is not None
+            and age_days > STALE_WORKTREE_DAYS
+        )
         worktree_records.append({"path": path, "branch": branch, "exists": exists, "dirty": dirty, "locked": locked, "last_activity_unix": timestamp, "age_days": age_days, "stale_candidate": stale})
     worktrees = [str(record["path"]) for record in worktree_records]
-    missing_worktrees = [path for path in worktrees if not Path(path).exists()]
-    errors.extend(f"registered worktree path is missing: {path}" for path in missing_worktrees)
-    if len(worktrees) > 4:
-        errors.append(f"registered worktrees exceed 4: {len(worktrees)}")
-    elif len(worktrees) > 3:
-        warnings.append(f"registered worktrees exceed 3: {len(worktrees)}")
     prune = git(["worktree", "prune", "--dry-run", "--verbose"], repo).splitlines()
+    worktree_warnings, worktree_errors = classify_worktrees(worktree_records, prune)
+    warnings.extend(worktree_warnings)
+    errors.extend(worktree_errors)
     upstream = git(["rev-list", "--left-right", "--count", "@{upstream}...HEAD"], repo).split()
     ahead = int(upstream[1]) if len(upstream) == 2 and upstream[1].isdigit() else None
     behind = int(upstream[0]) if len(upstream) == 2 and upstream[0].isdigit() else None
@@ -126,7 +152,14 @@ def main() -> int:
         "schema_version": "local-hygiene-v1",
         "tree_oid": identity(repo)["tree"],
         "sizes_counts": stats,
-        "worktrees": {"count": len(worktrees), "entries": worktree_records, "stale_registration_candidates": prune},
+        "worktrees": {
+            "count": len(worktrees),
+            "advisory_count_threshold": WARN_WORKTREES,
+            "count_is_blocking": False,
+            "stale_after_days": STALE_WORKTREE_DAYS,
+            "entries": worktree_records,
+            "stale_registration_candidates": prune,
+        },
         "remote_sync": {"branch": branch, "upstream": upstream_name, "ahead": ahead, "behind": behind, "last_activity_unix": last_activity},
         "allowlist": {"entries": len(allowlist_entries), "validated": True},
         "warnings": warnings,

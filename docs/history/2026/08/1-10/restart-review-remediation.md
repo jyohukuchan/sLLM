@@ -15,4 +15,12 @@
 - 最終reviewで検出したbuild/ROCm/target/codegen変更のGPU gate不一致を、G0/G1/G2/G4/P0必須へ統一した。
 - governance baseline本体をcommit `2764e73ebc45c8bbd209a426ca93ce341ed5d860`として`origin/main`へpushした。
 
+## 2026-08-14: worktree個数gateの修正
+
+- ユーザー確認により、当初AIが設定したregistered worktree 4個超の停止条件には個別の明示承認記録がなく、
+  validでcleanな並行worktreeまでpushを止めるのは旧workspace肥大化の防止目的に対して過剰と判定した。
+- worktree個数だけのhard gateを廃止し、9個以上をadvisory warningへ変更した。missing/prunable registrationと、
+  clean・unlocked・非mainで14日超のworktreeもcleanup候補として警告するが、それだけでは非zero終了しない。
+- 容量、未追跡data、remote同期等の実害を伴う既存停止条件と、所有者確認なしにworktreeを削除しない規則は維持した。
+
 [対応する計画](../../../../plans/active/2026/08/1-10/restart-review-remediation.md)

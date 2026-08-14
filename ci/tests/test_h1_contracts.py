@@ -20,6 +20,7 @@ from common import (  # noqa: E402
     load_manifests,
     sha256_json,
 )
+from local_hygiene import WARN_WORKTREES, classify_worktrees  # noqa: E402
 from validate_matrix import main as validate_matrix_main  # noqa: E402
 from validate_rust import RUSTUP_AUTO_INSTALL, command_for_mode  # noqa: E402
 
@@ -101,6 +102,36 @@ class HostContractTests(unittest.TestCase):
 
     def test_matrix_validator_proves_markers_and_fixture_consumers(self) -> None:
         self.assertEqual(validate_matrix_main(), 0)
+
+    def test_worktree_count_is_advisory_and_state_is_reported(self) -> None:
+        healthy = [
+            {
+                "path": f"/tmp/healthy-{index}",
+                "exists": True,
+                "stale_candidate": False,
+            }
+            for index in range(WARN_WORKTREES + 1)
+        ]
+        warnings, errors = classify_worktrees(healthy, [])
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            warnings,
+            [
+                f"registered worktrees exceed advisory threshold "
+                f"{WARN_WORKTREES}: {WARN_WORKTREES + 1}"
+            ],
+        )
+
+        warnings, errors = classify_worktrees(
+            [
+                {"path": "/tmp/missing", "exists": False, "stale_candidate": False},
+                {"path": "/tmp/stale", "exists": True, "stale_candidate": True},
+            ],
+            ["Removing worktrees/stale: gitdir file points to non-existent location"],
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(len(warnings), 3)
+        self.assertTrue(all("candidate" in warning or "metadata" in warning for warning in warnings))
 
 
 def main() -> int:
