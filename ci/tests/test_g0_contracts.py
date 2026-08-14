@@ -102,6 +102,40 @@ class CppFilesTests(unittest.TestCase):
             ["ci/tools/g0_native_observer.cpp", "native/hip/src/host.cpp"],
         )
 
+    def test_format_mode_uses_the_versioned_clang_format_18_contract(self) -> None:
+        source = ROOT / "ci/tools/g0_native_observer.cpp"
+        version = subprocess.CompletedProcess(
+            args=["clang-format-18", "--version"],
+            returncode=0,
+            stdout="Ubuntu clang-format version 18.1.3\n",
+            stderr="",
+        )
+        formatted = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            patch.object(validate_cpp, "cpp_files", return_value=[source]),
+            patch.object(validate_cpp.sys, "argv", ["validate_cpp.py", "--mode", "format"]),
+            patch.object(validate_cpp.subprocess, "run", side_effect=[version, formatted]) as run,
+        ):
+            self.assertEqual(validate_cpp.main(), 0)
+        self.assertEqual(run.call_args_list[0].args[0], ["clang-format-18", "--version"])
+        self.assertEqual(run.call_args_list[1].args[0][0], "clang-format-18")
+
+    def test_format_mode_rejects_an_unversioned_toolchain_drift(self) -> None:
+        source = ROOT / "ci/tools/g0_native_observer.cpp"
+        version = subprocess.CompletedProcess(
+            args=["clang-format-18", "--version"],
+            returncode=0,
+            stdout="clang-format version 22.1.8\n",
+            stderr="",
+        )
+        with (
+            patch.object(validate_cpp, "cpp_files", return_value=[source]),
+            patch.object(validate_cpp.sys, "argv", ["validate_cpp.py", "--mode", "format"]),
+            patch.object(validate_cpp.subprocess, "run", return_value=version) as run,
+        ):
+            self.assertEqual(validate_cpp.main(), 1)
+        run.assert_called_once()
+
 
 def write_sidecar(path: Path) -> None:
     path.with_name(path.name + ".sha256").write_text(

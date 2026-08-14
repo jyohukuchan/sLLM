@@ -59,7 +59,8 @@ probeはHIP runtimeが列挙した全visible deviceについて、device allocat
 - Ubuntu 24.04.4、kernel `6.17.0-35-generic`
 - Rust 1.97.1、MSRV確認用Rust 1.85.0
 - G++ 13.3、CMake 3.28.3、Ninja 1.11.1
-- clang-format 22.1.8、ShellCheck 0.11.0
+- H0 format正本は`clang-format-18` 18.1.3。無印のlocal `clang-format` 22.1.8は別途存在するが、
+  candidateのformat判定には使用しない。ShellCheck 0.11.0
 - ROCm system package installation: `/opt/rocm/core-7.14`
 - APT source: `https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404`、suite `stable`、component `main`
 - installed SDK packages: `amdrocm-core-sdk7.14-gfx1030=7.14.0-3`、`amdrocm-core-sdk7.14-gfx1201=7.14.0-3`

@@ -65,8 +65,8 @@ extern "C" __global__ __launch_bounds__(
     1) void sllm_kv_state_bf16_to_f16_token_major_v2(Bf16Input key_input,
                                                      Bf16Input value_input,
                                                      uint16_t *const key_output,
-                                                     uint16_t *const
-                                                         value_output,
+                                                     uint16_t
+                                                         *const value_output,
                                                      const uint32_t token_count,
                                                      const uint64_t
                                                      /*capacity_tokens*/,

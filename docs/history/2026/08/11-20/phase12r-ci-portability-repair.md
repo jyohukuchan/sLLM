@@ -62,5 +62,12 @@
   必要とするためcheckoutを`fetch-depth: 1`へ縮小し、上限を5分へ広げた。validatorはshallow immutable checkoutと
   5分上限を正本契約として検査する。
 - `validate_json_manifests.py`、H3 workflow/aggregate focused 10件、Python compile/static、diff checkをPASSした。
+- timeout修正candidate `2f497bf06fefa7932496fa520bb7e6500c16dc46`ではcore H3 run `31824467505`と
+  public-runtime H3 run `31824467525`がPASSし、H0もtimeoutせず512件の終端まで到達した。host run
+  `31824467573`の唯一の失敗は、localの無印clang-format 22とhosted clang-format 18の判定差だった。
+- format validatorをversioned `clang-format-18`へ固定し、誤って22を渡す負例を追加した。対象だった
+  `native/hip/src/kv_state_kernel.hip.cpp`の1箇所を18で整形し、public-runtimeとRMSNorm H3のhash chainを同期した。
+- 修正後local H0はcollected/selected `512/512`を198.801秒でPASSした。H3 public/RMSNorm focused contract 36件、
+  matrix/manifest、Python compile/static、Markdown link、diff checkもPASSした。
 
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase12r-ci-portability-repair.md)

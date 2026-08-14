@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 EXCLUDED = {".git", ".local-artifacts", "reference", "target", "build", "ci"}
 EXPLICIT_CPP_SOURCES = {"ci/tools/g0_native_observer.cpp"}
+CLANG_FORMAT = "clang-format-18"
 
 
 def cpp_files() -> list[Path]:
@@ -50,14 +51,29 @@ def main() -> int:
         return 1
     if args.mode == "format":
         try:
+            version = subprocess.run(
+                [CLANG_FORMAT, "--version"],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+                timeout=10,
+            )
+            if version.returncode != 0 or "clang-format version 18." not in version.stdout:
+                observed = (version.stdout or version.stderr).strip() or "unavailable"
+                print(
+                    f"{CLANG_FORMAT} does not satisfy the clang-format 18 contract: {observed}",
+                    file=sys.stderr,
+                )
+                return 1
             result = subprocess.run(
-                ["clang-format", "--dry-run", "--Werror", *[str(path) for path in files]],
+                [CLANG_FORMAT, "--dry-run", "--Werror", *[str(path) for path in files]],
                 cwd=ROOT,
                 check=False,
                 timeout=300,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            print(f"clang-format unavailable or timed out: {exc}", file=sys.stderr)
+            print(f"{CLANG_FORMAT} unavailable or timed out: {exc}", file=sys.stderr)
             return 1
     else:
         cmake = ROOT / "CMakeLists.txt"

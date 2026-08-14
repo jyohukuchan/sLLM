@@ -211,7 +211,7 @@
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "56e8f0ff1b34c9a2eb46d6332078246552344888dcf6a622da353e6d5966f9de"
+        "sha256": "909928d31461fc0a287edc8e572aed5bc55900eec39fd1b3053b0d5c5f983ef8"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
@@ -282,7 +282,7 @@
         "sha256": "4d5a1899942f00886059f89aaa9391da16e38249a443f164c98377b85a7be4df"
       }
     ],
-    "source_set_sha256": "4da9492cb5d0bd5816aec1c1bac3b30c3325c0943fbbc67debc2d38063ff9b3c"
+    "source_set_sha256": "0119c4bdcdd7213080339688135e65cde9cc114041438d557de1403817dee7a2"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
