@@ -548,6 +548,7 @@ pub fn build_qwen35_graph(
         model_fingerprint: lock.fingerprint().to_owned(),
         plan_digest: *plan.digest(),
         fp8_tensor_names: BTreeSet::new(),
+        fp8_dtype: None,
         fp8_sidecar_fingerprint: None,
     })?;
     builder.build()
@@ -562,6 +563,43 @@ pub fn build_qwen35_fp8_graph(
     sidecar: &VerifiedFp8Sidecar,
     token_count: u64,
     state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_fp8_graph_with_dtype(
+        lock,
+        plan,
+        sidecar,
+        token_count,
+        state_capacity,
+        DType::F8E4M3Fn,
+    )
+}
+
+/// Build the CDNA3 resident form of the Phase 10 sidecar. Values are expected
+/// to be numerically converted to FNUZ by the provisioning source.
+pub fn build_qwen35_fp8_fnuz_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedFp8Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_fp8_graph_with_dtype(
+        lock,
+        plan,
+        sidecar,
+        token_count,
+        state_capacity,
+        DType::F8E4M3FnuZ,
+    )
+}
+
+fn build_qwen35_fp8_graph_with_dtype(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedFp8Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+    fp8_dtype: DType,
 ) -> Result<QwenGraph, QwenGraphError> {
     if sidecar.source_lock_fingerprint() != lock.fingerprint() {
         return Err(QwenGraphError::InvalidModel(
@@ -632,6 +670,7 @@ pub fn build_qwen35_fp8_graph(
         model_fingerprint: lock.fingerprint().to_owned(),
         plan_digest: *plan.digest(),
         fp8_tensor_names,
+        fp8_dtype: Some(fp8_dtype),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
     })?
     .build()
@@ -1266,6 +1305,7 @@ struct GraphBuilderConfig {
     model_fingerprint: String,
     plan_digest: [u8; 32],
     fp8_tensor_names: BTreeSet<String>,
+    fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
 }
 
@@ -1279,6 +1319,7 @@ struct GraphBuilder {
     model_fingerprint: String,
     plan_digest: [u8; 32],
     fp8_tensor_names: BTreeSet<String>,
+    fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
@@ -1300,6 +1341,7 @@ impl GraphBuilder {
             model_fingerprint,
             plan_digest,
             fp8_tensor_names,
+            fp8_dtype,
             fp8_sidecar_fingerprint,
         } = config;
         let bindings = bindings
@@ -1321,6 +1363,7 @@ impl GraphBuilder {
             model_fingerprint,
             plan_digest,
             fp8_tensor_names,
+            fp8_dtype,
             fp8_sidecar_fingerprint,
             tensors: Vec::new(),
             producers: Vec::new(),
@@ -2459,7 +2502,12 @@ impl GraphBuilder {
         let shape = binding.shape.clone();
         let name = binding.tensor_name.clone();
         let view = if self.fp8_tensor_names.contains(&name) {
-            fp8_weight_view(&shape)?
+            fp8_weight_view(
+                &shape,
+                self.fp8_dtype.ok_or_else(|| {
+                    QwenGraphError::InvalidPlan("FP8 tensor set has no resident dtype".to_owned())
+                })?,
+            )?
         } else {
             view(to_dtype(binding.dtype)?, &shape)?
         };
@@ -2469,7 +2517,7 @@ impl GraphBuilder {
     }
 }
 
-fn fp8_weight_view(shape: &[u64]) -> Result<TensorView, QwenGraphError> {
+fn fp8_weight_view(shape: &[u64], dtype: DType) -> Result<TensorView, QwenGraphError> {
     let shape: Vec<usize> = shape
         .iter()
         .map(|&dimension| {
@@ -2477,7 +2525,7 @@ fn fp8_weight_view(shape: &[u64]) -> Result<TensorView, QwenGraphError> {
         })
         .collect::<Result<_, _>>()?;
     Ok(TensorView::with_encoding(
-        DType::F8E4M3Fn,
+        dtype,
         Encoding::Fp8Scaled {
             granularity: Fp8ScaleGranularity::OuterDimension,
             scale_dtype: DType::F32,
@@ -2698,6 +2746,7 @@ mod tests {
             model_fingerprint: "fixture".to_owned(),
             plan_digest: [7; 32],
             fp8_tensor_names: BTreeSet::new(),
+            fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
         })
         .expect("fixture bindings")
@@ -3216,6 +3265,7 @@ mod tests {
             model_fingerprint: "fixture".to_owned(),
             plan_digest: [9; 32],
             fp8_tensor_names: BTreeSet::new(),
+            fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
         })
         .expect("fixture bindings");

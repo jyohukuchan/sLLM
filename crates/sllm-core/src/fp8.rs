@@ -6,9 +6,12 @@
 //! interchangeable.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 /// Largest finite OCP E4M3FN magnitude (`0x7e`).
 pub const E4M3FN_MAX: f32 = 448.0;
+/// Largest finite CDNA3 E4M3FNUZ magnitude (`0x7f`).
+pub const E4M3FNUZ_MAX: f32 = 240.0;
 
 /// Decode one OCP E4M3FN byte to FP32.
 pub fn decode_e4m3fn(bits: u8) -> f32 {
@@ -57,6 +60,77 @@ pub fn encode_e4m3fn(value: f32) -> u8 {
         }
     }
     sign | best
+}
+
+/// Decode one CDNA3 E4M3FNUZ byte to FP32.
+///
+/// FNUZ has one unsigned zero, uses `0x80` as its sole NaN, and shifts the
+/// normal exponent bias from seven to eight. Bytes are therefore never
+/// interchangeable with OCP E4M3FN storage.
+pub fn decode_e4m3fnuz(bits: u8) -> f32 {
+    if bits == 0x80 {
+        return f32::NAN;
+    }
+    let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
+    let exponent = (bits >> 3) & 0x0f;
+    let mantissa = bits & 0x07;
+    if exponent == 0 {
+        return sign * f32::from(mantissa) * 2.0_f32.powi(-10);
+    }
+    sign * (1.0 + f32::from(mantissa) / 8.0) * 2.0_f32.powi(i32::from(exponent) - 8)
+}
+
+/// Encode FP32 as E4M3FNUZ using round-to-nearest-even and finite
+/// saturation. Both signed zeros become `0x00`; every NaN becomes `0x80`.
+pub fn encode_e4m3fnuz(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x80;
+    }
+    let negative = value.is_sign_negative();
+    let magnitude = value.abs();
+    if magnitude == 0.0 {
+        return 0;
+    }
+    if !magnitude.is_finite() || magnitude >= E4M3FNUZ_MAX {
+        return if negative { 0xff } else { 0x7f };
+    }
+    let mut low = 0_u8;
+    let mut high = 0x7f_u8;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if decode_e4m3fnuz(middle) < magnitude {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    let upper = low;
+    let lower = upper.saturating_sub(1);
+    let lower_error = magnitude - decode_e4m3fnuz(lower);
+    let upper_error = decode_e4m3fnuz(upper) - magnitude;
+    let best = if upper_error < lower_error
+        || (upper_error == lower_error && upper & 1 == 0 && lower & 1 != 0)
+    {
+        upper
+    } else {
+        lower
+    };
+    if negative && best != 0 {
+        best | 0x80
+    } else {
+        best
+    }
+}
+
+/// Numerically convert canonical OCP E4M3FN storage into CDNA3 FNUZ.
+pub fn convert_e4m3fn_to_e4m3fnuz(source: &[u8]) -> Vec<u8> {
+    static TABLE: OnceLock<[u8; 256]> = OnceLock::new();
+    let table = TABLE
+        .get_or_init(|| std::array::from_fn(|bits| encode_e4m3fnuz(decode_e4m3fn(bits as u8))));
+    source
+        .iter()
+        .map(|bits| table[usize::from(*bits)])
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -203,6 +277,7 @@ fn quantize_e4m3fn(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fp8Provider {
     Gfx1201HipBlasLtOuterVector,
+    Gfx942HipBlasLtFnuzOuterVector,
     Gfx1030ByteDecodeEmulation,
     Gfx1030ConvertedBf16,
 }
@@ -243,25 +318,25 @@ pub fn select_fp8_provider(
         ));
     }
     match request.exact_gcn_arch {
-        "gfx1201" => {
+        "gfx1201" | "gfx942" => {
             if !request.runtime_fp8_capable {
                 return Err(Fp8ProviderRejection(
-                    "gfx1201 runtime does not report FP8 capability",
+                    "native target runtime does not report FP8 capability",
                 ));
             }
             if !request.outer_vector_scales {
                 return Err(Fp8ProviderRejection(
-                    "gfx1201 native provider requires outer-vector FP32 scales",
+                    "native provider requires outer-vector FP32 scales",
                 ));
             }
             if !request.aligned_16_bytes {
                 return Err(Fp8ProviderRejection(
-                    "gfx1201 native provider requires 16-byte-aligned bindings",
+                    "native provider requires 16-byte-aligned bindings",
                 ));
             }
             if !request.workspace_available {
                 return Err(Fp8ProviderRejection(
-                    "gfx1201 native provider workspace is unavailable",
+                    "native provider workspace is unavailable",
                 ));
             }
             if !request.hipblaslt_solution_supported {
@@ -269,12 +344,16 @@ pub fn select_fp8_provider(
                     "hipBLASLt returned no supported FP8 solution for this shape",
                 ));
             }
-            Ok(Fp8Provider::Gfx1201HipBlasLtOuterVector)
+            Ok(if request.exact_gcn_arch == "gfx942" {
+                Fp8Provider::Gfx942HipBlasLtFnuzOuterVector
+            } else {
+                Fp8Provider::Gfx1201HipBlasLtOuterVector
+            })
         }
         "gfx1030" if request.allow_gfx1030_bf16_conversion => Ok(Fp8Provider::Gfx1030ConvertedBf16),
         "gfx1030" => Ok(Fp8Provider::Gfx1030ByteDecodeEmulation),
         _ => Err(Fp8ProviderRejection(
-            "Phase 10 FP8 provider requires exact gfx1201 or gfx1030",
+            "FP8 provider requires exact gfx1201, gfx1030, or gfx942",
         )),
     }
 }
@@ -282,6 +361,55 @@ pub fn select_fp8_provider(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn reference_decode_e4m3fn(bits: u8) -> f64 {
+        let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
+        let exponent = (bits >> 3) & 0x0f;
+        let mantissa = bits & 0x07;
+        if exponent == 0 {
+            return sign * f64::from(mantissa) * 2.0_f64.powi(-9);
+        }
+        if exponent == 0x0f && mantissa == 0x07 {
+            return f64::NAN;
+        }
+        sign * (1.0 + f64::from(mantissa) / 8.0) * 2.0_f64.powi(i32::from(exponent) - 7)
+    }
+
+    fn reference_decode_e4m3fnuz(bits: u8) -> f64 {
+        if bits == 0x80 {
+            return f64::NAN;
+        }
+        let sign = if bits & 0x80 == 0 { 1.0 } else { -1.0 };
+        let exponent = (bits >> 3) & 0x0f;
+        let mantissa = bits & 0x07;
+        if exponent == 0 {
+            return sign * f64::from(mantissa) * 2.0_f64.powi(-10);
+        }
+        sign * (1.0 + f64::from(mantissa) / 8.0) * 2.0_f64.powi(i32::from(exponent) - 8)
+    }
+
+    fn reference_ocp_to_fnuz(bits: u8) -> u8 {
+        let value = reference_decode_e4m3fn(bits);
+        if value.is_nan() {
+            return 0x80;
+        }
+        let negative = value.is_sign_negative();
+        let magnitude = value.abs();
+        let mut best = 0_u8;
+        let mut best_error = f64::INFINITY;
+        for candidate in 0_u8..=0x7f {
+            let error = (reference_decode_e4m3fnuz(candidate) - magnitude).abs();
+            if error < best_error || (error == best_error && candidate & 1 == 0 && best & 1 != 0) {
+                best = candidate;
+                best_error = error;
+            }
+        }
+        if negative && best != 0 {
+            best | 0x80
+        } else {
+            best
+        }
+    }
 
     #[test]
     fn e4m3fn_special_values_and_signed_zero_are_explicit() {
@@ -303,6 +431,33 @@ mod tests {
                 continue;
             }
             assert_eq!(encode_e4m3fn(value), bits, "byte 0x{bits:02x}");
+        }
+    }
+
+    #[test]
+    fn e4m3fnuz_all_bytes_and_ocp_conversion_are_numeric() {
+        assert_eq!(encode_e4m3fnuz(0.0), 0x00);
+        assert_eq!(encode_e4m3fnuz(-0.0), 0x00);
+        assert_eq!(encode_e4m3fnuz(-2.0_f32.powi(-20)), 0x00);
+        assert_eq!(encode_e4m3fnuz(f32::NAN), 0x80);
+        assert_eq!(decode_e4m3fnuz(0x01), 2.0_f32.powi(-10));
+        assert_eq!(decode_e4m3fnuz(0x7f), E4M3FNUZ_MAX);
+        assert!(decode_e4m3fnuz(0x80).is_nan());
+        for bits in 0_u8..=u8::MAX {
+            let value = decode_e4m3fnuz(bits);
+            if !value.is_nan() {
+                assert_eq!(encode_e4m3fnuz(value), bits, "byte 0x{bits:02x}");
+            }
+        }
+        let converted = convert_e4m3fn_to_e4m3fnuz(&(0_u8..=u8::MAX).collect::<Vec<_>>());
+        for (source, destination) in (0_u8..=u8::MAX).zip(converted) {
+            assert_eq!(destination, reference_ocp_to_fnuz(source));
+            let expected = decode_e4m3fn(source);
+            let actual = decode_e4m3fnuz(destination);
+            assert_eq!(actual.is_nan(), expected.is_nan());
+            if expected.is_finite() {
+                assert_eq!(destination, encode_e4m3fnuz(expected));
+            }
         }
     }
 
@@ -363,6 +518,13 @@ mod tests {
                 ..request
             }),
             Ok(Fp8Provider::Gfx1030ByteDecodeEmulation)
+        );
+        assert_eq!(
+            select_fp8_provider(Fp8ProviderRequest {
+                exact_gcn_arch: "gfx942",
+                ..request
+            }),
+            Ok(Fp8Provider::Gfx942HipBlasLtFnuzOuterVector)
         );
     }
 }

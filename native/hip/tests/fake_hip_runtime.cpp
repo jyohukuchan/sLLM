@@ -23,6 +23,7 @@ struct State final {
   bool event_query_gate = false;
   bool event_query_entered = false;
   bool completion_pending = false;
+  bool vmm_supported = true;
   hipError_t rmsnorm_launch_status = hipSuccess;
   hipError_t elementwise_launch_status = hipSuccess;
   hipError_t matmul_launch_status = hipSuccess;
@@ -175,6 +176,7 @@ void reset() noexcept {
   state.event_query_gate = false;
   state.event_query_entered = false;
   state.completion_pending = false;
+  state.vmm_supported = true;
   state.rmsnorm_launch_status = hipSuccess;
   state.elementwise_launch_status = hipSuccess;
   state.matmul_launch_status = hipSuccess;
@@ -211,6 +213,11 @@ void reset() noexcept {
   state.event_destroy_calls = 0U;
   state.stream_destroy_calls = 0U;
   state.allocation_free_calls = 0U;
+}
+
+void set_vmm_supported(const bool supported) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.vmm_supported = supported;
 }
 
 hipError_t rmsnorm_launch(const uint16_t *const /*activation*/,
@@ -743,6 +750,18 @@ hipError_t hipGetDeviceProperties(hipDeviceProp_t *const properties,
 
 hipError_t hipSetDevice(const int device) noexcept {
   return device == 0 ? hipSuccess : hipErrorInvalidValue;
+}
+
+hipError_t hipDeviceGetAttribute(int *const value,
+                                 const hipDeviceAttribute_t attribute,
+                                 const int device) noexcept {
+  if (value == nullptr || device != 0 ||
+      attribute != hipDeviceAttributeVirtualMemoryManagementSupported) {
+    return hipErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  *value = state.vmm_supported ? 1 : 0;
+  return hipSuccess;
 }
 
 hipError_t hipMemGetInfo(std::size_t *const available,

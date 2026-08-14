@@ -8,8 +8,8 @@ use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, ModelLock,
     OsSamplingRandom, QwenResidentModel, VerifiedFp8Sidecar, WeightLoadPlan,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
-    verify_fp8_sidecar,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_verified_weight_load_plan, read_model_lock, verify_fp8_sidecar,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
@@ -60,14 +60,16 @@ impl QwenBackendConfigV1 {
             let provider = self
                 .fp8_provider
                 .as_deref()
-                .unwrap_or(if self.target == "gfx1201" {
-                    "native"
-                } else {
-                    "converted-bf16"
+                .unwrap_or(match self.target.as_str() {
+                    "gfx1201" => "native",
+                    "gfx942" => "native-fnuz",
+                    _ => "converted-bf16",
                 });
             let valid = matches!(
                 (provider, self.target.as_str()),
-                ("native", "gfx1201") | ("emulation" | "converted-bf16", "gfx1030")
+                ("native", "gfx1201")
+                    | ("native-fnuz", "gfx942")
+                    | ("emulation" | "converted-bf16", "gfx1030")
             );
             if !valid {
                 return Err(BackendErrorV1::new(
@@ -99,6 +101,7 @@ pub struct ProductionRequestAuditV1 {
     pub logical_kv_capacity_tokens: Option<u64>,
     pub observed_kv_length_tokens: Option<u64>,
     pub physical_page_bytes: Option<u64>,
+    pub kv_memory_kind: Option<String>,
     pub tokens_per_page: Option<u64>,
     pub mapped_kv_capacity_tokens: Option<u64>,
     pub committed_kv_bytes: Option<u64>,
@@ -183,17 +186,21 @@ impl QwenChatBackendV1 {
             _ => unreachable!("validated FP8 configuration has paired paths"),
         };
         let fp8_provider = sidecar.as_ref().map(|_| {
-            config.fp8_provider.clone().unwrap_or_else(|| {
-                if config.target == "gfx1201" {
-                    "native".to_owned()
-                } else {
-                    "converted-bf16".to_owned()
-                }
-            })
+            config
+                .fp8_provider
+                .clone()
+                .unwrap_or_else(|| match config.target.as_str() {
+                    "gfx1201" => "native".to_owned(),
+                    "gfx942" => "native-fnuz".to_owned(),
+                    _ => "converted-bf16".to_owned(),
+                })
         });
         let seed_graph = match (&sidecar, fp8_provider.as_deref()) {
             (Some(_), Some("converted-bf16")) | (None, None) => {
                 build_qwen35_graph(&lock, &plan, 1, 1)
+            }
+            (Some(sidecar), Some("native-fnuz")) => {
+                build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, 1, 1)
             }
             (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(&lock, &plan, sidecar, 1, 1),
             _ => unreachable!("validated FP8 configuration has a selected provider"),
@@ -212,6 +219,14 @@ impl QwenChatBackendV1 {
             })?;
         let resident = match (&sidecar, fp8_provider.as_deref()) {
             (Some(sidecar), Some("converted-bf16")) => QwenResidentModel::new_fp8_converted_bf16(
+                Arc::clone(&session),
+                seed_graph,
+                plan.clone(),
+                Arc::clone(&cache),
+                Arc::clone(sidecar),
+                config.completion_timeout,
+            ),
+            (Some(sidecar), Some("native-fnuz")) => QwenResidentModel::new_fp8_fnuz(
                 Arc::clone(&session),
                 seed_graph,
                 plan.clone(),
@@ -394,6 +409,13 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             (Some(_), Some("converted-bf16")) | (None, None) => {
                 build_qwen35_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
             }
+            (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
+                &state.lock,
+                &state.plan,
+                sidecar,
+                prompt_tokens,
+                state_capacity,
+            ),
             (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                 &state.lock,
                 &state.plan,
@@ -492,6 +514,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             weight_encoding: match state.fp8_provider.as_deref() {
                 None => "bf16".to_owned(),
                 Some("converted-bf16") => "bf16-converted-from-ocp-e4m3fn".to_owned(),
+                Some("native-fnuz") => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
             fp8_provider: state.fp8_provider.clone(),
@@ -513,6 +536,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             logical_kv_capacity_tokens: first_kv.map(|layer| layer.logical_capacity_tokens()),
             observed_kv_length_tokens: first_kv.map(|layer| layer.observed_length_tokens()),
             physical_page_bytes: first_kv.map(|layer| layer.physical().physical_page_bytes()),
+            kv_memory_kind: first_kv.map(|layer| match layer.physical().memory_kind() {
+                sllm_core::KvMemoryKind::VirtualContiguous => "virtual-contiguous".to_owned(),
+                sllm_core::KvMemoryKind::ContiguousResident => "contiguous-resident".to_owned(),
+            }),
             tokens_per_page: first_kv.map(|layer| layer.physical().tokens_per_page()),
             mapped_kv_capacity_tokens: first_kv
                 .map(|layer| layer.physical().mapped_token_capacity()),

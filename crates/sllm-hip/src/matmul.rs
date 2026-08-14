@@ -83,7 +83,10 @@ impl MatmulDescriptor {
     }
 
     fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
-        let op_version = if self.weight.view().dtype() == sllm_core::DType::F8E4M3Fn {
+        let op_version = if matches!(
+            self.weight.view().dtype(),
+            sllm_core::DType::F8E4M3Fn | sllm_core::DType::F8E4M3FnuZ
+        ) {
             sys::SLLM_HIP_MATMUL_FP8_VERSION
         } else {
             sys::SLLM_HIP_MATMUL_VERSION

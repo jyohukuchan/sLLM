@@ -85,12 +85,63 @@ __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) noexcept {
   return static_cast<uint8_t>(sign | (select_upper ? upper : lower));
 }
 
+__device__ __forceinline__ float e4m3fnuz_to_float(const uint8_t bits) noexcept {
+  if (bits == UINT8_C(0x80)) {
+    return NAN;
+  }
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & UINT8_C(0x0f));
+  const uint8_t mantissa = static_cast<uint8_t>(bits & UINT8_C(0x07));
+  return exponent == 0U
+             ? sign * static_cast<float>(mantissa) * ldexpf(1.0F, -10)
+             : sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
+                   ldexpf(1.0F, static_cast<int>(exponent) - 8);
+}
+
+__device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) noexcept {
+  if (isnan(value)) {
+    return UINT8_C(0x80);
+  }
+  const bool negative = signbit(value);
+  value = fabsf(value);
+  if (value == 0.0F) {
+    return 0U;
+  }
+  if (!isfinite(value) || value >= 240.0F) {
+    return negative ? UINT8_C(0xff) : UINT8_C(0x7f);
+  }
+  uint8_t low = 0U;
+  uint8_t high = UINT8_C(0x7f);
+  while (low < high) {
+    const uint8_t middle =
+        static_cast<uint8_t>(low + static_cast<uint8_t>((high - low) / 2U));
+    if (e4m3fnuz_to_float(middle) < value) {
+      low = static_cast<uint8_t>(middle + 1U);
+    } else {
+      high = middle;
+    }
+  }
+  const uint8_t upper = low;
+  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
+  const float lower_error = value - e4m3fnuz_to_float(lower);
+  const float upper_error = e4m3fnuz_to_float(upper) - value;
+  const bool select_upper = upper_error < lower_error ||
+                            (upper_error == lower_error &&
+                             (upper & UINT8_C(1)) == 0U &&
+                             (lower & UINT8_C(1)) != 0U);
+  const uint8_t selected = select_upper ? upper : lower;
+  return negative && selected != 0U
+             ? static_cast<uint8_t>(selected | UINT8_C(0x80))
+             : selected;
+}
+
 } // namespace
 
 extern "C" __global__ __launch_bounds__(256, 1) void
 sllm_matmul_bf16_to_fp8_outer_v1(const uint16_t *const activation,
                                  uint8_t *const quantized, float *const scales,
-                                 const uint64_t m, const uint64_t k) {
+                                 const uint64_t m, const uint64_t k,
+                                 const uint32_t fnuz) {
   const uint64_t row = blockIdx.x;
   if (row >= m) {
     return;
@@ -109,13 +160,16 @@ sllm_matmul_bf16_to_fp8_outer_v1(const uint16_t *const activation,
     }
     __syncthreads();
   }
-  const float scale = reductions[0] == 0.0F ? 1.0F : reductions[0] / 448.0F;
+  const float scale = reductions[0] == 0.0F
+                          ? 1.0F
+                          : reductions[0] / (fnuz != 0U ? 240.0F : 448.0F);
   if (threadIdx.x == 0U) {
     scales[row] = scale;
   }
   for (uint64_t column = threadIdx.x; column < k; column += blockDim.x) {
+    const float value = bf16_to_float(activation[row * k + column]) / scale;
     quantized[row * k + column] =
-        float_to_e4m3fn(bf16_to_float(activation[row * k + column]) / scale);
+        fnuz != 0U ? float_to_e4m3fnuz(value) : float_to_e4m3fn(value);
   }
 }
 
@@ -208,8 +262,8 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_tiled16_v2(
 // f5919bf458ef190468b5c329bb293f8a54a1e69c. The ggml tensor/runtime and
 // fusion machinery are deliberately not imported; this kernel retains sLLM's
 // BF16 input/output and FP32 accumulation contract.
-extern "C" __global__
-__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
+template <uint32_t WaveWidth, uint32_t WaveCount>
+__device__ __forceinline__ void matmul_bf16_decode_body(
     const uint16_t *const activation, const uint16_t *const weight,
     uint16_t *const output, const uint64_t k, const uint64_t n) {
   const uint64_t column = blockIdx.x;
@@ -245,21 +299,21 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
   }
 
 #pragma unroll
-  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
-    partial += __shfl_down(partial, offset, 32);
+  for (uint32_t offset = WaveWidth / 2U; offset != 0U; offset >>= 1U) {
+    partial += __shfl_down(partial, offset, WaveWidth);
   }
-  __shared__ float wave_sums[8];
-  const uint32_t lane = threadIdx.x & 31U;
-  const uint32_t wave = threadIdx.x >> 5U;
+  __shared__ float wave_sums[WaveCount];
+  const uint32_t lane = threadIdx.x % WaveWidth;
+  const uint32_t wave = threadIdx.x / WaveWidth;
   if (lane == 0U) {
     wave_sums[wave] = partial;
   }
   __syncthreads();
   if (wave == 0U) {
-    partial = lane < 8U ? wave_sums[lane] : 0.0F;
+    partial = lane < WaveCount ? wave_sums[lane] : 0.0F;
 #pragma unroll
-    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
-      partial += __shfl_down(partial, offset, 32);
+    for (uint32_t offset = WaveWidth / 2U; offset != 0U; offset >>= 1U) {
+      partial += __shfl_down(partial, offset, WaveWidth);
     }
     if (lane == 0U) {
       output[column] = float_to_bf16_rne_bits(partial);
@@ -267,14 +321,30 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
   }
 }
 
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
+    const uint16_t *const activation, const uint16_t *const weight,
+    uint16_t *const output, const uint64_t k, const uint64_t n) {
+  matmul_bf16_decode_body<32U, 8U>(activation, weight, output, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_wave64_v1(
+    const uint16_t *const activation, const uint16_t *const weight,
+    uint16_t *const output, const uint64_t k, const uint64_t n) {
+  matmul_bf16_decode_body<64U, 4U>(activation, weight, output, k, n);
+}
+
 namespace sllm_matmul_kernel {
 hipError_t launch_fp8_quantize(
     const uint16_t *const activation, uint8_t *const quantized,
     float *const scales, const uint64_t m, const uint64_t k,
+    const bool fnuz,
     const hipStream_t stream) noexcept {
   hipLaunchKernelGGL(sllm_matmul_bf16_to_fp8_outer_v1,
                      dim3(static_cast<uint32_t>(m)), dim3(kWorkgroupSize), 0U,
-                     stream, activation, quantized, scales, m, k);
+                     stream, activation, quantized, scales, m, k,
+                     fnuz ? UINT32_C(1) : UINT32_C(0));
   return hipGetLastError();
 }
 
@@ -301,7 +371,11 @@ hipError_t launch(const uint16_t *const activation,
   if (variant == KernelVariant::HipBlas) {
     return hipErrorInvalidValue;
   }
-  if (variant == KernelVariant::DecodeReduction) {
+  if (variant == KernelVariant::DecodeReductionWave64) {
+    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_wave64_v1,
+                       dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
+                       stream, activation, weight, output, k, n);
+  } else if (variant == KernelVariant::DecodeReduction) {
     hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_v3,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
                        stream, activation, weight, output, k, n);

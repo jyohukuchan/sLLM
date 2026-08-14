@@ -173,9 +173,16 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   if (status != SLLM_STATUS_OK) {
     return status;
   }
+  const uint32_t fp8_dtype = descriptor->weight.dtype;
+  if (fp8_outer && fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+      fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED_DTYPE,
+        "FP8 matmul weight must use OCP E4M3FN or E4M3FNUZ");
+  }
   status = validate_tensor(
       descriptor->weight, &metadata->weight,
-      fp8_outer ? SLLM_TENSOR_DTYPE_F8_E4M3_FN : SLLM_TENSOR_DTYPE_BF16,
+      fp8_outer ? fp8_dtype : SLLM_TENSOR_DTYPE_BF16,
       fp8_outer ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
                 : SLLM_TENSOR_ENCODING_UNQUANTIZED,
       fp8_outer ? UINT64_C(1) : UINT64_C(2), fp8_outer, sink);
@@ -206,6 +213,7 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
         "matmul output element count overflowed u64");
   }
   metadata->fp8_outer = fp8_outer;
+  metadata->fp8_dtype = fp8_outer ? fp8_dtype : 0U;
   metadata->weight_value_bytes = metadata->n * metadata->k;
   if (fp8_outer && (metadata->weight_value_bytes & UINT64_C(3)) != 0U) {
     return sllm_public_runtime::write_error(

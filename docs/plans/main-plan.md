@@ -453,15 +453,15 @@
   昇格しない。native FP8はopt-in、V620 emulationはcorrectness-only、V620 `converted-bf16`は明示pathとする。
 - 詳細は[Phase 10 archive](archive/2026/08/11-20/phase10-fp8-w8a8.md)を正とする。
 
-### Phase 11: FP8/BF16のCDNA3移植（計画済み）
+### Phase 11: FP8/BF16のCDNA3移植（完了）
 
 - exact `gfx942`、wave64へBF16 kernel/providerを移植し、OCP E4M3FN model storageをVRAM load時に
   E4M3FNUZへ数値変換してhipBLASLt FNUZ providerへ渡す。generic targetやraw byte reinterpretを使わない。
 - MI300XではVMMなしが想定されるため、opaque KV/attention契約を維持する`contiguous-resident` providerを
   追加する。VMM対応targetのvAttentionは維持し、Paged Attentionへの選定変更やsilent fallbackは行わない。
-- Phase 11は`gfx942` artifact、runner、oracle、model lockを実機実行可能なcandidateへ仕上げる。実機PASSと
-  性能値はPhase 12で取得する。
-- 詳細は[Phase 11 active plan](active/2026/08/11-20/phase11-cdna3-port.md)を正とする。
+- exact gfx942 compile/link、全byte FNUZ oracle、wave64 BF16 provider、capability-selected contiguous-resident KV、
+  production `native-fnuz` graph/service、MI300X dry-run runnerを完成した。実機PASSと性能値はPhase 12で取得する。
+- 詳細は[Phase 11 archive](archive/2026/08/11-20/phase11-cdna3-port.md)を正とする。
 
 ### Phase 12: Hot Aisle MI300X単体実機確認（計画済み）
 
@@ -483,14 +483,14 @@
 
 ## 現在の状態と次の作業
 
-- Phase 10まで完了した。次はPhase 11のCDNA3移植であり、MI300X実機確認は
-  Phase 12、モデル非依存prepared execution制御はPhase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。
+- Phase 11まで完了した。次はPhase 12のMI300X実機確認であり、モデル非依存prepared execution制御は
+  Phase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで
   memory-bound matvec、production graph/command-list、MLP fusionの優先順位を再確認する。RDNA4 FA3-likeは
   attentionが支配要因になった時の非blocking follow-upとして別管理する。
-- Phase 11はMI300XのVMMなしを前提に`contiguous-resident` KV providerを用意し、Phase 12はHot Aisle MI300X x1
+- Phase 11でMI300XのVMMなしに備える`contiguous-resident` KV providerを実装した。Phase 12はHot Aisle MI300X x1
   Small VMを標準10〜12 GPU時間、上限16時間の二回構成で検証する。単一VMの性能証拠をmulti-GPU、bare metal、
   MI300A/MI325Xへ一般化しない。
 - Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の

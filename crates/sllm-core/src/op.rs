@@ -792,7 +792,7 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
         }
     }
     let bf16_weight = weight.encoding() == Encoding::Unquantized && weight.dtype() == DType::Bf16;
-    let fp8_weight = weight.dtype() == DType::F8E4M3Fn
+    let fp8_weight = matches!(weight.dtype(), DType::F8E4M3Fn | DType::F8E4M3FnuZ)
         && weight.encoding()
             == Encoding::Fp8Scaled {
                 granularity: Fp8ScaleGranularity::OuterDimension,

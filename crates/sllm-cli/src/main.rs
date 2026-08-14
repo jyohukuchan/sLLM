@@ -51,18 +51,18 @@ fn print_help() {
     println!();
     println!("direct: --lane direct --lock PATH --cache PATH --row-id ID --model-size 2B|4B|9B");
     println!("  --case-id ID --input-token-ids IDS --max-new-tokens N --device-index N");
-    println!("  --target gfx1030|gfx1201 --greedy [--warmups N] [--measured N]");
+    println!("  --target gfx1030|gfx1201|gfx942 --greedy [--warmups N] [--measured N]");
     println!(
         "render-tokenize: --lane render-tokenize --message ROLE:CONTENT (same execution flags)"
     );
     println!("  both lanes require exactly 3 warmup and 10 measured requests");
     println!();
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
-    println!("  --device-index N --target gfx1030|gfx1201 [--greedy | --temperature F32]");
+    println!("  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32]");
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--fp8-manifest PATH --fp8-artifact PATH]");
-    println!("  [--fp8-provider native|emulation|converted-bf16]");
+    println!("  [--fp8-provider native|native-fnuz|emulation|converted-bf16]");
 }
 
 fn print_version() -> Result<(), String> {

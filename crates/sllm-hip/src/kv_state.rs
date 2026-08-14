@@ -17,8 +17,8 @@ use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sllm_core::{
-    DType, Encoding, ExecutionSessionId, KvStateAppendRequest, KvStateDescriptor, KvStateId,
-    KvStateSnapshot,
+    DType, Encoding, ExecutionSessionId, KvMemoryKind, KvStateAppendRequest, KvStateDescriptor,
+    KvStateId, KvStateSnapshot,
 };
 use sllm_hip_sys as sys;
 
@@ -102,7 +102,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS,
+            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED,
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
@@ -172,7 +172,18 @@ impl KvStateResource {
         self.inner
             .last_generation
             .store(info.generation, Ordering::Release);
-        let physical_memory = sllm_core::KvPhysicalMemorySnapshot::new(
+        let memory_kind = match info.memory_kind {
+            sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS => KvMemoryKind::VirtualContiguous,
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT => KvMemoryKind::ContiguousResident,
+            _ => {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "native KV memory provider is unknown",
+                ));
+            }
+        };
+        let physical_memory = sllm_core::KvPhysicalMemorySnapshot::new_with_kind(
+            memory_kind,
             self.inner.descriptor.capacity(),
             info.observed_length,
             info.physical_page_bytes,
@@ -861,7 +872,11 @@ fn validate_view_info(
         || info.encoding != sys::SLLM_TENSOR_ENCODING_UNQUANTIZED
         || info.head_count != layout.heads() as u32
         || info.head_dim != layout.head_dim() as u32
-        || info.memory_kind != sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+        || !matches!(
+            info.memory_kind,
+            sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+                | sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+        )
         || info.layout != sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR
         || info.capacity_tokens != descriptor.capacity()
         || info.context_identity != context.raw_handle()?.as_ptr() as usize as u64

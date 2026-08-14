@@ -200,7 +200,7 @@ struct Fp8LtPlan;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
                               float *activation_scales,
-                              const float *weight_scales, uint64_t m,
+                              const float *weight_scales, uint32_t fp8_dtype, uint64_t m,
                               uint64_t k, uint64_t n) noexcept;
 void destroy_fp8_lt_plan(Fp8LtPlan *plan) noexcept;
 hipError_t launch_fp8_lt_plan(Fp8LtPlan *plan, const uint8_t *activation,
@@ -303,22 +303,43 @@ struct KvVmmPlane final {
   uint64_t mapped_bytes;
   uint64_t page_bytes;
   std::vector<hipMemGenericAllocationHandle_t> handles;
+  bool contiguous;
 
   KvVmmPlane() noexcept
       : address(nullptr), logical_bytes(0U), reservation_bytes(0U),
-        mapped_bytes(0U), page_bytes(0U), handles() {}
+        mapped_bytes(0U), page_bytes(0U), handles(), contiguous(false) {}
   KvVmmPlane(const KvVmmPlane &) = delete;
   KvVmmPlane &operator=(const KvVmmPlane &) = delete;
   KvVmmPlane(KvVmmPlane &&other) noexcept
       : address(other.address), logical_bytes(other.logical_bytes),
         reservation_bytes(other.reservation_bytes),
         mapped_bytes(other.mapped_bytes), page_bytes(other.page_bytes),
-        handles(std::move(other.handles)) {
+        handles(std::move(other.handles)), contiguous(other.contiguous) {
     other.address = nullptr;
     other.logical_bytes = 0U;
     other.reservation_bytes = 0U;
     other.mapped_bytes = 0U;
     other.page_bytes = 0U;
+    other.contiguous = false;
+  }
+
+  hipError_t reserve_contiguous(const uint64_t logical,
+                                const uint64_t page) noexcept {
+    if (logical == 0U || page == 0U || logical > std::numeric_limits<std::size_t>::max()) {
+      return hipErrorInvalidValue;
+    }
+    void *candidate = nullptr;
+    const hipError_t status = hipMalloc(&candidate, static_cast<std::size_t>(logical));
+    if (status != hipSuccess) {
+      return status;
+    }
+    address = candidate;
+    logical_bytes = logical;
+    reservation_bytes = logical;
+    mapped_bytes = logical;
+    page_bytes = page;
+    contiguous = true;
+    return hipSuccess;
   }
   ~KvVmmPlane() { release_noexcept(); }
 
@@ -360,6 +381,9 @@ struct KvVmmPlane final {
     if (required_bytes > reservation_bytes || address == nullptr) {
       return hipErrorInvalidValue;
     }
+    if (contiguous) {
+      return hipSuccess;
+    }
     while (mapped_bytes < required_bytes) {
       hipMemGenericAllocationHandle_t handle = nullptr;
       hipError_t status = hipMemCreate(
@@ -389,6 +413,16 @@ struct KvVmmPlane final {
   }
 
   hipError_t release_checked() noexcept {
+    if (contiguous) {
+      const hipError_t status = address == nullptr ? hipSuccess : hipFree(address);
+      address = nullptr;
+      logical_bytes = 0U;
+      reservation_bytes = 0U;
+      mapped_bytes = 0U;
+      page_bytes = 0U;
+      contiguous = false;
+      return status;
+    }
     hipError_t first = hipSuccess;
     for (std::size_t index = handles.size(); index > 0U; --index) {
       void *const target = static_cast<char *>(address) +
@@ -439,6 +473,7 @@ struct KvState final : QuarantineNode {
   uint64_t tokens_per_page;
   uint64_t mapped_token_capacity;
   uint64_t committed_bytes_per_plane;
+  uint32_t memory_kind;
   sllm_public_runtime::AccountingState accounting;
   uint64_t published_length;
   uint64_t generation;
@@ -467,7 +502,17 @@ struct KvState final : QuarantineNode {
         tokens_per_page(page_bytes_value /
                         (static_cast<uint64_t>(head_count_value) *
                          head_dim_value * UINT64_C(2))),
-        mapped_token_capacity(0U), committed_bytes_per_plane(0U), accounting(),
+        mapped_token_capacity(std::min(
+            capacity_value,
+            key_plane.mapped_bytes /
+                (static_cast<uint64_t>(head_count_value) * head_dim_value *
+                 UINT64_C(2)))),
+        committed_bytes_per_plane(
+            std::min(key_plane.mapped_bytes, value_plane.mapped_bytes)),
+        memory_kind(key_plane.contiguous
+                        ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+                        : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS),
+        accounting(),
         published_length(0U), generation(0U), transition_token(0U),
         transition_start(0U), transition_count(0U), transition_end(0U),
         commit_allowed(false), view_count(0U), release_active(false) {}
@@ -1738,7 +1783,11 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1;
+  const bool wave64 = arch_name != nullptr &&
+                      std::strncmp(arch_name, "gfx942", 6U) == 0;
+  info->kernel_id = wave64
+                        ? SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE64_V1
+                        : SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1;
   info->workgroup_size_x = SLLM_HIP_RMSNORM_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(row_count);
   info->row_count = row_count;
@@ -1747,10 +1796,13 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX,
-      ::sllm_rmsnorm_kernel::kLogicalKernelId);
+      wave64 ? ::sllm_rmsnorm_kernel::kWave64LogicalKernelId
+             : ::sllm_rmsnorm_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(info->device_symbol,
                                          SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
-                                         ::sllm_rmsnorm_kernel::kDeviceSymbol);
+                                         wave64
+                                             ? ::sllm_rmsnorm_kernel::kWave64DeviceSymbol
+                                             : ::sllm_rmsnorm_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -1871,9 +1923,12 @@ void destroy_fp8_lt_plan(Fp8LtPlan *const plan) noexcept {
 hipError_t create_fp8_lt_plan(
     const hipblasLtHandle_t handle, Fp8LtPlan **const plan_output,
     float *const activation_scales,
-    const float *const weight_scales, const uint64_t m, const uint64_t k,
+    const float *const weight_scales, const uint32_t fp8_dtype,
+    const uint64_t m, const uint64_t k,
     const uint64_t n) noexcept {
-  if (handle == nullptr || plan_output == nullptr) {
+  if (handle == nullptr || plan_output == nullptr ||
+      (fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+       fp8_dtype != SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ)) {
     return hipErrorInvalidValue;
   }
   *plan_output = nullptr;
@@ -1898,6 +1953,10 @@ hipError_t create_fp8_lt_plan(
   }
   const hipblasOperation_t trans_a = HIPBLAS_OP_T;
   const hipblasOperation_t trans_b = HIPBLAS_OP_N;
+  const hipDataType fp8_library_dtype =
+      fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ
+          ? HIP_R_8F_E4M3_FNUZ
+          : HIP_R_8F_E4M3;
   if (failed(hipblasLtMatmulDescSetAttribute(
           plan->operation, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a,
           sizeof(trans_a))) ||
@@ -1923,9 +1982,9 @@ hipError_t create_fp8_lt_plan(
       failed(hipblasLtMatmulDescSetAttribute(
           plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode,
           sizeof(scale_mode))) ||
-      failed(hipblasLtMatrixLayoutCreate(&plan->a, HIP_R_8F_E4M3, k, n,
+      failed(hipblasLtMatrixLayoutCreate(&plan->a, fp8_library_dtype, k, n,
                                          static_cast<int64_t>(k))) ||
-      failed(hipblasLtMatrixLayoutCreate(&plan->b, HIP_R_8F_E4M3, k, m,
+      failed(hipblasLtMatrixLayoutCreate(&plan->b, fp8_library_dtype, k, m,
                                          static_cast<int64_t>(k))) ||
       failed(hipblasLtMatrixLayoutCreate(&plan->c, HIP_R_16BF, n, m,
                                          static_cast<int64_t>(n))) ||
@@ -1946,9 +2005,9 @@ hipError_t create_fp8_lt_plan(
   }
   hipblasLtMatmulHeuristicResult_t heuristic{};
   static std::mutex algorithm_cache_mutex;
-  static std::map<std::array<uint64_t, 3>, hipblasLtMatmulAlgo_t>
+  static std::map<std::array<uint64_t, 4>, hipblasLtMatmulAlgo_t>
       algorithm_cache;
-  const std::array<uint64_t, 3> shape_key = {m, k, n};
+  const std::array<uint64_t, 4> shape_key = {fp8_dtype, m, k, n};
   {
     std::lock_guard<std::mutex> cache_lock(algorithm_cache_mutex);
     const auto cached = algorithm_cache.find(shape_key);
@@ -2004,7 +2063,8 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant = metadata.fp8_outer
-                           ? (std::strcmp(arch_name, "gfx1201") == 0
+                           ? ((std::strcmp(arch_name, "gfx1201") == 0 ||
+                               std::strcmp(arch_name, "gfx942") == 0)
                                   ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
                                   : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
                            : ::sllm_matmul_kernel::select_variant(
@@ -3912,7 +3972,8 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     }
     std::unique_ptr<Context> candidate(new Context(info->device_index));
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    if (std::strcmp(properties.gcnArchName, "gfx1201") == 0) {
+    if (std::strcmp(properties.gcnArchName, "gfx1201") == 0 ||
+        std::strcmp(properties.gcnArchName, "gfx942") == 0) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
       const hipblasStatus_t lt_status =
@@ -3923,7 +3984,7 @@ sllm_context_create(const sllm_context_create_info_t *const info,
           lt_status != HIPBLAS_STATUS_SUCCESS) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "hipBLAS/hipBLASLt handle creation failed for the gfx1201 matmul registry");
+            "hipBLAS/hipBLASLt handle creation failed for the native matmul registry");
       }
     }
 #endif
@@ -5634,7 +5695,9 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
-    if (properties.warpSize != 32) {
+    const int expected_wavefront =
+        std::strcmp(properties.gcnArchName, "gfx942") == 0 ? 64 : 32;
+    if (properties.warpSize != expected_wavefront) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
@@ -5642,7 +5705,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
       execute_guard.disarm();
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
-          "RMSNorm baseline requires a wave32 device");
+          "RMSNorm provider wavefront differs from the exact target contract");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
     if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
@@ -6339,7 +6402,7 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->encoding = SLLM_TENSOR_ENCODING_UNQUANTIZED;
   info->head_count = state->head_count;
   info->head_dim = state->head_dim;
-  info->memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  info->memory_kind = state->memory_kind;
   info->layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
   info->capacity_tokens = state->capacity_tokens;
   info->observed_length = length;
@@ -6574,6 +6637,34 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
                                        hipMemAllocationGranularityRecommended);
     const uint64_t bytes_per_token =
         static_cast<uint64_t>(head_count) * head_dim * UINT64_C(2);
+    int vmm_supported = 0;
+    const hipError_t capability_status = hipDeviceGetAttribute(
+        &vmm_supported, hipDeviceAttributeVirtualMemoryManagementSupported,
+        static_cast<int>(context->device_index));
+    if (capability_status != hipSuccess) {
+      (void)rollback_child(context, error_sink,
+                           "KV state provisional accounting rollback failed");
+      return hip_failure(error_sink, capability_status,
+                         "query HIP VMM capability for KV provider");
+    }
+    const uint32_t selected_memory_kind =
+        info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+            ? (vmm_supported != 0
+                   ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+                   : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT)
+            : info->memory_kind;
+    if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
+      key_status = hipSuccess;
+      page_bytes = static_cast<std::size_t>(bytes_per_token);
+    }
+    if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+        vmm_supported == 0) {
+      (void)rollback_child(context, error_sink,
+                           "KV state provisional accounting rollback failed");
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "explicit virtual-contiguous KV requires HIP VMM capability");
+    }
     if (key_status == hipSuccess &&
         (page_bytes == 0U || page_bytes % bytes_per_token != 0U ||
          allocation_bytes >
@@ -6589,28 +6680,38 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
     KvVmmPlane key_plane;
     KvVmmPlane value_plane;
     if (key_status == hipSuccess) {
-      key_status = sllm_public_runtime::FaultInjector::consume(
-                       sllm_public_runtime::FaultPoint::NativeCreationFailure)
-                       ? hipErrorUnknown
-                       : key_plane.reserve(allocation_bytes, reservation_bytes,
-                                           page_bytes);
+      if (sllm_public_runtime::FaultInjector::consume(
+              sllm_public_runtime::FaultPoint::NativeCreationFailure)) {
+        key_status = hipErrorUnknown;
+      } else if (selected_memory_kind ==
+                 SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
+        key_status = key_plane.reserve_contiguous(allocation_bytes,
+                                                  bytes_per_token);
+      } else {
+        key_status = key_plane.reserve(allocation_bytes, reservation_bytes,
+                                       page_bytes);
+      }
     }
     if (key_status != hipSuccess) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, key_status, "reserve virtual KV K buffer");
+      return hip_failure(error_sink, key_status, "reserve selected KV K buffer");
     }
     const hipError_t value_status =
         sllm_public_runtime::FaultInjector::consume(
             sllm_public_runtime::FaultPoint::NativeCreationFailure)
             ? hipErrorUnknown
-            : value_plane.reserve(allocation_bytes, reservation_bytes,
-                                  page_bytes);
+            : (selected_memory_kind ==
+                       SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+                   ? value_plane.reserve_contiguous(allocation_bytes,
+                                                    bytes_per_token)
+                   : value_plane.reserve(allocation_bytes, reservation_bytes,
+                                         page_bytes));
     if (value_status != hipSuccess) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
       return hip_failure(error_sink, value_status,
-                         "reserve virtual KV V buffer");
+                         "reserve selected KV V buffer");
     }
     std::unique_ptr<Buffer> key_buffer;
     std::unique_ptr<Buffer> value_buffer;
@@ -7352,7 +7453,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
-    if (properties.warpSize != 32) {
+    const int expected_wavefront = std::strcmp(arch_name, "gfx942") == 0 ? 64 : 32;
+    if (properties.warpSize != expected_wavefront) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
                                            error_sink)) {
@@ -7360,7 +7462,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       }
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
-          "KV state baseline requires a wave32 device");
+          "KV state provider wavefront differs from the exact target contract");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
     if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {

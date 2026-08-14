@@ -77,6 +77,6 @@ VMMなしの`contiguous-resident` KV providerを渡す。実機PASSと性能値�
 ## 関連資料
 
 - [Phase 10 history](../../../../../history/2026/08/11-20/phase10-fp8-w8a8.md)
-- [メイン計画](../../../main-plan.md)
+- [メイン計画](../../../../main-plan.md)
 - [AMD GPU互換性](../../../../../compatibility/amd-gpu.md)
 - [model lock](../../../../../models/model-lock.md)

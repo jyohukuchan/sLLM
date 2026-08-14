@@ -122,9 +122,9 @@ KV cache は通常の tensor descriptor に加え、layer、K/V の分離また�
 
 schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。contiguous pointerはnative backend内だけでattention kernelへ渡す。このためvAttention上でもcontiguous-KV FlashAttention系kernelを利用でき、上位APIを変更せず将来paged/block layoutへ切り替えられる。Paged Attention production backendと量子化layoutは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
 
-Phase 11ではVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
-contiguous attention pointerを保つ`contiguous-resident` providerを追加する。logical capacity分を通常のdevice
-allocationで確保し、VMM capability=falseのprepare時に明示選択する。これはPaged Attentionへの方針変更でも
+Phase 11でVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
+contiguous attention pointerを保つ`contiguous-resident` providerを追加した。logical capacity分を通常のdevice
+allocationで確保し、VMM capability=falseのprepare時に選択する。これはPaged Attentionへの方針変更でも
 実行時error後のfallbackでもない。VMM capability=trueのtargetは既存virtual-contiguous providerを維持する。
 必要byte、capacity、selected provider、resident allocationはdiagnostic/auditへ残す。
 

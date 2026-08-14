@@ -160,7 +160,9 @@ validate_state_create_info(const sllm_kv_state_create_info_t *const info,
       info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
       (head_count != 2U && head_count != 4U) ||
       head_dim != SLLM_HIP_KV_HEAD_DIM ||
-      info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS ||
+      (info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED &&
+       info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+       info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
       info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,

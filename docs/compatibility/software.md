@@ -101,6 +101,9 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Phase 10 local FP8 providerはROCm 7.14.0 / hipBLASLt 1.4.1を使用する。exact `gfx1201`はOCP E4M3FN
   native、exact `gfx1030`はemulationまたはload時BF16 conversionであり、別ROCm release、別target、
   CDNA3 FNUZの互換性を証明しない。
+- Phase 11のROCm 7.14.0 local buildはexact `gfx942`、Code Object V6、wave64、`xnack=off`、`sramecc=on`を
+  compile/linkした。これはHot Aisle VMのdriver/runtime、hipBLASLt FNUZ solution、数値実行を証明せず、
+  software tupleの`project-verified`昇格はPhase 12 preflight/operator結果まで行わない。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、sLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 

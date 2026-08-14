@@ -244,5 +244,5 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|emulation|converted-bf16] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }

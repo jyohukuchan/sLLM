@@ -141,6 +141,13 @@ AMD/ROCmの公開datatype・API contractと独立数値oracleを基に実装し�
 source expressionをcopy、adapt、portしておらず、`THIRD_PARTY_NOTICES.md`へ追加する直接importはない。
 性能比較では既存の固定llama.cpp binary/resultだけをpeer baselineとして参照した。
 
+## Phase 11 CDNA3 implementation record
+
+Phase 11のE4M3FNUZ codec/converter、hipBLASLt FNUZ integration、wave64 BF16 provider、contiguous-resident KV、
+MI300X candidate runnerはAMD/ROCmの公開datatype/API contractとsLLM既存実装を基に作成した。新たな第三者
+source expressionのcopy、adapt、portはなく、Phase 9で既に記録したllama.cpp由来MMVF organizationの
+wave64化は同じ既存provenance範囲に含まれる。`THIRD_PARTY_NOTICES.md`への新規import追加はない。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

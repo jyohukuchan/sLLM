@@ -37,7 +37,7 @@ use crate::weights::{
 };
 use crate::{
     AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
-    VerifiedFp8Sidecar, decode_e4m3fn,
+    VerifiedFp8Sidecar, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fn,
 };
 
 /// Output published by a fully completed Qwen request transition.
@@ -392,6 +392,37 @@ impl QwenResidentModel {
             ));
         }
         let source = Fp8ProvisionSource { cache, sidecar };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// CDNA3 provider: numerically converts the verified OCP value bytes to
+    /// E4M3FNUZ once while provisioning model-resident storage. Scales remain
+    /// FP32 and the source sidecar identity remains part of the model identity.
+    pub fn new_fp8_fnuz(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        cache: Arc<VerifiedCache>,
+        sidecar: Arc<VerifiedFp8Sidecar>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if graph.fp8_sidecar_fingerprint() != Some(sidecar.manifest_fingerprint()) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FNUZ graph and OCP sidecar identities differ".to_owned(),
+            ));
+        }
+        if cache.lock_fingerprint != plan.lock_fingerprint
+            || sidecar.source_lock_fingerprint() != plan.lock_fingerprint
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FNUZ source cache, sidecar, and plan identities differ".to_owned(),
+            ));
+        }
+        let source = Fp8FnuzProvisionSource { cache, sidecar };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -855,6 +886,11 @@ struct Fp8ProvisionSource {
     sidecar: Arc<VerifiedFp8Sidecar>,
 }
 
+struct Fp8FnuzProvisionSource {
+    cache: Arc<VerifiedCache>,
+    sidecar: Arc<VerifiedFp8Sidecar>,
+}
+
 struct Fp8ConvertedProvisionSource {
     cache: Arc<VerifiedCache>,
     sidecar: Arc<VerifiedFp8Sidecar>,
@@ -959,6 +995,69 @@ impl QwenProvisionSource for Fp8ProvisionSource {
                 completion_timeout,
             )
         }
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        VerifiedProvisionSource {
+            cache: Arc::clone(&self.cache),
+        }
+        .read_scale_bytes(tensor_name, expected_length)
+    }
+}
+
+impl QwenProvisionSource for Fp8FnuzProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let Some(tensor) = self.sidecar.tensor(binding.tensor_name()) else {
+            return VerifiedProvisionSource {
+                cache: Arc::clone(&self.cache),
+            }
+            .upload_weight(
+                plan,
+                binding,
+                session,
+                queue,
+                destination,
+                completion_timeout,
+            );
+        };
+        if tensor.shape.as_slice() != binding.shape() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "FNUZ resident contract differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        let (values, scales) = self
+            .sidecar
+            .read_tensor_bytes(binding.tensor_name())
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let mut combined = convert_e4m3fn_to_e4m3fnuz(&values);
+        combined.extend_from_slice(&scales);
+        if u64::try_from(combined.len()).ok() != Some(destination.size_bytes()) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "FNUZ resident allocation differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        upload_buffer_bytes(
+            session,
+            queue,
+            &destination,
+            &combined,
+            completion_timeout,
+            "FNUZ weight/scale upload",
+        )
     }
 
     fn read_scale_bytes(

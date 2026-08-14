@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, ModelLock, OsSamplingRandom, QwenExecutionRequest,
     QwenResidentModel, SamplingParametersV1, VerifiedCache, WeightClassification,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
-    verify_fp8_sidecar,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_verified_weight_load_plan, read_model_lock, verify_fp8_sidecar,
 };
 use sllm_frontend::{
     DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -45,6 +45,7 @@ enum GenerationInput {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CliFp8Provider {
     Native,
+    NativeFnuz,
     Emulation,
     ConvertedBf16,
 }
@@ -53,6 +54,7 @@ impl CliFp8Provider {
     const fn label(self) -> &'static str {
         match self {
             Self::Native => "native",
+            Self::NativeFnuz => "native-fnuz",
             Self::Emulation => "emulation",
             Self::ConvertedBf16 => "converted-bf16",
         }
@@ -71,14 +73,15 @@ fn select_cli_fp8_provider(
             Err("--fp8-provider requires an FP8 sidecar".to_owned())
         };
     }
-    let selected = requested.unwrap_or(if target == "gfx1201" {
-        CliFp8Provider::Native
-    } else {
-        CliFp8Provider::ConvertedBf16
+    let selected = requested.unwrap_or(match target {
+        "gfx1201" => CliFp8Provider::Native,
+        "gfx942" => CliFp8Provider::NativeFnuz,
+        _ => CliFp8Provider::ConvertedBf16,
     });
     let valid = matches!(
         (selected, target),
         (CliFp8Provider::Native, "gfx1201")
+            | (CliFp8Provider::NativeFnuz, "gfx942")
             | (
                 CliFp8Provider::Emulation | CliFp8Provider::ConvertedBf16,
                 "gfx1030"
@@ -437,6 +440,9 @@ impl ModelFrontendBackend for ProductionBackend {
             (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
                 build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
             }
+            (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                build_qwen35_fp8_fnuz_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
+            }
             (Some(sidecar), Some(_)) => {
                 build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
             }
@@ -470,6 +476,14 @@ impl ModelFrontendBackend for ProductionBackend {
                             COMPLETION_TIMEOUT,
                         )
                     }
+                    Some(CliFp8Provider::NativeFnuz) => QwenResidentModel::new_fp8_fnuz(
+                        Arc::clone(&session),
+                        graph,
+                        plan.clone(),
+                        Arc::clone(&self.cache),
+                        Arc::clone(&sidecar),
+                        COMPLETION_TIMEOUT,
+                    ),
                     Some(_) => QwenResidentModel::new_fp8(
                         Arc::clone(&session),
                         graph,
@@ -485,6 +499,13 @@ impl ModelFrontendBackend for ProductionBackend {
                     Some(CliFp8Provider::ConvertedBf16) => {
                         build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
                     }
+                    Some(CliFp8Provider::NativeFnuz) => build_qwen35_fp8_fnuz_graph(
+                        &self.lock,
+                        &plan,
+                        &sidecar,
+                        input_len,
+                        state_capacity,
+                    ),
                     Some(_) => build_qwen35_fp8_graph(
                         &self.lock,
                         &plan,
@@ -569,7 +590,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "submission_count": audit.submission_count(),
                     "kernel_dispatch_count": audit.kernel_dispatch_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
-                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
+                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
                     "fp8_provider": fp8_provider.map(CliFp8Provider::label),
                 },
             }))
@@ -674,6 +695,9 @@ impl ModelFrontendBackend for ProductionBackend {
             (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
                 build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
             }
+            (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                build_qwen35_fp8_fnuz_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
+            }
             (Some(sidecar), Some(_)) => {
                 build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
             }
@@ -695,6 +719,16 @@ impl ModelFrontendBackend for ProductionBackend {
             let resident = match (&sidecar, fp8_provider) {
                 (Some(sidecar), Some(CliFp8Provider::ConvertedBf16)) => {
                     QwenResidentModel::new_fp8_converted_bf16(
+                        Arc::clone(&session),
+                        first_graph,
+                        plan.clone(),
+                        Arc::clone(&self.cache),
+                        Arc::clone(sidecar),
+                        COMPLETION_TIMEOUT,
+                    )
+                }
+                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                    QwenResidentModel::new_fp8_fnuz(
                         Arc::clone(&session),
                         first_graph,
                         plan.clone(),
@@ -731,6 +765,15 @@ impl ModelFrontendBackend for ProductionBackend {
             let control_graph = match (&sidecar, fp8_provider) {
                 (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
                     build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                }
+                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                    build_qwen35_fp8_fnuz_graph(
+                        &self.lock,
+                        &plan,
+                        sidecar,
+                        input_len,
+                        state_capacity,
+                    )
                 }
                 (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                     &self.lock,
@@ -857,6 +900,15 @@ impl ModelFrontendBackend for ProductionBackend {
                 let graph = match (&sidecar, fp8_provider) {
                     (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
                         build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                        build_qwen35_fp8_fnuz_graph(
+                            &self.lock,
+                            &plan,
+                            sidecar,
+                            input_len,
+                            state_capacity,
+                        )
                     }
                     (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                         &self.lock,
@@ -1084,7 +1136,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
-                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
+                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
                     "fp8_provider": fp8_provider.map(CliFp8Provider::label),
                     "request_model_load_count": 0,
                     "model_reused": true,
@@ -1253,11 +1305,12 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             "--fp8-provider" if command == "generate" || command == "benchmark" => {
                 let value = match take_value(&mut arguments, "--fp8-provider")?.as_str() {
                     "native" => CliFp8Provider::Native,
+                    "native-fnuz" => CliFp8Provider::NativeFnuz,
                     "emulation" => CliFp8Provider::Emulation,
                     "converted-bf16" => CliFp8Provider::ConvertedBf16,
                     _ => {
                         return Err(
-                            "--fp8-provider must be native, emulation, or converted-bf16"
+                            "--fp8-provider must be native, native-fnuz, emulation, or converted-bf16"
                                 .to_owned(),
                         );
                     }
@@ -1324,8 +1377,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             }
             "--target" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--target")?;
-                if value != "gfx1030" && value != "gfx1201" {
-                    return Err("--target must be gfx1030 or gfx1201".to_owned());
+                if value != "gfx1030" && value != "gfx1201" && value != "gfx942" {
+                    return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
                 }
                 set_once(&mut target, value, "--target")?;
             }
@@ -1684,6 +1737,10 @@ mod tests {
         assert_eq!(
             select_cli_fp8_provider(true, None, "gfx1030").unwrap(),
             Some(CliFp8Provider::ConvertedBf16)
+        );
+        assert_eq!(
+            select_cli_fp8_provider(true, None, "gfx942").unwrap(),
+            Some(CliFp8Provider::NativeFnuz)
         );
         assert_eq!(
             select_cli_fp8_provider(true, Some(CliFp8Provider::Emulation), "gfx1030").unwrap(),

@@ -44,9 +44,9 @@ pub use final_output::{
     QWEN35_EMBEDDING_TENSOR, QWEN35_HIDDEN_SIZE, QWEN35_VOCAB_SIZE, QwenFinalOutputBindings,
 };
 pub use fp8::{
-    E4M3FN_MAX, Fp8Error, Fp8Provider, Fp8ProviderRejection, Fp8ProviderRequest, QuantizedFp8,
-    decode_e4m3fn, encode_e4m3fn, quantize_e4m3fn_k_blocks, quantize_e4m3fn_outer_rows,
-    select_fp8_provider,
+    E4M3FN_MAX, E4M3FNUZ_MAX, Fp8Error, Fp8Provider, Fp8ProviderRejection, Fp8ProviderRequest,
+    QuantizedFp8, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fn, decode_e4m3fnuz, encode_e4m3fn,
+    encode_e4m3fnuz, quantize_e4m3fn_k_blocks, quantize_e4m3fn_outer_rows, select_fp8_provider,
 };
 pub use fp8_sidecar::{Fp8SidecarError, Fp8SidecarTensor, VerifiedFp8Sidecar, verify_fp8_sidecar};
 pub use handles::{
@@ -54,8 +54,8 @@ pub use handles::{
     QueueHandle,
 };
 pub use kv_state::{
-    CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateAppendRequest, KvStateDescriptor,
-    KvStateError, KvStateLayout, KvStateSnapshot,
+    CausalAttentionDescriptor, KvMemoryKind, KvPhysicalMemorySnapshot, KvStateAppendRequest,
+    KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -90,7 +90,7 @@ pub use qwen_graph::{
     QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
-    build_qwen35_fp8_graph, build_qwen35_graph,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{

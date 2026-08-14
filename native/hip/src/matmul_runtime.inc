@@ -131,7 +131,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                 weight->accounting, output->accounting);
             return property_status;
           }
-          if (std::strcmp(properties.gcnArchName, "gfx1201") == 0) {
+          if (std::strcmp(properties.gcnArchName, "gfx1201") == 0 ||
+              std::strcmp(properties.gcnArchName, "gfx942") == 0) {
             auto *const activation_scales = reinterpret_cast<float *>(
                 static_cast<uint8_t *>(candidate->matmul_workspace) +
                 scale_offset);
@@ -142,7 +143,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
             std::lock_guard<std::mutex> lt_lock(context->matmul_lt_mutex);
             const hipError_t lt_status = create_fp8_lt_plan(
                 context->matmul_lt_handle, &candidate->fp8_lt_plan,
-                activation_scales, weight_scales, metadata.m, metadata.k,
+                activation_scales, weight_scales, metadata.fp8_dtype,
+                metadata.m, metadata.k,
                 metadata.n);
             if (lt_status != hipSuccess) {
               (void)sllm_public_runtime::AccountingState::release_prepared_plan(
@@ -511,9 +513,12 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             plan->matmul_metadata.weight_value_bytes);
         launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
             activation, quantized, activation_scales,
-            plan->matmul_metadata.m, plan->matmul_metadata.k, queue->stream);
+            plan->matmul_metadata.m, plan->matmul_metadata.k,
+            plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
+            queue->stream);
         if (launch_status == hipSuccess) {
-          if (std::strcmp(arch_name, "gfx1201") == 0) {
+          if (std::strcmp(arch_name, "gfx1201") == 0 ||
+              std::strcmp(arch_name, "gfx942") == 0) {
             std::lock_guard<std::mutex> lt_lock(
                 plan->context->matmul_lt_mutex);
             launch_status = launch_fp8_lt_plan(plan->fp8_lt_plan, quantized,

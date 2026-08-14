@@ -12,9 +12,10 @@ use crate::{DType, Encoding};
 
 /// The only C3a2 KV storage layout.
 ///
-/// Each of K and V is a separate virtual-contiguous unquantized FP16 buffer
-/// with token-major shape `[capacity, 4, 256]`. Query-head repetition is performed by
-/// attention, not materialized in this state.
+/// Each of K and V is a separate contiguous-address unquantized FP16 buffer
+/// with token-major shape `[capacity, 4, 256]`. Physical ownership may use
+/// virtual-contiguous VMM pages or a contiguous-resident allocation. Query-head
+/// repetition is performed by attention, not materialized in this state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct KvStateLayout {
     heads: usize,
@@ -209,12 +210,20 @@ impl KvStateDescriptor {
     }
 }
 
-/// Backend-reported physical backing for a virtual-contiguous KV plane.
+/// Backend-selected physical backing for an opaque contiguous KV plane.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum KvMemoryKind {
+    VirtualContiguous,
+    ContiguousResident,
+}
+
+/// Backend-reported physical backing for a KV plane.
 ///
 /// This is evidence metadata only: allocation and mapping remain owned by the
 /// backend. `committed_bytes_per_plane` describes K or V, not their sum.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct KvPhysicalMemorySnapshot {
+    memory_kind: KvMemoryKind,
     physical_page_bytes: u64,
     tokens_per_page: u64,
     mapped_token_capacity: u64,
@@ -223,6 +232,26 @@ pub struct KvPhysicalMemorySnapshot {
 
 impl KvPhysicalMemorySnapshot {
     pub fn new(
+        logical_capacity: u64,
+        observed_length: u64,
+        physical_page_bytes: u64,
+        tokens_per_page: u64,
+        mapped_token_capacity: u64,
+        committed_bytes_per_plane: u64,
+    ) -> Result<Self, KvStateError> {
+        Self::new_with_kind(
+            KvMemoryKind::VirtualContiguous,
+            logical_capacity,
+            observed_length,
+            physical_page_bytes,
+            tokens_per_page,
+            mapped_token_capacity,
+            committed_bytes_per_plane,
+        )
+    }
+
+    pub fn new_with_kind(
+        memory_kind: KvMemoryKind,
         logical_capacity: u64,
         observed_length: u64,
         physical_page_bytes: u64,
@@ -239,11 +268,16 @@ impl KvPhysicalMemorySnapshot {
             return Err(KvStateError::InvalidPhysicalMemory);
         }
         Ok(Self {
+            memory_kind,
             physical_page_bytes,
             tokens_per_page,
             mapped_token_capacity,
             committed_bytes_per_plane,
         })
+    }
+
+    pub const fn memory_kind(self) -> KvMemoryKind {
+        self.memory_kind
     }
 
     pub const fn physical_page_bytes(self) -> u64 {

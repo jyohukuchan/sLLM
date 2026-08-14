@@ -1,7 +1,14 @@
 # Phase 12: Hot Aisle MI300X単体実機確認
 
-> 状態: planned
+> 状態: ready
 > 作成日: 2026-08-14
+
+## Phase 11 handoff
+
+- Phase 11はexact gfx942 native compile/link、FNUZ host oracle、wave64 BF16 provider、contiguous-resident KV、
+  production `native-fnuz`統合を完了した。
+- `python3 ci/tools/run_phase11_mi300x_candidate.py --dry-run`で、全6 profileと所要時間見積りをVM取得前に検査する。
+- local candidateはMI300X実行をclaimしない。最初の実行主張は本Phaseのpreflight/operator reportから開始する。
 
 ## 目的
 

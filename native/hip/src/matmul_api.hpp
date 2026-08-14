@@ -24,6 +24,7 @@ struct DescriptorMetadata final {
   uint64_t output_elements;
   uint64_t weight_value_bytes;
   uint64_t weight_scale_offset;
+  uint32_t fp8_dtype;
   bool fp8_outer;
 };
 

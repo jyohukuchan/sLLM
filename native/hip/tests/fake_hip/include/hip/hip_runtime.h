@@ -48,6 +48,10 @@ struct hipDeviceProp_t {
   int warpSize;
 };
 
+enum hipDeviceAttribute_t : int {
+  hipDeviceAttributeVirtualMemoryManagementSupported = 1,
+};
+
 enum : unsigned int {
   hipStreamNonBlocking = 1U,
   hipEventDisableTiming = 2U,
@@ -66,6 +70,8 @@ hipError_t hipGetDeviceCount(int *count) noexcept;
 hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties,
                                   unsigned int device) noexcept;
 hipError_t hipSetDevice(int device) noexcept;
+hipError_t hipDeviceGetAttribute(int *value, hipDeviceAttribute_t attribute,
+                                 int device) noexcept;
 hipError_t hipMemGetInfo(std::size_t *available, std::size_t *total) noexcept;
 hipError_t hipMemGetAllocationGranularity(
     std::size_t *granularity, const hipMemAllocationProp *properties,
@@ -107,6 +113,7 @@ namespace fake_hip {
 
 uint32_t f16_to_f32_bits_for_test(uint16_t raw) noexcept;
 void reset() noexcept;
+void set_vmm_supported(bool supported) noexcept;
 hipError_t rmsnorm_launch(const uint16_t *activation, const uint16_t *raw_scale,
                           uint16_t *output, uint32_t normalized_size,
                           uint32_t row_count, float epsilon,

@@ -123,7 +123,8 @@ artifact全体、全rangeをfail-closedに照合し、cache外の派生artifact�
 
 このsidecarはtext-linear 248 tensorだけを量子化し、非linear tensorはverified BF16 source cacheを使用する。
 model alias/fingerprintはsource lockとsidecar manifest identityの双方へ結び付ける。OCP E4M3FN byteをFNUZとして
-再解釈してはならず、Phase 11では数値変換した別resident representationを監査する。
+再解釈してはならない。Phase 11のgfx942 pathは、同じverified sidecarをload時に数値変換したE4M3FNUZ resident
+representationとして監査し、source model lockや派生artifact自体は変更しない。
 
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that

@@ -1,7 +1,20 @@
 # Phase 11: FP8/BF16のCDNA3移植
 
-> 状態: planned
+> 状態: completed
 > 作成日: 2026-08-14
+
+## 完了結果
+
+- exact `gfx942` / Code Object V6 / wave64 / `xnack=off` / `sramecc=on`でROCm 7.14.0 native runtimeをcompile/linkした。
+- 全256 byteのOCP E4M3FN→E4M3FNUZ数値変換、FNUZ dynamic activation量子化、hipBLASLt FNUZ provider、
+  model-resident load変換を実装した。OCP payloadのraw reinterpretやsilent BF16 fallbackは行わない。
+- M=1 BF16 matmulとRMSNormをgfx942専用wave64 kernel ID/symbolへ分離し、wave32固定箇所をcompile auditした。
+- HIP VMM capability=falseでは通常のdevice allocationを使う`contiguous-resident` KVをprepare時に選択し、
+  capability=trueでは既存virtual-contiguous vAttentionを維持する。fake capability host testで両分岐を確認した。
+- production CLI/serverはexact gfx942で`native-fnuz`を選び、同じQwen graph、semantic operation、service、
+  transactional state契約を使う。
+- MI300X候補manifestとpreflight/operator/slice/full-model/service/performanceのdry-run runnerを追加した。
+  MI300X実機実行、FNUZ solution/numerical PASS、性能値はPhase 12の開始条件として残す。
 
 ## 目的
 
@@ -113,7 +126,7 @@ layer/head/dtype/context別の必要byteを計算し、capacity超過をallocati
 
 ## 終了時更新先
 
-- [Phase 12 active plan](phase12-mi300x-validation.md)
+- [Phase 12 active plan](../../../../active/2026/08/11-20/phase12-mi300x-validation.md)
 - [メイン計画](../../../../main-plan.md)
 - [AMD GPU互換性](../../../../../compatibility/amd-gpu.md)
 - [software互換性](../../../../../compatibility/software.md)

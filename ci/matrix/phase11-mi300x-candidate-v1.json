@@ -1,0 +1,66 @@
+{
+  "schema_version": "phase11-mi300x-candidate-v1",
+  "candidate_id": "phase11-gfx942-single-gpu-v1",
+  "target": {
+    "exact_arch": "gfx942",
+    "code_object": 6,
+    "wave_size": 64,
+    "xnack": "off",
+    "sramecc": "on",
+    "generic_processor_version": 0,
+    "gpu_count": 1
+  },
+  "software": {
+    "rocm_release": "7.14.0",
+    "hipblaslt_release": "1.4.1"
+  },
+  "expected_capabilities": {
+    "fp8_encoding": "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+    "kv_memory_kind_when_vmm_false": "contiguous-resident",
+    "silent_fallback_allowed": false
+  },
+  "profiles": [
+    {
+      "name": "preflight",
+      "estimated_minutes": 30,
+      "requires_model": false,
+      "steps": ["identity", "health", "software-roots", "vmm", "hipblaslt-fnuz", "tiny-kernels"]
+    },
+    {
+      "name": "operator",
+      "estimated_minutes": 45,
+      "requires_model": false,
+      "steps": ["fp8-converter", "fp8-matmul", "bf16-matmul", "rmsnorm-wave64", "gdn", "rope-kv", "fa2-style"]
+    },
+    {
+      "name": "slice",
+      "estimated_minutes": 45,
+      "requires_model": true,
+      "steps": ["qwen4b-bf16-slice", "qwen4b-fp8-slice", "non-aligned-boundaries"]
+    },
+    {
+      "name": "full-model",
+      "estimated_minutes": 90,
+      "requires_model": true,
+      "steps": ["qwen4b-bf16-generation", "qwen4b-fp8-generation", "qwen9b-spot"]
+    },
+    {
+      "name": "service",
+      "estimated_minutes": 45,
+      "requires_model": true,
+      "steps": ["openai-non-stream", "openai-sse", "reasoning-split", "cancel-cleanup"]
+    },
+    {
+      "name": "performance",
+      "estimated_minutes": 180,
+      "requires_model": true,
+      "steps": ["sllm-bf16", "sllm-fp8", "llama-cpp-fixed", "telemetry", "cleanup"]
+    }
+  ],
+  "boundary_values": [127, 128, 129, 255, 256, 257, 1023, 1024, 1025],
+  "evidence": {
+    "repository_payloads": ["manifest", "schema", "summary"],
+    "external_payloads": ["binary", "model", "raw-profile", "raw-trace"],
+    "actual_mi300x_execution_phase": 12
+  }
+}

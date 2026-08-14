@@ -3306,6 +3306,68 @@ bool kv_state_create_snapshot_contract() {
   return valid && release_queue(&queue) && release_context(&context);
 }
 
+bool kv_capability_selected_contiguous_resident_contract() {
+  fake_hip::reset();
+  fake_hip::set_vmm_supported(false);
+  const std::size_t baseline_allocations = fake_hip::live_allocations();
+  constexpr uint64_t capacity = 1025U;
+  constexpr uint64_t bytes_per_token = 4U * 256U * sizeof(uint16_t);
+  constexpr uint64_t plane_bytes = capacity * bytes_per_token;
+  sllm_context_t *context = nullptr;
+  sllm_kv_state_t *state = nullptr;
+  if (!create_context(&context)) {
+    return false;
+  }
+
+  sllm_kv_state_create_info_t create_info{};
+  create_info.struct_size = sizeof(create_info);
+  create_info.abi_version = SLLM_HIP_ABI_VERSION;
+  create_info.session_id = 0x942U;
+  create_info.layer_id = 11U;
+  create_info.capacity_tokens = capacity;
+  create_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED;
+  create_info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+  Error error;
+  bool valid = expect_status(
+                   sllm_kv_state_create(context, &create_info, &state,
+                                        &error.sink),
+                   SLLM_STATUS_OK, "capability-selected contiguous KV create",
+                   error) &&
+               state != nullptr;
+
+  sllm_kv_view_info_t view_info{};
+  view_info.struct_size = sizeof(view_info);
+  view_info.abi_version = SLLM_HIP_ABI_VERSION;
+  view_info.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_kv_state_query(state, &view_info, &error.sink),
+                        SLLM_STATUS_OK,
+                        "capability-selected contiguous KV query", error) &&
+          view_info.memory_kind ==
+              SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
+          view_info.capacity_tokens == capacity &&
+          view_info.physical_page_bytes == bytes_per_token &&
+          view_info.tokens_per_page == 1U &&
+          view_info.mapped_token_capacity == capacity &&
+          view_info.committed_bytes_per_plane == plane_bytes;
+
+  valid = valid &&
+          expect_status(sllm_kv_state_release(&state, &error.sink),
+                        SLLM_STATUS_OK,
+                        "capability-selected contiguous KV release", error) &&
+          state == nullptr &&
+          fake_hip::live_allocations() == baseline_allocations;
+
+  create_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  valid = valid &&
+          expect_status(sllm_kv_state_create(context, &create_info, &state,
+                                             &error.sink),
+                        SLLM_STATUS_UNSUPPORTED,
+                        "explicit virtual KV without VMM", error) &&
+          state == nullptr;
+  return valid && release_context(&context);
+}
+
 bool kv_evidence_readback_contract() {
   fake_hip::reset();
   constexpr uint64_t capacity = 3U;
@@ -4209,6 +4271,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
   SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)
+  SLLM_RUN_KV_CONTRACT(kv_capability_selected_contiguous_resident_contract)
   SLLM_RUN_KV_CONTRACT(kv_evidence_readback_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_layout_and_transaction_contract)
   SLLM_RUN_KV_CONTRACT(

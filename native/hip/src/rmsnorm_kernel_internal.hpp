@@ -9,6 +9,8 @@ namespace sllm_rmsnorm_kernel {
 
 constexpr const char *kLogicalKernelId = "rmsnorm.baseline.wave32.v1";
 constexpr const char *kDeviceSymbol = "sllm_rmsnorm_baseline_wave32_v1";
+constexpr const char *kWave64LogicalKernelId = "rmsnorm.baseline.wave64.v1";
+constexpr const char *kWave64DeviceSymbol = "sllm_rmsnorm_baseline_wave64_v1";
 
 #if defined(__HIPCC__) || defined(__CUDACC__)
 #define SLLM_RMSNORM_HOST_DEVICE __host__ __device__

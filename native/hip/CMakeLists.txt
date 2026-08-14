@@ -182,17 +182,27 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
     if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR
        CMAKE_HIP_ARCHITECTURES STREQUAL "" OR
        CMAKE_HIP_ARCHITECTURES MATCHES ";" OR
-       NOT CMAKE_HIP_ARCHITECTURES MATCHES "^(gfx1030|gfx1201)$")
-        message(FATAL_ERROR "HIP build requires exactly one exact gfx1030 or gfx1201 target")
+       NOT CMAKE_HIP_ARCHITECTURES MATCHES "^(gfx1030|gfx1201|gfx942)$")
+        message(FATAL_ERROR "HIP build requires exactly one exact gfx1030, gfx1201, or gfx942 target")
     endif()
     if(NOT DEFINED SLLM_HIP_COMPILE_TARGET OR
        NOT SLLM_HIP_COMPILE_TARGET STREQUAL CMAKE_HIP_ARCHITECTURES)
         message(FATAL_ERROR
             "HIP build requires SLLM_HIP_COMPILE_TARGET to equal the exact CMAKE_HIP_ARCHITECTURES target")
     endif()
+    if(CMAKE_HIP_ARCHITECTURES STREQUAL "gfx942")
+        set(SLLM_EXPECTED_CODEGEN_FEATURES
+            "co_v6,wave64,xnack=off,sramecc=on,generic_processor_version=0")
+        set(SLLM_WAVEFRONT_FLAG -mwavefrontsize64)
+        set(SLLM_COMPILE_WAVE64 1)
+    else()
+        set(SLLM_EXPECTED_CODEGEN_FEATURES
+            "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0")
+        set(SLLM_WAVEFRONT_FLAG -mno-wavefrontsize64)
+        set(SLLM_COMPILE_WAVE64 0)
+    endif()
     if(NOT DEFINED SLLM_HIP_CODEGEN_FEATURES OR
-       NOT SLLM_HIP_CODEGEN_FEATURES STREQUAL
-          "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0")
+       NOT SLLM_HIP_CODEGEN_FEATURES STREQUAL SLLM_EXPECTED_CODEGEN_FEATURES)
         message(FATAL_ERROR "HIP codegen features are not the pinned tuple")
     endif()
     # ROCm 7.14 / AMD clang 23 accepts the two code-object/wave32 driver
@@ -214,7 +224,8 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
         )
         if(NOT SLLM_HIP_HELP_STATUS EQUAL 0 OR
            NOT SLLM_HIP_HELP MATCHES "-mcode-object-version=<value>" OR
-           NOT SLLM_HIP_HELP MATCHES "-mno-wavefrontsize64")
+           NOT SLLM_HIP_HELP MATCHES "-mno-wavefrontsize64" OR
+           NOT SLLM_HIP_HELP MATCHES "-mwavefrontsize64")
             message(FATAL_ERROR
                 "ROCm AMD clang does not expose the pinned HIP flags: ${SLLM_HIP_HELP_ERROR}")
         endif()
@@ -288,7 +299,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             -I "${PROJECT_SOURCE_DIR}/src"
             "--offload-arch=${CMAKE_HIP_ARCHITECTURES}"
             -mcode-object-version=6
-            -mno-wavefrontsize64
+            ${SLLM_WAVEFRONT_FLAG}
             -pthread
             -x hip
             -c
@@ -531,10 +542,11 @@ endif()
 if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     target_compile_definitions(sllm_hip_stub PRIVATE
         SLLM_HIP_COMPILE_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        SLLM_HIP_COMPILE_WAVE64=${SLLM_COMPILE_WAVE64}
     )
     target_compile_options(sllm_hip_stub PRIVATE
         $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
-        $<$<COMPILE_LANGUAGE:HIP>:-mno-wavefrontsize64>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
         $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
     )
 endif()
@@ -546,7 +558,7 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE)
     target_compile_features(sllm_hip_compile_probe_object PRIVATE cxx_std_17)
     target_compile_options(sllm_hip_compile_probe_object PRIVATE
         -mcode-object-version=6
-        -mno-wavefrontsize64
+        ${SLLM_WAVEFRONT_FLAG}
     )
     add_executable(sllm_hip_compile_probe_link
         $<TARGET_OBJECTS:sllm_hip_compile_probe_object>
@@ -560,7 +572,7 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE)
     )
     target_link_options(sllm_hip_compile_probe_link PRIVATE
         -mcode-object-version=6
-        -mno-wavefrontsize64
+        ${SLLM_WAVEFRONT_FLAG}
     )
     target_include_directories(sllm_hip_compile_probe_link PRIVATE
         "${ROCM_PATH}/include"

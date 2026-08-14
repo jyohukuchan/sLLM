@@ -99,7 +99,7 @@ sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 - exact `gfx1200`/`gfx1201`: `hipblaslt_f8`/`hipblaslt_bf8`を使う。
 - model storage encoding、sLLM kernel input、hipBLASLt datatypeが異なる場合は明示的に変換し、FNUZとOCP payloadを再解釈しない。
 
-`gfx942`は未検証のPhase 11 contractである。`gfx1201`はPhase 10で実装・local実機検証済みだが、
+`gfx942`はPhase 11でexact compile/linkとhost oracleまで完了した実機未検証contractである。`gfx1201`はPhase 10で実装・local実機検証済みだが、
 hipBLASLt表だけをhardware全体の対応根拠にせず、exact target、runtime capability、library query、
 shape/alignmentをすべて満たしたproblemだけdispatchする。
 
@@ -108,7 +108,8 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 - Phase 10はexact `gfx1201`でOCP E4M3FN native W8A8、exact `gfx1030`で明示的なW8A8 emulationと
   BF16 conversionを実装・検証した。RDNA2 pathをnative FP8と表記しない。R9700 nativeはVRAMを削減したが
   BF16より遅いためopt-in、V620 emulationはcorrectness-onlyとする。
-- Phase 11はexact `gfx942`、wave64、FNUZ FP8へ移植し、model storageのE4M3FNをload時に数値変換する。
+- Phase 11はexact `gfx942`、wave64、FNUZ FP8への実装、compile/link、host oracleを完了し、model storageの
+  E4M3FNをload時に数値変換する。実機evidenceはまだない。
   `gfx9-4-generic`やOCP/FNUZ payloadのraw reinterpretを使わない。
 - AMDの公開MI300X llama.cpp例は`gfx942:sramecc+:xnack-`、wave64、VMMなしを報告している。この情報は
   sLLMのHot Aisle VM実測ではないため`vendor-published observation`として扱い、Phase 12 preflightで
@@ -119,7 +120,7 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
   MI300A/MI325X、multi-GPU、bare metalへ自動的に一般化しない。
 
 詳細な実装・実機順は[Phase 10](../plans/archive/2026/08/11-20/phase10-fp8-w8a8.md)、
-[Phase 11](../plans/active/2026/08/11-20/phase11-cdna3-port.md)、
+[Phase 11](../plans/archive/2026/08/11-20/phase11-cdna3-port.md)、
 [Phase 12](../plans/active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
 
 ## 製品別evidence

@@ -856,8 +856,8 @@ fn validate_hip_environment(
     let target = env::var("CMAKE_HIP_ARCHITECTURES")
         .unwrap_or_else(|_| panic!("H3 requires CMAKE_HIP_ARCHITECTURES"));
     assert!(
-        matches!(target.as_str(), "gfx1030" | "gfx1201"),
-        "{purpose} requires exactly one exact gfx1030 or gfx1201 target"
+        matches!(target.as_str(), "gfx1030" | "gfx1201" | "gfx942"),
+        "{purpose} requires exactly one exact gfx1030, gfx1201, or gfx942 target"
     );
     assert!(
         !target.contains(';') && !target.contains(',') && !target.contains(' '),
@@ -866,9 +866,13 @@ fn validate_hip_environment(
 
     let codegen_features = env::var("SLLM_HIP_CODEGEN_FEATURES")
         .unwrap_or_else(|_| panic!("H3 requires SLLM_HIP_CODEGEN_FEATURES"));
+    let expected_features = if target == "gfx942" {
+        "co_v6,wave64,xnack=off,sramecc=on,generic_processor_version=0"
+    } else {
+        "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0"
+    };
     assert_eq!(
-        codegen_features,
-        "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0",
+        codegen_features, expected_features,
         "HIP codegen features are not the pinned tuple"
     );
     HipConfiguration {
