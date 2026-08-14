@@ -27,6 +27,10 @@ bool multiply_overflows(const uint64_t left, const uint64_t right,
 
 sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
                               TensorMetadata *const copied,
+                              const uint32_t expected_dtype,
+                              const uint32_t expected_encoding,
+                              const uint64_t element_bytes,
+                              const bool append_outer_scales,
                               sllm_error_sink_t *const sink) noexcept {
   if (binding.struct_size != sizeof(binding)) {
     return sllm_public_runtime::write_error(
@@ -49,20 +53,20 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
         sink, SLLM_STATUS_INVALID_TENSOR_BINDING,
         "matmul tensor binding requires a buffer and rank two");
   }
-  if (binding.dtype != SLLM_TENSOR_DTYPE_BF16) {
+  if (binding.dtype != expected_dtype) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_DTYPE,
-        "matmul tensors must use BF16 storage");
+        "matmul tensor dtype differs from the selected contract");
   }
-  if (binding.encoding != SLLM_TENSOR_ENCODING_UNQUANTIZED) {
+  if (binding.encoding != expected_encoding) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
-        "matmul tensors must be unquantized");
+        "matmul tensor encoding differs from the selected contract");
   }
-  if ((binding.byte_offset & UINT64_C(1)) != 0U) {
+  if ((binding.byte_offset & (element_bytes - 1U)) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_MISALIGNED_OFFSET,
-        "matmul BF16 tensor offset must be two-byte aligned");
+        "matmul tensor offset does not meet its storage alignment");
   }
   if (binding.shape[0] == 0U || binding.shape[1] == 0U) {
     return sllm_public_runtime::write_error(
@@ -85,11 +89,23 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
   uint64_t elements = 0U;
   uint64_t payload_bytes = 0U;
   if (multiply_overflows(binding.shape[0], binding.shape[1], &elements) ||
-      multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
+      multiply_overflows(elements, element_bytes, &payload_bytes) ||
       sllm_public_runtime::add_overflows(binding.byte_offset, payload_bytes)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_METADATA_OVERFLOW,
         "matmul tensor byte interval overflowed u64");
+  }
+  if (append_outer_scales) {
+    uint64_t scale_bytes = 0U;
+    if (multiply_overflows(binding.shape[0], UINT64_C(4), &scale_bytes) ||
+        sllm_public_runtime::add_overflows(payload_bytes, scale_bytes) ||
+        sllm_public_runtime::add_overflows(binding.byte_offset,
+                                           payload_bytes + scale_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul FP8 value/scale interval overflowed u64");
+    }
+    payload_bytes += scale_bytes;
   }
   copied->byte_offset = binding.byte_offset;
   copied->payload_bytes = payload_bytes;
@@ -138,7 +154,8 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   if (prefix_status != SLLM_STATUS_OK) {
     return prefix_status;
   }
-  if (descriptor->op_version != SLLM_HIP_MATMUL_VERSION) {
+  if (descriptor->op_version != SLLM_HIP_MATMUL_VERSION &&
+      descriptor->op_version != SLLM_HIP_MATMUL_FP8_VERSION) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
         "matmul descriptor version is unsupported");
@@ -148,16 +165,27 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "matmul descriptor reserved fields must be zero");
   }
-  sllm_status_t status =
-      validate_tensor(descriptor->activation, &metadata->activation, sink);
+  const bool fp8_outer =
+      descriptor->op_version == SLLM_HIP_MATMUL_FP8_VERSION;
+  sllm_status_t status = validate_tensor(
+      descriptor->activation, &metadata->activation, SLLM_TENSOR_DTYPE_BF16,
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(descriptor->weight, &metadata->weight, sink);
+  status = validate_tensor(
+      descriptor->weight, &metadata->weight,
+      fp8_outer ? SLLM_TENSOR_DTYPE_F8_E4M3_FN : SLLM_TENSOR_DTYPE_BF16,
+      fp8_outer ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+                : SLLM_TENSOR_ENCODING_UNQUANTIZED,
+      fp8_outer ? UINT64_C(1) : UINT64_C(2), fp8_outer, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(descriptor->output, &metadata->output, sink);
+  status = validate_tensor(descriptor->output, &metadata->output,
+                           SLLM_TENSOR_DTYPE_BF16,
+                           SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2),
+                           false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -177,6 +205,15 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
         sink, SLLM_STATUS_METADATA_OVERFLOW,
         "matmul output element count overflowed u64");
   }
+  metadata->fp8_outer = fp8_outer;
+  metadata->weight_value_bytes = metadata->n * metadata->k;
+  if (fp8_outer && (metadata->weight_value_bytes & UINT64_C(3)) != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_MISALIGNED_OFFSET,
+        "matmul FP8 outer scales require a four-byte-aligned value payload");
+  }
+  metadata->weight_scale_offset =
+      metadata->weight.byte_offset + metadata->weight_value_bytes;
   return SLLM_STATUS_OK;
 }
 

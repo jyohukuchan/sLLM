@@ -36,6 +36,9 @@ struct Config {
     request_timeout: Duration,
     completion_timeout: Duration,
     shutdown_timeout: Duration,
+    fp8_manifest: Option<PathBuf>,
+    fp8_artifact: Option<PathBuf>,
+    fp8_provider: Option<String>,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -60,6 +63,9 @@ fn parse_args() -> Result<Config, String> {
         "device index",
     )?;
     let target = take_required(&mut values, "--target")?;
+    let fp8_manifest = values.remove("--fp8-manifest").map(PathBuf::from);
+    let fp8_artifact = values.remove("--fp8-artifact").map(PathBuf::from);
+    let fp8_provider = values.remove("--fp8-provider");
     let listen = parse_value(
         &values
             .remove("--listen")
@@ -116,6 +122,9 @@ fn parse_args() -> Result<Config, String> {
         request_timeout,
         completion_timeout,
         shutdown_timeout,
+        fp8_manifest,
+        fp8_artifact,
+        fp8_provider,
     })
 }
 
@@ -133,6 +142,9 @@ fn run(config: Config) -> Result<(), String> {
                 target: config.target,
                 completion_timeout: config.completion_timeout,
                 shutdown_timeout: config.shutdown_timeout,
+                fp8_manifest_path: config.fp8_manifest,
+                fp8_artifact_path: config.fp8_artifact,
+                fp8_provider: config.fp8_provider,
             })
             .map_err(|error| error.to_string())?,
         );
@@ -232,5 +244,5 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|emulation|converted-bf16] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }

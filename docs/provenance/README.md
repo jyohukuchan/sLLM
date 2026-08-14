@@ -134,6 +134,13 @@ closely adapted, or ported, apply this policy for release or distribution.
 Prompts, model output, or an agent's claim of originality are not provenance
 evidence. Any human review is the ordinary review for the active work lane.
 
+## Phase 10 FP8 implementation record
+
+Phase 10のOCP E4M3FN converter、sidecar loader、HIP quantization、hipBLASLt integration、RDNA2 emulationは
+AMD/ROCmの公開datatype・API contractと独立数値oracleを基に実装した。llama.cpp、vLLM、その他の推論engineから
+source expressionをcopy、adapt、portしておらず、`THIRD_PARTY_NOTICES.md`へ追加する直接importはない。
+性能比較では既存の固定llama.cpp binary/resultだけをpeer baselineとして参照した。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

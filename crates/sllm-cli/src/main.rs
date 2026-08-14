@@ -61,6 +61,8 @@ fn print_help() {
     println!("  --device-index N --target gfx1030|gfx1201 [--greedy | --temperature F32]");
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
+    println!("  [--fp8-manifest PATH --fp8-artifact PATH]");
+    println!("  [--fp8-provider native|emulation|converted-bf16]");
 }
 
 fn print_version() -> Result<(), String> {

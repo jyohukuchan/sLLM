@@ -35,7 +35,10 @@ use crate::weights::{
     WeightClassification, WeightLoadEntry, WeightLoadPlan, WeightUploadError, WeightUploadReceipt,
     WeightUploadRequest, upload_verified_weight,
 };
-use crate::{AccessMode, DType, DispatchEvidence};
+use crate::{
+    AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
+    VerifiedFp8Sidecar, decode_e4m3fn,
+};
 
 /// Output published by a fully completed Qwen request transition.
 #[derive(Clone, Debug, PartialEq)]
@@ -365,6 +368,69 @@ impl QwenResidentModel {
         })
     }
 
+    /// Provision a graph built by `build_qwen35_fp8_graph`. Non-linear
+    /// tensors continue to come from the verified BF16 cache; text-linear
+    /// value/scale pairs come from the independently verified sidecar.
+    pub fn new_fp8(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        cache: Arc<VerifiedCache>,
+        sidecar: Arc<VerifiedFp8Sidecar>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if graph.fp8_sidecar_fingerprint() != Some(sidecar.manifest_fingerprint()) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FP8 graph and sidecar identities differ".to_owned(),
+            ));
+        }
+        if cache.lock_fingerprint != plan.lock_fingerprint
+            || sidecar.source_lock_fingerprint() != plan.lock_fingerprint
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FP8 source cache, sidecar, and plan identities differ".to_owned(),
+            ));
+        }
+        let source = Fp8ProvisionSource { cache, sidecar };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Explicit RDNA2 compatibility provider. It verifies the FP8 sidecar,
+    /// converts each text-linear value/scale pair to BF16 once during model
+    /// load, and then executes the existing BF16 graph. This is never labeled
+    /// native FP8 and is never selected after an execution failure.
+    pub fn new_fp8_converted_bf16(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        cache: Arc<VerifiedCache>,
+        sidecar: Arc<VerifiedFp8Sidecar>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if graph.fp8_sidecar_fingerprint().is_some() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "converted BF16 provider requires an unquantized graph".to_owned(),
+            ));
+        }
+        if cache.lock_fingerprint != plan.lock_fingerprint
+            || sidecar.source_lock_fingerprint() != plan.lock_fingerprint
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "converted BF16 source cache, sidecar, and plan identities differ".to_owned(),
+            ));
+        }
+        let source = Fp8ConvertedProvisionSource { cache, sidecar };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
     /// Creates a fresh request graph/state owner against this resident model.
     pub fn new_request(
         &self,
@@ -599,6 +665,7 @@ impl QwenExecutionRequest {
 struct QwenResidentInner {
     session: Arc<ExecutionSession>,
     model_fingerprint: String,
+    fp8_sidecar_fingerprint: Option<String>,
     plan: WeightLoadPlan,
     queue: ExecutionQueue,
     static_tensors: BTreeMap<String, TensorAllocation>,
@@ -783,6 +850,16 @@ struct VerifiedProvisionSource {
     cache: Arc<VerifiedCache>,
 }
 
+struct Fp8ProvisionSource {
+    cache: Arc<VerifiedCache>,
+    sidecar: Arc<VerifiedFp8Sidecar>,
+}
+
+struct Fp8ConvertedProvisionSource {
+    cache: Arc<VerifiedCache>,
+    sidecar: Arc<VerifiedFp8Sidecar>,
+}
+
 impl QwenProvisionSource for VerifiedProvisionSource {
     fn upload_weight(
         &self,
@@ -829,6 +906,205 @@ impl QwenProvisionSource for VerifiedProvisionSource {
     }
 }
 
+impl QwenProvisionSource for Fp8ProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        if let Some(tensor) = self.sidecar.tensor(binding.tensor_name()) {
+            if tensor.shape.as_slice() != binding.shape() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "FP8 sidecar shape differs for {}",
+                    binding.tensor_name()
+                )));
+            }
+            let (values, scales) = self
+                .sidecar
+                .read_tensor_bytes(binding.tensor_name())
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            let expected = values.len().checked_add(scales.len()).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("FP8 resident upload size overflowed".to_owned())
+            })?;
+            if u64::try_from(expected).ok() != Some(destination.size_bytes()) {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "FP8 resident allocation differs for {}",
+                    binding.tensor_name()
+                )));
+            }
+            let mut combined = values;
+            combined.extend_from_slice(&scales);
+            upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &combined,
+                completion_timeout,
+                "FP8 weight/scale upload",
+            )
+        } else {
+            VerifiedProvisionSource {
+                cache: Arc::clone(&self.cache),
+            }
+            .upload_weight(
+                plan,
+                binding,
+                session,
+                queue,
+                destination,
+                completion_timeout,
+            )
+        }
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        VerifiedProvisionSource {
+            cache: Arc::clone(&self.cache),
+        }
+        .read_scale_bytes(tensor_name, expected_length)
+    }
+}
+
+impl QwenProvisionSource for Fp8ConvertedProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let Some(tensor) = self.sidecar.tensor(binding.tensor_name()) else {
+            return VerifiedProvisionSource {
+                cache: Arc::clone(&self.cache),
+            }
+            .upload_weight(
+                plan,
+                binding,
+                session,
+                queue,
+                destination,
+                completion_timeout,
+            );
+        };
+        if tensor.shape.as_slice() != binding.shape() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "FP8 conversion shape differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        let (values, scale_bytes) = self
+            .sidecar
+            .read_tensor_bytes(binding.tensor_name())
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let rows = usize::try_from(tensor.shape[0]).map_err(|_| {
+            QwenExecutionError::InvalidRequest("FP8 conversion row count is too large".to_owned())
+        })?;
+        let columns = usize::try_from(tensor.shape[1]).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "FP8 conversion column count is too large".to_owned(),
+            )
+        })?;
+        if scale_bytes.len() != rows * 4 || values.len() != rows * columns {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "FP8 conversion payload length differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        let scales = scale_bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            .collect::<Vec<_>>();
+        if scales
+            .iter()
+            .any(|scale| !scale.is_finite() || *scale <= 0.0)
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "FP8 conversion scale is invalid for {}",
+                binding.tensor_name()
+            )));
+        }
+        let lookup = std::array::from_fn::<_, 256, _>(|bits| decode_e4m3fn(bits as u8));
+        let mut converted = vec![0_u8; values.len() * 2];
+        let workers = std::thread::available_parallelism()
+            .map_or(1, usize::from)
+            .min(rows.max(1));
+        let rows_per_worker = rows.div_ceil(workers);
+        let input_chunk_bytes = rows_per_worker * columns;
+        let output_chunk_bytes = input_chunk_bytes * 2;
+        std::thread::scope(|scope| {
+            for (chunk_index, output_chunk) in converted.chunks_mut(output_chunk_bytes).enumerate()
+            {
+                let start_row = chunk_index * rows_per_worker;
+                let end_row = (start_row + rows_per_worker).min(rows);
+                let input = &values[start_row * columns..end_row * columns];
+                let row_scales = &scales[start_row..end_row];
+                let lookup = &lookup;
+                scope.spawn(move || {
+                    for (local_row, row) in input.chunks_exact(columns).enumerate() {
+                        let scale = row_scales[local_row];
+                        let output_row = &mut output_chunk
+                            [local_row * columns * 2..(local_row + 1) * columns * 2];
+                        for (index, value) in row.iter().copied().enumerate() {
+                            let word = f32_to_bf16_rne(lookup[usize::from(value)] * scale);
+                            output_row[index * 2..index * 2 + 2]
+                                .copy_from_slice(&word.to_le_bytes());
+                        }
+                    }
+                });
+            }
+        });
+        if u64::try_from(converted.len()).ok() != Some(destination.size_bytes()) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "converted BF16 resident allocation differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        upload_buffer_bytes(
+            session,
+            queue,
+            &destination,
+            &converted,
+            completion_timeout,
+            "FP8-to-BF16 converted weight upload",
+        )
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        VerifiedProvisionSource {
+            cache: Arc::clone(&self.cache),
+        }
+        .read_scale_bytes(tensor_name, expected_length)
+    }
+}
+
+fn f32_to_bf16_rne(value: f32) -> u16 {
+    let bits = value.to_bits();
+    if bits & 0x7f80_0000 == 0x7f80_0000 {
+        return if bits & 0x007f_ffff == 0 {
+            (bits >> 16) as u16
+        } else {
+            ((bits >> 16) as u16) | 0x0040
+        };
+    }
+    let upper = bits >> 16;
+    let lower = bits & 0xffff;
+    (upper + u32::from(lower > 0x8000 || (lower == 0x8000 && upper & 1 != 0))) as u16
+}
+
 impl QwenResidentInner {
     fn provision<S: QwenProvisionSource>(
         session: Arc<ExecutionSession>,
@@ -855,7 +1131,7 @@ impl QwenResidentInner {
             })?;
             let destination = allocation.buffer.range(
                 allocation.graph_view.byte_offset(),
-                allocation.graph_view.payload_bytes(),
+                resident_weight_bytes(&allocation.graph_view)?,
             )?;
             source.upload_weight(
                 &plan,
@@ -889,6 +1165,7 @@ impl QwenResidentInner {
         Ok(Self {
             session,
             model_fingerprint: graph.model_fingerprint().to_owned(),
+            fp8_sidecar_fingerprint: graph.fp8_sidecar_fingerprint().map(str::to_owned),
             plan,
             queue,
             static_tensors,
@@ -907,6 +1184,11 @@ impl QwenExecutionCore {
         if graph.model_fingerprint() != resident.model_fingerprint {
             return Err(QwenExecutionError::InvalidRequest(
                 "resident model identity or backend differs from the request graph".to_owned(),
+            ));
+        }
+        if graph.fp8_sidecar_fingerprint() != resident.fp8_sidecar_fingerprint.as_deref() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "resident FP8 sidecar identity differs from the request graph".to_owned(),
             ));
         }
         validate_resident_graph(&graph, &layout, &resident.static_tensors, &resident.scales)?;
@@ -1004,7 +1286,7 @@ impl QwenExecutionCore {
             })?;
             let destination = allocation.buffer.range(
                 allocation.graph_view.byte_offset(),
-                allocation.graph_view.payload_bytes(),
+                resident_weight_bytes(&allocation.graph_view)?,
             )?;
             source.upload_weight(
                 &plan,
@@ -1886,14 +2168,24 @@ impl QwenExecutionCore {
 fn preflight_device_memory(
     session: &ExecutionSession,
     graph: &QwenGraph,
-    plan: &WeightLoadPlan,
+    _plan: &WeightLoadPlan,
 ) -> Result<(), QwenExecutionError> {
     let owned_tensor_bytes = graph
         .tensor_metadata()
         .iter()
         .try_fold(0_u64, |total, tensor| match tensor.backing() {
             QwenGraphTensorBacking::Owned => total
-                .checked_add(tensor.view().end_offset())
+                .checked_add(
+                    tensor
+                        .view()
+                        .byte_offset()
+                        .checked_add(resident_weight_bytes(tensor.view())?)
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidGraph(
+                                "owned tensor allocation byte count overflowed".to_owned(),
+                            )
+                        })?,
+                )
                 .ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(
                         "owned tensor allocation byte count overflowed".to_owned(),
@@ -1901,12 +2193,6 @@ fn preflight_device_memory(
                 }),
             QwenGraphTensorBacking::Alias { .. } => Ok(total),
         })?;
-    if plan.total_destination_bytes > owned_tensor_bytes {
-        return Err(QwenExecutionError::InvalidGraph(format!(
-            "model-resident bytes {} exceed owned tensor bytes {owned_tensor_bytes}",
-            plan.total_destination_bytes
-        )));
-    }
     let required = owned_tensor_bytes
         .checked_add(graph.total_state_bytes())
         .ok_or_else(|| {
@@ -1922,7 +2208,7 @@ fn preflight_device_memory(
     if required > available {
         return Err(QwenExecutionError::InvalidRequest(format!(
             "device memory preflight requires {required} bytes (model-resident {}, owned tensor/workspace {owned_tensor_bytes}, request-state {}), but only {available} bytes are available",
-            plan.total_destination_bytes,
+            owned_tensor_bytes,
             graph.total_state_bytes()
         )));
     }
@@ -2017,8 +2303,11 @@ fn validate_graph_plan(
             ))
         })?;
         let tensor = &graph.tensor_metadata()[tensor_id];
+        let source_dtype = tensor.view().dtype() == model_dtype(binding.dtype())?
+            && tensor.view().encoding() == Encoding::Unquantized;
+        let fp8_dtype = is_fp8_weight_view(tensor.view());
         if tensor.backing() != QwenGraphTensorBacking::Owned
-            || tensor.view().dtype() != model_dtype(binding.dtype())?
+            || (!source_dtype && !fp8_dtype)
             || !shape_matches(tensor.view().shape(), binding.shape())?
         {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -2299,6 +2588,33 @@ fn shape_matches(shape: &[usize], expected: &[u64]) -> Result<bool, QwenExecutio
         })
 }
 
+fn is_fp8_weight_view(view: &TensorView) -> bool {
+    view.dtype() == DType::F8E4M3Fn
+        && view.encoding()
+            == Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            }
+        && view.shape().len() == 2
+}
+
+fn resident_weight_bytes(view: &TensorView) -> Result<u64, QwenExecutionError> {
+    if !is_fp8_weight_view(view) {
+        return Ok(view.payload_bytes());
+    }
+    let rows = u64::try_from(view.shape()[0]).map_err(|_| {
+        QwenExecutionError::InvalidGraph("FP8 weight row count does not fit u64".to_owned())
+    })?;
+    view.payload_bytes()
+        .checked_add(rows.checked_mul(4).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("FP8 scale byte count overflowed".to_owned())
+        })?)
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("FP8 resident byte count overflowed".to_owned())
+        })
+}
+
 fn allocate_resident_tensors(
     session: &ExecutionSession,
     graph: &QwenGraph,
@@ -2309,7 +2625,15 @@ fn allocate_resident_tensors(
         if !layout.dynamic_tensors[tensor.id()] && tensor.backing() == QwenGraphTensorBacking::Owned
         {
             let buffer = session.allocate_with_category(
-                tensor.view().end_offset(),
+                tensor
+                    .view()
+                    .byte_offset()
+                    .checked_add(resident_weight_bytes(tensor.view())?)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(
+                            "resident allocation size overflowed".to_owned(),
+                        )
+                    })?,
                 crate::AllocationCategory::ModelResident,
             )?;
             allocations.insert(
@@ -2422,7 +2746,17 @@ fn allocate_tensors(
     let mut allocations: Vec<TensorAllocation> = Vec::with_capacity(graph.tensor_metadata().len());
     for tensor in graph.tensor_metadata() {
         let buffer = match tensor.backing() {
-            QwenGraphTensorBacking::Owned => session.allocate(tensor.view().end_offset())?,
+            QwenGraphTensorBacking::Owned => session.allocate(
+                tensor
+                    .view()
+                    .byte_offset()
+                    .checked_add(resident_weight_bytes(tensor.view())?)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(
+                            "test tensor allocation size overflowed".to_owned(),
+                        )
+                    })?,
+            )?,
             QwenGraphTensorBacking::Alias { tensor_id } => {
                 let source = allocations.get(tensor_id).ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(format!(
@@ -2815,6 +3149,55 @@ fn upload_exact_bytes(
         require_terminal_success(stage, transfer.wait(completion_timeout)?)?;
         offset = offset.checked_add(length).ok_or_else(|| {
             QwenExecutionError::InvalidRequest("upload offset overflowed".to_owned())
+        })?;
+    }
+    Ok(())
+}
+
+fn upload_buffer_bytes(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    bytes: &[u8],
+    completion_timeout: Duration,
+    stage: &str,
+) -> Result<(), QwenExecutionError> {
+    if bytes.is_empty() || u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "{stage} bytes do not exactly match the destination"
+        )));
+    }
+    let maximum = usize::try_from(session.max_transfer_bytes()?).unwrap_or(usize::MAX);
+    if maximum == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "backend transfer limit must be non-zero".to_owned(),
+        ));
+    }
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        let length = (bytes.len() - offset).min(maximum);
+        let absolute = destination
+            .offset_bytes()
+            .checked_add(u64::try_from(offset).map_err(|_| {
+                QwenExecutionError::InvalidRequest("FP8 upload offset does not fit u64".to_owned())
+            })?)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("FP8 upload offset overflowed".to_owned())
+            })?;
+        let range = destination.buffer().range(
+            absolute,
+            u64::try_from(length).map_err(|_| {
+                QwenExecutionError::InvalidRequest("FP8 upload length does not fit u64".to_owned())
+            })?,
+        )?;
+        let mut transfer = session.upload(
+            queue,
+            range,
+            Arc::from(bytes[offset..offset + length].to_vec()),
+        )?;
+        require_terminal_success(stage, transfer.wait(completion_timeout)?)?;
+        offset = offset.checked_add(length).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("FP8 upload offset overflowed".to_owned())
         })?;
     }
     Ok(())

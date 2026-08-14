@@ -8,6 +8,8 @@ mod dtype;
 mod execution;
 mod fake;
 mod final_output;
+mod fp8;
+mod fp8_sidecar;
 mod handles;
 mod kv_state;
 mod linear_attention;
@@ -24,7 +26,7 @@ pub use backend::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
     MaterializedTensor,
 };
-pub use dtype::{DType, Encoding, EncodingError};
+pub use dtype::{DType, Encoding, EncodingError, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 pub use execution::{
     AdapterResource, AllocationCategory, AllocationCategorySnapshot, AllocationSnapshot,
     BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DispatchEvidence,
@@ -41,6 +43,12 @@ pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{
     QWEN35_EMBEDDING_TENSOR, QWEN35_HIDDEN_SIZE, QWEN35_VOCAB_SIZE, QwenFinalOutputBindings,
 };
+pub use fp8::{
+    E4M3FN_MAX, Fp8Error, Fp8Provider, Fp8ProviderRejection, Fp8ProviderRequest, QuantizedFp8,
+    decode_e4m3fn, encode_e4m3fn, quantize_e4m3fn_k_blocks, quantize_e4m3fn_outer_rows,
+    select_fp8_provider,
+};
+pub use fp8_sidecar::{Fp8SidecarError, Fp8SidecarTensor, VerifiedFp8Sidecar, verify_fp8_sidecar};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
@@ -82,7 +90,7 @@ pub use qwen_graph::{
     QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
-    build_qwen35_graph,
+    build_qwen35_fp8_graph, build_qwen35_graph,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
@@ -670,7 +678,43 @@ mod tests {
                 ],
                 vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
             ),
-            Err(OpError::MatmulUnsupportedDType { actual: DType::F16 })
+            Err(OpError::MatmulActivationOutputContract)
+        );
+
+        let fp8_weight = TensorView::with_encoding(
+            DType::F8E4M3Fn,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            &[7, 5],
+        )
+        .unwrap();
+        SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![activation.clone(), fp8_weight],
+            vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
+        )
+        .expect("valid OCP E4M3FN W8A8 matmul descriptor");
+
+        let unsupported_fp8 = TensorView::with_encoding(
+            DType::F8E4M3Fn,
+            Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::KBlock { block_size: 128 },
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            &[7, 5],
+        )
+        .unwrap();
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation, unsupported_fp8],
+                vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
+            ),
+            Err(OpError::MatmulWeightContract)
         );
 
         let gate = TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap();

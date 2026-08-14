@@ -35,6 +35,14 @@ name = "sllm-matmul-g1-evidence"
 path = "src/bin/sllm-matmul-g1-evidence.rs"
 
 [[bin]]
+name = "sllm-fp8-matmul-evidence"
+path = "src/bin/sllm-fp8-matmul-evidence.rs"
+
+[[bin]]
+name = "sllm-fp8-qwen-accuracy-evidence"
+path = "src/bin/sllm-fp8-qwen-accuracy-evidence.rs"
+
+[[bin]]
 name = "sllm-attention-preprocess-g1-evidence"
 path = "src/bin/sllm-attention-preprocess-g1-evidence.rs"
 

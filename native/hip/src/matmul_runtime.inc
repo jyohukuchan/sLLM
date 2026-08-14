@@ -97,6 +97,63 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
       try {
         candidate = std::make_unique<ElementwisePlan>(context, activation,
                                                       weight, output, metadata);
+        if (metadata.fp8_outer) {
+          const sllm_status_t device_status =
+              select_context_device(context, error_sink);
+          if (device_status != SLLM_STATUS_OK) {
+            (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                context->accounting, activation->accounting,
+                weight->accounting, output->accounting);
+            return device_status;
+          }
+          const uint64_t value_bytes = metadata.m * metadata.k;
+          const uint64_t scale_offset =
+              (value_bytes + UINT64_C(3)) & ~UINT64_C(3);
+          candidate->matmul_workspace_bytes =
+              scale_offset + metadata.m * UINT64_C(4);
+          const hipError_t workspace_status = hipMalloc(
+              &candidate->matmul_workspace,
+              static_cast<std::size_t>(candidate->matmul_workspace_bytes));
+          if (workspace_status != hipSuccess) {
+            (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                context->accounting, activation->accounting,
+                weight->accounting, output->accounting);
+            return hip_failure(error_sink, workspace_status,
+                               "hipMalloc FP8 prepared workspace");
+          }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+          hipDeviceProp_t properties = {};
+          const sllm_status_t property_status = get_device_properties(
+              context->device_index, &properties, error_sink);
+          if (property_status != SLLM_STATUS_OK) {
+            (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                context->accounting, activation->accounting,
+                weight->accounting, output->accounting);
+            return property_status;
+          }
+          if (std::strcmp(properties.gcnArchName, "gfx1201") == 0) {
+            auto *const activation_scales = reinterpret_cast<float *>(
+                static_cast<uint8_t *>(candidate->matmul_workspace) +
+                scale_offset);
+            const auto *const weight_scales =
+                reinterpret_cast<const float *>(
+                    static_cast<const uint8_t *>(weight->device_pointer) +
+                    metadata.weight_scale_offset);
+            std::lock_guard<std::mutex> lt_lock(context->matmul_lt_mutex);
+            const hipError_t lt_status = create_fp8_lt_plan(
+                context->matmul_lt_handle, &candidate->fp8_lt_plan,
+                activation_scales, weight_scales, metadata.m, metadata.k,
+                metadata.n);
+            if (lt_status != hipSuccess) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              return hip_failure(error_sink, lt_status,
+                                 "prepare FP8 hipBLASLt solution");
+            }
+          }
+#endif
+        }
         token = register_handle(candidate.get(), HandleKind::MatmulPlan);
       } catch (...) {
         (void)sllm_public_runtime::AccountingState::release_prepared_plan(
@@ -157,7 +214,26 @@ sllm_matmul_plan_release(sllm_matmul_plan_t **const raw_plan,
             "matmul plan is releasing or has an in-flight completion");
       }
       plan->release_active = true;
-      const bool accounting_released =
+      bool workspace_released = true;
+      if (plan->matmul_workspace != nullptr) {
+        const sllm_status_t device_status =
+            select_context_device(plan->context, error_sink);
+        const hipError_t workspace_status =
+            device_status == SLLM_STATUS_OK
+                ? hipFree(plan->matmul_workspace)
+                : hipErrorInvalidValue;
+        if (workspace_status == hipSuccess) {
+          plan->matmul_workspace = nullptr;
+          plan->matmul_workspace_bytes = 0U;
+        } else {
+          workspace_released = false;
+        }
+      }
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      destroy_fp8_lt_plan(plan->fp8_lt_plan);
+      plan->fp8_lt_plan = nullptr;
+#endif
+      const bool accounting_released = workspace_released &&
           !sllm_public_runtime::FaultInjector::consume(
               sllm_public_runtime::FaultPoint::AccountingFailure) &&
           sllm_public_runtime::AccountingState::release_prepared_plan(
@@ -174,7 +250,7 @@ sllm_matmul_plan_release(sllm_matmul_plan_t **const raw_plan,
       poison_owner.retain(plan);
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INTERNAL_ERROR,
-          "matmul prepared-plan accounting release failed; plan quarantined");
+          "matmul workspace or prepared-plan accounting release failed; plan quarantined");
     }
     delete plan;
     return SLLM_STATUS_OK;
@@ -401,14 +477,60 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
     const uint16_t *const activation =
         static_cast<const uint16_t *>(byte_pointer(
             plan->input0, plan->matmul_metadata.activation.byte_offset));
-    const uint16_t *const weight = static_cast<const uint16_t *>(
-        byte_pointer(plan->input1, plan->matmul_metadata.weight.byte_offset));
+    const void *const weight_storage =
+        byte_pointer(plan->input1, plan->matmul_metadata.weight.byte_offset);
+    const uint16_t *const weight =
+        static_cast<const uint16_t *>(weight_storage);
     uint16_t *const output = static_cast<uint16_t *>(
         byte_pointer(plan->output, plan->matmul_metadata.output.byte_offset));
     const auto variant = ::sllm_matmul_kernel::select_variant(
         plan->matmul_metadata.m, plan->matmul_metadata.k,
         plan->matmul_metadata.n, arch_name);
     hipError_t launch_status = hipSuccess;
+    if (plan->matmul_metadata.fp8_outer) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      launch_status = hipErrorInvalidValue;
+#else
+      const uint64_t activation_value_bytes =
+          plan->matmul_metadata.m * plan->matmul_metadata.k;
+      const uint64_t scale_offset =
+          (activation_value_bytes + UINT64_C(3)) & ~UINT64_C(3);
+      if (plan->matmul_workspace == nullptr ||
+          plan->matmul_workspace_bytes <
+              scale_offset + plan->matmul_metadata.m * UINT64_C(4)) {
+        launch_status = hipErrorOutOfMemory;
+      } else {
+        auto *const quantized =
+            static_cast<uint8_t *>(plan->matmul_workspace);
+        auto *const activation_scales = reinterpret_cast<float *>(
+            static_cast<uint8_t *>(plan->matmul_workspace) + scale_offset);
+        const auto *const fp8_weight =
+            static_cast<const uint8_t *>(weight_storage);
+        const auto *const weight_scales = reinterpret_cast<const float *>(
+            static_cast<const uint8_t *>(weight_storage) +
+            plan->matmul_metadata.weight_value_bytes);
+        launch_status = ::sllm_matmul_kernel::launch_fp8_quantize(
+            activation, quantized, activation_scales,
+            plan->matmul_metadata.m, plan->matmul_metadata.k, queue->stream);
+        if (launch_status == hipSuccess) {
+          if (std::strcmp(arch_name, "gfx1201") == 0) {
+            std::lock_guard<std::mutex> lt_lock(
+                plan->context->matmul_lt_mutex);
+            launch_status = launch_fp8_lt_plan(plan->fp8_lt_plan, quantized,
+                                               fp8_weight, output,
+                                               queue->stream);
+          } else if (std::strcmp(arch_name, "gfx1030") == 0) {
+            launch_status = ::sllm_matmul_kernel::launch_fp8_emulation(
+                quantized, activation_scales, fp8_weight, weight_scales,
+                output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n, queue->stream);
+          } else {
+            launch_status = hipErrorNotSupported;
+          }
+        }
+      }
+#endif
+    } else
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlas) {
       if (plan->context->matmul_blas_handle == nullptr) {

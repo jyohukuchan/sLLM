@@ -2350,19 +2350,25 @@ bool matmul_prepare_execute_and_negative_contract() {
           SLLM_STATUS_OK, "matmul execute", error) ||
       completion == nullptr || info.backend != SLLM_BACKEND_HIP ||
       info.dispatch_count != 1U ||
-      info.kernel_id != SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2 ||
+      info.kernel_id != SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_BF16_FP32_V2 ||
       info.workgroup_size_x != SLLM_HIP_MATMUL_WORKGROUP_SIZE ||
-      info.grid_size_x != 1U || info.m != 3U || info.k != 5U || info.n != 7U ||
+      info.grid_size_x != 7U || info.m != 3U || info.k != 5U || info.n != 7U ||
       info.output_elements != 21U || info.fallback_allowed != 0U ||
       info.fallback_used != 0U ||
-      std::strcmp(info.kernel_symbol, "matmul.bf16_fp32.tiled16.v2") != 0 ||
-      std::strcmp(info.device_symbol, "sllm_matmul_bf16_fp32_tiled16_v2") !=
-          0 ||
+      std::strcmp(info.kernel_symbol, "matmul.hipblas.gemm_ex.v2") != 0 ||
+      std::strcmp(info.device_symbol, "hipblasGemmEx") != 0 ||
       std::strcmp(info.gcn_arch_name, "gfx1201") != 0 ||
       fake_hip::matmul_launch_calls() != 1U ||
       fake_hip::matmul_last_m() != 3U || fake_hip::matmul_last_k() != 5U ||
       fake_hip::matmul_last_n() != 7U ||
       fake_hip::matmul_last_output_elements() != 21U) {
+    std::cerr << "matmul dispatch mismatch completion=" << completion
+              << " backend=" << info.backend
+              << " dispatch_count=" << info.dispatch_count
+              << " kernel_id=" << info.kernel_id
+              << " grid=" << info.grid_size_x << " mkn=" << info.m << ","
+              << info.k << "," << info.n
+              << " launches=" << fake_hip::matmul_launch_calls() << "\n";
     return false;
   }
   if (!query_completion(completion, SLLM_STATUS_OK) ||

@@ -4,7 +4,10 @@ use std::mem::size_of;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
-use sllm_core::{DType, Encoding, RmsNormScaleMode, SemanticOpDescriptor, TensorView};
+use sllm_core::{
+    DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity, RmsNormScaleMode,
+    SemanticOpDescriptor, TensorView,
+};
 use sllm_hip_sys as sys;
 
 use crate::runtime::{
@@ -71,12 +74,20 @@ impl TensorBinding {
             dtype: match self.view.dtype() {
                 DType::Bf16 => sys::SLLM_TENSOR_DTYPE_BF16,
                 DType::F32 => sys::SLLM_TENSOR_DTYPE_F32,
+                DType::F8E4M3Fn => sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                DType::F8E4M3FnuZ => sys::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
                 DType::I32 => sys::SLLM_TENSOR_DTYPE_I32,
                 _ => u32::MAX,
             },
             encoding: match self.view.encoding() {
                 Encoding::Unquantized => sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
                 Encoding::Nvfp4 { .. } => u32::MAX,
+                Encoding::Fp8Scaled {
+                    granularity: Fp8ScaleGranularity::OuterDimension,
+                    scale_dtype: DType::F32,
+                    resident: Fp8ResidentRepresentation::PackedBytes,
+                } => sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
+                Encoding::Fp8Scaled { .. } => u32::MAX,
             },
             rank,
             reserved0: 0,

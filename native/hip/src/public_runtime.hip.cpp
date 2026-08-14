@@ -22,6 +22,7 @@
 #include <hip/hip_runtime.h>
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 #include <hipblas/hipblas.h>
+#include <hipblaslt/hipblaslt.h>
 #endif
 
 #include <array>
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <exception>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <type_traits>
@@ -99,6 +101,17 @@ hipError_t launch(const uint16_t *const activation,
                   const KernelVariant /*variant*/,
                   const hipStream_t stream) noexcept {
   return fake_hip::matmul_launch(activation, weight, output, m, k, n, stream);
+}
+
+hipError_t launch_fp8_quantize(const uint16_t *, uint8_t *, float *, uint64_t,
+                               uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_fp8_emulation(const uint8_t *, const float *, const uint8_t *,
+                                const float *, uint16_t *, uint64_t, uint64_t,
+                                uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
 }
 } // namespace sllm_matmul_kernel
 
@@ -183,6 +196,18 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
 
 namespace {
 
+struct Fp8LtPlan;
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
+                              float *activation_scales,
+                              const float *weight_scales, uint64_t m,
+                              uint64_t k, uint64_t n) noexcept;
+void destroy_fp8_lt_plan(Fp8LtPlan *plan) noexcept;
+hipError_t launch_fp8_lt_plan(Fp8LtPlan *plan, const uint8_t *activation,
+                              const uint8_t *weight, uint16_t *output,
+                              hipStream_t stream) noexcept;
+#endif
+
 enum class HandleKind : uint32_t {
   Context,
   Queue,
@@ -219,6 +244,8 @@ struct Context final : QuarantineNode {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
   hipblasHandle_t matmul_blas_handle;
   std::mutex matmul_blas_mutex;
+  hipblasLtHandle_t matmul_lt_handle;
+  std::mutex matmul_lt_mutex;
 #endif
 
   explicit Context(const uint32_t device)
@@ -227,7 +254,8 @@ struct Context final : QuarantineNode {
         next_dispatch_id(1U)
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
         ,
-        matmul_blas_handle(nullptr), matmul_blas_mutex()
+        matmul_blas_handle(nullptr), matmul_blas_mutex(),
+        matmul_lt_handle(nullptr), matmul_lt_mutex()
 #endif
   {
   }
@@ -236,6 +264,9 @@ struct Context final : QuarantineNode {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     if (matmul_blas_handle != nullptr) {
       (void)hipblasDestroy(matmul_blas_handle);
+    }
+    if (matmul_lt_handle != nullptr) {
+      (void)hipblasLtDestroy(matmul_lt_handle);
     }
 #endif
   }
@@ -725,6 +756,9 @@ struct ElementwisePlan final : QuarantineNode {
   bool embedding;
   bool matmul;
   bool argmax;
+  void *matmul_workspace;
+  uint64_t matmul_workspace_bytes;
+  Fp8LtPlan *fp8_lt_plan;
   bool release_active;
   bool in_flight;
 
@@ -735,6 +769,8 @@ struct ElementwisePlan final : QuarantineNode {
         input0(input0_value), input1(input1_value), output(output_value),
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
         argmax_metadata(), embedding(false), matmul(false), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr),
         release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
@@ -744,6 +780,8 @@ struct ElementwisePlan final : QuarantineNode {
         input0(weight_value), input1(token_ids_value), output(output_value),
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
         argmax_metadata(), embedding(true), matmul(false), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr),
         release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
@@ -753,6 +791,8 @@ struct ElementwisePlan final : QuarantineNode {
         input0(activation_value), input1(weight_value), output(output_value),
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
         argmax_metadata(), embedding(false), matmul(true), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr),
         release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
@@ -762,7 +802,18 @@ struct ElementwisePlan final : QuarantineNode {
         input0(logits_value), input1(nullptr), output(output_value), metadata(),
         embedding_metadata(), matmul_metadata(),
         argmax_metadata(metadata_value), embedding(false), matmul(false),
-        argmax(true), release_active(false), in_flight(false) {}
+        argmax(true), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr),
+        release_active(false), in_flight(false) {}
+
+  ~ElementwisePlan() {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    destroy_fp8_lt_plan(fp8_lt_plan);
+#endif
+    if (matmul_workspace != nullptr) {
+      (void)hipFree(matmul_workspace);
+    }
+  }
 };
 
 struct AttentionPreprocessPlan final : QuarantineNode {
@@ -1784,6 +1835,162 @@ void initialize_embedding_dispatch_info(
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+struct Fp8LtPlan {
+  hipblasLtHandle_t handle;
+  hipblasLtMatmulDesc_t operation;
+  hipblasLtMatrixLayout_t a;
+  hipblasLtMatrixLayout_t b;
+  hipblasLtMatrixLayout_t c;
+  hipblasLtMatrixLayout_t d;
+  hipblasLtMatmulAlgo_t algorithm;
+};
+
+void destroy_fp8_lt_plan(Fp8LtPlan *const plan) noexcept {
+  if (plan == nullptr) {
+    return;
+  }
+  if (plan->d != nullptr) {
+    (void)hipblasLtMatrixLayoutDestroy(plan->d);
+  }
+  if (plan->c != nullptr) {
+    (void)hipblasLtMatrixLayoutDestroy(plan->c);
+  }
+  if (plan->b != nullptr) {
+    (void)hipblasLtMatrixLayoutDestroy(plan->b);
+  }
+  if (plan->a != nullptr) {
+    (void)hipblasLtMatrixLayoutDestroy(plan->a);
+  }
+  if (plan->operation != nullptr) {
+    (void)hipblasLtMatmulDescDestroy(plan->operation);
+  }
+  delete plan;
+}
+
+hipError_t create_fp8_lt_plan(
+    const hipblasLtHandle_t handle, Fp8LtPlan **const plan_output,
+    float *const activation_scales,
+    const float *const weight_scales, const uint64_t m, const uint64_t k,
+    const uint64_t n) noexcept {
+  if (handle == nullptr || plan_output == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  *plan_output = nullptr;
+  std::unique_ptr<Fp8LtPlan> plan(new (std::nothrow) Fp8LtPlan{});
+  if (!plan) {
+    return hipErrorOutOfMemory;
+  }
+  hipblasLtMatmulPreference_t preference = nullptr;
+  const auto cleanup_preference = [&]() {
+    if (preference != nullptr) {
+      (void)hipblasLtMatmulPreferenceDestroy(preference);
+    }
+  };
+  const auto failed = [](const hipblasStatus_t status) {
+    return status != HIPBLAS_STATUS_SUCCESS;
+  };
+  plan->handle = handle;
+  if (failed(hipblasLtMatmulDescCreate(&plan->operation, HIPBLAS_COMPUTE_32F,
+                                       HIP_R_32F))) {
+    destroy_fp8_lt_plan(plan.release());
+    return hipErrorUnknown;
+  }
+  const hipblasOperation_t trans_a = HIPBLAS_OP_T;
+  const hipblasOperation_t trans_b = HIPBLAS_OP_N;
+  if (failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_TRANSA, &trans_a,
+          sizeof(trans_a))) ||
+      failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_TRANSB, &trans_b,
+          sizeof(trans_b)))) {
+    destroy_fp8_lt_plan(plan.release());
+    return hipErrorUnknown;
+  }
+  void *weight_scale_pointer = const_cast<float *>(weight_scales);
+  void *activation_scale_pointer = const_cast<float *>(activation_scales);
+  const hipblasLtMatmulMatrixScale_t scale_mode =
+      HIPBLASLT_MATMUL_MATRIX_SCALE_OUTER_VEC_32F;
+  if (failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
+          &weight_scale_pointer, sizeof(weight_scale_pointer))) ||
+      failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_POINTER,
+          &activation_scale_pointer, sizeof(activation_scale_pointer))) ||
+      failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_A_SCALE_MODE, &scale_mode,
+          sizeof(scale_mode))) ||
+      failed(hipblasLtMatmulDescSetAttribute(
+          plan->operation, HIPBLASLT_MATMUL_DESC_B_SCALE_MODE, &scale_mode,
+          sizeof(scale_mode))) ||
+      failed(hipblasLtMatrixLayoutCreate(&plan->a, HIP_R_8F_E4M3, k, n,
+                                         static_cast<int64_t>(k))) ||
+      failed(hipblasLtMatrixLayoutCreate(&plan->b, HIP_R_8F_E4M3, k, m,
+                                         static_cast<int64_t>(k))) ||
+      failed(hipblasLtMatrixLayoutCreate(&plan->c, HIP_R_16BF, n, m,
+                                         static_cast<int64_t>(n))) ||
+      failed(hipblasLtMatrixLayoutCreate(&plan->d, HIP_R_16BF, n, m,
+                                         static_cast<int64_t>(n))) ||
+      failed(hipblasLtMatmulPreferenceCreate(&preference))) {
+    cleanup_preference();
+    destroy_fp8_lt_plan(plan.release());
+    return hipErrorUnknown;
+  }
+  const uint64_t workspace_limit = 0U;
+  if (failed(hipblasLtMatmulPreferenceSetAttribute(
+          preference, HIPBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,
+          &workspace_limit, sizeof(workspace_limit)))) {
+    cleanup_preference();
+    destroy_fp8_lt_plan(plan.release());
+    return hipErrorUnknown;
+  }
+  hipblasLtMatmulHeuristicResult_t heuristic{};
+  static std::mutex algorithm_cache_mutex;
+  static std::map<std::array<uint64_t, 3>, hipblasLtMatmulAlgo_t>
+      algorithm_cache;
+  const std::array<uint64_t, 3> shape_key = {m, k, n};
+  {
+    std::lock_guard<std::mutex> cache_lock(algorithm_cache_mutex);
+    const auto cached = algorithm_cache.find(shape_key);
+    if (cached != algorithm_cache.end()) {
+      plan->algorithm = cached->second;
+    } else {
+      int solution_count = 0;
+      if (failed(hipblasLtMatmulAlgoGetHeuristic(
+              plan->handle, plan->operation, plan->a, plan->b, plan->c,
+              plan->d, preference, 1, &heuristic, &solution_count)) ||
+          solution_count != 1 || heuristic.state != HIPBLAS_STATUS_SUCCESS ||
+          heuristic.workspaceSize != 0U) {
+        cleanup_preference();
+        destroy_fp8_lt_plan(plan.release());
+        return hipErrorNotSupported;
+      }
+      plan->algorithm = heuristic.algo;
+      algorithm_cache.emplace(shape_key, heuristic.algo);
+    }
+  }
+  cleanup_preference();
+  *plan_output = plan.release();
+  return hipSuccess;
+}
+
+hipError_t launch_fp8_lt_plan(
+    Fp8LtPlan *const plan, const uint8_t *const activation,
+    const uint8_t *const weight, uint16_t *const output,
+    const hipStream_t stream) noexcept {
+  if (plan == nullptr) {
+    return hipErrorInvalidHandle;
+  }
+  const float alpha = 1.0F;
+  const float beta = 0.0F;
+  const hipblasStatus_t launch = hipblasLtMatmul(
+      plan->handle, plan->operation, &alpha, weight, plan->a, activation,
+      plan->b, &beta, output, plan->c, output, plan->d, &plan->algorithm,
+      nullptr, 0U, stream);
+  return launch == HIPBLAS_STATUS_SUCCESS ? hipSuccess : hipErrorUnknown;
+}
+#endif
+
 void initialize_matmul_dispatch_info(
     sllm_matmul_dispatch_info_t *const info, const uint64_t dispatch_id,
     const sllm_matmul::DescriptorMetadata &metadata,
@@ -1796,9 +2003,13 @@ void initialize_matmul_dispatch_info(
   info->info_version = SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  info->dispatch_count = 1U;
-  const auto variant = ::sllm_matmul_kernel::select_variant(
-      metadata.m, metadata.k, metadata.n, arch_name);
+  const auto variant = metadata.fp8_outer
+                           ? (std::strcmp(arch_name, "gfx1201") == 0
+                                  ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
+                                  : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
+                           : ::sllm_matmul_kernel::select_variant(
+                                 metadata.m, metadata.k, metadata.n, arch_name);
+  info->dispatch_count = metadata.fp8_outer ? 2U : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -3704,10 +3915,15 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     if (std::strcmp(properties.gcnArchName, "gfx1201") == 0) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
-      if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+      const hipblasStatus_t lt_status =
+          blas_status == HIPBLAS_STATUS_SUCCESS
+              ? hipblasLtCreate(&candidate->matmul_lt_handle)
+              : HIPBLAS_STATUS_NOT_INITIALIZED;
+      if (blas_status != HIPBLAS_STATUS_SUCCESS ||
+          lt_status != HIPBLAS_STATUS_SUCCESS) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "hipBLAS handle creation failed for the gfx1201 matmul registry");
+            "hipBLAS/hipBLASLt handle creation failed for the gfx1201 matmul registry");
       }
     }
 #endif

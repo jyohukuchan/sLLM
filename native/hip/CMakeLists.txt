@@ -517,6 +517,7 @@ if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         target_link_libraries(sllm_hip_stub PRIVATE
             "${ROCM_PATH}/lib/libhipblas.so"
+            "${ROCM_PATH}/lib/libhipblaslt.so"
         )
     endif()
 endif()

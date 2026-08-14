@@ -17,6 +17,7 @@ use crate::weights::{
     WeightClassification, WeightConsumer, WeightConsumerKey, WeightLoadPlan, build_weight_load_plan,
 };
 use crate::{DType, Encoding, TensorError, TensorView};
+use crate::{Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -434,6 +435,13 @@ pub struct QwenGraph {
     known_unconsumed: BTreeSet<String>,
     states: Vec<QwenGraphState>,
     total_state_bytes: u64,
+    fp8_sidecar_fingerprint: Option<String>,
+}
+
+impl QwenGraph {
+    pub fn fp8_sidecar_fingerprint(&self) -> Option<&str> {
+        self.fp8_sidecar_fingerprint.as_deref()
+    }
 }
 
 impl QwenGraph {
@@ -539,8 +547,112 @@ pub fn build_qwen35_graph(
         known_unconsumed,
         model_fingerprint: lock.fingerprint().to_owned(),
         plan_digest: *plan.digest(),
+        fp8_tensor_names: BTreeSet::new(),
+        fp8_sidecar_fingerprint: None,
     })?;
     builder.build()
+}
+
+/// Build the same production Qwen3.5 graph with every text-linear weight that
+/// is present in a verified Phase 10 sidecar represented as resident OCP
+/// E4M3FN plus outer-dimension FP32 scales.
+pub fn build_qwen35_fp8_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedFp8Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    if sidecar.source_lock_fingerprint() != lock.fingerprint() {
+        return Err(QwenGraphError::InvalidModel(
+            "FP8 sidecar source identity differs from the model lock".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    let max_position = lock.model.architecture.text_config.max_position_embeddings;
+    if state_capacity > max_position {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut fp8_tensor_names = BTreeSet::new();
+    for tensor in sidecar.tensors() {
+        let binding = by_name.get(tensor.name.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "FP8 sidecar tensor is not a required Qwen weight: {}",
+                tensor.name
+            ))
+        })?;
+        if tensor.shape.as_slice() != binding.shape.as_slice()
+            || !is_fp8_linear_consumer(binding.consumer.role)
+            || !fp8_tensor_names.insert(tensor.name.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "FP8 sidecar tensor differs from its graph binding: {}",
+                tensor.name
+            )));
+        }
+    }
+    let expected_fp8: BTreeSet<_> = bindings
+        .iter()
+        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
+        .map(|binding| binding.tensor_name.clone())
+        .collect();
+    if fp8_tensor_names != expected_fp8 {
+        return Err(QwenGraphError::InvalidPlan(
+            "FP8 sidecar does not cover the exact text-linear weight set".to_owned(),
+        ));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names,
+        fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
+    })?
+    .build()
+}
+
+fn is_fp8_linear_consumer(consumer: WeightConsumer) -> bool {
+    matches!(
+        consumer,
+        WeightConsumer::MlpGate
+            | WeightConsumer::MlpUp
+            | WeightConsumer::MlpDown
+            | WeightConsumer::GdnInProjQkv
+            | WeightConsumer::GdnInProjZ
+            | WeightConsumer::GdnInProjB
+            | WeightConsumer::GdnInProjA
+            | WeightConsumer::GdnOutProj
+            | WeightConsumer::AttentionQ
+            | WeightConsumer::AttentionK
+            | WeightConsumer::AttentionV
+            | WeightConsumer::AttentionO
+    )
 }
 
 fn validate_reviewed_model(lock: &ModelLock) -> Result<Qwen35ReviewedSpec, QwenGraphError> {
@@ -1153,6 +1265,8 @@ struct GraphBuilderConfig {
     known_unconsumed: BTreeSet<String>,
     model_fingerprint: String,
     plan_digest: [u8; 32],
+    fp8_tensor_names: BTreeSet<String>,
+    fp8_sidecar_fingerprint: Option<String>,
 }
 
 struct GraphBuilder {
@@ -1164,6 +1278,8 @@ struct GraphBuilder {
     known_unconsumed: BTreeSet<String>,
     model_fingerprint: String,
     plan_digest: [u8; 32],
+    fp8_tensor_names: BTreeSet<String>,
+    fp8_sidecar_fingerprint: Option<String>,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
     nodes: Vec<QwenGraphNode>,
@@ -1183,6 +1299,8 @@ impl GraphBuilder {
             known_unconsumed,
             model_fingerprint,
             plan_digest,
+            fp8_tensor_names,
+            fp8_sidecar_fingerprint,
         } = config;
         let bindings = bindings
             .into_iter()
@@ -1202,6 +1320,8 @@ impl GraphBuilder {
             known_unconsumed,
             model_fingerprint,
             plan_digest,
+            fp8_tensor_names,
+            fp8_sidecar_fingerprint,
             tensors: Vec::new(),
             producers: Vec::new(),
             nodes: Vec::new(),
@@ -1226,6 +1346,7 @@ impl GraphBuilder {
             known_unconsumed: self.known_unconsumed,
             states: self.states,
             total_state_bytes: self.total_state_bytes,
+            fp8_sidecar_fingerprint: self.fp8_sidecar_fingerprint,
         })
     }
 
@@ -2335,14 +2456,35 @@ impl GraphBuilder {
         let binding = self.bindings.get(&consumer).ok_or_else(|| {
             QwenGraphError::InvalidPlan(format!("missing graph binding: {consumer:?}"))
         })?;
-        let dtype = to_dtype(binding.dtype)?;
         let shape = binding.shape.clone();
         let name = binding.tensor_name.clone();
-        let view = view(dtype, &shape)?;
+        let view = if self.fp8_tensor_names.contains(&name) {
+            fp8_weight_view(&shape)?
+        } else {
+            view(to_dtype(binding.dtype)?, &shape)?
+        };
         let id = self.add_tensor(&name, view);
         self.weight_tensors.insert(consumer, id);
         Ok(id)
     }
+}
+
+fn fp8_weight_view(shape: &[u64]) -> Result<TensorView, QwenGraphError> {
+    let shape: Vec<usize> = shape
+        .iter()
+        .map(|&dimension| {
+            usize::try_from(dimension).map_err(|_| QwenGraphError::Overflow("FP8 tensor shape"))
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(TensorView::with_encoding(
+        DType::F8E4M3Fn,
+        Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::OuterDimension,
+            scale_dtype: DType::F32,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        },
+        &shape,
+    )?)
 }
 
 fn key(layer: u32, role: WeightConsumer) -> WeightConsumerKey {
@@ -2555,6 +2697,8 @@ mod tests {
             known_unconsumed: BTreeSet::new(),
             model_fingerprint: "fixture".to_owned(),
             plan_digest: [7; 32],
+            fp8_tensor_names: BTreeSet::new(),
+            fp8_sidecar_fingerprint: None,
         })
         .expect("fixture bindings")
         .build()
@@ -3071,6 +3215,8 @@ mod tests {
             known_unconsumed: BTreeSet::new(),
             model_fingerprint: "fixture".to_owned(),
             plan_digest: [9; 32],
+            fp8_tensor_names: BTreeSet::new(),
+            fp8_sidecar_fingerprint: None,
         })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());

@@ -83,10 +83,15 @@ impl MatmulDescriptor {
     }
 
     fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
+        let op_version = if self.weight.view().dtype() == sllm_core::DType::F8E4M3Fn {
+            sys::SLLM_HIP_MATMUL_FP8_VERSION
+        } else {
+            sys::SLLM_HIP_MATMUL_VERSION
+        };
         Ok(sys::sllm_matmul_desc_t {
             struct_size: size_of::<sys::sllm_matmul_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version: sys::SLLM_HIP_MATMUL_VERSION,
+            op_version,
             reserved: [0; 5],
             activation: self.activation.raw()?,
             weight: self.weight.raw()?,

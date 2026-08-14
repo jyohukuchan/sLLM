@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, ModelLock, OsSamplingRandom, QwenExecutionRequest,
     QwenResidentModel, SamplingParametersV1, VerifiedCache, WeightClassification,
-    build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
+    build_qwen35_fp8_graph, build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
+    verify_fp8_sidecar,
 };
 use sllm_frontend::{
     DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -41,6 +42,57 @@ enum GenerationInput {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CliFp8Provider {
+    Native,
+    Emulation,
+    ConvertedBf16,
+}
+
+impl CliFp8Provider {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Emulation => "emulation",
+            Self::ConvertedBf16 => "converted-bf16",
+        }
+    }
+}
+
+fn select_cli_fp8_provider(
+    has_sidecar: bool,
+    requested: Option<CliFp8Provider>,
+    target: &str,
+) -> Result<Option<CliFp8Provider>, String> {
+    if !has_sidecar {
+        return if requested.is_none() {
+            Ok(None)
+        } else {
+            Err("--fp8-provider requires an FP8 sidecar".to_owned())
+        };
+    }
+    let selected = requested.unwrap_or(if target == "gfx1201" {
+        CliFp8Provider::Native
+    } else {
+        CliFp8Provider::ConvertedBf16
+    });
+    let valid = matches!(
+        (selected, target),
+        (CliFp8Provider::Native, "gfx1201")
+            | (
+                CliFp8Provider::Emulation | CliFp8Provider::ConvertedBf16,
+                "gfx1030"
+            )
+    );
+    if !valid {
+        return Err(format!(
+            "FP8 provider {} is incompatible with exact target {target}",
+            selected.label()
+        ));
+    }
+    Ok(Some(selected))
+}
+
 #[derive(Debug, PartialEq)]
 struct GenerateRequest {
     input: GenerationInput,
@@ -49,6 +101,9 @@ struct GenerateRequest {
     stop_strings: Vec<String>,
     device_index: u32,
     target: String,
+    fp8_manifest: Option<PathBuf>,
+    fp8_artifact: Option<PathBuf>,
+    fp8_provider: Option<CliFp8Provider>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +143,9 @@ struct BenchmarkRequest {
     greedy: bool,
     warmups: u32,
     measured: u32,
+    fp8_manifest: Option<PathBuf>,
+    fp8_artifact: Option<PathBuf>,
+    fp8_provider: Option<CliFp8Provider>,
 }
 
 trait GreedyExecution {
@@ -242,6 +300,7 @@ trait ModelFrontendBackend {
 
 struct ProductionBackend {
     lock: ModelLock,
+    lock_path: PathBuf,
     cache: Arc<VerifiedCache>,
 }
 
@@ -254,6 +313,7 @@ impl ProductionBackend {
             .map_err(|_| "model cache does not match the lock".to_owned())?;
         Ok(Self {
             lock,
+            lock_path: request.lock.clone(),
             cache: Arc::new(cache),
         })
     }
@@ -363,8 +423,29 @@ impl ModelFrontendBackend for ProductionBackend {
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
         let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
             .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
-        let graph = build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-            .map_err(|_| "generation graph does not satisfy the fixed Qwen contract".to_owned())?;
+        let sidecar = match (&request.fp8_manifest, &request.fp8_artifact) {
+            (Some(manifest), Some(artifact)) => Some(Arc::new(
+                verify_fp8_sidecar(manifest, artifact, &self.lock_path, &self.lock)
+                    .map_err(|error| format!("FP8 sidecar verification failed: {error}"))?,
+            )),
+            (None, None) => None,
+            _ => return Err("FP8 generation requires both manifest and artifact".to_owned()),
+        };
+        let fp8_provider =
+            select_cli_fp8_provider(sidecar.is_some(), request.fp8_provider, &request.target)?;
+        let graph = match (&sidecar, fp8_provider) {
+            (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+            }
+            (Some(sidecar), Some(_)) => {
+                build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
+            }
+            (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+            _ => unreachable!("FP8 provider selection validated sidecar state"),
+        }
+        .map_err(|error| {
+            format!("generation graph does not satisfy the fixed Qwen contract: {error}")
+        })?;
         let plan_digest = plan.digest_hex();
         let model_fingerprint = self.lock.fingerprint().to_owned();
 
@@ -377,14 +458,58 @@ impl ModelFrontendBackend for ProductionBackend {
             .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
 
         let execution = (|| -> Result<Value, String> {
-            let mut owner = QwenExecutionRequest::new(
-                Arc::clone(&session),
-                graph,
-                plan,
-                Arc::clone(&self.cache),
-                COMPLETION_TIMEOUT,
-            )
-            .map_err(|error| format!("Qwen request provisioning failed: {error}"))?;
+            let (mut owner, _resident) = if let Some(sidecar) = sidecar {
+                let resident = match fp8_provider {
+                    Some(CliFp8Provider::ConvertedBf16) => {
+                        QwenResidentModel::new_fp8_converted_bf16(
+                            Arc::clone(&session),
+                            graph,
+                            plan.clone(),
+                            Arc::clone(&self.cache),
+                            Arc::clone(&sidecar),
+                            COMPLETION_TIMEOUT,
+                        )
+                    }
+                    Some(_) => QwenResidentModel::new_fp8(
+                        Arc::clone(&session),
+                        graph,
+                        plan.clone(),
+                        Arc::clone(&self.cache),
+                        Arc::clone(&sidecar),
+                        COMPLETION_TIMEOUT,
+                    ),
+                    None => unreachable!("sidecar requires a selected provider"),
+                }
+                .map_err(|error| format!("Qwen FP8 resident provisioning failed: {error}"))?;
+                let request_graph = match fp8_provider {
+                    Some(CliFp8Provider::ConvertedBf16) => {
+                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    Some(_) => build_qwen35_fp8_graph(
+                        &self.lock,
+                        &plan,
+                        &sidecar,
+                        input_len,
+                        state_capacity,
+                    ),
+                    None => unreachable!("sidecar requires a selected provider"),
+                }
+                .map_err(|error| format!("Qwen FP8 request graph failed: {error}"))?;
+                let owner = resident
+                    .new_request(request_graph)
+                    .map_err(|error| format!("Qwen FP8 request provisioning failed: {error}"))?;
+                (owner, Some(resident))
+            } else {
+                let owner = QwenExecutionRequest::new(
+                    Arc::clone(&session),
+                    graph,
+                    plan,
+                    Arc::clone(&self.cache),
+                    COMPLETION_TIMEOUT,
+                )
+                .map_err(|error| format!("Qwen request provisioning failed: {error}"))?;
+                (owner, None)
+            };
             let config = GenerationConfigV1::new(
                 request.max_new_tokens,
                 request.sampling,
@@ -444,6 +569,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "submission_count": audit.submission_count(),
                     "kernel_dispatch_count": audit.kernel_dispatch_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
+                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
+                    "fp8_provider": fp8_provider.map(CliFp8Provider::label),
                 },
             }))
         })();
@@ -533,8 +660,29 @@ impl ModelFrontendBackend for ProductionBackend {
         let model_load_start_ns = timing.model_load_start_ns();
         let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
             .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
-        let first_graph = build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-            .map_err(|_| "benchmark graph does not satisfy the fixed Qwen contract".to_owned())?;
+        let sidecar = match (&request.fp8_manifest, &request.fp8_artifact) {
+            (Some(manifest), Some(artifact)) => Some(Arc::new(
+                verify_fp8_sidecar(manifest, artifact, &self.lock_path, &self.lock)
+                    .map_err(|error| format!("FP8 sidecar verification failed: {error}"))?,
+            )),
+            (None, None) => None,
+            _ => return Err("FP8 benchmark requires both manifest and artifact".to_owned()),
+        };
+        let fp8_provider =
+            select_cli_fp8_provider(sidecar.is_some(), request.fp8_provider, &request.target)?;
+        let first_graph = match (&sidecar, fp8_provider) {
+            (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+            }
+            (Some(sidecar), Some(_)) => {
+                build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
+            }
+            (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+            _ => unreachable!("FP8 provider selection validated sidecar state"),
+        }
+        .map_err(|error| {
+            format!("benchmark graph does not satisfy the fixed Qwen contract: {error}")
+        })?;
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
         let session_request =
             ExecutionSessionRequest::new(request.device_index, request.target.clone())
@@ -544,13 +692,34 @@ impl ModelFrontendBackend for ProductionBackend {
             .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
 
         let execution = (|| -> Result<Value, String> {
-            let resident = QwenResidentModel::new(
-                Arc::clone(&session),
-                first_graph,
-                plan.clone(),
-                Arc::clone(&self.cache),
-                COMPLETION_TIMEOUT,
-            )
+            let resident = match (&sidecar, fp8_provider) {
+                (Some(sidecar), Some(CliFp8Provider::ConvertedBf16)) => {
+                    QwenResidentModel::new_fp8_converted_bf16(
+                        Arc::clone(&session),
+                        first_graph,
+                        plan.clone(),
+                        Arc::clone(&self.cache),
+                        Arc::clone(sidecar),
+                        COMPLETION_TIMEOUT,
+                    )
+                }
+                (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
+                    Arc::clone(&session),
+                    first_graph,
+                    plan.clone(),
+                    Arc::clone(&self.cache),
+                    Arc::clone(sidecar),
+                    COMPLETION_TIMEOUT,
+                ),
+                (None, None) => QwenResidentModel::new(
+                    Arc::clone(&session),
+                    first_graph,
+                    plan.clone(),
+                    Arc::clone(&self.cache),
+                    COMPLETION_TIMEOUT,
+                ),
+                _ => unreachable!("FP8 provider selection validated sidecar state"),
+            }
             .map_err(|error| format!("Qwen resident model provisioning failed: {error}"))?;
             let model_ready_ns = timing.now_ns();
             let model_ready_snapshot = session.memory_snapshot();
@@ -559,11 +728,23 @@ impl ModelFrontendBackend for ProductionBackend {
                 validate_model_ready_snapshot(&model_ready_memory)?;
             let ready_model_current_bytes = model_ready_snapshot.model_resident().current_bytes();
 
-            let control_graph = build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                .map_err(|_| {
-                    "benchmark correctness-control graph does not satisfy the Qwen contract"
-                        .to_owned()
-                })?;
+            let control_graph = match (&sidecar, fp8_provider) {
+                (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                    build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                }
+                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                    &self.lock,
+                    &plan,
+                    sidecar,
+                    input_len,
+                    state_capacity,
+                ),
+                (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+                _ => unreachable!("FP8 provider selection validated sidecar state"),
+            }
+            .map_err(|error| {
+                format!("benchmark correctness-control graph does not satisfy the Qwen contract: {error}")
+            })?;
             let mut control_owner = match resident.new_request(control_graph) {
                 Ok(owner) => owner,
                 Err(error) => {
@@ -673,10 +854,25 @@ impl ModelFrontendBackend for ProductionBackend {
                     _ => return Err("benchmark lane and input shape do not match".to_owned()),
                 };
                 validate_fixed_input_token_ids(seed_input.as_slice(), input.as_slice())?;
-                let graph = build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    .map_err(|_| {
-                        "benchmark request graph does not satisfy the Qwen contract".to_owned()
-                    })?;
+                let graph = match (&sidecar, fp8_provider) {
+                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                        &self.lock,
+                        &plan,
+                        sidecar,
+                        input_len,
+                        state_capacity,
+                    ),
+                    (None, None) => {
+                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    _ => unreachable!("FP8 provider selection validated sidecar state"),
+                }
+                .map_err(|error| {
+                    format!("benchmark request graph does not satisfy the Qwen contract: {error}")
+                })?;
                 let mut owner = match resident.new_request(graph) {
                     Ok(owner) => owner,
                     Err(error) => {
@@ -888,6 +1084,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
+                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
+                    "fp8_provider": fp8_provider.map(CliFp8Provider::label),
                     "request_model_load_count": 0,
                     "model_reused": true,
                     "sample_count": request.warmups + request.measured,
@@ -1028,6 +1226,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut benchmark_case_id = None;
     let mut benchmark_warmups = None;
     let mut benchmark_measured = None;
+    let mut fp8_manifest = None;
+    let mut fp8_artifact = None;
+    let mut fp8_provider = None;
     let mut message_bytes = 0_usize;
     let mut arguments = arguments.peekable();
 
@@ -1039,6 +1240,30 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 take_value(&mut arguments, "--cache")?,
                 "--cache",
             )?,
+            "--fp8-manifest" if command == "generate" || command == "benchmark" => set_once(
+                &mut fp8_manifest,
+                PathBuf::from(take_value(&mut arguments, "--fp8-manifest")?),
+                "--fp8-manifest",
+            )?,
+            "--fp8-artifact" if command == "generate" || command == "benchmark" => set_once(
+                &mut fp8_artifact,
+                PathBuf::from(take_value(&mut arguments, "--fp8-artifact")?),
+                "--fp8-artifact",
+            )?,
+            "--fp8-provider" if command == "generate" || command == "benchmark" => {
+                let value = match take_value(&mut arguments, "--fp8-provider")?.as_str() {
+                    "native" => CliFp8Provider::Native,
+                    "emulation" => CliFp8Provider::Emulation,
+                    "converted-bf16" => CliFp8Provider::ConvertedBf16,
+                    _ => {
+                        return Err(
+                            "--fp8-provider must be native, emulation, or converted-bf16"
+                                .to_owned(),
+                        );
+                    }
+                };
+                set_once(&mut fp8_provider, value, "--fp8-provider")?;
+            }
             "--text" if command == "tokenize" => {
                 let value = take_value(&mut arguments, "--text")?;
                 if value.len() > MAX_TEXT_BYTES {
@@ -1291,6 +1516,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 device_index: device_index
                     .ok_or_else(|| "generate requires --device-index".to_owned())?,
                 target: target.ok_or_else(|| "generate requires --target".to_owned())?,
+                fp8_manifest,
+                fp8_artifact,
+                fp8_provider,
             })
         }
         "benchmark" => {
@@ -1358,6 +1586,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 greedy,
                 warmups,
                 measured,
+                fp8_manifest,
+                fp8_artifact,
+                fp8_provider,
             })
         }
         _ => return Err("internal unsupported model command".to_owned()),
@@ -1443,6 +1674,22 @@ fn parse_message(value: &str) -> Result<Qwen35ChatMessageV1, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fp8_provider_defaults_preserve_target_specific_performance_policy() {
+        assert_eq!(
+            select_cli_fp8_provider(true, None, "gfx1201").unwrap(),
+            Some(CliFp8Provider::Native)
+        );
+        assert_eq!(
+            select_cli_fp8_provider(true, None, "gfx1030").unwrap(),
+            Some(CliFp8Provider::ConvertedBf16)
+        );
+        assert_eq!(
+            select_cli_fp8_provider(true, Some(CliFp8Provider::Emulation), "gfx1030").unwrap(),
+            Some(CliFp8Provider::Emulation)
+        );
+    }
     use sllm_core::{SamplingError, SamplingRandomSource};
     use sllm_frontend::{
         GenerationExecutorV1, GenerationServiceError, GenerationStepV1, GenerationTextFrontendV1,

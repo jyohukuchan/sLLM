@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::{DType, Encoding, TensorView};
+use crate::{DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity, TensorView};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SemanticOpKind {
@@ -785,14 +785,22 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
         if !tensor.is_contiguous() {
             return Err(OpError::MatmulNonContiguous);
         }
-        if tensor.encoding() != Encoding::Unquantized {
-            return Err(OpError::MatmulUnsupportedEncoding);
+    }
+    for tensor in [activation, output] {
+        if tensor.encoding() != Encoding::Unquantized || tensor.dtype() != DType::Bf16 {
+            return Err(OpError::MatmulActivationOutputContract);
         }
-        if tensor.dtype() != DType::Bf16 {
-            return Err(OpError::MatmulUnsupportedDType {
-                actual: tensor.dtype(),
-            });
-        }
+    }
+    let bf16_weight = weight.encoding() == Encoding::Unquantized && weight.dtype() == DType::Bf16;
+    let fp8_weight = weight.dtype() == DType::F8E4M3Fn
+        && weight.encoding()
+            == Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            };
+    if !bf16_weight && !fp8_weight {
+        return Err(OpError::MatmulWeightContract);
     }
     Ok(())
 }
@@ -1057,6 +1065,8 @@ pub enum OpError {
     MatmulUnsupportedDType {
         actual: DType,
     },
+    MatmulActivationOutputContract,
+    MatmulWeightContract,
     RmsNormContractRequired,
     RmsNormRankZero {
         tensor: RmsNormTensor,
@@ -1234,6 +1244,12 @@ impl fmt::Display for OpError {
             Self::MatmulUnsupportedDType { actual } => {
                 write!(formatter, "matmul tensors must be bf16, got {actual}")
             }
+            Self::MatmulActivationOutputContract => formatter.write_str(
+                "matmul activation and output must be contiguous unquantized BF16",
+            ),
+            Self::MatmulWeightContract => formatter.write_str(
+                "matmul weight must be BF16 or OCP E4M3FN with outer-dimension FP32 scales",
+            ),
             Self::RmsNormContractRequired => {
                 formatter.write_str("rms_norm requires an explicit contract")
             }

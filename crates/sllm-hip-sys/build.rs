@@ -650,6 +650,7 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=amdhip64");
         if public_runtime_enabled {
             println!("cargo:rustc-link-lib=dylib=hipblas");
+            println!("cargo:rustc-link-lib=dylib=hipblaslt");
         }
     }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
@@ -1020,6 +1021,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_DTYPE_BF16={{}}\", bindings::SLLM_TENSOR_DTYPE_BF16);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F16={{}}\", bindings::SLLM_TENSOR_DTYPE_F16);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F32={{}}\", bindings::SLLM_TENSOR_DTYPE_F32);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FN={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FN);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ);\n\
              println!(\"const SLLM_HIP_KV_HEAD_COUNT={{}}\", bindings::SLLM_HIP_KV_HEAD_COUNT);\n\
              println!(\"const SLLM_HIP_KV_HEAD_DIM={{}}\", bindings::SLLM_HIP_KV_HEAD_DIM);\n\
              println!(\"const SLLM_HIP_KV_MAX_CAPACITY={{}}\", bindings::SLLM_HIP_KV_MAX_CAPACITY);\n\
@@ -1052,11 +1055,14 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_EMBEDDING_MAX_HIDDEN={{}}\", bindings::SLLM_HIP_EMBEDDING_MAX_HIDDEN);\n\
              println!(\"const SLLM_HIP_EMBEDDING_MAX_TOKENS={{}}\", bindings::SLLM_HIP_EMBEDDING_MAX_TOKENS);\n\
              println!(\"const SLLM_HIP_MATMUL_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_VERSION);\n\
+             println!(\"const SLLM_HIP_MATMUL_FP8_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_FP8_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_DECODE_BF16_FP32_V2);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_HIPBLAS_DECODE_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MATMUL_WORKGROUP_SIZE);\n\
@@ -1089,8 +1095,11 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_TENSOR_MAX_RANK={{}}\", bindings::SLLM_HIP_TENSOR_MAX_RANK);\n\
              println!(\"const SLLM_TENSOR_DTYPE_BF16={{}}\", bindings::SLLM_TENSOR_DTYPE_BF16);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F32={{}}\", bindings::SLLM_TENSOR_DTYPE_F32);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FN={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FN);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ);\n\
              println!(\"const SLLM_TENSOR_DTYPE_I32={{}}\", bindings::SLLM_TENSOR_DTYPE_I32);\n\
              println!(\"const SLLM_TENSOR_ENCODING_UNQUANTIZED={{}}\", bindings::SLLM_TENSOR_ENCODING_UNQUANTIZED);\n\
+             println!(\"const SLLM_TENSOR_ENCODING_FP8_OUTER_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_FP8_OUTER_F32);\n\
              println!(\"const SLLM_RMSNORM_ACCUMULATION_F32={{}}\", bindings::SLLM_RMSNORM_ACCUMULATION_F32);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);\n\
              println!(\"const SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP={{}}\", bindings::SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP);\n\

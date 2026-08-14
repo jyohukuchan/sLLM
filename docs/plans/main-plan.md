@@ -441,15 +441,17 @@
 - 詳細は[Phase 9 archive](archive/2026/08/11-20/phase9-engine-structural-optimization.md)、判断と実績は
   [Phase 9 history](../history/2026/08/11-20/phase9-engine-structural-optimization.md)を正とする。
 
-### Phase 10: model本体FP8 W8A8（計画済み）
+### Phase 10: model本体FP8 W8A8（完了）
 
-- verified Qwen3.5-4B BF16 lockからblock 128の再現可能な開発用OCP E4M3派生lockを作り、weight/activation
-  FP8、FP32 accumulation、BF16 outputのlinear contractを実装する。
+- verified Qwen3.5-4B BF16 lockからper-output-row scale付きの再現可能なOCP E4M3FN sidecarを作り、
+  weight/activation FP8、FP32 accumulation、BF16 outputのlinear contractを実装した。
 - RDNA4 exact `gfx1201`はnative FP8 provider、RDNA2 exact `gfx1030`はW8A8 emulationと明示BF16 conversionを
-  別providerとして扱う。RDNA2 pathをnative FP8と表記せず、改善したproviderだけproduction defaultへ昇格する。
+  別providerとして実装した。RDNA2 pathをnative FP8と表記しない。
 - 公式Qwen3.5 FP8は27B以上が中心であるため、小型第三者checkpointを基準にせず、公式27B FP8はPhase 12の
   追加interop spotとする。
-- 詳細は[Phase 10 active plan](active/2026/08/11-20/phase10-fp8-w8a8.md)を正とする。
+- R9700 32/32でresident VRAMをBF16比約42.4%削減したが、prefill/decode/E2Eは低下したためdefaultへ
+  昇格しない。native FP8はopt-in、V620 emulationはcorrectness-only、V620 `converted-bf16`は明示pathとする。
+- 詳細は[Phase 10 archive](archive/2026/08/11-20/phase10-fp8-w8a8.md)を正とする。
 
 ### Phase 11: FP8/BF16のCDNA3移植（計画済み）
 
@@ -481,10 +483,10 @@
 
 ## 現在の状態と次の作業
 
-- Phase 9まで完了した。次はPhase 10のmodel本体FP8 W8A8であり、CDNA3移植はPhase 11、MI300X実機確認は
+- Phase 10まで完了した。次はPhase 11のCDNA3移植であり、MI300X実機確認は
   Phase 12、モデル非依存prepared execution制御はPhase 13、Gemma 4はPhase 14、Weight NVFP4はPhase 15とする。
-- Phase 9でdtype非依存のcompletion/segment骨格とtarget別BF16 providerを固定した。Phase 10はこの境界を
-  再利用してFP8 encoding、weight layout、kernel/providerを追加する。Phase 13でモデル非依存層へ抽出し、
+- Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
+  sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで
   memory-bound matvec、production graph/command-list、MLP fusionの優先順位を再確認する。RDNA4 FA3-likeは
   attentionが支配要因になった時の非blocking follow-upとして別管理する。
