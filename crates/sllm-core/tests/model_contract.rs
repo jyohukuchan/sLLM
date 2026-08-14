@@ -98,6 +98,110 @@ fn qwen_text_config_retains_typed_full_attention_contract() {
 }
 
 #[test]
+fn reviewed_qwen35_family_locks_preserve_shape_and_output_contracts() {
+    let cases = [
+        ("qwen3.5-2b-bf16.json", 2_048, 24, 8, 2, 6_144, true, 632),
+        ("qwen3.5-4b-bf16.json", 2_560, 32, 16, 4, 9_216, true, 738),
+        ("qwen3.5-9b-bf16.json", 4_096, 32, 16, 4, 12_288, false, 775),
+    ];
+    for (file, hidden, layers, heads, kv_heads, intermediate, tied, tensors) in cases {
+        let lock = read_model_lock(repository_path(&format!("docs/models/locks/{file}")))
+            .unwrap_or_else(|error| panic!("{file} must parse: {error}"));
+        let text = &lock.model().architecture.text_config;
+        assert_eq!(text.hidden_size, hidden, "{file}");
+        assert_eq!(text.num_hidden_layers, layers, "{file}");
+        assert_eq!(text.num_attention_heads, heads, "{file}");
+        assert_eq!(text.num_key_value_heads, kv_heads, "{file}");
+        assert_eq!(text.intermediate_size, intermediate, "{file}");
+        assert_eq!(text.tie_word_embeddings, tied, "{file}");
+        assert_eq!(
+            lock.model().tensor_contract.indexed_tensor_count,
+            tensors,
+            "{file}"
+        );
+        assert_eq!(text.layer_types.len(), layers as usize, "{file}");
+    }
+}
+
+#[test]
+#[cfg(feature = "reviewed-qwen35-external-cache")]
+fn reviewed_qwen35_external_caches_build_load_plans_and_graphs() {
+    let cases = [
+        ("qwen3.5-2b-bf16.json", "SLLM_QWEN35_2B_CACHE", 320, true),
+        ("qwen3.5-9b-bf16.json", "SLLM_QWEN35_9B_CACHE", 427, false),
+    ];
+    for (file, variable, required_count, tied) in cases {
+        let cache_path = std::env::var_os(variable)
+            .unwrap_or_else(|| panic!("{variable} must name the exact external cache"));
+        let lock = read_model_lock(repository_path(&format!("docs/models/locks/{file}")))
+            .unwrap_or_else(|error| panic!("{file} must parse: {error}"));
+        let cache = verify_model_cache(&lock, cache_path)
+            .unwrap_or_else(|error| panic!("{file} cache must verify: {error}"));
+        let plan = sllm_core::build_verified_weight_load_plan(&lock, &cache)
+            .unwrap_or_else(|error| panic!("{file} plan must build: {error}"));
+        let required = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.classification == sllm_core::WeightClassification::Required)
+            .count();
+        assert_eq!(required, required_count, "{file}");
+        assert_eq!(plan.tied_embeddings, tied, "{file}");
+        let lm_head = plan
+            .entries
+            .iter()
+            .find(|entry| entry.tensor_name == "lm_head.weight");
+        if tied {
+            assert!(lm_head.is_none(), "{file} must alias embedding output");
+        } else {
+            let lm_head = lm_head.expect("untied model must load lm_head.weight");
+            let consumer = lm_head.consumer.expect("lm_head consumer must be typed");
+            assert_eq!(consumer.layer, None, "{file}");
+            assert_eq!(
+                consumer.role,
+                sllm_core::WeightConsumer::OutputProjection,
+                "{file}"
+            );
+            assert_eq!(
+                lm_head.classification,
+                sllm_core::WeightClassification::Required,
+                "{file}"
+            );
+        }
+        for token_count in [1, 3, 17, 255, 256, 257] {
+            let graph = sllm_core::build_qwen35_graph(&lock, &plan, token_count, 257)
+                .unwrap_or_else(|error| {
+                    panic!("{file} graph for {token_count} tokens must build: {error}")
+                });
+            assert_eq!(
+                graph.layer_types().len(),
+                lock.model().architecture.text_config.num_hidden_layers as usize
+            );
+            assert_eq!(graph.weight_bindings().len(), required_count, "{file}");
+            let output = graph
+                .weight_bindings()
+                .iter()
+                .find(|binding| {
+                    binding.consumer().role
+                        == if tied {
+                            sllm_core::WeightConsumer::EmbeddingAndTiedOutput
+                        } else {
+                            sllm_core::WeightConsumer::OutputProjection
+                        }
+                })
+                .expect("output projection binding must be explicit");
+            assert_eq!(
+                output.tensor_name(),
+                if tied {
+                    "model.language_model.embed_tokens.weight"
+                } else {
+                    "lm_head.weight"
+                }
+            );
+        }
+    }
+}
+
+#[test]
 fn generation_stop_policy_shape_mutations_fail_closed() {
     let baseline = fs::read_to_string(repository_path("ci/fixtures/model-lock-v1/lock.json"))
         .expect("tiny lock exists");

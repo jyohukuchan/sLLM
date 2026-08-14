@@ -16,6 +16,7 @@ mod op;
 mod qwen_execution;
 mod qwen_graph;
 mod registry;
+mod sampling;
 mod tensor;
 mod weights;
 
@@ -25,8 +26,9 @@ pub use backend::{
 };
 pub use dtype::{DType, Encoding, EncodingError};
 pub use execution::{
-    AdapterResource, BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission,
-    DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
+    AdapterResource, AllocationCategory, AllocationCategorySnapshot, AllocationSnapshot,
+    BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DispatchEvidence,
+    ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
     ExecutionCausalAttentionSubmissionAdapter, ExecutionError, ExecutionKvStateSubmissionAdapter,
     ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue, ExecutionQueueId,
     ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
@@ -44,8 +46,8 @@ pub use handles::{
     QueueHandle,
 };
 pub use kv_state::{
-    CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateError,
-    KvStateLayout, KvStateSnapshot,
+    CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateAppendRequest, KvStateDescriptor,
+    KvStateError, KvStateLayout, KvStateSnapshot,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -56,11 +58,14 @@ pub use model::{
     ComponentStatus, ConfigEos, ExcludedFile, FrontendAssetKind, GenerationConfig,
     GenerationStopPolicyV1, LayerSchedule, LayerType, LicenseInfo, LockedFile, LockedModel,
     MaxNewTokensZero, ModelArchitecture, ModelError, ModelLock, NormalizationContract,
-    NormalizationKind, PromptEvaluation, RopeParameters, RopeType, ScaleMode, SliceContract,
-    StopEvaluation, StopIdentity, StopTokenHandling, TensorClassification, TensorContract,
-    TensorDType, TensorDescriptor, TextConfig, TokenizerContract, TokenizerEos, VerifiedCache,
-    VerifiedFile, fingerprint_for_json, parse_model_lock, read_model_lock, validate_model_config,
-    verify_model_cache,
+    NormalizationKind, PromptEvaluation, QWEN35_2B_FINGERPRINT, QWEN35_2B_REPO_ID,
+    QWEN35_2B_REVISION, QWEN35_4B_FINGERPRINT, QWEN35_4B_REPO_ID, QWEN35_4B_REVISION,
+    QWEN35_9B_FINGERPRINT, QWEN35_9B_REPO_ID, QWEN35_9B_REVISION, Qwen35ReviewedSpec,
+    RopeParameters, RopeType, ScaleMode, SliceContract, StopEvaluation, StopIdentity,
+    StopTokenHandling, TensorClassification, TensorContract, TensorDType, TensorDescriptor,
+    TextConfig, TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
+    parse_model_lock, qwen35_reviewed_spec, read_model_lock, reviewed_qwen35_spec,
+    validate_model_config, verify_model_cache,
 };
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
@@ -68,7 +73,10 @@ pub use op::{
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
     SemanticOp, SemanticOpDescriptor, SemanticOpKind,
 };
-pub use qwen_execution::{QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest};
+pub use qwen_execution::{
+    QwenExecutionAudit, QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest,
+    QwenKvLayerMemoryAudit, QwenRequestMemoryAudit, QwenResidentModel,
+};
 pub use qwen_graph::{
     QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QWEN35_MAX_POSITION_EMBEDDINGS,
     QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
@@ -77,6 +85,9 @@ pub use qwen_graph::{
     build_qwen35_graph,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
+pub use sampling::{
+    OsSamplingRandom, ProfileSamplerV1, SamplingError, SamplingParametersV1, SamplingRandomSource,
+};
 pub use tensor::{TensorError, TensorView};
 pub use weights::{
     WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer, WeightConsumerKey,

@@ -1,8 +1,8 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-03
+> 最終更新: 2026-08-13
 >
-> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1は検証した限定範囲だけ`project-verified`とする。
+> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
 
 共通の状態、resource gate候補、NVIDIAを含む将来例は[GPU互換性方針](gpu.md)を参照する。
 
@@ -110,12 +110,42 @@ sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 | `gfx942`のROCm 7.14.0掲載MI300製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1200`/`gfx1201`のROCm 7.14.0掲載RDNA 4製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
 | `gfx1030`のROCm 7.14.0掲載Radeon PRO W6800/V620製品・OS構成 | AMDの現行support資料に掲載 | `[vendor-supported, unverified]` |
-| canonical Radeon AI PRO R9700 1台、exact `gfx1201` | Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0でformal model-free G0/G1を実行 | `[project-verified]` |
-| canonical Radeon Pro V620 1台、exact `gfx1030` | 同じlocal host tupleでformal model-free G0/G1を実行。2台目V620はspareであり必須evidence外 | `[project-verified]` |
+| canonical Radeon AI PRO R9700 1台、exact `gfx1201` | Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0でformal model-free G0/G1、Phase 6 A0 HIP VMM PoC、A1比較・KV production probe、A6 Qwen3.5-4B API serviceを実行 | `[project-verified]` |
+| canonical Radeon Pro V620 1台、exact `gfx1030` | 同じlocal host tupleでformal model-free G0/G1、Phase 6 A0 HIP VMM PoC、A1比較・KV production probe、A6 API serviceを実行。2台目V620はspareであり必須evidence外 | `[project-verified]` |
 | consumer RDNA 2 / RX 6000系 | `gfx1030`の掲載だけでは同じtargetを持つ全consumer SKUの公式対応にならない。[Radeon Linux support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)に完全なSKU/OS構成が掲載された場合だけ`vendor-supported`を付ける | `[unverified]` |
 | `gfx1031`–`gfx1036` | LLVMのcode target定義は製品構成のvendor supportではない | `[unverified]` |
 
-local `project-verified` の範囲は、commit `f393d688a051d2b73c8773d8a930a711592609bc`のcanonical exact `gfx1030`/`gfx1201` artifactに対するG0 identity/healthと、1、3、17、255、256、257 byteのG1 allocation、copy、diagnostic dispatch、completion、byte-exact copy-backだけである。Code Object V6、wave32、target別ELF flags、artifact metadata、実loader pathを検証したが、capability profile、resource gate、semantic数値kernel、model、性能は未検証であり、target全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。
+commit `f393d688a051d2b73c8773d8a930a711592609bc`に結び付くformal G0/G1 evidenceの範囲は、canonical exact `gfx1030`/`gfx1201` artifactのidentity/healthと、1、3、17、255、256、257 byteのallocation、copy、diagnostic dispatch、completion、byte-exact copy-backだけである。Code Object V6、wave32、target別ELF flags、artifact metadata、実loader pathを検証したが、このG0/G1 evidence単独ではcapability profile、resource gate、semantic数値kernel、model、性能を証明しない。後続A0/A1 evidenceは以下に別scopeとして追加し、いずれもtarget全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。
+
+Phase 6 A0では同じcanonical 2 targetについてHIP VMM capability、minimum/recommended granularity、
+VA reserve、physical create/map/access、contiguous-pointer kernel、unmap/remap、event lifetime、cleanupを
+model-freeに追加検証した。両targetのminimumは4 KiB、recommendedは2 MiBで、Qwen3.5-4B相当16 regionの
+2 MiB page activation p95はV620 582.841 us、R9700 496.488 usだった。このevidenceはVMM primitiveの
+`project-verified`であり、vAttention production backend、full model、他RDNA2/RDNA4 SKU、別ROCm/kernel、
+Paged Attentionとの方式選択を証明しない。
+
+Phase 6 A1では同じ2 targetでQ heads 16、KV heads 4、head dimension 256、Q length 1/37、
+KV length 255/256/257/1023/1024/1025のcontiguous、vAttention、paged accessorを同じ
+FA2-style online-softmax proxyで実行した。NumPy oracle、mode間数値一致、fallbackなし、health、cleanupを
+PASSし、actual public runtimeのvirtual-contiguous KVも1023/1024/1025 tokenで全要素oracle、
+2/2/4 MiB per-plane commitment、未map readback拒否を両targetでPASSした。このscopeについて
+`project-verified`とし、初期方式はvAttention型を選択した。
+
+これはupstream FlashAttention-2/CKの性能、FlashAttention-3/4のAMD動作、full model、長時間安定性、
+他SKU/tuple、Paged Attention production backendを証明しない。実測値、identity、再検討条件は
+[KV memory decision](../architecture/kv-memory.md)を正とする。
+
+Phase 6 A6ではQwen3.5-4B lock
+`sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae`を使い、canonical
+V620/R9700の各UUIDだけを`ROCR_VISIBLE_DEVICES`で可視化して論理device 0へ接続した。両targetで
+non-stream、SSE、stop、HIP dispatch後disconnect、1023/1024/1025 logical capacity、2 MiB physical page、
+32 MiB committed K/V、request-local KV/linear・VRAM・GPU process cleanupをPASSした。target別binary SHA-256は
+`gfx1030=dd07bca6c1ca023365bc8800142302929ee50495993e431843aa35528b81723c`、
+`gfx1201=029fdf71f5899200915f1f8a5161316c6f9832f85dbb3ea9a7ddc188c677067b`である。
+
+このA6 scopeは単一GPU・単一model-resident serverだけである。HIP current deviceはthread-localなので、
+mixed-GPU hostで複数GPUを可視化したままglobal physical indexを渡す構成は対応外とし、stable UUIDによる
+単独可視化と論理device 0を必須運用条件とする。他SKU、別tuple、multi-GPU、長時間安定性へ一般化しない。
 
 ## 将来AMD候補
 

@@ -143,14 +143,25 @@ sllm_status_t validate_state_create_info(
         sink, SLLM_STATUS_INVALID_ABI_VERSION,
         "linear attention state ABI version is unsupported");
   }
-  if (!all_zero(info->reserved, sizeof(info->reserved))) {
-    return sllm_public_runtime::write_error(
-        sink, SLLM_STATUS_RESERVED_NONZERO,
-        "linear attention state reserved fields must be zero");
-  }
+  const uint32_t qk_heads = info->qk_heads == 0U
+                                ? SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
+                                : info->qk_heads;
+  const uint32_t value_heads = info->value_heads == 0U
+                                   ? SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+                                   : info->value_heads;
+  const uint32_t head_dim = info->head_dim == 0U
+                                ? SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+                                : info->head_dim;
+  const uint32_t conv_kernel_size =
+      info->conv_kernel_size == 0U ? SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE
+                                   : info->conv_kernel_size;
   if (info->session_id == 0U || info->flags != 0U ||
       info->capacity_tokens == 0U ||
-      info->capacity_tokens > SLLM_HIP_LINEAR_ATTENTION_MAX_CAPACITY) {
+      info->capacity_tokens > SLLM_HIP_LINEAR_ATTENTION_MAX_CAPACITY ||
+      qk_heads != SLLM_HIP_LINEAR_ATTENTION_QK_HEADS ||
+      (value_heads != 16U && value_heads != 32U) ||
+      head_dim != SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM ||
+      conv_kernel_size != SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_LINEAR_ATTENTION_STATE_DESCRIPTOR,
         "linear attention state has an invalid session, flags, or capacity");
@@ -216,12 +227,26 @@ sllm_status_t validate_and_copy_descriptor(
         "linear attention token interval is invalid or exceeds capacity");
   }
 
-  const uint64_t qkv_shape[] = {token_count, 8192U};
-  const uint64_t output_shape[] = {token_count, 4096U};
-  const uint64_t scalar_shape[] = {token_count, 32U};
-  const uint64_t conv_shape[] = {8192U, 1U, 4U};
-  const uint64_t head_scalar_shape[] = {32U};
-  const uint64_t norm_shape[] = {128U};
+  const uint64_t value_heads =
+      descriptor->z.shape[1] / SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  if ((value_heads != 16U && value_heads != 32U) ||
+      descriptor->z.shape[1] % SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_SHAPE_MISMATCH,
+        "linear attention output width is not a reviewed value-head layout");
+  }
+  const uint64_t qkv_width =
+      (2U * SLLM_HIP_LINEAR_ATTENTION_QK_HEADS + value_heads) *
+      SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  const uint64_t output_width =
+      value_heads * SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  const uint64_t qkv_shape[] = {token_count, qkv_width};
+  const uint64_t output_shape[] = {token_count, output_width};
+  const uint64_t scalar_shape[] = {token_count, value_heads};
+  const uint64_t conv_shape[] = {qkv_width, 1U,
+                                 SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE};
+  const uint64_t head_scalar_shape[] = {value_heads};
+  const uint64_t norm_shape[] = {SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM};
   struct Validation final {
     const sllm_tensor_binding_t *binding;
     uint32_t dtype;
@@ -273,6 +298,12 @@ sllm_status_t validate_and_copy_descriptor(
   metadata->token_count = token_count;
   metadata->start_position = descriptor->start_position;
   metadata->expected_length = descriptor->expected_length;
+  metadata->qk_heads = SLLM_HIP_LINEAR_ATTENTION_QK_HEADS;
+  metadata->value_heads = static_cast<uint32_t>(value_heads);
+  metadata->head_dim = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  metadata->conv_kernel_size = SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE;
+  metadata->qkv_width = static_cast<uint32_t>(qkv_width);
+  metadata->output_width = static_cast<uint32_t>(output_width);
   return SLLM_STATUS_OK;
 }
 

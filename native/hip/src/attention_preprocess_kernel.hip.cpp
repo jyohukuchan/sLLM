@@ -73,12 +73,11 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
     const uint16_t *const packed_q_gate, const uint16_t *const k,
     const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
     const int32_t *const positions, uint16_t *const q_output,
-    uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m) {
+    uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+    const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim) {
   if (threadIdx.x != 0U) {
     return;
   }
-  constexpr uint32_t q_heads = 16U;
-  constexpr uint32_t k_heads = 4U;
   const uint64_t q_block_count = static_cast<uint64_t>(m) * q_heads;
   const uint64_t block = static_cast<uint64_t>(blockIdx.x);
   uint64_t row = 0U;
@@ -95,23 +94,23 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
   }
   const int32_t position = positions[row];
   if (is_q) {
-    const uint64_t input_offset =
-        row * 8192U + static_cast<uint64_t>(head) * 512U;
+    const uint64_t input_offset = row * q_heads * head_dim * 2U +
+                                  static_cast<uint64_t>(head) * head_dim * 2U;
     const uint64_t output_offset =
-        row * 4096U + static_cast<uint64_t>(head) * 256U;
-    const uint64_t scale_offset = static_cast<uint64_t>(head) * 256U;
+        row * q_heads * head_dim + static_cast<uint64_t>(head) * head_dim;
+    const uint64_t scale_offset = static_cast<uint64_t>(head) * head_dim;
     process_head(packed_q_gate + input_offset, q_raw_scale + scale_offset,
                  q_output + output_offset, position);
     for (uint32_t dim = 0U; dim != 256U; ++dim) {
       gate_output[output_offset + dim] =
-          packed_q_gate[input_offset + 256U + dim];
+          packed_q_gate[input_offset + head_dim + dim];
     }
   } else {
     const uint64_t input_offset =
-        row * 1024U + static_cast<uint64_t>(head) * 256U;
+        row * k_heads * head_dim + static_cast<uint64_t>(head) * head_dim;
     const uint64_t output_offset =
-        row * 1024U + static_cast<uint64_t>(head) * 256U;
-    const uint64_t scale_offset = static_cast<uint64_t>(head) * 256U;
+        row * k_heads * head_dim + static_cast<uint64_t>(head) * head_dim;
+    const uint64_t scale_offset = static_cast<uint64_t>(head) * head_dim;
     process_head(k + input_offset, k_raw_scale + scale_offset,
                  k_output + output_offset, position);
   }
@@ -124,14 +123,16 @@ hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
                   const uint16_t *const k_raw_scale,
                   const int32_t *const positions, uint16_t *const q_output,
                   uint16_t *const gate_output, uint16_t *const k_output,
-                  const uint32_t m, const hipStream_t stream) noexcept {
-  const uint32_t block_count = m * (16U + 4U);
+                  const uint32_t m, const uint32_t q_heads,
+                  const uint32_t k_heads, const uint32_t head_dim,
+                  const hipStream_t stream) noexcept {
+  const uint32_t block_count = m * (q_heads + k_heads);
   const dim3 grid(block_count, 1U, 1U);
   const dim3 block(1U, 1U, 1U);
   hipLaunchKernelGGL(sllm_attention_preprocess_headwise_norm_rope_v1, grid,
                      block, 0U, stream, packed_q_gate, k, q_raw_scale,
-                     k_raw_scale, positions, q_output, gate_output, k_output,
-                     m);
+                     k_raw_scale, positions, q_output, gate_output, k_output, m,
+                     q_heads, k_heads, head_dim);
   return hipGetLastError();
 }
 

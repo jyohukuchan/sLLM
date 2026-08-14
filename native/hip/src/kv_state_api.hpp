@@ -13,6 +13,8 @@ struct TensorMetadata final {
   uint64_t payload_bytes = 0U;
   uint64_t end_offset = 0U;
   uint64_t token_count = 0U;
+  uint32_t head_count = 0U;
+  uint32_t head_dim = 0U;
 };
 
 struct AppendMetadata final {

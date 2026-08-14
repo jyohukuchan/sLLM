@@ -83,7 +83,7 @@
       },
       "status": 400,
       "code": "unsupported_parameter",
-      "param": "messages"
+      "param": "messages[0].role"
     },
     {
       "id": "multipart_content_rejected",
@@ -93,7 +93,7 @@
       },
       "status": 400,
       "code": "unsupported_parameter",
-      "param": "messages"
+      "param": "messages[0].content"
     },
     {
       "id": "n_must_be_one",
@@ -103,7 +103,7 @@
         "n": 2
       },
       "status": 400,
-      "code": "invalid_value",
+      "code": "unsupported_parameter",
       "param": "n"
     },
     {

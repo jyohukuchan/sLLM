@@ -224,11 +224,13 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
         "elementwise operands must have exactly equal layouts");
   }
   if (descriptor->operation == SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL &&
-      (metadata->input0.rank != 3U || metadata->input0.shape[1] != 16U ||
+      (metadata->input0.rank != 3U ||
+       (metadata->input0.shape[1] != 8U && metadata->input0.shape[1] != 16U) ||
        metadata->input0.shape[2] != 256U)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "sigmoid multiply requires contiguous BF16 [M,16,256] operands");
+        "sigmoid multiply requires a reviewed contiguous BF16 [M,H,256] "
+        "layout");
   }
   const auto overlaps = [](const sllm_tensor_binding_t &left_binding,
                            const TensorMetadata &left,

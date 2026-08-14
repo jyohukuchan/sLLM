@@ -1,0 +1,86 @@
+{
+  "$schema": "https://sllm.dev/schema/phase6-a2-v1.schema.json",
+  "schema_version": "phase6-a2-v1",
+  "observed_at": "2026-08-13",
+  "openai_drift": {
+    "normative": {
+      "profile": "docs/api/openai-compatibility.md",
+      "openapi_commit": "117ce5680e4269f6656a4fd70d28f9755630d938",
+      "openapi_sha256": "e9cfcc3a325093a640af9e3b289dd4fa69f0c03e3a9af425fda47a5fe1238361"
+    },
+    "current_observation": {
+      "openapi_commit": "11854aef674352d3f9cd5c0a7038f079a7bbac06",
+      "openapi_sha256": "63028c4d3916a53d9252c8b665b9f220b57051c8030b7eb23603048c75691bb2",
+      "openapi_info_version": "2.3.0",
+      "source": "https://github.com/openai/openai-openapi"
+    },
+    "operations": ["GET /v1/models", "POST /v1/chat/completions"],
+    "reachable_schema_counts": {"GET /v1/models": 2, "POST /v1/chat/completions": 71},
+    "request_changes": [],
+    "response_changes": [],
+    "stream_changes": [],
+    "error_changes": [],
+    "other_changes": [
+      {"schema": "ModelIdsShared", "kind": "enum_added", "values": ["gpt-5.5"]}
+    ],
+    "supported_subset": [
+      "GET /v1/models",
+      "POST /v1/chat/completions",
+      "system/user/assistant string messages",
+      "temperature/top_p/max_completion_tokens/stop/presence_penalty/frequency_penalty",
+      "stream",
+      "n=1"
+    ],
+    "rejected_subset": [
+      "tools/function calling",
+      "multimodal content",
+      "developer/tool roles",
+      "logprobs",
+      "response_format",
+      "seed",
+      "n!=1"
+    ],
+    "normative_pin_changed": false
+  },
+  "llama_reuse": {
+    "upstream": "https://github.com/ggml-org/llama.cpp",
+    "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "license": "MIT",
+    "license_sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+    "copyright": "Copyright (c) 2023-2026 The ggml authors",
+    "units": [
+      {"path": "src/llama-sampler.cpp", "blob": "a9cb6bee5fd78728e5c94d5d1d008c3022abf330", "sha256": "ff421839a5fb33d781dff2125e28aef7503cd1e98220b0813e40d159839be93d", "reuse_mode": "ported", "scope": "temperature, top-p, presence/frequency penalty behavior", "planned_local": "crates/sllm-core/src/sampling.rs"},
+      {"path": "src/llama-sampler.h", "blob": "b9bfc20d251738289b6c8357c38a0a04178b8b8c", "sha256": "668d1a37d305fb81dece86405d49101e86dab6d7041f294c4d7688d59104c930", "reuse_mode": "ported", "scope": "sampler contract needed by the selected operations", "planned_local": "crates/sllm-core/src/sampling.rs"},
+      {"path": "tests/test-sampling.cpp", "blob": "2aecff90e7bb4b8c09e32ae3dab24d41ca2138f0", "sha256": "f6ef72cf70e2ead3384893c68ff167bf5292f6590273bce14f2933d50f454d74", "reuse_mode": "adapted", "scope": "selected tiny-logit and boundary cases", "planned_local": "crates/sllm-core/tests/sampling_contract.rs"},
+      {"path": "tools/server/tests/unit/test_chat_completion.py", "blob": "0258b539ed870a7ed90ff4acc6bbd5ee233286aa", "sha256": "32199bdf961bf3227667b1763456f3b981401cc67024be94ee986a92573f9622", "reuse_mode": "adapted", "scope": "profile-v1 request, response, usage, and finish-reason cases", "planned_local": "crates/sllm-server/tests/openai_contract.rs"},
+      {"path": "tools/server/tests/unit/test_stream.py", "blob": "a1ef55567bc7e1f830b46b8624b8f8a5a77b6d1e", "sha256": "8156d07e0e0886dbe790eb90b1aed8870c25b0b2e3ed90b769870c04c4617002", "reuse_mode": "adapted", "scope": "profile-v1 chunk ordering, terminator, and disconnect cases", "planned_local": "crates/sllm-server/tests/stream_contract.rs"},
+      {"path": "tools/server/tests/unit/test_security.py", "blob": "ac0544575bd267a35b5551107529a9c1d9eb265c", "sha256": "3a3d1c1355a85ea025edafca93c5eda4d2a653000db99414d591209b152f4a34", "reuse_mode": "adapted", "scope": "applicable body, path, and header negative cases", "planned_local": "crates/sllm-server/tests/security_contract.rs"},
+      {"path": "tools/server/tests/utils.py", "blob": "ae56bc70a15aa90b5dfe2810c7cc93b9f810e9bc", "sha256": "c5930da153906283d3a5cd9bbd53160afbab5008316efcc242c5316820e7fed8", "reuse_mode": "facts-only", "scope": "HTTP/SSE harness responsibilities only", "planned_local": null}
+    ],
+    "actual_import_commit": null,
+    "release_actions": ["source headers", "THIRD_PARTY_NOTICES.md", "imported local SHA-256", "modification record", "immutable import commit"]
+  },
+  "facts_only_readers": [
+    {"engine": "vLLM", "commit": "568afb3a13806beb53bb2e6bd518269357b237c0", "paths": ["vllm/entrypoints/openai/chat_completion/protocol.py", "vllm/entrypoints/openai/chat_completion/serving.py", "vllm/entrypoints/openai/chat_completion/api_router.py", "vllm/entrypoints/openai/models/protocol.py", "vllm/entrypoints/openai/models/serving.py", "vllm/entrypoints/openai/engine/protocol.py"]},
+    {"engine": "SGLang", "commit": "fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1", "paths": ["python/sglang/srt/entrypoints/openai/protocol.py", "python/sglang/srt/entrypoints/openai/serving_base.py", "python/sglang/srt/entrypoints/openai/serving_chat.py", "python/sglang/srt/entrypoints/openai/sse_utils.py", "python/sglang/srt/entrypoints/openai/usage_processor.py"]},
+    {"engine": "TensorRT-LLM", "commit": "376f7e1bd8ed543f75014309e3fd4b237e9b0e73", "paths": ["tensorrt_llm/serve/openai_protocol.py", "tensorrt_llm/serve/openai_server.py", "tensorrt_llm/serve/openai_service.py", "tensorrt_llm/serve/postprocess_handlers.py"]},
+    {"engine": "LMDeploy", "commit": "f4b8140ba19cd823c541241cbb113cc32f854e6a", "paths": ["lmdeploy/serve/openai/protocol.py", "lmdeploy/serve/openai/api_server.py", "lmdeploy/serve/openai/serving_chat_completion.py", "lmdeploy/serve/openai/utils.py"]}
+  ],
+  "implementation_acceptance_cases": [
+    "validate before generation",
+    "stream and non-stream share normalized generation results",
+    "first role delta, content deltas, final finish reason, exact [DONE]",
+    "prompt/completion/total usage is centralized",
+    "disconnect aborts a request exactly once",
+    "pre-header JSON errors differ from post-header terminal stream errors",
+    "bounded queue and bounded stream channel apply backpressure",
+    "unknown fields and unsupported profile fields fail closed"
+  ],
+  "dependency_policy": {
+    "path": "ci/dependencies/rust-workspace-v1.json",
+    "schema_version": "rust-dependency-policy-v1",
+    "workspace_package": "workspace:sllm-server@0.1.0",
+    "counts": {"packages": 132, "registry_packages": 126, "workspace_packages": 6, "edges": 309},
+    "offline_validator": "ci/tools/validate_rust_dependencies.py"
+  }
+}

@@ -1,0 +1,533 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/engine-performance-aggregate-v1.schema.json",
+  "title": "sLLM direct engine performance aggregate v1",
+  "description": "The aggregate is valid only when every input manifest satisfies the direct-v1 build-identity and pre/during/post evidence contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "benchmark_schema_version",
+    "state",
+    "claims",
+    "matrix",
+    "expected_rows",
+    "rows",
+    "identity",
+    "counts",
+    "graph_csv"
+  ],
+  "properties": {
+    "benchmark_schema_version": {
+      "const": "engine-performance-aggregate-v1"
+    },
+    "state": {
+      "const": "PASS"
+    },
+    "claims": {
+      "$ref": "#/$defs/claims"
+    },
+    "matrix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "matrix_id",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "matrix_id": {
+          "const": "engine-performance-direct-v1"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "expected_rows": {
+      "type": "array",
+      "minItems": 22,
+      "maxItems": 22,
+      "items": {
+        "$ref": "#/$defs/row_id"
+      }
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 22,
+      "maxItems": 22,
+      "items": {
+        "$ref": "#/$defs/row"
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "build_identity_by_target",
+        "binary_sha256_by_target",
+        "model_lock_sha256_by_model",
+        "model_lock_fingerprint_by_model",
+        "model_cache_sha256_by_model"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/source_identity"
+        },
+        "build_identity_by_target": {
+          "$ref": "#/$defs/target_build_identities"
+        },
+        "binary_sha256_by_target": {
+          "$ref": "#/$defs/target_digests"
+        },
+        "model_lock_sha256_by_model": {
+          "$ref": "#/$defs/model_digests"
+        },
+        "model_lock_fingerprint_by_model": {
+          "$ref": "#/$defs/model_fingerprints"
+        },
+        "model_cache_sha256_by_model": {
+          "$ref": "#/$defs/model_digests"
+        }
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_rows",
+        "collected_rows",
+        "passed_rows",
+        "expected_samples",
+        "collected_samples"
+      ],
+      "properties": {
+        "expected_rows": {
+          "const": 22
+        },
+        "collected_rows": {
+          "const": 22
+        },
+        "passed_rows": {
+          "const": 22
+        },
+        "expected_samples": {
+          "const": 220
+        },
+        "collected_samples": {
+          "const": 220
+        }
+      }
+    },
+    "graph_csv": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes",
+        "row_count"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "row_count": {
+          "const": 176
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "sha40": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "build_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cargo_command", "cargo_profile", "rust_toolchain", "ROCM_PATH", "HIP_PATH",
+        "SLLM_HIP_COMPILER", "CMAKE_HIP_ARCHITECTURES", "SLLM_HIP_CODEGEN_FEATURES",
+        "SLLM_ENABLE_HIP_RUNTIME", "SLLM_ENABLE_PUBLIC_HIP_RUNTIME", "SLLM_ENABLE_HIP_COMPILE_PROBE"
+      ],
+      "properties": {
+        "cargo_command": { "const": "cargo +1.97.1 build --locked --offline --release -p sllm-cli" },
+        "cargo_profile": { "const": "release" },
+        "rust_toolchain": { "const": "1.97.1" },
+        "ROCM_PATH": { "const": "/opt/rocm" },
+        "HIP_PATH": { "const": "/opt/rocm" },
+        "SLLM_HIP_COMPILER": { "const": "/opt/rocm/bin/amdclang++" },
+        "CMAKE_HIP_ARCHITECTURES": { "enum": ["gfx1030", "gfx1201"] },
+        "SLLM_HIP_CODEGEN_FEATURES": { "const": "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0" },
+        "SLLM_ENABLE_HIP_RUNTIME": { "const": "1" },
+        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": { "const": "1" },
+        "SLLM_ENABLE_HIP_COMPILE_PROBE": { "const": "0" }
+      }
+    },
+    "source_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_root", "source_base_revision", "semantic_tree"],
+      "properties": {
+        "source_root": { "$ref": "#/$defs/path" },
+        "source_base_revision": { "$ref": "#/$defs/sha40" },
+        "semantic_tree": { "$ref": "#/$defs/sha40" }
+      }
+    },
+    "aggregate_build_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "build_manifest_sha256", "build_inputs_digest", "build_configuration", "target",
+        "backend", "rocm_release", "rocm_root", "binary_sha256"
+      ],
+      "properties": {
+        "schema_version": { "const": "sllm-build-identity-v2" },
+        "build_manifest_sha256": { "$ref": "#/$defs/sha256" },
+        "build_inputs_digest": { "$ref": "#/$defs/fingerprint" },
+        "build_configuration": { "$ref": "#/$defs/build_configuration" },
+        "target": { "enum": ["gfx1030", "gfx1201"] },
+        "backend": { "const": "hip" },
+        "rocm_release": { "const": "7.14.0" },
+        "rocm_root": { "const": "/opt/rocm/core-7.14" },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "target_build_identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gfx1030", "gfx1201"],
+      "properties": {
+        "gfx1030": {
+          "allOf": [
+            { "$ref": "#/$defs/aggregate_build_identity" },
+            { "properties": { "target": { "const": "gfx1030" } } }
+          ]
+        },
+        "gfx1201": {
+          "allOf": [
+            { "$ref": "#/$defs/aggregate_build_identity" },
+            { "properties": { "target": { "const": "gfx1201" } } }
+          ]
+        }
+      }
+    },
+    "row_id": {
+      "type": "string",
+      "pattern": "^engine-performance-direct-(2b|4b|9b)-gfx(1030|1201)-[a-z0-9-]+$"
+    },
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "baseline_only",
+        "optimized",
+        "faster",
+        "hard_gate"
+      ],
+      "properties": {
+        "baseline_only": {
+          "const": true
+        },
+        "optimized": {
+          "const": false
+        },
+        "faster": {
+          "const": false
+        },
+        "hard_gate": {
+          "const": false
+        }
+      }
+    },
+    "target_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "gfx1030",
+        "gfx1201"
+      ],
+      "properties": {
+        "gfx1030": {
+          "$ref": "#/$defs/sha256"
+        },
+        "gfx1201": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "model_digests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "2B",
+        "4B",
+        "9B"
+      ],
+      "properties": {
+        "2B": {
+          "$ref": "#/$defs/sha256"
+        },
+        "4B": {
+          "$ref": "#/$defs/sha256"
+        },
+        "9B": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "model_fingerprints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "2B",
+        "4B",
+        "9B"
+      ],
+      "properties": {
+        "2B": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "4B": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "9B": {
+          "$ref": "#/$defs/fingerprint"
+        }
+      }
+    },
+    "stat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "median",
+        "p10",
+        "p90",
+        "mad",
+        "min",
+        "max",
+        "count"
+      ],
+      "properties": {
+        "median": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p10": {
+          "type": "number",
+          "minimum": 0
+        },
+        "p90": {
+          "type": "number",
+          "minimum": 0
+        },
+        "mad": {
+          "type": "number",
+          "minimum": 0
+        },
+        "min": {
+          "type": "number",
+          "minimum": 0
+        },
+        "max": {
+          "type": "number",
+          "minimum": 0
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      }
+    },
+    "vram_stat": {
+      "allOf": [
+        { "$ref": "#/$defs/stat" },
+        {
+          "type": "object",
+          "properties": { "count": { "const": 1 } }
+        }
+      ]
+    },
+    "timing_stat": {
+      "allOf": [
+        { "$ref": "#/$defs/stat" },
+        {
+          "type": "object",
+          "properties": { "count": { "const": 10 } }
+        }
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ttft_ns",
+        "prefill_ns",
+        "tpot_ns",
+        "decode_token_per_s",
+        "prefill_token_per_s",
+        "e2e_ns",
+        "resident_vram_bytes",
+        "peak_vram_bytes"
+      ],
+      "properties": {
+        "ttft_ns": {
+          "$ref": "#/$defs/timing_stat"
+        },
+        "prefill_ns": {
+          "$ref": "#/$defs/timing_stat"
+        },
+        "tpot_ns": {
+          "$ref": "#/$defs/stat"
+        },
+        "decode_token_per_s": {
+          "$ref": "#/$defs/stat"
+        },
+        "prefill_token_per_s": {
+          "$ref": "#/$defs/timing_stat"
+        },
+        "e2e_ns": {
+          "$ref": "#/$defs/timing_stat"
+        },
+        "resident_vram_bytes": {
+          "$ref": "#/$defs/vram_stat"
+        },
+        "peak_vram_bytes": {
+          "$ref": "#/$defs/vram_stat"
+        }
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order",
+        "row_id",
+        "model_size",
+        "case_id",
+        "input_token_sequence",
+        "input_token_ids",
+        "target",
+        "input_tokens",
+        "requested_output_tokens",
+        "timeout_seconds",
+        "manifest_sha256",
+        "raw_result_sha256",
+        "binary_sha256",
+        "model_lock_sha256",
+        "model_lock_fingerprint",
+        "warmup_count",
+        "sample_count",
+        "metrics"
+      ],
+      "properties": {
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 21
+        },
+        "row_id": {
+          "$ref": "#/$defs/row_id"
+        },
+        "model_size": {
+          "enum": [
+            "2B",
+            "4B",
+            "9B"
+          ]
+        },
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "input_token_sequence": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "input_token_ids": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1024,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 248319
+          }
+        },
+        "target": {
+          "enum": [
+            "gfx1030",
+            "gfx1201"
+          ]
+        },
+        "input_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "requested_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "raw_result_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "binary_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "model_lock_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "model_lock_fingerprint": {
+          "$ref": "#/$defs/fingerprint"
+        },
+        "warmup_count": {
+          "const": 3
+        },
+        "sample_count": {
+          "const": 10
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        }
+      }
+    }
+  }
+}

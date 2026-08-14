@@ -399,6 +399,8 @@ int main() {
             << " reserved0=" << offsetof(sllm_device_info_t, reserved0)
             << " name=" << offsetof(sllm_device_info_t, name)
             << " gcn_arch_name=" << offsetof(sllm_device_info_t, gcn_arch_name)
+            << " available_memory_bytes="
+            << offsetof(sllm_device_info_t, available_memory_bytes)
             << " reserved=" << offsetof(sllm_device_info_t, reserved) << '\n';
   std::cout
       << "layout sllm_context_create_info_t size="
@@ -763,21 +765,21 @@ int main() {
       << offsetof(sllm_attention_preprocess_dispatch_info_t, gcn_arch_name)
       << " reserved="
       << offsetof(sllm_attention_preprocess_dispatch_info_t, reserved) << '\n';
-  std::cout << "layout sllm_kv_state_create_info_t size="
-            << sizeof(sllm_kv_state_create_info_t)
-            << " align=" << alignof(sllm_kv_state_create_info_t)
-            << " struct_size="
-            << offsetof(sllm_kv_state_create_info_t, struct_size)
-            << " abi_version="
-            << offsetof(sllm_kv_state_create_info_t, abi_version)
-            << " session_id="
-            << offsetof(sllm_kv_state_create_info_t, session_id)
-            << " layer_id=" << offsetof(sllm_kv_state_create_info_t, layer_id)
-            << " flags=" << offsetof(sllm_kv_state_create_info_t, flags)
-            << " capacity_tokens="
-            << offsetof(sllm_kv_state_create_info_t, capacity_tokens)
-            << " reserved=" << offsetof(sllm_kv_state_create_info_t, reserved)
-            << '\n';
+  std::cout
+      << "layout sllm_kv_state_create_info_t size="
+      << sizeof(sllm_kv_state_create_info_t)
+      << " align=" << alignof(sllm_kv_state_create_info_t)
+      << " struct_size=" << offsetof(sllm_kv_state_create_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_kv_state_create_info_t, abi_version)
+      << " session_id=" << offsetof(sllm_kv_state_create_info_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_state_create_info_t, layer_id)
+      << " flags=" << offsetof(sllm_kv_state_create_info_t, flags)
+      << " capacity_tokens="
+      << offsetof(sllm_kv_state_create_info_t, capacity_tokens)
+      << " head_count=" << offsetof(sllm_kv_state_create_info_t, head_count)
+      << " head_dim=" << offsetof(sllm_kv_state_create_info_t, head_dim)
+      << " memory_kind=" << offsetof(sllm_kv_state_create_info_t, memory_kind)
+      << " layout=" << offsetof(sllm_kv_state_create_info_t, layout) << '\n';
   std::cout
       << "layout sllm_kv_view_info_t size=" << sizeof(sllm_kv_view_info_t)
       << " align=" << alignof(sllm_kv_view_info_t)
@@ -787,9 +789,18 @@ int main() {
       << " session_id=" << offsetof(sllm_kv_view_info_t, session_id)
       << " layer_id=" << offsetof(sllm_kv_view_info_t, layer_id)
       << " dtype=" << offsetof(sllm_kv_view_info_t, dtype)
+      << " memory_kind=" << offsetof(sllm_kv_view_info_t, memory_kind)
+      << " layout=" << offsetof(sllm_kv_view_info_t, layout)
       << " capacity_tokens=" << offsetof(sllm_kv_view_info_t, capacity_tokens)
       << " observed_length=" << offsetof(sllm_kv_view_info_t, observed_length)
       << " generation=" << offsetof(sllm_kv_view_info_t, generation)
+      << " physical_page_bytes="
+      << offsetof(sllm_kv_view_info_t, physical_page_bytes)
+      << " tokens_per_page=" << offsetof(sllm_kv_view_info_t, tokens_per_page)
+      << " mapped_token_capacity="
+      << offsetof(sllm_kv_view_info_t, mapped_token_capacity)
+      << " committed_bytes_per_plane="
+      << offsetof(sllm_kv_view_info_t, committed_bytes_per_plane)
       << " context_identity=" << offsetof(sllm_kv_view_info_t, context_identity)
       << " state_identity=" << offsetof(sllm_kv_view_info_t, state_identity)
       << " k_stride_elements="
@@ -887,25 +898,30 @@ int main() {
       << offsetof(sllm_causal_attention_dispatch_info_t, gcn_arch_name)
       << " reserved="
       << offsetof(sllm_causal_attention_dispatch_info_t, reserved) << '\n';
-  std::cout << "layout sllm_linear_attention_state_create_info_t size="
-            << sizeof(sllm_linear_attention_state_create_info_t)
-            << " align=" << alignof(sllm_linear_attention_state_create_info_t)
-            << " struct_size="
-            << offsetof(sllm_linear_attention_state_create_info_t, struct_size)
-            << " abi_version="
-            << offsetof(sllm_linear_attention_state_create_info_t, abi_version)
-            << " session_id="
-            << offsetof(sllm_linear_attention_state_create_info_t, session_id)
-            << " layer_id="
-            << offsetof(sllm_linear_attention_state_create_info_t, layer_id)
-            << " flags="
-            << offsetof(sllm_linear_attention_state_create_info_t, flags)
-            << " capacity_tokens="
-            << offsetof(sllm_linear_attention_state_create_info_t,
-                        capacity_tokens)
-            << " reserved="
-            << offsetof(sllm_linear_attention_state_create_info_t, reserved)
-            << '\n';
+  std::cout
+      << "layout sllm_linear_attention_state_create_info_t size="
+      << sizeof(sllm_linear_attention_state_create_info_t)
+      << " align=" << alignof(sllm_linear_attention_state_create_info_t)
+      << " struct_size="
+      << offsetof(sllm_linear_attention_state_create_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_linear_attention_state_create_info_t, abi_version)
+      << " session_id="
+      << offsetof(sllm_linear_attention_state_create_info_t, session_id)
+      << " layer_id="
+      << offsetof(sllm_linear_attention_state_create_info_t, layer_id)
+      << " flags=" << offsetof(sllm_linear_attention_state_create_info_t, flags)
+      << " capacity_tokens="
+      << offsetof(sllm_linear_attention_state_create_info_t, capacity_tokens)
+      << " qk_heads="
+      << offsetof(sllm_linear_attention_state_create_info_t, qk_heads)
+      << " value_heads="
+      << offsetof(sllm_linear_attention_state_create_info_t, value_heads)
+      << " head_dim="
+      << offsetof(sllm_linear_attention_state_create_info_t, head_dim)
+      << " conv_kernel_size="
+      << offsetof(sllm_linear_attention_state_create_info_t, conv_kernel_size)
+      << '\n';
   std::cout
       << "layout sllm_linear_attention_view_info_t size="
       << sizeof(sllm_linear_attention_view_info_t)

@@ -15,7 +15,9 @@ constexpr const char *kDeviceSymbol =
 hipError_t launch(const uint16_t *query, const uint16_t *key,
                   const uint16_t *value, uint16_t *output, uint32_t query_count,
                   uint64_t capacity_tokens, uint64_t start_position,
-                  uint64_t committed_kv_length, hipStream_t stream) noexcept;
+                  uint64_t committed_kv_length, uint32_t q_heads,
+                  uint32_t kv_heads, uint32_t head_dim,
+                  hipStream_t stream) noexcept;
 
 } // namespace sllm_causal_attention_kernel
 

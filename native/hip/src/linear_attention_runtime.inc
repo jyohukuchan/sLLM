@@ -132,11 +132,11 @@ void fill_linear_attention_view_info(
   info->generation = state->generation;
   info->context_identity = state->context_identity;
   info->state_identity = state->state_identity;
-  info->conv_state_shape[0] = SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY;
-  info->conv_state_shape[1] = SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH;
-  info->recurrent_state_shape[0] = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
-  info->recurrent_state_shape[1] = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
-  info->recurrent_state_shape[2] = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  info->conv_state_shape[0] = state->conv_kernel_size - 1U;
+  info->conv_state_shape[1] = state->qkv_width;
+  info->recurrent_state_shape[0] = state->value_heads;
+  info->recurrent_state_shape[1] = state->head_dim;
+  info->recurrent_state_shape[2] = state->head_dim;
 }
 
 void fill_linear_attention_dispatch_info(
@@ -159,18 +159,18 @@ void fill_linear_attention_dispatch_info(
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
   info->workgroup_size_x = SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
   const uint64_t conv_elements =
-      (metadata.token_count + SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY) *
-      SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH;
+      (metadata.token_count + metadata.conv_kernel_size - 1U) *
+      metadata.qkv_width;
   info->conv_grid_size_x = static_cast<uint32_t>(
       (conv_elements + SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE - 1U) /
       SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
-  info->recurrent_grid_size_x = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
+  info->recurrent_grid_size_x = metadata.value_heads;
   info->token_count = metadata.token_count;
   info->start_position = metadata.start_position;
   info->expected_length = metadata.expected_length;
-  info->qk_heads = SLLM_HIP_LINEAR_ATTENTION_QK_HEADS;
-  info->value_heads = SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
-  info->head_dim = SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
+  info->qk_heads = metadata.qk_heads;
+  info->value_heads = metadata.value_heads;
+  info->head_dim = metadata.head_dim;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
@@ -271,13 +271,26 @@ extern "C" sllm_status_t sllm_linear_attention_state_create(
       return device_status;
     }
 
-    constexpr std::size_t conv_bytes =
-        static_cast<std::size_t>(SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY) *
-        SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH * sizeof(uint16_t);
-    constexpr std::size_t recurrent_bytes =
-        static_cast<std::size_t>(SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS) *
-        SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM *
-        SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM * sizeof(float);
+    const uint32_t qk_heads = info->qk_heads == 0U
+                                  ? SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
+                                  : info->qk_heads;
+    const uint32_t value_heads = info->value_heads == 0U
+                                     ? SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+                                     : info->value_heads;
+    const uint32_t head_dim = info->head_dim == 0U
+                                  ? SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+                                  : info->head_dim;
+    const uint32_t conv_kernel_size =
+        info->conv_kernel_size == 0U
+            ? SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE
+            : info->conv_kernel_size;
+    const uint32_t qkv_width = (2U * qk_heads + value_heads) * head_dim;
+    const std::size_t conv_bytes =
+        static_cast<std::size_t>(conv_kernel_size - 1U) * qkv_width *
+        sizeof(uint16_t);
+    const std::size_t recurrent_bytes =
+        static_cast<std::size_t>(value_heads) * head_dim * head_dim *
+        sizeof(float);
     void *allocations[4] = {};
     for (std::size_t index = 0U; index != 4U; ++index) {
       const std::size_t bytes = index < 2U ? conv_bytes : recurrent_bytes;
@@ -320,6 +333,7 @@ extern "C" sllm_status_t sllm_linear_attention_state_create(
     try {
       candidate = std::make_unique<LinearAttentionState>(
           context, info->session_id, info->layer_id, info->capacity_tokens,
+          qk_heads, value_heads, head_dim, conv_kernel_size,
           std::array<void *, 2>{allocations[0], allocations[1]},
           std::array<void *, 2>{allocations[2], allocations[3]}, context_token);
     } catch (...) {
@@ -631,6 +645,14 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             "linear attention range does not start at the committed state "
             "length");
       }
+      if (metadata.qk_heads != state->qk_heads ||
+          metadata.value_heads != state->value_heads ||
+          metadata.head_dim != state->head_dim ||
+          metadata.conv_kernel_size != state->conv_kernel_size) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_SHAPE_MISMATCH,
+            "linear attention tensor layout differs from the state layout");
+      }
       if (context->next_dispatch_id == 0U) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INTERNAL_ERROR,
@@ -665,7 +687,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
       return device_status;
     }
     const uint64_t required_scratch = metadata.token_count *
-                                      SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH *
+                                      metadata.qkv_width *
                                       sizeof(uint16_t);
     if (required_scratch > state->scratch_bytes) {
       void *new_scratch = nullptr;
@@ -791,7 +813,8 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             static_cast<const uint16_t *>(state->conv_state[active_slot]),
             static_cast<uint16_t *>(state->scratch),
             static_cast<uint16_t *>(state->conv_state[inactive_slot]),
-            static_cast<uint32_t>(metadata.token_count), queue->stream);
+            static_cast<uint32_t>(metadata.token_count), metadata.qkv_width,
+            metadata.conv_kernel_size, queue->stream);
     if (conv_status != hipSuccess) {
       return cleanup_failed_submission(candidate, token, conv_status,
                                        "linear attention convolution launch",
@@ -803,7 +826,9 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             a_log, dt_bias, norm_weight,
             static_cast<const float *>(state->recurrent_state[active_slot]),
             static_cast<float *>(state->recurrent_state[inactive_slot]), output,
-            static_cast<uint32_t>(metadata.token_count), queue->stream);
+            static_cast<uint32_t>(metadata.token_count), metadata.qk_heads,
+            metadata.value_heads, metadata.head_dim, metadata.qkv_width,
+            metadata.output_width, queue->stream);
     if (recurrent_status != hipSuccess) {
       return cleanup_failed_submission(candidate, token, recurrent_status,
                                        "linear attention recurrent launch",

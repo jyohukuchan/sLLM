@@ -2754,6 +2754,8 @@ bool create_kv_state(const sllm_context_t *const context,
   info.session_id = 0x1234U;
   info.layer_id = 7U;
   info.capacity_tokens = capacity;
+  info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
   Error error;
   return expect_status(sllm_kv_state_create(context, &info, state, &error.sink),
                        SLLM_STATUS_OK, "sllm_kv_state_create", error);
@@ -2832,10 +2834,15 @@ bool kv_query(const sllm_kv_state_t *const state, uint64_t length,
          info.dtype == SLLM_TENSOR_DTYPE_F16 &&
          info.encoding == SLLM_TENSOR_ENCODING_UNQUANTIZED &&
          info.head_count == 4U && info.head_dim == 256U &&
+         info.memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+         info.layout == SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR &&
          info.observed_length == length && info.generation == generation &&
-         info.k_stride_elements[0] == info.capacity_tokens * 256U &&
+         info.physical_page_bytes == 2U * 1024U * 1024U &&
+         info.tokens_per_page == 1024U &&
+         info.mapped_token_capacity >= length &&
+         info.k_stride_elements[0] == 4U * 256U &&
          info.k_stride_elements[1] == 256U && info.k_stride_elements[2] == 1U &&
-         info.v_stride_elements[0] == info.capacity_tokens * 256U &&
+         info.v_stride_elements[0] == 4U * 256U &&
          info.v_stride_elements[1] == 256U && info.v_stride_elements[2] == 1U &&
          info.context_identity != 0U && info.state_identity != 0U;
 }
@@ -3243,13 +3250,15 @@ bool kv_state_create_snapshot_contract() {
   invalid.abi_version = SLLM_HIP_ABI_VERSION;
   invalid.session_id = 1U;
   invalid.capacity_tokens = 17U;
-  invalid.reserved[0] = 1U;
+  invalid.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  invalid.layout = 99U;
   Error error;
   bool valid = expect_status(
                    sllm_kv_state_create(context, &invalid, &state, &error.sink),
-                   SLLM_STATUS_RESERVED_NONZERO, "KV reserved create", error) &&
+                   SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+                   "KV invalid layout create", error) &&
                state == nullptr;
-  invalid.reserved[0] = 0U;
+  invalid.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
   invalid.abi_version = SLLM_HIP_ABI_VERSION + 1U;
   valid = valid &&
           expect_status(
@@ -3295,7 +3304,7 @@ bool kv_evidence_readback_contract() {
   constexpr uint64_t capacity = 3U;
   constexpr std::size_t input_words = 4U * 256U;
   constexpr uint64_t input_bytes = input_words * sizeof(uint16_t);
-  constexpr uint64_t head_bytes = capacity * 256U * sizeof(uint16_t);
+  constexpr uint64_t head_bytes = 256U * sizeof(uint16_t);
   constexpr uint64_t plane_bytes = capacity * 4U * 256U * sizeof(uint16_t);
   sllm_context_t *context = nullptr;
   sllm_queue_t *queue = nullptr;
@@ -3346,7 +3355,8 @@ bool kv_evidence_readback_contract() {
                    output.size(), output.data());
   valid = valid &&
           expect_status(sllm_hip_kv_view_readback(&empty_request, &error.sink),
-                        SLLM_STATUS_OK, "KV evidence empty readback", error);
+                        SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+                        "KV evidence unmapped empty readback", error);
   auto wrong_kind = empty_request;
   wrong_kind.view = reinterpret_cast<const sllm_kv_view_t *>(state);
   valid = valid &&
@@ -3522,7 +3532,7 @@ bool kv_append_layout_and_transaction_contract() {
           info.fallback_allowed == 0U && info.fallback_used == 0U &&
           info.grid_size_x == 4U &&
           std::strcmp(info.kernel_symbol,
-                      "kv_state.bf16_to_f16_transpose.v1") == 0 &&
+                      "kv_state.bf16_to_f16_token_major.v2") == 0 &&
           query_completion(completion, SLLM_STATUS_OK) &&
           release_completion(&completion) && kv_query(state, 1U, 1U);
   std::vector<uint16_t> first_key_output(4U * capacity * 256U);
@@ -3533,9 +3543,7 @@ bool kv_append_layout_and_transaction_contract() {
           fake_hip::copy_kv_value_output(first_value_output.data(),
                                          first_value_output.size());
   for (std::size_t index = 0U; index != special_count; ++index) {
-    const std::size_t offset =
-        (index / 256U) * static_cast<std::size_t>(capacity) * 256U +
-        (index % 256U);
+    const std::size_t offset = index;
     if (first_key_output[offset] != special_f16[index] ||
         first_value_output[offset] != special_f16[index]) {
       valid = false;
@@ -3567,7 +3575,7 @@ bool kv_append_layout_and_transaction_contract() {
       for (uint64_t dimension = 0U; dimension != 256U; ++dimension) {
         const uint64_t source = row * 1024U + head * 256U + dimension;
         const uint64_t destination =
-            head * capacity * 256U + (1U + row) * 256U + dimension;
+            (1U + row) * 4U * 256U + head * 256U + dimension;
         if (key_output[destination] != f16_values[source % 4U] ||
             value_output[destination] != f16_values[(source + 1U) % 4U]) {
           valid = false;
@@ -3657,6 +3665,124 @@ bool kv_append_layout_and_transaction_contract() {
           expect_status(sllm_kv_state_release(&state, &error.sink),
                         SLLM_STATUS_OK, "KV layout state release", error) &&
           release_queue(&queue) && release_context(&context);
+  return valid;
+}
+
+bool kv_vattention_page_boundary_and_idempotent_cancel_contract() {
+  fake_hip::reset();
+  const std::size_t baseline_allocations = fake_hip::live_allocations();
+  constexpr uint64_t capacity = 1025U;
+  constexpr uint64_t page_bytes = 2U * 1024U * 1024U;
+  constexpr uint64_t row_bytes = 4U * 256U * sizeof(uint16_t);
+  const uint64_t input_bytes = 1023U * row_bytes;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_kv_state_t *state = nullptr;
+  sllm_buffer_t *key = nullptr;
+  sllm_buffer_t *value = nullptr;
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_kv_state(context, capacity, &state) ||
+      !create_buffer_sized(context, input_bytes, &key) ||
+      !create_buffer_sized(context, input_bytes, &value)) {
+    return false;
+  }
+  std::vector<uint16_t> words(1023U * 4U * 256U, 0x3f80U);
+  bool valid = upload_kv_words(queue, key, words) &&
+               upload_kv_words(queue, value, words);
+  Error error;
+  auto append = [&](const uint64_t tokens, const uint64_t position) {
+    auto descriptor = kv_append_descriptor(key, value, tokens, position);
+    auto info = kv_append_info();
+    sllm_completion_t *completion = nullptr;
+    return expect_status(sllm_kv_state_append(state, queue, &descriptor,
+                                              &completion, &info, &error.sink),
+                         SLLM_STATUS_OK, "vAttention boundary append", error) &&
+           completion != nullptr &&
+           query_completion(completion, SLLM_STATUS_OK) &&
+           release_completion(&completion);
+  };
+  auto growth_is = [&](const uint64_t length, const uint64_t mapped_tokens,
+                       const uint64_t committed) {
+    sllm_kv_view_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+    const bool queried =
+        expect_status(sllm_kv_state_query(state, &info, &error.sink),
+                      SLLM_STATUS_OK, "vAttention boundary query", error);
+    const bool matches = queried && info.observed_length == length &&
+                         info.physical_page_bytes == page_bytes &&
+                         info.tokens_per_page == 1024U &&
+                         info.mapped_token_capacity == mapped_tokens &&
+                         info.committed_bytes_per_plane == committed;
+    if (!matches) {
+      std::cerr << "vAttention growth mismatch length=" << info.observed_length
+                << " page=" << info.physical_page_bytes
+                << " tokens_per_page=" << info.tokens_per_page
+                << " mapped=" << info.mapped_token_capacity
+                << " committed=" << info.committed_bytes_per_plane << '\n';
+    }
+    return matches;
+  };
+  valid = valid && append(1023U, 0U) && growth_is(1023U, 1024U, page_bytes) &&
+          append(1U, 1023U) && growth_is(1024U, 1024U, page_bytes) &&
+          append(1U, 1024U) && growth_is(1025U, 1025U, 2U * page_bytes);
+  if (!valid) {
+    std::cerr << "vAttention B-1/B/B+1 append phase failed\n";
+  }
+  valid =
+      valid && release_buffer(&key) && release_buffer(&value) &&
+      expect_status(sllm_kv_state_release(&state, &error.sink), SLLM_STATUS_OK,
+                    "vAttention boundary state release", error) &&
+      state == nullptr &&
+      fake_hip::live_allocations() == baseline_allocations &&
+      release_queue(&queue) && release_context(&context);
+  if (!valid) {
+    std::cerr << "vAttention boundary cleanup phase failed live="
+              << fake_hip::live_allocations() << '\n';
+  }
+
+  sllm_context_t *cancel_context = nullptr;
+  sllm_queue_t *cancel_queue = nullptr;
+  sllm_kv_state_t *cancel_state = nullptr;
+  sllm_buffer_t *cancel_key = nullptr;
+  sllm_buffer_t *cancel_value = nullptr;
+  valid = valid && create_context(&cancel_context) &&
+          create_queue(cancel_context, &cancel_queue) &&
+          create_kv_state(cancel_context, capacity, &cancel_state) &&
+          create_buffer_sized(cancel_context, row_bytes, &cancel_key) &&
+          create_buffer_sized(cancel_context, row_bytes, &cancel_value);
+  std::vector<uint16_t> one_row(4U * 256U, 0x3f80U);
+  valid = valid && upload_kv_words(cancel_queue, cancel_key, one_row) &&
+          upload_kv_words(cancel_queue, cancel_value, one_row);
+  auto descriptor = kv_append_descriptor(cancel_key, cancel_value, 1U, 0U);
+  auto info = kv_append_info();
+  sllm_completion_t *completion = nullptr;
+  fake_hip::set_completion_pending(true);
+  valid = valid &&
+          expect_status(sllm_kv_state_append(cancel_state, cancel_queue,
+                                             &descriptor, &completion, &info,
+                                             &error.sink),
+                        SLLM_STATUS_OK, "vAttention cancel append", error) &&
+          expect_status(sllm_kv_state_append_cancel(cancel_state, completion,
+                                                    &error.sink),
+                        SLLM_STATUS_OK, "vAttention first cancel", error) &&
+          expect_status(sllm_kv_state_append_cancel(cancel_state, completion,
+                                                    &error.sink),
+                        SLLM_STATUS_OK, "vAttention idempotent cancel", error);
+  fake_hip::set_completion_pending(false);
+  valid = valid && query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion) && kv_query(cancel_state, 0U, 0U) &&
+          release_buffer(&cancel_key) && release_buffer(&cancel_value) &&
+          expect_status(sllm_kv_state_release(&cancel_state, &error.sink),
+                        SLLM_STATUS_OK, "vAttention canceled state release",
+                        error) &&
+          release_queue(&cancel_queue) && release_context(&cancel_context) &&
+          fake_hip::live_allocations() == baseline_allocations;
+  if (!valid) {
+    std::cerr << "vAttention idempotent cancel phase failed live="
+              << fake_hip::live_allocations() << '\n';
+  }
   return valid;
 }
 
@@ -4066,17 +4192,22 @@ int main() {
     std::cerr << "RMSNorm execute rank-flatten test failed\n";
     return 1;
   }
-  if (!kv_append_accounting_multiplicity_contract() ||
-      !causal_attention_numerical_gqa_and_lifetime_contract() ||
-      !linear_attention_transaction_and_lifetime_contract() ||
-      !kv_append_same_buffer_disjoint_lifecycle_contract() ||
-      !kv_state_create_snapshot_contract() ||
-      !kv_evidence_readback_contract() ||
-      !kv_append_layout_and_transaction_contract() ||
-      !kv_append_lifetime_alias_and_quarantine_contract()) {
-    std::cerr << "KV state public contract test failed\n";
-    return 1;
+#define SLLM_RUN_KV_CONTRACT(test_name)                                        \
+  if (!(test_name)()) {                                                        \
+    std::cerr << #test_name " failed\n";                                       \
+    return 1;                                                                  \
   }
+  SLLM_RUN_KV_CONTRACT(kv_append_accounting_multiplicity_contract)
+  SLLM_RUN_KV_CONTRACT(causal_attention_numerical_gqa_and_lifetime_contract)
+  SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
+  SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
+  SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)
+  SLLM_RUN_KV_CONTRACT(kv_evidence_readback_contract)
+  SLLM_RUN_KV_CONTRACT(kv_append_layout_and_transaction_contract)
+  SLLM_RUN_KV_CONTRACT(
+      kv_vattention_page_boundary_and_idempotent_cancel_contract)
+  SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
+#undef SLLM_RUN_KV_CONTRACT
   std::cout << "production public runtime host fault test: PASS\n";
   return 0;
 }

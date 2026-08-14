@@ -33,8 +33,8 @@ use crate::runtime::{
 
 const ERROR_CAPACITY: usize = 256;
 const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
-const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_transpose.v1";
-const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_transpose_v1";
+const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_token_major.v2";
+const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_token_major_v2";
 
 struct KvStateInner {
     raw: usize,
@@ -100,7 +100,10 @@ impl KvStateResource {
             layer_id: descriptor.layer_id(),
             flags: 0,
             capacity_tokens: descriptor.capacity(),
-            reserved: [0; 4],
+            head_count: descriptor.layout().heads() as u32,
+            head_dim: descriptor.layout().head_dim() as u32,
+            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS,
+            layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
@@ -169,11 +172,26 @@ impl KvStateResource {
         self.inner
             .last_generation
             .store(info.generation, Ordering::Release);
-        KvStateSnapshot::new(
+        let physical_memory = sllm_core::KvPhysicalMemorySnapshot::new(
+            self.inner.descriptor.capacity(),
+            info.observed_length,
+            info.physical_page_bytes,
+            info.tokens_per_page,
+            info.mapped_token_capacity,
+            info.committed_bytes_per_plane,
+        )
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("native KV physical-memory metadata failed core validation: {error}"),
+            )
+        })?;
+        KvStateSnapshot::new_with_physical_memory(
             self.inner.session_id,
             self.inner.state_id,
             self.inner.descriptor,
             info.observed_length,
+            physical_memory,
         )
         .map_err(|error| {
             RuntimeError::new(
@@ -220,8 +238,8 @@ impl KvStateResource {
         }
         let key_raw = key.raw()?;
         let value_raw = value.raw()?;
-        validate_append_binding(key)?;
-        validate_append_binding(value)?;
+        validate_append_binding(key, self.inner.descriptor)?;
+        validate_append_binding(value, self.inner.descriptor)?;
         let descriptor = sys::sllm_kv_append_desc_t {
             struct_size: size_of::<sys::sllm_kv_append_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
@@ -289,8 +307,8 @@ impl KvStateResource {
         start_position: u64,
         expected_kv_length: u64,
     ) -> Result<(CausalAttentionCompletion, CausalAttentionEvidence), RuntimeError> {
-        validate_causal_attention_binding(query)?;
-        validate_causal_attention_binding(output)?;
+        validate_causal_attention_binding(query, self.inner.descriptor)?;
+        validate_causal_attention_binding(output, self.inner.descriptor)?;
         let descriptor = sys::sllm_causal_attention_desc_t {
             struct_size: size_of::<sys::sllm_causal_attention_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
@@ -751,10 +769,16 @@ fn empty_view_info() -> sys::sllm_kv_view_info_t {
         encoding: 0,
         head_count: 0,
         head_dim: 0,
+        memory_kind: 0,
+        layout: 0,
         reserved1: 0,
         capacity_tokens: 0,
         observed_length: 0,
         generation: 0,
+        physical_page_bytes: 0,
+        tokens_per_page: 0,
+        mapped_token_capacity: 0,
+        committed_bytes_per_plane: 0,
         context_identity: 0,
         state_identity: 0,
         k_stride_elements: [0; 3],
@@ -822,9 +846,9 @@ fn validate_view_info(
     session_id: ExecutionSessionId,
     descriptor: KvStateDescriptor,
 ) -> Result<(), RuntimeError> {
-    let expected_stride = descriptor
-        .capacity()
-        .checked_mul(sys::SLLM_HIP_KV_HEAD_DIM as u64)
+    let layout = descriptor.layout();
+    let token_stride = (layout.heads() as u64)
+        .checked_mul(layout.head_dim() as u64)
         .ok_or_else(|| {
             RuntimeError::local(RuntimeStatus::MetadataOverflow, "KV stride overflow")
         })?;
@@ -835,20 +859,27 @@ fn validate_view_info(
         || info.layer_id != descriptor.layer_id()
         || info.dtype != sys::SLLM_TENSOR_DTYPE_F16
         || info.encoding != sys::SLLM_TENSOR_ENCODING_UNQUANTIZED
-        || info.head_count != sys::SLLM_HIP_KV_HEAD_COUNT
-        || info.head_dim != sys::SLLM_HIP_KV_HEAD_DIM
+        || info.head_count != layout.heads() as u32
+        || info.head_dim != layout.head_dim() as u32
+        || info.memory_kind != sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+        || info.layout != sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR
         || info.capacity_tokens != descriptor.capacity()
         || info.context_identity != context.raw_handle()?.as_ptr() as usize as u64
         || info.state_identity != raw_state as u64
-        || info.k_stride_elements != [expected_stride, 256, 1]
-        || info.v_stride_elements != [expected_stride, 256, 1]
+        || info.k_stride_elements != [token_stride, layout.head_dim() as u64, 1]
+        || info.v_stride_elements != [token_stride, layout.head_dim() as u64, 1]
+        || info.physical_page_bytes == 0
+        || info.tokens_per_page == 0
+        || info.mapped_token_capacity > descriptor.capacity()
+        || info.observed_length > info.mapped_token_capacity
+        || info.committed_bytes_per_plane % info.physical_page_bytes != 0
         || info.reserved0 != 0
         || info.reserved1 != 0
         || info.reserved != [0; 4]
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidKvStateDescriptor,
-            "native KV snapshot metadata is not the fixed FP16 [4, capacity, 256] layout",
+            "native KV snapshot metadata differs from the descriptor layout",
         ));
     }
     if info.observed_length > descriptor.capacity() {
@@ -860,36 +891,45 @@ fn validate_view_info(
     Ok(())
 }
 
-fn validate_append_binding(binding: &TensorBinding) -> Result<(), RuntimeError> {
+fn validate_append_binding(
+    binding: &TensorBinding,
+    descriptor: KvStateDescriptor,
+) -> Result<(), RuntimeError> {
     let view = binding.view();
+    let layout = descriptor.layout();
     if view.dtype() != DType::Bf16
         || view.encoding() != Encoding::Unquantized
         || view.shape().len() != 3
-        || view.shape()[1] != 4
-        || view.shape()[2] != 256
-        || view.strides() != [4 * 256, 256, 1]
+        || view.shape()[1] != layout.heads()
+        || view.shape()[2] != layout.head_dim()
+        || view.strides() != [layout.heads() * layout.head_dim(), layout.head_dim(), 1]
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidKvAppendDescriptor,
-            "KV append input must be contiguous BF16 [M, 4, 256]",
+            "KV append input must match the contiguous descriptor layout",
         ));
     }
     Ok(())
 }
 
-fn validate_causal_attention_binding(binding: &TensorBinding) -> Result<(), RuntimeError> {
+fn validate_causal_attention_binding(
+    binding: &TensorBinding,
+    descriptor: KvStateDescriptor,
+) -> Result<(), RuntimeError> {
     let view = binding.view();
+    let layout = descriptor.layout();
+    let q_heads = layout.heads() * 4;
     if view.dtype() != DType::Bf16
         || view.encoding() != Encoding::Unquantized
         || view.shape().len() != 3
-        || view.shape()[1] != 16
-        || view.shape()[2] != 256
-        || view.strides() != [16 * 256, 256, 1]
+        || view.shape()[1] != q_heads
+        || view.shape()[2] != layout.head_dim()
+        || view.strides() != [q_heads * layout.head_dim(), layout.head_dim(), 1]
         || view.shape()[0] == 0
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidCausalAttentionDescriptor,
-            "causal attention Q/output must be contiguous BF16 [M, 16, 256]",
+            "causal attention Q/output must match the contiguous KV descriptor layout",
         ));
     }
     Ok(())
@@ -905,7 +945,7 @@ fn validate_append_info(
     let expected_target = context.expected_target();
     let expected_grid = request
         .token_count()
-        .checked_mul(4)
+        .checked_mul(descriptor.layout().heads() as u64)
         .and_then(|value| u32::try_from(value).ok());
     if info.struct_size != size_of::<sys::sllm_kv_append_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
@@ -913,7 +953,7 @@ fn validate_append_info(
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count != 1
-        || info.kernel_id != sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1
+        || info.kernel_id != sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2
         || info.workgroup_size_x != sys::SLLM_HIP_KV_WORKGROUP_SIZE
         || Some(info.grid_size_x) != expected_grid
         || info.start_position != request.start_position()
@@ -969,7 +1009,7 @@ fn validate_causal_attention_info(
             )
         })?;
     let expected_grid = query_count
-        .checked_mul(16)
+        .checked_mul((descriptor.layout().heads() * 4) as u64)
         .and_then(|value| u32::try_from(value).ok());
     let expected_target = context.expected_target();
     if info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
@@ -984,9 +1024,9 @@ fn validate_causal_attention_info(
         || info.query_count != query_count
         || info.start_position != start_position
         || info.committed_kv_length != committed_kv_length
-        || info.q_heads != sys::SLLM_HIP_CAUSAL_ATTENTION_Q_HEADS
-        || info.kv_heads != sys::SLLM_HIP_CAUSAL_ATTENTION_KV_HEADS
-        || info.head_dim != sys::SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM
+        || info.q_heads != (descriptor.layout().heads() * 4) as u32
+        || info.kv_heads != descriptor.layout().heads() as u32
+        || info.head_dim != descriptor.layout().head_dim() as u32
         || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
         || info.fallback_allowed != 0
         || info.fallback_used != 0
@@ -1111,7 +1151,7 @@ fn round_shift(value: u32, shift: u32) -> u32 {
     truncated + u32::from(remainder > halfway || (remainder == halfway && truncated & 1 != 0))
 }
 
-/// Exact expected placement in a native [4, capacity, 256] allocation.
+/// Exact expected placement in a native token-major [capacity, 4, 256] allocation.
 pub fn expected_storage_offset(
     capacity: u64,
     start_position: u64,
@@ -1126,9 +1166,10 @@ pub fn expected_storage_offset(
         .checked_add(token)
         .filter(|position| *position < capacity)
         .and_then(|position| {
-            head.checked_mul(capacity)?
-                .checked_mul(256)?
-                .checked_add(position.checked_mul(256)?.checked_add(dim)?)
+            position
+                .checked_mul(4 * 256)?
+                .checked_add(head.checked_mul(256)?)?
+                .checked_add(dim)
         })
 }
 
@@ -1148,11 +1189,14 @@ mod tests {
     }
 
     #[test]
-    fn placement_is_head_major_capacity_stride_and_rejects_boundaries() {
-        assert_eq!(expected_storage_offset(257, 17, 3, 0, 0), Some(20 * 256));
+    fn placement_is_token_major_and_rejects_boundaries() {
+        assert_eq!(
+            expected_storage_offset(257, 17, 3, 0, 0),
+            Some(20 * 4 * 256)
+        );
         assert_eq!(
             expected_storage_offset(257, 17, 3, 1, 255),
-            Some(257 * 256 + 20 * 256 + 255)
+            Some(20 * 4 * 256 + 256 + 255)
         );
         assert_eq!(expected_storage_offset(257, 257, 0, 0, 0), None);
         assert_eq!(expected_storage_offset(257, 0, 0, 4, 0), None);
@@ -1170,7 +1214,7 @@ mod tests {
     #[test]
     fn abi_layout_fields_have_expected_rust_sizes() {
         assert_eq!(size_of::<sys::sllm_kv_state_create_info_t>(), 48);
-        assert_eq!(size_of::<sys::sllm_kv_view_info_t>(), 152);
+        assert_eq!(size_of::<sys::sllm_kv_view_info_t>(), 192);
         assert_eq!(size_of::<sys::sllm_kv_append_desc_t>(), 416);
         assert_eq!(size_of::<sys::sllm_kv_append_info_t>(), 304);
         assert_eq!(size_of::<sys::sllm_causal_attention_desc_t>(), 424);

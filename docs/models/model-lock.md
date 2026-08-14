@@ -100,6 +100,9 @@ execution environment, and output size/SHA-256. The expected numerical result is
 computed from the verified extracted bytes and an independent input fixture; a
 slice hash or cache path never substitutes for the source model lock.
 
+Qwen3.5-2B/9BのPhase 4で固定したraw非保存のrange recipeとhashは
+[Qwen3.5 Phase 4 real-weight slice identities](qwen3.5-phase4-slices.md)を正とする。
+
 ## Derived artifacts
 
 For each converted, quantized, merged, or otherwise generated artifact, record:

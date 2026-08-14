@@ -131,14 +131,32 @@ class RunnerIdentityTests(unittest.TestCase):
     def test_every_registered_host_command_has_exact_direct_or_wrapper_classification(self) -> None:
         commands = host_runner._registered_host_commands(ROOT)
         unittest_commands = host_runner._registered_unittest_commands(ROOT)
-        self.assertEqual(len(commands), 34)
-        self.assertEqual(len(unittest_commands), 17)
-        self.assertEqual(len(commands) - len(unittest_commands), 17)
+        suites, host, _ = host_runner.load_manifests(ROOT)
+        expected_command_records = [
+            record
+            for row in host["rows"]
+            for record in host_runner.registered_row_commands(suites, row, ROOT)
+        ]
+        expected_commands = [command for _command_id, command in expected_command_records]
+        expected_unittest_commands = [
+            command
+            for command in expected_commands
+            if host_runner._is_registered_script(command)
+            or command[1:3] == ["-m", "unittest"]
+        ]
+        self.assertEqual(commands, expected_commands)
+        self.assertEqual(unittest_commands, expected_unittest_commands)
+        self.assertEqual(len(commands), len(expected_command_records))
         validator_commands = [
             command for command in commands
             if len(command) > 1 and command[1].startswith("ci/tools/")
         ]
-        self.assertEqual(len(validator_commands), 14)
+        expected_validator_commands = [
+            command
+            for command in expected_commands
+            if len(command) > 1 and command[1].startswith("ci/tools/")
+        ]
+        self.assertEqual(validator_commands, expected_validator_commands)
         self.assertTrue(all(host_runner.execution_argv(command, repo=ROOT) == command for command in validator_commands))
         for command in commands:
             with self.subTest(command=command):

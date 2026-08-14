@@ -63,41 +63,38 @@ __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
   return static_cast<uint16_t>(upper);
 }
 
-__device__ float score(const uint16_t *const query,
-                       const uint16_t *const key) noexcept {
+__device__ float score(const uint16_t *const query, const uint16_t *const key,
+                       const uint32_t head_dim) noexcept {
   float dot = 0.0F;
-  for (uint32_t dimension = 0U; dimension != 256U; ++dimension) {
+  for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
     dot += bf16_to_f32(query[dimension]) * f16_to_f32(key[dimension]);
   }
-  return dot * 0.0625F;
+  return dot * rsqrtf(static_cast<float>(head_dim));
 }
 
 #pragma clang fp contract(off)
 __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     const uint16_t *const query, const uint16_t *const key,
     const uint16_t *const value, uint16_t *const output,
-    const uint32_t query_count, const uint64_t capacity_tokens,
-    const uint64_t start_position, const uint64_t committed_kv_length) {
-  if (blockIdx.x >= query_count * 16U) {
+    const uint32_t query_count, const uint64_t /*capacity_tokens*/,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim) {
+  if (blockIdx.x >= query_count * q_heads) {
     return;
   }
   const uint64_t flat = blockIdx.x;
-  const uint64_t row = flat / 16U;
-  const uint32_t query_head = static_cast<uint32_t>(flat % 16U);
+  const uint64_t row = flat / q_heads;
+  const uint32_t query_head = static_cast<uint32_t>(flat % q_heads);
   const uint64_t query_position = start_position + row;
   if (query_position >= committed_kv_length) {
     return;
   }
   const uint16_t *const query_row =
-      query + row * 16U * 256U + static_cast<uint64_t>(query_head) * 256U;
-  const uint32_t kv_head = query_head / 4U;
-  const uint64_t kv_head_stride = capacity_tokens * 256U;
-  const uint16_t *const key_head =
-      key + static_cast<uint64_t>(kv_head) * kv_head_stride;
-  const uint16_t *const value_head =
-      value + static_cast<uint64_t>(kv_head) * kv_head_stride;
-  uint16_t *const output_row =
-      output + row * 16U * 256U + static_cast<uint64_t>(query_head) * 256U;
+      query + row * q_heads * head_dim +
+      static_cast<uint64_t>(query_head) * head_dim;
+  const uint32_t kv_head = query_head / (q_heads / kv_heads);
+  uint16_t *const output_row = output + row * q_heads * head_dim +
+                               static_cast<uint64_t>(query_head) * head_dim;
 
   __shared__ float maximum;
   __shared__ float denominator;
@@ -106,14 +103,17 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     maximum = -std::numeric_limits<float>::infinity();
     for (uint64_t key_position = 0U; key_position <= query_position;
          ++key_position) {
-      maximum =
-          fmaxf(maximum, score(query_row, key_head + key_position * 256U));
+      maximum = fmaxf(
+          maximum,
+          score(query_row, key + (key_position * kv_heads + kv_head) * head_dim,
+                head_dim));
     }
     denominator = 0.0F;
     for (uint64_t key_position = 0U; key_position <= query_position;
          ++key_position) {
       const float value_score =
-          score(query_row, key_head + key_position * 256U);
+          score(query_row, key + (key_position * kv_heads + kv_head) * head_dim,
+                head_dim);
       denominator += expf(value_score - maximum);
     }
   }
@@ -125,12 +125,17 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
        ++key_position) {
     if (threadIdx.x == 0U) {
       probability =
-          expf(score(query_row, key_head + key_position * 256U) - maximum) /
+          expf(score(query_row,
+                     key + (key_position * kv_heads + kv_head) * head_dim,
+                     head_dim) -
+               maximum) /
           denominator;
     }
     __syncthreads();
     accumulation +=
-        probability * f16_to_f32(value_head[key_position * 256U + dimension]);
+        probability *
+        f16_to_f32(
+            value[(key_position * kv_heads + kv_head) * head_dim + dimension]);
     __syncthreads();
   }
   output_row[dimension] = f32_to_bf16_rne(accumulation);
@@ -142,23 +147,26 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const uint16_t *const value, uint16_t *const output,
                   const uint32_t query_count, const uint64_t capacity_tokens,
                   const uint64_t start_position,
-                  const uint64_t committed_kv_length,
+                  const uint64_t committed_kv_length, const uint32_t q_heads,
+                  const uint32_t kv_heads, const uint32_t head_dim,
                   const hipStream_t stream) noexcept {
   if (query == nullptr || key == nullptr || value == nullptr ||
       output == nullptr || query_count == 0U ||
       query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
-      committed_kv_length == 0U) {
+      committed_kv_length == 0U || q_heads == 0U || kv_heads == 0U ||
+      q_heads % kv_heads != 0U || head_dim == 0U ||
+      head_dim > SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE) {
     return hipErrorInvalidValue;
   }
-  const uint64_t block_count = static_cast<uint64_t>(query_count) * 16U;
+  const uint64_t block_count = static_cast<uint64_t>(query_count) * q_heads;
   if (block_count > std::numeric_limits<uint32_t>::max()) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(causal_attention_kernel,
-                     dim3(static_cast<uint32_t>(block_count)),
-                     dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream,
-                     query, key, value, output, query_count, capacity_tokens,
-                     start_position, committed_kv_length);
+  hipLaunchKernelGGL(
+      causal_attention_kernel, dim3(static_cast<uint32_t>(block_count)),
+      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
+      value, output, query_count, capacity_tokens, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim);
   return hipGetLastError();
 }
 

@@ -1,0 +1,382 @@
+{
+  "schema_version": "model-lock-v1",
+  "model": {
+    "repo_id": "Qwen/Qwen3.5-2B",
+    "repo_type": "model",
+    "requested_revision": "main",
+    "resolved_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+    "license": {
+      "id": "Apache-2.0",
+      "statement": "Apache-2.0",
+      "evidence_paths": [
+        "LICENSE",
+        "README.md"
+      ]
+    },
+    "base_models": [
+      {
+        "repo_id": "Qwen/Qwen3.5-2B-Base",
+        "revision": null,
+        "evidence_path": "README.md"
+      }
+    ],
+    "evidence_files": [
+      "LICENSE",
+      "README.md"
+    ],
+    "files": [
+      {
+        "path": "LICENSE",
+        "size_bytes": 11544,
+        "sha256": "bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a",
+        "git_blob": "f938136e3adacfd92be087f6e113b5d6d97f678f",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/LICENSE",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/LICENSE",
+        "lfs_oid": null
+      },
+      {
+        "path": "README.md",
+        "size_bytes": 62814,
+        "sha256": "c0e83a849c776e6fa843d011f023132d942a0f0140d903205bf1c363adad2275",
+        "git_blob": "2efa49d346c547ea81cd3d1310f414df25934f45",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/README.md",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/README.md",
+        "lfs_oid": null
+      },
+      {
+        "path": "chat_template.jinja",
+        "size_bytes": 7755,
+        "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+        "git_blob": "0ef09f214eaa6d9bca297988afc1454b5827b2c7",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/chat_template.jinja",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/chat_template.jinja",
+        "lfs_oid": null
+      },
+      {
+        "path": "config.json",
+        "size_bytes": 2908,
+        "sha256": "ed1c1723241f23f7f4e23430759cbd7dcfb4103cbdfe052bfe7626b57c2615b4",
+        "git_blob": "d30a15be1bbfd610f58ad80f1fbeb6778f58a80f",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "merges.txt",
+        "size_bytes": 3353259,
+        "sha256": "a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d",
+        "git_blob": "a494e019ca1502219fd0128658b979e5f05ae8e8",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/merges.txt",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/merges.txt",
+        "lfs_oid": null
+      },
+      {
+        "path": "model.safetensors-00001-of-00001.safetensors",
+        "size_bytes": 4548221488,
+        "sha256": "aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1",
+        "git_blob": "3868ead7f1658210f24643fa927afa7d9717083c",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/model.safetensors-00001-of-00001.safetensors",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/model.safetensors-00001-of-00001.safetensors",
+        "lfs_oid": "sha256:aa33250c4fc64891ddfaba3a314fd9542ea371843c387178b425fbcc5ed680b1"
+      },
+      {
+        "path": "model.safetensors.index.json",
+        "size_bytes": 64460,
+        "sha256": "aca8afed9da75b0f050b408d270766fd77627f1af401e240f61c3b47d0db02f9",
+        "git_blob": "69a41758e1138259916d08b99b56fada441fd502",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/model.safetensors.index.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/model.safetensors.index.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "preprocessor_config.json",
+        "size_bytes": 390,
+        "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+        "git_blob": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/preprocessor_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/preprocessor_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "tokenizer.json",
+        "size_bytes": 12807982,
+        "sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+        "git_blob": "a73a846725794819aa6e1c9e97d8dc9671c2006d",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/tokenizer.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/tokenizer.json",
+        "lfs_oid": "sha256:5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size_bytes": 16709,
+        "sha256": "49e2b6e395f959f077f1e992b338919c0d4a9732fc6e613995e06557f843500c",
+        "git_blob": "fae3ce993e07c092ad024dde45e592379fde91bb",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/tokenizer_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/tokenizer_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "video_preprocessor_config.json",
+        "size_bytes": 385,
+        "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+        "git_blob": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/video_preprocessor_config.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/video_preprocessor_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "vocab.json",
+        "size_bytes": 6722759,
+        "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003",
+        "git_blob": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "source_page_url": "https://huggingface.co/Qwen/Qwen3.5-2B/blob/15852e8c16360a2fea060d615a32b45270f8a8fc/vocab.json",
+        "download_url": "https://huggingface.co/Qwen/Qwen3.5-2B/resolve/15852e8c16360a2fea060d615a32b45270f8a8fc/vocab.json",
+        "lfs_oid": null
+      }
+    ],
+    "excluded_files": [
+      {
+        "path": ".gitattributes",
+        "git_blob": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "reason": "repository metadata is excluded from runtime and evidence inputs"
+      }
+    ],
+    "architecture": {
+      "architectures": [
+        "Qwen3_5ForConditionalGeneration"
+      ],
+      "top_level_architecture": "Qwen3_5ForConditionalGeneration",
+      "model_type": "qwen3_5",
+      "text_model_type": "qwen3_5_text",
+      "phase_scope": "text-only",
+      "custom_code": false,
+      "converted": false,
+      "moe": false,
+      "vision": {
+        "present": true,
+        "tensor_prefix": "model.visual.",
+        "tensor_count": 297,
+        "phase3_status": "known-unconsumed"
+      },
+      "mtp": {
+        "present": true,
+        "tensor_prefix": "mtp.",
+        "tensor_count": 15,
+        "phase3_status": "known-unconsumed"
+      },
+      "text_config": {
+        "model_type": "qwen3_5_text",
+        "hidden_size": 2048,
+        "num_hidden_layers": 24,
+        "num_attention_heads": 8,
+        "num_key_value_heads": 2,
+        "head_dim": 256,
+        "intermediate_size": 6144,
+        "dtype": "BF16",
+        "rms_norm_eps": "1e-6",
+        "attention_bias": false,
+        "attention_dropout": "0",
+        "attn_output_gate": true,
+        "full_attention_interval": 4,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention"
+        ],
+        "max_position_embeddings": 262144,
+        "rope_parameters": {
+          "rope_type": "default",
+          "rope_theta": 10000000,
+          "partial_rotary_factor": "0.25",
+          "mrope_interleaved": true,
+          "mrope_section": [
+            11,
+            11,
+            10
+          ]
+        },
+        "tie_word_embeddings": true,
+        "use_cache": true,
+        "vocab_size": 248320,
+        "mtp_num_hidden_layers": 1
+      },
+      "layer_schedule": {
+        "kind": "explicit",
+        "num_hidden_layers": 24,
+        "full_attention_interval": 4,
+        "layer_types": [
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention",
+          "linear_attention",
+          "linear_attention",
+          "linear_attention",
+          "full_attention"
+        ],
+        "allowed_types": [
+          "linear_attention",
+          "full_attention"
+        ]
+      }
+    },
+    "tensor_contract": {
+      "index_path": "model.safetensors.index.json",
+      "indexed_tensor_count": 632,
+      "shards": [
+        "model.safetensors-00001-of-00001.safetensors"
+      ],
+      "classifications": [
+        {
+          "id": "text",
+          "prefix": "model.language_model.",
+          "tensor_count": 320,
+          "phase3_status": "partially-consumed"
+        },
+        {
+          "id": "vision",
+          "prefix": "model.visual.",
+          "tensor_count": 297,
+          "phase3_status": "known-unconsumed"
+        },
+        {
+          "id": "mtp",
+          "prefix": "mtp.",
+          "tensor_count": 15,
+          "phase3_status": "known-unconsumed"
+        }
+      ],
+      "unknown_policy": "reject",
+      "duplicate_policy": "reject",
+      "index_policy": "exact-weight-map-and-shard-metadata"
+    },
+    "slice_contract": {
+      "tensor_name": "model.language_model.layers.0.input_layernorm.weight",
+      "source_file": "model.safetensors-00001-of-00001.safetensors",
+      "dtype": "BF16",
+      "shape": [
+        2048
+      ],
+      "header_length_field_bytes": 8,
+      "header_length_bytes": 76648,
+      "data_buffer_start": 76656,
+      "data_offset_basis": "data-buffer-relative",
+      "data_offsets": [
+        1017129088,
+        1017133184
+      ],
+      "absolute_byte_range": [
+        1017205744,
+        1017209840
+      ],
+      "byte_size": 4096,
+      "normalization": {
+        "kind": "rmsnorm",
+        "scale_mode": "offset-one",
+        "effective_scale": "1 + raw_weight",
+        "epsilon": "1e-6",
+        "activation_dtype": "BF16",
+        "weight_dtype": "BF16",
+        "accumulation_dtype": "FP32",
+        "output_dtype": "BF16"
+      }
+    },
+    "tokenizer_contract": {
+      "files": [
+        "chat_template.jinja",
+        "merges.txt",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "vocab.json"
+      ],
+      "chat_template_path": "chat_template.jinja",
+      "vocab_size": 248320,
+      "eos_token_id": 248044,
+      "special_token_ids": {
+        "vision_start": 248053,
+        "vision_end": 248054,
+        "vision_pad": 248055,
+        "image_pad": 248056,
+        "video_pad": 248057
+      },
+      "stop_identity": {
+        "config_eos": {
+          "token": "<|endoftext|>",
+          "token_id": 248044,
+          "source_file": "config.json"
+        },
+        "tokenizer_eos": {
+          "token": "<|im_end|>",
+          "token_id": 248046,
+          "source_files": [
+            "tokenizer_config.json",
+            "tokenizer.json"
+          ]
+        }
+      },
+      "generation_stop_policy": {
+        "version": 1,
+        "stop_token_ids": [
+          248046,
+          248044
+        ],
+        "evaluation": "newly_generated_after_argmax",
+        "prompt_evaluation": "never_stop",
+        "stop_token": {
+          "visible_output": false,
+          "subsequent_decode_input": false
+        },
+        "budget_boundary": "stop_token_wins",
+        "max_new_tokens_zero": "max_new_tokens_before_decode",
+        "reason_version": 1
+      }
+    },
+    "generation_config": {
+      "present": false,
+      "path": null
+    },
+    "derivation": null
+  },
+  "fingerprint": "sha256:304e19f8b8ef78bab1848a6cfb46ac619a8ca5c8fd052cac1c43fc3f4d6dcdb3",
+  "aliases": [
+    "qwen3.5-2b-bf16"
+  ],
+  "generated_at": "2026-08-11T00:00:00Z"
+}

@@ -112,6 +112,7 @@ void fill_causal_attention_dispatch_info(
     sllm_causal_attention_dispatch_info_t* const info,
     const uint64_t dispatch_id,
     const sllm_causal_attention::DescriptorMetadata& metadata,
+    const uint32_t kv_heads,
     const char* const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
@@ -124,13 +125,14 @@ void fill_causal_attention_dispatch_info(
   info->dispatch_count = 1U;
   info->kernel_id = SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1;
   info->workgroup_size_x = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(metadata.query_count * 16U);
+  info->grid_size_x =
+      static_cast<uint32_t>(metadata.query_count * metadata.query.q_heads);
   info->query_count = metadata.query_count;
   info->start_position = metadata.start_position;
   info->committed_kv_length = metadata.expected_kv_length;
-  info->q_heads = SLLM_HIP_CAUSAL_ATTENTION_Q_HEADS;
-  info->kv_heads = SLLM_HIP_CAUSAL_ATTENTION_KV_HEADS;
-  info->head_dim = SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM;
+  info->q_heads = metadata.query.q_heads;
+  info->kv_heads = kv_heads;
+  info->head_dim = metadata.query.head_dim;
   info->scale_denominator = SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
@@ -226,6 +228,12 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH,
             "causal attention length does not equal the committed KV snapshot");
+      }
+      if (metadata.query.q_heads != state->head_count * 4U ||
+          metadata.query.head_dim != state->head_dim) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_SHAPE_MISMATCH,
+            "causal attention query layout differs from the KV state layout");
       }
       if (metadata.query.end_offset > query->size_bytes ||
           metadata.output.end_offset > output->size_bytes) {
@@ -393,7 +401,8 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         static_cast<const uint16_t*>(state->value_buffer->device_pointer),
         output_pointer, static_cast<uint32_t>(metadata.query_count),
         state->capacity_tokens, metadata.start_position,
-        metadata.expected_kv_length, queue->stream);
+        metadata.expected_kv_length, metadata.query.q_heads,
+        state->head_count, state->head_dim, queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -409,7 +418,7 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
                                        error_sink);
     }
     fill_causal_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
-                                        arch_name);
+                                        state->head_count, arch_name);
     *completion_output = reinterpret_cast<sllm_completion_t*>(token);
     (void)candidate.release();
     execute_guard.disarm();

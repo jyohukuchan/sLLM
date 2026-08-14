@@ -1,0 +1,19 @@
+[package]
+name = "sllm-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+sllm-core.workspace = true
+sllm-frontend.workspace = true
+sllm-hip.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true

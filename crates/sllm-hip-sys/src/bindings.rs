@@ -118,17 +118,20 @@ pub const SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM: u32 = 64;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION: u32 = 262_144;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_M: u64 = 262_144;
-pub const SLLM_HIP_KV_STATE_VERSION: u32 = 1;
-pub const SLLM_HIP_KV_VIEW_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_KV_STATE_VERSION: u32 = 2;
+pub const SLLM_HIP_KV_VIEW_INFO_VERSION: u32 = 2;
 pub const SLLM_HIP_KV_APPEND_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_HEAD_COUNT: u32 = 4;
 pub const SLLM_HIP_KV_HEAD_DIM: u32 = 256;
 pub const SLLM_HIP_KV_MAX_CAPACITY: u64 = 262_144;
 pub const SLLM_HIP_KV_MAX_M: u64 = 262_144;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1: u32 = 1;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2: u32 = 2;
 pub const SLLM_HIP_KV_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_KV_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_KV_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS: u32 = 1;
+pub const SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1: u32 = 1;
@@ -320,7 +323,8 @@ pub struct sllm_device_info_t {
     pub reserved0: u32,
     pub name: [c_char; 128],
     pub gcn_arch_name: [c_char; 64],
-    pub reserved: [u32; 4],
+    pub available_memory_bytes: u64,
+    pub reserved: [u32; 2],
 }
 
 #[repr(C)]
@@ -635,7 +639,10 @@ pub struct sllm_kv_state_create_info_t {
     pub layer_id: u32,
     pub flags: u32,
     pub capacity_tokens: u64,
-    pub reserved: [u32; 4],
+    pub head_count: u32,
+    pub head_dim: u32,
+    pub memory_kind: u32,
+    pub layout: u32,
 }
 
 #[repr(C)]
@@ -651,10 +658,16 @@ pub struct sllm_kv_view_info_t {
     pub encoding: u32,
     pub head_count: u32,
     pub head_dim: u32,
+    pub memory_kind: u32,
+    pub layout: u32,
     pub reserved1: u32,
     pub capacity_tokens: u64,
     pub observed_length: u64,
     pub generation: u64,
+    pub physical_page_bytes: u64,
+    pub tokens_per_page: u64,
+    pub mapped_token_capacity: u64,
+    pub committed_bytes_per_plane: u64,
     pub context_identity: u64,
     pub state_identity: u64,
     pub k_stride_elements: [u64; 3],
@@ -752,7 +765,10 @@ pub struct sllm_linear_attention_state_create_info_t {
     pub layer_id: u32,
     pub flags: u32,
     pub capacity_tokens: u64,
-    pub reserved: [u32; 4],
+    pub qk_heads: u32,
+    pub value_heads: u32,
+    pub head_dim: u32,
+    pub conv_kernel_size: u32,
 }
 
 #[repr(C)]

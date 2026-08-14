@@ -32,6 +32,57 @@ G2_SUITE_ID = "h0-rmsnorm-g2-contract"
 P0_SUITE_ID = "h0-rmsnorm-p0-contract"
 PHASE3_STAGE_A_SUITE_ID = "h0-phase3-stage-a-evidence-plan"
 RUST_DEPENDENCY_SUITE_ID = "h0-rust-dependency-closure"
+ENGINE_PERFORMANCE_DIRECT_SUITE_ID = "h0-engine-performance-direct-contract"
+ENGINE_PERFORMANCE_RENDER_SUITE_ID = "h0-engine-performance-render-tokenize-contract"
+LLAMA_PHASE5_SUITE_ID = "h0-llama-phase5-contract"
+VATTENTION_A0_SUITE_ID = "h0-vattention-a0-contract"
+VATTENTION_A1_SUITE_ID = "h0-vattention-a1-contract"
+EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
+    "p1.engine-performance.schema",
+    "p1.engine-performance.runner",
+    "p1.engine-performance.aggregate",
+]
+EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
+EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
+EXPECTED_VATTENTION_A0_TEST_IDS = ["phase6.vattention-a0.contract"]
+EXPECTED_VATTENTION_A1_TEST_IDS = ["phase6.vattention-a1.contract"]
+EXPECTED_VATTENTION_A0_PATH_RULES = {
+    "ci/tools/vattention_a0_probe.hip.cpp",
+    "ci/tools/run_vattention_a0.py",
+    "ci/tests/test_vattention_a0.py",
+}
+EXPECTED_VATTENTION_A1_PATH_RULES = {
+    "ci/tools/vattention_a1_compare.hip.cpp",
+    "ci/tools/vattention_a1_production_probe.cpp",
+    "ci/tools/run_vattention_a1.py",
+    "ci/tests/test_vattention_a1.py",
+}
+EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
+    "ci/tools/engine_performance_common.py",
+    "ci/tools/create_engine_build_identity.py",
+    "ci/tools/run_engine_performance.py",
+    "ci/tools/aggregate_engine_performance.py",
+    "ci/matrix/engine-performance-direct-v1.json",
+    "ci/schema/engine-performance-direct-v1.schema.json",
+    "ci/schema/engine-performance-aggregate-v1.schema.json",
+    "ci/tests/test_engine_performance_schema.py",
+    "ci/tests/test_engine_performance_runner.py",
+    "ci/tests/test_engine_performance_aggregate.py",
+}
+EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES = {
+    "ci/matrix/engine-performance-render-v1.json",
+    "ci/schema/engine-performance-render-v1.schema.json",
+    "ci/tools/run_engine_performance_render.py",
+    "ci/tools/aggregate_engine_performance_render.py",
+    "ci/tests/test_engine_performance_render.py",
+}
+EXPECTED_LLAMA_PHASE5_PATH_RULES = {
+    "ci/matrix/llama-phase5-v1.json",
+    "ci/schema/llama-phase5-v1.schema.json",
+    "ci/tools/llama_phase5_wrapper.cpp",
+    "ci/tools/run_llama_phase5.py",
+    "ci/tests/test_llama_phase5.py",
+}
 EXPECTED_RUST_DEPENDENCY_TEST_IDS = [
     "h0.rust.dependency.manifest",
     "h0.rust.dependency.negative",
@@ -198,6 +249,11 @@ EXPECTED_FIXTURE_SUITES = {
     "tests/fixtures/api_cases.json": {"h0-python", "h1-host-contract"},
     "tests/fixtures/boundary_cases.json": {"h0-python", "h2-tiny-oracle"},
     "tests/fixtures/kv_layout.json": {"h0-python", "h2-tiny-oracle"},
+    "tests/fixtures/openai_chat_profile_v1.json": {
+        "h0-openai-profile-v1-contract",
+        "h1-host-contract",
+    },
+    "tests/fixtures/profile_sampling_cases.json": {"h0-python", "h2-tiny-oracle"},
     "tests/fixtures/sampling_cases.json": {"h0-python", "h2-tiny-oracle"},
 }
 EXPECTED_H3_STATIC_PATH_RULES = {
@@ -637,6 +693,116 @@ def validate_rust_dependency_registration(
             raise ContractError(f"Rust dependency closure path is not explicitly owned: {path}")
 
 
+def validate_phase5_suite_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Require exact host-only registration for each Phase 5 contract lane."""
+
+    expected = {
+        ENGINE_PERFORMANCE_DIRECT_SUITE_ID: (
+            EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS,
+            {"command_id": "engine-performance-host-contracts", "argv": [
+                "{python}", "-m", "unittest", "ci.tests.test_engine_performance_schema",
+                "ci.tests.test_engine_performance_runner", "ci.tests.test_engine_performance_aggregate",
+            ]},
+            EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES,
+        ),
+        ENGINE_PERFORMANCE_RENDER_SUITE_ID: (
+            EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS,
+            {"command_id": "engine-performance-render-host-contracts", "argv": [
+                "{python}", "-m", "unittest", "ci.tests.test_engine_performance_render",
+            ]},
+            EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES,
+        ),
+        LLAMA_PHASE5_SUITE_ID: (
+            EXPECTED_LLAMA_PHASE5_TEST_IDS,
+            {"command_id": "llama-phase5-host-contracts", "argv": [
+                "{python}", "-m", "unittest", "ci.tests.test_llama_phase5",
+            ]},
+            EXPECTED_LLAMA_PHASE5_PATH_RULES,
+        ),
+    }
+    suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
+    rows = {row["row_id"]: row for row in host["rows"]}
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    host_attributes = {key: False for key in ALLOWED_ATTRIBUTES}
+    for suite_id, (test_ids, command, required_paths) in expected.items():
+        suite = suite_by_id.get(suite_id)
+        if suite is None:
+            raise ContractError(f"missing Phase 5 host contract suite: {suite_id}")
+        if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0":
+            raise ContractError(f"Phase 5 suite has the wrong tier/marker: {suite_id}")
+        if suite["attributes"] != host_attributes:
+            raise ContractError(f"Phase 5 suite must be host-only and offline: {suite_id}")
+        if suite["test_ids"] != test_ids:
+            raise ContractError(f"Phase 5 suite test_ids are missing, reordered, or changed: {suite_id}")
+        if suite["commands"] != [command]:
+            raise ContractError(f"Phase 5 suite command registration drifted: {suite_id}")
+        if suite_id not in rows["h0"]["suite_ids"]:
+            raise ContractError(f"Phase 5 suite is not owned by host h0: {suite_id}")
+        for path in required_paths:
+            if suite_id not in rules_by_pattern.get(path, set()):
+                raise ContractError(f"Phase 5 path is not explicitly registered to {suite_id}: {path}")
+
+
+def validate_vattention_a0_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Require an offline host contract for the GPU-executed A0 runner."""
+
+    suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
+    suite = suite_by_id.get(VATTENTION_A0_SUITE_ID)
+    expected_attributes = {key: False for key in ALLOWED_ATTRIBUTES}
+    expected_command = {
+        "command_id": "vattention-a0-host-contracts",
+        "argv": ["{python}", "-m", "unittest", "ci.tests.test_vattention_a0"],
+    }
+    if suite is None:
+        raise ContractError("missing Phase 6 vAttention A0 host contract suite")
+    if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0":
+        raise ContractError("vAttention A0 host contract has the wrong tier/marker")
+    if suite["attributes"] != expected_attributes:
+        raise ContractError("vAttention A0 host contract must be offline and GPU-free")
+    if suite["test_ids"] != EXPECTED_VATTENTION_A0_TEST_IDS or suite["commands"] != [expected_command]:
+        raise ContractError("vAttention A0 host contract registration drifted")
+    rows = {row["row_id"]: row for row in host["rows"]}
+    if VATTENTION_A0_SUITE_ID not in rows["h0"]["suite_ids"]:
+        raise ContractError("vAttention A0 host contract is not owned by H0")
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    for path in EXPECTED_VATTENTION_A0_PATH_RULES:
+        if VATTENTION_A0_SUITE_ID not in rules_by_pattern.get(path, set()):
+            raise ContractError(f"vAttention A0 path is not explicitly registered: {path}")
+
+
+def validate_vattention_a1_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Require an offline host contract for the GPU-executed A1 comparison."""
+
+    suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
+    suite = suite_by_id.get(VATTENTION_A1_SUITE_ID)
+    expected_attributes = {key: False for key in ALLOWED_ATTRIBUTES}
+    expected_command = {
+        "command_id": "vattention-a1-host-contracts",
+        "argv": ["{python}", "-m", "unittest", "ci.tests.test_vattention_a1"],
+    }
+    if suite is None:
+        raise ContractError("missing Phase 6 vAttention A1 host contract suite")
+    if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0":
+        raise ContractError("vAttention A1 host contract has the wrong tier/marker")
+    if suite["attributes"] != expected_attributes:
+        raise ContractError("vAttention A1 host contract must be offline and GPU-free")
+    if suite["test_ids"] != EXPECTED_VATTENTION_A1_TEST_IDS or suite["commands"] != [expected_command]:
+        raise ContractError("vAttention A1 host contract registration drifted")
+    rows = {row["row_id"]: row for row in host["rows"]}
+    if VATTENTION_A1_SUITE_ID not in rows["h0"]["suite_ids"]:
+        raise ContractError("vAttention A1 host contract is not owned by H0")
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    for path in EXPECTED_VATTENTION_A1_PATH_RULES:
+        if VATTENTION_A1_SUITE_ID not in rules_by_pattern.get(path, set()):
+            raise ContractError(f"vAttention A1 path is not explicitly registered: {path}")
+
+
 def validate_cargo_toolchain_registration(suites: dict[str, object]) -> None:
     """Allow the development pin everywhere, with one exact MSRV exception."""
 
@@ -674,12 +840,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 20:
-            raise ContractError("suites-v1 identity is not revision 20")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 13:
-            raise ContractError("host-v1 identity is not revision 13")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 32:
-            raise ContractError("path-to-suite-v1 identity is not revision 32")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 25:
+            raise ContractError("suites-v1 identity is not revision 25")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 18:
+            raise ContractError("host-v1 identity is not revision 18")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 39:
+            raise ContractError("path-to-suite-v1 identity is not revision 39")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:
@@ -820,6 +986,9 @@ def main() -> int:
         validate_semantic_g1_path_ownership(paths)
         validate_phase3_stage_a_registration(suites, host, paths)
         validate_rust_dependency_registration(suites, host, paths)
+        validate_phase5_suite_registration(suites, host, paths)
+        validate_vattention_a0_registration(suites, host, paths)
+        validate_vattention_a1_registration(suites, host, paths)
         for g1_path in EXPECTED_G1_STATIC_PATH_RULES:
             if G1_STATIC_SUITE_ID not in rules_by_pattern.get(g1_path, set()):
                 raise ContractError(f"G1 path is not explicitly registered to the H0 static suite: {g1_path}")

@@ -44,9 +44,10 @@ extern "C" __global__
 __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
     const uint16_t *const qkv, const uint16_t *const conv_weight,
     const uint16_t *const previous_conv_state, uint16_t *const convolved_qkv,
-    uint16_t *const next_conv_state, const uint32_t token_count) {
-  constexpr uint64_t width = sllm_linear_attention_kernel::kQkvWidth;
-  constexpr uint64_t history = sllm_linear_attention_kernel::kConvHistory;
+    uint16_t *const next_conv_state, const uint32_t token_count,
+    const uint32_t qkv_width, const uint32_t conv_kernel_size) {
+  const uint64_t width = qkv_width;
+  const uint64_t history = conv_kernel_size - 1U;
   const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
                          static_cast<uint64_t>(threadIdx.x);
   const uint64_t output_elements = static_cast<uint64_t>(token_count) * width;
@@ -54,15 +55,18 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
     const uint64_t token = index / width;
     const uint64_t channel = index % width;
     float sum = 0.0F;
-    for (uint64_t tap = 0U; tap != 4U; ++tap) {
-      const int64_t source = static_cast<int64_t>(token + tap) - 3;
+    for (uint64_t tap = 0U; tap != conv_kernel_size; ++tap) {
+      const int64_t source =
+          static_cast<int64_t>(token + tap) - static_cast<int64_t>(history);
       const uint16_t value =
-          source < 0
-              ? previous_conv_state[static_cast<uint64_t>(source + 3) * width +
-                                    channel]
-              : qkv[static_cast<uint64_t>(source) * width + channel];
-      sum +=
-          bf16_to_float(value) * bf16_to_float(conv_weight[channel * 4U + tap]);
+          source < 0 ? previous_conv_state[static_cast<uint64_t>(
+                                               source +
+                                               static_cast<int64_t>(history)) *
+                                               width +
+                                           channel]
+                     : qkv[static_cast<uint64_t>(source) * width + channel];
+      sum += bf16_to_float(value) *
+             bf16_to_float(conv_weight[channel * conv_kernel_size + tap]);
     }
     const float silu = sum / (1.0F + expf(-sum));
     convolved_qkv[index] = float_to_bf16_rne_bits(silu);
@@ -73,11 +77,14 @@ __launch_bounds__(128, 1) void sllm_linear_attention_causal_conv_silu_v1(
   if (history_index < history * width) {
     const uint64_t history_row = history_index / width;
     const uint64_t channel = history_index % width;
-    const int64_t source = static_cast<int64_t>(token_count) - 3 +
+    const int64_t source = static_cast<int64_t>(token_count) -
+                           static_cast<int64_t>(history) +
                            static_cast<int64_t>(history_row);
     next_conv_state[history_index] =
         source < 0
-            ? previous_conv_state[static_cast<uint64_t>(source + 3) * width +
+            ? previous_conv_state[static_cast<uint64_t>(
+                                      source + static_cast<int64_t>(history)) *
+                                      width +
                                   channel]
             : qkv[static_cast<uint64_t>(source) * width + channel];
   }
@@ -91,17 +98,15 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     const float *const a_log, const uint16_t *const dt_bias,
     const float *const norm_weight, const float *const previous_recurrent_state,
     float *const next_recurrent_state, uint16_t *const output,
-    const uint32_t token_count) {
-  constexpr uint32_t head_dim = sllm_linear_attention_kernel::kHeadDim;
-  constexpr uint32_t qkv_width = sllm_linear_attention_kernel::kQkvWidth;
-  constexpr uint32_t output_width = sllm_linear_attention_kernel::kOutputWidth;
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width) {
   const uint32_t value_head = blockIdx.x;
   const uint32_t dimension = threadIdx.x;
-  if (value_head >= sllm_linear_attention_kernel::kValueHeads ||
-      dimension >= head_dim) {
+  if (value_head >= value_heads || dimension >= head_dim) {
     return;
   }
-  const uint32_t qk_head = value_head / 2U;
+  const uint32_t qk_head = value_head / (value_heads / qk_heads);
   const uint64_t state_row =
       (static_cast<uint64_t>(value_head) * head_dim + dimension) * head_dim;
   for (uint32_t key_dimension = 0U; key_dimension != head_dim;
@@ -110,13 +115,13 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         previous_recurrent_state[state_row + key_dimension];
   }
 
-  __shared__ float q_values[head_dim];
-  __shared__ float k_values[head_dim];
+  __shared__ float q_values[sllm_linear_attention_kernel::kHeadDim];
+  __shared__ float k_values[sllm_linear_attention_kernel::kHeadDim];
   __shared__ float q_inverse_norm;
   __shared__ float k_inverse_norm;
   __shared__ float beta;
   __shared__ float decay;
-  __shared__ float output_values[head_dim];
+  __shared__ float output_values[sllm_linear_attention_kernel::kHeadDim];
   __shared__ float output_inverse_rms;
 
   for (uint32_t token = 0U; token != token_count; ++token) {
@@ -125,7 +130,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         convolved_qkv[qkv_row + static_cast<uint64_t>(qk_head) * head_dim +
                       dimension]);
     k_values[dimension] = bf16_to_float(
-        convolved_qkv[qkv_row + 2048U +
+        convolved_qkv[qkv_row + static_cast<uint64_t>(qk_heads) * head_dim +
                       static_cast<uint64_t>(qk_head) * head_dim + dimension]);
     __syncthreads();
     if (dimension == 0U) {
@@ -138,7 +143,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
       q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
       k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
       const uint64_t scalar_index =
-          static_cast<uint64_t>(token) * 32U + value_head;
+          static_cast<uint64_t>(token) * value_heads + value_head;
       const float b_value = bf16_to_float(b_input[scalar_index]);
       const float beta_f32 = 1.0F / (1.0F + expf(-b_value));
       beta = bf16_to_float(float_to_bf16_rne_bits(beta_f32));
@@ -150,7 +155,7 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     __syncthreads();
     q_values[dimension] = bf16_to_float(
         float_to_bf16_rne_bits(q_values[dimension] * q_inverse_norm));
-    q_values[dimension] *= 1.0F / sqrtf(128.0F);
+    q_values[dimension] *= 1.0F / sqrtf(static_cast<float>(head_dim));
     k_values[dimension] = bf16_to_float(
         float_to_bf16_rne_bits(k_values[dimension] * k_inverse_norm));
     __syncthreads();
@@ -166,7 +171,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
                              k_values[key_dimension];
     }
     const float value = bf16_to_float(
-        convolved_qkv[qkv_row + 4096U +
+        convolved_qkv[qkv_row +
+                      static_cast<uint64_t>(2U * qk_heads) * head_dim +
                       static_cast<uint64_t>(value_head) * head_dim +
                       dimension]);
     const float residual = value - previous_projection;
@@ -187,7 +193,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
       for (uint32_t index = 0U; index != head_dim; ++index) {
         sum += output_values[index] * output_values[index];
       }
-      output_inverse_rms = 1.0F / sqrtf(sum / 128.0F + 1.0e-6F);
+      output_inverse_rms =
+          1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);
     }
     __syncthreads();
     const uint64_t output_index = static_cast<uint64_t>(token) * output_width +
@@ -206,20 +213,22 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
 
 namespace sllm_linear_attention_kernel {
 
-hipError_t launch_convolution(const uint16_t *const qkv,
-                              const uint16_t *const conv_weight,
-                              const uint16_t *const previous_conv_state,
-                              uint16_t *const convolved_qkv,
-                              uint16_t *const next_conv_state,
-                              const uint32_t token_count,
-                              const hipStream_t stream) noexcept {
+hipError_t
+launch_convolution(const uint16_t *const qkv, const uint16_t *const conv_weight,
+                   const uint16_t *const previous_conv_state,
+                   uint16_t *const convolved_qkv,
+                   uint16_t *const next_conv_state, const uint32_t token_count,
+                   const uint32_t qkv_width, const uint32_t conv_kernel_size,
+                   const hipStream_t stream) noexcept {
   if (qkv == nullptr || conv_weight == nullptr ||
       previous_conv_state == nullptr || convolved_qkv == nullptr ||
-      next_conv_state == nullptr || token_count == 0U) {
+      next_conv_state == nullptr || token_count == 0U || qkv_width == 0U ||
+      conv_kernel_size < 2U) {
     return hipErrorInvalidValue;
   }
   const uint64_t elements =
-      static_cast<uint64_t>(token_count) * kQkvWidth + kConvHistory * kQkvWidth;
+      static_cast<uint64_t>(token_count) * qkv_width +
+      static_cast<uint64_t>(conv_kernel_size - 1U) * qkv_width;
   const uint64_t workgroup = static_cast<uint64_t>(kWorkgroupSize);
   const uint64_t blocks =
       elements / workgroup + static_cast<uint64_t>(elements % workgroup != 0U);
@@ -229,29 +238,36 @@ hipError_t launch_convolution(const uint16_t *const qkv,
   hipLaunchKernelGGL(sllm_linear_attention_causal_conv_silu_v1,
                      dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
                      0U, stream, qkv, conv_weight, previous_conv_state,
-                     convolved_qkv, next_conv_state, token_count);
+                     convolved_qkv, next_conv_state, token_count, qkv_width,
+                     conv_kernel_size);
   return hipGetLastError();
 }
 
-hipError_t launch_recurrent(
-    const uint16_t *const convolved_qkv, const uint16_t *const z,
-    const uint16_t *const b_input, const uint16_t *const a_input,
-    const float *const a_log, const uint16_t *const dt_bias,
-    const float *const norm_weight, const float *const previous_recurrent_state,
-    float *const next_recurrent_state, uint16_t *const output,
-    const uint32_t token_count, const hipStream_t stream) noexcept {
+hipError_t
+launch_recurrent(const uint16_t *const convolved_qkv, const uint16_t *const z,
+                 const uint16_t *const b_input, const uint16_t *const a_input,
+                 const float *const a_log, const uint16_t *const dt_bias,
+                 const float *const norm_weight,
+                 const float *const previous_recurrent_state,
+                 float *const next_recurrent_state, uint16_t *const output,
+                 const uint32_t token_count, const uint32_t qk_heads,
+                 const uint32_t value_heads, const uint32_t head_dim,
+                 const uint32_t qkv_width, const uint32_t output_width,
+                 const hipStream_t stream) noexcept {
   if (convolved_qkv == nullptr || z == nullptr || b_input == nullptr ||
       a_input == nullptr || a_log == nullptr || dt_bias == nullptr ||
       norm_weight == nullptr || previous_recurrent_state == nullptr ||
       next_recurrent_state == nullptr || output == nullptr ||
-      token_count == 0U) {
+      token_count == 0U || qk_heads == 0U || value_heads == 0U ||
+      value_heads % qk_heads != 0U || head_dim != kHeadDim) {
     return hipErrorInvalidValue;
   }
   hipLaunchKernelGGL(sllm_linear_attention_recurrent_gated_norm_v1,
-                     dim3(kValueHeads), dim3(kWorkgroupSize), 0U, stream,
+                     dim3(value_heads), dim3(kWorkgroupSize), 0U, stream,
                      convolved_qkv, z, b_input, a_input, a_log, dt_bias,
                      norm_weight, previous_recurrent_state,
-                     next_recurrent_state, output, token_count);
+                     next_recurrent_state, output, token_count, qk_heads,
+                     value_heads, head_dim, qkv_width, output_width);
   return hipGetLastError();
 }
 

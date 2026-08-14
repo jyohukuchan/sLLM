@@ -6,6 +6,7 @@
 
 use crate::model::{
     LayerType, LockedFile, ModelLock, TensorDType, TensorDescriptor, VerifiedCache,
+    reviewed_qwen35_spec,
 };
 use crate::{BufferRange, ExecutionQueue, ExecutionSession, ExecutionState};
 use sha2::{Digest, Sha256};
@@ -18,10 +19,12 @@ pub const WEIGHT_LOAD_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
 
 const PLAN_DOMAIN: &[u8] = b"sLLM-weight-load-plan-v1\0";
 const QWEN_SCHEMA_VERSION: &str = "model-lock-v1";
-const QWEN_REPO_ID: &str = "Qwen/Qwen3.5-4B";
-const QWEN_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
-const QWEN_FINGERPRINT: &str =
-    "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae";
+#[cfg(test)]
+const QWEN_REPO_ID: &str = crate::model::QWEN35_4B_REPO_ID;
+#[cfg(test)]
+const QWEN_REVISION: &str = crate::model::QWEN35_4B_REVISION;
+#[cfg(test)]
+const QWEN_FINGERPRINT: &str = crate::model::QWEN35_4B_FINGERPRINT;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WeightPlanError(String);
@@ -77,6 +80,8 @@ impl WeightClassification {
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum WeightConsumer {
     EmbeddingAndTiedOutput,
+    Embedding,
+    OutputProjection,
     FinalNorm,
     InputNorm,
     PostAttentionNorm,
@@ -125,6 +130,8 @@ impl WeightConsumer {
             Self::AttentionO => 20,
             Self::AttentionQNorm => 21,
             Self::AttentionKNorm => 22,
+            Self::Embedding => 23,
+            Self::OutputProjection => 24,
         }
     }
 }
@@ -493,7 +500,7 @@ pub fn build_weight_load_plan<'a>(
 
     let architecture = &lock.model.architecture;
     let config = &architecture.text_config;
-    let expected_consumers = expected_consumers(&config.layer_types);
+    let expected_consumers = expected_consumers(&config.layer_types, config.tie_word_embeddings);
     let mut observed_consumers = BTreeSet::new();
     let mut vision_count = 0_u64;
     let mut mtp_count = 0_u64;
@@ -507,6 +514,7 @@ pub fn build_weight_load_plan<'a>(
             &config.layer_types,
             &architecture.vision.tensor_prefix,
             &architecture.mtp.tensor_prefix,
+            config.tie_word_embeddings,
         )?;
         if let Some(key) = consumer {
             if !observed_consumers.insert(key) {
@@ -624,18 +632,9 @@ pub fn build_verified_weight_load_plan(
 
 fn validate_fixed_lock(lock: &ModelLock) -> Result<(), WeightPlanError> {
     let config = &lock.model.architecture.text_config;
-    if lock.schema_version != QWEN_SCHEMA_VERSION
-        || lock.model.repo_id != QWEN_REPO_ID
-        || lock.model.resolved_revision != QWEN_REVISION
-        || lock.fingerprint() != QWEN_FINGERPRINT
-    {
+    if lock.schema_version != QWEN_SCHEMA_VERSION || reviewed_qwen35_spec(lock).is_none() {
         return Err(WeightPlanError::invalid(
-            "model identity is not the fixed Qwen3.5-4B contract",
-        ));
-    }
-    if !config.tie_word_embeddings {
-        return Err(WeightPlanError::invalid(
-            "the current Qwen contract requires tied embeddings",
+            "model identity is not a reviewed Qwen3.5 dense contract",
         ));
     }
     if config.num_hidden_layers
@@ -715,14 +714,20 @@ fn classify_descriptor(
     layer_types: &[LayerType],
     vision_prefix: &str,
     mtp_prefix: &str,
+    tied_embeddings: bool,
 ) -> Result<(WeightClassification, Option<WeightConsumerKey>), WeightPlanError> {
     let name = descriptor.tensor_name.as_str();
     let top_level = match name {
-        "model.language_model.embed_tokens.weight" => Some(WeightConsumer::EmbeddingAndTiedOutput),
+        "model.language_model.embed_tokens.weight" => Some(if tied_embeddings {
+            WeightConsumer::EmbeddingAndTiedOutput
+        } else {
+            WeightConsumer::Embedding
+        }),
         "model.language_model.norm.weight" => Some(WeightConsumer::FinalNorm),
+        "lm_head.weight" if !tied_embeddings => Some(WeightConsumer::OutputProjection),
         "lm_head.weight" | "model.language_model.lm_head.weight" => {
             return Err(WeightPlanError::invalid(
-                "independent lm_head is forbidden for tied embeddings",
+                "independent lm_head contradicts tied embeddings",
             ));
         }
         _ => None,
@@ -815,17 +820,31 @@ fn classify_descriptor(
     ))
 }
 
-fn expected_consumers(layer_types: &[LayerType]) -> BTreeSet<WeightConsumerKey> {
+fn expected_consumers(
+    layer_types: &[LayerType],
+    tied_embeddings: bool,
+) -> BTreeSet<WeightConsumerKey> {
+    let embedding_role = if tied_embeddings {
+        WeightConsumer::EmbeddingAndTiedOutput
+    } else {
+        WeightConsumer::Embedding
+    };
     let mut expected = BTreeSet::from([
         WeightConsumerKey {
             layer: None,
-            role: WeightConsumer::EmbeddingAndTiedOutput,
+            role: embedding_role,
         },
         WeightConsumerKey {
             layer: None,
             role: WeightConsumer::FinalNorm,
         },
     ]);
+    if !tied_embeddings {
+        expected.insert(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::OutputProjection,
+        });
+    }
     for (layer, layer_type) in layer_types.iter().enumerate() {
         let layer = u64::try_from(layer).expect("Qwen layer index fits u64");
         for role in [

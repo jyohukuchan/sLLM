@@ -36,9 +36,8 @@ sllm_status_t validate_device_info(const sllm_device_info_t *const info,
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  if (info->reserved0 != 0U || info->reserved[0] != 0U ||
-      info->reserved[1] != 0U || info->reserved[2] != 0U ||
-      info->reserved[3] != 0U) {
+  if (info->reserved0 != 0U || info->available_memory_bytes != 0U ||
+      info->reserved[0] != 0U || info->reserved[1] != 0U) {
     return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
                        "device info reserved fields must be zero");
   }

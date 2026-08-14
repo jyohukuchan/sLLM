@@ -376,6 +376,7 @@ pub struct DeviceInfo {
     pub device_index: u32,
     pub visible_device_count: u32,
     pub total_memory_bytes: u64,
+    pub available_memory_bytes: u64,
     pub wavefront_size: u32,
     pub name: String,
     pub gcn_arch_name: String,
@@ -386,6 +387,7 @@ fn device_info_from_raw(info: &sys::sllm_device_info_t) -> DeviceInfo {
         device_index: info.device_index,
         visible_device_count: info.visible_device_count,
         total_memory_bytes: info.total_memory_bytes,
+        available_memory_bytes: info.available_memory_bytes,
         wavefront_size: info.wavefront_size,
         name: read_c_string(&info.name),
         gcn_arch_name: read_c_string(&info.gcn_arch_name),
@@ -3005,11 +3007,12 @@ impl Context {
             device_index: 0,
             visible_device_count: 0,
             total_memory_bytes: 0,
+            available_memory_bytes: 0,
             wavefront_size: 0,
             reserved0: 0,
             name: [0; 128],
             gcn_arch_name: [0; 64],
-            reserved: [0; 4],
+            reserved: [0; 2],
         };
         let raw = unsafe { sys::sllm_device_query(device_index, &mut info, &mut error_sink) };
         ensure_ok(raw, &error_buffer, error_sink.message_length)

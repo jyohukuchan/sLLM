@@ -440,6 +440,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     status = ::sllm_attention_preprocess_kernel::launch(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
+        plan->metadata.q_heads, plan->metadata.k_heads,
+        plan->metadata.head_dim,
         queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();

@@ -74,7 +74,10 @@ impl LinearAttentionStateResource {
             layer_id: descriptor.layer_id(),
             flags: 0,
             capacity_tokens: descriptor.capacity(),
-            reserved: [0; 4],
+            qk_heads: descriptor.layout().qk_heads() as u32,
+            value_heads: descriptor.layout().value_heads() as u32,
+            head_dim: descriptor.layout().head_dim() as u32,
+            conv_kernel_size: descriptor.layout().conv_kernel_size() as u32,
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
@@ -147,7 +150,7 @@ impl LinearAttentionStateResource {
         &self,
         info: &sys::sllm_linear_attention_view_info_t,
     ) -> Result<(), RuntimeError> {
-        let layout = LinearAttentionLayout;
+        let layout = self.inner.descriptor.layout();
         let valid = info.struct_size as usize
             == size_of::<sys::sllm_linear_attention_view_info_t>()
             && info.abi_version == sys::SLLM_HIP_ABI_VERSION
@@ -246,6 +249,7 @@ impl LinearAttentionStateResource {
         let evidence = validate_dispatch(
             &info,
             request.descriptor(),
+            self.inner.descriptor.layout(),
             self.inner.context.expected_target(),
         )?;
         let retained = bindings.map(|binding| binding.buffer().clone()).to_vec();
@@ -443,13 +447,14 @@ fn empty_dispatch_info() -> sys::sllm_linear_attention_dispatch_info_t {
 fn validate_dispatch(
     info: &sys::sllm_linear_attention_dispatch_info_t,
     descriptor: sllm_core::LinearAttentionDescriptor,
+    layout: LinearAttentionLayout,
     expected_target: Option<&str>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
     let target = read_c_string(&info.gcn_arch_name);
     let kernel_symbol = read_c_string(&info.kernel_symbol);
     let conv_device_symbol = read_c_string(&info.conv_device_symbol);
     let recurrent_device_symbol = read_c_string(&info.recurrent_device_symbol);
-    let expected_conv_grid = convolution_grid_size(descriptor.token_count());
+    let expected_conv_grid = convolution_grid_size(descriptor.token_count(), layout);
     let valid = info.struct_size as usize
         == size_of::<sys::sllm_linear_attention_dispatch_info_t>()
         && info.abi_version == sys::SLLM_HIP_ABI_VERSION
@@ -462,13 +467,13 @@ fn validate_dispatch(
             == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
         && info.workgroup_size_x == sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
         && expected_conv_grid == Some(info.conv_grid_size_x)
-        && info.recurrent_grid_size_x == sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+        && info.recurrent_grid_size_x == layout.value_heads() as u32
         && info.token_count == descriptor.token_count()
         && info.start_position == descriptor.start_position()
         && info.expected_length == descriptor.expected_length()
-        && info.qk_heads == sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
-        && info.value_heads == sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
-        && info.head_dim == sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+        && info.qk_heads == layout.qk_heads() as u32
+        && info.value_heads == layout.value_heads() as u32
+        && info.head_dim == layout.head_dim() as u32
         && info.fallback_allowed == 0
         && info.fallback_used == 0
         && kernel_symbol == KERNEL_SYMBOL
@@ -495,10 +500,10 @@ fn validate_dispatch(
     })
 }
 
-fn convolution_grid_size(token_count: u64) -> Option<u32> {
+fn convolution_grid_size(token_count: u64, layout: LinearAttentionLayout) -> Option<u32> {
     let elements = token_count
-        .checked_add(sys::SLLM_HIP_LINEAR_ATTENTION_CONV_HISTORY as u64)?
-        .checked_mul(sys::SLLM_HIP_LINEAR_ATTENTION_QKV_WIDTH as u64)?;
+        .checked_add(layout.conv_history() as u64)?
+        .checked_mul(layout.qkv_width() as u64)?;
     let workgroup = sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE as u64;
     let grid = elements.checked_add(workgroup - 1)? / workgroup;
     u32::try_from(grid).ok()
@@ -579,7 +584,8 @@ mod tests {
         info.conv_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
         info.recurrent_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
         info.workgroup_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
-        info.conv_grid_size_x = convolution_grid_size(descriptor.token_count()).unwrap();
+        let layout = LinearAttentionLayout::default();
+        info.conv_grid_size_x = convolution_grid_size(descriptor.token_count(), layout).unwrap();
         info.recurrent_grid_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
         info.token_count = descriptor.token_count();
         info.start_position = descriptor.start_position();
@@ -597,13 +603,14 @@ mod tests {
     #[test]
     fn dispatch_requires_exact_symbols_and_convolution_grid_formula() {
         let descriptor = sllm_core::LinearAttentionDescriptor::new(3, 17, 20).unwrap();
+        let layout = LinearAttentionLayout::default();
         let info = valid_dispatch(descriptor);
-        assert!(validate_dispatch(&info, descriptor, Some("gfx1201")).is_ok());
+        assert!(validate_dispatch(&info, descriptor, layout, Some("gfx1201")).is_ok());
         assert_eq!(info.conv_grid_size_x, ((17_u32 + 3) * 8_192).div_ceil(128));
 
         let mut wrong_grid = info;
         wrong_grid.conv_grid_size_x += 1;
-        assert!(validate_dispatch(&wrong_grid, descriptor, Some("gfx1201")).is_err());
+        assert!(validate_dispatch(&wrong_grid, descriptor, layout, Some("gfx1201")).is_err());
 
         for field in 0..3 {
             let mut wrong_symbol = info;
@@ -618,7 +625,7 @@ mod tests {
                     "sllm_linear_attention_recurrent_gated_norm_v2",
                 ),
             }
-            assert!(validate_dispatch(&wrong_symbol, descriptor, Some("gfx1201")).is_err());
+            assert!(validate_dispatch(&wrong_symbol, descriptor, layout, Some("gfx1201")).is_err());
         }
     }
 

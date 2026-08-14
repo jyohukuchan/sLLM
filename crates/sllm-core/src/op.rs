@@ -234,6 +234,9 @@ impl RmsNormContract {
 /// distinct without pretending that a `TensorView` contains payload values.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct AttentionPreprocessContract {
+    q_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
     packing: AttentionPreprocessPacking,
     position_mode: AttentionPreprocessPositionMode,
     start_position: u32,
@@ -365,6 +368,9 @@ impl AttentionPreprocessContract {
             .map_err(|_| OpError::AttentionPreprocessTokenCountOverflow { token_count })?;
 
         Ok(Self {
+            q_heads: Self::Q_HEADS as u32,
+            kv_heads: Self::KV_HEADS as u32,
+            head_dim: Self::HEAD_DIM as u32,
             packing,
             position_mode,
             start_position,
@@ -386,7 +392,30 @@ impl AttentionPreprocessContract {
         start_position: i64,
         token_count: u64,
     ) -> Result<Self, OpError> {
-        Self::new(
+        Self::new_qwen3_5_with_layout(
+            position_mode,
+            start_position,
+            token_count,
+            Self::Q_HEADS as u32,
+            Self::KV_HEADS as u32,
+            Self::HEAD_DIM as u32,
+        )
+    }
+
+    pub fn new_qwen3_5_with_layout(
+        position_mode: AttentionPreprocessPositionMode,
+        start_position: i64,
+        token_count: u64,
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+    ) -> Result<Self, OpError> {
+        if q_heads == 0 || kv_heads == 0 || q_heads % kv_heads != 0 || head_dim != 256 {
+            return Err(OpError::AttentionPreprocessInvalidConfig {
+                field: "head layout",
+            });
+        }
+        let mut contract = Self::new(
             AttentionPreprocessPacking::HeadInterleavedQGate,
             position_mode,
             start_position,
@@ -400,11 +429,27 @@ impl AttentionPreprocessContract {
             true,
             Self::MROPE_SECTIONS,
             Self::MAX_POSITION_EMBEDDINGS,
-        )
+        )?;
+        contract.q_heads = q_heads;
+        contract.kv_heads = kv_heads;
+        contract.head_dim = head_dim;
+        Ok(contract)
     }
 
     pub const fn packing(self) -> AttentionPreprocessPacking {
         self.packing
+    }
+
+    pub const fn q_heads(self) -> u32 {
+        self.q_heads
+    }
+
+    pub const fn kv_heads(self) -> u32 {
+        self.kv_heads
+    }
+
+    pub const fn head_dim(self) -> u32 {
+        self.head_dim
     }
 
     pub const fn position_mode(self) -> AttentionPreprocessPositionMode {
@@ -560,19 +605,20 @@ impl SemanticOpDescriptor {
 
     /// Returns the zero-copy rank-2 view consumed by the existing `o_proj`
     /// matmul path. Only the validated C3c sigmoid output gate has this
-    /// handoff: `[M, 16, 256]` is the same contiguous storage as `[M, 4096]`.
+    /// handoff: `[M, H, 256]` is the same contiguous storage as `[M, H * 256]`.
     pub fn sigmoid_mul_o_proj_input_view(&self) -> Option<TensorView> {
         if self.kind != SemanticOpKind::SigmoidMul {
             return None;
         }
         let output = &self.outputs[0];
         let m = output.shape()[0];
+        let width = output.shape()[1].checked_mul(output.shape()[2])?;
         Some(
             TensorView::new(
                 DType::Bf16,
                 Encoding::Unquantized,
-                &[m, 16 * 256],
-                &[16 * 256, 1],
+                &[m, width],
+                &[width, 1],
                 output.byte_offset(),
             )
             .expect("validated sigmoid_mul output always has a representable o_proj view"),
@@ -809,7 +855,7 @@ fn validate_baseline_elementwise(
     }
     if kind == SemanticOpKind::SigmoidMul {
         let shape = inputs[0].shape();
-        if shape.len() != 3 || shape[1] != 16 || shape[2] != 256 {
+        if shape.len() != 3 || !matches!(shape[1], 8 | 16) || shape[2] != 256 {
             return Err(OpError::SigmoidMulShapeMismatch);
         }
     }
@@ -920,37 +966,31 @@ fn validate_attention_preprocess(
     let expected_shapes: [&[usize]; 8] = [
         &[
             token_count,
-            AttentionPreprocessContract::Q_HEADS,
-            AttentionPreprocessContract::PACKED_Q_GATE_WIDTH,
+            contract.q_heads() as usize,
+            (contract.head_dim() * 2) as usize,
         ],
         &[
             token_count,
-            AttentionPreprocessContract::KV_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
+            contract.kv_heads() as usize,
+            contract.head_dim() as usize,
         ],
-        &[
-            AttentionPreprocessContract::Q_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
-        ],
-        &[
-            AttentionPreprocessContract::KV_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
-        ],
+        &[contract.q_heads() as usize, contract.head_dim() as usize],
+        &[contract.kv_heads() as usize, contract.head_dim() as usize],
         &[token_count],
         &[
             token_count,
-            AttentionPreprocessContract::Q_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
+            contract.q_heads() as usize,
+            contract.head_dim() as usize,
         ],
         &[
             token_count,
-            AttentionPreprocessContract::Q_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
+            contract.q_heads() as usize,
+            contract.head_dim() as usize,
         ],
         &[
             token_count,
-            AttentionPreprocessContract::KV_HEADS,
-            AttentionPreprocessContract::HEAD_DIM,
+            contract.kv_heads() as usize,
+            contract.head_dim() as usize,
         ],
     ];
     for (index, (tensor, role)) in tensors.into_iter().enumerate() {
@@ -1163,7 +1203,7 @@ impl fmt::Display for OpError {
                 kind.name()
             ),
             Self::SigmoidMulShapeMismatch => formatter.write_str(
-                "sigmoid_mul requires identical contiguous BF16 [M,16,256] gate, attention value, and output",
+                "sigmoid_mul requires identical contiguous BF16 [M,H,256] gate, attention value, and output",
             ),
             Self::EmbeddingZeroExtent => {
                 formatter.write_str("embedding tensors must have non-zero extents")

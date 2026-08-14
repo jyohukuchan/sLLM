@@ -6,6 +6,7 @@ members = [
     "crates/sllm-hip",
     "crates/sllm-cli",
     "crates/sllm-frontend",
+    "crates/sllm-server",
 ]
 
 [workspace.package]
@@ -15,11 +16,18 @@ rust-version = "1.85.0"
 license = "MIT"
 
 [workspace.dependencies]
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150" }
+serde_path_to_error = { version = "=0.1.20" }
 sha2 = { version = "=0.10.9" }
 tokenizers = { version = "=0.21.4", default-features = false, features = ["onig"] }
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = { version = "=0.1.19", default-features = false, features = ["sync"] }
+tower-http = { version = "=0.7.0", default-features = false, features = ["limit", "trace"] }
 sllm-core = { path = "crates/sllm-core" }
 sllm-frontend = { path = "crates/sllm-frontend" }
 sllm-hip = { path = "crates/sllm-hip" }
 sllm-hip-sys = { path = "crates/sllm-hip-sys" }
+sllm-server = { path = "crates/sllm-server" }

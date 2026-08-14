@@ -146,7 +146,7 @@ KERNEL_SYMBOLS = (
     "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
     "sllm_elementwise_silu_mul_bf16_fp32_v1",
     "sllm_embedding_gather_bf16_i32_v1",
-    "sllm_kv_state_bf16_to_f16_transpose_v1",
+    "sllm_kv_state_bf16_to_f16_token_major_v2",
     "sllm_linear_attention_causal_conv_silu_v1",
     "sllm_linear_attention_recurrent_gated_norm_v1",
     "sllm_matmul_bf16_fp32_v1",
@@ -715,7 +715,7 @@ def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[st
     toolchain = read_json(repo / "ci/toolchains/rocm-7.14.0.json")
     if set(matrix) != {"$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"}:
         raise RuntimeContractError("public-runtime matrix has missing or unknown top-level fields")
-    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 2:
+    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 3:
         raise RuntimeContractError("public-runtime matrix identity is invalid")
     if matrix.get("toolchain_id") != "rocm-7.14.0" or matrix.get("targets") != list(TARGETS):
         raise RuntimeContractError("public-runtime matrix is not bound to ROCm 7.14.0 and the exact two targets")

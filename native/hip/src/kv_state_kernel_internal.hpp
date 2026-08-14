@@ -9,13 +9,15 @@
 
 namespace sllm_kv_state_kernel {
 
-constexpr const char *kLogicalKernelId = "kv_state.bf16_to_f16_transpose.v1";
-constexpr const char *kDeviceSymbol = "sllm_kv_state_bf16_to_f16_transpose_v1";
+constexpr const char *kLogicalKernelId = "kv_state.bf16_to_f16_token_major.v2";
+constexpr const char *kDeviceSymbol =
+    "sllm_kv_state_bf16_to_f16_token_major_v2";
 
 hipError_t launch(const uint16_t *key_input, const uint16_t *value_input,
                   uint16_t *key_output, uint16_t *value_output,
                   uint32_t token_count, uint64_t capacity_tokens,
-                  uint64_t start_position, hipStream_t stream) noexcept;
+                  uint64_t start_position, uint32_t head_count,
+                  uint32_t head_dim, hipStream_t stream) noexcept;
 
 } // namespace sllm_kv_state_kernel
 

@@ -5,11 +5,12 @@
 //! graph is the handoff between the validated model/load-plan contracts and a
 //! later execution/state owner.
 
-use crate::final_output::{QWEN35_EMBEDDING_TENSOR, QWEN35_HIDDEN_SIZE, QWEN35_VOCAB_SIZE};
+use crate::final_output::{QWEN35_EMBEDDING_TENSOR, QWEN35_VOCAB_SIZE};
 use crate::kv_state::KvStateDescriptor;
 use crate::linear_attention::LinearAttentionStateDescriptor;
 use crate::model::{
-    ClassificationStatus, LayerType, ModelLock, RopeType, TensorDType, TensorDescriptor,
+    ClassificationStatus, LayerType, ModelLock, Qwen35ReviewedSpec, RopeType, TensorDType,
+    TensorDescriptor, reviewed_qwen35_spec,
 };
 use crate::op::{OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind};
 use crate::weights::{
@@ -23,6 +24,66 @@ pub const QWEN35_MAX_POSITION_EMBEDDINGS: u64 = 262_144;
 pub const QWEN35_LAYER_COUNT: usize = 32;
 pub const QWEN35_REQUIRED_WEIGHT_COUNT: usize = 426;
 pub const QWEN35_PLAN_ENTRY_COUNT: usize = 738;
+
+#[derive(Clone, Copy, Debug)]
+struct QwenGraphDimensions {
+    hidden: u64,
+    intermediate: u64,
+    vocab: u64,
+    q_heads: u64,
+    kv_heads: u64,
+    head_dim: u64,
+    full_q_width: u64,
+    full_kv_width: u64,
+    full_output_width: u64,
+    linear_qk_heads: u64,
+    linear_value_heads: u64,
+    linear_head_dim: u64,
+    linear_qkv_width: u64,
+    linear_output_width: u64,
+    linear_conv_kernel: u64,
+    tied_embeddings: bool,
+}
+
+impl QwenGraphDimensions {
+    fn from_spec(spec: Qwen35ReviewedSpec) -> Result<Self, QwenGraphError> {
+        let mul = |a: u64, b: u64, field| a.checked_mul(b).ok_or(QwenGraphError::Overflow(field));
+        let full_output_width = mul(spec.attention_heads, spec.head_dim, "full output width")?;
+        let full_q_width = mul(2, full_output_width, "full query width")?;
+        let full_kv_width = mul(spec.kv_heads, spec.head_dim, "full KV width")?;
+        let linear_qk_width = mul(
+            spec.linear_qk_heads,
+            spec.linear_head_dim,
+            "linear QK width",
+        )?;
+        let linear_output_width = mul(
+            spec.linear_value_heads,
+            spec.linear_head_dim,
+            "linear output width",
+        )?;
+        let linear_qkv_width = mul(2, linear_qk_width, "linear QK pair width")?
+            .checked_add(linear_output_width)
+            .ok_or(QwenGraphError::Overflow("linear QKV width"))?;
+        Ok(Self {
+            hidden: spec.hidden_size,
+            intermediate: spec.intermediate_size,
+            vocab: QWEN35_VOCAB_SIZE as u64,
+            q_heads: spec.attention_heads,
+            kv_heads: spec.kv_heads,
+            head_dim: spec.head_dim,
+            full_q_width,
+            full_kv_width,
+            full_output_width,
+            linear_qk_heads: spec.linear_qk_heads,
+            linear_value_heads: spec.linear_value_heads,
+            linear_head_dim: spec.linear_head_dim,
+            linear_qkv_width,
+            linear_output_width,
+            linear_conv_kernel: 4,
+            tied_embeddings: spec.tied_embeddings,
+        })
+    }
+}
 
 /// The reviewed schedule.  The interval in the model config is only a
 /// consistency field; this list is the dispatch authority.
@@ -446,7 +507,8 @@ pub fn build_qwen35_graph(
     token_count: u64,
     state_capacity: u64,
 ) -> Result<QwenGraph, QwenGraphError> {
-    validate_fixed_model(lock)?;
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
     if token_count == 0 {
         return Err(QwenGraphError::ZeroTokenCount);
     }
@@ -459,40 +521,43 @@ pub fn build_qwen35_graph(
             capacity: state_capacity,
         });
     }
-    if state_capacity > QWEN35_MAX_POSITION_EMBEDDINGS {
+    let max_position = lock.model.architecture.text_config.max_position_embeddings;
+    if state_capacity > max_position {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position: QWEN35_MAX_POSITION_EMBEDDINGS,
+            max_position,
         });
     }
 
-    let (bindings, known_unconsumed) = validate_plan(lock, plan)?;
-    let builder = GraphBuilder::new(
-        QWEN35_LAYER_TYPES.to_vec(),
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let builder = GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
         token_count,
         state_capacity,
         bindings,
         known_unconsumed,
-        lock.fingerprint().to_owned(),
-        *plan.digest(),
-    )?;
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+    })?;
     builder.build()
 }
 
-fn validate_fixed_model(lock: &ModelLock) -> Result<(), QwenGraphError> {
+fn validate_reviewed_model(lock: &ModelLock) -> Result<Qwen35ReviewedSpec, QwenGraphError> {
     let model = &lock.model;
     let architecture = &model.architecture;
     let config = &architecture.text_config;
+    let spec = reviewed_qwen35_spec(lock).ok_or_else(|| {
+        QwenGraphError::InvalidModel(
+            "model lock identity is not a reviewed Qwen3.5 dense revision".to_owned(),
+        )
+    })?;
     if lock.schema_version != "model-lock-v1"
-        || model.repo_id != "Qwen/Qwen3.5-4B"
         || model.repo_type != "model"
         || model.requested_revision != "main"
-        || model.resolved_revision != "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"
-        || lock.fingerprint()
-            != "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"
     {
         return Err(QwenGraphError::InvalidModel(
-            "model lock identity is not the reviewed Qwen3.5-4B revision".to_owned(),
+            "model lock envelope differs from the reviewed Qwen3.5 contract".to_owned(),
         ));
     }
     if architecture.architectures != ["Qwen3_5ForConditionalGeneration"]
@@ -505,7 +570,7 @@ fn validate_fixed_model(lock: &ModelLock) -> Result<(), QwenGraphError> {
         || architecture.moe
         || !architecture.vision.present
         || architecture.vision.tensor_prefix != "model.visual."
-        || architecture.vision.tensor_count != 297
+        || architecture.vision.tensor_count != spec.vision_tensor_count
         || architecture.vision.phase3_status != crate::model::ComponentStatus::KnownUnconsumed
         || !architecture.mtp.present
         || architecture.mtp.tensor_prefix != "mtp."
@@ -516,26 +581,35 @@ fn validate_fixed_model(lock: &ModelLock) -> Result<(), QwenGraphError> {
             "model lock is not the fixed text-only component contract".to_owned(),
         ));
     }
-    if config.hidden_size != QWEN35_HIDDEN_SIZE as u64
-        || config.num_hidden_layers != QWEN35_LAYER_COUNT as u64
-        || config.num_attention_heads != 16
-        || config.num_key_value_heads != 4
-        || config.head_dim != 256
-        || config.intermediate_size != 9216
+    let expected_schedule: Vec<_> = (0..spec.layer_count)
+        .map(|layer| {
+            if (layer + 1) % 4 == 0 {
+                LayerType::FullAttention
+            } else {
+                LayerType::LinearAttention
+            }
+        })
+        .collect();
+    if config.hidden_size != spec.hidden_size
+        || config.num_hidden_layers != spec.layer_count
+        || config.num_attention_heads != spec.attention_heads
+        || config.num_key_value_heads != spec.kv_heads
+        || config.head_dim != spec.head_dim
+        || config.intermediate_size != spec.intermediate_size
         || config.dtype != TensorDType::Bf16
         || config.rms_norm_eps != "1e-6"
         || config.attention_bias
         || config.attention_dropout != "0"
         || !config.attn_output_gate
         || config.full_attention_interval != 4
-        || config.layer_types.as_slice() != QWEN35_LAYER_TYPES.as_slice()
+        || config.layer_types != expected_schedule
         || config.max_position_embeddings != QWEN35_MAX_POSITION_EMBEDDINGS
         || config.rope_parameters.rope_type != RopeType::Default
         || config.rope_parameters.rope_theta != 10_000_000
         || config.rope_parameters.partial_rotary_factor != "0.25"
         || !config.rope_parameters.mrope_interleaved
         || config.rope_parameters.mrope_section != [11, 11, 10]
-        || !config.tie_word_embeddings
+        || config.tie_word_embeddings != spec.tied_embeddings
         || !config.use_cache
         || config.vocab_size != QWEN35_VOCAB_SIZE as u64
         || config.mtp_num_hidden_layers != 1
@@ -546,9 +620,9 @@ fn validate_fixed_model(lock: &ModelLock) -> Result<(), QwenGraphError> {
     }
     let schedule = &architecture.layer_schedule;
     if schedule.kind != "explicit"
-        || schedule.num_hidden_layers != QWEN35_LAYER_COUNT as u64
+        || schedule.num_hidden_layers != spec.layer_count
         || schedule.full_attention_interval != 4
-        || schedule.layer_types.as_slice() != QWEN35_LAYER_TYPES.as_slice()
+        || schedule.layer_types != expected_schedule
         || schedule.allowed_types != [LayerType::LinearAttention, LayerType::FullAttention]
     {
         return Err(QwenGraphError::InvalidModel(
@@ -557,54 +631,73 @@ fn validate_fixed_model(lock: &ModelLock) -> Result<(), QwenGraphError> {
     }
     let classifications = &model.tensor_contract.classifications;
     if model.tensor_contract.index_path != "model.safetensors.index.json"
-        || model.tensor_contract.shards
-            != [
-                "model.safetensors-00001-of-00002.safetensors".to_owned(),
-                "model.safetensors-00002-of-00002.safetensors".to_owned(),
-            ]
+        || model.tensor_contract.shards.len() != spec.shard_count
         || model.tensor_contract.unknown_policy != "reject"
         || model.tensor_contract.duplicate_policy != "reject"
         || model.tensor_contract.index_policy != "exact-weight-map-and-shard-metadata"
-        || model.tensor_contract.indexed_tensor_count != QWEN35_PLAN_ENTRY_COUNT as u64
-        || model.tensor_contract.classifications.len() != 3
-        || classifications[0].id != "text"
-        || classifications[0].prefix != "model.language_model."
-        || classifications[0].tensor_count != 426
-        || classifications[0].phase3_status != ClassificationStatus::PartiallyConsumed
-        || classifications[1].id != "vision"
-        || classifications[1].prefix != "model.visual."
-        || classifications[1].tensor_count != 297
-        || classifications[1].phase3_status != ClassificationStatus::KnownUnconsumed
-        || classifications[2].id != "mtp"
-        || classifications[2].prefix != "mtp."
-        || classifications[2].tensor_count != 15
-        || classifications[2].phase3_status != ClassificationStatus::KnownUnconsumed
+        || model.tensor_contract.indexed_tensor_count != spec.indexed_tensor_count
     {
         return Err(QwenGraphError::InvalidModel(
             "tensor contract is not the fixed text/vision/MTP catalog".to_owned(),
         ));
     }
-    Ok(())
+    let text = classifications.iter().find(|entry| entry.id == "text");
+    let vision = classifications.iter().find(|entry| entry.id == "vision");
+    let mtp = classifications.iter().find(|entry| entry.id == "mtp");
+    let output = classifications.iter().find(|entry| entry.id == "output");
+    if text.is_none_or(|entry| {
+        entry.prefix != "model.language_model."
+            || entry.tensor_count
+                != if spec.tied_embeddings {
+                    spec.text_tensor_count
+                } else {
+                    spec.text_tensor_count - 1
+                }
+            || entry.phase3_status != ClassificationStatus::PartiallyConsumed
+    }) || vision.is_none_or(|entry| {
+        entry.prefix != "model.visual."
+            || entry.tensor_count != spec.vision_tensor_count
+            || entry.phase3_status != ClassificationStatus::KnownUnconsumed
+    }) || mtp.is_none_or(|entry| {
+        entry.prefix != "mtp."
+            || entry.tensor_count != 15
+            || entry.phase3_status != ClassificationStatus::KnownUnconsumed
+    }) || (spec.tied_embeddings && output.is_some())
+        || (!spec.tied_embeddings
+            && output.is_none_or(|entry| {
+                entry.prefix != "lm_head."
+                    || entry.tensor_count != 1
+                    || entry.phase3_status != ClassificationStatus::Consumed
+            }))
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "tensor classifications differ from the reviewed family contract".to_owned(),
+        ));
+    }
+    Ok(spec)
 }
 
 fn validate_plan(
     lock: &ModelLock,
     plan: &WeightLoadPlan,
+    dimensions: QwenGraphDimensions,
 ) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
     if plan.schema_version != lock.schema_version
         || plan.repo_id != lock.model.repo_id
         || plan.resolved_revision != lock.model.resolved_revision
         || plan.lock_fingerprint != lock.fingerprint()
-        || !plan.tied_embeddings
+        || plan.tied_embeddings != dimensions.tied_embeddings
     {
         return Err(QwenGraphError::InvalidPlan(
             "plan identity or tied-embedding condition differs from the lock".to_owned(),
         ));
     }
-    if plan.entries.len() != QWEN35_PLAN_ENTRY_COUNT {
+    let expected_entries = usize::try_from(lock.model.tensor_contract.indexed_tensor_count)
+        .map_err(|_| QwenGraphError::Overflow("plan entry count"))?;
+    if plan.entries.len() != expected_entries {
         return Err(QwenGraphError::InvalidPlan(format!(
             "expected {} entries, got {}",
-            QWEN35_PLAN_ENTRY_COUNT,
+            expected_entries,
             plan.entries.len()
         )));
     }
@@ -646,7 +739,11 @@ fn validate_plan(
         ));
     }
 
-    let mut required = Vec::with_capacity(QWEN35_REQUIRED_WEIGHT_COUNT);
+    let expected_consumers = expected_consumers(
+        &lock.model.architecture.text_config.layer_types,
+        dimensions.tied_embeddings,
+    );
+    let mut required = Vec::with_capacity(expected_consumers.len());
     let mut known_unconsumed = BTreeSet::new();
     let mut vision_count = 0_u64;
     let mut mtp_count = 0_u64;
@@ -659,7 +756,11 @@ fn validate_plan(
                         entry.tensor_name
                     ))
                 })?;
-                let (expected_name, expected_dtype, expected_shape) = expected_weight(consumer)?;
+                let (expected_name, expected_dtype, expected_shape) = expected_weight(
+                    consumer,
+                    &lock.model.architecture.text_config.layer_types,
+                    dimensions,
+                )?;
                 if entry.tensor_name != expected_name
                     || entry.dtype != expected_dtype
                     || entry.shape != expected_shape
@@ -715,10 +816,15 @@ fn validate_plan(
             }
         }
     }
-    if required.len() != QWEN35_REQUIRED_WEIGHT_COUNT
+    if required.len() != expected_consumers.len()
         || vision_count != lock.model.architecture.vision.tensor_count
         || mtp_count != lock.model.architecture.mtp.tensor_count
-        || known_unconsumed.len() != 312
+        || known_unconsumed.len()
+            != usize::try_from(
+                lock.model.architecture.vision.tensor_count
+                    + lock.model.architecture.mtp.tensor_count,
+            )
+            .map_err(|_| QwenGraphError::Overflow("known-unconsumed count"))?
     {
         return Err(QwenGraphError::InvalidPlan(format!(
             "consumer/component coverage differs: required={}, vision={vision_count}/{}, mtp={mtp_count}/{}, known-unconsumed={}",
@@ -729,9 +835,8 @@ fn validate_plan(
         )));
     }
     required.sort_by_key(|binding| binding.consumer);
-    let expected = expected_consumers(&QWEN35_LAYER_TYPES);
     let observed: BTreeSet<_> = required.iter().map(|binding| binding.consumer).collect();
-    if observed != expected {
+    if observed != expected_consumers {
         return Err(QwenGraphError::InvalidPlan(
             "required consumer coverage is not one-to-one and complete".to_owned(),
         ));
@@ -768,17 +873,31 @@ fn validate_non_overlapping_source_ranges(plan: &WeightLoadPlan) -> Result<(), Q
     Ok(())
 }
 
-fn expected_consumers(layer_types: &[LayerType]) -> BTreeSet<WeightConsumerKey> {
+fn expected_consumers(
+    layer_types: &[LayerType],
+    tied_embeddings: bool,
+) -> BTreeSet<WeightConsumerKey> {
+    let embedding_role = if tied_embeddings {
+        WeightConsumer::EmbeddingAndTiedOutput
+    } else {
+        WeightConsumer::Embedding
+    };
     let mut result = BTreeSet::from([
         WeightConsumerKey {
             layer: None,
-            role: WeightConsumer::EmbeddingAndTiedOutput,
+            role: embedding_role,
         },
         WeightConsumerKey {
             layer: None,
             role: WeightConsumer::FinalNorm,
         },
     ]);
+    if !tied_embeddings {
+        result.insert(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::OutputProjection,
+        });
+    }
     for (layer, layer_type) in layer_types.iter().copied().enumerate() {
         let layer = layer as u64;
         result.extend([
@@ -836,6 +955,8 @@ fn expected_consumers(layer_types: &[LayerType]) -> BTreeSet<WeightConsumerKey> 
 
 fn expected_weight(
     consumer: WeightConsumerKey,
+    layer_types: &[LayerType],
+    dimensions: QwenGraphDimensions,
 ) -> Result<(String, TensorDType, Vec<u64>), QwenGraphError> {
     let layer = consumer.layer;
     let role = consumer.role;
@@ -843,33 +964,55 @@ fn expected_weight(
         (None, WeightConsumer::EmbeddingAndTiedOutput) => (
             QWEN35_EMBEDDING_TENSOR.to_owned(),
             TensorDType::Bf16,
-            vec![QWEN35_VOCAB_SIZE as u64, QWEN35_HIDDEN_SIZE as u64],
+            vec![dimensions.vocab, dimensions.hidden],
+        ),
+        (None, WeightConsumer::Embedding) => (
+            QWEN35_EMBEDDING_TENSOR.to_owned(),
+            TensorDType::Bf16,
+            vec![dimensions.vocab, dimensions.hidden],
+        ),
+        (None, WeightConsumer::OutputProjection) => (
+            "lm_head.weight".to_owned(),
+            TensorDType::Bf16,
+            vec![dimensions.vocab, dimensions.hidden],
         ),
         (None, WeightConsumer::FinalNorm) => (
             "model.language_model.norm.weight".to_owned(),
             TensorDType::Bf16,
-            vec![QWEN35_HIDDEN_SIZE as u64],
+            vec![dimensions.hidden],
         ),
-        (Some(layer), role) if layer < QWEN35_LAYER_COUNT as u64 => {
+        (Some(layer), role)
+            if usize::try_from(layer)
+                .ok()
+                .is_some_and(|layer| layer < layer_types.len()) =>
+        {
             let prefix = format!("model.language_model.layers.{layer}.");
             let common = match role {
-                WeightConsumer::InputNorm => {
-                    Some(("input_layernorm.weight", TensorDType::Bf16, vec![2560]))
-                }
+                WeightConsumer::InputNorm => Some((
+                    "input_layernorm.weight",
+                    TensorDType::Bf16,
+                    vec![dimensions.hidden],
+                )),
                 WeightConsumer::PostAttentionNorm => Some((
                     "post_attention_layernorm.weight",
                     TensorDType::Bf16,
-                    vec![2560],
+                    vec![dimensions.hidden],
                 )),
-                WeightConsumer::MlpGate => {
-                    Some(("mlp.gate_proj.weight", TensorDType::Bf16, vec![9216, 2560]))
-                }
-                WeightConsumer::MlpUp => {
-                    Some(("mlp.up_proj.weight", TensorDType::Bf16, vec![9216, 2560]))
-                }
-                WeightConsumer::MlpDown => {
-                    Some(("mlp.down_proj.weight", TensorDType::Bf16, vec![2560, 9216]))
-                }
+                WeightConsumer::MlpGate => Some((
+                    "mlp.gate_proj.weight",
+                    TensorDType::Bf16,
+                    vec![dimensions.intermediate, dimensions.hidden],
+                )),
+                WeightConsumer::MlpUp => Some((
+                    "mlp.up_proj.weight",
+                    TensorDType::Bf16,
+                    vec![dimensions.intermediate, dimensions.hidden],
+                )),
+                WeightConsumer::MlpDown => Some((
+                    "mlp.down_proj.weight",
+                    TensorDType::Bf16,
+                    vec![dimensions.hidden, dimensions.intermediate],
+                )),
                 _ => None,
             };
             if let Some((suffix, dtype, shape)) = common {
@@ -906,29 +1049,33 @@ fn expected_weight(
                         WeightConsumer::AttentionQ => (
                             "self_attn.q_proj.weight",
                             TensorDType::Bf16,
-                            vec![8192, 2560],
+                            vec![dimensions.full_q_width, dimensions.hidden],
                         ),
                         WeightConsumer::AttentionK => (
                             "self_attn.k_proj.weight",
                             TensorDType::Bf16,
-                            vec![1024, 2560],
+                            vec![dimensions.full_kv_width, dimensions.hidden],
                         ),
                         WeightConsumer::AttentionV => (
                             "self_attn.v_proj.weight",
                             TensorDType::Bf16,
-                            vec![1024, 2560],
+                            vec![dimensions.full_kv_width, dimensions.hidden],
                         ),
                         WeightConsumer::AttentionO => (
                             "self_attn.o_proj.weight",
                             TensorDType::Bf16,
-                            vec![2560, 4096],
+                            vec![dimensions.hidden, dimensions.full_output_width],
                         ),
-                        WeightConsumer::AttentionQNorm => {
-                            ("self_attn.q_norm.weight", TensorDType::Bf16, vec![256])
-                        }
-                        WeightConsumer::AttentionKNorm => {
-                            ("self_attn.k_norm.weight", TensorDType::Bf16, vec![256])
-                        }
+                        WeightConsumer::AttentionQNorm => (
+                            "self_attn.q_norm.weight",
+                            TensorDType::Bf16,
+                            vec![dimensions.head_dim],
+                        ),
+                        WeightConsumer::AttentionKNorm => (
+                            "self_attn.k_norm.weight",
+                            TensorDType::Bf16,
+                            vec![dimensions.head_dim],
+                        ),
                         _ => unreachable!(),
                     }
                 } else {
@@ -936,41 +1083,51 @@ fn expected_weight(
                         WeightConsumer::GdnInProjQkv => (
                             "linear_attn.in_proj_qkv.weight",
                             TensorDType::Bf16,
-                            vec![8192, 2560],
+                            vec![dimensions.linear_qkv_width, dimensions.hidden],
                         ),
                         WeightConsumer::GdnInProjZ => (
                             "linear_attn.in_proj_z.weight",
                             TensorDType::Bf16,
-                            vec![4096, 2560],
+                            vec![dimensions.linear_output_width, dimensions.hidden],
                         ),
                         WeightConsumer::GdnInProjB => (
                             "linear_attn.in_proj_b.weight",
                             TensorDType::Bf16,
-                            vec![32, 2560],
+                            vec![dimensions.linear_value_heads, dimensions.hidden],
                         ),
                         WeightConsumer::GdnInProjA => (
                             "linear_attn.in_proj_a.weight",
                             TensorDType::Bf16,
-                            vec![32, 2560],
+                            vec![dimensions.linear_value_heads, dimensions.hidden],
                         ),
                         WeightConsumer::GdnConv1d => (
                             "linear_attn.conv1d.weight",
                             TensorDType::Bf16,
-                            vec![8192, 1, 4],
+                            vec![
+                                dimensions.linear_qkv_width,
+                                1,
+                                dimensions.linear_conv_kernel,
+                            ],
                         ),
-                        WeightConsumer::GdnALog => {
-                            ("linear_attn.A_log", TensorDType::F32, vec![32])
-                        }
-                        WeightConsumer::GdnDtBias => {
-                            ("linear_attn.dt_bias", TensorDType::Bf16, vec![32])
-                        }
-                        WeightConsumer::GdnNorm => {
-                            ("linear_attn.norm.weight", TensorDType::F32, vec![128])
-                        }
+                        WeightConsumer::GdnALog => (
+                            "linear_attn.A_log",
+                            TensorDType::F32,
+                            vec![dimensions.linear_value_heads],
+                        ),
+                        WeightConsumer::GdnDtBias => (
+                            "linear_attn.dt_bias",
+                            TensorDType::Bf16,
+                            vec![dimensions.linear_value_heads],
+                        ),
+                        WeightConsumer::GdnNorm => (
+                            "linear_attn.norm.weight",
+                            TensorDType::F32,
+                            vec![dimensions.linear_head_dim],
+                        ),
                         WeightConsumer::GdnOutProj => (
                             "linear_attn.out_proj.weight",
                             TensorDType::Bf16,
-                            vec![2560, 4096],
+                            vec![dimensions.hidden, dimensions.linear_output_width],
                         ),
                         _ => unreachable!(),
                     }
@@ -987,8 +1144,20 @@ fn expected_weight(
     Ok((name, dtype, shape))
 }
 
+struct GraphBuilderConfig {
+    layer_types: Vec<LayerType>,
+    dimensions: QwenGraphDimensions,
+    token_count: u64,
+    state_capacity: u64,
+    bindings: Vec<QwenGraphWeightBinding>,
+    known_unconsumed: BTreeSet<String>,
+    model_fingerprint: String,
+    plan_digest: [u8; 32],
+}
+
 struct GraphBuilder {
     layer_types: Vec<LayerType>,
+    dimensions: QwenGraphDimensions,
     token_count: u64,
     state_capacity: u64,
     bindings: BTreeMap<WeightConsumerKey, QwenGraphWeightBinding>,
@@ -1004,26 +1173,29 @@ struct GraphBuilder {
 }
 
 impl GraphBuilder {
-    fn new(
-        layer_types: Vec<LayerType>,
-        token_count: u64,
-        state_capacity: u64,
-        bindings: Vec<QwenGraphWeightBinding>,
-        known_unconsumed: BTreeSet<String>,
-        model_fingerprint: String,
-        plan_digest: [u8; 32],
-    ) -> Result<Self, QwenGraphError> {
+    fn new(config: GraphBuilderConfig) -> Result<Self, QwenGraphError> {
+        let GraphBuilderConfig {
+            layer_types,
+            dimensions,
+            token_count,
+            state_capacity,
+            bindings,
+            known_unconsumed,
+            model_fingerprint,
+            plan_digest,
+        } = config;
         let bindings = bindings
             .into_iter()
             .map(|binding| (binding.consumer, binding))
             .collect::<BTreeMap<_, _>>();
-        if bindings.len() != expected_consumers(&layer_types).len() {
+        if bindings.len() != expected_consumers(&layer_types, dimensions.tied_embeddings).len() {
             return Err(QwenGraphError::InvalidPlan(
                 "graph binding map is not one-to-one".to_owned(),
             ));
         }
         Ok(Self {
             layer_types,
+            dimensions,
             token_count,
             state_capacity,
             bindings,
@@ -1062,8 +1234,15 @@ impl GraphBuilder {
             let layer = layer as u32;
             match layer_type {
                 LayerType::FullAttention => {
-                    let descriptor = KvStateDescriptor::new(layer, self.state_capacity)
-                        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+                    let descriptor = KvStateDescriptor::new_with_layout(
+                        layer,
+                        self.state_capacity,
+                        usize::try_from(self.dimensions.kv_heads)
+                            .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
+                        usize::try_from(self.dimensions.head_dim)
+                            .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
+                    )
+                    .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
                     self.add_state(
                         layer,
                         QwenGraphStateKind::FullKey,
@@ -1082,9 +1261,19 @@ impl GraphBuilder {
                     )?;
                 }
                 LayerType::LinearAttention => {
-                    let descriptor =
-                        LinearAttentionStateDescriptor::new(layer, self.state_capacity)
-                            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+                    let descriptor = LinearAttentionStateDescriptor::new_with_layout(
+                        layer,
+                        self.state_capacity,
+                        usize::try_from(self.dimensions.linear_qk_heads)
+                            .map_err(|_| QwenGraphError::Overflow("linear QK heads"))?,
+                        usize::try_from(self.dimensions.linear_value_heads)
+                            .map_err(|_| QwenGraphError::Overflow("linear value heads"))?,
+                        usize::try_from(self.dimensions.linear_head_dim)
+                            .map_err(|_| QwenGraphError::Overflow("linear head dimension"))?,
+                        usize::try_from(self.dimensions.linear_conv_kernel)
+                            .map_err(|_| QwenGraphError::Overflow("linear convolution kernel"))?,
+                    )
+                    .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
                     let layout = descriptor.layout();
                     self.add_state(
                         layer,
@@ -1138,11 +1327,16 @@ impl GraphBuilder {
     fn build_graph(&mut self) -> Result<(), QwenGraphError> {
         let token_ids = self.add_tensor("input.token_ids", view(DType::I32, &[self.token_count])?);
         let positions = self.add_tensor("input.positions", view(DType::I32, &[self.token_count])?);
+        let embedding_role = if self.dimensions.tied_embeddings {
+            WeightConsumer::EmbeddingAndTiedOutput
+        } else {
+            WeightConsumer::Embedding
+        };
         let embedding_weight = self.weight_tensor(WeightConsumerKey {
             layer: None,
-            role: WeightConsumer::EmbeddingAndTiedOutput,
+            role: embedding_role,
         })?;
-        let hidden_view = view(DType::Bf16, &[self.token_count, QWEN35_HIDDEN_SIZE as u64])?;
+        let hidden_view = view(DType::Bf16, &[self.token_count, self.dimensions.hidden])?;
         let mut hidden = self.add_tensor("embedding.output", hidden_view.clone());
         let embedding = SemanticOpDescriptor::new(
             SemanticOpKind::Embedding,
@@ -1160,7 +1354,7 @@ impl GraphBuilder {
             vec![],
             vec![WeightConsumerKey {
                 layer: None,
-                role: WeightConsumer::EmbeddingAndTiedOutput,
+                role: embedding_role,
             }],
         )?;
 
@@ -1171,8 +1365,11 @@ impl GraphBuilder {
                 layer: Some(layer_index as u64),
                 role: WeightConsumer::InputNorm,
             })?;
-            let normed =
-                self.activation(layer, "input_rmsnorm.output", &[self.token_count, 2560])?;
+            let normed = self.activation(
+                layer,
+                "input_rmsnorm.output",
+                &[self.token_count, self.dimensions.hidden],
+            )?;
             let norm_op = SemanticOpDescriptor::new_rms_norm(
                 vec![
                     self.tensors[layer_input].view.clone(),
@@ -1206,7 +1403,7 @@ impl GraphBuilder {
             let post_normed = self.activation(
                 layer,
                 "post_attention_rmsnorm.output",
-                &[self.token_count, 2560],
+                &[self.token_count, self.dimensions.hidden],
             )?;
             let post_op = SemanticOpDescriptor::new_rms_norm(
                 vec![
@@ -1237,8 +1434,16 @@ impl GraphBuilder {
                 layer: Some(layer_index as u64),
                 role: WeightConsumer::MlpUp,
             })?;
-            let gate = self.activation(layer, "mlp.gate.output", &[self.token_count, 9216])?;
-            let up = self.activation(layer, "mlp.up.output", &[self.token_count, 9216])?;
+            let gate = self.activation(
+                layer,
+                "mlp.gate.output",
+                &[self.token_count, self.dimensions.intermediate],
+            )?;
+            let up = self.activation(
+                layer,
+                "mlp.up.output",
+                &[self.token_count, self.dimensions.intermediate],
+            )?;
             self.add_matmul(
                 &format!("layer.{layer}.mlp_gate_matmul"),
                 post_normed,
@@ -1255,7 +1460,11 @@ impl GraphBuilder {
                 WeightConsumer::MlpUp,
                 layer,
             )?;
-            let silu = self.activation(layer, "mlp.silu_mul.output", &[self.token_count, 9216])?;
+            let silu = self.activation(
+                layer,
+                "mlp.silu_mul.output",
+                &[self.token_count, self.dimensions.intermediate],
+            )?;
             let silu_op = SemanticOpDescriptor::new(
                 SemanticOpKind::SiluMul,
                 vec![
@@ -1276,7 +1485,11 @@ impl GraphBuilder {
                 layer: Some(layer_index as u64),
                 role: WeightConsumer::MlpDown,
             })?;
-            let down = self.activation(layer, "mlp.down.output", &[self.token_count, 2560])?;
+            let down = self.activation(
+                layer,
+                "mlp.down.output",
+                &[self.token_count, self.dimensions.hidden],
+            )?;
             self.add_matmul(
                 &format!("layer.{layer}.mlp_down_matmul"),
                 silu,
@@ -1285,8 +1498,11 @@ impl GraphBuilder {
                 WeightConsumer::MlpDown,
                 layer,
             )?;
-            let mlp_residual =
-                self.activation(layer, "mlp.residual.output", &[self.token_count, 2560])?;
+            let mlp_residual = self.activation(
+                layer,
+                "mlp.residual.output",
+                &[self.token_count, self.dimensions.hidden],
+            )?;
             let add_op = SemanticOpDescriptor::new(
                 SemanticOpKind::Add,
                 vec![
@@ -1312,7 +1528,7 @@ impl GraphBuilder {
         })?;
         let final_norm = self.add_tensor(
             "final_rmsnorm.output",
-            view(DType::Bf16, &[self.token_count, QWEN35_HIDDEN_SIZE as u64])?,
+            view(DType::Bf16, &[self.token_count, self.dimensions.hidden])?,
         );
         let final_op = SemanticOpDescriptor::new_rms_norm(
             vec![
@@ -1335,20 +1551,33 @@ impl GraphBuilder {
             }],
         )?;
 
+        let output_role = if self.dimensions.tied_embeddings {
+            WeightConsumer::EmbeddingAndTiedOutput
+        } else {
+            WeightConsumer::OutputProjection
+        };
         let tied_weight = self.weight_tensor(WeightConsumerKey {
             layer: None,
-            role: WeightConsumer::EmbeddingAndTiedOutput,
+            role: output_role,
         })?;
         let logits = self.add_tensor(
-            "tied_lm_head.logits",
-            view(DType::Bf16, &[self.token_count, QWEN35_VOCAB_SIZE as u64])?,
+            if self.dimensions.tied_embeddings {
+                "tied_lm_head.logits"
+            } else {
+                "lm_head.logits"
+            },
+            view(DType::Bf16, &[self.token_count, self.dimensions.vocab])?,
         );
         self.add_matmul(
-            "tied_lm_head_matmul",
+            if self.dimensions.tied_embeddings {
+                "tied_lm_head_matmul"
+            } else {
+                "lm_head_matmul"
+            },
             final_norm,
             tied_weight,
             logits,
-            WeightConsumer::EmbeddingAndTiedOutput,
+            output_role,
             u32::MAX,
         )?;
         let output_tokens =
@@ -1391,10 +1620,26 @@ impl GraphBuilder {
             layer: Some(layer_key),
             role: WeightConsumer::GdnInProjA,
         })?;
-        let qkv = self.activation(layer, "linear.qkv.output", &[self.token_count, 8192])?;
-        let z = self.activation(layer, "linear.z.output", &[self.token_count, 4096])?;
-        let b = self.activation(layer, "linear.b.output", &[self.token_count, 32])?;
-        let a = self.activation(layer, "linear.a.output", &[self.token_count, 32])?;
+        let qkv = self.activation(
+            layer,
+            "linear.qkv.output",
+            &[self.token_count, self.dimensions.linear_qkv_width],
+        )?;
+        let z = self.activation(
+            layer,
+            "linear.z.output",
+            &[self.token_count, self.dimensions.linear_output_width],
+        )?;
+        let b = self.activation(
+            layer,
+            "linear.b.output",
+            &[self.token_count, self.dimensions.linear_value_heads],
+        )?;
+        let a = self.activation(
+            layer,
+            "linear.a.output",
+            &[self.token_count, self.dimensions.linear_value_heads],
+        )?;
         self.add_matmul(
             &format!("layer.{layer}.linear.qkv_matmul"),
             normed,
@@ -1443,16 +1688,30 @@ impl GraphBuilder {
             layer: Some(layer_key),
             role: WeightConsumer::GdnNorm,
         })?;
-        let state_output =
-            self.activation(layer, "linear.state.output", &[self.token_count, 4096])?;
-        let descriptor = LinearAttentionStateDescriptor::new(layer, self.state_capacity)
-            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        let state_output = self.activation(
+            layer,
+            "linear.state.output",
+            &[self.token_count, self.dimensions.linear_output_width],
+        )?;
+        let descriptor = LinearAttentionStateDescriptor::new_with_layout(
+            layer,
+            self.state_capacity,
+            usize::try_from(self.dimensions.linear_qk_heads)
+                .map_err(|_| QwenGraphError::Overflow("linear QK heads"))?,
+            usize::try_from(self.dimensions.linear_value_heads)
+                .map_err(|_| QwenGraphError::Overflow("linear value heads"))?,
+            usize::try_from(self.dimensions.linear_head_dim)
+                .map_err(|_| QwenGraphError::Overflow("linear head dimension"))?,
+            usize::try_from(self.dimensions.linear_conv_kernel)
+                .map_err(|_| QwenGraphError::Overflow("linear convolution kernel"))?,
+        )
+        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
         self.add_typed(
             &format!("layer.{layer}.linear_attention_state"),
             QwenGraphNodeKind::LinearAttentionState {
                 layer,
                 state: descriptor,
-                output_shape: [self.token_count, 4096],
+                output_shape: [self.token_count, self.dimensions.linear_output_width],
             },
             // This is the existing Stage C binding order. The projection
             // weights remain owned by their matmul nodes; these four are the
@@ -1471,7 +1730,11 @@ impl GraphBuilder {
             layer: Some(layer_key),
             role: WeightConsumer::GdnOutProj,
         })?;
-        let out = self.activation(layer, "linear.out.output", &[self.token_count, 2560])?;
+        let out = self.activation(
+            layer,
+            "linear.out.output",
+            &[self.token_count, self.dimensions.hidden],
+        )?;
         self.add_matmul(
             &format!("layer.{layer}.linear.out_matmul"),
             state_output,
@@ -1483,7 +1746,7 @@ impl GraphBuilder {
         let residual = self.activation(
             layer,
             "attention.residual.output",
-            &[self.token_count, 2560],
+            &[self.token_count, self.dimensions.hidden],
         )?;
         self.add_add(
             &format!("layer.{layer}.attention_residual_add"),
@@ -1503,9 +1766,21 @@ impl GraphBuilder {
         let q_weight = self.weight_tensor(key(layer, WeightConsumer::AttentionQ))?;
         let k_weight = self.weight_tensor(key(layer, WeightConsumer::AttentionK))?;
         let v_weight = self.weight_tensor(key(layer, WeightConsumer::AttentionV))?;
-        let q = self.activation(layer, "full.q.output", &[self.token_count, 8192])?;
-        let k = self.activation(layer, "full.k.output", &[self.token_count, 1024])?;
-        let v = self.activation(layer, "full.v.output", &[self.token_count, 1024])?;
+        let q = self.activation(
+            layer,
+            "full.q.output",
+            &[self.token_count, self.dimensions.full_q_width],
+        )?;
+        let k = self.activation(
+            layer,
+            "full.k.output",
+            &[self.token_count, self.dimensions.full_kv_width],
+        )?;
+        let v = self.activation(
+            layer,
+            "full.v.output",
+            &[self.token_count, self.dimensions.full_kv_width],
+        )?;
         let q_node = self.add_matmul(
             &format!("layer.{layer}.full.q_matmul"),
             normed,
@@ -1533,37 +1808,65 @@ impl GraphBuilder {
         let packed_q = self.add_alias(
             &format!("layer.{layer}.full.q_gate.packed"),
             q,
-            view(DType::Bf16, &[self.token_count, 16, 512])?,
+            view(
+                DType::Bf16,
+                &[
+                    self.token_count,
+                    self.dimensions.q_heads,
+                    self.dimensions.head_dim * 2,
+                ],
+            )?,
             q_node,
         )?;
         let k_reshaped = self.add_alias(
             &format!("layer.{layer}.full.k.reshaped"),
             k,
-            view(DType::Bf16, &[self.token_count, 4, 256])?,
+            view(
+                DType::Bf16,
+                &[
+                    self.token_count,
+                    self.dimensions.kv_heads,
+                    self.dimensions.head_dim,
+                ],
+            )?,
             k_node,
         )?;
         let v_reshaped = self.add_alias(
             &format!("layer.{layer}.full.v.reshaped"),
             v,
-            view(DType::Bf16, &[self.token_count, 4, 256])?,
+            view(
+                DType::Bf16,
+                &[
+                    self.token_count,
+                    self.dimensions.kv_heads,
+                    self.dimensions.head_dim,
+                ],
+            )?,
             v_node,
         )?;
         let q_norm = self.weight_tensor(key(layer, WeightConsumer::AttentionQNorm))?;
         let k_norm = self.weight_tensor(key(layer, WeightConsumer::AttentionKNorm))?;
         let q_norm_expanded = self.add_tensor(
             &format!("layer.{layer}.full.q_norm.expanded"),
-            view(DType::Bf16, &[16, 256])?,
+            view(
+                DType::Bf16,
+                &[self.dimensions.q_heads, self.dimensions.head_dim],
+            )?,
         );
         let k_norm_expanded = self.add_tensor(
             &format!("layer.{layer}.full.k_norm.expanded"),
-            view(DType::Bf16, &[4, 256])?,
+            view(
+                DType::Bf16,
+                &[self.dimensions.kv_heads, self.dimensions.head_dim],
+            )?,
         );
         self.add_scale_materialization(
             &format!("layer.{layer}.full.q_norm.broadcast"),
             layer,
             q_norm,
             q_norm_expanded,
-            16,
+            u32::try_from(self.dimensions.q_heads)
+                .map_err(|_| QwenGraphError::Overflow("query heads"))?,
             key(layer, WeightConsumer::AttentionQNorm),
         )?;
         self.add_scale_materialization(
@@ -1571,26 +1874,48 @@ impl GraphBuilder {
             layer,
             k_norm,
             k_norm_expanded,
-            4,
+            u32::try_from(self.dimensions.kv_heads)
+                .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
             key(layer, WeightConsumer::AttentionKNorm),
         )?;
-        let q_output =
-            self.activation(layer, "full.q.preprocessed", &[self.token_count, 16, 256])?;
+        let q_output = self.activation(
+            layer,
+            "full.q.preprocessed",
+            &[
+                self.token_count,
+                self.dimensions.q_heads,
+                self.dimensions.head_dim,
+            ],
+        )?;
         let gate = self.activation(
             layer,
             "full.gate.preprocessed",
-            &[self.token_count, 16, 256],
+            &[
+                self.token_count,
+                self.dimensions.q_heads,
+                self.dimensions.head_dim,
+            ],
         )?;
-        let k_output =
-            self.activation(layer, "full.k.preprocessed", &[self.token_count, 4, 256])?;
+        let k_output = self.activation(
+            layer,
+            "full.k.preprocessed",
+            &[
+                self.token_count,
+                self.dimensions.kv_heads,
+                self.dimensions.head_dim,
+            ],
+        )?;
         self.add_typed(
             &format!("layer.{layer}.attention_preprocess"),
             QwenGraphNodeKind::AttentionPreprocess {
                 layer,
                 token_count: self.token_count,
-                q_heads: 16,
-                kv_heads: 4,
-                head_dim: 256,
+                q_heads: u32::try_from(self.dimensions.q_heads)
+                    .map_err(|_| QwenGraphError::Overflow("query heads"))?,
+                kv_heads: u32::try_from(self.dimensions.kv_heads)
+                    .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
+                head_dim: u32::try_from(self.dimensions.head_dim)
+                    .map_err(|_| QwenGraphError::Overflow("head dimension"))?,
             },
             vec![
                 packed_q,
@@ -1603,8 +1928,15 @@ impl GraphBuilder {
             vec![],
             vec![],
         )?;
-        let kv = KvStateDescriptor::new(layer, self.state_capacity)
-            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        let kv = KvStateDescriptor::new_with_layout(
+            layer,
+            self.state_capacity,
+            usize::try_from(self.dimensions.kv_heads)
+                .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
+            usize::try_from(self.dimensions.head_dim)
+                .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
+        )
+        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
         let kv_node = self.add_typed(
             &format!("layer.{layer}.kv_append"),
             QwenGraphNodeKind::FullKvAppend { layer, state: kv },
@@ -1616,15 +1948,27 @@ impl GraphBuilder {
         let context = self.activation(
             layer,
             "full.causal_attention.output",
-            &[self.token_count, 16, 256],
+            &[
+                self.token_count,
+                self.dimensions.q_heads,
+                self.dimensions.head_dim,
+            ],
         )?;
         self.add_typed(
             &format!("layer.{layer}.causal_attention"),
             QwenGraphNodeKind::FullCausalAttention {
                 layer,
                 state: kv,
-                query_shape: [self.token_count, 16, 256],
-                output_shape: [self.token_count, 16, 256],
+                query_shape: [
+                    self.token_count,
+                    self.dimensions.q_heads,
+                    self.dimensions.head_dim,
+                ],
+                output_shape: [
+                    self.token_count,
+                    self.dimensions.q_heads,
+                    self.dimensions.head_dim,
+                ],
             },
             vec![q_output],
             vec![context],
@@ -1634,7 +1978,11 @@ impl GraphBuilder {
         let sigmoid = self.activation(
             layer,
             "full.sigmoid_mul.output",
-            &[self.token_count, 16, 256],
+            &[
+                self.token_count,
+                self.dimensions.q_heads,
+                self.dimensions.head_dim,
+            ],
         )?;
         let sigmoid_op = SemanticOpDescriptor::new(
             SemanticOpKind::SigmoidMul,
@@ -1656,11 +2004,18 @@ impl GraphBuilder {
         let o_input = self.add_alias(
             &format!("layer.{layer}.full.o.input"),
             sigmoid,
-            view(DType::Bf16, &[self.token_count, 4096])?,
+            view(
+                DType::Bf16,
+                &[self.token_count, self.dimensions.full_output_width],
+            )?,
             sigmoid_node,
         )?;
         let o_weight = self.weight_tensor(key(layer, WeightConsumer::AttentionO))?;
-        let o = self.activation(layer, "full.o.output", &[self.token_count, 2560])?;
+        let o = self.activation(
+            layer,
+            "full.o.output",
+            &[self.token_count, self.dimensions.hidden],
+        )?;
         self.add_matmul(
             &format!("layer.{layer}.full.o_matmul"),
             o_input,
@@ -1672,7 +2027,7 @@ impl GraphBuilder {
         let residual = self.activation(
             layer,
             "attention.residual.output",
-            &[self.token_count, 2560],
+            &[self.token_count, self.dimensions.hidden],
         )?;
         self.add_add(
             &format!("layer.{layer}.attention_residual_add"),
@@ -2066,6 +2421,10 @@ mod tests {
             .expect("fixed Qwen lock parses")
     }
 
+    fn fixed_dimensions() -> QwenGraphDimensions {
+        QwenGraphDimensions::from_spec(reviewed_qwen35_spec(&fixed_lock()).unwrap()).unwrap()
+    }
+
     fn tensor_byte_size(dtype: TensorDType, shape: &[u64]) -> u64 {
         let width = match dtype {
             TensorDType::Bf16 | TensorDType::F16 => 2,
@@ -2114,8 +2473,10 @@ mod tests {
             .map(|file| (file.path.clone(), file.size_bytes))
             .collect();
         let mut specs = Vec::new();
-        for consumer in expected_consumers(&QWEN35_LAYER_TYPES) {
-            let (name, dtype, shape) = expected_weight(consumer).expect("known consumer");
+        let dimensions = fixed_dimensions();
+        for consumer in expected_consumers(&QWEN35_LAYER_TYPES, true) {
+            let (name, dtype, shape) =
+                expected_weight(consumer, &QWEN35_LAYER_TYPES, dimensions).expect("known consumer");
             specs.push((name, dtype, shape));
         }
         for index in 0..vision_count {
@@ -2165,10 +2526,12 @@ mod tests {
     }
 
     fn fixture_bindings(schedule: &[LayerType]) -> Vec<QwenGraphWeightBinding> {
-        expected_consumers(schedule)
+        let dimensions = fixed_dimensions();
+        expected_consumers(schedule, true)
             .into_iter()
             .map(|consumer| {
-                let (tensor_name, dtype, shape) = expected_weight(consumer).expect("fixture role");
+                let (tensor_name, dtype, shape) =
+                    expected_weight(consumer, schedule, dimensions).expect("fixture role");
                 QwenGraphWeightBinding {
                     consumer,
                     tensor_name,
@@ -2183,15 +2546,16 @@ mod tests {
     }
 
     fn tiny_fixture(schedule: &[LayerType]) -> QwenGraph {
-        GraphBuilder::new(
-            schedule.to_vec(),
-            3,
-            17,
-            fixture_bindings(schedule),
-            BTreeSet::new(),
-            "fixture".to_owned(),
-            [7; 32],
-        )
+        GraphBuilder::new(GraphBuilderConfig {
+            layer_types: schedule.to_vec(),
+            dimensions: fixed_dimensions(),
+            token_count: 3,
+            state_capacity: 17,
+            bindings: fixture_bindings(schedule),
+            known_unconsumed: BTreeSet::new(),
+            model_fingerprint: "fixture".to_owned(),
+            plan_digest: [7; 32],
+        })
         .expect("fixture bindings")
         .build()
         .expect("fixture graph")
@@ -2279,9 +2643,9 @@ mod tests {
                 .iter()
                 .find(|state| state.kind() == QwenGraphStateKind::FullKey)
                 .expect("full key state");
-            assert_eq!(full.shape(), &[4, 257, 256]);
+            assert_eq!(full.shape(), &[257, 4, 256]);
             assert_eq!(full.dtype(), DType::F16);
-            assert_eq!(full.strides(), &[257 * 256, 256, 1]);
+            assert_eq!(full.strides(), &[4 * 256, 256, 1]);
             assert!(graph.weight_binding("model.visual.synthetic_0").is_err());
             assert!(graph.weight_binding("not-a-weight").is_err());
         }
@@ -2698,15 +3062,16 @@ mod tests {
     #[test]
     fn invalid_alias_payload_length_is_rejected_before_edges() {
         let schedule = [LayerType::LinearAttention];
-        let mut builder = GraphBuilder::new(
-            schedule.to_vec(),
-            3,
-            17,
-            fixture_bindings(&schedule),
-            BTreeSet::new(),
-            "fixture".to_owned(),
-            [9; 32],
-        )
+        let mut builder = GraphBuilder::new(GraphBuilderConfig {
+            layer_types: schedule.to_vec(),
+            dimensions: fixed_dimensions(),
+            token_count: 3,
+            state_capacity: 17,
+            bindings: fixture_bindings(&schedule),
+            known_unconsumed: BTreeSet::new(),
+            model_fingerprint: "fixture".to_owned(),
+            plan_digest: [9; 32],
+        })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());
         builder

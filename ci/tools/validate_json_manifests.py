@@ -147,6 +147,19 @@ MODEL_LOCK_SCHEMA = "ci/schema/model-lock-v1.schema.json"
 MODEL_LOCK_PATH = "docs/models/locks/qwen3.5-4b-bf16.json"
 RUST_DEPENDENCY_SCHEMA = "ci/schema/rust-dependency-policy-v1.schema.json"
 RUST_DEPENDENCY_MANIFEST = "ci/dependencies/rust-workspace-v1.json"
+PHASE6_A2_SCHEMA = "ci/schema/phase6-a2-v1.schema.json"
+PHASE6_A2_CONTRACT = "ci/contracts/phase6-a2-v1.json"
+ENGINE_PERFORMANCE_SCHEMA_FILES = {
+    "ci/schema/engine-performance-direct-v1.schema.json",
+    "ci/schema/engine-performance-aggregate-v1.schema.json",
+    "ci/schema/engine-performance-render-v1.schema.json",
+    "ci/schema/llama-phase5-v1.schema.json",
+}
+ENGINE_PERFORMANCE_MATRIX_FILES = {
+    "ci/matrix/engine-performance-direct-v1.json",
+    "ci/matrix/engine-performance-render-v1.json",
+    "ci/matrix/llama-phase5-v1.json",
+}
 
 
 def h3_workspace_expectations() -> dict[str, object]:
@@ -1353,6 +1366,16 @@ def main() -> int:
             raise ContractError("model-lock-v1 schema is not registered for manifest validation")
         if RUST_DEPENDENCY_SCHEMA not in schema_names:
             raise ContractError("Rust dependency policy schema is not registered for manifest validation")
+        if PHASE6_A2_SCHEMA not in schema_names or not (ROOT / PHASE6_A2_CONTRACT).is_file():
+            raise ContractError("Phase 6 A2 schema/contract is not registered for manifest validation")
+        if not ENGINE_PERFORMANCE_SCHEMA_FILES.issubset(schema_names):
+            raise ContractError("Phase 5 engine-performance schemas are not registered for manifest validation")
+        missing_matrices = sorted(path for path in ENGINE_PERFORMANCE_MATRIX_FILES if not (ROOT / path).is_file())
+        if missing_matrices:
+            raise ContractError(
+                "Phase 5 engine-performance matrices are not registered for manifest validation: "
+                + ", ".join(missing_matrices)
+            )
         from jsonschema import Draft202012Validator, FormatChecker
         for path in schema_paths:
             schema = read_json(path)
@@ -1365,6 +1388,12 @@ def main() -> int:
                 errors.extend(
                     f"{path.relative_to(ROOT)}: {error.message}"
                     for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(dependency_manifest)
+                )
+            if path.relative_to(ROOT).as_posix() == PHASE6_A2_SCHEMA:
+                phase6_a2_contract = read_json(ROOT / PHASE6_A2_CONTRACT)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(phase6_a2_contract)
                 )
         load_manifests(ROOT)
         from validate_rmsnorm_h3_contracts import validate_static as validate_rmsnorm_h3_static

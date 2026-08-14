@@ -18,7 +18,8 @@ use sllm_hip::{
     RuntimeError,
 };
 
-const N: usize = 2560;
+const DEFAULT_N: usize = 2560;
+const REVIEWED_N: [usize; 3] = [2048, 2560, 4096];
 const CASE_ROWS: [usize; 6] = [1, 2, 17, 255, 256, 257];
 const CASE_SEEDS: [u32; 6] = [9201, 9202, 9217, 9255, 9256, 9257];
 const CASE_IDS: [&str; 6] = [
@@ -51,7 +52,7 @@ struct RuntimeResult {
 #[derive(Serialize)]
 struct CaseResult {
     order: usize,
-    id: &'static str,
+    id: String,
     rows: usize,
     n: usize,
     input_seed: u32,
@@ -93,10 +94,10 @@ fn bfloat16(value: f32) -> [u8; 2] {
     (rounded as u16).to_le_bytes()
 }
 
-fn activation(rows: usize, seed: u32) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(rows * N * 2);
+fn activation(rows: usize, n: usize, seed: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(rows * n * 2);
     for row in 0..rows {
-        for index in 0..N {
+        for index in 0..n {
             let lane = ((seed as usize + row * 17 + index * 13) % 257) as f32;
             let value = (lane - 128.0) / 64.0;
             bytes.extend_from_slice(&bfloat16(value));
@@ -118,9 +119,10 @@ fn run_case(
     queue: &sllm_hip::Queue,
     raw_scale: &sllm_hip::Buffer,
     rows: usize,
+    n: usize,
     seed: u32,
 ) -> (Vec<u8>, RmsNormDispatchInfo) {
-    let activation_bytes = activation(rows, seed);
+    let activation_bytes = activation(rows, n, seed);
     let output_len = activation_bytes.len();
     let activation_buffer = sllm_hip::Buffer::allocate(context, output_len as u64)
         .unwrap_or_else(|error| fail(format!("activation allocation failed: {error}")));
@@ -129,11 +131,11 @@ fn run_case(
     copy_to_device(queue, &activation_buffer, &activation_bytes, "activation");
 
     let activation_view =
-        TensorView::new(DType::Bf16, Encoding::Unquantized, &[rows, N], &[N, 1], 0)
+        TensorView::new(DType::Bf16, Encoding::Unquantized, &[rows, n], &[n, 1], 0)
             .unwrap_or_else(|error| fail(format!("activation view failed: {error}")));
-    let scale_view = TensorView::contiguous(DType::Bf16, &[N])
+    let scale_view = TensorView::contiguous(DType::Bf16, &[n])
         .unwrap_or_else(|error| fail(format!("scale view failed: {error}")));
-    let output_view = TensorView::new(DType::Bf16, Encoding::Unquantized, &[rows, N], &[N, 1], 0)
+    let output_view = TensorView::new(DType::Bf16, Encoding::Unquantized, &[rows, n], &[n, 1], 0)
         .unwrap_or_else(|error| fail(format!("output view failed: {error}")));
     let descriptor = RmsNormDescriptor::new(
         activation_buffer.binding(activation_view),
@@ -151,7 +153,7 @@ fn run_case(
     if dispatch.dispatch_count != 1
         || dispatch.kernel_id != 1
         || dispatch.workgroup_size_x != 256
-        || dispatch.normalized_size != N as u64
+        || dispatch.normalized_size != n as u64
         || dispatch.row_count != rows as u64
         || dispatch.fallback_allowed
         || dispatch.fallback_used
@@ -199,9 +201,10 @@ fn base64(bytes: &[u8]) -> String {
     encoded
 }
 
-fn execution_arguments() -> (String, i32) {
+fn execution_arguments() -> (String, i32, usize) {
     let mut target = None;
     let mut slice_fd = None;
+    let mut n = None;
     let mut args = env::args().skip(1);
     while let Some(current) = args.next() {
         match current.as_str() {
@@ -229,27 +232,63 @@ fn execution_arguments() -> (String, i32) {
                 }
                 slice_fd = Some(fd);
             }
+            "--n" => {
+                if n.is_some() {
+                    fail("duplicate --n argument");
+                }
+                let value = args.next().unwrap_or_else(|| fail("missing value for --n"));
+                let value = value
+                    .parse::<usize>()
+                    .unwrap_or_else(|_| fail("--n must be an unsigned integer"));
+                if !REVIEWED_N.contains(&value) {
+                    fail("--n must be one of 2048, 2560, or 4096");
+                }
+                n = Some(value);
+            }
             _ => fail(format!("unknown execution argument {current}")),
         }
     }
     (
         target.unwrap_or_else(|| fail("missing required argument --target")),
         slice_fd.unwrap_or_else(|| fail("missing required argument --slice-fd")),
+        n.unwrap_or(DEFAULT_N),
     )
 }
 
-fn read_slice_fd(raw_fd: i32) -> Vec<u8> {
+fn read_slice_fd(raw_fd: i32, n: usize) -> Vec<u8> {
     // SAFETY: the runner passes an owned CLOEXEC descriptor to this process;
     // this child takes ownership and closes it exactly once on drop.
     let file = unsafe { File::from_raw_fd(raw_fd) };
-    let mut bytes = Vec::with_capacity(N * 2);
-    file.take((N * 2 + 1) as u64)
+    let mut bytes = Vec::with_capacity(n * 2);
+    file.take((n * 2 + 1) as u64)
         .read_to_end(&mut bytes)
         .unwrap_or_else(|error| fail(format!("cannot read G2 slice fd: {error}")));
-    if bytes.len() != N * 2 {
-        fail("G2 slice fd must contain exactly 5120 bytes");
+    if bytes.len() != n * 2 {
+        fail(format!("G2 slice fd must contain exactly {} bytes", n * 2));
     }
     bytes
+}
+
+fn case_contract(n: usize) -> Vec<(usize, u32, String)> {
+    if n == DEFAULT_N {
+        CASE_ROWS
+            .into_iter()
+            .zip(CASE_SEEDS)
+            .zip(CASE_IDS)
+            .map(|((rows, seed), id)| (rows, seed, id.to_owned()))
+            .collect()
+    } else {
+        [1_usize, 3, 17]
+            .into_iter()
+            .map(|rows| {
+                (
+                    rows,
+                    10_000_u32 + u32::try_from(n).expect("reviewed N fits u32") + rows as u32,
+                    format!("phase4-g2-r{rows}-n{n}"),
+                )
+            })
+            .collect()
+    }
 }
 
 fn embedded_build_identity() -> &'static str {
@@ -293,11 +332,11 @@ fn main() {
     // Force the generated marker and identity to be referenced before any
     // target, slice, model, or HIP operation is considered.
     let _ = embedded_build_identity();
-    let (target, slice_fd) = execution_arguments();
+    let (target, slice_fd, n) = execution_arguments();
     if target != "gfx1030" && target != "gfx1201" {
         fail("target must be gfx1030 or gfx1201");
     }
-    let raw_scale = read_slice_fd(slice_fd);
+    let raw_scale = read_slice_fd(slice_fd, n);
     // The runner exposes exactly one routed physical GPU to this process.
     let device_index = 0;
     let backend =
@@ -314,23 +353,18 @@ fn main() {
     let raw_scale_buffer = sllm_hip::Buffer::allocate(&context, raw_scale.len() as u64)
         .unwrap_or_else(|error| fail(format!("raw scale allocation failed: {error}")));
     copy_to_device(&queue, &raw_scale_buffer, &raw_scale, "raw scale");
-    let mut cases = Vec::with_capacity(CASE_ROWS.len());
-    for (order, rows) in CASE_ROWS.into_iter().enumerate() {
-        let request = activation(rows, CASE_SEEDS[order]);
-        let (output, dispatch) = run_case(
-            &backend,
-            &context,
-            &queue,
-            &raw_scale_buffer,
-            rows,
-            CASE_SEEDS[order],
-        );
+    let contract = case_contract(n);
+    let mut cases = Vec::with_capacity(contract.len());
+    for (order, (rows, seed, id)) in contract.into_iter().enumerate() {
+        let request = activation(rows, n, seed);
+        let (output, dispatch) =
+            run_case(&backend, &context, &queue, &raw_scale_buffer, rows, n, seed);
         cases.push(CaseResult {
             order,
-            id: CASE_IDS[order],
+            id,
             rows,
-            n: N,
-            input_seed: CASE_SEEDS[order],
+            n,
+            input_seed: seed,
             request_b64: base64(&request),
             output_b64: base64(&output),
             dispatch: DispatchResult {
@@ -356,7 +390,7 @@ fn main() {
         tokenizer_used: false,
         generation_used: false,
         selected_backend: "hip",
-        dispatch_count: 6,
+        dispatch_count: cases.len() as u32,
         fallback_used: false,
         cases,
     };

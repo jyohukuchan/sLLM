@@ -9,6 +9,9 @@
 #include <unordered_set>
 
 struct FakeHipStream {};
+struct FakeHipMemHandle {
+  std::size_t size = 0U;
+};
 
 namespace {
 
@@ -59,6 +62,8 @@ struct State final {
   std::unordered_set<hipEvent_t> events;
   std::unordered_set<hipStream_t> streams;
   std::unordered_set<void *> allocations;
+  std::unordered_set<void *> reservations;
+  std::unordered_set<hipMemGenericAllocationHandle_t> vmm_handles;
 };
 
 State state;
@@ -368,10 +373,8 @@ hipError_t kv_state_append_launch(
        ++element) {
     const uint64_t row = element / elements_per_row;
     const uint64_t within_row = element % elements_per_row;
-    const uint64_t head = within_row / 256U;
-    const uint64_t dimension = within_row % 256U;
-    const uint64_t output_offset = head * capacity_tokens * 256U +
-                                   (start_position + row) * 256U + dimension;
+    const uint64_t output_offset =
+        (start_position + row) * elements_per_row + within_row;
     key_output[output_offset] = bf16_to_f16(key_input[element]);
     value_output[output_offset] = bf16_to_f16(value_input[element]);
   }
@@ -383,7 +386,7 @@ hipError_t kv_state_append_launch(
 hipError_t causal_attention_launch(
     const uint16_t *const query, const uint16_t *const key,
     const uint16_t *const value, uint16_t *const output,
-    const uint32_t query_count, const uint64_t capacity_tokens,
+    const uint32_t query_count, const uint64_t /*capacity_tokens*/,
     const uint64_t start_position, const uint64_t committed_kv_length,
     const hipStream_t /*stream*/) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
@@ -400,17 +403,14 @@ hipError_t causal_attention_launch(
       const uint16_t *const query_head =
           query + (static_cast<uint64_t>(row) * 16U + head) * 256U;
       const uint32_t kv_head = head / 4U;
-      const uint16_t *const key_head =
-          key + static_cast<uint64_t>(kv_head) * capacity_tokens * 256U;
-      const uint16_t *const value_head =
-          value + static_cast<uint64_t>(kv_head) * capacity_tokens * 256U;
       float maximum = -INFINITY;
       for (uint64_t key_position = 0U; key_position <= position;
            ++key_position) {
         float dot = 0.0F;
         for (uint32_t dimension = 0U; dimension != 256U; ++dimension) {
-          dot += bf16_to_f32(query_head[dimension]) *
-                 f16_to_f32(key_head[key_position * 256U + dimension]);
+          dot +=
+              bf16_to_f32(query_head[dimension]) *
+              f16_to_f32(key[(key_position * 4U + kv_head) * 256U + dimension]);
         }
         maximum = std::fmax(maximum, dot * 0.0625F);
       }
@@ -419,8 +419,9 @@ hipError_t causal_attention_launch(
            ++key_position) {
         float dot = 0.0F;
         for (uint32_t dimension = 0U; dimension != 256U; ++dimension) {
-          dot += bf16_to_f32(query_head[dimension]) *
-                 f16_to_f32(key_head[key_position * 256U + dimension]);
+          dot +=
+              bf16_to_f32(query_head[dimension]) *
+              f16_to_f32(key[(key_position * 4U + kv_head) * 256U + dimension]);
         }
         denominator += std::exp(dot * 0.0625F - maximum);
       }
@@ -433,14 +434,17 @@ hipError_t causal_attention_launch(
           float dot = 0.0F;
           for (uint32_t dot_dimension = 0U; dot_dimension != 256U;
                ++dot_dimension) {
-            dot += bf16_to_f32(query_head[dot_dimension]) *
-                   f16_to_f32(key_head[key_position * 256U + dot_dimension]);
+            dot +=
+                bf16_to_f32(query_head[dot_dimension]) *
+                f16_to_f32(
+                    key[(key_position * 4U + kv_head) * 256U + dot_dimension]);
           }
           const float probability =
               std::exp(dot * 0.0625F - maximum) / denominator;
           accumulation +=
               probability *
-              f16_to_f32(value_head[key_position * 256U + dimension]);
+              f16_to_f32(
+                  value[(key_position * 4U + kv_head) * 256U + dimension]);
         }
         output_head[dimension] = f32_to_bf16_rne(accumulation);
       }
@@ -694,7 +698,8 @@ std::size_t live_streams() noexcept {
 
 std::size_t live_allocations() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
-  return state.allocations.size();
+  return state.allocations.size() + state.reservations.size() +
+         state.vmm_handles.size();
 }
 
 } // namespace fake_hip
@@ -738,6 +743,117 @@ hipError_t hipGetDeviceProperties(hipDeviceProp_t *const properties,
 
 hipError_t hipSetDevice(const int device) noexcept {
   return device == 0 ? hipSuccess : hipErrorInvalidValue;
+}
+
+hipError_t hipMemGetInfo(std::size_t *const available,
+                         std::size_t *const total) noexcept {
+  if (available == nullptr || total == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  *total = static_cast<std::size_t>(16U) * 1024U * 1024U;
+  *available = static_cast<std::size_t>(12U) * 1024U * 1024U;
+  return hipSuccess;
+}
+
+hipError_t hipMemGetAllocationGranularity(
+    std::size_t *const granularity,
+    const hipMemAllocationProp *const properties,
+    const hipMemAllocationGranularity_flags option) noexcept {
+  if (granularity == nullptr || properties == nullptr ||
+      properties->type != hipMemAllocationTypePinned ||
+      properties->location.type != hipMemLocationTypeDevice ||
+      properties->location.id != 0) {
+    return hipErrorInvalidValue;
+  }
+  *granularity = option == hipMemAllocationGranularityMinimum
+                     ? std::size_t{4096}
+                     : std::size_t{2} * 1024U * 1024U;
+  return hipSuccess;
+}
+
+hipError_t hipMemAddressReserve(void **const pointer, const std::size_t size,
+                                const std::size_t /*alignment*/,
+                                void *const /*requested*/,
+                                const unsigned long long /*flags*/) noexcept {
+  if (pointer == nullptr || size == 0U) {
+    return hipErrorInvalidValue;
+  }
+  *pointer = std::calloc(1U, size);
+  if (*pointer == nullptr) {
+    return hipErrorUnknown;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.reservations.insert(*pointer);
+  return hipSuccess;
+}
+
+hipError_t hipMemAddressFree(void *const pointer,
+                             const std::size_t /*size*/) noexcept {
+  if (pointer == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.reservations.erase(pointer) == 0U) {
+    return hipErrorInvalidValue;
+  }
+  ++state.allocation_free_calls;
+  std::free(pointer);
+  return hipSuccess;
+}
+
+hipError_t hipMemCreate(hipMemGenericAllocationHandle_t *const handle,
+                        const std::size_t size,
+                        const hipMemAllocationProp *const properties,
+                        const unsigned long long /*flags*/) noexcept {
+  if (handle == nullptr || size == 0U || properties == nullptr ||
+      properties->location.type != hipMemLocationTypeDevice) {
+    return hipErrorInvalidValue;
+  }
+  *handle = new (std::nothrow) FakeHipMemHandle{size};
+  if (*handle == nullptr) {
+    return hipErrorUnknown;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.vmm_handles.insert(*handle);
+  return hipSuccess;
+}
+
+hipError_t hipMemMap(void *const pointer, const std::size_t size,
+                     const std::size_t offset,
+                     const hipMemGenericAllocationHandle_t handle,
+                     const unsigned long long /*flags*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return pointer == nullptr || size == 0U || offset != 0U ||
+                 state.vmm_handles.count(handle) == 0U
+             ? hipErrorInvalidValue
+             : hipSuccess;
+}
+
+hipError_t hipMemSetAccess(void *const pointer, const std::size_t size,
+                           const hipMemAccessDesc *const descriptors,
+                           const std::size_t count) noexcept {
+  return pointer == nullptr || size == 0U || descriptors == nullptr ||
+                 count != 1U ||
+                 descriptors->flags != hipMemAccessFlagsProtReadWrite
+             ? hipErrorInvalidValue
+             : hipSuccess;
+}
+
+hipError_t hipMemUnmap(void *const pointer, const std::size_t size) noexcept {
+  return pointer == nullptr || size == 0U ? hipErrorInvalidValue : hipSuccess;
+}
+
+hipError_t
+hipMemRelease(const hipMemGenericAllocationHandle_t handle) noexcept {
+  if (handle == nullptr) {
+    return hipErrorInvalidValue;
+  }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.vmm_handles.erase(handle) == 0U) {
+    return hipErrorInvalidValue;
+  }
+  delete handle;
+  return hipSuccess;
 }
 
 hipError_t hipStreamCreateWithFlags(hipStream_t *const stream,

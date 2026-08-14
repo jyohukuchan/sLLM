@@ -10,14 +10,16 @@
       "crates/sllm-core/Cargo.toml",
       "crates/sllm-frontend/Cargo.toml",
       "crates/sllm-hip-sys/Cargo.toml",
-      "crates/sllm-hip/Cargo.toml"
+      "crates/sllm-hip/Cargo.toml",
+      "crates/sllm-server/Cargo.toml"
     ],
     "default_members": [
       "crates/sllm-cli/Cargo.toml",
       "crates/sllm-core/Cargo.toml",
       "crates/sllm-frontend/Cargo.toml",
       "crates/sllm-hip-sys/Cargo.toml",
-      "crates/sllm-hip/Cargo.toml"
+      "crates/sllm-hip/Cargo.toml",
+      "crates/sllm-server/Cargo.toml"
     ]
   },
   "workspace_members": [
@@ -69,6 +71,20 @@
       "targets": [
         {
           "name": "model_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "sampling_contract",
           "kind": [
             "test"
           ],
@@ -420,6 +436,72 @@
           "doctest": true
         }
       ]
+    },
+    {
+      "identity": {
+        "name": "sllm-server",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-server/Cargo.toml",
+      "targets": [
+        {
+          "name": "http_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "profile_v1_fixture_server",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "sllm-server",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm_server",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
     }
   ],
   "packages": [
@@ -457,6 +539,43 @@
     },
     {
       "identity": {
+        "name": "atomic-waker",
+        "version": "1.1.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.36",
+      "features": [],
+      "checksum": "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+    },
+    {
+      "identity": {
+        "name": "axum-core",
+        "version": "0.5.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.78",
+      "features": [],
+      "checksum": "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+    },
+    {
+      "identity": {
+        "name": "axum",
+        "version": "0.8.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.80",
+      "features": [
+        "http1",
+        "json",
+        "tokio"
+      ],
+      "checksum": "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+    },
+    {
+      "identity": {
         "name": "base64",
         "version": "0.13.1",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -490,6 +609,20 @@
       "rust_version": null,
       "features": [],
       "checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+    },
+    {
+      "identity": {
+        "name": "bytes",
+        "version": "1.12.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.57",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
     },
     {
       "identity": {
@@ -733,6 +866,20 @@
     },
     {
       "identity": {
+        "name": "errno",
+        "version": "0.3.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+    },
+    {
+      "identity": {
         "name": "esaxx-rs",
         "version": "0.1.10",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -769,6 +916,80 @@
     },
     {
       "identity": {
+        "name": "futures-channel",
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "b1f9e3d69d39e4862ffed03ed071a76f9a13ba1d9109d355b0f0aa6b15e393c4"
+    },
+    {
+      "identity": {
+        "name": "futures-core",
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.36",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "92d699e522242e69e3003b94ecc1f960f3a5e015aa7c5d7486e65ad01dd94f5e"
+    },
+    {
+      "identity": {
+        "name": "futures-sink",
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.36",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
+    },
+    {
+      "identity": {
+        "name": "futures-task",
+        "version": "0.3.34",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "alloc",
+        "std"
+      ],
+      "checksum": "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
+    },
+    {
+      "identity": {
+        "name": "futures-util",
+        "version": "0.3.33",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "alloc",
+        "slab",
+        "std"
+      ],
+      "checksum": "a77a90a256fce34da66415271e30f94ee91c57b04b8a2c042d9cf3220179deaa"
+    },
+    {
+      "identity": {
         "name": "generic-array",
         "version": "0.14.7",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,6 +1013,101 @@
         "std"
       ],
       "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+    },
+    {
+      "identity": {
+        "name": "http-body-util",
+        "version": "0.1.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.61",
+      "features": [
+        "default"
+      ],
+      "checksum": "23169fe34a5fbcdd3f3862e78fb9b6fccd5f02a6dc6f732547005d45631ce71c"
+    },
+    {
+      "identity": {
+        "name": "http-body",
+        "version": "1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.61",
+      "features": [],
+      "checksum": "ca2a8f2913ee65f60facd6a5905613afaa448497a0230cc41ce022d93290bc2c"
+    },
+    {
+      "identity": {
+        "name": "http",
+        "version": "1.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.57.0",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "918d3568bebf352712bc2ef3d46a8bcf1a75b373be6539de198e9105cbbf9ce0"
+    },
+    {
+      "identity": {
+        "name": "httparse",
+        "version": "1.10.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
+    },
+    {
+      "identity": {
+        "name": "httpdate",
+        "version": "1.0.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+    },
+    {
+      "identity": {
+        "name": "hyper-util",
+        "version": "0.1.20",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.64",
+      "features": [
+        "default",
+        "http1",
+        "server",
+        "service",
+        "tokio"
+      ],
+      "checksum": "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
+    },
+    {
+      "identity": {
+        "name": "hyper",
+        "version": "1.11.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.63",
+      "features": [
+        "default",
+        "http1",
+        "server"
+      ],
+      "checksum": "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
     },
     {
       "identity": {
@@ -881,6 +1197,19 @@
     },
     {
       "identity": {
+        "name": "matchit",
+        "version": "0.8.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT AND BSD-3-Clause",
+      "rust_version": null,
+      "features": [
+        "default"
+      ],
+      "checksum": "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+    },
+    {
+      "identity": {
         "name": "memchr",
         "version": "2.8.3",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -889,9 +1218,21 @@
       "rust_version": "1.61",
       "features": [
         "alloc",
+        "default",
         "std"
       ],
       "checksum": "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+    },
+    {
+      "identity": {
+        "name": "mime",
+        "version": "0.3.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
     },
     {
       "identity": {
@@ -905,6 +1246,21 @@
         "std"
       ],
       "checksum": "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+    },
+    {
+      "identity": {
+        "name": "mio",
+        "version": "1.2.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [
+        "net",
+        "os-ext",
+        "os-poll"
+      ],
+      "checksum": "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
     },
     {
       "identity": {
@@ -991,6 +1347,32 @@
       "rust_version": "1.31",
       "features": [],
       "checksum": "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+    },
+    {
+      "identity": {
+        "name": "percent-encoding",
+        "version": "2.3.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.51",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+    },
+    {
+      "identity": {
+        "name": "pin-project-lite",
+        "version": "0.2.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.37",
+      "features": [],
+      "checksum": "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
     },
     {
       "identity": {
@@ -1269,6 +1651,7 @@
       "rust_version": "1.56",
       "features": [
         "alloc",
+        "default",
         "result",
         "std"
       ],
@@ -1297,9 +1680,21 @@
       "rust_version": "1.71",
       "features": [
         "default",
+        "raw_value",
         "std"
       ],
       "checksum": "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+    },
+    {
+      "identity": {
+        "name": "serde_path_to_error",
+        "version": "0.1.20",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.61",
+      "features": [],
+      "checksum": "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
     },
     {
       "identity": {
@@ -1331,14 +1726,54 @@
     },
     {
       "identity": {
+        "name": "signal-hook-registry",
+        "version": "1.4.8",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.26",
+      "features": [],
+      "checksum": "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
+    },
+    {
+      "identity": {
+        "name": "slab",
+        "version": "0.4.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.51",
+      "features": [
+        "std"
+      ],
+      "checksum": "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+    },
+    {
+      "identity": {
         "name": "smallvec",
         "version": "1.15.2",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
       },
       "license": "MIT OR Apache-2.0",
       "rust_version": null,
-      "features": [],
+      "features": [
+        "const_generics",
+        "const_new"
+      ],
       "checksum": "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+    },
+    {
+      "identity": {
+        "name": "socket2",
+        "version": "0.6.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.70",
+      "features": [
+        "all"
+      ],
+      "checksum": "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
     },
     {
       "identity": {
@@ -1395,6 +1830,36 @@
     },
     {
       "identity": {
+        "name": "syn",
+        "version": "3.0.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "clone-impls",
+        "default",
+        "derive",
+        "full",
+        "parsing",
+        "printing",
+        "proc-macro"
+      ],
+      "checksum": "53e9bae58849f64dfa4f5d5ae372c8341f7305f82a3868709269343628b659a3"
+    },
+    {
+      "identity": {
+        "name": "sync_wrapper",
+        "version": "1.0.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
+    },
+    {
+      "identity": {
         "name": "thiserror-impl",
         "version": "2.0.18",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1430,6 +1895,148 @@
         "onig"
       ],
       "checksum": "a620b996116a59e184c2fa2dfd8251ea34a36d0a514758c6f966386bd2e03476"
+    },
+    {
+      "identity": {
+        "name": "tokio-macros",
+        "version": "2.7.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "78773a2a397f451582ce068015985c33193cf6dea8b74d2a639fe457b2f07b0e"
+    },
+    {
+      "identity": {
+        "name": "tokio-stream",
+        "version": "0.1.19",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [
+        "sync",
+        "tokio-util"
+      ],
+      "checksum": "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
+    },
+    {
+      "identity": {
+        "name": "tokio-util",
+        "version": "0.7.19",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [
+        "default"
+      ],
+      "checksum": "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+    },
+    {
+      "identity": {
+        "name": "tokio",
+        "version": "1.53.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.71",
+      "features": [
+        "default",
+        "libc",
+        "macros",
+        "mio",
+        "net",
+        "rt",
+        "rt-multi-thread",
+        "signal",
+        "signal-hook-registry",
+        "socket2",
+        "sync",
+        "time",
+        "tokio-macros",
+        "windows-sys"
+      ],
+      "checksum": "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+    },
+    {
+      "identity": {
+        "name": "tower-http",
+        "version": "0.7.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.65",
+      "features": [
+        "limit",
+        "trace",
+        "tracing"
+      ],
+      "checksum": "b11f75e912b0c2be01b63d8cf8057b8c3f97cf34abb3d431a3a4c8675498e233"
+    },
+    {
+      "identity": {
+        "name": "tower-layer",
+        "version": "0.3.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [],
+      "checksum": "121c2a6cda46980bb0fcd1647ffaf6cd3fc79a013de288782836f6df9c48780e"
+    },
+    {
+      "identity": {
+        "name": "tower-service",
+        "version": "0.3.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [],
+      "checksum": "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+    },
+    {
+      "identity": {
+        "name": "tower",
+        "version": "0.5.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.64.0",
+      "features": [
+        "futures-core",
+        "futures-util",
+        "make",
+        "pin-project-lite",
+        "sync_wrapper",
+        "tokio",
+        "util"
+      ],
+      "checksum": "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
+    },
+    {
+      "identity": {
+        "name": "tracing-core",
+        "version": "0.1.36",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.65.0",
+      "features": [],
+      "checksum": "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
+    },
+    {
+      "identity": {
+        "name": "tracing",
+        "version": "0.1.44",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.65.0",
+      "features": [],
+      "checksum": "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
     },
     {
       "identity": {
@@ -1499,6 +2106,20 @@
     },
     {
       "identity": {
+        "name": "wasi",
+        "version": "0.11.1+wasi-snapshot-preview1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
+      "rust_version": null,
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+    },
+    {
+      "identity": {
         "name": "wasip2",
         "version": "1.0.4+wasi-0.2.12",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1507,6 +2128,52 @@
       "rust_version": "1.87.0",
       "features": [],
       "checksum": "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+    },
+    {
+      "identity": {
+        "name": "windows-link",
+        "version": "0.2.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+    },
+    {
+      "identity": {
+        "name": "windows-sys",
+        "version": "0.61.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [
+        "Wdk",
+        "Wdk_Foundation",
+        "Wdk_Storage",
+        "Wdk_Storage_FileSystem",
+        "Wdk_System",
+        "Wdk_System_IO",
+        "Win32",
+        "Win32_Foundation",
+        "Win32_Networking",
+        "Win32_Networking_WinSock",
+        "Win32_Security",
+        "Win32_Storage",
+        "Win32_Storage_FileSystem",
+        "Win32_System",
+        "Win32_System_Console",
+        "Win32_System_Diagnostics",
+        "Win32_System_Diagnostics_Debug",
+        "Win32_System_IO",
+        "Win32_System_Pipes",
+        "Win32_System_SystemServices",
+        "Win32_System_Threading",
+        "Win32_System_WindowsProgramming",
+        "default"
+      ],
+      "checksum": "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
     },
     {
       "identity": {
@@ -1608,6 +2275,17 @@
       "rust_version": "1.85.0",
       "features": [],
       "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-server",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
     }
   ],
   "edges": [
@@ -1697,6 +2375,402 @@
       "requested_features": [],
       "uses_default_features": false,
       "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:http-body-util@0.1.5",
+      "name": "http-body-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:mime@0.3.17",
+      "name": "mime",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.16",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:sync_wrapper@1.0.2",
+      "name": "sync_wrapper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:tower-layer@0.3.3",
+      "name": "tower-layer",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-core@0.5.6",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:axum-core@0.5.6",
+      "name": "axum-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.5.5",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:futures-util@0.3.33",
+      "name": "futures-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:http-body-util@0.1.5",
+      "name": "http-body-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:hyper-util@0.1.20",
+      "name": "hyper-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.3",
+      "requested_features": [
+        "server",
+        "service",
+        "tokio"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:hyper@1.11.0",
+      "name": "hyper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.5",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:matchit@0.8.4",
+      "name": "matchit",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.8.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:memchr@2.8.3",
+      "name": "memchr",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.4.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:mime@0.3.17",
+      "name": "mime",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.16",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:percent-encoding@2.3.2",
+      "name": "percent-encoding",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:serde_core@1.0.228",
+      "name": "serde_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.221",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [
+        "raw_value"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:serde_path_to_error@0.1.20",
+      "name": "serde_path_to_error",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.8",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:sync_wrapper@1.0.2",
+      "name": "sync_wrapper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.44",
+      "requested_features": [
+        "time"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": "tokio"
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:tower-layer@0.3.3",
+      "name": "tower-layer",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum@0.8.9",
+      "to": "registry:tower@0.5.3",
+      "name": "tower",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.5.2",
+      "requested_features": [
+        "util"
+      ],
+      "uses_default_features": false,
+      "optional": false,
       "rename": null
     },
     {
@@ -2210,6 +3284,117 @@
       "rename": null
     },
     {
+      "from": "registry:errno@0.3.14",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"hermit\")",
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:errno@0.3.14",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"wasi\")",
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:errno@0.3.14",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:errno@0.3.14",
+      "to": "registry:windows-sys@0.61.2",
+      "name": "windows-sys",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": ">=0.52, <0.62",
+      "requested_features": [
+        "Win32_Foundation",
+        "Win32_System_Diagnostics_Debug"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:futures-channel@0.3.34",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.34",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:futures-util@0.3.33",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.33",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:futures-util@0.3.33",
+      "to": "registry:futures-task@0.3.34",
+      "name": "futures-task",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.33",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:futures-util@0.3.33",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:futures-util@0.3.33",
+      "to": "registry:slab@0.4.12",
+      "name": "slab",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.7",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
       "from": "registry:generic-array@0.14.7",
       "to": "registry:typenum@1.20.1",
       "name": "typenum",
@@ -2366,6 +3551,347 @@
       "rename": null
     },
     {
+      "from": "registry:http-body-util@0.1.5",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body-util@0.1.5",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body-util@0.1.5",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body-util@0.1.5",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body-util@0.1.5",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body@1.1.0",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http-body@1.1.0",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http@1.5.0",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:http@1.5.0",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.7.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:hyper@1.11.0",
+      "name": "hyper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.8.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper-util@0.1.20",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:atomic-waker@1.1.2",
+      "name": "atomic-waker",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:futures-channel@0.3.34",
+      "name": "futures-channel",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.31",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:httparse@1.10.1",
+      "name": "httparse",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:httpdate@1.0.3",
+      "name": "httpdate",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:smallvec@1.15.2",
+      "name": "smallvec",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.12",
+      "requested_features": [
+        "const_generics",
+        "const_new"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [
+        "sync"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:itertools@0.14.0",
       "to": "registry:either@1.16.0",
       "name": "either",
@@ -2397,6 +3923,52 @@
       "target": null,
       "req": "^1.0.7",
       "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:mio@1.2.2",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(unix, target_os = \"hermit\", target_os = \"wasi\"))",
+      "req": "^0.2.183",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:mio@1.2.2",
+      "to": "registry:wasi@0.11.1+wasi-snapshot-preview1",
+      "name": "wasi",
+      "kind": "normal",
+      "target": "cfg(target_os = \"wasi\")",
+      "req": "^0.11.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:mio@1.2.2",
+      "to": "registry:windows-sys@0.61.2",
+      "name": "windows-sys",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": "^0.61",
+      "requested_features": [
+        "Wdk_Foundation",
+        "Wdk_Storage_FileSystem",
+        "Wdk_System_IO",
+        "Win32_Foundation",
+        "Win32_Networking_WinSock",
+        "Win32_Security",
+        "Win32_Storage_FileSystem",
+        "Win32_System_IO",
+        "Win32_System_WindowsProgramming"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -2990,6 +4562,44 @@
       "rename": null
     },
     {
+      "from": "registry:serde_path_to_error@0.1.20",
+      "to": "registry:itoa@1.0.18",
+      "name": "itoa",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_path_to_error@0.1.20",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": "cfg(any())",
+      "req": "^1.0.220",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_path_to_error@0.1.20",
+      "to": "registry:serde_core@1.0.228",
+      "name": "serde_core",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.220",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:sha2@0.10.9",
       "to": "registry:cfg-if@1.0.4",
       "name": "cfg-if",
@@ -3021,6 +4631,60 @@
       "target": null,
       "req": "^0.10.7",
       "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:signal-hook-registry@1.4.8",
+      "to": "registry:errno@0.3.14",
+      "name": "errno",
+      "kind": "normal",
+      "target": null,
+      "req": ">=0.2, <0.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:signal-hook-registry@1.4.8",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:socket2@0.6.5",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(unix, target_os = \"wasi\"))",
+      "req": "^0.2.172",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:socket2@0.6.5",
+      "to": "registry:windows-sys@0.61.2",
+      "name": "windows-sys",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": ">=0.60, <0.62",
+      "requested_features": [
+        "Win32_Foundation",
+        "Win32_Networking_WinSock",
+        "Win32_System_IO",
+        "Win32_System_Threading",
+        "Win32_System_WindowsProgramming"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -3101,6 +4765,42 @@
     },
     {
       "from": "registry:syn@2.0.118",
+      "to": "registry:unicode-ident@1.0.24",
+      "name": "unicode-ident",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@3.0.3",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.91",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@3.0.3",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:syn@3.0.3",
       "to": "registry:unicode-ident@1.0.24",
       "name": "unicode-ident",
       "kind": "normal",
@@ -3468,6 +5168,511 @@
       "rename": null
     },
     {
+      "from": "registry:tokio-macros@2.7.2",
+      "to": "registry:proc-macro2@1.0.107",
+      "name": "proc-macro2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.60",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-macros@2.7.2",
+      "to": "registry:quote@1.0.47",
+      "name": "quote",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-macros@2.7.2",
+      "to": "registry:syn@3.0.3",
+      "name": "syn",
+      "kind": "normal",
+      "target": null,
+      "req": "^3.0",
+      "requested_features": [
+        "full"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-stream@0.1.19",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-stream@0.1.19",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-stream@0.1.19",
+      "to": "registry:tokio-util@0.7.19",
+      "name": "tokio-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.7.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-stream@0.1.19",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.38.0",
+      "requested_features": [
+        "sync"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.5.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
+      "to": "registry:futures-sink@0.3.34",
+      "name": "futures-sink",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.47.0",
+      "requested_features": [
+        "sync"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(tokio_unstable, target_os = \"linux\"))",
+      "req": "^0.2.168",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"wasi\")",
+      "req": "^0.2.168",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2.168",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:mio@1.2.2",
+      "name": "mio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:mio@1.2.2",
+      "name": "mio",
+      "kind": "normal",
+      "target": "cfg(all(tokio_unstable, target_os = \"linux\"))",
+      "req": "^1.2.0",
+      "requested_features": [
+        "os-ext",
+        "os-poll"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.11",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:signal-hook-registry@1.4.8",
+      "name": "signal-hook-registry",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^1.1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:socket2@0.6.5",
+      "name": "socket2",
+      "kind": "normal",
+      "target": "cfg(any(not(target_family = \"wasm\"), all(target_os = \"wasi\", not(target_env = \"p1\"))))",
+      "req": "^0.6.3",
+      "requested_features": [
+        "all"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:tokio-macros@2.7.2",
+      "name": "tokio-macros",
+      "kind": "normal",
+      "target": null,
+      "req": "~2.7.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:windows-sys@0.61.2",
+      "name": "windows-sys",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": "^0.61",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:bitflags@2.13.0",
+      "name": "bitflags",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:http-body-util@0.1.5",
+      "name": "http-body-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:percent-encoding@2.3.2",
+      "name": "percent-encoding",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:tower-layer@0.3.3",
+      "name": "tower-layer",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower-http@0.7.0",
+      "to": "registry:tracing@0.1.44",
+      "name": "tracing",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.22",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:futures-util@0.3.33",
+      "name": "futures-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.22",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.7",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:sync_wrapper@1.0.2",
+      "name": "sync_wrapper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.6.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:tower-layer@0.3.3",
+      "name": "tower-layer",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tower@0.5.3",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tracing@0.1.44",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tracing@0.1.44",
+      "to": "registry:tracing-core@0.1.36",
+      "name": "tracing-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.36",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:unicode-normalization-alignments@0.1.12",
       "to": "registry:smallvec@1.15.2",
       "name": "smallvec",
@@ -3486,6 +5691,18 @@
       "kind": "normal",
       "target": null,
       "req": "^0.57.1",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-sys@0.61.2",
+      "to": "registry:windows-link@0.2.1",
+      "name": "windows-link",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.1",
       "requested_features": [],
       "uses_default_features": false,
       "optional": false,
@@ -3762,20 +5979,172 @@
       "uses_default_features": true,
       "optional": false,
       "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:axum@0.8.9",
+      "name": "axum",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.8.9",
+      "requested_features": [
+        "http1",
+        "json",
+        "tokio"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:futures-util@0.3.33",
+      "name": "futures-util",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.3.33",
+      "requested_features": [
+        "std"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:serde_path_to_error@0.1.20",
+      "name": "serde_path_to_error",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.1.20",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:tokio-stream@0.1.19",
+      "name": "tokio-stream",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.1.19",
+      "requested_features": [
+        "sync"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.53.1",
+      "requested_features": [
+        "macros",
+        "net",
+        "rt-multi-thread",
+        "signal",
+        "sync",
+        "time"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:tower-http@0.7.0",
+      "name": "tower-http",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.7.0",
+      "requested_features": [
+        "limit",
+        "trace"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "workspace:sllm-core@0.1.0",
+      "name": "sllm-core",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "workspace:sllm-frontend@0.1.0",
+      "name": "sllm-frontend",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "workspace:sllm-hip@0.1.0",
+      "name": "sllm-hip",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
     }
   ],
   "counts": {
-    "packages": 90,
-    "registry_packages": 85,
-    "workspace_packages": 5,
-    "edges": 174,
+    "packages": 132,
+    "registry_packages": 126,
+    "workspace_packages": 6,
+    "edges": 309,
     "edge_kinds": {
       "build": 6,
       "dev": 1,
-      "normal": 167
+      "normal": 302
     },
-    "target_specific_edges": 21,
-    "target_expressions": 18
+    "target_specific_edges": 38,
+    "target_expressions": 25
   },
   "feature_assertions": {
     "tokenizers": {
@@ -3794,6 +6163,95 @@
       ],
       "required_packages": [
         "registry:esaxx-rs@0.1.10"
+      ]
+    },
+    "server_runtime": {
+      "workspace_package": "workspace:sllm-server@0.1.0",
+      "dependencies": [
+        {
+          "package": "registry:axum@0.8.9",
+          "requested": [
+            "http1",
+            "json",
+            "tokio"
+          ],
+          "resolved": [
+            "http1",
+            "json",
+            "tokio"
+          ],
+          "uses_default_features": false
+        },
+        {
+          "package": "registry:futures-util@0.3.33",
+          "requested": [
+            "std"
+          ],
+          "resolved": [
+            "alloc",
+            "slab",
+            "std"
+          ],
+          "uses_default_features": false
+        },
+        {
+          "package": "registry:serde_path_to_error@0.1.20",
+          "requested": [],
+          "resolved": [],
+          "uses_default_features": true
+        },
+        {
+          "package": "registry:tokio-stream@0.1.19",
+          "requested": [
+            "sync"
+          ],
+          "resolved": [
+            "sync",
+            "tokio-util"
+          ],
+          "uses_default_features": false
+        },
+        {
+          "package": "registry:tokio@1.53.1",
+          "requested": [
+            "macros",
+            "net",
+            "rt-multi-thread",
+            "signal",
+            "sync",
+            "time"
+          ],
+          "resolved": [
+            "default",
+            "libc",
+            "macros",
+            "mio",
+            "net",
+            "rt",
+            "rt-multi-thread",
+            "signal",
+            "signal-hook-registry",
+            "socket2",
+            "sync",
+            "time",
+            "tokio-macros",
+            "windows-sys"
+          ],
+          "uses_default_features": false
+        },
+        {
+          "package": "registry:tower-http@0.7.0",
+          "requested": [
+            "limit",
+            "trace"
+          ],
+          "resolved": [
+            "limit",
+            "trace",
+            "tracing"
+          ],
+          "uses_default_features": false
+        }
       ]
     }
   },

@@ -1,0 +1,49 @@
+{
+  "schema_version": "profile-sampling-cases-v1",
+  "cases": [
+    {
+      "id": "seven-way-nucleus",
+      "logits": [0.0, 1.0, -1.0, 0.5, 2.0, 0.25, -0.25],
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "history": [],
+      "uniform": 0.5,
+      "expected_token": 4
+    },
+    {
+      "id": "presence-frequency-history",
+      "logits": [0.0, 2.5, 1.0],
+      "temperature": 1.0,
+      "top_p": 1.0,
+      "presence_penalty": 1.0,
+      "frequency_penalty": 1.0,
+      "history": [1, 1],
+      "uniform": 0.1,
+      "expected_token": 2
+    },
+    {
+      "id": "stable-tie-at-top-p-zero",
+      "logits": [2.0, 2.0, 1.0],
+      "temperature": 1.0,
+      "top_p": 0.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "history": [],
+      "uniform": 0.9,
+      "expected_token": 0
+    },
+    {
+      "id": "temperature-two-full-distribution",
+      "logits": [-3.0, 0.0, 3.0, 1.0, -1.0],
+      "temperature": 2.0,
+      "top_p": 1.0,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "history": [],
+      "uniform": 0.73,
+      "expected_token": 3
+    }
+  ]
+}

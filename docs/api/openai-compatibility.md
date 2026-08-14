@@ -46,7 +46,9 @@ Required request fields:
 
 Supported message roles are `system`, `user`, and `assistant`. For each message,
 `content` must be a JSON string. Multipart content and the `developer`, `tool`, or
-`function` roles are outside profile v1.
+`function` roles are outside profile v1. This initial Qwen profile additionally
+requires at least one `user` message and permits at most one `system` message,
+which must be the first message.
 
 Supported generation fields are:
 
@@ -62,6 +64,10 @@ Supported generation fields are:
 The server validates the ranges and types defined by the pinned OpenAI schema. It
 must reject any request containing an unsupported field or value even when the
 rest of the request is valid; it must not silently coerce or discard it.
+Profile-v1 resource limits further cap the JSON body at 1 MiB, the model alias at
+256 UTF-8 bytes, messages at 1,024 entries, and `max_completion_tokens` at
+1–4,096. A `stop` array contains 1–4 nonempty, unique strings; the total stop
+payload is also bounded by the request-body limit.
 
 For `stream: false` or an omitted `stream`, the response is the standard
 `chat.completion` object with one choice. The choice contains an assistant text
@@ -73,8 +79,12 @@ For `stream: true`, the response uses Server-Sent Events with content type
 standard `chat.completion.chunk`. After the final JSON chunk, the stream terminates
 with exactly `data: [DONE]\n\n`. Disconnect and generation failures must terminate
 generation promptly; an error before response headers uses the normal JSON error
-form below. Mid-stream failure behavior must be documented before it is claimed as
-compatible.
+form below. After response headers have been sent, profile v1 emits one SSE event
+whose `data` is the same standard error envelope, closes the stream immediately,
+and does not emit a final completion chunk or `[DONE]`. This is an explicit sLLM
+terminal-error convention, not a claim that OpenAI specifies an equivalent
+mid-stream error event. Clients must treat close-without-`[DONE]` as failure and
+must not retain the partial text as a successful completion.
 
 ## Errors and unsupported features
 
@@ -124,6 +134,32 @@ particular, profile v1 rejects:
 Authentication and deployment policy are outside this payload-compatibility
 profile. A deployment that requires authentication should use the standard
 `Authorization: Bearer ...` header rather than adding credentials to JSON bodies.
+
+## Initial production runtime
+
+The initial `sllm-server` runtime serves one model-resident Qwen backend on one
+GPU. On a host with multiple GPUs, deployments must make exactly the selected
+GPU visible by its stable UUID and pass logical device index `0` to the server:
+
+```console
+ROCR_VISIBLE_DEVICES=GPU-76a08c022586fed6 sllm-server \
+  --device-index 0 --target gfx1030 [model and server options]
+```
+
+The corresponding canonical R9700 invocation uses UUID
+`GPU-a8e9ddefa2d60f55` and target `gfx1201`. A global physical device index in a
+multi-visible-GPU process is not a supported initial deployment: HIP current
+device state is thread-local, while the bounded scheduler executes generation on
+a worker thread. UUID isolation makes logical device `0` stable on every server
+thread and prevents a target-specific code object from being submitted to a
+different visible GPU. Multi-GPU serving remains outside profile v1.
+
+This deployment condition does not change the JSON or SSE compatibility claim.
+The production backend uses the same transport-independent generation service as
+the CLI, keeps the model resident between requests, and creates and releases
+request-local KV/linear state for each request. Profile v1 uses the locked Qwen
+chat template with thinking disabled; it does not expose a reasoning-control
+request field.
 
 ## sLLM extensions
 

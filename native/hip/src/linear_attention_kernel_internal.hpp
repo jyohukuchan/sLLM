@@ -25,15 +25,16 @@ hipError_t launch_convolution(const uint16_t *qkv, const uint16_t *conv_weight,
                               const uint16_t *previous_conv_state,
                               uint16_t *convolved_qkv,
                               uint16_t *next_conv_state, uint32_t token_count,
+                              uint32_t qkv_width, uint32_t conv_kernel_size,
                               hipStream_t stream) noexcept;
 
-hipError_t launch_recurrent(const uint16_t *convolved_qkv, const uint16_t *z,
-                            const uint16_t *b_input, const uint16_t *a_input,
-                            const float *a_log, const uint16_t *dt_bias,
-                            const float *norm_weight,
-                            const float *previous_recurrent_state,
-                            float *next_recurrent_state, uint16_t *output,
-                            uint32_t token_count, hipStream_t stream) noexcept;
+hipError_t launch_recurrent(
+    const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
+    const uint16_t *a_input, const float *a_log, const uint16_t *dt_bias,
+    const float *norm_weight, const float *previous_recurrent_state,
+    float *next_recurrent_state, uint16_t *output, uint32_t token_count,
+    uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
 
 } // namespace sllm_linear_attention_kernel
 

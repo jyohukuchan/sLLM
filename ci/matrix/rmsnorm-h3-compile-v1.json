@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json",
   "schema_version": "rmsnorm-h3-compile-v1",
   "matrix_id": "rmsnorm-h3-compile-v1",
-  "revision": 1,
+  "revision": 2,
   "suite_id": "h3-rmsnorm-compile-only",
   "tier": "tier_h3_rmsnorm",
   "toolchain_id": "rocm-7.14.0",
@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "4475645f841a7599002d7e82caafa3a8c0ab00b3c02d669f38f8889e95952e51"
+          "sha256": "9f5123b1ea334aa12dec061cdb2f414bdb47f46ed00612baa8c826e52b0a97c0"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,7 +42,7 @@
           "sha256": "d4aaae93cd08e18f6725f2a82e7c7f69bd17e5b3446dd2fb2dab81f5e8a932eb"
         }
       ],
-      "source_set_sha256": "2ef68f951757b16b96e42093093fa71117714cf552b777125407096d7d8ea724"
+      "source_set_sha256": "f06b5452a77409df9b2a6c3d4a134b1313049ebbd86ecb561d4097d9c60697a0"
     },
     "host_abi": {
       "canonical_order": [
@@ -54,7 +54,7 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "3c2252d782370a9030d62c0e747069c0b5ceae94f1ee662d115a714377cde86f"
+          "sha256": "481df57bb100ace33d8e0cf2e62a0724756e679a30d4a772720fb01bd70ae9dd"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -69,7 +69,7 @@
           "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"
         }
       ],
-      "source_set_sha256": "617f050117f3629a91382a1326fafa4da23c283914e9fa748c82d7505d873d32"
+      "source_set_sha256": "ef37186c80eed86c807ce4ecb6f6c232c02d4be80a63cee2c728289e3882e253"
     },
     "binding_build": {
       "canonical_order": [
@@ -82,11 +82,11 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "0617068294d73bfa1d6df4f63a4fb23a02da25388a28d33d03502ebf36b0fff6"
+          "sha256": "39fbddedd1c28f6ef44aea78f4cb1370b9aaebec788e9dadebd585bca6044665"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "87c44717b8b48c22a8a81865f082406cb8397a81aafa0f694de060819b864372"
+          "sha256": "41d7cade93eeecaf85d77681b53c2a0872552430da6b8f7f102f03982eb314cc"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
@@ -94,14 +94,14 @@
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "1e94798b3ae556a591a8ea1c82d268f00affc9001dbe35569a067df4c2de27c4"
+          "sha256": "7e948c8435640317d6ea6d39656df8d78647aebe3761c29c0ac388a6aa1f9413"
         },
         {
           "path": "native/hip/CMakeLists.txt",
           "sha256": "1a0eae00e6df882e330047c143026dd228adff79d495c740b762e078afefbc9f"
         }
       ],
-      "source_set_sha256": "18dfad055e88483e5f046bccce596bc90ec74023cf0859f900a349abdca5c178"
+      "source_set_sha256": "6923dd104dbaa99dc9734ce782184e2a5a9a0fd4308435ab146b284809b3791e"
     },
     "ci_contract": {
       "canonical_order": [
@@ -123,7 +123,7 @@
       "files": [
         {
           "path": "ci/schema/rmsnorm-h3-compile-v1.schema.json",
-          "sha256": "c3c14cb3ff3a85ab11f29be6fae720f16fa4b22148b80c4b58772ec101c9c344"
+          "sha256": "0212c4622aa69feed53f28e8e84cdbf6cba64689cc5f6fd88c88a56f211e2446"
         },
         {
           "path": "ci/schema/rmsnorm-h3-artifact-v1.schema.json",
@@ -143,15 +143,15 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "a86dfc583c1454a3d8700bb41e42f89cbf18ac2d59cce3c20ba2737b37b1e4a3"
+          "sha256": "5d0651cd5e66cc82ed0ba600b41dbe7e5ee91633d449175adb19d95bbed811ad"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "74cc55f139425f7fd48ecb910ff646cdc84c752e9a8ff813cc80b11d301dffc5"
+          "sha256": "347ec8c73a98d55625e58c3c87b5fc0536981de56f40ee7cba0353a399bb12bf"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "07e905156fa51f0b3bb785bd3b5da2a7a4a9ab62f57375a99beb9f54d93cec78"
+          "sha256": "d2a584d3cd1a27f3c8e3fa0b9a8323a125091cdb1aca9ed0f65ad4624e2017d9"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -178,7 +178,7 @@
           "sha256": "34b8f8137d7a289e2cc420636c4de95c4728b50dabad93dc5bc293cdcc71f88c"
         }
       ],
-      "source_set_sha256": "7920e303a62f962698428d219848f112910b1f11ec6c2fa3c5725574038295b8"
+      "source_set_sha256": "13c239be76e75bdb9312eb77c05bb279d79ad2bf7fd4b562bba29194650f02a7"
     }
   },
   "source_symbol_map": [

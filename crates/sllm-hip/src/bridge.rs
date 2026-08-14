@@ -48,12 +48,14 @@ pub(crate) fn open_execution_session(
     backend: HipBackend,
     request: ExecutionSessionRequest,
 ) -> Result<Arc<ExecutionSession>, ExecutionError> {
+    let device = Context::query_device(request.device_index()).map_err(map_backend_error)?;
     let context = Context::create(request.device_index(), request.expected_target())
         .map_err(map_backend_error)?;
     let adapter = Arc::new(HipExecutionSession {
         state: Arc::new(HipSessionState::new()),
         backend,
         context,
+        available_memory_bytes: device.available_memory_bytes,
     });
     Ok(Arc::new(ExecutionSession::new(HIP_BACKEND_NAME, adapter)))
 }
@@ -248,11 +250,16 @@ struct HipExecutionSession {
     state: Arc<HipSessionState>,
     backend: HipBackend,
     context: Context,
+    available_memory_bytes: u64,
 }
 
 impl ExecutionSessionAdapter for HipExecutionSession {
     fn max_transfer_bytes(&self) -> u64 {
         crate::sys::SLLM_HIP_MAX_TRANSFER_BYTES
+    }
+
+    fn available_memory_bytes(&self) -> Option<u64> {
+        Some(self.available_memory_bytes)
     }
 
     fn supports(&self, descriptor: &sllm_core::SemanticOpDescriptor) -> PrepareSupport {
@@ -1269,6 +1276,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            available_memory_bytes: u64::MAX,
         };
         assert_eq!(
             adapter.max_transfer_bytes(),
@@ -1368,6 +1376,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            available_memory_bytes: u64::MAX,
         };
         assert_eq!(
             adapter.supports(&attention_descriptor()),

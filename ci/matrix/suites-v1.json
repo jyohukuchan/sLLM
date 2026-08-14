@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "sLLM-host-suites",
-  "revision": 20,
+  "revision": 25,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -159,6 +159,68 @@
       "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
       "test_ids": ["phase3.stage_a.evidence_plan.contract", "phase3.stage_a.evidence_plan.negative", "phase3.stage_a.evidence_plan.no_execution"],
       "commands": [{"command_id": "phase3-stage-a-evidence-plan", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase3_stage_a_evidence_plan"]}]
+    },
+    {
+      "suite_id": "h0-engine-performance-direct-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["p1.engine-performance.schema", "p1.engine-performance.runner", "p1.engine-performance.aggregate"],
+      "commands": [{"command_id": "engine-performance-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_engine_performance_schema", "ci.tests.test_engine_performance_runner", "ci.tests.test_engine_performance_aggregate"]}]
+    },
+    {
+      "suite_id": "h0-engine-performance-render-tokenize-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["p1.engine-performance.render"],
+      "commands": [{"command_id": "engine-performance-render-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_engine_performance_render"]}]
+    },
+    {
+      "suite_id": "h0-llama-phase5-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["p3.llama.phase5"],
+      "commands": [{"command_id": "llama-phase5-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_llama_phase5"]}]
+    },
+    {
+      "suite_id": "h0-vattention-a0-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase6.vattention-a0.contract"],
+      "commands": [{"command_id": "vattention-a0-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_vattention_a0"]}]
+    },
+    {
+      "suite_id": "h0-vattention-a1-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase6.vattention-a1.contract"],
+      "commands": [{"command_id": "vattention-a1-host-contracts", "argv": ["{python}", "-m", "unittest", "ci.tests.test_vattention_a1"]}]
+    },
+    {
+      "suite_id": "h0-phase6-a2-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase6.a2.contract", "phase6.a2.negative"],
+      "commands": [
+        {"command_id": "phase6-a2-validator", "argv": ["{python}", "ci/tools/validate_phase6_a2.py"]},
+        {"command_id": "phase6-a2-tests", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase6_a2"]}
+      ]
+    },
+    {
+      "suite_id": "h0-openai-profile-v1-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase6.a6.profile-fixture", "phase6.a6.profile-negative", "phase6.a6.differential-contract", "phase6.a6.evidence-runner-contract"],
+      "commands": [
+        {"command_id": "openai-profile-v1-validator", "argv": ["{python}", "ci/tools/validate_openai_profile_v1.py"]},
+        {"command_id": "openai-profile-v1-tests", "argv": ["{python}", "-m", "unittest", "ci.tests.test_openai_profile_v1", "ci.tests.test_openai_profile_differential", "ci.tests.test_openai_a6_evidence_runner"]}
+      ]
     },
     {
       "suite_id": "h0-license-provenance",

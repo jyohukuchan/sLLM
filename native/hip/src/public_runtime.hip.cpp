@@ -112,7 +112,12 @@ hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
                   const uint16_t *const k_raw_scale,
                   const int32_t *const positions, uint16_t *const q_output,
                   uint16_t *const gate_output, uint16_t *const k_output,
-                  const uint32_t m, const hipStream_t stream) noexcept {
+                  const uint32_t m, const uint32_t q_heads,
+                  const uint32_t k_heads, const uint32_t head_dim,
+                  const hipStream_t stream) noexcept {
+  (void)q_heads;
+  (void)k_heads;
+  (void)head_dim;
   return fake_hip::attention_preprocess_launch(
       packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
       gate_output, k_output, m, stream);
@@ -124,7 +129,10 @@ hipError_t launch(const uint16_t *const key_input,
                   const uint16_t *const value_input, uint16_t *const key_output,
                   uint16_t *const value_output, const uint32_t token_count,
                   const uint64_t capacity_tokens, const uint64_t start_position,
+                  const uint32_t head_count, const uint32_t head_dim,
                   const hipStream_t stream) noexcept {
+  (void)head_count;
+  (void)head_dim;
   return fake_hip::kv_state_append_launch(
       key_input, value_input, key_output, value_output, token_count,
       capacity_tokens, start_position, stream);
@@ -136,8 +144,12 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const uint16_t *const value, uint16_t *const output,
                   const uint32_t query_count, const uint64_t capacity_tokens,
                   const uint64_t start_position,
-                  const uint64_t committed_kv_length,
+                  const uint64_t committed_kv_length, const uint32_t q_heads,
+                  const uint32_t kv_heads, const uint32_t head_dim,
                   const hipStream_t stream) noexcept {
+  (void)q_heads;
+  (void)kv_heads;
+  (void)head_dim;
   return fake_hip::causal_attention_launch(
       query, key, value, output, query_count, capacity_tokens, start_position,
       committed_kv_length, stream);
@@ -147,8 +159,8 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
 namespace sllm_linear_attention_kernel {
 hipError_t launch_convolution(const uint16_t *const, const uint16_t *const,
                               const uint16_t *const, uint16_t *const,
-                              uint16_t *const, const uint32_t,
-                              const hipStream_t) noexcept {
+                              uint16_t *const, const uint32_t, const uint32_t,
+                              const uint32_t, const hipStream_t) noexcept {
   return hipSuccess;
 }
 
@@ -157,6 +169,8 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
                             const float *const, const uint16_t *const,
                             const float *const, const float *const,
                             float *const, uint16_t *const, const uint32_t,
+                            const uint32_t, const uint32_t, const uint32_t,
+                            const uint32_t, const uint32_t,
                             const hipStream_t) noexcept {
   return hipSuccess;
 }
@@ -229,6 +243,132 @@ struct Buffer final : QuarantineNode {
         release_active(false) {}
 };
 
+struct KvVmmPlane final {
+  void *address;
+  uint64_t logical_bytes;
+  uint64_t reservation_bytes;
+  uint64_t mapped_bytes;
+  uint64_t page_bytes;
+  std::vector<hipMemGenericAllocationHandle_t> handles;
+
+  KvVmmPlane() noexcept
+      : address(nullptr), logical_bytes(0U), reservation_bytes(0U),
+        mapped_bytes(0U), page_bytes(0U), handles() {}
+  KvVmmPlane(const KvVmmPlane &) = delete;
+  KvVmmPlane &operator=(const KvVmmPlane &) = delete;
+  KvVmmPlane(KvVmmPlane &&other) noexcept
+      : address(other.address), logical_bytes(other.logical_bytes),
+        reservation_bytes(other.reservation_bytes),
+        mapped_bytes(other.mapped_bytes), page_bytes(other.page_bytes),
+        handles(std::move(other.handles)) {
+    other.address = nullptr;
+    other.logical_bytes = 0U;
+    other.reservation_bytes = 0U;
+    other.mapped_bytes = 0U;
+    other.page_bytes = 0U;
+  }
+  ~KvVmmPlane() { release_noexcept(); }
+
+  hipError_t reserve(const uint64_t logical, const uint64_t reservation,
+                     const uint64_t page) noexcept {
+    if (logical == 0U || reservation < logical || page == 0U ||
+        reservation % page != 0U ||
+        reservation > std::numeric_limits<std::size_t>::max()) {
+      return hipErrorInvalidValue;
+    }
+    void *candidate = nullptr;
+    const hipError_t status =
+        hipMemAddressReserve(&candidate, static_cast<std::size_t>(reservation),
+                             static_cast<std::size_t>(page), nullptr, 0U);
+    if (status != hipSuccess) {
+      return status;
+    }
+    address = candidate;
+    logical_bytes = logical;
+    reservation_bytes = reservation;
+    page_bytes = page;
+    try {
+      handles.reserve(static_cast<std::size_t>(reservation / page));
+    } catch (...) {
+      (void)hipMemAddressFree(address,
+                              static_cast<std::size_t>(reservation_bytes));
+      address = nullptr;
+      logical_bytes = 0U;
+      reservation_bytes = 0U;
+      page_bytes = 0U;
+      return hipErrorUnknown;
+    }
+    return hipSuccess;
+  }
+
+  hipError_t grow(const uint64_t required_bytes,
+                  const hipMemAllocationProp &properties,
+                  const hipMemAccessDesc &access) noexcept {
+    if (required_bytes > reservation_bytes || address == nullptr) {
+      return hipErrorInvalidValue;
+    }
+    while (mapped_bytes < required_bytes) {
+      hipMemGenericAllocationHandle_t handle = nullptr;
+      hipError_t status = hipMemCreate(
+          &handle, static_cast<std::size_t>(page_bytes), &properties, 0U);
+      if (status != hipSuccess) {
+        return status;
+      }
+      void *const target =
+          static_cast<char *>(address) + static_cast<std::size_t>(mapped_bytes);
+      status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                         handle, 0U);
+      if (status != hipSuccess) {
+        (void)hipMemRelease(handle);
+        return status;
+      }
+      status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                               &access, 1U);
+      if (status != hipSuccess) {
+        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+        (void)hipMemRelease(handle);
+        return status;
+      }
+      handles.push_back(handle);
+      mapped_bytes += page_bytes;
+    }
+    return hipSuccess;
+  }
+
+  hipError_t release_checked() noexcept {
+    hipError_t first = hipSuccess;
+    for (std::size_t index = handles.size(); index > 0U; --index) {
+      void *const target = static_cast<char *>(address) +
+                           (index - 1U) * static_cast<std::size_t>(page_bytes);
+      const hipError_t unmap =
+          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+      const hipError_t release = hipMemRelease(handles[index - 1U]);
+      if (first == hipSuccess && unmap != hipSuccess) {
+        first = unmap;
+      }
+      if (first == hipSuccess && release != hipSuccess) {
+        first = release;
+      }
+    }
+    handles.clear();
+    mapped_bytes = 0U;
+    if (address != nullptr) {
+      const hipError_t free_status = hipMemAddressFree(
+          address, static_cast<std::size_t>(reservation_bytes));
+      if (first == hipSuccess && free_status != hipSuccess) {
+        first = free_status;
+      }
+    }
+    address = nullptr;
+    logical_bytes = 0U;
+    reservation_bytes = 0U;
+    page_bytes = 0U;
+    return first;
+  }
+
+  void release_noexcept() noexcept { (void)release_checked(); }
+};
+
 struct KvState final : QuarantineNode {
   Context *context;
   uint64_t context_identity;
@@ -236,8 +376,16 @@ struct KvState final : QuarantineNode {
   uint64_t session_id;
   uint32_t layer_id;
   uint64_t capacity_tokens;
+  uint32_t head_count;
+  uint32_t head_dim;
   Buffer *key_buffer;
   Buffer *value_buffer;
+  KvVmmPlane key_plane;
+  KvVmmPlane value_plane;
+  uint64_t physical_page_bytes;
+  uint64_t tokens_per_page;
+  uint64_t mapped_token_capacity;
+  uint64_t committed_bytes_per_plane;
   sllm_public_runtime::AccountingState accounting;
   uint64_t published_length;
   uint64_t generation;
@@ -251,16 +399,25 @@ struct KvState final : QuarantineNode {
 
   KvState(Context *const context_value, const uint64_t session_value,
           const uint32_t layer_value, const uint64_t capacity_value,
+          const uint32_t head_count_value, const uint32_t head_dim_value,
           Buffer *const key_value, Buffer *const value_value,
-          const uint64_t context_token)
+          KvVmmPlane &&key_plane_value, KvVmmPlane &&value_plane_value,
+          const uint64_t page_bytes_value, const uint64_t context_token)
       : QuarantineNode(HandleKind::KvState), context(context_value),
         context_identity(context_token), state_identity(0U),
         session_id(session_value), layer_id(layer_value),
-        capacity_tokens(capacity_value), key_buffer(key_value),
-        value_buffer(value_value), accounting(), published_length(0U),
-        generation(0U), transition_token(0U), transition_start(0U),
-        transition_count(0U), transition_end(0U), commit_allowed(false),
-        view_count(0U), release_active(false) {}
+        capacity_tokens(capacity_value), head_count(head_count_value),
+        head_dim(head_dim_value), key_buffer(key_value),
+        value_buffer(value_value), key_plane(std::move(key_plane_value)),
+        value_plane(std::move(value_plane_value)),
+        physical_page_bytes(page_bytes_value),
+        tokens_per_page(page_bytes_value /
+                        (static_cast<uint64_t>(head_count_value) *
+                         head_dim_value * UINT64_C(2))),
+        mapped_token_capacity(0U), committed_bytes_per_plane(0U), accounting(),
+        published_length(0U), generation(0U), transition_token(0U),
+        transition_start(0U), transition_count(0U), transition_end(0U),
+        commit_allowed(false), view_count(0U), release_active(false) {}
 };
 
 struct KvView final : QuarantineNode {
@@ -296,6 +453,12 @@ struct LinearAttentionState final : QuarantineNode {
   uint64_t session_id;
   uint32_t layer_id;
   uint64_t capacity_tokens;
+  uint32_t qk_heads;
+  uint32_t value_heads;
+  uint32_t head_dim;
+  uint32_t conv_kernel_size;
+  uint32_t qkv_width;
+  uint32_t output_width;
   std::array<void *, 2> conv_state;
   std::array<void *, 2> recurrent_state;
   void *scratch;
@@ -311,20 +474,26 @@ struct LinearAttentionState final : QuarantineNode {
   bool commit_allowed;
   bool release_active;
 
-  LinearAttentionState(Context *const context_value,
-                       const uint64_t session_value, const uint32_t layer_value,
-                       const uint64_t capacity_value,
-                       const std::array<void *, 2> conv_value,
-                       const std::array<void *, 2> recurrent_value,
-                       const uint64_t context_token)
+  LinearAttentionState(
+      Context *const context_value, const uint64_t session_value,
+      const uint32_t layer_value, const uint64_t capacity_value,
+      const uint32_t qk_heads_value, const uint32_t value_heads_value,
+      const uint32_t head_dim_value, const uint32_t conv_kernel_size_value,
+      const std::array<void *, 2> conv_value,
+      const std::array<void *, 2> recurrent_value, const uint64_t context_token)
       : QuarantineNode(HandleKind::LinearAttentionState),
         context(context_value), context_identity(context_token),
         state_identity(0U), session_id(session_value), layer_id(layer_value),
-        capacity_tokens(capacity_value), conv_state(conv_value),
-        recurrent_state(recurrent_value), scratch(nullptr), scratch_bytes(0U),
-        accounting(), published_length(0U), generation(0U), active_slot(0U),
-        transition_token(0U), transition_start(0U), transition_count(0U),
-        transition_end(0U), commit_allowed(false), release_active(false) {}
+        capacity_tokens(capacity_value), qk_heads(qk_heads_value),
+        value_heads(value_heads_value), head_dim(head_dim_value),
+        conv_kernel_size(conv_kernel_size_value),
+        qkv_width((2U * qk_heads_value + value_heads_value) * head_dim_value),
+        output_width(value_heads_value * head_dim_value),
+        conv_state(conv_value), recurrent_state(recurrent_value),
+        scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
+        generation(0U), active_slot(0U), transition_token(0U),
+        transition_start(0U), transition_count(0U), transition_end(0U),
+        commit_allowed(false), release_active(false) {}
 };
 
 struct Event final : QuarantineNode {
@@ -1219,9 +1388,8 @@ sllm_status_t validate_device_info(const sllm_device_info_t *const info,
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  if (info->reserved0 != 0U || info->reserved[0] != 0U ||
-      info->reserved[1] != 0U || info->reserved[2] != 0U ||
-      info->reserved[3] != 0U) {
+  if (info->reserved0 != 0U || info->available_memory_bytes != 0U ||
+      info->reserved[0] != 0U || info->reserved[1] != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "device info reserved fields must be zero");
@@ -1674,14 +1842,13 @@ void initialize_attention_preprocess_dispatch_info(
   info->dispatch_count = 1U;
   info->kernel_id = SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1;
   info->workgroup_size_x = SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(
-      metadata.m * (SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS +
-                    SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS));
+  info->grid_size_x =
+      static_cast<uint32_t>(metadata.m * (metadata.q_heads + metadata.k_heads));
   info->m = metadata.m;
-  info->q_heads = SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS;
-  info->k_heads = SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS;
-  info->q_head_dim = SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM;
-  info->k_head_dim = SLLM_HIP_ATTENTION_PREPROCESS_K_HEAD_DIM;
+  info->q_heads = metadata.q_heads;
+  info->k_heads = metadata.k_heads;
+  info->q_head_dim = metadata.head_dim;
+  info->k_head_dim = metadata.head_dim;
   info->rotary_dim = SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM;
   info->start_position = metadata.start_position;
   info->fallback_allowed = 0U;
@@ -3419,6 +3586,20 @@ sllm_device_query(const uint32_t device_index, sllm_device_info_t *const info,
     info->device_index = device_index;
     info->visible_device_count = count;
     info->total_memory_bytes = static_cast<uint64_t>(properties.totalGlobalMem);
+    const hipError_t select_status =
+        hipSetDevice(static_cast<int>(device_index));
+    if (select_status != hipSuccess) {
+      return hip_failure(error_sink, select_status, "hipSetDevice");
+    }
+    std::size_t available_memory_bytes = 0U;
+    std::size_t total_memory_bytes = 0U;
+    const hipError_t memory_status =
+        hipMemGetInfo(&available_memory_bytes, &total_memory_bytes);
+    if (memory_status != hipSuccess) {
+      return hip_failure(error_sink, memory_status, "hipMemGetInfo");
+    }
+    info->available_memory_bytes =
+        static_cast<uint64_t>(available_memory_bytes);
     info->wavefront_size = static_cast<uint32_t>(properties.warpSize);
     (void)copy_property(info->name, SLLM_HIP_MAX_DEVICE_NAME, properties.name,
                         sizeof(properties.name));
@@ -5890,31 +6071,40 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->layer_id = state->layer_id;
   info->dtype = SLLM_TENSOR_DTYPE_F16;
   info->encoding = SLLM_TENSOR_ENCODING_UNQUANTIZED;
-  info->head_count = SLLM_HIP_KV_HEAD_COUNT;
-  info->head_dim = SLLM_HIP_KV_HEAD_DIM;
+  info->head_count = state->head_count;
+  info->head_dim = state->head_dim;
+  info->memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  info->layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
   info->capacity_tokens = state->capacity_tokens;
   info->observed_length = length;
   info->generation = generation;
   info->context_identity = context_id;
   info->state_identity = state_id;
-  info->k_stride_elements[0] = state->capacity_tokens * SLLM_HIP_KV_HEAD_DIM;
-  info->k_stride_elements[1] = SLLM_HIP_KV_HEAD_DIM;
+  info->physical_page_bytes = state->physical_page_bytes;
+  info->tokens_per_page = state->tokens_per_page;
+  info->mapped_token_capacity = state->mapped_token_capacity;
+  info->committed_bytes_per_plane = state->committed_bytes_per_plane;
+  info->k_stride_elements[0] =
+      static_cast<uint64_t>(state->head_count) * state->head_dim;
+  info->k_stride_elements[1] = state->head_dim;
   info->k_stride_elements[2] = 1U;
-  info->v_stride_elements[0] = state->capacity_tokens * SLLM_HIP_KV_HEAD_DIM;
-  info->v_stride_elements[1] = SLLM_HIP_KV_HEAD_DIM;
+  info->v_stride_elements[0] =
+      static_cast<uint64_t>(state->head_count) * state->head_dim;
+  info->v_stride_elements[1] = state->head_dim;
   info->v_stride_elements[2] = 1U;
 }
 
 void fill_kv_append_info(sllm_kv_append_info_t *const info,
                          const uint64_t dispatch_id, const uint64_t start,
                          const uint64_t count, const uint64_t end,
+                         const uint32_t head_count,
                          const char *const arch_name) noexcept {
   sllm_kv_state::initialize_append_info(info);
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1;
+  info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2;
   info->workgroup_size_x = SLLM_HIP_KV_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(count * 4U);
+  info->grid_size_x = static_cast<uint32_t>(count * head_count);
   info->start_position = start;
   info->token_count = count;
   info->end_position = end;
@@ -5940,24 +6130,25 @@ bool kv_intervals_overlap(const Buffer *const left_buffer,
          right_start < left_end;
 }
 
-bool checked_kv_plane_bytes(const uint64_t capacity,
+bool checked_kv_plane_bytes(const uint64_t capacity, const uint32_t head_count,
+                            const uint32_t head_dim,
                             uint64_t *const plane_bytes) noexcept {
   if (plane_bytes == nullptr || capacity == 0U ||
       capacity > SLLM_HIP_KV_MAX_CAPACITY) {
     return false;
   }
   if (capacity > std::numeric_limits<uint64_t>::max() /
-                     static_cast<uint64_t>(SLLM_HIP_KV_HEAD_COUNT) ||
-      capacity * static_cast<uint64_t>(SLLM_HIP_KV_HEAD_COUNT) >
+                     static_cast<uint64_t>(head_count) ||
+      capacity * static_cast<uint64_t>(head_count) >
           std::numeric_limits<uint64_t>::max() /
-              static_cast<uint64_t>(SLLM_HIP_KV_HEAD_DIM) ||
-      capacity * static_cast<uint64_t>(SLLM_HIP_KV_HEAD_COUNT) *
-              static_cast<uint64_t>(SLLM_HIP_KV_HEAD_DIM) >
+              static_cast<uint64_t>(head_dim) ||
+      capacity * static_cast<uint64_t>(head_count) *
+              static_cast<uint64_t>(head_dim) >
           std::numeric_limits<uint64_t>::max() / UINT64_C(2)) {
     return false;
   }
-  *plane_bytes = capacity * static_cast<uint64_t>(SLLM_HIP_KV_HEAD_COUNT) *
-                 static_cast<uint64_t>(SLLM_HIP_KV_HEAD_DIM) * UINT64_C(2);
+  *plane_bytes = capacity * static_cast<uint64_t>(head_count) *
+                 static_cast<uint64_t>(head_dim) * UINT64_C(2);
   return *plane_bytes <= SLLM_HIP_KV_EVIDENCE_MAX_READBACK_BYTES;
 }
 
@@ -6099,53 +6290,76 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
                            "KV state provisional accounting rollback failed");
       return device_status;
     }
-    uint64_t elements = info->capacity_tokens * SLLM_HIP_KV_HEAD_COUNT;
-    elements *= SLLM_HIP_KV_HEAD_DIM;
+    const uint32_t head_count =
+        info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
+    const uint32_t head_dim =
+        info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
+    uint64_t elements = info->capacity_tokens * head_count;
+    elements *= head_dim;
     const std::size_t allocation_bytes =
         static_cast<std::size_t>(elements * UINT64_C(2));
-    void *key_pointer = nullptr;
-    const hipError_t key_status =
-        sllm_public_runtime::FaultInjector::consume(
-            sllm_public_runtime::FaultPoint::NativeCreationFailure)
-            ? hipErrorUnknown
-            : hipMalloc(&key_pointer, allocation_bytes);
+    hipMemAllocationProp allocation_properties{};
+    allocation_properties.type = hipMemAllocationTypePinned;
+    allocation_properties.location.type = hipMemLocationTypeDevice;
+    allocation_properties.location.id = static_cast<int>(context->device_index);
+    std::size_t page_bytes = 0U;
+    hipError_t key_status =
+        hipMemGetAllocationGranularity(&page_bytes, &allocation_properties,
+                                       hipMemAllocationGranularityRecommended);
+    const uint64_t bytes_per_token =
+        static_cast<uint64_t>(head_count) * head_dim * UINT64_C(2);
+    if (key_status == hipSuccess &&
+        (page_bytes == 0U || page_bytes % bytes_per_token != 0U ||
+         allocation_bytes >
+             std::numeric_limits<std::size_t>::max() - (page_bytes - 1U))) {
+      key_status = hipErrorInvalidValue;
+    }
+    const uint64_t reservation_bytes =
+        key_status == hipSuccess
+            ? ((static_cast<uint64_t>(allocation_bytes) + page_bytes - 1U) /
+               page_bytes) *
+                  page_bytes
+            : 0U;
+    KvVmmPlane key_plane;
+    KvVmmPlane value_plane;
+    if (key_status == hipSuccess) {
+      key_status = sllm_public_runtime::FaultInjector::consume(
+                       sllm_public_runtime::FaultPoint::NativeCreationFailure)
+                       ? hipErrorUnknown
+                       : key_plane.reserve(allocation_bytes, reservation_bytes,
+                                           page_bytes);
+    }
     if (key_status != hipSuccess) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, key_status, "hipMalloc KV K buffer");
+      return hip_failure(error_sink, key_status, "reserve virtual KV K buffer");
     }
-    NativeAllocationGuard key_guard(context, key_pointer);
-    void *value_pointer = nullptr;
     const hipError_t value_status =
         sllm_public_runtime::FaultInjector::consume(
             sllm_public_runtime::FaultPoint::NativeCreationFailure)
             ? hipErrorUnknown
-            : hipMalloc(&value_pointer, allocation_bytes);
+            : value_plane.reserve(allocation_bytes, reservation_bytes,
+                                  page_bytes);
     if (value_status != hipSuccess) {
-      const hipError_t cleanup_status = key_guard.cleanup();
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
-      return cleanup_status == hipSuccess
-                 ? hip_failure(error_sink, value_status,
-                               "hipMalloc KV V buffer")
-                 : hip_failure(error_sink, cleanup_status,
-                               "hipFree KV K buffer rollback");
+      return hip_failure(error_sink, value_status,
+                         "reserve virtual KV V buffer");
     }
-    NativeAllocationGuard value_guard(context, value_pointer);
     std::unique_ptr<Buffer> key_buffer;
     std::unique_ptr<Buffer> value_buffer;
     std::unique_ptr<KvState> candidate;
     try {
-      key_buffer =
-          std::make_unique<Buffer>(context, key_pointer, allocation_bytes);
-      value_buffer =
-          std::make_unique<Buffer>(context, value_pointer, allocation_bytes);
+      key_buffer = std::make_unique<Buffer>(context, key_plane.address,
+                                            allocation_bytes);
+      value_buffer = std::make_unique<Buffer>(context, value_plane.address,
+                                              allocation_bytes);
       candidate = std::make_unique<KvState>(
           context, info->session_id, info->layer_id, info->capacity_tokens,
-          key_buffer.get(), value_buffer.get(), context_token);
+          head_count, head_dim, key_buffer.get(), value_buffer.get(),
+          std::move(key_plane), std::move(value_plane), page_bytes,
+          context_token);
     } catch (...) {
-      (void)key_guard.cleanup();
-      (void)value_guard.cleanup();
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
       return sllm_public_runtime::write_error(
@@ -6159,8 +6373,6 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
               context->accounting, key_buffer->accounting,
               value_buffer->accounting)) {
         poison_context_locked(context);
-        key_guard.release();
-        value_guard.release();
         poison_owner.retain(std::move(candidate));
         key_buffer.release();
         value_buffer.release();
@@ -6181,8 +6393,6 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
               context->accounting, key_buffer->accounting,
               value_buffer->accounting)) {
         poison_context_locked(context);
-        key_guard.release();
-        value_guard.release();
         poison_owner.retain(std::move(candidate));
         key_buffer.release();
         value_buffer.release();
@@ -6202,8 +6412,6 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
               value_buffer->accounting);
       if (!released) {
         poison_context_locked(context);
-        key_guard.release();
-        value_guard.release();
         poison_owner.retain(std::move(candidate));
         key_buffer.release();
         value_buffer.release();
@@ -6217,8 +6425,6 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
     }
     candidate->state_identity = token;
     *raw_state = reinterpret_cast<sllm_kv_state_t *>(token);
-    key_guard.release();
-    value_guard.release();
     key_buffer.release();
     value_buffer.release();
     (void)candidate.release();
@@ -6277,12 +6483,8 @@ sllm_kv_state_release(sllm_kv_state_t **const raw_state,
       state->release_active = false;
       return device_status;
     }
-    NativeAllocationGuard key_guard(state->context,
-                                    state->key_buffer->device_pointer);
-    NativeAllocationGuard value_guard(state->context,
-                                      state->value_buffer->device_pointer);
-    const hipError_t key_status = key_guard.cleanup();
-    const hipError_t value_status = value_guard.cleanup();
+    const hipError_t key_status = state->key_plane.release_checked();
+    const hipError_t value_status = state->value_plane.release_checked();
     state->key_buffer->device_pointer = nullptr;
     state->value_buffer->device_pointer = nullptr;
     if (key_status != hipSuccess || value_status != hipSuccess) {
@@ -6294,7 +6496,7 @@ sllm_kv_state_release(sllm_kv_state_t **const raw_state,
       retain_poisoned(state, state->context);
       return hip_failure(error_sink,
                          key_status != hipSuccess ? key_status : value_status,
-                         "hipFree KV state buffers");
+                         "release virtual KV state buffers");
     }
 
     bool accounting_released = false;
@@ -6614,19 +6816,24 @@ sllm_hip_kv_view_readback(const sllm_hip_kv_readback_request_t *const request,
     }
 
     uint64_t plane_bytes = 0U;
-    if (!checked_kv_plane_bytes(state->capacity_tokens, &plane_bytes)) {
+    if (!checked_kv_plane_bytes(state->capacity_tokens, state->head_count,
+                                state->head_dim, &plane_bytes)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_METADATA_OVERFLOW,
           "KV evidence readback state storage size is invalid");
     }
     const uint64_t storage_bytes = plane_bytes;
+    const uint64_t visible_bytes = view->observed_length *
+                                   static_cast<uint64_t>(state->head_count) *
+                                   state->head_dim * UINT64_C(2);
     if (state->key_buffer->size_bytes != storage_bytes ||
         state->value_buffer->size_bytes != storage_bytes ||
-        request->byte_offset > plane_bytes ||
-        request->byte_length > plane_bytes - request->byte_offset) {
+        request->byte_offset > visible_bytes ||
+        request->byte_length > visible_bytes - request->byte_offset) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
-          "KV evidence readback range is outside one exact KV plane");
+          "KV evidence readback range is outside the published mapped token "
+          "range");
     }
 
     Buffer *const buffer = request->plane == SLLM_HIP_KV_EVIDENCE_PLANE_K
@@ -6775,6 +6982,12 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_KV_LENGTH_MISMATCH,
             "KV append expected length is not the published state length");
       }
+      if (metadata.key_input.head_count != state->head_count ||
+          metadata.key_input.head_dim != state->head_dim) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_SHAPE_MISMATCH,
+            "KV append input head layout differs from the state layout");
+      }
       if (metadata.end_position > state->capacity_tokens) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
@@ -6895,6 +7108,41 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV state device target does not match the compiled exact target");
     }
 #endif
+    const uint64_t bytes_per_token = static_cast<uint64_t>(state->head_count) *
+                                     state->head_dim * UINT64_C(2);
+    const uint64_t required_bytes = metadata.end_position * bytes_per_token;
+    const uint64_t required_mapped_bytes =
+        ((required_bytes + state->physical_page_bytes - 1U) /
+         state->physical_page_bytes) *
+        state->physical_page_bytes;
+    hipMemAllocationProp allocation_properties{};
+    allocation_properties.type = hipMemAllocationTypePinned;
+    allocation_properties.location.type = hipMemLocationTypeDevice;
+    allocation_properties.location.id =
+        static_cast<int>(state->context->device_index);
+    hipMemAccessDesc access{};
+    access.location = allocation_properties.location;
+    access.flags = hipMemAccessFlagsProtReadWrite;
+    hipError_t grow_status = state->key_plane.grow(
+        required_mapped_bytes, allocation_properties, access);
+    if (grow_status == hipSuccess) {
+      grow_status = state->value_plane.grow(required_mapped_bytes,
+                                            allocation_properties, access);
+    }
+    state->committed_bytes_per_plane = std::min(
+        state->key_plane.mapped_bytes, state->value_plane.mapped_bytes);
+    state->mapped_token_capacity =
+        std::min(state->capacity_tokens,
+                 state->committed_bytes_per_plane / bytes_per_token);
+    if (grow_status != hipSuccess) {
+      execute_guard.disarm();
+      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
+                                           error_sink)) {
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      return hip_failure(error_sink, grow_status,
+                         "grow virtual KV physical commitment");
+    }
     try {
       candidate = std::make_unique<Completion>(
           state->context, queue, nullptr, 0U, false, std::vector<uint8_t>{});
@@ -6981,7 +7229,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         static_cast<uint16_t *>(state->key_buffer->device_pointer),
         static_cast<uint16_t *>(state->value_buffer->device_pointer),
         static_cast<uint32_t>(metadata.token_count), state->capacity_tokens,
-        metadata.start_position, queue->stream);
+        metadata.start_position, state->head_count, state->head_dim,
+        queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -6997,7 +7246,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
                                        error_sink);
     }
     fill_kv_append_info(append_info, dispatch_id, metadata.start_position,
-                        metadata.token_count, metadata.end_position, arch_name);
+                        metadata.token_count, metadata.end_position,
+                        state->head_count, arch_name);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

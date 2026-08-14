@@ -109,12 +109,64 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 | ROCm build/runtime | system packages `amdrocm-core-sdk7.14-gfx1030`、`amdrocm-core-sdk7.14-gfx1201`（ともに `7.14.0-3`）、`https://repo.amd.com/rocm/packages-multi-arch/ubuntu2404` の `stable main`。root `/opt/rocm/core-7.14` |
 | compiler / runtime | AMD clang 23.0.0git / HIP runtime `71460850` |
 | package migration | legacy ROCm user-space packages、旧installation root、旧ROCm APT sourceを除去。amdgpu driver packagesは変更せず保持 |
-| canonical GPU | V620 exact `gfx1030`、BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`; R9700 exact `gfx1201`、BDF `0000:47:00.0`、UUID `GPU-a8e9ddefa2d60f55` |
+| canonical GPU | V620 exact `gfx1030`、BDF `0000:03:00.0`、UUID `GPU-76a08c022586fed6`; R9700 exact `gfx1201`、BDF `0000:07:00.0`、UUID `GPU-a8e9ddefa2d60f55` |
 | artifact | target別専用binary、Code Object V6、wave32、`xnack`/`sramecc=unsupported`; SHA-256 `gfx1030=40a55e8028355dd1b27b26886ccfef6d0b4085569d2656f90e7ebdc2be1a852c`、`gfx1201=69207b19c1146f73258db848fd5da74a25dd0a8e980b090ee09037da0dd2b1f5` |
 | runtime libraries | `/opt/rocm/core-7.14/lib/libamdhip64.so.7.14.60850-0000000`、`/opt/rocm/core-7.14/lib/libhsa-runtime64.so.1.21.0` |
 | G0/G1 scope | G0 identity/read-only health/process、G1の1、3、17、255、256、257 byte。各case 2 allocation、2 transfer、1 diagnostic dispatch、byte exact、CPU fallback/model/semantic opなし |
 
 この結果はsemantic数値kernel、full model、性能、generic code object、複数GPU実行、長時間安定性、別GPU/SKU、またはvendor-supported OS/GPU tupleを証明しない。G0/G1 evidenceは検証したcandidate・artifact・canonical 2 GPUへだけ結び付ける。
+
+### Phase 5 direct-runner の実行時 evidence
+
+Phase 5 の direct runner は、UUID-primary の AMD-SMI `list -e` mapping を起点に、BDF、製品名、exact `gfx` target、HIP physical index を相互照合する。現在の検証値は V620 が `0000:03:00.0` / HIP index `1`、R9700 が `0000:07:00.0` / HIP index `2` である。AMD-SMI 26.5.0 は HIP の `GPU-*` UUID を `-g` selector として受け付けないため、個別 metric/process/static 読み出しは UUID mapping から解決した BDF に限定する。実行子processの `/proc/<pid>/maps` から `/opt/rocm/core-7.14` 配下の `libamdhip64.so` と `libhsa-runtime64.so` の実解決pathを取得し、ROCm 7.14.0 root外を拒否する。
+
+各rowの pre/during/post evidence は温度、dynamic clock の観測範囲、power、performance level、profile、limits、runtime VRAM、AMD-SMI `monitor -v` の補助VRAM、ECC、process ownership、process-group cleanup、loader path digestを含む。dynamic clock の min/max、socket power telemetry、legacy aggregate `throttle_status` は観測値として記録する。R9700では300 W cap・330 W公開maximumを変更していないrunでも最大362 Wが観測され、倍率を後付けした瞬時telemetry gateでは有効なrunを安定に判定できなかった。power値単独はhard gateにせず、AMD-SMIが公開する明示的violation、ECC、slowdown温度以上、profile/limit/performance-level drift、foreign process、loader rootまたはlibrary digest違反をfail-closedとする。`static --clock`のcurrent levelと報告frequency levelは動的に変化し得るため、完全payloadを保存するがexact identity比較からは除外する。ROCm libraryはGPU処理開始後に固定ROCm root内の追加componentを遅延mapできるため、各観測のroot・path・content digestを独立検証し、検証済みpath集合の追加だけをdriftとしない。AMD-SMIのdynamic sensorが単発で`N/A`を返した場合だけ100 ms間隔で最大3回取得し、連続欠落はfail-closedとする。identity、process、ECC意味、明示violationはこのretry対象にしない。
+
+このhostの V620/R9700 では AMD-SMI の violation/throttle accumulator fields が全て `N/A` であり、CLI help も violation reporting を MI300 以降に限定している。さらにR9700では2026-08-12の無負荷連続10回でlegacy aggregate `throttle_status`が8〜16 W、hotspot 42〜43℃でも`UNTHROTTLED` 4回、`THROTTLED` 6回と交互に現れ、Phase 3でも34℃・processなしの同現象を記録済みである。このfield単独はreasonを特定できるhard gateにせず、`accumulator_available=false` と制約を記録しつつ、ECC、温度、power、profile、limit、process、VRAM、loader evidenceを必須とする。MI300等でviolation fieldsが公開される場合はactive violationを成功runへ混ぜない。
+
+明示allowlistされた外部processは、各観測時点でVRAM 1 MiB以下、GTT 16 MiB以下、GFX activity 0等のinert contractを独立に満たす場合だけ許可する。pre/post間でinert contextが消失またはlazy生成されること自体はbenchmark GPUへの干渉ではないため、存在一致を要求しない。各時点で存在するrecordのPID許可、resource上限、activityは引き続きfail-closedに検証する。
+
+### 2026-08-13 Phase 6 A0 HIP VMM evidence
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0の
+local tupleで、canonical V620 `gfx1030`とR9700 `gfx1201`にtarget別standalone HIP binaryを実行した。
+両targetでVMM minimum 4 KiB、recommended 2 MiB、reserve/create/map/access、contiguous-pointer kernel、
+unmap/remap、event完了後cleanup、CPU byte oracleをPASSした。Qwen3.5-4B相当の128 MiB logical VA reserveは
+physical delta 0 byteで、最初の2 MiB x 16 regionだけをcommitした32 MiBはcleanup後に復元した。
+
+このevidenceはPhase 6 A0のmodel-free draft範囲だけを`project-verified`とする。software lifecycleは
+`experimental`のままであり、production vAttention backend、full model、長時間安定性、別tuple、
+Paged Attentionとの採用判断へは拡張しない。詳細identityとlatencyは
+[Phase 6 history](../history/2026/08/11-20/openai-chat-completions-v1.md)を正とする。
+
+### 2026-08-13 Phase 6 A1 virtual-contiguous KV evidence
+
+同じlocal tupleとcanonical V620 `gfx1030` / R9700 `gfx1201`で、target別のFA2-style comparison probeと
+actual public runtime production probeを実行した。comparisonはcontiguous、HIP VMM virtual-contiguous、
+paged block-table accessorの36 caseを同一数値contractで比較し、production probeはtoken-major FP16 KVの
+1023/1024/1025境界、physical commitment、未map拒否、cleanupを確認した。両targetともfallbackなし、
+NumPyまたは独立BF16→FP16 oracle、pre/post ECC 0、process残留なしでPASSした。local aggregate SHA-256は
+`453756b16f55ef81ff28dcb48cdebe69b9bdd83381b3a04202f94855af236021`である。
+
+初期KV方式はこのtupleに限定したHIP VMM virtual-contiguous方式（vAttention型）とするが、software lifecycleは
+`experimental`のままとする。比較kernelはupstream FlashAttention-2/CKではなくFA2-style proxyであり、
+FA3/4 AMD動作、full model、service、長時間安定性、別tupleを証明しない。詳細は
+[KV memory decision](../architecture/kv-memory.md)を正とする。
+
+### 2026-08-14 Phase 6 A6 Qwen3.5-4B API service evidence
+
+同じlocal tupleで、target別release binaryとQwen3.5-4B verified lockを使い、canonical V620 `gfx1030`と
+R9700 `gfx1201`のOpenAI-compatible serviceを実行した。対象GPUはstable UUIDで一台だけ可視化し、serverは
+論理device 0を使用した。raw HTTP non-stream/SSE、OpenAI Python client 2.44.0、stop、HIP dispatch後の
+disconnect/recovery、1023/1024/1025 logical capacityを両targetでPASSした。completed requestはHIP-only、
+fallbackなしであり、2 MiB page、32 MiB committed K/V、request/workspace allocation zero、GPU process
+pre/post zero、ECC/health正常を記録した。
+
+V620 report SHA-256は`b8ad41a3f35c693b98fc6629e5997413726fb8e9ad8dc16de21a49c20a874d8f`、
+R9700 reportは`0648e41bb3a92ac60b82223a15b8ef2540ec9db7354da0ba29ecb5bf8c1f845f`である。
+software lifecycleは`experimental`のままとし、複数GPU可視process、global physical indexでのworker選択、
+別tuple、multi-GPU serving、長時間安定性は証明しない。詳細は
+[Phase 6 history](../history/2026/08/11-20/openai-chat-completions-v1.md)を正とする。
 
 ## 公式資料
 

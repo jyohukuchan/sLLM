@@ -99,6 +99,8 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
   metadata->payload_bytes = bytes;
   metadata->end_offset = binding.byte_offset + bytes;
   metadata->query_count = binding.shape[0];
+  metadata->q_heads = static_cast<uint32_t>(binding.shape[1]);
+  metadata->head_dim = static_cast<uint32_t>(binding.shape[2]);
   (void)name;
   return SLLM_STATUS_OK;
 }
@@ -178,16 +180,13 @@ sllm_status_t validate_and_copy_descriptor(
         sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
         "causal attention range is outside the bounded KV capacity");
   }
-  const uint64_t expected_shape[] = {metadata->query.query_count, 16U, 256U};
-  if (descriptor->query.shape[0] != expected_shape[0] ||
-      descriptor->query.shape[1] != expected_shape[1] ||
-      descriptor->query.shape[2] != expected_shape[2] ||
-      descriptor->output.shape[0] != expected_shape[0] ||
-      descriptor->output.shape[1] != expected_shape[1] ||
-      descriptor->output.shape[2] != expected_shape[2]) {
+  if ((metadata->query.q_heads != 8U && metadata->query.q_heads != 16U) ||
+      metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
+      metadata->output.q_heads != metadata->query.q_heads ||
+      metadata->output.head_dim != metadata->query.head_dim) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "causal attention Q/output shape must be [M, 16, 256]");
+        "causal attention Q/output must share a reviewed [M,Hq,256] shape");
   }
   if (descriptor->query.buffer == descriptor->output.buffer &&
       intervals_overlap(metadata->query, metadata->output)) {

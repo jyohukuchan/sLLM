@@ -274,7 +274,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
     expected_top = {"$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "toolchain_id", "container", "workflow", "source_sets", "source_symbol_map", "public_abi_symbols", "logical_kernel", "device_symbol", "case_manifest", "rows"}
     if set(matrix) != expected_top:
         raise ContractError("RMSNorm matrix has missing or unknown top-level fields")
-    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 1:
+    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 2:
         raise ContractError("RMSNorm matrix identity is invalid")
     if matrix["suite_id"] != "h3-rmsnorm-compile-only" or matrix["tier"] != "tier_h3_rmsnorm" or matrix["toolchain_id"] != "rocm-7.14.0":
         raise ContractError("RMSNorm matrix suite/tier/toolchain is not fixed")

@@ -40,6 +40,52 @@ TOKENIZERS_PACKAGE = "registry:tokenizers@0.21.4"
 ESAXX_PACKAGE = "registry:esaxx-rs@0.1.10"
 WASIP2_PACKAGE = "registry:wasip2@1.0.4+wasi-0.2.12"
 WASIP2_TARGET = 'cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))'
+EXPECTED_PACKAGE_COUNT = 132
+EXPECTED_REGISTRY_PACKAGE_COUNT = 126
+EXPECTED_WORKSPACE_PACKAGE_COUNT = 6
+EXPECTED_EDGE_COUNT = 309
+SERVER_PACKAGE = "workspace:sllm-server@0.1.0"
+SERVER_RUNTIME_DEPENDENCIES = [
+    {
+        "package": "registry:axum@0.8.9",
+        "requested": ["http1", "json", "tokio"],
+        "resolved": ["http1", "json", "tokio"],
+        "uses_default_features": False,
+    },
+    {
+        "package": "registry:futures-util@0.3.33",
+        "requested": ["std"],
+        "resolved": ["alloc", "slab", "std"],
+        "uses_default_features": False,
+    },
+    {
+        "package": "registry:serde_path_to_error@0.1.20",
+        "requested": [],
+        "resolved": [],
+        "uses_default_features": True,
+    },
+    {
+        "package": "registry:tokio-stream@0.1.19",
+        "requested": ["sync"],
+        "resolved": ["sync", "tokio-util"],
+        "uses_default_features": False,
+    },
+    {
+        "package": "registry:tokio@1.53.1",
+        "requested": ["macros", "net", "rt-multi-thread", "signal", "sync", "time"],
+        "resolved": [
+            "default", "libc", "macros", "mio", "net", "rt", "rt-multi-thread", "signal",
+            "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "windows-sys",
+        ],
+        "uses_default_features": False,
+    },
+    {
+        "package": "registry:tower-http@0.7.0",
+        "requested": ["limit", "trace"],
+        "resolved": ["limit", "trace", "tracing"],
+        "uses_default_features": False,
+    },
+]
 B0_DISABLED_HIP_FLAGS = frozenset({
     "SLLM_ENABLE_HIP_COMPILE_PROBE",
     "SLLM_ENABLE_HIP_RUNTIME",
@@ -312,7 +358,7 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
     if resolve.get("root") is not None:
         raise ContractError("B0 requires a virtual workspace with resolve.root = null")
     workspace_ids = set(workspace_members)
-    if len(workspace_ids) != len(workspace_members) or len(workspace_ids) != 5:
+    if len(workspace_ids) != len(workspace_members) or len(workspace_ids) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
         raise ContractError("workspace member count or identity uniqueness drifted")
     workspace, manifest_by_id = _root_workspace(repo, metadata, workspace_ids)
     package_by_id = {package.get("id"): package for package in packages}
@@ -364,11 +410,11 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                 }
             )
 
-    if len(packages_out) != 90:
+    if len(packages_out) != EXPECTED_PACKAGE_COUNT:
         raise ContractError(f"resolved package count drifted: {len(packages_out)}")
-    if sum(package["identity"]["source"] == REGISTRY_SOURCE for package in packages_out) != 85:
+    if sum(package["identity"]["source"] == REGISTRY_SOURCE for package in packages_out) != EXPECTED_REGISTRY_PACKAGE_COUNT:
         raise ContractError("resolved registry package count drifted")
-    if len(workspace_members_out) != 5:
+    if len(workspace_members_out) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
         raise ContractError("resolved workspace package count drifted")
 
     metadata_deps: dict[str, list[dict[str, Any]]] = {
@@ -421,7 +467,7 @@ def normalize_metadata(metadata: dict[str, Any], repo: Path = ROOT) -> dict[str,
                         "rename": declared.get("rename"),
                     }
                 )
-    if len(edges_out) != 174:
+    if len(edges_out) != EXPECTED_EDGE_COUNT:
         raise ContractError(f"resolved edge count drifted: {len(edges_out)}")
     edge_keys = {
         (
@@ -544,15 +590,15 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("Rust dependency policy identity drifted")
     _reject_unsafe_strings(manifest)
     package_map = _manifest_package_map(manifest)
-    if len(package_map) != 90:
+    if len(package_map) != EXPECTED_PACKAGE_COUNT:
         raise ContractError(f"policy package count drifted: {len(package_map)}")
-    if sum(key.startswith("registry:") for key in package_map) != 85:
+    if sum(key.startswith("registry:") for key in package_map) != EXPECTED_REGISTRY_PACKAGE_COUNT:
         raise ContractError("policy registry package count drifted")
-    if sum(key.startswith("workspace:") for key in package_map) != 5:
+    if sum(key.startswith("workspace:") for key in package_map) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
         raise ContractError("policy workspace package count drifted")
 
     members = manifest.get("workspace_members")
-    if not isinstance(members, list) or len(members) != 5:
+    if not isinstance(members, list) or len(members) != EXPECTED_WORKSPACE_PACKAGE_COUNT:
         raise ContractError("policy workspace member count drifted")
     member_keys: set[str] = set()
     for member in members:
@@ -576,7 +622,7 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("workspace member/package identity sets differ")
 
     edges = manifest.get("edges")
-    if not isinstance(edges, list) or len(edges) != 174:
+    if not isinstance(edges, list) or len(edges) != EXPECTED_EDGE_COUNT:
         raise ContractError("policy edge count drifted")
     edge_keys: set[tuple[Any, ...]] = set()
     for edge in edges:
@@ -617,7 +663,7 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError(f"policy counts are inconsistent: {counts!r} != {expected_counts!r}")
 
     assertions = manifest.get("feature_assertions")
-    if not isinstance(assertions, dict) or set(assertions) != {"tokenizers"}:
+    if not isinstance(assertions, dict) or set(assertions) != {"server_runtime", "tokenizers"}:
         raise ContractError("feature assertions are not closed")
     tokenizers = assertions["tokenizers"]
     expected_assertion_keys = {"package", "allowed", "resolved", "forbidden", "required_packages"}
@@ -637,6 +683,26 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("tokenizers has a forbidden resolved feature")
     if ESAXX_PACKAGE not in package_map or package_map[ESAXX_PACKAGE]["features"]:
         raise ContractError("esaxx-rs must remain present with no enabled features")
+
+    server_runtime = assertions["server_runtime"]
+    if server_runtime != {
+        "workspace_package": SERVER_PACKAGE,
+        "dependencies": SERVER_RUNTIME_DEPENDENCIES,
+    }:
+        raise ContractError("server runtime feature assertion drifted")
+    for dependency in SERVER_RUNTIME_DEPENDENCIES:
+        package = dependency["package"]
+        if package not in package_map or package_map[package]["features"] != dependency["resolved"]:
+            raise ContractError(f"server runtime resolved features drifted: {package}")
+        direct_edges = [
+            edge for edge in edges
+            if edge["from"] == SERVER_PACKAGE and edge["to"] == package and edge["kind"] == "normal"
+        ]
+        if len(direct_edges) != 1:
+            raise ContractError(f"server runtime direct dependency edge drifted: {package}")
+        direct = direct_edges[0]
+        if direct["requested_features"] != dependency["requested"] or direct["uses_default_features"] != dependency["uses_default_features"]:
+            raise ContractError(f"server runtime requested feature edge drifted: {package}")
 
     msrv = manifest.get("msrv_policy")
     if not isinstance(msrv, dict) or set(msrv) != {"authority_version", "authority_target", "mode", "exceptions"}:

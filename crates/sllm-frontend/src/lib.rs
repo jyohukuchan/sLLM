@@ -4,6 +4,7 @@ use core::fmt;
 use std::borrow::Borrow;
 
 mod chat;
+mod generation;
 mod tokenizer;
 
 pub use chat::{
@@ -11,6 +12,12 @@ pub use chat::{
     QWEN35_CHAT_TEMPLATE_FILENAME, QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
     Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, ThinkingModeV1,
     UntrustedChatMessageV1, UntrustedChatRequestV1, UntrustedChatValueV1,
+};
+pub use generation::{
+    FinishReasonV1, GenerationCancellationV1, GenerationConfigV1, GenerationExecutorV1,
+    GenerationInputV1, GenerationOutputSinkV1, GenerationResultV1, GenerationServiceError,
+    GenerationServiceV1, GenerationStepV1, GenerationTextFrontendV1, MAX_STOP_STRING_BYTES_V1,
+    MAX_STOP_STRINGS_V1, TokenUsageV1,
 };
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, SpecialTokenSnapshotV1, TokenIdContextV1,

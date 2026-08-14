@@ -34,10 +34,136 @@ const MAX_JSON_DEPTH: usize = 64;
 const MAX_JSON_COLLECTION_ITEMS: usize = 1_000_000;
 const MAX_JSON_STRING_BYTES: usize = 1024 * 1024;
 const MAX_RANGE_READ_BYTES: usize = 16 * 1024 * 1024;
-const QWEN_REPO_ID: &str = "Qwen/Qwen3.5-4B";
-const QWEN_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
-const QWEN_FINGERPRINT: &str =
+pub const QWEN35_4B_REPO_ID: &str = "Qwen/Qwen3.5-4B";
+pub const QWEN35_4B_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
+pub const QWEN35_4B_FINGERPRINT: &str =
     "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae";
+pub const QWEN35_2B_REPO_ID: &str = "Qwen/Qwen3.5-2B";
+pub const QWEN35_2B_REVISION: &str = "15852e8c16360a2fea060d615a32b45270f8a8fc";
+pub const QWEN35_2B_FINGERPRINT: &str =
+    "sha256:304e19f8b8ef78bab1848a6cfb46ac619a8ca5c8fd052cac1c43fc3f4d6dcdb3";
+pub const QWEN35_9B_REPO_ID: &str = "Qwen/Qwen3.5-9B";
+pub const QWEN35_9B_REVISION: &str = "c202236235762e1c871ad0ccb60c8ee5ba337b9a";
+pub const QWEN35_9B_FINGERPRINT: &str =
+    "sha256:2d2bc642540e97d4681f8c66140e09f305f487476bb9fe238ca82a298febf893";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Qwen35ReviewedSpec {
+    pub repo_id: &'static str,
+    pub revision: &'static str,
+    pub fingerprint: &'static str,
+    pub alias: &'static str,
+    pub base_repo_id: &'static str,
+    pub hidden_size: u64,
+    pub layer_count: u64,
+    pub attention_heads: u64,
+    pub kv_heads: u64,
+    pub head_dim: u64,
+    pub intermediate_size: u64,
+    pub linear_qk_heads: u64,
+    pub linear_value_heads: u64,
+    pub linear_head_dim: u64,
+    pub vision_depth: u64,
+    pub vision_hidden_size: u64,
+    pub vision_intermediate_size: u64,
+    pub vision_output_size: u64,
+    pub vision_tensor_count: u64,
+    pub text_tensor_count: u64,
+    pub indexed_tensor_count: u64,
+    pub shard_count: usize,
+    pub tied_embeddings: bool,
+}
+
+const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 3] = [
+    Qwen35ReviewedSpec {
+        repo_id: QWEN35_2B_REPO_ID,
+        revision: QWEN35_2B_REVISION,
+        fingerprint: QWEN35_2B_FINGERPRINT,
+        alias: "qwen3.5-2b-bf16",
+        base_repo_id: "Qwen/Qwen3.5-2B-Base",
+        hidden_size: 2048,
+        layer_count: 24,
+        attention_heads: 8,
+        kv_heads: 2,
+        head_dim: 256,
+        intermediate_size: 6144,
+        linear_qk_heads: 16,
+        linear_value_heads: 16,
+        linear_head_dim: 128,
+        vision_depth: 24,
+        vision_hidden_size: 1024,
+        vision_intermediate_size: 4096,
+        vision_output_size: 2048,
+        vision_tensor_count: 297,
+        text_tensor_count: 320,
+        indexed_tensor_count: 632,
+        shard_count: 1,
+        tied_embeddings: true,
+    },
+    Qwen35ReviewedSpec {
+        repo_id: QWEN35_4B_REPO_ID,
+        revision: QWEN35_4B_REVISION,
+        fingerprint: QWEN35_4B_FINGERPRINT,
+        alias: "qwen3.5-4b-bf16",
+        base_repo_id: "Qwen/Qwen3.5-4B-Base",
+        hidden_size: 2560,
+        layer_count: 32,
+        attention_heads: 16,
+        kv_heads: 4,
+        head_dim: 256,
+        intermediate_size: 9216,
+        linear_qk_heads: 16,
+        linear_value_heads: 32,
+        linear_head_dim: 128,
+        vision_depth: 24,
+        vision_hidden_size: 1024,
+        vision_intermediate_size: 4096,
+        vision_output_size: 2560,
+        vision_tensor_count: 297,
+        text_tensor_count: 426,
+        indexed_tensor_count: 738,
+        shard_count: 2,
+        tied_embeddings: true,
+    },
+    Qwen35ReviewedSpec {
+        repo_id: QWEN35_9B_REPO_ID,
+        revision: QWEN35_9B_REVISION,
+        fingerprint: QWEN35_9B_FINGERPRINT,
+        alias: "qwen3.5-9b-bf16",
+        base_repo_id: "Qwen/Qwen3.5-9B-Base",
+        hidden_size: 4096,
+        layer_count: 32,
+        attention_heads: 16,
+        kv_heads: 4,
+        head_dim: 256,
+        intermediate_size: 12288,
+        linear_qk_heads: 16,
+        linear_value_heads: 32,
+        linear_head_dim: 128,
+        vision_depth: 27,
+        vision_hidden_size: 1152,
+        vision_intermediate_size: 4304,
+        vision_output_size: 4096,
+        vision_tensor_count: 333,
+        text_tensor_count: 427,
+        indexed_tensor_count: 775,
+        shard_count: 4,
+        tied_embeddings: false,
+    },
+];
+
+pub fn qwen35_reviewed_spec(repo_id: &str) -> Option<Qwen35ReviewedSpec> {
+    QWEN35_REVIEWED_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.repo_id == repo_id)
+}
+
+pub fn reviewed_qwen35_spec(lock: &ModelLock) -> Option<Qwen35ReviewedSpec> {
+    qwen35_reviewed_spec(&lock.model.repo_id).filter(|spec| {
+        lock.model.resolved_revision == spec.revision && lock.fingerprint == spec.fingerprint
+    })
+}
 
 // Linux is the supported host platform.  These are kept local instead of
 // adding a new direct libc dependency solely for model-lock file opening.
@@ -588,30 +714,33 @@ fn validate_lock(document: &ModelLock, value: &Value) -> Result<(), ModelError> 
     validate_datetime(&document.generated_at)?;
     validate_model(&document.model)?;
 
-    if document.model.repo_id == QWEN_REPO_ID {
+    if let Some(spec) = qwen35_reviewed_spec(&document.model.repo_id) {
         if document.model.requested_revision != "main"
-            || document.model.resolved_revision != QWEN_REVISION
-            || document.aliases != ["qwen3.5-4b-bf16".to_owned()]
+            || document.model.resolved_revision != spec.revision
+            || document.aliases != [spec.alias.to_owned()]
         {
             return Err(invalid(
                 "Qwen lock is not bound to the reviewed immutable identity",
             ));
         }
-        if document.fingerprint != QWEN_FINGERPRINT {
+        if document.fingerprint != spec.fingerprint {
             return Err(invalid("reviewed Qwen lock fingerprint differs"));
         }
-        validate_qwen_lock_contract(document)?;
+        validate_qwen_lock_contract(document, spec)?;
     }
     Ok(())
 }
 
-fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
+fn validate_qwen_lock_contract(
+    document: &ModelLock,
+    spec: Qwen35ReviewedSpec,
+) -> Result<(), ModelError> {
     let model = &document.model;
     if model.license.id.as_deref() != Some("Apache-2.0")
         || model.license.statement != "Apache-2.0"
         || model.base_models
             != [BaseModel {
-                repo_id: "Qwen/Qwen3.5-4B-Base".to_owned(),
+                repo_id: spec.base_repo_id.to_owned(),
                 revision: None,
                 evidence_path: "README.md".to_owned(),
             }]
@@ -626,7 +755,7 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
         return Err(invalid("Qwen reviewed evidence paths differ"));
     }
     let architecture = &model.architecture;
-    let expected_layers = qwen_layer_schedule();
+    let expected_layers = qwen_layer_schedule(spec.layer_count);
     if architecture.architectures != ["Qwen3_5ForConditionalGeneration"]
         || architecture.top_level_architecture != "Qwen3_5ForConditionalGeneration"
         || architecture.model_type != "qwen3_5"
@@ -639,7 +768,7 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
             != (ComponentMetadata {
                 present: true,
                 tensor_prefix: "model.visual.".to_owned(),
-                tensor_count: 297,
+                tensor_count: spec.vision_tensor_count,
                 phase3_status: ComponentStatus::KnownUnconsumed,
             })
         || architecture.mtp
@@ -652,12 +781,12 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
         || architecture.text_config
             != (TextConfig {
                 model_type: "qwen3_5_text".to_owned(),
-                hidden_size: 2560,
-                num_hidden_layers: 32,
-                num_attention_heads: 16,
-                num_key_value_heads: 4,
-                head_dim: 256,
-                intermediate_size: 9216,
+                hidden_size: spec.hidden_size,
+                num_hidden_layers: spec.layer_count,
+                num_attention_heads: spec.attention_heads,
+                num_key_value_heads: spec.kv_heads,
+                head_dim: spec.head_dim,
+                intermediate_size: spec.intermediate_size,
                 dtype: TensorDType::Bf16,
                 rms_norm_eps: "1e-6".to_owned(),
                 attention_bias: false,
@@ -673,7 +802,7 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
                     mrope_interleaved: true,
                     mrope_section: vec![11, 11, 10],
                 },
-                tie_word_embeddings: true,
+                tie_word_embeddings: spec.tied_embeddings,
                 use_cache: true,
                 vocab_size: 248320,
                 mtp_num_hidden_layers: 1,
@@ -681,7 +810,7 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
         || architecture.layer_schedule
             != (LayerSchedule {
                 kind: "explicit".to_owned(),
-                num_hidden_layers: 32,
+                num_hidden_layers: spec.layer_count,
                 full_attention_interval: 4,
                 layer_types: expected_layers,
                 allowed_types: vec![LayerType::LinearAttention, LayerType::FullAttention],
@@ -692,35 +821,62 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
         ));
     }
     if model.tensor_contract.index_path != "model.safetensors.index.json"
-        || model.tensor_contract.indexed_tensor_count != 738
-        || model.tensor_contract.shards
-            != [
-                "model.safetensors-00001-of-00002.safetensors".to_owned(),
-                "model.safetensors-00002-of-00002.safetensors".to_owned(),
-            ]
-        || model.tensor_contract.classifications
-            != [
-                TensorClassification {
-                    id: "text".to_owned(),
-                    prefix: "model.language_model.".to_owned(),
-                    tensor_count: 426,
-                    phase3_status: ClassificationStatus::PartiallyConsumed,
-                },
-                TensorClassification {
-                    id: "vision".to_owned(),
-                    prefix: "model.visual.".to_owned(),
-                    tensor_count: 297,
-                    phase3_status: ClassificationStatus::KnownUnconsumed,
-                },
-                TensorClassification {
-                    id: "mtp".to_owned(),
-                    prefix: "mtp.".to_owned(),
-                    tensor_count: 15,
-                    phase3_status: ClassificationStatus::KnownUnconsumed,
-                },
-            ]
+        || model.tensor_contract.indexed_tensor_count != spec.indexed_tensor_count
+        || model.tensor_contract.shards.len() != spec.shard_count
     {
         return Err(invalid("Qwen reviewed tensor contract differs"));
+    }
+    let expected_classifications = if spec.tied_embeddings {
+        vec![
+            TensorClassification {
+                id: "text".to_owned(),
+                prefix: "model.language_model.".to_owned(),
+                tensor_count: spec.text_tensor_count,
+                phase3_status: ClassificationStatus::PartiallyConsumed,
+            },
+            TensorClassification {
+                id: "vision".to_owned(),
+                prefix: "model.visual.".to_owned(),
+                tensor_count: spec.vision_tensor_count,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+            TensorClassification {
+                id: "mtp".to_owned(),
+                prefix: "mtp.".to_owned(),
+                tensor_count: 15,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+        ]
+    } else {
+        vec![
+            TensorClassification {
+                id: "text".to_owned(),
+                prefix: "model.language_model.".to_owned(),
+                tensor_count: spec.text_tensor_count - 1,
+                phase3_status: ClassificationStatus::PartiallyConsumed,
+            },
+            TensorClassification {
+                id: "output".to_owned(),
+                prefix: "lm_head.".to_owned(),
+                tensor_count: 1,
+                phase3_status: ClassificationStatus::Consumed,
+            },
+            TensorClassification {
+                id: "vision".to_owned(),
+                prefix: "model.visual.".to_owned(),
+                tensor_count: spec.vision_tensor_count,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+            TensorClassification {
+                id: "mtp".to_owned(),
+                prefix: "mtp.".to_owned(),
+                tensor_count: 15,
+                phase3_status: ClassificationStatus::KnownUnconsumed,
+            },
+        ]
+    };
+    if model.tensor_contract.classifications != expected_classifications {
+        return Err(invalid("Qwen reviewed tensor classifications differ"));
     }
     let tokenizer = &model.tokenizer_contract;
     if tokenizer.files
@@ -788,41 +944,16 @@ fn validate_qwen_lock_contract(document: &ModelLock) -> Result<(), ModelError> {
     Ok(())
 }
 
-fn qwen_layer_schedule() -> Vec<LayerType> {
-    vec![
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::LinearAttention,
-        LayerType::FullAttention,
-    ]
+fn qwen_layer_schedule(layer_count: u64) -> Vec<LayerType> {
+    (0..layer_count)
+        .map(|layer| {
+            if (layer + 1) % 4 == 0 {
+                LayerType::FullAttention
+            } else {
+                LayerType::LinearAttention
+            }
+        })
+        .collect()
 }
 
 /// Returns the reviewed Qwen3.5-4B checkpoint namespace as a one-to-one,
@@ -967,7 +1098,7 @@ fn validate_qwen_shape_inputs(
     if text_inputs.num_hidden_layers != text_inputs.layer_types.len() as u64
         || text_inputs.num_hidden_layers != architecture.text_config.num_hidden_layers
         || text_inputs.full_attention_interval != 4
-        || text_inputs.layer_types != qwen_layer_schedule()
+        || text_inputs.layer_types != qwen_layer_schedule(text_inputs.num_hidden_layers)
         || text_inputs.num_key_value_heads > text_inputs.num_attention_heads
     {
         return Err(invalid(
@@ -1022,9 +1153,14 @@ fn validate_qwen_shape_inputs(
             "Qwen vision_config",
         )?,
     };
-    if vision_inputs.depth != 24 {
+    let expected_vision_tensors = vision_inputs
+        .depth
+        .checked_mul(12)
+        .and_then(|count| count.checked_add(9))
+        .ok_or_else(|| invalid("Qwen vision tensor count overflowed"))?;
+    if expected_vision_tensors != architecture.vision.tensor_count {
         return Err(invalid(
-            "Qwen vision depth must produce the reviewed 297 tensors",
+            "Qwen vision depth does not produce the locked tensor count",
         ));
     }
 
@@ -1038,9 +1174,9 @@ fn validate_qwen_shape_inputs(
         .get("tie_word_embeddings")
         .and_then(Value::as_bool)
         .ok_or_else(|| invalid("Qwen tie_word_embeddings condition is missing"))?;
-    if mtp_num_hidden_layers != 1 || mtp_use_dedicated_embeddings || !tie_word_embeddings {
+    if mtp_num_hidden_layers != 1 || mtp_use_dedicated_embeddings {
         return Err(invalid(
-            "Qwen MTP requires one layer, tied embeddings, and no dedicated embeddings",
+            "Qwen MTP requires one layer and no dedicated embeddings",
         ));
     }
     Ok(QwenShapeInputs {
@@ -1115,6 +1251,14 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
         TensorDType::Bf16,
         vec![text.hidden_size],
     )?;
+    if !inputs.tie_word_embeddings {
+        add(
+            "lm_head.weight".to_owned(),
+            "output",
+            TensorDType::Bf16,
+            vec![text.vocab_size, text.hidden_size],
+        )?;
+    }
     for (layer, layer_type) in text.layer_types.iter().copied().enumerate() {
         let prefix = format!("model.language_model.layers.{layer}");
         add(
@@ -1311,10 +1455,7 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
         )?;
     }
 
-    if inputs.mtp_num_hidden_layers != 1
-        || inputs.mtp_use_dedicated_embeddings
-        || !inputs.tie_word_embeddings
-    {
+    if inputs.mtp_num_hidden_layers != 1 || inputs.mtp_use_dedicated_embeddings {
         return Err(invalid("Qwen MTP shape conditions are not satisfied"));
     }
     let mtp_q_width = checked_shape_mul(
@@ -1374,12 +1515,6 @@ fn qwen_tensor_catalog(inputs: &QwenShapeInputs) -> Result<QwenTensorCatalog, Mo
     ] {
         add(format!("mtp.{suffix}"), "mtp", TensorDType::Bf16, shape)?;
     }
-    if catalog.len() != 738 {
-        return Err(invalid(format!(
-            "Qwen tensor catalog cardinality differs from 738: {}",
-            catalog.len()
-        )));
-    }
     Ok(catalog)
 }
 
@@ -1388,11 +1523,6 @@ fn validate_qwen_header_catalog(
     classifications: &[TensorClassification],
     expected: &QwenTensorCatalog,
 ) -> Result<(), ModelError> {
-    if expected.len() != 738 {
-        return Err(invalid(
-            "Qwen tensor catalog cardinality differs from the reviewed 738 tensors",
-        ));
-    }
     let missing: Vec<&str> = expected
         .keys()
         .filter(|name| !actual.contains_key(*name))
@@ -1457,7 +1587,7 @@ mod qwen_shape_tests {
                 intermediate_size: 9216,
                 vocab_size: 248320,
                 full_attention_interval: 4,
-                layer_types: qwen_layer_schedule(),
+                layer_types: qwen_layer_schedule(32),
                 linear_conv_kernel_dim: 4,
                 linear_key_head_dim: 128,
                 linear_num_key_heads: 16,
@@ -2801,7 +2931,8 @@ fn validate_parsed_model_config(
         .as_object()
         .ok_or_else(|| invalid("config root must be an object"))?;
     let architecture = &lock.model.architecture;
-    let require_full_text_config = lock.model.repo_id == QWEN_REPO_ID;
+    let reviewed_spec = qwen35_reviewed_spec(&lock.model.repo_id);
+    let require_full_text_config = reviewed_spec.is_some();
     if let Some(value) = root.get("architectures") {
         if !json_string_array_equals(value, &architecture.architectures) {
             return Err(invalid("config architectures differ from lock"));
@@ -2839,8 +2970,10 @@ fn validate_parsed_model_config(
             check_optional_u64(text, key, expected)?;
         }
     }
-    if require_full_text_config || text.contains_key("tie_word_embeddings") {
+    if text.contains_key("tie_word_embeddings") {
         check_bool(text, "tie_word_embeddings", locked.tie_word_embeddings)?;
+    } else if require_full_text_config && locked.tie_word_embeddings {
+        return Err(invalid("config text tie_word_embeddings is missing"));
     }
     if let Some(value) = text.get("dtype") {
         if value.as_str() != Some("bfloat16") {
@@ -2906,7 +3039,7 @@ fn validate_parsed_model_config(
         return Err(invalid("config EOS ID is missing"));
     }
     if require_full_text_config {
-        validate_qwen_config_constants(root)?;
+        validate_qwen_config_constants(root, reviewed_spec.expect("reviewed spec is present"))?;
         validate_qwen_typed_config_values(text, locked)?;
     }
     if require_full_text_config {
@@ -2919,7 +3052,10 @@ fn validate_parsed_model_config(
 /// Validate every reviewed config field that is specific to the immutable
 /// Qwen3.5-4B revision.  The lock is still the byte identity; these constants
 /// make the semantic surface explicit without widening model-lock-v1.
-fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), ModelError> {
+fn validate_qwen_config_constants(
+    root: &Map<String, Value>,
+    spec: Qwen35ReviewedSpec,
+) -> Result<(), ModelError> {
     expect_exact_keys(
         root,
         &[
@@ -2938,7 +3074,7 @@ fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), Model
     )?;
     expect_string_array(root, "architectures", &["Qwen3_5ForConditionalGeneration"])?;
     expect_string(root, "model_type", "qwen3_5")?;
-    expect_bool(root, "tie_word_embeddings", true)?;
+    expect_bool(root, "tie_word_embeddings", spec.tied_embeddings)?;
     expect_string(root, "transformers_version", "4.57.0.dev0")?;
     for (field, expected) in [
         ("image_token_id", 248056),
@@ -2984,13 +3120,13 @@ fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), Model
     expect_string(vision, "hidden_act", "gelu_pytorch_tanh")?;
     expect_f64(vision, "initializer_range", 0.02)?;
     for (field, expected) in [
-        ("depth", 24),
-        ("hidden_size", 1024),
+        ("depth", spec.vision_depth),
+        ("hidden_size", spec.vision_hidden_size),
         ("in_channels", 3),
-        ("intermediate_size", 4096),
+        ("intermediate_size", spec.vision_intermediate_size),
         ("num_heads", 16),
         ("num_position_embeddings", 2304),
-        ("out_hidden_size", 2560),
+        ("out_hidden_size", spec.vision_output_size),
         ("patch_size", 16),
         ("spatial_merge_size", 2),
         ("temporal_patch_size", 2),
@@ -3002,47 +3138,52 @@ fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), Model
         .get("text_config")
         .and_then(Value::as_object)
         .ok_or_else(|| invalid("Qwen text_config is not an object"))?;
-    expect_exact_keys(
-        text,
-        &[
-            "attention_bias",
-            "attention_dropout",
-            "attn_output_gate",
-            "dtype",
-            "eos_token_id",
-            "full_attention_interval",
-            "head_dim",
-            "hidden_act",
-            "hidden_size",
-            "initializer_range",
-            "intermediate_size",
-            "layer_types",
-            "linear_conv_kernel_dim",
-            "linear_key_head_dim",
-            "linear_num_key_heads",
-            "linear_num_value_heads",
-            "linear_value_head_dim",
-            "mamba_ssm_dtype",
-            "max_position_embeddings",
-            "mlp_only_layers",
-            "model_type",
-            "mtp_num_hidden_layers",
-            "mtp_use_dedicated_embeddings",
-            "num_attention_heads",
-            "num_hidden_layers",
-            "num_key_value_heads",
-            "rms_norm_eps",
-            "rope_parameters",
-            "tie_word_embeddings",
-            "use_cache",
-            "vocab_size",
-        ],
-        "Qwen text_config",
-    )?;
+    let mut expected_text_keys = vec![
+        "attention_bias",
+        "attention_dropout",
+        "attn_output_gate",
+        "dtype",
+        "eos_token_id",
+        "full_attention_interval",
+        "head_dim",
+        "hidden_act",
+        "hidden_size",
+        "initializer_range",
+        "intermediate_size",
+        "layer_types",
+        "linear_conv_kernel_dim",
+        "linear_key_head_dim",
+        "linear_num_key_heads",
+        "linear_num_value_heads",
+        "linear_value_head_dim",
+        "mamba_ssm_dtype",
+        "max_position_embeddings",
+        "mlp_only_layers",
+        "model_type",
+        "mtp_num_hidden_layers",
+        "mtp_use_dedicated_embeddings",
+        "num_attention_heads",
+        "num_hidden_layers",
+        "num_key_value_heads",
+        "rms_norm_eps",
+        "rope_parameters",
+        "use_cache",
+        "vocab_size",
+    ];
+    if spec.tied_embeddings {
+        expected_text_keys.push("tie_word_embeddings");
+    }
+    expect_exact_keys(text, &expected_text_keys, "Qwen text_config")?;
     expect_bool(text, "attention_bias", false)?;
     expect_bool(text, "attn_output_gate", true)?;
     expect_bool(text, "mtp_use_dedicated_embeddings", false)?;
-    expect_bool(text, "tie_word_embeddings", true)?;
+    if spec.tied_embeddings {
+        expect_bool(text, "tie_word_embeddings", true)?;
+    } else if text.contains_key("tie_word_embeddings") {
+        return Err(invalid(
+            "untied Qwen text_config must inherit the root output contract",
+        ));
+    }
     expect_bool(text, "use_cache", true)?;
     expect_string(text, "hidden_act", "silu")?;
     expect_string(text, "mamba_ssm_dtype", "float32")?;
@@ -3060,7 +3201,7 @@ fn validate_qwen_config_constants(root: &Map<String, Value>) -> Result<(), Model
         ("linear_conv_kernel_dim", 4),
         ("linear_key_head_dim", 128),
         ("linear_num_key_heads", 16),
-        ("linear_num_value_heads", 32),
+        ("linear_num_value_heads", spec.linear_value_heads),
         ("linear_value_head_dim", 128),
         ("max_position_embeddings", 262144),
     ] {
@@ -3623,7 +3764,7 @@ fn validate_safetensors(
             )));
         }
     }
-    if lock.model.repo_id == QWEN_REPO_ID {
+    if qwen35_reviewed_spec(&lock.model.repo_id).is_some() {
         let shape_inputs = qwen_shape_inputs
             .ok_or_else(|| invalid("Qwen safetensors validation lacks parsed config shapes"))?;
         let catalog = qwen_tensor_catalog(shape_inputs)?;
@@ -4002,7 +4143,7 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/models/locks/qwen3.5-4b-bf16.json");
         let lock = read_model_lock(path).expect("reviewed Qwen lock parses");
-        assert_eq!(lock.fingerprint(), QWEN_FINGERPRINT);
+        assert_eq!(lock.fingerprint(), QWEN35_4B_FINGERPRINT);
         assert_eq!(lock.model.architecture.text_config.dtype, TensorDType::Bf16);
     }
 

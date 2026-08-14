@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-03
+> 最終更新: 2026-08-13
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0とmodel-free G1を検証済みである。検証範囲はidentity/health、exact artifact/loader binding、allocation、copy、diagnostic dispatch、completion、byte-exact copy-backに限り、数値kernel、model、性能、別SKU・別tupleは未検証である。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1に加え、Phase 6 A0のHIP VMM reserve/map/remapとcontiguous-pointer数値probeを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tuple、full modelやproduction採用へ一般化しない。
 
 ## 二層の識別モデル
 
@@ -94,7 +94,16 @@ vendor mapping、library query、probeは代替関係ではない。例えばhar
 
 `lifecycle=supported`への昇格には原則として同じscopeの`project-verified`を要求する。`vendor-supported`だけで自動昇格せず、反対にvendor公式範囲外でも十分なproject evidenceがあれば`project-verified`を保持できる。
 
-現時点の初期AMD targetは`lifecycle=experimental`かつ、canonical 2 GPUのmodel-free G0/G1以外の機能scopeでは`evidence`に`unverified`を含む。AMDの製品別状態と検証scopeは[AMD GPU互換性方針](amd-gpu.md)に記録する。
+現時点の初期AMD targetは`lifecycle=experimental`である。canonical V620 `gfx1030`とR9700 `gfx1201`は
+model-free G0/G1に加え、Phase 6 A0のHIP VMM primitive、A1のFA2-style proxy比較と
+virtual-contiguous KV最小production pathについて`project-verified`である。他の機能scope、SKU、tupleは
+引き続き`unverified`を含む。AMDの製品別状態と検証scopeは[AMD GPU互換性方針](amd-gpu.md)、
+KV方式の範囲は[KV memory decision](../architecture/kv-memory.md)に記録する。
+
+Phase 6 A6では同じcanonical 2 targetを各UUIDで単独可視化し、Qwen3.5-4BのOpenAI-compatible
+non-stream/SSE/stop/disconnect service pathを追加検証した。これは単一GPU・単一model-resident serverの
+限定scopeだけを`project-verified`とする。複数GPU可視のprocess、global physical indexによるworker選択、
+multi-GPU servingは検証範囲外である。
 
 ### software.mdとの関係
 

@@ -30,6 +30,9 @@ struct DescriptorMetadata final {
   TensorMetadata k_output;
   uint64_t m;
   uint32_t start_position;
+  uint32_t q_heads;
+  uint32_t k_heads;
+  uint32_t head_dim;
 };
 
 sllm_status_t

@@ -1,0 +1,89 @@
+{
+  "schema_version": "openai-chat-profile-fixture-v1",
+  "profile": "sllm-openai-chat-completions-v1",
+  "official_openapi": {
+    "repository": "https://github.com/openai/openai-openapi",
+    "commit": "117ce5680e4269f6656a4fd70d28f9755630d938",
+    "operation": "POST /v1/chat/completions"
+  },
+  "served_model": "qwen-test",
+  "positive": {
+    "request": {
+      "model": "qwen-test",
+      "messages": [
+        {"role": "system", "content": "Answer briefly."},
+        {"role": "user", "content": "hello"}
+      ],
+      "temperature": 0.0,
+      "top_p": 1.0,
+      "max_completion_tokens": 17,
+      "presence_penalty": 0.0,
+      "frequency_penalty": 0.0,
+      "n": 1
+    },
+    "non_stream": {
+      "object": "chat.completion",
+      "choice_index": 0,
+      "role": "assistant",
+      "content": "hello終",
+      "finish_reason": "stop",
+      "prompt_tokens": 3,
+      "completion_tokens": 2,
+      "total_tokens": 5
+    },
+    "stream": {
+      "object": "chat.completion.chunk",
+      "first_delta_role": "assistant",
+      "content_deltas": ["hel", "lo終"],
+      "finish_reason": "stop",
+      "prompt_tokens": 3,
+      "completion_tokens": 2,
+      "total_tokens": 5,
+      "terminal": "[DONE]"
+    }
+  },
+  "negative": [
+    {
+      "case_id": "malformed-json",
+      "body": "{",
+      "status": 400,
+      "code": "invalid_json",
+      "param": null
+    },
+    {
+      "case_id": "unsupported-tools",
+      "body": {"model": "qwen-test", "messages": [{"role": "user", "content": "x"}], "tools": []},
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "tools"
+    },
+    {
+      "case_id": "invalid-n",
+      "body": {"model": "qwen-test", "messages": [{"role": "user", "content": "x"}], "n": 2},
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "n"
+    },
+    {
+      "case_id": "tool-message",
+      "body": {"model": "qwen-test", "messages": [{"role": "tool", "content": "x"}]},
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "messages[0].role"
+    },
+    {
+      "case_id": "multipart-content",
+      "body": {"model": "qwen-test", "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]},
+      "status": 400,
+      "code": "unsupported_parameter",
+      "param": "messages[0].content"
+    },
+    {
+      "case_id": "unknown-model",
+      "body": {"model": "not-served", "messages": [{"role": "user", "content": "x"}]},
+      "status": 404,
+      "code": "model_not_found",
+      "param": "model"
+    }
+  ]
+}

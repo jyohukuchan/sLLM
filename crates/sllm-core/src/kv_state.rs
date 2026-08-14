@@ -12,11 +12,23 @@ use crate::{DType, Encoding};
 
 /// The only C3a2 KV storage layout.
 ///
-/// Each of K and V is a separate contiguous unquantized FP16 buffer with
-/// shape `[4, capacity, 256]`.  Query-head repetition is performed by
+/// Each of K and V is a separate virtual-contiguous unquantized FP16 buffer
+/// with token-major shape `[capacity, 4, 256]`. Query-head repetition is performed by
 /// attention, not materialized in this state.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct KvStateLayout;
+pub struct KvStateLayout {
+    heads: usize,
+    head_dim: usize,
+}
+
+impl Default for KvStateLayout {
+    fn default() -> Self {
+        Self {
+            heads: Self::HEADS,
+            head_dim: Self::HEAD_DIM,
+        }
+    }
+}
 
 impl KvStateLayout {
     pub const HEADS: usize = 4;
@@ -24,12 +36,19 @@ impl KvStateLayout {
     pub const DTYPE: DType = DType::F16;
     pub const ENCODING: Encoding = Encoding::Unquantized;
 
+    pub fn new(heads: usize, head_dim: usize) -> Result<Self, KvStateError> {
+        if heads == 0 || head_dim == 0 {
+            return Err(KvStateError::InvalidLayout);
+        }
+        Ok(Self { heads, head_dim })
+    }
+
     pub const fn heads(self) -> usize {
-        Self::HEADS
+        self.heads
     }
 
     pub const fn head_dim(self) -> usize {
-        Self::HEAD_DIM
+        self.head_dim
     }
 
     pub const fn dtype(self) -> DType {
@@ -41,7 +60,7 @@ impl KvStateLayout {
     }
 
     pub const fn storage_shape(self, capacity: u64) -> [u64; 3] {
-        [Self::HEADS as u64, capacity, Self::HEAD_DIM as u64]
+        [capacity, self.heads as u64, self.head_dim as u64]
     }
 }
 
@@ -95,16 +114,21 @@ impl CausalAttentionDescriptor {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum KvStateError {
     ZeroCapacity,
+    InvalidLayout,
     ZeroQueryCount,
     LengthOverflow,
     LengthMismatch { expected: u64, actual: u64 },
     LengthOutOfBounds { length: u64, capacity: u64 },
+    InvalidPhysicalMemory,
 }
 
 impl fmt::Display for KvStateError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroCapacity => formatter.write_str("KV state capacity must be non-zero"),
+            Self::InvalidLayout => {
+                formatter.write_str("KV state layout dimensions must be non-zero")
+            }
             Self::ZeroQueryCount => formatter.write_str("attention query count must be non-zero"),
             Self::LengthOverflow => formatter.write_str("attention length overflowed u64"),
             Self::LengthMismatch { expected, actual } => {
@@ -119,6 +143,9 @@ impl fmt::Display for KvStateError {
                     "KV state length {length} exceeds capacity {capacity}"
                 )
             }
+            Self::InvalidPhysicalMemory => formatter.write_str(
+                "KV physical-memory metadata must be page-aligned and within logical capacity",
+            ),
         }
     }
 }
@@ -130,12 +157,31 @@ impl std::error::Error for KvStateError {}
 pub struct KvStateDescriptor {
     layer_id: u32,
     capacity: NonZeroU64,
+    layout: KvStateLayout,
 }
 
 impl KvStateDescriptor {
     pub fn new(layer_id: u32, capacity: u64) -> Result<Self, KvStateError> {
         let capacity = NonZeroU64::new(capacity).ok_or(KvStateError::ZeroCapacity)?;
-        Ok(Self { layer_id, capacity })
+        Ok(Self {
+            layer_id,
+            capacity,
+            layout: KvStateLayout::default(),
+        })
+    }
+
+    pub fn new_with_layout(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+    ) -> Result<Self, KvStateError> {
+        let capacity = NonZeroU64::new(capacity).ok_or(KvStateError::ZeroCapacity)?;
+        Ok(Self {
+            layer_id,
+            capacity,
+            layout: KvStateLayout::new(heads, head_dim)?,
+        })
     }
 
     pub const fn layer_id(self) -> u32 {
@@ -147,7 +193,7 @@ impl KvStateDescriptor {
     }
 
     pub const fn layout(self) -> KvStateLayout {
-        KvStateLayout
+        self.layout
     }
 
     pub const fn storage_shape(self) -> [u64; 3] {
@@ -163,6 +209,60 @@ impl KvStateDescriptor {
     }
 }
 
+/// Backend-reported physical backing for a virtual-contiguous KV plane.
+///
+/// This is evidence metadata only: allocation and mapping remain owned by the
+/// backend. `committed_bytes_per_plane` describes K or V, not their sum.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KvPhysicalMemorySnapshot {
+    physical_page_bytes: u64,
+    tokens_per_page: u64,
+    mapped_token_capacity: u64,
+    committed_bytes_per_plane: u64,
+}
+
+impl KvPhysicalMemorySnapshot {
+    pub fn new(
+        logical_capacity: u64,
+        observed_length: u64,
+        physical_page_bytes: u64,
+        tokens_per_page: u64,
+        mapped_token_capacity: u64,
+        committed_bytes_per_plane: u64,
+    ) -> Result<Self, KvStateError> {
+        if physical_page_bytes == 0
+            || tokens_per_page == 0
+            || mapped_token_capacity > logical_capacity
+            || observed_length > mapped_token_capacity
+            || committed_bytes_per_plane % physical_page_bytes != 0
+        {
+            return Err(KvStateError::InvalidPhysicalMemory);
+        }
+        Ok(Self {
+            physical_page_bytes,
+            tokens_per_page,
+            mapped_token_capacity,
+            committed_bytes_per_plane,
+        })
+    }
+
+    pub const fn physical_page_bytes(self) -> u64 {
+        self.physical_page_bytes
+    }
+
+    pub const fn tokens_per_page(self) -> u64 {
+        self.tokens_per_page
+    }
+
+    pub const fn mapped_token_capacity(self) -> u64 {
+        self.mapped_token_capacity
+    }
+
+    pub const fn committed_bytes_per_plane(self) -> u64 {
+        self.committed_bytes_per_plane
+    }
+}
+
 /// Backend-reported authoritative state metadata at one observation point.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct KvStateSnapshot {
@@ -170,6 +270,7 @@ pub struct KvStateSnapshot {
     state_id: KvStateId,
     descriptor: KvStateDescriptor,
     length: u64,
+    physical_memory: Option<KvPhysicalMemorySnapshot>,
 }
 
 impl KvStateSnapshot {
@@ -192,6 +293,32 @@ impl KvStateSnapshot {
             state_id,
             descriptor,
             length,
+            physical_memory: None,
+        })
+    }
+
+    /// Constructs a snapshot that includes authoritative physical backing
+    /// metadata. Backends without virtual-memory reporting continue to use
+    /// [`Self::new`] and expose `None`.
+    pub fn new_with_physical_memory(
+        session_id: ExecutionSessionId,
+        state_id: KvStateId,
+        descriptor: KvStateDescriptor,
+        length: u64,
+        physical_memory: KvPhysicalMemorySnapshot,
+    ) -> Result<Self, KvStateError> {
+        if length > descriptor.capacity() || length > physical_memory.mapped_token_capacity() {
+            return Err(KvStateError::LengthOutOfBounds {
+                length,
+                capacity: descriptor.capacity(),
+            });
+        }
+        Ok(Self {
+            session_id,
+            state_id,
+            descriptor,
+            length,
+            physical_memory: Some(physical_memory),
         })
     }
 
@@ -221,6 +348,10 @@ impl KvStateSnapshot {
 
     pub const fn layout(self) -> KvStateLayout {
         self.descriptor.layout()
+    }
+
+    pub const fn physical_memory(self) -> Option<KvPhysicalMemorySnapshot> {
+        self.physical_memory
     }
 }
 
@@ -289,7 +420,7 @@ mod tests {
         assert_eq!(layout.head_dim(), 256);
         assert_eq!(layout.dtype(), DType::F16);
         assert_eq!(layout.encoding(), Encoding::Unquantized);
-        assert_eq!(descriptor.storage_shape(), [4, 257, 256]);
+        assert_eq!(descriptor.storage_shape(), [257, 4, 256]);
         assert_eq!(descriptor.layer_id(), 7);
         assert_eq!(descriptor.capacity(), 257);
         assert_ne!(descriptor, KvStateDescriptor::new(8, 257).unwrap());

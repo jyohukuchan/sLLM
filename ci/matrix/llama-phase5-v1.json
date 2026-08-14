@@ -1,0 +1,157 @@
+{
+  "schema_version": "llama-phase5-v1",
+  "record_kind": "matrix",
+  "matrix_id": "llama-phase5-v1",
+  "revision": 1,
+  "required": false,
+  "claims": {"baseline_only": true, "optimized": false, "faster": false, "hard_gate": false},
+  "llama": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "reference_path": "reference/llama.cpp",
+    "source_tree": "e9b6173953477054a4068884aa5fc9aeef6475e8"
+  },
+  "model": {
+    "repo_id": "Qwen/Qwen3.5-4B",
+    "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "format": "GGUF",
+    "dtype": "BF16",
+    "gguf_sha256": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045"
+  },
+  "conversion": {
+    "manifest_schema": "phase5-p3-llama-cpp-artifacts-v1",
+    "source_manifest": {
+      "path": "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/manifest.json",
+      "sha256": "09fceef231a65ea8793b0749fd1340f9eaffd00562aeffad7beaac74d1991f21"
+    },
+    "source_lock": {
+      "path": "docs/models/locks/qwen3.5-4b-bf16.json",
+      "sha256": "4071e1b36901e523a3c5c65559f2cecda7c9cc258185770f049886f52d1fe678",
+      "fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+      "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "file_set_sha256": "ea94e7fe8d4e916590236b9a7f47b8aa0e896ce0a75a7252348b86c9f318d934"
+    },
+    "source": {
+      "repository": "https://github.com/ggml-org/llama.cpp",
+      "path": "/home/homelab1/coding-local/sLLM/reference/llama.cpp",
+      "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+      "tree": "e9b6173953477054a4068884aa5fc9aeef6475e8",
+      "checkout": "detached",
+      "clean": true
+    },
+    "tool": {
+      "path": "/home/homelab1/coding-local/sLLM/reference/llama.cpp/convert_hf_to_gguf.py",
+      "sha256": "8f1bed9466221e57e434caa7ee720abe1569deb6bc2fe5a65da950ea66c8e737",
+      "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+      "tree": "e9b6173953477054a4068884aa5fc9aeef6475e8"
+    },
+    "arguments": ["python3", "/home/homelab1/coding-local/sLLM/reference/llama.cpp/convert_hf_to_gguf.py", "/home/homelab1/.cache/sllm/models/Qwen--Qwen3.5-4B/snapshots/851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "--outfile", "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/qwen3.5-4b-bf16-no-mtp.gguf", "--outtype", "bf16", "--no-mtp"],
+    "duration_seconds": 27.04,
+    "output": {
+      "path": "/home/homelab1/.cache/sllm/benchmarks/phase5/p3-llama-cpp-qwen3.5-4b-851bf6e8/qwen3.5-4b-bf16-no-mtp.gguf",
+      "sha256": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045",
+      "bytes": 8424393568,
+      "format": "GGUF",
+      "dtype": "BF16"
+    },
+    "gguf": {
+      "architecture": "qwen35",
+      "name": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "file_type": 32,
+      "quantization_version": 2,
+      "tensor_count": 426,
+      "mtp_tensor_count": 0
+    },
+    "toolchain": {
+      "rocm_root": "/opt/rocm/core-7.14",
+      "rocm_version": "7.14.60850-0000000",
+      "compiler_path": "/opt/rocm/core-7.14/bin/amdclang++",
+      "compiler_realpath": "/opt/rocm/core-7.14/lib/llvm/bin/amdllvm",
+      "compiler_version": "AMD clang version 23.0.0git (ROCm/llvm-project 46fcb339fb61119b337f973c7ca9e710a319fdd0+PATCHED:440716f8b87be9d8e20ed910e10e5b6d14d57cf6)"
+    }
+  },
+  "protocol": {
+    "backend": "hip", "dtype": "BF16", "batch_size": 1, "sequences": 1,
+    "warmup_requests": 3, "measured_requests": 10,
+    "stop_token_ids": [248046, 248044], "visible_stop_tokens": false,
+    "n_batch": 2048, "n_ubatch": 512, "n_gpu_layers": -1,
+    "split_mode": "none", "main_gpu": 0, "greedy": true, "bos_insertion": false
+  },
+  "source_direct_matrix": {
+    "path": "ci/matrix/engine-performance-direct-v1.json",
+    "sha256": "fb0fab31e6c9b21a78e023bf9739a4363470e7a7df0f0898d0d878131e50cb78",
+    "matrix_id": "engine-performance-direct-v1",
+    "revision": 4
+  },
+  "targets": [
+    {"order": 0, "target": "gfx1030", "backend": "hip", "gpu_uuid": "GPU-76a08c022586fed6", "gpu_bdf": "0000:03:00.0", "product": "AMD Radeon Pro V620", "physical_hip_index": 1, "logical_device_index": 0},
+    {"order": 1, "target": "gfx1201", "backend": "hip", "gpu_uuid": "GPU-a8e9ddefa2d60f55", "gpu_bdf": "0000:07:00.0", "product": "AMD Radeon AI PRO R9700", "physical_hip_index": 2, "logical_device_index": 0}
+  ],
+  "cases": [
+    {"order": 0, "case_id": "minimum", "direct_sequence_id": "minimum", "input_tokens": 1, "requested_output_tokens": 1},
+    {"order": 1, "case_id": "short-odd", "direct_sequence_id": "short-odd", "input_tokens": 17, "requested_output_tokens": 17},
+    {"order": 2, "case_id": "boundary-255", "direct_sequence_id": "boundary-255", "input_tokens": 255, "requested_output_tokens": 64},
+    {"order": 3, "case_id": "boundary-256", "direct_sequence_id": "boundary-256", "input_tokens": 256, "requested_output_tokens": 64},
+    {"order": 4, "case_id": "boundary-257", "direct_sequence_id": "boundary-257", "input_tokens": 257, "requested_output_tokens": 64},
+    {"order": 5, "case_id": "prefill-long", "direct_sequence_id": "prefill-long", "input_tokens": 1024, "requested_output_tokens": 128},
+    {"order": 6, "case_id": "decode-long", "direct_sequence_id": "decode-long", "input_tokens": 32, "requested_output_tokens": 256}
+  ],
+  "rows": [
+    {"order": 0, "row_id": "llama-phase5-4b-gfx1030-minimum", "target": "gfx1030", "case_id": "minimum", "input_tokens": 1, "requested_output_tokens": 1},
+    {"order": 1, "row_id": "llama-phase5-4b-gfx1030-short-odd", "target": "gfx1030", "case_id": "short-odd", "input_tokens": 17, "requested_output_tokens": 17},
+    {"order": 2, "row_id": "llama-phase5-4b-gfx1030-boundary-255", "target": "gfx1030", "case_id": "boundary-255", "input_tokens": 255, "requested_output_tokens": 64},
+    {"order": 3, "row_id": "llama-phase5-4b-gfx1030-boundary-256", "target": "gfx1030", "case_id": "boundary-256", "input_tokens": 256, "requested_output_tokens": 64},
+    {"order": 4, "row_id": "llama-phase5-4b-gfx1030-boundary-257", "target": "gfx1030", "case_id": "boundary-257", "input_tokens": 257, "requested_output_tokens": 64},
+    {"order": 5, "row_id": "llama-phase5-4b-gfx1030-prefill-long", "target": "gfx1030", "case_id": "prefill-long", "input_tokens": 1024, "requested_output_tokens": 128},
+    {"order": 6, "row_id": "llama-phase5-4b-gfx1030-decode-long", "target": "gfx1030", "case_id": "decode-long", "input_tokens": 32, "requested_output_tokens": 256},
+    {"order": 7, "row_id": "llama-phase5-4b-gfx1201-minimum", "target": "gfx1201", "case_id": "minimum", "input_tokens": 1, "requested_output_tokens": 1},
+    {"order": 8, "row_id": "llama-phase5-4b-gfx1201-short-odd", "target": "gfx1201", "case_id": "short-odd", "input_tokens": 17, "requested_output_tokens": 17},
+    {"order": 9, "row_id": "llama-phase5-4b-gfx1201-boundary-255", "target": "gfx1201", "case_id": "boundary-255", "input_tokens": 255, "requested_output_tokens": 64},
+    {"order": 10, "row_id": "llama-phase5-4b-gfx1201-boundary-256", "target": "gfx1201", "case_id": "boundary-256", "input_tokens": 256, "requested_output_tokens": 64},
+    {"order": 11, "row_id": "llama-phase5-4b-gfx1201-boundary-257", "target": "gfx1201", "case_id": "boundary-257", "input_tokens": 257, "requested_output_tokens": 64},
+    {"order": 12, "row_id": "llama-phase5-4b-gfx1201-prefill-long", "target": "gfx1201", "case_id": "prefill-long", "input_tokens": 1024, "requested_output_tokens": 128},
+    {"order": 13, "row_id": "llama-phase5-4b-gfx1201-decode-long", "target": "gfx1201", "case_id": "decode-long", "input_tokens": 32, "requested_output_tokens": 256}
+  ],
+  "official_llama_bench": {
+    "tool": "llama-bench",
+    "definitions": {
+      "repetitions": 10,
+      "warmup": {
+        "runs": 1,
+        "prompt_processing": "one prompt-processing warmup per test; zero-initialized token buffer",
+        "generation": "one-token warmup; initial BOS when configured, otherwise rand()%n_vocab, then rand()%n_vocab",
+        "wrapper_equivalence": false
+      },
+      "random_tokens": true,
+      "ratio_comparable": false
+    },
+    "uuid_isolation": {
+      "environment_variable": "ROCR_VISIBLE_DEVICES",
+      "value": "exact target gpu_uuid",
+      "visible_device_count": 1,
+      "llama_bench_device": "ROCm0"
+    },
+    "common_arguments": ["-r", "10", "-ngl", "-1", "-sm", "none", "-mg", "0", "-dev", "ROCm0", "-b", "2048", "-ub", "512", "-ctk", "f16", "-ctv", "f16", "-fa", "auto", "--offline", "-o", "json"],
+    "commands": {
+      "prompt_processing": "${LLAMA_BENCH} -m ${MODEL} -r 10 -p 1,17,32,255,256,257,1024 -n 0 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+      "decode": "${LLAMA_BENCH} -m ${MODEL} -r 10 -p 0 -n 1,17,64,128,256 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+      "paired": [
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 1,1 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 17,17 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 255,64 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 256,64 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 257,64 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 1024,128 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json",
+        "${LLAMA_BENCH} -m ${MODEL} -r 10 -pg 32,256 -ngl -1 -sm none -mg 0 -dev ROCm0 -b 2048 -ub 512 -ctk f16 -ctv f16 -fa auto --offline -o json"
+      ]
+    },
+    "metric_definitions": {
+      "prompt_processing": "llama-bench prompt-processing throughput from official random/zero-initialized token buffers; not wrapper TTFT",
+      "decode": "llama-bench decode throughput from official random token generation; not wrapper TPOT/token-s",
+      "paired": "llama-bench prompt-processing plus decode throughput for each -pg pair; context-only",
+      "context_only": true,
+      "ratio_comparable": false
+    }
+  }
+}

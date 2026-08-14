@@ -12,12 +12,34 @@ enum hipError_t : int {
 };
 
 struct FakeHipStream;
+struct FakeHipMemHandle;
 struct FakeHipEvent {
   bool recorded = false;
 };
 
 using hipStream_t = FakeHipStream *;
 using hipEvent_t = FakeHipEvent *;
+using hipMemGenericAllocationHandle_t = FakeHipMemHandle *;
+
+enum hipMemAllocationType : int { hipMemAllocationTypePinned = 1 };
+enum hipMemLocationType : int { hipMemLocationTypeDevice = 1 };
+enum hipMemAllocationGranularity_flags : int {
+  hipMemAllocationGranularityMinimum = 0,
+  hipMemAllocationGranularityRecommended = 1,
+};
+enum hipMemAccessFlags : int { hipMemAccessFlagsProtReadWrite = 3 };
+struct hipMemLocation {
+  hipMemLocationType type;
+  int id;
+};
+struct hipMemAllocationProp {
+  hipMemAllocationType type;
+  hipMemLocation location;
+};
+struct hipMemAccessDesc {
+  hipMemLocation location;
+  hipMemAccessFlags flags;
+};
 
 struct hipDeviceProp_t {
   char name[256];
@@ -44,6 +66,26 @@ hipError_t hipGetDeviceCount(int *count) noexcept;
 hipError_t hipGetDeviceProperties(hipDeviceProp_t *properties,
                                   unsigned int device) noexcept;
 hipError_t hipSetDevice(int device) noexcept;
+hipError_t hipMemGetInfo(std::size_t *available, std::size_t *total) noexcept;
+hipError_t hipMemGetAllocationGranularity(
+    std::size_t *granularity, const hipMemAllocationProp *properties,
+    hipMemAllocationGranularity_flags option) noexcept;
+hipError_t hipMemAddressReserve(void **pointer, std::size_t size,
+                                std::size_t alignment, void *requested,
+                                unsigned long long flags) noexcept;
+hipError_t hipMemAddressFree(void *pointer, std::size_t size) noexcept;
+hipError_t hipMemCreate(hipMemGenericAllocationHandle_t *handle,
+                        std::size_t size,
+                        const hipMemAllocationProp *properties,
+                        unsigned long long flags) noexcept;
+hipError_t hipMemMap(void *pointer, std::size_t size, std::size_t offset,
+                     hipMemGenericAllocationHandle_t handle,
+                     unsigned long long flags) noexcept;
+hipError_t hipMemSetAccess(void *pointer, std::size_t size,
+                           const hipMemAccessDesc *descriptors,
+                           std::size_t count) noexcept;
+hipError_t hipMemUnmap(void *pointer, std::size_t size) noexcept;
+hipError_t hipMemRelease(hipMemGenericAllocationHandle_t handle) noexcept;
 hipError_t hipStreamCreateWithFlags(hipStream_t *stream,
                                     unsigned int flags) noexcept;
 hipError_t hipStreamDestroy(hipStream_t stream) noexcept;

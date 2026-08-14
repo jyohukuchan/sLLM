@@ -14,15 +14,15 @@
     "policy_id": {"const": "rust-workspace-v1"},
     "workspace": {"$ref": "#/$defs/workspace"},
     "workspace_members": {
-      "type": "array", "minItems": 5, "maxItems": 5,
+      "type": "array", "minItems": 6, "maxItems": 6,
       "items": {"$ref": "#/$defs/workspace_member"}
     },
     "packages": {
-      "type": "array", "minItems": 90, "maxItems": 90,
+      "type": "array", "minItems": 132, "maxItems": 132,
       "items": {"$ref": "#/$defs/package"}
     },
     "edges": {
-      "type": "array", "minItems": 174, "maxItems": 174,
+      "type": "array", "minItems": 309, "maxItems": 309,
       "items": {"$ref": "#/$defs/edge"}
     },
     "counts": {"$ref": "#/$defs/counts"},
@@ -68,8 +68,8 @@
       "properties": {
         "root": {"const": "."},
         "resolver": {"const": 3},
-        "members": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}},
-        "default_members": {"type": "array", "minItems": 5, "maxItems": 5, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}}
+        "members": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}},
+        "default_members": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}}
       }
     },
     "workspace_member": {
@@ -112,17 +112,30 @@
       "type": "object", "additionalProperties": false,
       "required": ["packages", "registry_packages", "workspace_packages", "edges", "edge_kinds", "target_specific_edges", "target_expressions"],
       "properties": {
-        "packages": {"const": 90}, "registry_packages": {"const": 85}, "workspace_packages": {"const": 5}, "edges": {"const": 174},
+        "packages": {"const": 132}, "registry_packages": {"const": 126}, "workspace_packages": {"const": 6}, "edges": {"const": 309},
         "edge_kinds": {
           "type": "object", "additionalProperties": false, "required": ["build", "dev", "normal"],
-          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 167}}
+          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 302}}
         },
-        "target_specific_edges": {"const": 21}, "target_expressions": {"const": 18}
+        "target_specific_edges": {"const": 38}, "target_expressions": {"const": 25}
       }
     },
     "feature_assertions": {
-      "type": "object", "additionalProperties": false, "required": ["tokenizers"],
+      "type": "object", "additionalProperties": false, "required": ["server_runtime", "tokenizers"],
       "properties": {
+        "server_runtime": {
+          "const": {
+            "workspace_package": "workspace:sllm-server@0.1.0",
+            "dependencies": [
+              {"package": "registry:axum@0.8.9", "requested": ["http1", "json", "tokio"], "resolved": ["http1", "json", "tokio"], "uses_default_features": false},
+              {"package": "registry:futures-util@0.3.33", "requested": ["std"], "resolved": ["alloc", "slab", "std"], "uses_default_features": false},
+              {"package": "registry:serde_path_to_error@0.1.20", "requested": [], "resolved": [], "uses_default_features": true},
+              {"package": "registry:tokio-stream@0.1.19", "requested": ["sync"], "resolved": ["sync", "tokio-util"], "uses_default_features": false},
+              {"package": "registry:tokio@1.53.1", "requested": ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], "resolved": ["default", "libc", "macros", "mio", "net", "rt", "rt-multi-thread", "signal", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "windows-sys"], "uses_default_features": false},
+              {"package": "registry:tower-http@0.7.0", "requested": ["limit", "trace"], "resolved": ["limit", "trace", "tracing"], "uses_default_features": false}
+            ]
+          }
+        },
         "tokenizers": {
           "type": "object", "additionalProperties": false,
           "required": ["package", "allowed", "resolved", "forbidden", "required_packages"],

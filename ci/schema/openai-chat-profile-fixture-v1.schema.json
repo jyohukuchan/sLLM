@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/openai-chat-profile-fixture-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile", "official_openapi", "served_model", "positive", "negative"],
+  "properties": {
+    "schema_version": {"const": "openai-chat-profile-fixture-v1"},
+    "profile": {"const": "sllm-openai-chat-completions-v1"},
+    "official_openapi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "operation"],
+      "properties": {
+        "repository": {"const": "https://github.com/openai/openai-openapi"},
+        "commit": {"const": "117ce5680e4269f6656a4fd70d28f9755630d938"},
+        "operation": {"const": "POST /v1/chat/completions"}
+      }
+    },
+    "served_model": {"type": "string", "minLength": 1},
+    "positive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request", "non_stream", "stream"],
+      "properties": {
+        "request": {"type": "object"},
+        "non_stream": {"type": "object"},
+        "stream": {"type": "object"}
+      }
+    },
+    "negative": {
+      "type": "array",
+      "minItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["case_id", "body", "status", "code", "param"],
+        "properties": {
+          "case_id": {"type": "string", "minLength": 1},
+          "body": {"type": ["object", "string"]},
+          "status": {"enum": [400, 404]},
+          "code": {"enum": ["invalid_json", "invalid_value", "unsupported_parameter", "model_not_found"]},
+          "param": {"type": ["string", "null"]}
+        }
+      }
+    }
+  }
+}

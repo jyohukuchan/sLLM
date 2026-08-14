@@ -19,7 +19,7 @@ use crate::execution::{
     Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
-use crate::kv_state::{CausalAttentionDescriptor, KvStateDescriptor};
+use crate::kv_state::{CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateDescriptor};
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
 use crate::model::{TensorDType, VerifiedCache};
 use crate::op::{
@@ -38,10 +38,21 @@ use crate::weights::{
 use crate::{AccessMode, DType, DispatchEvidence};
 
 /// Output published by a fully completed Qwen request transition.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
+    last_logits: Option<Vec<f32>>,
     committed_length: u64,
+}
+
+struct AttentionPreprocessExecution {
+    layer: u32,
+    q_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    token_count: u64,
+    start_position: u64,
+    position_mode: AttentionPreprocessPositionMode,
 }
 
 /// Immutable, request-local dispatch audit published after a successful
@@ -83,9 +94,88 @@ impl QwenExecutionAudit {
     }
 }
 
+/// One full-attention layer's logical and physical KV state at an exact
+/// request boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QwenKvLayerMemoryAudit {
+    layer: u32,
+    logical_capacity_tokens: u64,
+    observed_length_tokens: u64,
+    physical: KvPhysicalMemorySnapshot,
+}
+
+impl QwenKvLayerMemoryAudit {
+    pub const fn layer(self) -> u32 {
+        self.layer
+    }
+
+    pub const fn logical_capacity_tokens(self) -> u64 {
+        self.logical_capacity_tokens
+    }
+
+    pub const fn observed_length_tokens(self) -> u64 {
+        self.observed_length_tokens
+    }
+
+    pub const fn physical(self) -> KvPhysicalMemorySnapshot {
+        self.physical
+    }
+}
+
+/// Request-local state inventory used by service and GPU evidence runners.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenRequestMemoryAudit {
+    kv_layers: Vec<QwenKvLayerMemoryAudit>,
+    linear_attention_layers: usize,
+    linear_attention_capacity_tokens: Option<u64>,
+    linear_attention_observed_length_tokens: Option<u64>,
+}
+
+impl QwenRequestMemoryAudit {
+    pub fn kv_layers(&self) -> &[QwenKvLayerMemoryAudit] {
+        &self.kv_layers
+    }
+
+    pub const fn linear_attention_layers(&self) -> usize {
+        self.linear_attention_layers
+    }
+
+    pub const fn linear_attention_capacity_tokens(&self) -> Option<u64> {
+        self.linear_attention_capacity_tokens
+    }
+
+    pub const fn linear_attention_observed_length_tokens(&self) -> Option<u64> {
+        self.linear_attention_observed_length_tokens
+    }
+
+    pub fn committed_kv_bytes(&self) -> Result<u64, QwenExecutionError> {
+        self.kv_layers.iter().try_fold(0_u64, |total, layer| {
+            layer
+                .physical
+                .committed_bytes_per_plane()
+                .checked_mul(2)
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "request KV committed-byte audit overflowed u64".to_string(),
+                    )
+                })
+        })
+    }
+}
+
 impl QwenExecutionOutput {
     pub fn token_ids(&self) -> &[i32] {
         &self.token_ids
+    }
+
+    /// Last-token, full-vocabulary logits when explicitly requested.
+    ///
+    /// The default greedy path leaves this absent and retains the device
+    /// Argmax behavior used by Phase 3. Sampling requests read back exactly
+    /// one BF16 row and convert it to finite-width F32 host values.
+    pub fn last_logits(&self) -> Option<&[f32]> {
+        self.last_logits.as_deref()
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -200,16 +290,122 @@ impl From<OpError> for QwenExecutionError {
     }
 }
 
+/// A validated model whose required weights are uploaded once for one HIP
+/// execution session. It owns only model-resident buffers and the shared queue;
+/// every call to [`Self::new_request`] creates fresh graph-local workspace and
+/// fresh KV/linear-attention state.
+pub struct QwenResidentModel {
+    inner: Arc<QwenResidentInner>,
+}
+
+impl fmt::Debug for QwenResidentModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QwenResidentModel")
+            .field("session", &self.inner.session.id())
+            .field("model_fingerprint", &self.inner.model_fingerprint)
+            .field("plan_digest", &self.inner.plan.digest_hex())
+            .finish_non_exhaustive()
+    }
+}
+
+impl QwenResidentModel {
+    /// Validates and uploads all required model weights and derived attention
+    /// scale tensors exactly once for `session`.
+    pub fn new(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        cache: Arc<VerifiedCache>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "completion timeout must be non-zero".to_owned(),
+            ));
+        }
+        if cache.lock_fingerprint != plan.lock_fingerprint {
+            return Err(QwenExecutionError::InvalidRequest(
+                "verified cache fingerprint differs from the weight plan".to_owned(),
+            ));
+        }
+        let source = VerifiedProvisionSource {
+            cache: Arc::clone(&cache),
+        };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Creates a fresh request graph/state owner against this resident model.
+    pub fn new_request(
+        &self,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        QwenExecutionCore::from_resident(Arc::clone(&self.inner), graph).map(|core| {
+            QwenExecutionRequest {
+                _resident: Arc::clone(&self.inner),
+                core,
+            }
+        })
+    }
+
+    /// Explicit-session variant used by service owners that keep the session
+    /// handle separately. It rejects even a same-backend session with a
+    /// different identity before graph/state allocation.
+    pub fn new_request_for_session(
+        &self,
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        if session.id() != self.inner.session.id() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "request session differs from the resident model session".to_owned(),
+            ));
+        }
+        self.new_request(graph)
+    }
+
+    /// Compatibility spelling for callers that prefer factory terminology.
+    pub fn create_request(
+        &self,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request(graph)
+    }
+
+    /// Short factory spelling retained for service and benchmark callers.
+    pub fn request(&self, graph: QwenGraph) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request(graph)
+    }
+
+    pub fn session_id(&self) -> crate::ExecutionSessionId {
+        self.inner.session.id()
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.inner.model_fingerprint
+    }
+
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        self.inner.plan.digest()
+    }
+
+    pub fn memory_snapshot(&self) -> crate::AllocationSnapshot {
+        self.inner.session.memory_snapshot()
+    }
+}
+
 /// One fully provisioned, request-local Qwen execution owner.
 ///
-/// Construction validates the D0 graph/load-plan identity, allocates one
-/// buffer per owned graph tensor, uploads every required weight through the
-/// verified-cache bridge, expands the small full-attention scale tensors, and
-/// creates the backend-owned state objects. The supplied cache is retained for
-/// the lifetime of the owner so the identity binding remains explicit even
-/// after all D1 uploads have completed.
+/// `new` remains source-compatible with the original API. It now builds a
+/// short-lived resident owner and then creates one request, while callers that
+/// repeat requests should retain [`QwenResidentModel`] and call
+/// [`QwenResidentModel::new_request`].
 pub struct QwenExecutionRequest {
-    _cache: Arc<VerifiedCache>,
+    _resident: Arc<QwenResidentInner>,
     core: QwenExecutionCore,
 }
 
@@ -235,25 +431,9 @@ impl QwenExecutionRequest {
         cache: Arc<VerifiedCache>,
         completion_timeout: Duration,
     ) -> Result<Self, QwenExecutionError> {
-        if completion_timeout.is_zero() {
-            return Err(QwenExecutionError::InvalidRequest(
-                "completion timeout must be non-zero".to_owned(),
-            ));
-        }
-        if cache.lock_fingerprint != plan.lock_fingerprint {
-            return Err(QwenExecutionError::InvalidRequest(
-                "verified cache fingerprint differs from the weight plan".to_owned(),
-            ));
-        }
-
-        let source = VerifiedProvisionSource {
-            cache: Arc::clone(&cache),
-        };
-        let core = QwenExecutionCore::provision(session, graph, plan, completion_timeout, &source)?;
-        Ok(Self {
-            _cache: cache,
-            core,
-        })
+        let resident =
+            QwenResidentModel::new(session, graph.clone(), plan, cache, completion_timeout)?;
+        resident.new_request(graph)
     }
 
     /// Runs the graph from position zero. A request accepts exactly the D0
@@ -265,9 +445,26 @@ impl QwenExecutionRequest {
         self.core.prefill(token_ids)
     }
 
+    /// Runs prefill and publishes the final row of full-vocabulary logits in
+    /// addition to the existing device Argmax output.
+    pub fn prefill_with_last_logits(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.prefill_with_last_logits(token_ids)
+    }
+
     /// Runs exactly one decode token at the current committed position.
     pub fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode(token_id)
+    }
+
+    /// Runs one decode transition and publishes its full-vocabulary logits.
+    pub fn decode_with_last_logits(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_with_last_logits(token_id)
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -282,6 +479,13 @@ impl QwenExecutionRequest {
         self.core.lifecycle.poisoned.load(Ordering::Acquire)
     }
 
+    /// Idempotently invalidates this request owner without affecting the
+    /// resident model. Synchronous callers use it between transitions when a
+    /// transport cancellation or host-side sampling/decoding failure occurs.
+    pub fn cancel(&mut self) {
+        self.core.lifecycle.poisoned.store(true, Ordering::Release);
+    }
+
     pub fn model_fingerprint(&self) -> &str {
         self.core.graph.model_fingerprint()
     }
@@ -290,16 +494,91 @@ impl QwenExecutionRequest {
         self.core.plan.digest()
     }
 
+    pub fn session_id(&self) -> crate::ExecutionSessionId {
+        self.core.session.id()
+    }
+
     /// Returns the immutable audit accumulated by successful compute
     /// submissions. An empty audit is never a successful request audit.
     pub fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
         self.core.audit_snapshot()
+    }
+
+    /// Captures all request-local state at one quiescent boundary. HIP-backed
+    /// KV states must include physical virtual-memory metadata; a backend that
+    /// omits it fails closed instead of producing inferred evidence.
+    pub fn memory_audit_snapshot(&self) -> Result<QwenRequestMemoryAudit, QwenExecutionError> {
+        let mut kv_layers = Vec::with_capacity(self.core.kv_states.len());
+        for (&layer, state) in &self.core.kv_states {
+            let snapshot = state.snapshot(self.core.session.as_ref())?;
+            let physical = snapshot.physical_memory().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "KV layer {layer} did not report physical-memory metadata"
+                ))
+            })?;
+            kv_layers.push(QwenKvLayerMemoryAudit {
+                layer,
+                logical_capacity_tokens: snapshot.capacity(),
+                observed_length_tokens: snapshot.length(),
+                physical,
+            });
+        }
+        if let Some(reference) = kv_layers.first().copied() {
+            for layer in &kv_layers[1..] {
+                if layer.logical_capacity_tokens != reference.logical_capacity_tokens
+                    || layer.observed_length_tokens != reference.observed_length_tokens
+                    || layer.physical != reference.physical
+                {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "KV layer {} memory metadata differs from layer {}",
+                        layer.layer, reference.layer
+                    )));
+                }
+            }
+        }
+
+        let mut linear_capacity = None;
+        let mut linear_length = None;
+        for (&layer, state) in &self.core.linear_states {
+            let snapshot = state.snapshot(self.core.session.as_ref())?;
+            match (linear_capacity, linear_length) {
+                (None, None) => {
+                    linear_capacity = Some(snapshot.descriptor().capacity());
+                    linear_length = Some(snapshot.length());
+                }
+                (Some(capacity), Some(length))
+                    if capacity == snapshot.descriptor().capacity()
+                        && length == snapshot.length() => {}
+                _ => {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "linear-attention layer {layer} state differs from its peers"
+                    )));
+                }
+            }
+        }
+
+        Ok(QwenRequestMemoryAudit {
+            kv_layers,
+            linear_attention_layers: self.core.linear_states.len(),
+            linear_attention_capacity_tokens: linear_capacity,
+            linear_attention_observed_length_tokens: linear_length,
+        })
     }
 }
 
 // There is intentionally no `Drop` implementation. Destroying a request
 // never shuts down its shared session; any active transition guard poisons its
 // request before the owner is released.
+
+struct QwenResidentInner {
+    session: Arc<ExecutionSession>,
+    model_fingerprint: String,
+    plan: WeightLoadPlan,
+    queue: ExecutionQueue,
+    static_tensors: BTreeMap<String, TensorAllocation>,
+    scales: BTreeMap<String, CachedScale>,
+    completion_timeout: Duration,
+}
 
 struct QwenExecutionCore {
     session: Arc<ExecutionSession>,
@@ -366,11 +645,13 @@ impl DispatchAuditAccumulator {
     }
 }
 
+#[derive(Clone)]
 struct TensorAllocation {
     buffer: ExecutionBuffer,
     graph_view: TensorView,
 }
 
+#[derive(Clone)]
 struct CachedScale {
     raw_tensor_id: usize,
     raw_bytes: Arc<[u8]>,
@@ -387,7 +668,7 @@ struct ScaleMaterialization {
 
 struct GraphLayout {
     tensor_ids: BTreeMap<String, usize>,
-    weight_tensor_ids: BTreeMap<String, usize>,
+    _weight_tensor_ids: BTreeMap<String, usize>,
     dynamic_tensors: Vec<bool>,
     scales: Vec<ScaleMaterialization>,
 }
@@ -521,7 +802,7 @@ impl QwenProvisionSource for VerifiedProvisionSource {
     }
 }
 
-impl QwenExecutionCore {
+impl QwenResidentInner {
     fn provision<S: QwenProvisionSource>(
         session: Arc<ExecutionSession>,
         graph: QwenGraph,
@@ -530,6 +811,146 @@ impl QwenExecutionCore {
         source: &S,
     ) -> Result<Self, QwenExecutionError> {
         let layout = validate_graph_plan(&graph, &plan)?;
+        preflight_device_memory(session.as_ref(), &graph, &plan)?;
+        let queue = session.create_queue()?;
+        let static_tensors = allocate_resident_tensors(&session, &graph, &layout)?;
+
+        let mut uploaded = BTreeSet::new();
+        for binding in graph.weight_bindings() {
+            if !uploaded.insert(binding.tensor_name().to_owned()) {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "required weight is represented more than once: {}",
+                    binding.tensor_name()
+                )));
+            }
+            let allocation = static_tensors.get(binding.tensor_name()).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("resident weight allocation is absent".to_owned())
+            })?;
+            let destination = allocation.buffer.range(
+                allocation.graph_view.byte_offset(),
+                allocation.graph_view.payload_bytes(),
+            )?;
+            source.upload_weight(
+                &plan,
+                binding,
+                session.as_ref(),
+                &queue,
+                destination,
+                completion_timeout,
+            )?;
+        }
+        if uploaded.len() != graph.weight_bindings().len() {
+            return Err(QwenExecutionError::InvalidGraph(
+                "required weight identities are not one-to-one".to_owned(),
+            ));
+        }
+
+        let scales = provision_resident_scales(
+            source,
+            &session,
+            &queue,
+            &graph,
+            &static_tensors,
+            &layout.scales,
+            completion_timeout,
+        )?;
+        let scales = scales
+            .into_iter()
+            .map(|(tensor_id, scale)| (graph.tensor_metadata()[tensor_id].name().to_owned(), scale))
+            .collect();
+
+        Ok(Self {
+            session,
+            model_fingerprint: graph.model_fingerprint().to_owned(),
+            plan,
+            queue,
+            static_tensors,
+            scales,
+            completion_timeout,
+        })
+    }
+}
+
+impl QwenExecutionCore {
+    fn from_resident(
+        resident: Arc<QwenResidentInner>,
+        graph: QwenGraph,
+    ) -> Result<Self, QwenExecutionError> {
+        let layout = validate_graph_plan(&graph, &resident.plan)?;
+        if graph.model_fingerprint() != resident.model_fingerprint {
+            return Err(QwenExecutionError::InvalidRequest(
+                "resident model identity or backend differs from the request graph".to_owned(),
+            ));
+        }
+        validate_resident_graph(&graph, &layout, &resident.static_tensors, &resident.scales)?;
+        preflight_device_memory(resident.session.as_ref(), &graph, &resident.plan)?;
+        let tensors =
+            allocate_request_tensors(&resident.session, &graph, &layout, &resident.static_tensors)?;
+        let scales = graph
+            .nodes()
+            .iter()
+            .filter_map(|node| match node.kind() {
+                QwenGraphNodeKind::AttentionScaleMaterialization { .. } => Some(node.outputs()[0]),
+                _ => None,
+            })
+            .map(|tensor_id| {
+                let name = graph.tensor_metadata()[tensor_id].name().to_owned();
+                let scale = resident.scales.get(&name).ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "resident attention scale is absent: {name}"
+                    ))
+                })?;
+                Ok((
+                    tensor_id,
+                    CachedScale {
+                        raw_tensor_id: graph
+                            .nodes()
+                            .iter()
+                            .find(|node| node.outputs().contains(&tensor_id))
+                            .and_then(|node| node.inputs().first().copied())
+                            .ok_or_else(|| {
+                                QwenExecutionError::InvalidGraph(
+                                    "resident attention scale input is absent".to_owned(),
+                                )
+                            })?,
+                        raw_bytes: Arc::clone(&scale.raw_bytes),
+                        expanded_bytes: Arc::clone(&scale.expanded_bytes),
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<usize, CachedScale>, QwenExecutionError>>()?;
+        let (kv_states, linear_states) = create_states(resident.session.as_ref(), &graph)?;
+        let core = Self {
+            session: Arc::clone(&resident.session),
+            graph,
+            plan: resident.plan.clone(),
+            queue: resident.queue.clone(),
+            tensors,
+            tensor_ids: layout.tensor_ids,
+            dynamic_tensors: layout.dynamic_tensors,
+            kv_states,
+            linear_states,
+            scales,
+            completion_timeout: resident.completion_timeout,
+            audit: Mutex::new(DispatchAuditAccumulator::default()),
+            lifecycle: Arc::new(RequestLifecycle::new()),
+            committed_length: 0,
+            last_output: None,
+        };
+        core.ensure_state_lengths(0)?;
+        Ok(core)
+    }
+
+    #[cfg(test)]
+    fn provision<S: QwenProvisionSource>(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        completion_timeout: Duration,
+        source: &S,
+    ) -> Result<Self, QwenExecutionError> {
+        let layout = validate_graph_plan(&graph, &plan)?;
+        preflight_device_memory(session.as_ref(), &graph, &plan)?;
         let queue = session.create_queue()?;
         let tensors = allocate_tensors(&session, &graph)?;
 
@@ -542,7 +963,7 @@ impl QwenExecutionCore {
                 )));
             }
             let tensor_id = *layout
-                .weight_tensor_ids
+                ._weight_tensor_ids
                 .get(binding.tensor_name())
                 .ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(format!(
@@ -605,6 +1026,21 @@ impl QwenExecutionCore {
     }
 
     fn prefill(&mut self, token_ids: &[i32]) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_impl(token_ids, false)
+    }
+
+    fn prefill_with_last_logits(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_impl(token_ids, true)
+    }
+
+    fn prefill_impl(
+        &mut self,
+        token_ids: &[i32],
+        include_last_logits: bool,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.poisoned.load(Ordering::Acquire) {
             return Err(QwenExecutionError::Poisoned);
         }
@@ -622,10 +1058,29 @@ impl QwenExecutionCore {
                 token_ids.len()
             )));
         }
-        self.run_transition(token_ids, AttentionPreprocessPositionMode::Prefill)
+        self.run_transition(
+            token_ids,
+            AttentionPreprocessPositionMode::Prefill,
+            include_last_logits,
+        )
     }
 
     fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, false)
+    }
+
+    fn decode_with_last_logits(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, true)
+    }
+
+    fn decode_impl(
+        &mut self,
+        token_id: i32,
+        include_last_logits: bool,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.poisoned.load(Ordering::Acquire) {
             return Err(QwenExecutionError::Poisoned);
         }
@@ -637,6 +1092,7 @@ impl QwenExecutionCore {
         self.run_transition(
             &[token_id],
             AttentionPreprocessPositionMode::DecodeContinuation,
+            include_last_logits,
         )
     }
 
@@ -644,6 +1100,7 @@ impl QwenExecutionCore {
         &mut self,
         token_ids: &[i32],
         position_mode: AttentionPreprocessPositionMode,
+        include_last_logits: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         let token_count = u64::try_from(token_ids.len()).map_err(|_| {
             QwenExecutionError::InvalidRequest("token count does not fit u64".to_owned())
@@ -692,10 +1149,14 @@ impl QwenExecutionCore {
         self.upload_runtime_inputs(token_ids, start_position, token_count)?;
         let output =
             self.lower_graph(token_count, start_position, expected_length, position_mode)?;
+        let last_logits = include_last_logits
+            .then(|| self.read_last_logits(token_count))
+            .transpose()?;
         self.ensure_state_lengths(expected_length)?;
 
         let output = QwenExecutionOutput {
             token_ids: output,
+            last_logits,
             committed_length: expected_length,
         };
         self.committed_length = expected_length;
@@ -728,14 +1189,24 @@ impl QwenExecutionCore {
                 QwenGraphNodeKind::AttentionScaleMaterialization {
                     heads, head_dim, ..
                 } => self.validate_cached_scale(node, heads, head_dim)?,
-                QwenGraphNodeKind::AttentionPreprocess { layer, .. } => self
-                    .execute_attention_preprocess(
-                        node,
+                QwenGraphNodeKind::AttentionPreprocess {
+                    layer,
+                    q_heads,
+                    kv_heads,
+                    head_dim,
+                    ..
+                } => self.execute_attention_preprocess(
+                    node,
+                    AttentionPreprocessExecution {
                         layer,
+                        q_heads,
+                        kv_heads,
+                        head_dim,
                         token_count,
                         start_position,
                         position_mode,
-                    )?,
+                    },
+                )?,
                 QwenGraphNodeKind::FullKvAppend { layer, state } => {
                     self.execute_kv_append(node, layer, state, token_count, start_position)?
                 }
@@ -762,6 +1233,89 @@ impl QwenExecutionCore {
         argmax.ok_or_else(|| {
             QwenExecutionError::InvalidGraph("graph has no argmax output node".to_owned())
         })
+    }
+
+    fn read_last_logits(&self, token_count: u64) -> Result<Vec<f32>, QwenExecutionError> {
+        let argmax = self.graph.nodes().last().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("graph has no terminal Argmax node".to_owned())
+        })?;
+        if !matches!(
+            argmax.kind(),
+            QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
+        ) || argmax.inputs().len() != 1
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal Argmax does not have one logits input".to_owned(),
+            ));
+        }
+        let logits_id = argmax.inputs()[0];
+        let view = self.view(logits_id, token_count)?;
+        if view.dtype() != DType::Bf16
+            || view.shape()
+                != [
+                    usize::try_from(token_count).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "token count does not fit usize".to_owned(),
+                        )
+                    })?,
+                    QWEN35_VOCAB_SIZE,
+                ]
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal logits do not have the fixed BF16 [tokens,vocab] shape".to_owned(),
+            ));
+        }
+        let row_bytes = u64::try_from(QWEN35_VOCAB_SIZE)
+            .expect("fixed vocabulary fits u64")
+            .checked_mul(2)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits row bytes overflowed".to_owned())
+            })?;
+        let row_index = token_count.checked_sub(1).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("cannot read logits for zero tokens".to_owned())
+        })?;
+        let row_offset = view
+            .byte_offset()
+            .checked_add(row_index.checked_mul(row_bytes).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits row offset overflowed".to_owned())
+            })?)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits row offset overflowed".to_owned())
+            })?;
+        let allocation = self.tensors.get(logits_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("terminal logits allocation is absent".to_owned())
+        })?;
+        let maximum = self.session.max_transfer_bytes()?;
+        if maximum == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "backend transfer limit must be non-zero".to_owned(),
+            ));
+        }
+        let mut bytes =
+            Vec::with_capacity(usize::try_from(row_bytes).expect("logits row fits usize"));
+        let mut relative = 0_u64;
+        while relative < row_bytes {
+            let length = (row_bytes - relative).min(maximum);
+            let offset = row_offset.checked_add(relative).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits chunk offset overflowed".to_owned())
+            })?;
+            let range = allocation.buffer.range(offset, length)?;
+            let mut readback = self.session.readback(&self.queue, range)?;
+            require_terminal_success(
+                "last-logits-readback",
+                readback.wait(self.completion_timeout)?,
+            )?;
+            let start = bytes.len();
+            bytes.resize(
+                start + usize::try_from(length).expect("transfer length fits usize"),
+                0,
+            );
+            readback.read_into(&mut bytes[start..])?;
+            relative = relative.checked_add(length).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits chunk progress overflowed".to_owned())
+            })?;
+        }
+        decode_bf16_logits(&bytes)
     }
 
     fn execute_semantic(
@@ -833,10 +1387,7 @@ impl QwenExecutionCore {
     fn execute_attention_preprocess(
         &self,
         node: &QwenGraphNode,
-        layer: u32,
-        token_count: u64,
-        start_position: u64,
-        position_mode: AttentionPreprocessPositionMode,
+        execution: AttentionPreprocessExecution,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 5 || node.outputs().len() != 3 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -844,24 +1395,27 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        let contract = AttentionPreprocessContract::new_qwen3_5(
-            position_mode,
-            i64::try_from(start_position).map_err(|_| {
+        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout(
+            execution.position_mode,
+            i64::try_from(execution.start_position).map_err(|_| {
                 QwenExecutionError::InvalidRequest("position does not fit i64".to_owned())
             })?,
-            token_count,
+            execution.token_count,
+            execution.q_heads,
+            execution.kv_heads,
+            execution.head_dim,
         )?;
         let descriptor = SemanticOpDescriptor::new_attention_preprocess(
-            self.views(node.inputs(), token_count)?,
-            self.views(node.outputs(), token_count)?,
+            self.views(node.inputs(), execution.token_count)?,
+            self.views(node.outputs(), execution.token_count)?,
             contract,
         )?;
-        let inputs = self.bind_many(node.inputs(), token_count, AccessMode::Read)?;
-        let outputs = self.bind_many(node.outputs(), token_count, AccessMode::Write)?;
+        let inputs = self.bind_many(node.inputs(), execution.token_count, AccessMode::Read)?;
+        let outputs = self.bind_many(node.outputs(), execution.token_count, AccessMode::Write)?;
         let mut submission = self.submit_semantic(node.label(), descriptor, inputs, outputs)?;
         wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
         self.record_dispatch(submission.dispatch())?;
-        let _ = layer;
+        let _ = execution.layer;
         Ok(())
     }
 
@@ -1207,6 +1761,52 @@ impl QwenExecutionCore {
     }
 }
 
+fn preflight_device_memory(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+) -> Result<(), QwenExecutionError> {
+    let owned_tensor_bytes = graph
+        .tensor_metadata()
+        .iter()
+        .try_fold(0_u64, |total, tensor| match tensor.backing() {
+            QwenGraphTensorBacking::Owned => total
+                .checked_add(tensor.view().end_offset())
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(
+                        "owned tensor allocation byte count overflowed".to_owned(),
+                    )
+                }),
+            QwenGraphTensorBacking::Alias { .. } => Ok(total),
+        })?;
+    if plan.total_destination_bytes > owned_tensor_bytes {
+        return Err(QwenExecutionError::InvalidGraph(format!(
+            "model-resident bytes {} exceed owned tensor bytes {owned_tensor_bytes}",
+            plan.total_destination_bytes
+        )));
+    }
+    let required = owned_tensor_bytes
+        .checked_add(graph.total_state_bytes())
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(
+                "model, workspace, and request-state byte count overflowed".to_owned(),
+            )
+        })?;
+    let available = session.available_memory_bytes()?.ok_or_else(|| {
+        QwenExecutionError::InvalidRequest(
+            "backend did not report available device memory for placement preflight".to_owned(),
+        )
+    })?;
+    if required > available {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "device memory preflight requires {required} bytes (model-resident {}, owned tensor/workspace {owned_tensor_bytes}, request-state {}), but only {available} bytes are available",
+            plan.total_destination_bytes,
+            graph.total_state_bytes()
+        )));
+    }
+    Ok(())
+}
+
 fn validate_upload_receipt(
     receipt: &WeightUploadReceipt,
     plan: &WeightLoadPlan,
@@ -1229,10 +1829,7 @@ fn validate_graph_plan(
     graph: &QwenGraph,
     plan: &WeightLoadPlan,
 ) -> Result<GraphLayout, QwenExecutionError> {
-    if graph.model_fingerprint() != plan.lock_fingerprint
-        || graph.plan_digest() != plan.digest()
-        || !plan.tied_embeddings
-    {
+    if graph.model_fingerprint() != plan.lock_fingerprint || graph.plan_digest() != plan.digest() {
         return Err(QwenExecutionError::InvalidGraph(
             "graph/load-plan identity or tied-embedding condition differs".to_owned(),
         ));
@@ -1329,7 +1926,7 @@ fn validate_graph_plan(
         ));
     }
 
-    validate_tied_embedding_identity(graph, &weight_tensor_ids)?;
+    validate_output_projection_identity(graph, &weight_tensor_ids, plan.tied_embeddings)?;
     for node in graph.nodes() {
         for consumer in node.weight_consumers() {
             if !consumers.contains(consumer) {
@@ -1424,33 +2021,52 @@ fn validate_graph_plan(
 
     Ok(GraphLayout {
         tensor_ids,
-        weight_tensor_ids,
+        _weight_tensor_ids: weight_tensor_ids,
         dynamic_tensors,
         scales,
     })
 }
 
-fn validate_tied_embedding_identity(
+fn validate_output_projection_identity(
     graph: &QwenGraph,
     weight_tensor_ids: &BTreeMap<String, usize>,
+    tied_embeddings: bool,
 ) -> Result<(), QwenExecutionError> {
-    let tied_binding = graph
+    let embedding_role = if tied_embeddings {
+        crate::WeightConsumer::EmbeddingAndTiedOutput
+    } else {
+        crate::WeightConsumer::Embedding
+    };
+    let output_role = if tied_embeddings {
+        crate::WeightConsumer::EmbeddingAndTiedOutput
+    } else {
+        crate::WeightConsumer::OutputProjection
+    };
+    let embedding_binding = graph
         .weight_bindings()
         .iter()
         .find(|binding| {
-            binding.consumer().layer.is_none()
-                && matches!(
-                    binding.consumer().role,
-                    crate::WeightConsumer::EmbeddingAndTiedOutput
-                )
+            binding.consumer().layer.is_none() && binding.consumer().role == embedding_role
         })
         .ok_or_else(|| {
-            QwenExecutionError::InvalidGraph("tied embedding binding is absent".to_owned())
+            QwenExecutionError::InvalidGraph("embedding binding is absent".to_owned())
         })?;
-    let tied_id = *weight_tensor_ids
-        .get(tied_binding.tensor_name())
+    let output_binding = graph
+        .weight_bindings()
+        .iter()
+        .find(|binding| {
+            binding.consumer().layer.is_none() && binding.consumer().role == output_role
+        })
         .ok_or_else(|| {
-            QwenExecutionError::InvalidGraph("tied embedding tensor is absent".to_owned())
+            QwenExecutionError::InvalidGraph("output projection binding is absent".to_owned())
+        })?;
+    let embedding_id = *weight_tensor_ids
+        .get(embedding_binding.tensor_name())
+        .ok_or_else(|| QwenExecutionError::InvalidGraph("embedding tensor is absent".to_owned()))?;
+    let output_id = *weight_tensor_ids
+        .get(output_binding.tensor_name())
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("output projection tensor is absent".to_owned())
         })?;
     let embedding = graph
         .nodes()
@@ -1465,11 +2081,24 @@ fn validate_tied_embedding_identity(
     let output = graph
         .nodes()
         .iter()
-        .find(|node| node.label() == "tied_lm_head_matmul")
-        .ok_or_else(|| QwenExecutionError::InvalidGraph("tied output node is absent".to_owned()))?;
-    if embedding.inputs().first() != Some(&tied_id) || output.inputs().get(1) != Some(&tied_id) {
+        .find(|node| {
+            node.label()
+                == if tied_embeddings {
+                    "tied_lm_head_matmul"
+                } else {
+                    "lm_head_matmul"
+                }
+        })
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("output projection node is absent".to_owned())
+        })?;
+    if embedding.inputs().first() != Some(&embedding_id)
+        || output.inputs().get(1) != Some(&output_id)
+        || (tied_embeddings && embedding_id != output_id)
+        || (!tied_embeddings && embedding_id == output_id)
+    {
         return Err(QwenExecutionError::InvalidGraph(
-            "embedding and tied output do not share the same graph tensor".to_owned(),
+            "embedding/output projection alias contract differs from the model".to_owned(),
         ));
     }
     Ok(())
@@ -1548,6 +2177,122 @@ fn shape_matches(shape: &[usize], expected: &[u64]) -> Result<bool, QwenExecutio
         })
 }
 
+fn allocate_resident_tensors(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+) -> Result<BTreeMap<String, TensorAllocation>, QwenExecutionError> {
+    let mut allocations = BTreeMap::new();
+    for tensor in graph.tensor_metadata() {
+        if !layout.dynamic_tensors[tensor.id()] && tensor.backing() == QwenGraphTensorBacking::Owned
+        {
+            let buffer = session.allocate_with_category(
+                tensor.view().end_offset(),
+                crate::AllocationCategory::ModelResident,
+            )?;
+            allocations.insert(
+                tensor.name().to_owned(),
+                TensorAllocation {
+                    buffer,
+                    graph_view: tensor.view().clone(),
+                },
+            );
+        }
+    }
+    Ok(allocations)
+}
+
+fn allocate_request_tensors(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+    resident_tensors: &BTreeMap<String, TensorAllocation>,
+) -> Result<Vec<TensorAllocation>, QwenExecutionError> {
+    let mut allocations: Vec<TensorAllocation> = Vec::with_capacity(graph.tensor_metadata().len());
+    for tensor in graph.tensor_metadata() {
+        let buffer = match tensor.backing() {
+            QwenGraphTensorBacking::Owned => {
+                if layout.dynamic_tensors[tensor.id()] {
+                    session.allocate_with_category(
+                        tensor.view().end_offset(),
+                        crate::AllocationCategory::Workspace,
+                    )?
+                } else {
+                    let resident = resident_tensors.get(tensor.name()).ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "resident tensor is absent: {}",
+                            tensor.name()
+                        ))
+                    })?;
+                    resident.buffer.clone()
+                }
+            }
+            QwenGraphTensorBacking::Alias { tensor_id } => allocations
+                .get(tensor_id)
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "alias tensor {} precedes its backing tensor",
+                        tensor.name()
+                    ))
+                })?
+                .buffer
+                .clone(),
+        };
+        allocations.push(TensorAllocation {
+            buffer,
+            graph_view: tensor.view().clone(),
+        });
+    }
+    Ok(allocations)
+}
+
+fn validate_resident_graph(
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+    resident_tensors: &BTreeMap<String, TensorAllocation>,
+    resident_scales: &BTreeMap<String, CachedScale>,
+) -> Result<(), QwenExecutionError> {
+    for (tensor_id, tensor) in graph.tensor_metadata().iter().enumerate() {
+        if !layout.dynamic_tensors[tensor_id] && tensor.backing() == QwenGraphTensorBacking::Owned {
+            let resident = resident_tensors.get(tensor.name()).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(format!(
+                    "request graph requires a model tensor that is not resident: {}",
+                    tensor.name()
+                ))
+            })?;
+            if resident.graph_view.dtype() != tensor.view().dtype()
+                || resident.graph_view.encoding() != tensor.view().encoding()
+                || resident.graph_view.shape() != tensor.view().shape()
+                || resident.graph_view.strides() != tensor.view().strides()
+                || resident.graph_view.byte_offset() != tensor.view().byte_offset()
+            {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "request graph model tensor binding differs from resident: {}",
+                    tensor.name()
+                )));
+            }
+        }
+    }
+    for node in graph.nodes() {
+        if let QwenGraphNodeKind::AttentionScaleMaterialization { .. } = node.kind() {
+            let output = graph
+                .tensor_metadata()
+                .get(node.outputs()[0])
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph("resident scale output is absent".to_owned())
+                })?;
+            if !resident_scales.contains_key(output.name()) {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "request graph attention scale is not resident: {}",
+                    output.name()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn allocate_tensors(
     session: &ExecutionSession,
     graph: &QwenGraph,
@@ -1584,6 +2329,99 @@ fn allocate_tensors(
     Ok(allocations)
 }
 
+fn provision_resident_scales<S: QwenProvisionSource>(
+    source: &S,
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    graph: &QwenGraph,
+    tensors: &BTreeMap<String, TensorAllocation>,
+    scales: &[ScaleMaterialization],
+    completion_timeout: Duration,
+) -> Result<BTreeMap<usize, CachedScale>, QwenExecutionError> {
+    let mut raw_cache = BTreeMap::<usize, Arc<[u8]>>::new();
+    let mut result = BTreeMap::new();
+    for scale in scales {
+        if result.contains_key(&scale.output_tensor_id) {
+            return Err(QwenExecutionError::InvalidGraph(
+                "scale materialization output occurs more than once".to_owned(),
+            ));
+        }
+        let raw_tensor = graph
+            .tensor_metadata()
+            .get(scale.raw_tensor_id)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("scale raw tensor is absent".to_owned())
+            })?;
+        let output = graph
+            .tensor_metadata()
+            .get(scale.output_tensor_id)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("scale output tensor is absent".to_owned())
+            })?;
+        let output_allocation = tensors.get(output.name()).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!(
+                "resident scale output allocation is absent: {}",
+                output.name()
+            ))
+        })?;
+        let raw = match raw_cache.get(&scale.raw_tensor_id) {
+            Some(bytes) => Arc::clone(bytes),
+            None => {
+                let bytes = source.read_scale_bytes(raw_tensor.name(), 512)?;
+                if bytes.len() != 512 {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "attention scale {} is not exactly 256 BF16 values",
+                        raw_tensor.name()
+                    )));
+                }
+                raw_cache.insert(scale.raw_tensor_id, Arc::clone(&bytes));
+                bytes
+            }
+        };
+        let repeat = usize::try_from(scale.heads).map_err(|_| {
+            QwenExecutionError::InvalidGraph("scale head count does not fit usize".to_owned())
+        })?;
+        let expected = raw.len().checked_mul(repeat).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("expanded scale byte length overflowed".to_owned())
+        })?;
+        let mut expanded = Vec::with_capacity(expected);
+        for _ in 0..repeat {
+            expanded.extend_from_slice(&raw);
+        }
+        if expanded.len() != expected
+            || u64::try_from(expected).map_err(|_| {
+                QwenExecutionError::InvalidGraph(
+                    "expanded scale byte length does not fit u64".to_owned(),
+                )
+            })? != output.view().payload_bytes()
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "expanded scale bytes do not exactly match the output tensor".to_owned(),
+            ));
+        }
+        let expanded: Arc<[u8]> = Arc::from(expanded);
+        upload_exact_bytes(
+            session,
+            queue,
+            &output_allocation.buffer,
+            &output_allocation.graph_view,
+            &expanded,
+            completion_timeout,
+            "attention scale upload",
+        )?;
+        result.insert(
+            scale.output_tensor_id,
+            CachedScale {
+                raw_tensor_id: scale.raw_tensor_id,
+                raw_bytes: raw,
+                expanded_bytes: expanded,
+            },
+        );
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
 fn provision_scales<S: QwenProvisionSource>(
     source: &S,
     session: &ExecutionSession,
@@ -1924,6 +2762,21 @@ fn decode_argmax_bytes(bytes: &[u8]) -> Result<Vec<i32>, QwenExecutionError> {
     Ok(token_ids)
 }
 
+fn decode_bf16_logits(bytes: &[u8]) -> Result<Vec<f32>, QwenExecutionError> {
+    if bytes.len() != QWEN35_VOCAB_SIZE * std::mem::size_of::<u16>() {
+        return Err(QwenExecutionError::InvalidRequest(
+            "last-logits readback is not exactly one BF16 vocabulary row".to_owned(),
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<u16>())
+        .map(|chunk| {
+            let bits = u16::from_le_bytes(chunk.try_into().expect("exact BF16 chunk"));
+            f32::from_bits(u32::from(bits) << 16)
+        })
+        .collect())
+}
+
 fn require_terminal_success(stage: &str, state: ExecutionState) -> Result<(), QwenExecutionError> {
     match state {
         ExecutionState::Success => Ok(()),
@@ -1973,7 +2826,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use crate::execution::{
         AdapterResource, ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter,
@@ -2079,6 +2932,7 @@ mod tests {
         failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         pending_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         shutdown_calls: Arc<AtomicUsize>,
+        available_memory_bytes: Arc<AtomicU64>,
     }
 
     impl Default for ExecutionRecorder {
@@ -2088,6 +2942,7 @@ mod tests {
                 failure_kind: Arc::new(Mutex::new(None)),
                 pending_kind: Arc::new(Mutex::new(None)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
+                available_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
             }
         }
     }
@@ -2151,7 +3006,11 @@ mod tests {
 
     impl ExecutionSessionAdapter for ExecutionRecorder {
         fn max_transfer_bytes(&self) -> u64 {
-            257
+            1_048_576
+        }
+
+        fn available_memory_bytes(&self) -> Option<u64> {
+            Some(self.available_memory_bytes.load(Ordering::Relaxed))
         }
 
         fn supports(&self, _descriptor: &SemanticOpDescriptor) -> PrepareSupport {
@@ -2623,6 +3482,32 @@ mod tests {
     }
 
     #[test]
+    fn device_memory_preflight_rejects_before_queue_or_allocation() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        recorder.available_memory_bytes.store(1, Ordering::Relaxed);
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let result = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        );
+        let error = match result {
+            Ok(_) => panic!("insufficient device memory must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("device memory preflight requires")
+        );
+        assert!(error.to_string().contains("but only 1 bytes are available"));
+        assert!(recorder.events().is_empty());
+    }
+
+    #[test]
     fn dispatch_audit_counts_typed_multi_dispatch_and_kv_submission() {
         let mut audit = DispatchAuditAccumulator::default();
         let semantic = dispatch_evidence();
@@ -2820,6 +3705,33 @@ mod tests {
     }
 
     #[test]
+    fn optional_last_logits_readback_is_one_full_bf16_vocab_row() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![4, 5, 6]]));
+        let (mut core, _) = provisioned_core(Arc::clone(&recorder));
+        let output = core
+            .prefill_with_last_logits(&[1, 2, 3])
+            .expect("prefill with logits succeeds");
+        assert_eq!(output.token_ids(), [4, 5, 6]);
+        let logits = output.last_logits().expect("last logits are published");
+        assert_eq!(logits.len(), QWEN35_VOCAB_SIZE);
+        assert!(logits.iter().all(|value| value.to_bits() == 0));
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "argmax-readback-start")
+        );
+        assert_eq!(
+            recorder
+                .events()
+                .iter()
+                .filter(|event| event.as_str() == "readback-bytes")
+                .count(),
+            2,
+        );
+    }
+
+    #[test]
     fn failure_after_state_mutation_poison_rejects_reuse_and_never_publishes() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![1, 2, 3]]));
         recorder.set_failure(SemanticOpKind::Add);
@@ -2994,5 +3906,56 @@ mod tests {
         let mut wrong_target = first;
         wrong_target.target = "other".to_owned();
         assert!(mixed_target.record_evidence(&wrong_target).is_err());
+    }
+
+    #[test]
+    fn resident_uploads_once_and_request_state_returns_to_resident() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let lock = crate::parse_model_lock(include_bytes!(
+            "../../../docs/models/locks/qwen3.5-4b-bf16.json"
+        ))
+        .expect("fixed lock parses");
+        let graph_with_different_shape =
+            crate::build_qwen35_graph(&lock, &plan, 5, 19).expect("different request graph builds");
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let source = TestProvisionSource::default();
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan,
+                Duration::from_millis(1),
+                &source,
+            )
+            .expect("resident fixture provisions"),
+        );
+        let upload_count = source.uploaded().len();
+        let resident_memory = session.memory_snapshot();
+        assert!(resident_memory.model_resident().current_bytes() > 0);
+        assert_eq!(resident_memory.request_state().current_bytes(), 0);
+        assert_eq!(resident_memory.workspace().current_bytes(), 0);
+
+        let request = QwenExecutionCore::from_resident(Arc::clone(&resident), graph.clone())
+            .expect("first fresh request provisions");
+        let request_memory = session.memory_snapshot();
+        assert!(request_memory.request_state().current_bytes() > 0);
+        assert!(request_memory.workspace().current_bytes() > 0);
+        drop(request);
+        let returned = session.memory_snapshot();
+        assert_eq!(
+            returned.model_resident().current_bytes(),
+            resident_memory.model_resident().current_bytes()
+        );
+        assert_eq!(returned.request_state().current_bytes(), 0);
+        assert_eq!(returned.workspace().current_bytes(), 0);
+
+        let request =
+            QwenExecutionCore::from_resident(resident.clone(), graph_with_different_shape)
+                .expect("second fresh request provisions");
+        drop(request);
+        assert_eq!(source.uploaded().len(), upload_count);
+        drop(resident);
+        assert_eq!(session.memory_snapshot().current_bytes(), 0);
     }
 }

@@ -1,0 +1,1242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/engine-performance-direct-v1.schema.json",
+  "title": "sLLM direct engine performance CLI result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "benchmark_schema_version",
+    "state",
+    "lane",
+    "lane_definition",
+    "row",
+    "identities",
+    "model_load",
+    "config",
+    "memory",
+    "audit",
+    "cleanup",
+    "session_cleanup",
+    "correctness_control",
+    "warmups",
+    "measured"
+  ],
+  "properties": {
+    "benchmark_schema_version": {
+      "const": "engine-performance-direct-v1"
+    },
+    "state": {
+      "const": "PASS"
+    },
+    "lane": {
+      "const": "direct"
+    },
+    "lane_definition": {
+      "const": "pretokenized direct engine: request start excludes render/tokenize"
+    },
+    "row": {
+      "$ref": "#/$defs/row"
+    },
+    "identities": {
+      "$ref": "#/$defs/identities"
+    },
+    "model_load": {
+      "$ref": "#/$defs/model_load"
+    },
+    "config": {
+      "$ref": "#/$defs/config"
+    },
+    "memory": {
+      "$ref": "#/$defs/memory"
+    },
+    "correctness_control": {
+      "$ref": "#/$defs/correctness_control"
+    },
+    "audit": {
+      "$ref": "#/$defs/audit"
+    },
+    "cleanup": {
+      "$ref": "#/$defs/cleanup"
+    },
+    "session_cleanup": {
+      "$ref": "#/$defs/session_cleanup"
+    },
+    "warmups": {
+      "$ref": "#/$defs/warmups"
+    },
+    "measured": {
+      "$ref": "#/$defs/measured"
+    }
+  },
+  "$defs": {
+    "token_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1024,
+      "items": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 248319
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "row_id",
+        "model_size",
+        "case_id",
+        "input_token_ids",
+        "input_token_count",
+        "requested_output_tokens"
+      ],
+      "properties": {
+        "row_id": {
+          "type": "string",
+          "pattern": "^engine-performance-direct-(2b|4b|9b)-gfx(1030|1201)-[a-z0-9-]+$"
+        },
+        "model_size": {
+          "enum": [
+            "2B",
+            "4B",
+            "9B"
+          ]
+        },
+        "case_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9-]+$"
+        },
+        "input_token_ids": {
+          "$ref": "#/$defs/token_ids"
+        },
+        "input_token_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "requested_output_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_size",
+        "repo_id",
+        "resolved_revision",
+        "lock_fingerprint"
+      ],
+      "properties": {
+        "model_size": {
+          "enum": [
+            "2B",
+            "4B",
+            "9B"
+          ]
+        },
+        "repo_id": {
+          "enum": [
+            "Qwen/Qwen3.5-2B",
+            "Qwen/Qwen3.5-4B",
+            "Qwen/Qwen3.5-9B"
+          ]
+        },
+        "resolved_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "lock_fingerprint": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "backend",
+        "session_id",
+        "device_index",
+        "target",
+        "model",
+        "binding"
+      ],
+      "properties": {
+        "engine": {
+          "const": "sllm"
+        },
+        "backend": {
+          "const": "hip"
+        },
+        "session_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "device_index": {
+          "const": 0
+        },
+        "target": {
+          "enum": [
+            "gfx1030",
+            "gfx1201"
+          ]
+        },
+        "model": {
+          "$ref": "#/$defs/model"
+        },
+        "binding": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "model_fingerprint",
+            "plan_digest"
+          ],
+          "properties": {
+            "model_fingerprint": {
+              "$ref": "#/$defs/digest"
+            },
+            "plan_digest": {
+              "$ref": "#/$defs/digest"
+            }
+          }
+        }
+      }
+    },
+    "model_load": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event",
+        "start_ns",
+        "model_ready_ns",
+        "duration_ns",
+        "load_count"
+      ],
+      "properties": {
+        "event": {
+          "const": "model_load"
+        },
+        "start_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "model_ready_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "duration_ns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "load_count": {
+          "const": 1
+        }
+      }
+    },
+    "stop_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stop_token_ids",
+        "visible_stop_tokens"
+      ],
+      "properties": {
+        "stop_token_ids": {
+          "const": [
+            248046,
+            248044
+          ]
+        },
+        "visible_stop_tokens": {
+          "const": false
+        }
+      }
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_token_ids",
+        "input_token_count",
+        "max_new_tokens",
+        "greedy",
+        "warmups",
+        "measured",
+        "tokenizer",
+        "render",
+        "stop_policy"
+      ],
+      "properties": {
+        "input_token_ids": {
+          "$ref": "#/$defs/token_ids"
+        },
+        "input_token_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "max_new_tokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4096
+        },
+        "greedy": {
+          "const": true
+        },
+        "warmups": {
+          "const": 3
+        },
+        "measured": {
+          "const": 10
+        },
+        "tokenizer": {
+          "const": false
+        },
+        "render": {
+          "const": false
+        },
+        "stop_policy": {
+          "$ref": "#/$defs/stop_policy"
+        }
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_resident",
+        "request_state",
+        "workspace",
+        "current_bytes",
+        "high_water_bytes",
+        "poisoned"
+      ],
+      "properties": {
+        "model_resident": {
+          "$ref": "#/$defs/category"
+        },
+        "request_state": {
+          "$ref": "#/$defs/category"
+        },
+        "workspace": {
+          "$ref": "#/$defs/category"
+        },
+        "current_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "high_water_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "poisoned": {
+          "const": false
+        }
+      }
+    },
+    "category": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "current_bytes",
+        "high_water_bytes"
+      ],
+      "properties": {
+        "current_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "high_water_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model_ready",
+        "after_model_drop",
+        "model_resident_high_water_bytes",
+        "resident_vram_bytes",
+        "resident_vram_source",
+        "peak_vram_bytes",
+        "peak_source"
+      ],
+      "properties": {
+        "model_ready": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "after_model_drop": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "model_resident_high_water_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resident_vram_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "resident_vram_source": {
+          "const": "model_resident_allocator_high_water"
+        },
+        "peak_vram_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "peak_source": {
+          "const": "runtime_allocator"
+        }
+      }
+    },
+    "sample_events": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_start_ns",
+        "prefill_submit_ns",
+        "prefill_complete_ns",
+        "first_token_ns",
+        "later_token_publications_ns",
+        "stop_ns",
+        "cleanup_ns"
+      ],
+      "properties": {
+        "request_start_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "prefill_submit_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "prefill_complete_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "first_token_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "later_token_publications_ns": {
+          "type": "array",
+          "maxItems": 4095,
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+          "maximum": 9223372036854775807
+          }
+        },
+        "stop_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        },
+        "cleanup_ns": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9223372036854775807
+        }
+      }
+    },
+    "sample_derived": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ttft_ns",
+        "prefill_ns",
+        "prefill_tokens_per_second",
+        "e2e_ns",
+        "tpot_ns",
+        "decode_tokens",
+        "decode_tokens_per_second"
+      ],
+      "properties": {
+        "ttft_ns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prefill_ns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "prefill_tokens_per_second": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "e2e_ns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tpot_ns": {
+          "type": "array",
+          "maxItems": 4095,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "decode_tokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "decode_tokens_per_second": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "number",
+              "exclusiveMinimum": 0
+            }
+          ]
+        }
+      }
+    },
+    "sample_tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input_token_ids",
+        "generated_token_ids",
+        "visible_token_ids",
+        "decode_input_token_ids"
+      ],
+      "properties": {
+        "input_token_ids": {
+          "$ref": "#/$defs/token_ids"
+        },
+        "generated_token_ids": {
+          "$ref": "#/$defs/token_ids"
+        },
+        "visible_token_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 248319
+          }
+        },
+        "decode_input_token_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 248319
+          }
+        }
+      }
+    },
+    "stop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "reason_version",
+        "kind",
+        "token_id"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "reason_version": {
+          "const": 1
+        },
+        "kind": {
+          "enum": [
+            "max_new_tokens",
+            "stop_token"
+          ]
+        },
+        "token_id": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "enum": [
+                248046,
+                248044
+              ]
+            }
+          ]
+        }
+      }
+    },
+    "sample_audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_backend",
+        "target",
+        "device_index",
+        "model_fingerprint",
+        "plan_digest",
+        "fallback_used",
+        "submission_count",
+        "kernel_dispatch_count",
+        "all_dispatches_hip"
+      ],
+      "properties": {
+        "selected_backend": {
+          "const": "hip"
+        },
+        "target": {
+          "enum": [
+            "gfx1030",
+            "gfx1201"
+          ]
+        },
+        "device_index": {
+          "const": 0
+        },
+        "model_fingerprint": {
+          "$ref": "#/$defs/digest"
+        },
+        "plan_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "fallback_used": {
+          "const": false
+        },
+        "submission_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kernel_dispatch_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "all_dispatches_hip": {
+          "const": true
+        }
+      }
+    },
+    "sample_memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_start",
+        "after_cleanup"
+      ],
+      "properties": {
+        "request_start": {
+          "$ref": "#/$defs/snapshot"
+        },
+        "after_cleanup": {
+          "$ref": "#/$defs/snapshot"
+        }
+      }
+    },
+    "sample_cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sample_index",
+        "request_dropped",
+        "allocator_cleanup_validated",
+        "retryable_cleanup",
+        "durable_quarantine"
+      ],
+      "properties": {
+        "sample_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        },
+        "request_dropped": {
+          "const": true
+        },
+        "allocator_cleanup_validated": {
+          "const": true
+        },
+        "retryable_cleanup": {
+          "const": 0
+        },
+        "durable_quarantine": {
+          "const": 0
+        }
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "execution_path",
+        "timing_instrumentation",
+        "events",
+        "derived",
+        "tokens",
+        "stop",
+        "audit",
+        "memory",
+        "cleanup"
+      ],
+      "properties": {
+        "execution_path": {
+          "const": "timed-production"
+        },
+        "timing_instrumentation": {
+          "const": "on"
+        },
+        "events": {
+          "$ref": "#/$defs/sample_events"
+        },
+        "derived": {
+          "$ref": "#/$defs/sample_derived"
+        },
+        "tokens": {
+          "$ref": "#/$defs/sample_tokens"
+        },
+        "stop": {
+          "$ref": "#/$defs/stop"
+        },
+        "audit": {
+          "$ref": "#/$defs/sample_audit"
+        },
+        "memory": {
+          "$ref": "#/$defs/sample_memory"
+        },
+        "cleanup": {
+          "$ref": "#/$defs/sample_cleanup"
+        }
+      }
+    },
+    "correctness_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "label",
+        "execution_path",
+        "timing_instrumentation",
+        "included_in_performance_statistics",
+        "tokens",
+        "stop",
+        "audit",
+        "memory",
+        "cleanup",
+        "comparison"
+      ],
+      "properties": {
+        "label": {"const": "correctness-only"},
+        "execution_path": {"const": "normal-untimed"},
+        "timing_instrumentation": {"const": "off"},
+        "included_in_performance_statistics": {"const": false},
+        "tokens": {"$ref": "#/$defs/sample_tokens"},
+        "stop": {"$ref": "#/$defs/stop"},
+        "audit": {"$ref": "#/$defs/sample_audit"},
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["request_start", "after_cleanup"],
+          "properties": {
+            "request_start": {"$ref": "#/$defs/snapshot"},
+            "after_cleanup": {"$ref": "#/$defs/snapshot"}
+          }
+        },
+        "cleanup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["request_dropped", "allocator_cleanup_validated"],
+          "properties": {
+            "request_dropped": {"const": true},
+            "allocator_cleanup_validated": {"const": true}
+          }
+        },
+        "comparison": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "scope", "token_fields", "stop_fields", "dispatch_fields", "dispatch_count_rule"],
+          "properties": {
+            "mode": {"const": "exact"},
+            "scope": {"const": "every_warmup_and_measured_sample"},
+            "token_fields": {"const": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"]},
+            "stop_fields": {"const": ["version", "reason_version", "kind", "token_id"]},
+            "dispatch_fields": {"const": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count"]},
+            "dispatch_count_rule": {"const": "exact_when_token_and_stop_fields_match"}
+          }
+        }
+      }
+    },
+    "audit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_backend",
+        "target",
+        "device_index",
+        "submission_count",
+        "kernel_dispatch_count",
+        "fallback_used",
+        "all_dispatches_hip",
+        "model_load_count",
+        "request_model_load_count",
+        "model_reused",
+        "sample_count",
+        "correctness_control_request_count",
+        "total_request_count"
+      ],
+      "properties": {
+        "selected_backend": {
+          "const": "hip"
+        },
+        "target": {
+          "enum": [
+            "gfx1030",
+            "gfx1201"
+          ]
+        },
+        "device_index": {
+          "const": 0
+        },
+        "submission_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kernel_dispatch_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "fallback_used": {
+          "const": false
+        },
+        "all_dispatches_hip": {
+          "const": true
+        },
+        "model_load_count": {
+          "const": 1
+        },
+        "request_model_load_count": {
+          "const": 0
+        },
+        "model_reused": {
+          "const": true
+        },
+        "sample_count": {
+          "const": 13
+        },
+        "correctness_control_request_count": {
+          "const": 1
+        },
+        "total_request_count": {
+          "const": 14
+        }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "correctness_control_request_count",
+        "warmup_request_count",
+        "measured_request_count",
+        "request_cleanup_count",
+        "performance_sample_count",
+        "all_requests_dropped",
+        "correctness_control_dropped",
+        "retryable_cleanup",
+        "durable_quarantine"
+      ],
+      "properties": {
+        "correctness_control_request_count": {
+          "const": 1
+        },
+        "warmup_request_count": {
+          "const": 3
+        },
+        "measured_request_count": {
+          "const": 10
+        },
+        "request_cleanup_count": {
+          "const": 14
+        },
+        "performance_sample_count": {
+          "const": 13
+        },
+        "all_requests_dropped": {
+          "const": true
+        },
+        "correctness_control_dropped": {
+          "const": true
+        },
+        "retryable_cleanup": {
+          "const": 0
+        },
+        "durable_quarantine": {
+          "const": 0
+        }
+      }
+    },
+    "session_cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retryable_cleanup",
+        "durable_quarantine"
+      ],
+      "properties": {
+        "retryable_cleanup": {
+          "const": 0
+        },
+        "durable_quarantine": {
+          "const": 0
+        }
+      }
+    },
+    "warmups": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "samples"
+      ],
+      "properties": {
+        "count": {
+          "const": 3
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/sample"
+          }
+        }
+      }
+    },
+    "measured": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "count",
+        "samples"
+      ],
+      "properties": {
+        "count": {
+          "const": 10
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/sample"
+          }
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "manifest_device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "backend", "gpu_uuid", "gpu_bdf", "product", "physical_hip_index", "logical_device_index"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "backend": {"const": "hip"},
+        "gpu_uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"},
+        "gpu_bdf": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "product": {"type": "string", "minLength": 1},
+        "physical_hip_index": {"type": "integer", "minimum": 0},
+        "logical_device_index": {"const": 0}
+      }
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reliable", "state", "ras_uncorrectable_count"],
+      "properties": {
+        "available": {"type": "boolean"}, "reliable": {"type": "boolean"},
+        "state": {"enum": ["OK", "ERROR", "UNAVAILABLE"]},
+        "ras_uncorrectable_count": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "reliable", "state", "gpu_processes", "residual_runner_children"],
+      "properties": {
+        "available": {"type": "boolean"}, "reliable": {"type": "boolean"},
+        "state": {"enum": ["CLEAN", "DIRTY", "UNAVAILABLE"]},
+        "gpu_processes": {"type": "array"}, "residual_runner_children": {"type": "array"}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_device", "health", "process"],
+      "properties": {
+        "selected_device": {"$ref": "#/$defs/manifest_device"},
+        "health": {"$ref": "#/$defs/health"}, "process": {"$ref": "#/$defs/process"}
+      }
+    },
+    "manifest_execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exit_code", "timed_out", "timeout_seconds", "stderr_bytes", "term_sent", "kill_sent", "process_group_gone"],
+      "properties": {
+        "exit_code": {"type": ["integer", "null"]}, "timed_out": {"type": "boolean"},
+        "timeout_seconds": {"type": "integer", "minimum": 1}, "stderr_bytes": {"type": "integer", "minimum": 0},
+        "term_sent": {"type": "boolean"}, "kill_sent": {"type": "boolean"}, "process_group_gone": {"type": "boolean"}
+      }
+    },
+    "manifest_cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pre_process_clean", "post_process_clean", "process_group_gone", "retryable_cleanup", "durable_quarantine"],
+      "properties": {
+        "pre_process_clean": {"type": "boolean"}, "post_process_clean": {"type": "boolean"},
+        "process_group_gone": {"type": "boolean"}, "retryable_cleanup": {"type": "integer", "minimum": 0},
+        "durable_quarantine": {"type": "integer", "minimum": 0}
+      }
+    },
+    "build_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cargo_command", "cargo_profile", "rust_toolchain", "ROCM_PATH", "HIP_PATH", "SLLM_HIP_COMPILER", "CMAKE_HIP_ARCHITECTURES", "SLLM_HIP_CODEGEN_FEATURES", "SLLM_ENABLE_HIP_RUNTIME", "SLLM_ENABLE_PUBLIC_HIP_RUNTIME", "SLLM_ENABLE_HIP_COMPILE_PROBE"],
+      "properties": {
+        "cargo_command": {"const": "cargo +1.97.1 build --locked --offline --release -p sllm-cli"},
+        "cargo_profile": {"const": "release"},
+        "rust_toolchain": {"const": "1.97.1"},
+        "ROCM_PATH": {"const": "/opt/rocm"},
+        "HIP_PATH": {"const": "/opt/rocm"},
+        "SLLM_HIP_COMPILER": {"const": "/opt/rocm/bin/amdclang++"},
+        "CMAKE_HIP_ARCHITECTURES": {"enum": ["gfx1030", "gfx1201"]},
+        "SLLM_HIP_CODEGEN_FEATURES": {"const": "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0"},
+        "SLLM_ENABLE_HIP_RUNTIME": {"const": "1"},
+        "SLLM_ENABLE_PUBLIC_HIP_RUNTIME": {"const": "1"},
+        "SLLM_ENABLE_HIP_COMPILE_PROBE": {"const": "0"}
+      }
+    },
+    "build_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "source_root", "source_base_revision", "semantic_tree", "build_inputs_digest", "build_configuration", "target", "backend", "rocm_release", "rocm_root", "binary_sha256"],
+      "properties": {
+        "path": {"$ref": "#/$defs/path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "source_root": {"$ref": "#/$defs/path"},
+        "source_base_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "semantic_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "build_inputs_digest": {"$ref": "#/$defs/digest"},
+        "build_configuration": {"$ref": "#/$defs/build_configuration"},
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "backend": {"const": "hip"},
+        "rocm_release": {"const": "7.14.0"},
+        "rocm_root": {"const": "/opt/rocm/core-7.14"},
+        "binary_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "evidence_static": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "product", "gpu_bdf", "gpu_uuid", "physical_hip_index", "amd_smi_gpu_index", "driver_version", "kernel_version", "profile", "limits", "clock_levels", "vram_total_mb"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "product": {"type": "string", "minLength": 1},
+        "gpu_bdf": {"type": "string", "pattern": "^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\\.[0-7]$"},
+        "gpu_uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"},
+        "physical_hip_index": {"type": "integer", "minimum": 0},
+        "amd_smi_gpu_index": {"type": "integer", "minimum": 0},
+        "driver_version": {"type": "string", "minLength": 1},
+        "kernel_version": {"type": "string", "minLength": 1},
+        "profile": {"$ref": "#/$defs/evidence_profile"},
+        "limits": {"$ref": "#/$defs/evidence_digest_object"},
+        "clock_levels": {"$ref": "#/$defs/evidence_digest_object"},
+        "vram_total_mb": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "evidence_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current", "available_profiles", "digest"],
+      "properties": {
+        "current": {"type": "string", "minLength": 1},
+        "available_profiles": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "evidence_digest_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["values", "digest"],
+      "properties": {
+        "values": {"type": "object"},
+        "digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "evidence_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["temperature_c", "gfx_clock_mhz", "mem_clock_mhz", "power_w", "perf_level", "throttle_status", "vram_used_mb", "vram_total_mb", "ecc_uncorrectable", "metric_digest"],
+      "properties": {
+        "temperature_c": {"type": "object", "additionalProperties": false, "required": ["edge", "hotspot", "mem"], "properties": {"edge": {"type": "number"}, "hotspot": {"type": "number"}, "mem": {"type": "number"}}},
+        "gfx_clock_mhz": {"type": "number", "minimum": 0},
+        "mem_clock_mhz": {"type": "number", "minimum": 0},
+        "power_w": {"type": "number", "minimum": 0},
+        "perf_level": {"type": "string", "minLength": 1},
+        "throttle_status": {"type": "string", "minLength": 1},
+        "vram_used_mb": {"type": "number", "minimum": 0},
+        "vram_total_mb": {"type": "number", "exclusiveMinimum": 0},
+        "ecc_uncorrectable": {"type": "integer", "minimum": 0},
+        "metric_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "evidence_vram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "gpu", "used_mb", "free_mb", "total_mb", "percent"],
+      "properties": {
+        "source": {"const": "amd-smi monitor -v"},
+        "gpu": {"type": "integer", "minimum": 0},
+        "used_mb": {"type": "number", "minimum": 0},
+        "free_mb": {"type": "number", "minimum": 0},
+        "total_mb": {"type": "number", "exclusiveMinimum": 0},
+        "percent": {"type": "number", "minimum": 0, "maximum": 100}
+      }
+    },
+    "evidence_process": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "pids"],
+      "properties": {
+        "state": {"enum": ["CLEAN", "OWNED"]},
+        "pids": {"type": "array", "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "evidence_monitor_sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["timestamp_ns", "metric", "vram_auxiliary", "process", "loader_path_digest", "violation"],
+      "properties": {
+        "timestamp_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "metric": {"$ref": "#/$defs/evidence_metric"},
+        "vram_auxiliary": {"$ref": "#/$defs/evidence_vram"},
+        "process": {"$ref": "#/$defs/evidence_process"},
+        "loader_path_digest": {"$ref": "#/$defs/digest"},
+        "violation": {"$ref": "#/$defs/evidence_violation"}
+      }
+    },
+    "evidence_loader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required_rocm_release", "expected_root", "resolved_paths", "path_digest", "library_digests", "process_ids"],
+      "properties": {
+        "required_rocm_release": {"const": "7.14.0"},
+        "expected_root": {"const": "/opt/rocm/core-7.14"},
+        "resolved_paths": {"type": "array", "minItems": 2, "items": {"type": "string", "pattern": "^/opt/rocm/core-7\\.14/.+"}, "allOf": [{"contains": {"pattern": "libamdhip64\\.so"}}, {"contains": {"pattern": "libhsa-runtime64\\.so"}}]},
+        "path_digest": {"$ref": "#/$defs/digest"},
+        "library_digests": {"type": "object", "minProperties": 2, "propertyNames": {"pattern": "^/opt/rocm/core-7\\.14/.+"}, "additionalProperties": {"$ref": "#/$defs/sha256"}},
+        "process_ids": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}
+      }
+    },
+    "evidence_violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["power_statuses", "explicit_violation", "accumulator_available", "accumulator_reason", "accumulator_digest"],
+      "properties": {
+        "power_statuses": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "explicit_violation": {"type": "boolean"},
+        "accumulator_available": {"type": "boolean"},
+        "accumulator_reason": {"type": "string", "minLength": 1},
+        "accumulator_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "evidence_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sample_count", "temperature_hotspot_c", "temperature_mem_c", "gfx_clock_mhz", "mem_clock_mhz", "power_w", "vram_used_mb", "vram_aux_used_mb", "perf_levels"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1},
+        "temperature_hotspot_c": {"$ref": "#/$defs/evidence_range"},
+        "temperature_mem_c": {"$ref": "#/$defs/evidence_range"},
+        "gfx_clock_mhz": {"$ref": "#/$defs/evidence_range"},
+        "mem_clock_mhz": {"$ref": "#/$defs/evidence_range"},
+        "power_w": {"$ref": "#/$defs/evidence_range"},
+        "vram_used_mb": {"$ref": "#/$defs/evidence_range"},
+        "vram_aux_used_mb": {"$ref": "#/$defs/evidence_range"},
+        "perf_levels": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "evidence_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "max"],
+      "properties": {"min": {"type": "number", "minimum": 0}, "max": {"type": "number", "minimum": 0}}
+    },
+    "evidence_phase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["static", "metric", "vram_auxiliary", "process_state"],
+      "properties": {
+        "static": {"$ref": "#/$defs/evidence_static"},
+        "metric": {"$ref": "#/$defs/evidence_metric"},
+        "vram_auxiliary": {"$ref": "#/$defs/evidence_vram"},
+        "process_state": {"enum": ["CLEAN", "OWNED"]}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "cadence_seconds", "tool", "definitions", "visibility", "pre", "during", "post", "checks"],
+      "properties": {
+        "version": {"const": "engine-performance-evidence-v1"},
+        "cadence_seconds": {"const": 1},
+        "tool": {"type": "object", "additionalProperties": false, "required": ["path", "tool_version", "library_version", "rocm_version"], "properties": {"path": {"$ref": "#/$defs/path"}, "tool_version": {"type": "string", "minLength": 1}, "library_version": {"type": "string", "minLength": 1}, "rocm_version": {"const": "7.14.0"}}},
+        "definitions": {"type": "object", "additionalProperties": false, "required": ["clock_variation", "violation", "process_ownership"], "properties": {"clock_variation": {"const": "Dynamic clock min/max is observational; no numeric threshold is a violation."}, "violation": {"enum": ["When violation accumulators are unavailable, aggregate THROTTLED status is observational; ECC, published thermal/power limits, and exposed active violations remain fail-closed.", "A non-UNTHROTTLED power status or exposed active violation is explicit evidence; all-N/A accumulators are a documented AMD-SMI limitation."]}, "process_ownership": {"const": "Every during sample must name only descendants of the benchmark process group."}}},
+        "visibility": {"type": "object", "additionalProperties": false, "required": ["cleared", "selector", "uuid"], "properties": {"cleared": {"const": ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"]}, "selector": {"const": "ROCR_VISIBLE_DEVICES"}, "uuid": {"type": "string", "pattern": "^GPU-[0-9a-f]{16}$"}}},
+        "pre": {"$ref": "#/$defs/evidence_phase"},
+        "during": {"type": "object", "additionalProperties": false, "required": ["sample_count", "sample_digest", "first", "last", "summary", "process_sample_digest", "loader", "violation"], "properties": {"sample_count": {"type": "integer", "minimum": 1}, "sample_digest": {"$ref": "#/$defs/digest"}, "first": {"$ref": "#/$defs/evidence_monitor_sample"}, "last": {"$ref": "#/$defs/evidence_monitor_sample"}, "summary": {"$ref": "#/$defs/evidence_summary"}, "process_sample_digest": {"$ref": "#/$defs/digest"}, "loader": {"$ref": "#/$defs/evidence_loader"}, "violation": {"$ref": "#/$defs/evidence_violation"}}},
+        "post": {"$ref": "#/$defs/evidence_phase"},
+        "checks": {"type": "object", "additionalProperties": false, "required": ["exact_identity", "static_identity_unchanged", "profile_unchanged", "limits_unchanged", "performance_level_unchanged", "explicit_violation", "vram_auxiliary_complete", "process_ownership", "loader_paths_verified", "monitor_errors", "process_group_cleanup"], "properties": {"exact_identity": {"type": "boolean"}, "static_identity_unchanged": {"type": "boolean"}, "profile_unchanged": {"type": "boolean"}, "limits_unchanged": {"type": "boolean"}, "performance_level_unchanged": {"type": "boolean"}, "explicit_violation": {"type": "boolean"}, "vram_auxiliary_complete": {"type": "boolean"}, "process_ownership": {"type": "boolean"}, "loader_paths_verified": {"type": "boolean"}, "monitor_errors": {"type": "integer", "minimum": 0}, "process_group_cleanup": {"type": "boolean"}}}
+      }
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benchmark_schema_version", "record_kind", "state", "required", "failure_reason", "row_id", "claims", "matrix", "binary", "build_identity", "model_lock", "model_cache", "raw_artifact", "observations", "evidence", "execution", "cleanup"],
+      "properties": {
+        "benchmark_schema_version": {"const": "engine-performance-direct-v1"}, "record_kind": {"const": "evidence_manifest"},
+        "state": {"enum": ["PASS", "FAIL"]}, "required": {"const": false}, "failure_reason": {"type": ["string", "null"]},
+        "row_id": {"type": "string", "pattern": "^engine-performance-direct-(2b|4b|9b)-gfx(1030|1201)-[a-z0-9-]+$"},
+        "claims": {"type": "object", "additionalProperties": false, "required": ["baseline_only", "optimized", "faster", "hard_gate"], "properties": {"baseline_only": {"const": true}, "optimized": {"const": false}, "faster": {"const": false}, "hard_gate": {"const": false}}},
+        "matrix": {"type": "object", "additionalProperties": false, "required": ["path", "matrix_id", "sha256"], "properties": {"path": {"$ref": "#/$defs/path"}, "matrix_id": {"const": "engine-performance-direct-v1"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+        "binary": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"], "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 1}}},
+        "build_identity": {"$ref": "#/$defs/build_identity"},
+        "model_lock": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "fingerprint"], "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}, "fingerprint": {"$ref": "#/$defs/digest"}}},
+        "model_cache": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+        "raw_artifact": {"type": "object", "additionalProperties": false, "required": ["path", "sha256", "bytes"], "properties": {"path": {"$ref": "#/$defs/path"}, "sha256": {"$ref": "#/$defs/sha256"}, "bytes": {"type": "integer", "minimum": 0}}},
+        "observations": {"type": "object", "additionalProperties": false, "required": ["pre", "post"], "properties": {"pre": {"$ref": "#/$defs/observation"}, "post": {"$ref": "#/$defs/observation"}}},
+        "evidence": {"$ref": "#/$defs/evidence"},
+        "execution": {"$ref": "#/$defs/manifest_execution"}, "cleanup": {"$ref": "#/$defs/manifest_cleanup"}
+      }
+    }
+  }
+}

@@ -84,20 +84,21 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
         sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
         "KV append inputs must be unquantized");
   }
-  if (binding->rank != 3U || binding->shape[1] != SLLM_HIP_KV_HEAD_COUNT ||
+  if (binding->rank != 3U ||
+      (binding->shape[1] != 2U && binding->shape[1] != 4U) ||
       binding->shape[2] != SLLM_HIP_KV_HEAD_DIM || binding->shape[0] == 0U ||
       binding->shape[0] > SLLM_HIP_KV_MAX_M) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "KV append inputs must have shape [M, 4, 256]");
+        "KV append inputs must have a reviewed shape [M, Hkv, 256]");
   }
   if ((binding->byte_offset % UINT64_C(2)) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_MISALIGNED_OFFSET,
         "KV append input offset is not FP16/BF16 aligned");
   }
-  const uint64_t expected_strides[3] = {
-      SLLM_HIP_KV_HEAD_COUNT * SLLM_HIP_KV_HEAD_DIM, SLLM_HIP_KV_HEAD_DIM, 1U};
+  const uint64_t expected_strides[3] = {binding->shape[1] * binding->shape[2],
+                                        binding->shape[2], 1U};
   for (uint32_t index = 0U; index != 3U; ++index) {
     if (binding->stride_elements[index] != expected_strides[index]) {
       return sllm_public_runtime::write_error(
@@ -115,9 +116,8 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
 
   uint64_t elements = 0U;
   uint64_t payload_bytes = 0U;
-  if (multiply_overflows(binding->shape[0], SLLM_HIP_KV_HEAD_COUNT,
-                         &elements) ||
-      multiply_overflows(elements, SLLM_HIP_KV_HEAD_DIM, &elements) ||
+  if (multiply_overflows(binding->shape[0], binding->shape[1], &elements) ||
+      multiply_overflows(elements, binding->shape[2], &elements) ||
       multiply_overflows(elements, UINT64_C(2), &payload_bytes) ||
       sllm_public_runtime::add_overflows(binding->byte_offset, payload_bytes)) {
     return sllm_public_runtime::write_error(
@@ -129,6 +129,8 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
   metadata->payload_bytes = payload_bytes;
   metadata->end_offset = binding->byte_offset + payload_bytes;
   metadata->token_count = binding->shape[0];
+  metadata->head_count = static_cast<uint32_t>(binding->shape[1]);
+  metadata->head_dim = static_cast<uint32_t>(binding->shape[2]);
   (void)name;
   return SLLM_STATUS_OK;
 }
@@ -149,17 +151,21 @@ validate_state_create_info(const sllm_kv_state_create_info_t *const info,
   if (struct_status != SLLM_STATUS_OK) {
     return struct_status;
   }
-  if (!all_zero(info->reserved, 4U)) {
-    return sllm_public_runtime::write_error(
-        sink, SLLM_STATUS_RESERVED_NONZERO,
-        "KV state create info reserved fields must be zero");
-  }
+  const uint32_t head_count =
+      info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
+  const uint32_t head_dim =
+      info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
   if (info->flags != 0U || info->session_id == 0U ||
       info->capacity_tokens == 0U ||
-      info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY) {
+      info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
+      (head_count != 2U && head_count != 4U) ||
+      head_dim != SLLM_HIP_KV_HEAD_DIM ||
+      info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS ||
+      info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
-        "KV state create info has an invalid session, flags, or capacity");
+        "KV state create info has an invalid session, shape, memory kind, or "
+        "layout");
   }
   return SLLM_STATUS_OK;
 }
@@ -237,6 +243,12 @@ validate_and_copy_append(const sllm_kv_append_desc_t *const descriptor,
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
         "KV key and value append token counts must match");
+  }
+  if (metadata->key_input.head_count != metadata->value_input.head_count ||
+      metadata->key_input.head_dim != metadata->value_input.head_dim) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_SHAPE_MISMATCH,
+        "KV key and value append head layouts must match");
   }
   metadata->token_count = metadata->key_input.token_count;
   if (sllm_public_runtime::add_overflows(metadata->start_position,

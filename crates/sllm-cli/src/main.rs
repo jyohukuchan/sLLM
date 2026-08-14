@@ -1,6 +1,7 @@
 use std::env;
 use std::process::ExitCode;
 
+mod benchmark;
 mod model;
 
 fn main() -> ExitCode {
@@ -21,7 +22,10 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
-        Some(command @ ("verify-model" | "tokenize" | "render" | "decode" | "generate")) => {
+        Some(
+            command
+            @ ("verify-model" | "tokenize" | "render" | "decode" | "generate" | "benchmark"),
+        ) => {
             let output = model::run(command, arguments)?;
             println!("{output}");
             Ok(())
@@ -42,7 +46,21 @@ fn print_help() {
     println!("  tokenize      Encode text with the verified tokenizer");
     println!("  render        Render Qwen3.5 chat messages");
     println!("  decode        Decode token IDs with the verified tokenizer");
-    println!("  generate      Run greedy Qwen3.5 text generation on one exact HIP target");
+    println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
+    println!("  benchmark     Run the bounded Phase 5 engine benchmark lanes");
+    println!();
+    println!("direct: --lane direct --lock PATH --cache PATH --row-id ID --model-size 2B|4B|9B");
+    println!("  --case-id ID --input-token-ids IDS --max-new-tokens N --device-index N");
+    println!("  --target gfx1030|gfx1201 --greedy [--warmups N] [--measured N]");
+    println!(
+        "render-tokenize: --lane render-tokenize --message ROLE:CONTENT (same execution flags)"
+    );
+    println!("  both lanes require exactly 3 warmup and 10 measured requests");
+    println!();
+    println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
+    println!("  --device-index N --target gfx1030|gfx1201 [--greedy | --temperature F32]");
+    println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
+    println!("  [--stop TEXT] (repeat --stop at most four times)");
 }
 
 fn print_version() -> Result<(), String> {

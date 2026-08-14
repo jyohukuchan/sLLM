@@ -13,7 +13,23 @@ use crate::{DType, Encoding};
 
 /// The only Phase 3 Qwen3.5 linear-attention layout.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct LinearAttentionLayout;
+pub struct LinearAttentionLayout {
+    qk_heads: usize,
+    value_heads: usize,
+    head_dim: usize,
+    conv_kernel_size: usize,
+}
+
+impl Default for LinearAttentionLayout {
+    fn default() -> Self {
+        Self {
+            qk_heads: Self::QK_HEADS,
+            value_heads: Self::VALUE_HEADS,
+            head_dim: Self::HEAD_DIM,
+            conv_kernel_size: Self::CONV_KERNEL_SIZE,
+        }
+    }
+}
 
 impl LinearAttentionLayout {
     pub const QK_HEADS: usize = 16;
@@ -30,28 +46,75 @@ impl LinearAttentionLayout {
     pub const RECURRENT_STATE_DTYPE: DType = DType::F32;
     pub const ENCODING: Encoding = Encoding::Unquantized;
 
+    pub fn new(
+        qk_heads: usize,
+        value_heads: usize,
+        head_dim: usize,
+        conv_kernel_size: usize,
+    ) -> Result<Self, LinearAttentionError> {
+        if qk_heads == 0
+            || value_heads == 0
+            || head_dim == 0
+            || conv_kernel_size == 0
+            || value_heads % qk_heads != 0
+        {
+            return Err(LinearAttentionError::InvalidLayout);
+        }
+        Ok(Self {
+            qk_heads,
+            value_heads,
+            head_dim,
+            conv_kernel_size,
+        })
+    }
+
+    pub const fn qk_heads(self) -> usize {
+        self.qk_heads
+    }
+    pub const fn value_heads(self) -> usize {
+        self.value_heads
+    }
+    pub const fn head_dim(self) -> usize {
+        self.head_dim
+    }
+    pub const fn conv_kernel_size(self) -> usize {
+        self.conv_kernel_size
+    }
+    pub const fn conv_history(self) -> usize {
+        self.conv_kernel_size - 1
+    }
+    pub const fn qk_repeat_factor(self) -> usize {
+        self.value_heads / self.qk_heads
+    }
+    pub const fn qkv_width(self) -> usize {
+        (2 * self.qk_heads + self.value_heads) * self.head_dim
+    }
+    pub const fn output_width(self) -> usize {
+        self.value_heads * self.head_dim
+    }
+
     pub const fn conv_state_shape(self) -> [u64; 2] {
-        [Self::CONV_HISTORY as u64, Self::QKV_WIDTH as u64]
+        [self.conv_history() as u64, self.qkv_width() as u64]
     }
 
     pub const fn recurrent_state_shape(self) -> [u64; 3] {
         [
-            Self::VALUE_HEADS as u64,
-            Self::HEAD_DIM as u64,
-            Self::HEAD_DIM as u64,
+            self.value_heads as u64,
+            self.head_dim as u64,
+            self.head_dim as u64,
         ]
     }
 
     pub const fn qkv_shape(self, token_count: u64) -> [u64; 2] {
-        [token_count, Self::QKV_WIDTH as u64]
+        [token_count, self.qkv_width() as u64]
     }
 
     pub const fn output_shape(self, token_count: u64) -> [u64; 2] {
-        [token_count, Self::OUTPUT_WIDTH as u64]
+        [token_count, self.output_width() as u64]
     }
 
     pub const fn scalar_head_shape(self, token_count: u64) -> [u64; 2] {
-        [token_count, Self::VALUE_HEADS as u64]
+        [token_count, self.value_heads as u64]
     }
 }
 
@@ -60,12 +123,33 @@ impl LinearAttentionLayout {
 pub struct LinearAttentionStateDescriptor {
     layer_id: u32,
     capacity: NonZeroU64,
+    layout: LinearAttentionLayout,
 }
 
 impl LinearAttentionStateDescriptor {
     pub fn new(layer_id: u32, capacity: u64) -> Result<Self, LinearAttentionError> {
         let capacity = NonZeroU64::new(capacity).ok_or(LinearAttentionError::ZeroCapacity)?;
-        Ok(Self { layer_id, capacity })
+        Ok(Self {
+            layer_id,
+            capacity,
+            layout: LinearAttentionLayout::default(),
+        })
+    }
+
+    pub fn new_with_layout(
+        layer_id: u32,
+        capacity: u64,
+        qk_heads: usize,
+        value_heads: usize,
+        head_dim: usize,
+        conv_kernel_size: usize,
+    ) -> Result<Self, LinearAttentionError> {
+        let capacity = NonZeroU64::new(capacity).ok_or(LinearAttentionError::ZeroCapacity)?;
+        Ok(Self {
+            layer_id,
+            capacity,
+            layout: LinearAttentionLayout::new(qk_heads, value_heads, head_dim, conv_kernel_size)?,
+        })
     }
 
     pub const fn layer_id(self) -> u32 {
@@ -77,7 +161,7 @@ impl LinearAttentionStateDescriptor {
     }
 
     pub const fn layout(self) -> LinearAttentionLayout {
-        LinearAttentionLayout
+        self.layout
     }
 }
 
@@ -211,6 +295,7 @@ impl LinearAttentionRequest {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum LinearAttentionError {
     ZeroCapacity,
+    InvalidLayout,
     ZeroTokenCount,
     LengthOverflow,
     LengthMismatch { expected: u64, actual: u64 },
@@ -221,6 +306,7 @@ impl fmt::Display for LinearAttentionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroCapacity => formatter.write_str("linear-attention capacity must be non-zero"),
+            Self::InvalidLayout => formatter.write_str("linear-attention layout is invalid"),
             Self::ZeroTokenCount => {
                 formatter.write_str("linear-attention token count must be non-zero")
             }
@@ -245,7 +331,7 @@ mod tests {
 
     #[test]
     fn fixed_layout_matches_qwen35_contract() {
-        let layout = LinearAttentionLayout;
+        let layout = LinearAttentionLayout::default();
         assert_eq!(layout.conv_state_shape(), [3, 8_192]);
         assert_eq!(layout.recurrent_state_shape(), [32, 128, 128]);
         assert_eq!(layout.qkv_shape(257), [257, 8_192]);

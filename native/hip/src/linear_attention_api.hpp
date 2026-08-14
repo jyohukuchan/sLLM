@@ -27,6 +27,12 @@ struct DescriptorMetadata final {
   uint64_t token_count = 0U;
   uint64_t start_position = 0U;
   uint64_t expected_length = 0U;
+  uint32_t qk_heads = 0U;
+  uint32_t value_heads = 0U;
+  uint32_t head_dim = 0U;
+  uint32_t conv_kernel_size = 0U;
+  uint32_t qkv_width = 0U;
+  uint32_t output_width = 0U;
 };
 
 sllm_status_t validate_state_create_info(

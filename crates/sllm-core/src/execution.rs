@@ -57,6 +57,200 @@ execution_id!(PreparedOperationId);
 execution_id!(KvStateId);
 execution_id!(LinearAttentionStateId);
 
+/// The accounting bucket for one session-owned device allocation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AllocationCategory {
+    ModelResident,
+    RequestState,
+    Workspace,
+}
+
+/// Current and high-water bytes for one allocation bucket.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AllocationCategorySnapshot {
+    current_bytes: u64,
+    high_water_bytes: u64,
+}
+
+impl AllocationCategorySnapshot {
+    pub const fn current_bytes(self) -> u64 {
+        self.current_bytes
+    }
+
+    pub const fn high_water_bytes(self) -> u64 {
+        self.high_water_bytes
+    }
+}
+
+/// Checked session allocation accounting. The category snapshots are exact
+/// for allocations admitted through this execution boundary; backend memory
+/// outside the boundary is intentionally not inferred.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AllocationSnapshot {
+    model_resident: AllocationCategorySnapshot,
+    request_state: AllocationCategorySnapshot,
+    workspace: AllocationCategorySnapshot,
+    current_bytes: u64,
+    high_water_bytes: u64,
+    poisoned: bool,
+}
+
+impl AllocationSnapshot {
+    pub const fn model_resident(self) -> AllocationCategorySnapshot {
+        self.model_resident
+    }
+
+    pub const fn request_state(self) -> AllocationCategorySnapshot {
+        self.request_state
+    }
+
+    pub const fn workspace(self) -> AllocationCategorySnapshot {
+        self.workspace
+    }
+
+    pub const fn current_bytes(self) -> u64 {
+        self.current_bytes
+    }
+
+    pub const fn high_water_bytes(self) -> u64 {
+        self.high_water_bytes
+    }
+
+    pub const fn poisoned(self) -> bool {
+        self.poisoned
+    }
+}
+
+#[derive(Debug)]
+struct AllocationAccountingState {
+    buckets: [AllocationCategorySnapshot; 3],
+    current_bytes: u64,
+    high_water_bytes: u64,
+    poisoned: bool,
+}
+
+impl Default for AllocationAccountingState {
+    fn default() -> Self {
+        const EMPTY: AllocationCategorySnapshot = AllocationCategorySnapshot {
+            current_bytes: 0,
+            high_water_bytes: 0,
+        };
+        Self {
+            buckets: [EMPTY; 3],
+            current_bytes: 0,
+            high_water_bytes: 0,
+            poisoned: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct AllocationAccounting {
+    state: Mutex<AllocationAccountingState>,
+}
+
+impl AllocationAccounting {
+    fn snapshot(&self) -> AllocationSnapshot {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        AllocationSnapshot {
+            model_resident: state.buckets[0],
+            request_state: state.buckets[1],
+            workspace: state.buckets[2],
+            current_bytes: state.current_bytes,
+            high_water_bytes: state.high_water_bytes,
+            poisoned: state.poisoned,
+        }
+    }
+
+    fn reserve(
+        self: &Arc<Self>,
+        category: AllocationCategory,
+        size_bytes: u64,
+    ) -> Result<Arc<AllocationLease>, ExecutionError> {
+        if size_bytes == 0 {
+            return Err(ExecutionError::InvalidRange {
+                reason: "allocation accounting cannot reserve zero bytes".to_owned(),
+            });
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ExecutionError::AllocationAccountingPoisoned)?;
+        if state.poisoned {
+            return Err(ExecutionError::AllocationAccountingPoisoned);
+        }
+        let index = category.index();
+        let current = state.buckets[index].current_bytes;
+        let next_category = match current.checked_add(size_bytes) {
+            Some(value) => value,
+            None => {
+                state.poisoned = true;
+                return Err(ExecutionError::AllocationAccountingOverflow);
+            }
+        };
+        let next_total = match state.current_bytes.checked_add(size_bytes) {
+            Some(value) => value,
+            None => {
+                state.poisoned = true;
+                return Err(ExecutionError::AllocationAccountingOverflow);
+            }
+        };
+        state.buckets[index].current_bytes = next_category;
+        state.buckets[index].high_water_bytes =
+            state.buckets[index].high_water_bytes.max(next_category);
+        state.current_bytes = next_total;
+        state.high_water_bytes = state.high_water_bytes.max(next_total);
+        drop(state);
+        Ok(Arc::new(AllocationLease {
+            accounting: Arc::clone(self),
+            category,
+            size_bytes,
+        }))
+    }
+
+    fn release(&self, category: AllocationCategory, size_bytes: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        let index = category.index();
+        let Some(next_category) = state.buckets[index].current_bytes.checked_sub(size_bytes) else {
+            state.poisoned = true;
+            return;
+        };
+        let Some(next_total) = state.current_bytes.checked_sub(size_bytes) else {
+            state.poisoned = true;
+            return;
+        };
+        state.buckets[index].current_bytes = next_category;
+        state.current_bytes = next_total;
+    }
+}
+
+impl AllocationCategory {
+    const fn index(self) -> usize {
+        match self {
+            Self::ModelResident => 0,
+            Self::RequestState => 1,
+            Self::Workspace => 2,
+        }
+    }
+}
+
+struct AllocationLease {
+    accounting: Arc<AllocationAccounting>,
+    category: AllocationCategory,
+    size_bytes: u64,
+}
+
+impl Drop for AllocationLease {
+    fn drop(&mut self) {
+        self.accounting.release(self.category, self.size_bytes);
+    }
+}
+
 /// Exact device selection supplied when opening an owned backend session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionSessionRequest {
@@ -202,6 +396,8 @@ pub enum ExecutionError {
     NotReady,
     Closing,
     CleanupQuarantined,
+    AllocationAccountingOverflow,
+    AllocationAccountingPoisoned,
     BackendStatus {
         status: u32,
         diagnostic: String,
@@ -294,6 +490,12 @@ impl fmt::Display for ExecutionError {
             Self::CleanupQuarantined => {
                 formatter.write_str("execution cleanup entered durable quarantine")
             }
+            Self::AllocationAccountingOverflow => {
+                formatter.write_str("execution allocation accounting overflowed")
+            }
+            Self::AllocationAccountingPoisoned => {
+                formatter.write_str("execution allocation accounting is poisoned")
+            }
             Self::BackendStatus { status, diagnostic } => {
                 write!(formatter, "backend status {status}: {diagnostic}")
             }
@@ -333,6 +535,13 @@ impl AdapterResource {
 pub trait ExecutionSessionAdapter: Send + Sync {
     /// Maximum byte count accepted by one H2D or D2H transfer.
     fn max_transfer_bytes(&self) -> u64;
+
+    /// Free device memory observed immediately before the session was opened.
+    /// Backends that cannot report it return `None`; callers that require a
+    /// fail-closed placement preflight must reject that absence explicitly.
+    fn available_memory_bytes(&self) -> Option<u64> {
+        None
+    }
 
     fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport;
 
@@ -550,6 +759,7 @@ struct ExecutionSessionState {
     // before shutdown can establish closing, and a shutdown that establishes
     // closing prevents a later adapter call.
     adapter_admission: Mutex<()>,
+    allocation_accounting: Arc<AllocationAccounting>,
 }
 
 /// An owned backend execution context.  Its public API never exposes a
@@ -580,6 +790,7 @@ impl ExecutionSession {
                 adapter,
                 closing: AtomicBool::new(false),
                 adapter_admission: Mutex::new(()),
+                allocation_accounting: Arc::new(AllocationAccounting::default()),
             }),
         }
     }
@@ -601,6 +812,23 @@ impl ExecutionSession {
             });
         }
         Ok(limit)
+    }
+
+    pub fn available_memory_bytes(&self) -> Result<Option<u64>, ExecutionError> {
+        self.ensure_open()?;
+        Ok(self.state.adapter.available_memory_bytes())
+    }
+
+    /// Returns exact current and high-water accounting for this session.
+    /// This remains readable after shutdown so callers can verify cleanup.
+    pub fn allocation_snapshot(&self) -> AllocationSnapshot {
+        self.state.allocation_accounting.snapshot()
+    }
+
+    /// Alias used by benchmark/reporting callers that expose memory rather
+    /// than allocator terminology.
+    pub fn memory_snapshot(&self) -> AllocationSnapshot {
+        self.allocation_snapshot()
     }
 
     pub fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport {
@@ -632,19 +860,39 @@ impl ExecutionSession {
     }
 
     pub fn allocate(&self, size_bytes: u64) -> Result<ExecutionBuffer, ExecutionError> {
+        self.allocate_with_category(size_bytes, AllocationCategory::Workspace)
+    }
+
+    /// Allocates a checked device buffer in an explicit accounting bucket.
+    pub fn allocate_with_category(
+        &self,
+        size_bytes: u64,
+        category: AllocationCategory,
+    ) -> Result<ExecutionBuffer, ExecutionError> {
         self.ensure_open()?;
         if size_bytes == 0 {
             return Err(ExecutionError::InvalidRange {
                 reason: "execution buffer size must be non-zero".to_owned(),
             });
         }
+        let allocation = self
+            .state
+            .allocation_accounting
+            .reserve(category, size_bytes)?;
         let access = ExecutionAdapterAccess { session: self };
-        let resource = self.state.adapter.allocate(&access, size_bytes)?;
+        let resource = match self.state.adapter.allocate(&access, size_bytes) {
+            Ok(resource) => resource,
+            Err(error) => {
+                drop(allocation);
+                return Err(error);
+            }
+        };
         Ok(ExecutionBuffer {
             state: Arc::clone(&self.state),
             id: ExecutionBufferId::new(next_execution_id()),
             size_bytes,
             payload: resource.payload,
+            _allocation: allocation,
         })
     }
 
@@ -658,12 +906,25 @@ impl ExecutionSession {
         descriptor: KvStateDescriptor,
     ) -> Result<KvState, ExecutionError> {
         self.ensure_open()?;
+        let allocation = kv_state_allocation_bytes(descriptor)
+            .map(|bytes| {
+                self.state
+                    .allocation_accounting
+                    .reserve(AllocationCategory::RequestState, bytes)
+            })
+            .transpose()?;
         let id = KvStateId::new(next_execution_id());
-        let resource = self.state.adapter.create_kv_state(
+        let resource = match self.state.adapter.create_kv_state(
             &ExecutionAdapterAccess { session: self },
             id,
             descriptor,
-        )?;
+        ) {
+            Ok(resource) => resource,
+            Err(error) => {
+                drop(allocation);
+                return Err(error);
+            }
+        };
         Ok(KvState {
             state: Arc::clone(&self.state),
             id,
@@ -672,6 +933,7 @@ impl ExecutionSession {
             append_in_flight: Arc::new(AtomicBool::new(false)),
             attention_in_flight: Arc::new(AtomicBool::new(false)),
             operation_admission: Arc::new(Mutex::new(())),
+            _allocation: allocation,
         })
     }
 
@@ -692,18 +954,32 @@ impl ExecutionSession {
         descriptor: LinearAttentionStateDescriptor,
     ) -> Result<LinearAttentionState, ExecutionError> {
         self.ensure_open()?;
+        let allocation = linear_state_allocation_bytes(descriptor)
+            .map(|bytes| {
+                self.state
+                    .allocation_accounting
+                    .reserve(AllocationCategory::RequestState, bytes)
+            })
+            .transpose()?;
         let id = LinearAttentionStateId::new(next_execution_id());
-        let resource = self.state.adapter.create_linear_attention_state(
+        let resource = match self.state.adapter.create_linear_attention_state(
             &ExecutionAdapterAccess { session: self },
             id,
             descriptor,
-        )?;
+        ) {
+            Ok(resource) => resource,
+            Err(error) => {
+                drop(allocation);
+                return Err(error);
+            }
+        };
         Ok(LinearAttentionState {
             state: Arc::clone(&self.state),
             id,
             descriptor,
             payload: resource.payload,
             execution_in_flight: Arc::new(AtomicBool::new(false)),
+            _allocation: allocation,
         })
     }
 
@@ -733,7 +1009,7 @@ impl ExecutionSession {
         self.ensure_open()?;
         self.ensure_linear_attention_state(state)?;
         self.ensure_queue(queue)?;
-        validate_linear_attention_bindings(self, &bindings, descriptor)?;
+        validate_linear_attention_bindings(self, &bindings, descriptor, state.descriptor.layout())?;
         if descriptor.expected_length() > state.capacity() {
             return Err(ExecutionError::InvalidRange {
                 reason: "linear-attention transition exceeds state capacity".to_owned(),
@@ -803,7 +1079,8 @@ impl ExecutionSession {
         self.ensure_kv_state(state)?;
         self.ensure_queue(queue)?;
 
-        let token_count = validate_kv_append_bindings(self, &key, &value)?;
+        let token_count =
+            validate_kv_append_bindings(self, &key, &value, state.descriptor.layout())?;
         if start_position != expected_length {
             return Err(ExecutionError::InvalidRange {
                 reason: "KV append start position must equal expected length".to_owned(),
@@ -898,7 +1175,13 @@ impl ExecutionSession {
         self.ensure_open()?;
         self.ensure_kv_state(state)?;
         self.ensure_queue(queue)?;
-        validate_causal_attention_bindings(self, &query, &output, descriptor)?;
+        validate_causal_attention_bindings(
+            self,
+            &query,
+            &output,
+            descriptor,
+            state.descriptor.layout(),
+        )?;
         if descriptor.expected_kv_length() > state.capacity() {
             return Err(ExecutionError::InvalidRange {
                 reason: "causal attention snapshot length exceeds KV capacity".to_owned(),
@@ -1301,6 +1584,41 @@ fn ensure_identity(
     Ok(())
 }
 
+fn checked_shape_bytes(dtype: DType, shape: &[u64]) -> Result<u64, ExecutionError> {
+    let elements = shape.iter().try_fold(1_u64, |total, dimension| {
+        total
+            .checked_mul(*dimension)
+            .ok_or_else(|| ExecutionError::InvalidRange {
+                reason: "state allocation element count overflowed".to_owned(),
+            })
+    })?;
+    elements
+        .checked_mul(dtype.size_bytes())
+        .ok_or_else(|| ExecutionError::InvalidRange {
+            reason: "state allocation byte count overflowed".to_owned(),
+        })
+}
+
+fn kv_state_allocation_bytes(descriptor: KvStateDescriptor) -> Option<u64> {
+    let one = checked_shape_bytes(descriptor.dtype(), &descriptor.storage_shape()).ok()?;
+    one.checked_mul(2)
+}
+
+fn linear_state_allocation_bytes(descriptor: LinearAttentionStateDescriptor) -> Option<u64> {
+    let layout = descriptor.layout();
+    let convolution = checked_shape_bytes(
+        crate::linear_attention::LinearAttentionLayout::CONV_STATE_DTYPE,
+        &layout.conv_state_shape(),
+    )
+    .ok()?;
+    let recurrent = checked_shape_bytes(
+        crate::linear_attention::LinearAttentionLayout::RECURRENT_STATE_DTYPE,
+        &layout.recurrent_state_shape(),
+    )
+    .ok()?;
+    convolution.checked_add(recurrent)
+}
+
 /// Opaque, session-owned device allocation.
 #[derive(Clone)]
 pub struct ExecutionBuffer {
@@ -1308,6 +1626,7 @@ pub struct ExecutionBuffer {
     id: ExecutionBufferId,
     size_bytes: u64,
     payload: Arc<dyn Any + Send + Sync>,
+    _allocation: Arc<AllocationLease>,
 }
 
 impl fmt::Debug for ExecutionBuffer {
@@ -1385,6 +1704,7 @@ pub struct KvState {
     append_in_flight: Arc<AtomicBool>,
     attention_in_flight: Arc<AtomicBool>,
     operation_admission: Arc<Mutex<()>>,
+    _allocation: Option<Arc<AllocationLease>>,
 }
 
 impl fmt::Debug for KvState {
@@ -1437,6 +1757,7 @@ pub struct LinearAttentionState {
     descriptor: LinearAttentionStateDescriptor,
     payload: Arc<dyn Any + Send + Sync>,
     execution_in_flight: Arc<AtomicBool>,
+    _allocation: Option<Arc<AllocationLease>>,
 }
 
 impl fmt::Debug for LinearAttentionState {
@@ -2223,9 +2544,10 @@ fn validate_kv_append_bindings(
     session: &ExecutionSession,
     key: &OwnedTensorBinding,
     value: &OwnedTensorBinding,
+    layout: KvStateLayout,
 ) -> Result<u64, ExecutionError> {
-    validate_kv_append_binding(session, key, "KV key")?;
-    validate_kv_append_binding(session, value, "KV value")?;
+    validate_kv_append_binding(session, key, "KV key", layout)?;
+    validate_kv_append_binding(session, value, "KV value", layout)?;
 
     let key_shape = key.view().shape();
     let value_shape = value.view().shape();
@@ -2257,7 +2579,15 @@ fn validate_causal_attention_bindings(
     query: &OwnedTensorBinding,
     output: &OwnedTensorBinding,
     descriptor: CausalAttentionDescriptor,
+    layout: KvStateLayout,
 ) -> Result<(), ExecutionError> {
+    let query_heads =
+        layout
+            .heads()
+            .checked_mul(4)
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "causal attention query head count overflowed".to_owned(),
+            })?;
     for (role, binding, required) in [
         ("causal attention query", query, AccessMode::Read),
         ("causal attention output", output, AccessMode::Write),
@@ -2291,11 +2621,13 @@ fn validate_causal_attention_bindings(
         })?;
         let shape = view.shape();
         let strides = view.strides();
-        if shape != [query_count, 16, 256] || strides != [16 * 256, 256, 1] || !view.is_contiguous()
+        if shape != [query_count, query_heads, layout.head_dim()]
+            || strides != [query_heads * layout.head_dim(), layout.head_dim(), 1]
+            || !view.is_contiguous()
         {
             return Err(ExecutionError::InvalidRequest {
                 reason: format!(
-                    "{role} must have the fixed contiguous [M, 16, 256] shape and strides"
+                    "{role} shape and strides must match the contiguous reviewed query-head layout"
                 ),
             });
         }
@@ -2351,14 +2683,15 @@ fn validate_linear_attention_bindings(
     session: &ExecutionSession,
     bindings: &LinearAttentionBindings,
     descriptor: LinearAttentionDescriptor,
+    layout: LinearAttentionLayout,
 ) -> Result<(), ExecutionError> {
     let token_count =
         usize::try_from(descriptor.token_count()).map_err(|_| ExecutionError::InvalidRequest {
             reason: "linear-attention token count does not fit the host index type".to_owned(),
         })?;
-    let qkv_shape = [token_count, LinearAttentionLayout::QKV_WIDTH];
-    let output_shape = [token_count, LinearAttentionLayout::OUTPUT_WIDTH];
-    let scalar_shape = [token_count, LinearAttentionLayout::VALUE_HEADS];
+    let qkv_shape = [token_count, layout.qkv_width()];
+    let output_shape = [token_count, layout.output_width()];
+    let scalar_shape = [token_count, layout.value_heads()];
     validate_linear_attention_binding(
         session,
         bindings.qkv(),
@@ -2397,11 +2730,7 @@ fn validate_linear_attention_bindings(
         "linear attention convolution weight",
         AccessMode::Read,
         DType::Bf16,
-        &[
-            LinearAttentionLayout::QKV_WIDTH,
-            1,
-            LinearAttentionLayout::CONV_KERNEL_SIZE,
-        ],
+        &[layout.qkv_width(), 1, layout.conv_kernel_size()],
     )?;
     validate_linear_attention_binding(
         session,
@@ -2409,7 +2738,7 @@ fn validate_linear_attention_bindings(
         "linear attention A_log",
         AccessMode::Read,
         DType::F32,
-        &[LinearAttentionLayout::VALUE_HEADS],
+        &[layout.value_heads()],
     )?;
     validate_linear_attention_binding(
         session,
@@ -2417,7 +2746,7 @@ fn validate_linear_attention_bindings(
         "linear attention dt_bias",
         AccessMode::Read,
         DType::Bf16,
-        &[LinearAttentionLayout::VALUE_HEADS],
+        &[layout.value_heads()],
     )?;
     validate_linear_attention_binding(
         session,
@@ -2425,7 +2754,7 @@ fn validate_linear_attention_bindings(
         "linear attention norm weight",
         AccessMode::Read,
         DType::F32,
-        &[LinearAttentionLayout::HEAD_DIM],
+        &[layout.head_dim()],
     )?;
     validate_linear_attention_binding(
         session,
@@ -2493,6 +2822,7 @@ fn validate_kv_append_binding(
     session: &ExecutionSession,
     binding: &OwnedTensorBinding,
     role: &'static str,
+    layout: KvStateLayout,
 ) -> Result<(), ExecutionError> {
     validate_binding_identity(session.backend_name(), session.id(), binding)?;
     ensure_view_in_bounds(binding.buffer(), binding.view())?;
@@ -2504,9 +2834,9 @@ fn validate_kv_append_binding(
         });
     }
     let shape = binding.view().shape();
-    if shape.len() != 3 || shape[1] != KvStateLayout::HEADS || shape[2] != KvStateLayout::HEAD_DIM {
+    if shape.len() != 3 || shape[1] != layout.heads() || shape[2] != layout.head_dim() {
         return Err(ExecutionError::InvalidRequest {
-            reason: format!("{role} must have contiguous shape [M, 4, 256]"),
+            reason: format!("{role} must match the state KV head layout"),
         });
     }
     if shape[0] == 0 {
@@ -3397,7 +3727,7 @@ mod tests {
                     backend: 1,
                     fallback_allowed: false,
                     fallback_used: false,
-                    kernel_symbol: "kv_state.bf16_to_f16_transpose.v1".to_owned(),
+                    kernel_symbol: "kv_state.bf16_to_f16_token_major.v2".to_owned(),
                     device_symbol: "fake_kv_append".to_owned(),
                     target: "fake".to_owned(),
                 },
@@ -3546,6 +3876,65 @@ mod tests {
     }
 
     #[test]
+    fn allocation_accounting_is_checked_and_raii_returns_request_bytes() {
+        let test_session = session("test");
+        let resident = test_session
+            .allocate_with_category(17, AllocationCategory::ModelResident)
+            .unwrap();
+        let workspace = test_session.allocate(3).unwrap();
+        let snapshot = test_session.allocation_snapshot();
+        assert_eq!(snapshot.model_resident().current_bytes(), 17);
+        assert_eq!(snapshot.workspace().current_bytes(), 3);
+        assert_eq!(snapshot.high_water_bytes(), 20);
+        drop(workspace);
+        assert_eq!(
+            test_session.memory_snapshot().workspace().current_bytes(),
+            0
+        );
+        assert_eq!(
+            test_session
+                .memory_snapshot()
+                .model_resident()
+                .current_bytes(),
+            17
+        );
+        drop(resident);
+        let final_snapshot = test_session.memory_snapshot();
+        assert_eq!(final_snapshot.current_bytes(), 0);
+        assert_eq!(final_snapshot.high_water_bytes(), 20);
+        assert!(!final_snapshot.poisoned());
+    }
+
+    #[test]
+    fn allocation_accounting_poison_is_sticky_after_overflow() {
+        let accounting = Arc::new(AllocationAccounting::default());
+        let huge = accounting
+            .reserve(AllocationCategory::Workspace, u64::MAX)
+            .unwrap();
+        assert!(matches!(
+            accounting.reserve(AllocationCategory::Workspace, 1),
+            Err(ExecutionError::AllocationAccountingOverflow)
+        ));
+        assert!(accounting.snapshot().poisoned);
+        assert!(matches!(
+            accounting.reserve(AllocationCategory::Workspace, 1),
+            Err(ExecutionError::AllocationAccountingPoisoned)
+        ));
+        drop(huge);
+        assert!(accounting.snapshot().poisoned);
+    }
+
+    #[test]
+    fn allocation_accounting_poison_is_sticky_after_underflow() {
+        let accounting = Arc::new(AllocationAccounting::default());
+        accounting
+            .reserve(AllocationCategory::Workspace, 3)
+            .unwrap();
+        accounting.release(AllocationCategory::Workspace, 4);
+        assert!(accounting.snapshot().poisoned);
+    }
+
+    #[test]
     fn adapters_without_stateful_methods_remain_source_compatible_and_unsupported() {
         let test_session = session("test");
         let descriptor = crate::KvStateDescriptor::new(0, 1).unwrap();
@@ -3568,6 +3957,26 @@ mod tests {
         let adapter = Arc::new(KvStateAdapter::new());
         let session_adapter: Arc<dyn ExecutionSessionAdapter> = adapter.clone();
         (ExecutionSession::new("kv-test", session_adapter), adapter)
+    }
+
+    #[test]
+    fn allocation_accounting_includes_both_kv_planes_and_linear_state() {
+        let (session, _) = kv_session();
+        let kv_descriptor = KvStateDescriptor::new(0, 3).unwrap();
+        let linear_descriptor = LinearAttentionStateDescriptor::new(1, 3).unwrap();
+        let kv = session.create_kv_state(kv_descriptor).unwrap();
+        let linear = session
+            .create_linear_attention_state(linear_descriptor)
+            .unwrap();
+        let expected = kv_state_allocation_bytes(kv_descriptor).unwrap()
+            + linear_state_allocation_bytes(linear_descriptor).unwrap();
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            expected
+        );
+        drop(kv);
+        drop(linear);
+        assert_eq!(session.memory_snapshot().request_state().current_bytes(), 0);
     }
 
     fn kv_binding(

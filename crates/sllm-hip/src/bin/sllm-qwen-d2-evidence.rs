@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 use sllm_core::{
-    Backend, ExecutionSessionRequest, QWEN35_LAYER_COUNT, QWEN35_PLAN_ENTRY_COUNT,
-    QWEN35_REQUIRED_WEIGHT_COUNT, QwenExecutionRequest, QwenGraphTensorBacking,
+    Backend, ExecutionSessionRequest, QwenExecutionRequest, QwenGraphTensorBacking,
     WeightClassification, build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
+    reviewed_qwen35_spec,
 };
 use sllm_hip::HipBackend;
 
@@ -171,6 +171,8 @@ fn run(config: &Config) -> Result<Report, String> {
     }
 
     let lock = read_model_lock(&config.lock).map_err(|error| error.to_string())?;
+    let spec = reviewed_qwen35_spec(&lock)
+        .ok_or_else(|| "model is not a reviewed Qwen3.5 dense identity".to_owned())?;
     let cache = lock
         .verify_cache(&config.cache)
         .map_err(|error| error.to_string())?;
@@ -188,11 +190,10 @@ fn run(config: &Config) -> Result<Report, String> {
         .iter()
         .filter(|entry| entry.classification == WeightClassification::KnownUnconsumed)
         .count();
-    if plan.entries.len() != QWEN35_PLAN_ENTRY_COUNT
-        || required_weights != QWEN35_REQUIRED_WEIGHT_COUNT
-        || known_unconsumed_weights != QWEN35_PLAN_ENTRY_COUNT - QWEN35_REQUIRED_WEIGHT_COUNT
-        || graph.layer_types().len() != QWEN35_LAYER_COUNT
-        || graph.states().len() != 64
+    if plan.entries.len() != spec.indexed_tensor_count as usize
+        || required_weights + known_unconsumed_weights != plan.entries.len()
+        || graph.layer_types().len() != spec.layer_count as usize
+        || graph.states().len() != spec.layer_count as usize * 2
     {
         return Err("canonical Qwen coverage counts differ".to_owned());
     }

@@ -275,19 +275,19 @@ sllm_status_t validate_and_copy_descriptor(
   }
 
   const uint64_t m = metadata->packed_q_gate.shape[0];
-  const uint64_t packed_shape[] = {
-      m, SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS,
-      SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM};
-  const uint64_t k_shape[] = {m, SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS,
-                              SLLM_HIP_ATTENTION_PREPROCESS_K_HEAD_DIM};
-  const uint64_t scale_q_shape[] = {SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS,
-                                    SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM};
-  const uint64_t scale_k_shape[] = {SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS,
-                                    SLLM_HIP_ATTENTION_PREPROCESS_K_HEAD_DIM};
+  const uint64_t q_heads = metadata->packed_q_gate.shape[1];
+  const uint64_t k_heads = metadata->k.shape[1];
+  const uint64_t head_dim = metadata->k.shape[2];
+  const uint64_t packed_shape[] = {m, q_heads, head_dim * 2U};
+  const uint64_t k_shape[] = {m, k_heads, head_dim};
+  const uint64_t scale_q_shape[] = {q_heads, head_dim};
+  const uint64_t scale_k_shape[] = {k_heads, head_dim};
   const uint64_t position_shape[] = {m};
-  const uint64_t q_output_shape[] = {m, SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS,
-                                     SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM};
+  const uint64_t q_output_shape[] = {m, q_heads, head_dim};
   if (m == 0U || m > SLLM_HIP_ATTENTION_PREPROCESS_MAX_M ||
+      (q_heads != 8U && q_heads != 16U) || (k_heads != 2U && k_heads != 4U) ||
+      q_heads != k_heads * 4U ||
+      head_dim != SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM ||
       static_cast<uint64_t>(descriptor->start_position) + m >
           SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION ||
       !exact_shape(metadata->packed_q_gate, 3U, packed_shape) ||
@@ -304,6 +304,9 @@ sllm_status_t validate_and_copy_descriptor(
   }
   metadata->m = m;
   metadata->start_position = descriptor->start_position;
+  metadata->q_heads = static_cast<uint32_t>(q_heads);
+  metadata->k_heads = static_cast<uint32_t>(k_heads);
+  metadata->head_dim = static_cast<uint32_t>(head_dim);
   return SLLM_STATUS_OK;
 }
 

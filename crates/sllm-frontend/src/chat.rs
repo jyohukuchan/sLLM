@@ -9,8 +9,13 @@ pub const QWEN35_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_756;
 pub const QWEN35_CHAT_TEMPLATE_SHA256: &str =
     "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
 
-const QWEN35_REPO_ID: &str = "Qwen/Qwen3.5-4B";
-const QWEN35_RESOLVED_REVISION: &str = "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a";
+const QWEN35_2B_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_755;
+const QWEN35_2B_CHAT_TEMPLATE_SHA256: &str =
+    "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80";
+#[cfg(test)]
+const QWEN35_REPO_ID: &str = sllm_core::QWEN35_4B_REPO_ID;
+#[cfg(test)]
+const QWEN35_RESOLVED_REVISION: &str = sllm_core::QWEN35_4B_REVISION;
 
 /// Hard host-side output cap for one rendered prompt (16 MiB).
 ///
@@ -315,6 +320,7 @@ impl std::error::Error for ChatRenderError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Qwen35ChatTemplateV1 {
     consistency_label: String,
+    default_thinking: bool,
 }
 
 impl Qwen35ChatTemplateV1 {
@@ -322,7 +328,8 @@ impl Qwen35ChatTemplateV1 {
         lock: &ModelLock,
         cache: &VerifiedCache,
     ) -> Result<Self, ChatRenderError> {
-        Self::from_verified_cache_impl(lock, cache, QWEN35_CHAT_TEMPLATE_SHA256)
+        let (_, expected_sha256, _) = reviewed_template_identity(lock)?;
+        Self::from_verified_cache_impl(lock, cache, expected_sha256)
     }
 
     /// Test-only construction still performs the production metadata, bounded
@@ -344,11 +351,7 @@ impl Qwen35ChatTemplateV1 {
         cache: &VerifiedCache,
         expected_sha256: &str,
     ) -> Result<Self, ChatRenderError> {
-        if lock.model.repo_id != QWEN35_REPO_ID
-            || lock.model.resolved_revision != QWEN35_RESOLVED_REVISION
-        {
-            return Err(ChatRenderError::UnsupportedTemplateIdentity);
-        }
+        let (expected_size, locked_sha256, default_thinking) = reviewed_template_identity(lock)?;
         if lock.model.tokenizer_contract.chat_template_path != QWEN35_CHAT_TEMPLATE_FILENAME {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
@@ -361,8 +364,8 @@ impl Qwen35ChatTemplateV1 {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         };
         if locked.next().is_some()
-            || locked_file.size_bytes != QWEN35_CHAT_TEMPLATE_SIZE_BYTES
-            || locked_file.sha256 != QWEN35_CHAT_TEMPLATE_SHA256
+            || locked_file.size_bytes != expected_size
+            || locked_file.sha256 != locked_sha256
         {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
@@ -375,8 +378,8 @@ impl Qwen35ChatTemplateV1 {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         };
         if verified.next().is_some()
-            || verified_file.size_bytes != QWEN35_CHAT_TEMPLATE_SIZE_BYTES
-            || verified_file.sha256 != QWEN35_CHAT_TEMPLATE_SHA256
+            || verified_file.size_bytes != expected_size
+            || verified_file.sha256 != locked_sha256
         {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
@@ -387,13 +390,14 @@ impl Qwen35ChatTemplateV1 {
         let bytes = cache
             .read_frontend_asset(FrontendAssetKind::ChatTemplateJinja)
             .map_err(|_| ChatRenderError::TemplateAssetUnavailable)?;
-        if bytes.len() != QWEN35_CHAT_TEMPLATE_SIZE_BYTES as usize {
+        if bytes.len() != expected_size as usize {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
         validate_template_bytes(&bytes, expected_sha256)?;
 
         Ok(Self {
             consistency_label: lock.fingerprint().to_owned(),
+            default_thinking,
         })
     }
 
@@ -423,9 +427,21 @@ impl Qwen35ChatTemplateV1 {
             return Err(ChatRenderError::OutputLimitExceedsHostCap);
         }
         let last_user = validate_typed_messages(messages)?;
-        let planned = plan_output(messages, options, last_user, output_limit_bytes)?;
+        let planned = plan_output(
+            messages,
+            options,
+            last_user,
+            output_limit_bytes,
+            self.default_thinking,
+        )?;
         let mut output = String::with_capacity(planned);
-        write_output(&mut output, messages, options, last_user);
+        write_output(
+            &mut output,
+            messages,
+            options,
+            last_user,
+            self.default_thinking,
+        );
         debug_assert_eq!(output.len(), planned);
         Ok(output)
     }
@@ -436,6 +452,32 @@ impl Qwen35ChatTemplateV1 {
     ) -> Result<String, ChatRenderError> {
         let (messages, options) = validate_untrusted_request(request)?;
         self.render(&messages, options)
+    }
+}
+
+fn reviewed_template_identity(
+    lock: &ModelLock,
+) -> Result<(u64, &'static str, bool), ChatRenderError> {
+    let identity = (
+        lock.model.repo_id.as_str(),
+        lock.model.resolved_revision.as_str(),
+    );
+    if identity == (sllm_core::QWEN35_2B_REPO_ID, sllm_core::QWEN35_2B_REVISION) {
+        Ok((
+            QWEN35_2B_CHAT_TEMPLATE_SIZE_BYTES,
+            QWEN35_2B_CHAT_TEMPLATE_SHA256,
+            false,
+        ))
+    } else if identity == (sllm_core::QWEN35_4B_REPO_ID, sllm_core::QWEN35_4B_REVISION)
+        || identity == (sllm_core::QWEN35_9B_REPO_ID, sllm_core::QWEN35_9B_REVISION)
+    {
+        Ok((
+            QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
+            QWEN35_CHAT_TEMPLATE_SHA256,
+            true,
+        ))
+    } else {
+        Err(ChatRenderError::UnsupportedTemplateIdentity)
     }
 }
 
@@ -640,6 +682,7 @@ fn visit_fragments(
     messages: &[Qwen35ChatMessageV1],
     options: Qwen35RenderOptionsV1,
     last_user: usize,
+    default_thinking: bool,
     mut visit: impl FnMut(&str),
 ) {
     for (index, message) in messages.iter().enumerate() {
@@ -674,10 +717,13 @@ fn visit_fragments(
 
     if options.add_generation_prompt {
         match options.thinking {
-            ThinkingModeV1::TemplateDefault | ThinkingModeV1::Enabled => {
+            ThinkingModeV1::TemplateDefault if default_thinking => {
                 visit(GENERATION_THINKING);
             }
-            ThinkingModeV1::Disabled => visit(GENERATION_DISABLED),
+            ThinkingModeV1::Enabled => visit(GENERATION_THINKING),
+            ThinkingModeV1::TemplateDefault | ThinkingModeV1::Disabled => {
+                visit(GENERATION_DISABLED)
+            }
         }
     }
 }
@@ -687,10 +733,11 @@ fn plan_output(
     options: Qwen35RenderOptionsV1,
     last_user: usize,
     limit: usize,
+    default_thinking: bool,
 ) -> Result<usize, ChatRenderError> {
     let mut total = 0usize;
     let mut result = Ok(());
-    visit_fragments(messages, options, last_user, |fragment| {
+    visit_fragments(messages, options, last_user, default_thinking, |fragment| {
         if result.is_ok() {
             result = checked_fragment(&mut total, fragment, limit);
         }
@@ -703,8 +750,9 @@ fn write_output(
     messages: &[Qwen35ChatMessageV1],
     options: Qwen35RenderOptionsV1,
     last_user: usize,
+    default_thinking: bool,
 ) {
-    visit_fragments(messages, options, last_user, |fragment| {
+    visit_fragments(messages, options, last_user, default_thinking, |fragment| {
         output.push_str(fragment);
     });
 }

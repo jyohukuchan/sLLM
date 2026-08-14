@@ -11,9 +11,11 @@ sLLM のランタイムは Rust workspace が主導し、GPU の操作だけを 
 ```text
 Cargo workspace
 ├── crates/sllm-core
+├── crates/sllm-frontend
 ├── crates/sllm-hip-sys
 ├── crates/sllm-hip
 ├── crates/sllm-cli
+├── crates/sllm-server
 └── native/hip
     └── CMake project
 ```
@@ -21,9 +23,11 @@ Cargo workspace
 | 領域 | 責務 |
 | --- | --- |
 | `sllm-core` | frontend、model/config、tokenizer、scheduler、sampling、backend 非依存の execution plan と tensor/op descriptor |
+| `sllm-frontend` | typed chat renderer/tokenizer、transport非依存generation loop、sampling/stop/usage/cancellationの統合 |
 | `sllm-hip-sys` | versioned HIP C ABI の宣言、check-in した generated bindings、`build.rs` による native build と link 情報の伝達 |
 | `sllm-hip` | C ABI の安全な Rust wrapper、HIP backend 実装、resource ownership、非同期実行の lifetime と error 変換 |
 | `sllm-cli` | CLI、設定の読み込み、runtime の組み立てと起動。GPU resource の詳細を直接扱わない |
+| `sllm-server` | strict OpenAI profile DTO、model registry、bounded FIFO、HTTP/non-stream/SSE adapter、transport cancellation |
 | `native/hip` | HIP context、allocator、queues、events、operator dispatch、backend 内 kernel registry、HIP kernels |
 
 Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `sllm-core` に漏らさない。
@@ -102,9 +106,50 @@ MVP の Qwen3.5-4B は BF16 の unquantized encoding だけを実装する。そ
 
 ## KV cache layout
 
-KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。MVP は連続 FP16 layout を実装する。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。scheduler は layout の内部 pointer arithmetic を行わず、backend が提示する alignment、block size、capacity capability に従って allocation と slot を計画する。
+KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期方式はHIP VMMのvirtual-contiguous FP16 KVで、storage layoutはtoken-major `[capacity, kv_heads, head_dim]`である。create時に最大logical capacityのVAをreserveし、append前に必要なK/V physical pageだけをcommitする。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。
 
-この abstraction は将来の paged/block layout や量子化 layout を受け入れるためのものであり、MVP でそれらを実装することを意味しない。
+schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。contiguous pointerはnative backend内だけでattention kernelへ渡す。このためvAttention上でもcontiguous-KV FlashAttention系kernelを利用でき、上位APIを変更せず将来paged/block layoutへ切り替えられる。Paged Attention production backendと量子化layoutは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
+
+## Generation service境界
+
+Phase 6ではrender/tokenize/prefill/decode/sampling/stop/usageを`GenerationServiceV1`へ集約する。CLIとHTTP
+adapterは入力DTOとtransportだけを担当し、token loopを複製しない。各呼び出しはrequest-localなexecution、
+sampling履歴、stop matcher、cancellation flag、opaque KV stateを所有し、model weightとresident ownerだけを
+request間で共有する。
+
+temperature 0はQwen executionが返すdevice argmaxをそのまま使い、full-vocabulary logitsをhostへ読まない。
+samplingが必要な場合だけterminal BF16 logits rowをbackendのbounded transfer単位へ分割してreadbackし、
+temperature、top-p、presence/frequency penaltyを適用する。public requestにseedは持たせず、deterministic testは
+明示的なrandom-source seamを内部serviceへ注入する。
+
+stop文字列matcherはdecoded UTF-8の末尾がstop prefixである間はpublicationを保留し、token境界またはUTF-8
+byte-fallback境界を跨いだ完全一致でもstop自身をvisible outputへ含めない。共通resultはprompt/completion/total
+usage、`stop`/`length`、generated/visible/decode-input token列を保持する。cancelまたは途中errorはrequest ownerを
+再利用不能にするが、resident model ownerを破棄しない。A5のHTTP disconnect/shutdown/timeoutはこのcancellation
+境界へ接続する。
+
+### OpenAI serverのadmissionとstreaming境界
+
+Phase 6 A4/A5の初期serverは一つのworkerだけがgeneration backendを呼び、bounded FIFOを超えるrequestを
+HTTP 429で拒否する。served aliasはmodel-lockのSHA-256 fingerprintとmodel-resident backend ownerへ結合し、
+request-local errorやdisconnectでregistry entryを破棄しない。HTTP taskとworker間のgeneration eventもbounded
+channelとし、slow consumerに対してbackend側を同期的にbackpressureする。
+
+non-streamとSSEは同じdelta、finish reason、usage eventから構築する。SSEはassistant role chunk、0個以上の
+nonempty content delta、terminal finish chunk、exact `[DONE]`の順に送る。response header送信後のgeneration errorは
+standard error envelopeを一つのSSE data eventとして送り、finish chunkと`[DONE]`なしでcloseする。receiver dropは
+request cancellationを発火し、scheduler timeoutとgraceful shutdownも同じflagへ伝播する。backendはbounded sink
+へのpublish前後とlong-running operationの境界でcancellationを観測し、request-local stateを解放する。
+
+A6のproduction backendはverified model lock、tokenizer/template、weight plan、exact HIP sessionを一度loadし、
+既存`QwenResidentModel`をこのworkerへ接続する。token loopは複製せず`GenerationServiceV1`を呼ぶ。各requestの
+監査値はlogical KV capacity、mapped token capacity、physical page bytes、K/V committed bytes、full/linear
+layer数、HIP submission、fallback、request/workspace allocationとcleanupを含む。成功responseはexact targetの
+HIP dispatchのみ、fallbackなし、整合したphysical metadataを満たさなければfail-closedにする。
+
+初期serverは単一GPU runtimeである。mixed-GPU hostでは`ROCR_VISIBLE_DEVICES=<stable GPU UUID>`で対象を1台だけ
+可視化し、serverには論理device 0を渡す。HIP current deviceはthread-localなので、複数GPUを可視化したまま
+global physical indexをworkerへ渡す構成は初期対応外である。
 
 ## Build integration
 

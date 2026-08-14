@@ -1,0 +1,103 @@
+{
+  "schema_version": "engine-performance-render-v1",
+  "matrix_id": "engine-performance-render-v1",
+  "revision": 1,
+  "suite_id": "h0-engine-performance-render-tokenize-contract",
+  "tier": "tier_p1",
+  "required": false,
+  "claims": {
+    "baseline_only": true,
+    "optimized": false,
+    "faster": false,
+    "hard_gate": false
+  },
+  "protocol": {
+    "backend": "hip",
+    "dtype": "BF16",
+    "batch_size": 1,
+    "warmup_requests": 3,
+    "measured_requests": 10,
+    "max_new_tokens": 17,
+    "greedy": true,
+    "thinking": "disabled",
+    "add_generation_prompt": true,
+    "message": "user:Hello",
+    "stop_token_ids": [248046, 248044],
+    "visible_stop_tokens": false
+  },
+  "render_contract": {
+    "renderer_version": 1,
+    "template_filename": "chat_template.jinja",
+    "template_sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+    "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
+    "message": {
+      "role": "user",
+      "content": "Hello"
+    },
+    "thinking": "disabled",
+    "add_generation_prompt": true,
+    "rendered_prompt": "<|im_start|>user\nHello<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+    "rendered_prompt_sha256": "13071b0f0e23e97681f6f39247dbb715973302580660a81dbae994fe8064e7d3",
+    "input_token_ids": [248045, 846, 198, 9419, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271]
+  },
+  "targets": [
+    {
+      "order": 0,
+      "target": "gfx1030",
+      "backend": "hip",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "gpu_bdf": "0000:03:00.0",
+      "product": "AMD Radeon Pro V620",
+      "physical_hip_index": 1,
+      "logical_device_index": 0
+    },
+    {
+      "order": 1,
+      "target": "gfx1201",
+      "backend": "hip",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "gpu_bdf": "0000:07:00.0",
+      "product": "AMD Radeon AI PRO R9700",
+      "physical_hip_index": 2,
+      "logical_device_index": 0
+    }
+  ],
+  "model": {
+    "order": 0,
+    "model_size": "4B",
+    "repo_id": "Qwen/Qwen3.5-4B",
+    "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "lock_path": "docs/models/locks/qwen3.5-4b-bf16.json",
+    "lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"
+  },
+  "rows": [
+    {
+      "order": 0,
+      "row_id": "engine-performance-render-4b-gfx1030-chat-hello",
+      "model_size": "4B",
+      "case_id": "chat-hello",
+      "message": "user:Hello",
+      "thinking": "disabled",
+      "add_generation_prompt": true,
+      "input_token_ids": [248045, 846, 198, 9419, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271],
+      "input_tokens": 13,
+      "requested_output_tokens": 17,
+      "target": "gfx1030",
+      "timeout_seconds": 5400
+    },
+    {
+      "order": 1,
+      "row_id": "engine-performance-render-4b-gfx1201-chat-hello",
+      "model_size": "4B",
+      "case_id": "chat-hello",
+      "message": "user:Hello",
+      "thinking": "disabled",
+      "add_generation_prompt": true,
+      "input_token_ids": [248045, 846, 198, 9419, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271],
+      "input_tokens": 13,
+      "requested_output_tokens": 17,
+      "target": "gfx1201",
+      "timeout_seconds": 5400
+    }
+  ]
+}

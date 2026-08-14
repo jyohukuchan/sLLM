@@ -142,17 +142,20 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION UINT32_C(262144)
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_M UINT64_C(262144)
 
-#define SLLM_HIP_KV_STATE_VERSION UINT32_C(1)
-#define SLLM_HIP_KV_VIEW_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_KV_STATE_VERSION UINT32_C(2)
+#define SLLM_HIP_KV_VIEW_INFO_VERSION UINT32_C(2)
 #define SLLM_HIP_KV_APPEND_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_KV_HEAD_COUNT UINT32_C(4)
 #define SLLM_HIP_KV_HEAD_DIM UINT32_C(256)
 #define SLLM_HIP_KV_MAX_CAPACITY UINT64_C(262144)
 #define SLLM_HIP_KV_MAX_M UINT64_C(262144)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1 UINT32_C(1)
+#define SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2 UINT32_C(2)
 #define SLLM_HIP_KV_WORKGROUP_SIZE UINT32_C(256)
 #define SLLM_HIP_KV_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_KV_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS UINT32_C(1)
+#define SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR UINT32_C(1)
 
 #define SLLM_HIP_CAUSAL_ATTENTION_VERSION UINT32_C(1)
 #define SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -318,7 +321,8 @@ typedef struct sllm_device_info_t {
   uint32_t reserved0;
   char name[SLLM_HIP_MAX_DEVICE_NAME];
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
-  uint32_t reserved[4];
+  uint64_t available_memory_bytes;
+  uint32_t reserved[2];
 } sllm_device_info_t;
 
 typedef struct sllm_context_create_info_t {
@@ -596,8 +600,9 @@ typedef struct sllm_attention_preprocess_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_attention_preprocess_dispatch_info_t;
 
-/* A request-local full-attention KV state owns separate K and V device
- * allocations.  The allocations are logically FP16 [4, capacity, 256]; no
+/* A request-local full-attention KV state owns separate K and V virtual
+ * address reservations. Physical pages grow on demand. The allocations are
+ * logically FP16 [capacity, head_count, head_dim]; no
  * query-head repetition is materialized.  session_id is an application
  * identity checked together with the context and is never dereferenced by
  * the runtime. */
@@ -608,7 +613,10 @@ typedef struct sllm_kv_state_create_info_t {
   uint32_t layer_id;
   uint32_t flags;
   uint64_t capacity_tokens;
-  uint32_t reserved[4];
+  uint32_t head_count;
+  uint32_t head_dim;
+  uint32_t memory_kind;
+  uint32_t layout;
 } sllm_kv_state_create_info_t;
 
 typedef struct sllm_kv_view_info_t {
@@ -622,10 +630,16 @@ typedef struct sllm_kv_view_info_t {
   uint32_t encoding;
   uint32_t head_count;
   uint32_t head_dim;
+  uint32_t memory_kind;
+  uint32_t layout;
   uint32_t reserved1;
   uint64_t capacity_tokens;
   uint64_t observed_length;
   uint64_t generation;
+  uint64_t physical_page_bytes;
+  uint64_t tokens_per_page;
+  uint64_t mapped_token_capacity;
+  uint64_t committed_bytes_per_plane;
   uint64_t context_identity;
   uint64_t state_identity;
   uint64_t k_stride_elements[3];
@@ -672,7 +686,7 @@ typedef struct sllm_kv_append_info_t {
 } sllm_kv_append_info_t;
 
 /* C3b causal full attention. Q and output are contiguous unquantized BF16
- * [M, 16, 256]. The referenced state is one committed FP16 [4, capacity,
+ * [M, 16, 256]. The referenced state is one committed FP16 [capacity, 4,
  * 256] snapshot; no repeated K/V payload is part of this descriptor. */
 typedef struct sllm_causal_attention_desc_t {
   uint32_t struct_size;
@@ -712,8 +726,9 @@ typedef struct sllm_causal_attention_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_causal_attention_dispatch_info_t;
 
-/* A request-local linear-attention state owns two BF16 [3,8192]
- * convolution-history slots and two F32 [32,128,128] recurrent slots. The
+/* A request-local linear-attention state owns two BF16
+ * [conv_kernel_size-1,qkv_width] convolution-history slots and two F32
+ * [value_heads,head_dim,head_dim] recurrent slots. The
  * inactive pair is published only after successful completion. */
 typedef struct sllm_linear_attention_state_create_info_t {
   uint32_t struct_size;
@@ -722,7 +737,10 @@ typedef struct sllm_linear_attention_state_create_info_t {
   uint32_t layer_id;
   uint32_t flags;
   uint64_t capacity_tokens;
-  uint32_t reserved[4];
+  uint32_t qk_heads;
+  uint32_t value_heads;
+  uint32_t head_dim;
+  uint32_t conv_kernel_size;
 } sllm_linear_attention_state_create_info_t;
 
 typedef struct sllm_linear_attention_view_info_t {

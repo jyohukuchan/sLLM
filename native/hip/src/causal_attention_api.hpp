@@ -12,6 +12,8 @@ struct TensorMetadata final {
   uint64_t payload_bytes = 0U;
   uint64_t end_offset = 0U;
   uint64_t query_count = 0U;
+  uint32_t q_heads = 0U;
+  uint32_t head_dim = 0U;
 };
 
 struct DescriptorMetadata final {

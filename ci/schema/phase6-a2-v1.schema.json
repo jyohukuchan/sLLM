@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase6-a2-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "observed_at", "openai_drift", "llama_reuse", "facts_only_readers", "implementation_acceptance_cases", "dependency_policy"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase6-a2-v1.schema.json"},
+    "schema_version": {"const": "phase6-a2-v1"},
+    "observed_at": {"type": "string", "format": "date"},
+    "openai_drift": {"type": "object"},
+    "llama_reuse": {"type": "object"},
+    "facts_only_readers": {"type": "array", "minItems": 4, "maxItems": 4},
+    "implementation_acceptance_cases": {"type": "array", "minItems": 8, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "dependency_policy": {"type": "object"}
+  }
+}

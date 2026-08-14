@@ -103,16 +103,24 @@ def validate_chat_request(
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         return _reject("invalid_value", "messages", "messages must be a non-empty array")
-    for message in messages:
+    for index, message in enumerate(messages):
         if not isinstance(message, Mapping):
             return _reject("invalid_value", "messages", "each message must be an object")
         if set(message) - SUPPORTED_MESSAGE_FIELDS:
             return _reject("unsupported_parameter", "messages", "message field is unsupported")
         role = message.get("role")
         if role not in SUPPORTED_ROLES:
-            return _reject("unsupported_parameter", "messages", "message role is unsupported")
+            return _reject(
+                "unsupported_parameter",
+                f"messages[{index}].role",
+                "message role is unsupported",
+            )
         if not isinstance(message.get("content"), str):
-            return _reject("unsupported_parameter", "messages", "only text content is supported")
+            return _reject(
+                "unsupported_parameter",
+                f"messages[{index}].content",
+                "only text content is supported",
+            )
 
     if "temperature" in payload and (
         not _is_finite_number(payload["temperature"])
@@ -149,8 +157,10 @@ def validate_chat_request(
     if "stream" in payload and not isinstance(payload["stream"], bool):
         return _reject("invalid_value", "stream", "stream must be boolean")
     if "n" in payload and (
-        isinstance(payload["n"], bool) or not isinstance(payload["n"], int) or payload["n"] != 1
+        isinstance(payload["n"], bool) or not isinstance(payload["n"], int)
     ):
         return _reject("invalid_value", "n", "n must equal 1")
+    if payload.get("n", 1) != 1:
+        return _reject("unsupported_parameter", "n", "only n=1 is supported")
 
     return ValidationResult(accepted=True)

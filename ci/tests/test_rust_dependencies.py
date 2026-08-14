@@ -107,6 +107,18 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         self.assert_policy_rejected(mutate)
 
+    def test_server_runtime_requested_feature_drift_is_rejected(self) -> None:
+        def mutate(document):
+            document["feature_assertions"]["server_runtime"]["dependencies"][0]["requested"] = ["json"]
+
+        self.assert_policy_rejected(mutate)
+
+    def test_server_runtime_default_feature_drift_is_rejected(self) -> None:
+        def mutate(document):
+            document["feature_assertions"]["server_runtime"]["dependencies"][0]["uses_default_features"] = True
+
+        self.assert_policy_rejected(mutate)
+
     def test_esaxx_presence_and_feature_closure_is_explicit(self) -> None:
         def mutate(document):
             package = next(item for item in document["packages"] if item["identity"]["name"] == "esaxx-rs")

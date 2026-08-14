@@ -2,8 +2,8 @@
 //!
 //! This runner uses the public Rust execution-session API plus the dedicated
 //! non-installed, copy-only private evidence readback. It never receives or
-//! writes a native device pointer; exact storage is compared against a
-//! pre-append baseline and an independent BF16-to-FP16 placement oracle.
+//! writes a native device pointer; exact published storage is compared against
+//! an independent BF16-to-FP16 token-major placement oracle.
 
 use std::env;
 use std::process::ExitCode;
@@ -47,7 +47,7 @@ struct CaseEvidence {
 struct OracleEvidence {
     special_values_checked: bool,
     rounding_values_checked: bool,
-    transpose_placement_checked: bool,
+    token_major_placement_checked: bool,
     exact_storage_readback_available: bool,
 }
 
@@ -138,13 +138,13 @@ fn oracle_evidence(exact_storage_readback_available: bool) -> OracleEvidence {
     let rounding_values_checked = [(0x3f80, 0x3c00), (0x3f81, 0x3c08), (0x3f82, 0x3c10)]
         .into_iter()
         .all(|(input, expected)| bf16_to_f16_bits(input) == expected);
-    let transpose_placement_checked = expected_storage_offset(257, 17, 3, 1, 255)
-        == Some(257 * 256 + 20 * 256 + 255)
+    let token_major_placement_checked = expected_storage_offset(257, 17, 3, 1, 255)
+        == Some(20 * 4 * 256 + 256 + 255)
         && expected_storage_offset(257, 257, 0, 0, 0).is_none();
     OracleEvidence {
         special_values_checked,
         rounding_values_checked,
-        transpose_placement_checked,
+        token_major_placement_checked,
         exact_storage_readback_available,
     }
 }
@@ -195,9 +195,9 @@ fn read_plane(
     session: &ExecutionSession,
     state: &sllm_core::KvState,
     plane: u32,
-    capacity: u64,
+    published_length: u64,
 ) -> Result<Vec<u16>, String> {
-    let word_count = plane_word_count(capacity)?;
+    let word_count = plane_word_count(published_length)?;
     let byte_count = word_count
         .checked_mul(std::mem::size_of::<u16>())
         .ok_or_else(|| "KV plane byte count overflow".to_owned())?;
@@ -210,73 +210,24 @@ fn read_plane(
         .collect())
 }
 
-fn expected_plane_words(
-    baseline: &[u16],
-    capacity: u64,
-    prefix_words: &[u16],
-    start_position: u64,
-    input_words: &[u16],
-) -> Result<Vec<u16>, String> {
-    let word_count = plane_word_count(capacity)?;
-    if baseline.len() != word_count
-        || prefix_words.len() % (4 * 256) != 0
-        || input_words.len() % (4 * 256) != 0
-    {
+fn expected_plane_words(prefix_words: &[u16], input_words: &[u16]) -> Result<Vec<u16>, String> {
+    if prefix_words.len() % (4 * 256) != 0 || input_words.len() % (4 * 256) != 0 {
         return Err("KV evidence oracle received a malformed plane".to_owned());
     }
-    let prefix_tokens = prefix_words.len() / (4 * 256);
-    let input_tokens = input_words.len() / (4 * 256);
-    let mut expected = baseline.to_vec();
-    for (index, slot) in expected.iter_mut().enumerate().take(word_count) {
-        let head_stride = usize::try_from(capacity)
-            .ok()
-            .and_then(|value| value.checked_mul(256))
-            .ok_or_else(|| "KV head stride overflow".to_owned())?;
-        let head = index / head_stride;
-        let within_head = index % head_stride;
-        let token = within_head / 256;
-        let dimension = within_head % 256;
-        let token_u64 = u64::try_from(token).unwrap_or(u64::MAX);
-        let source = if token < prefix_tokens {
-            prefix_words
-                .get(token * 4 * 256 + head * 256 + dimension)
-                .copied()
-                .map(bf16_to_f16_bits)
-        } else if token_u64 >= start_position
-            && token_u64 - start_position < u64::try_from(input_tokens).unwrap_or(u64::MAX)
-        {
-            let input_token = usize::try_from(token_u64 - start_position).unwrap_or(usize::MAX);
-            input_words
-                .get(input_token * 4 * 256 + head * 256 + dimension)
-                .copied()
-                .map(bf16_to_f16_bits)
-        } else {
-            None
-        };
-        if let Some(value) = source {
-            *slot = value;
-        }
-    }
-    Ok(expected)
+    Ok(prefix_words
+        .iter()
+        .chain(input_words)
+        .copied()
+        .map(bf16_to_f16_bits)
+        .collect())
 }
 
 fn exact_plane_matches(
     actual: &[u16],
-    baseline: &[u16],
-    capacity: u64,
     prefix_words: &[u16],
-    start_position: u64,
     input_words: &[u16],
 ) -> Result<bool, String> {
-    Ok(actual
-        == expected_plane_words(
-            baseline,
-            capacity,
-            prefix_words,
-            start_position,
-            input_words,
-        )?
-        .as_slice())
+    Ok(actual == expected_plane_words(prefix_words, input_words)?.as_slice())
 }
 
 fn append_prefix(
@@ -363,18 +314,6 @@ fn run_normal_case(
     let state = session
         .create_kv_state(descriptor)
         .map_err(|error| format!("KV state creation failed: {error}"))?;
-    let baseline_k = read_plane(
-        session,
-        &state,
-        sllm_hip_sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_K,
-        capacity,
-    )?;
-    let baseline_v = read_plane(
-        session,
-        &state,
-        sllm_hip_sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_V,
-        capacity,
-    )?;
     let prefix_words = append_prefix(session, queue, &state, start_position as usize, seed + 1000)?;
     let bytes = u64::try_from(m)
         .ok()
@@ -437,7 +376,7 @@ fn run_normal_case(
         .snapshot(session)
         .map_err(|error| format!("normal KV snapshot failed: {error}"))?;
     let expected_length = start_position + u64::try_from(m).unwrap_or(u64::MAX);
-    let metadata_layout = snapshot.layout().storage_shape(capacity) == [4, capacity, 256]
+    let metadata_layout = snapshot.layout().storage_shape(capacity) == [capacity, 4, 256]
         && snapshot.layout().dtype() == DType::F16
         && snapshot.layout().encoding() == Encoding::Unquantized;
     let normal_length_generation = snapshot.length() == expected_length;
@@ -445,30 +384,16 @@ fn run_normal_case(
         session,
         &state,
         sllm_hip_sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_K,
-        capacity,
+        expected_length,
     )?;
     let actual_v = read_plane(
         session,
         &state,
         sllm_hip_sys::evidence::SLLM_HIP_KV_EVIDENCE_PLANE_V,
-        capacity,
+        expected_length,
     )?;
-    let exact_k = exact_plane_matches(
-        &actual_k,
-        &baseline_k,
-        capacity,
-        &prefix_words,
-        start_position,
-        &key_words,
-    )?;
-    let exact_v = exact_plane_matches(
-        &actual_v,
-        &baseline_v,
-        capacity,
-        &prefix_words,
-        start_position,
-        &value_words,
-    )?;
+    let exact_k = exact_plane_matches(&actual_k, &prefix_words, &key_words)?;
+    let exact_v = exact_plane_matches(&actual_v, &prefix_words, &value_words)?;
     drop(state);
     drop(key_buffer);
     drop(value_buffer);
@@ -647,7 +572,7 @@ fn run(config: &Config) -> Report {
             let pass = all_cases
                 && oracle.special_values_checked
                 && oracle.rounding_values_checked
-                && oracle.transpose_placement_checked
+                && oracle.token_major_placement_checked
                 && transactions.stale_rejection
                 && transactions.one_in_flight_rejection
                 && transactions.timeout_observed
