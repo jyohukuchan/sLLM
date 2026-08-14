@@ -1,5 +1,13 @@
 # Phase 12 MI300X validation history
 
+## 2026-08-15: VM取得延期とlocal先行queue
+
+- ユーザーが十数時間以上MI300X cloudを継続管理できないため、本Phaseを`ready`のまま保持し、VMを起動しないことを
+  固定した。
+- 待機中はPhase 13以降をlocal forward queueで先行する。再開時はlatest mainからexact `gfx942` candidateを再buildする。
+- Phase 12 matrixはQwen3.5 4B/9B BF16/FP8、contiguous-resident KV、service、性能比較のまま維持し、先行した
+  Gemma/NVFP4/MoEを自動追加しない。
+
 ## 2026-08-14: Hot Aisle実機計画の作成
 
 - Hot Aisle Small VMのMI300X x1をPhase 12に採用する計画を作成した。192 GB HBM3、8/13 CPU core、

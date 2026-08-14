@@ -1,7 +1,10 @@
 # Phase 13: モデル非依存prepared execution制御
 
-> 状態: planned
+> 状態: ready（Phase 12R完了後のlocal先行実行対象）
 > 作成日: 2026-08-14
+
+[Phase 12待機中のローカル先行実行キュー](phase12-wait-local-forward-queue.md)ではPhase 12RのCI portability repairに
+続いて本Phaseを実行する。Phase 12を完了扱いにせず、MI300X VMを起動しない。
 
 ## 目的
 

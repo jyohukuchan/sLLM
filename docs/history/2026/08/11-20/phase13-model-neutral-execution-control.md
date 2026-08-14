@@ -1,5 +1,17 @@
 # Phase 13 モデル非依存prepared execution制御履歴
 
+## 2026-08-15: Phase 12R後のqueue対象へ変更
+
+- ユーザー指示によるCI portability repairをPhase 12Rとしてlocal forward queueの先頭へ追加した。
+- 本Phaseの番号、目的、受入条件は変更せず、Phase 12R完了後の最初の製品機能Phaseとして維持した。
+
+## 2026-08-15: Phase 12待機中の先行実行対象へ変更
+
+- MI300Xを管理できる時間が確保できるまでPhase 12を`ready`で保持するユーザー指示に基づき、本Phaseをlocal queueの
+  最初の`ready` work unitとした。
+- Phase 12の完了やskipは主張せず、V620/R9700とhostだけで既存計画P13-A0〜A6を進める。
+- 完了後はGemma 4 Denseで停止せず、Phase 14、cross-model RDNA性能bridge、Phase 15へ続くqueueへ接続した。
+
 ## 2026-08-14: 計画作成とPhase繰り下げ
 
 - ユーザー指示により、Phase 9で`QwenExecutionCore`へ実装した共通化可能な実行制御を抽出する作業を

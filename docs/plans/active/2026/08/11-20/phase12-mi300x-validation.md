@@ -12,9 +12,19 @@
 
 ## 目的
 
-Phase 11 candidateをHot AisleのMI300X x1 VMで実行し、exact `gfx942`のBF16、FNUZ FP8、wave64、
+Phase 11から引き継いだlatest main candidateをHot AisleのMI300X x1 VMで実行し、exact `gfx942`のBF16、FNUZ FP8、wave64、
 contiguous-resident KV、full model、OpenAI-compatible service、性能とcleanupをfail-closedに確認する。
 VM固有tupleの証拠と、exact gfx942 kernelに一般化できる証拠を分けて記録する。
+
+## MI300Xを管理できない期間の扱い
+
+Hot Aisle VMを継続管理できる時間が確保できるまでは本Phaseを`ready`で保持し、VMを作成・起動しない。
+その間は[ローカル先行実行キュー](phase12-wait-local-forward-queue.md)に従ってPhase 13以降を進めてよい。
+これは本Phaseの完了、skip、順序変更を意味しない。
+
+先行変更後に本Phaseを開始する際は、その時点の最新mainからexact `gfx942` artifactを再buildし、dry-run、
+source/build identity、runner/report schemaを再確認する。Phase 12のmatrixはQwen3.5 4B/9B BF16/FP8、
+contiguous-resident KV、service、性能比較のまま維持し、Gemma、NVFP4、KV量子化、MoEを自動追加しない。
 
 ## hardware判断
 
@@ -47,7 +57,7 @@ Hot Aisleの2026-08-14時点の新規顧客料金は$2.99/GPU/hourでminute bill
 
 ## VM取得前の準備
 
-- Phase 11 candidateのsource/build identity、`gfx942` artifact、runner/report schemaを固定する。
+- Phase 11から引き継いだlatest main candidateのsource/build identity、`gfx942` artifact、runner/report schemaを固定する。
 - 4B BF16/FP8のverified model lockを用意し、9Bと公式27B FP8は必要なfileだけを選ぶ。
 - model cacheを圧縮・hash検証可能な形で転送するか、VM作成直後に並列取得する。モデル取得中にcompile設計を
   始めない。model/binary/raw profileをGitへ追加しない。
