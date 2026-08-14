@@ -20,7 +20,7 @@ upstream:
 local:
   files:
     - path: native/hip/src/matmul_kernel.hip.cpp
-      imported_sha256: pending-import-commit
+      imported_sha256: 82f6d5952ce75753707fcc461351f2a768055ed076a5e396894faa467d494815
 copyright:
   - Copyright (c) 2023-2026 The ggml authors
 license:
@@ -35,7 +35,7 @@ reuse:
     - Converted the input/output contract to BF16 with FP32 accumulation and checked scalar fallback for odd or unaligned reductions.
     - Fixed wave32 launch geometry for the canonical AMD targets and retained the independent sLLM dispatch registry.
 import:
-  commit: pending-import-commit
+  commit: 6444555cc2dab919bd98994c1e2cfb3941969ed1
 ```
 
 ## llama-cpp-phase9-gdn-layout-001
@@ -59,7 +59,7 @@ upstream:
 local:
   files:
     - path: native/hip/src/linear_attention_kernel.hip.cpp
-      imported_sha256: pending-import-commit
+      imported_sha256: 05faf73a9aa1e5854b5f8f81833b9cbfeaedbfe05396abe726798c19e1a22c7a
 copyright:
   - Copyright (c) 2023-2026 The ggml authors
 license:
@@ -74,7 +74,7 @@ reuse:
     - Preserved sLLM's BF16 input, transactional state publication, public ABI, and numerical operation order.
     - Enabled the transposed layout only for gfx1030 after real-GPU differential and performance testing.
 import:
-  commit: pending-import-commit
+  commit: 6444555cc2dab919bd98994c1e2cfb3941969ed1
 ```
 
 ## llama-cpp-profile-v1-sampling-001
