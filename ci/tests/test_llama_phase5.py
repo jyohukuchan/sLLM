@@ -103,51 +103,34 @@ class LlamaPhase5ContractTests(unittest.TestCase):
         self.assertEqual(conversion["tool"]["commit"], runner.PINNED_COMMIT)
         self.assertEqual(conversion["tool"]["sha256"], runner.CONVERTER_SHA256)
 
-    @staticmethod
-    def _realistic_actual_manifest_fixture() -> dict:
-        return json.loads(runner.CONVERSION_SOURCE_MANIFEST_PATH.read_text(encoding="utf-8"))
+    def test_tracked_conversion_identity_matches_the_pinned_contract(self) -> None:
+        identity = self.matrix["conversion"]
+        runner.schema_validate(identity, "conversion_identity", "tracked conversion identity")
+        self.assertEqual(identity, runner.expected_conversion_identity(runner.PINNED_TREE))
+        self.assertEqual(identity["source_manifest"]["sha256"], runner.CONVERSION_SOURCE_MANIFEST_SHA256)
+        self.assertEqual(identity["arguments"][-3:], ["--outtype", "bf16", "--no-mtp"])
+        self.assertEqual(identity["gguf"], {"architecture": "qwen35", "name": runner.SOURCE_MODEL_REVISION, "file_type": 32, "quantization_version": 2, "tensor_count": 426, "mtp_tensor_count": 0})
 
-    def test_realistic_detailed_conversion_manifest_normalizes_to_source_digest(self) -> None:
-        fixture = self._realistic_actual_manifest_fixture()
-        runner.schema_validate(fixture, "conversion_manifest", "realistic detailed conversion fixture")
-        lock = runner.validate_source_lock(runner.SOURCE_LOCK_PATH)
-        identity = runner.validate_conversion_manifest(
-            runner.CONVERSION_SOURCE_MANIFEST_PATH,
-            lock,
-            runner.CONVERSION_OUTPUT_PATH,
-        )
-        self.assertEqual(identity["sha256"], runner.CONVERSION_SOURCE_MANIFEST_SHA256)
-        self.assertEqual(identity["path"], str(runner.CONVERSION_SOURCE_MANIFEST_PATH.resolve()))
-        self.assertEqual(identity["manifest"], runner.expected_conversion_identity(runner.PINNED_TREE))
-        self.assertEqual(identity["manifest"]["arguments"][-3:], ["--outtype", "bf16", "--no-mtp"])
-        self.assertIn("--no-mtp", identity["manifest"]["arguments"])
-        self.assertEqual(identity["manifest"]["gguf"], {"architecture": "qwen35", "name": runner.SOURCE_MODEL_REVISION, "file_type": 32, "quantization_version": 2, "tensor_count": 426, "mtp_tensor_count": 0})
+    def test_conversion_manifest_schema_does_not_bind_primary_dirty_status(self) -> None:
+        schema = json.loads(runner.SCHEMA_PATH.read_text(encoding="utf-8"))
+        repository_after = schema["$defs"]["conversion_manifest"]["properties"]["repository_after"]
+        self.assertTrue(repository_after["additionalProperties"])
+        self.assertNotIn("primary_repo_status", repository_after["properties"])
+        self.assertNotIn("primary_repo_status_sha256_at_end", repository_after["properties"])
 
-    def test_detailed_fixture_does_not_bind_primary_dirty_status(self) -> None:
-        fixture = self._realistic_actual_manifest_fixture()
-        fixture["repository_after"]["primary_repo_status"] = "clean"
-        fixture["repository_after"]["primary_repo_status_sha256_at_end"] = "0" * 64
-        runner.schema_validate(fixture, "conversion_manifest", "volatile primary-status fixture")
-
-    def test_detailed_conversion_tamper_cases_fail_closed(self) -> None:
-        lock = runner.validate_source_lock(runner.SOURCE_LOCK_PATH)
+    def test_tracked_conversion_tamper_cases_fail_closed(self) -> None:
         mutations = {
-            "source file set": lambda document: document["model"]["files"][0].__setitem__("sha256", "0" * 64),
-            "conversion arguments": lambda document: document["conversion"]["run"]["args"].remove("--no-mtp"),
-            "GGUF metadata": lambda document: document["gguf_metadata_validation"].__setitem__("general_file_type", 0),
-            "output identity": lambda document: document["conversion"]["run"].__setitem__("output_size_bytes", 1),
+            "source commit": lambda identity: identity["source"].__setitem__("commit", "0" * 40),
+            "conversion arguments": lambda identity: identity["arguments"].remove("--no-mtp"),
+            "GGUF metadata": lambda identity: identity["gguf"].__setitem__("file_type", 0),
+            "output identity": lambda identity: identity["output"].__setitem__("bytes", 1),
         }
         for label, mutate in mutations.items():
-            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
-                fixture = copy.deepcopy(self._realistic_actual_manifest_fixture())
-                mutate(fixture)
-                encoded = (json.dumps(fixture, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
-                path = Path(directory) / "manifest.json"
-                path.write_bytes(encoded)
-                digest = hashlib.sha256(encoded).hexdigest()
-                with patch.object(runner, "CONVERSION_SOURCE_MANIFEST_PATH", path), patch.object(runner, "CONVERSION_SOURCE_MANIFEST_SHA256", digest):
-                    with self.assertRaises(runner.ContractError):
-                        runner.validate_conversion_manifest(path, lock, runner.CONVERSION_OUTPUT_PATH)
+            with self.subTest(label=label):
+                identity = copy.deepcopy(self.matrix["conversion"])
+                mutate(identity)
+                with self.assertRaises(runner.ContractError):
+                    runner.schema_validate(identity, "conversion_identity", f"tampered {label}")
 
     def test_distribution_stats_have_all_required_fields(self) -> None:
         stats = runner.distribution_stats([1, 2, 3, 4, 5])

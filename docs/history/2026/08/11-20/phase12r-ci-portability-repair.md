@@ -76,5 +76,9 @@
   再現した。tracked matrix/schemaのllama sourceとconverter pathをrepository-relativeへ正規化し、実conversion manifestの
   absolute runtime path検査は`runtime_conversion_arguments()`へ分離した。local llama focused 49件と修正後H0
   collected/selected `513/513`を198.192秒でPASSした。
+- candidate `045ab142817f7910eae43be702195a74dc09ee03`をtracked-only一時worktreeで再検証し、host contract 49件のうち
+  1件がuntrackedな実conversion manifestを読む残存依存を検出した。実model/cacheを必要とするruntime validatorは維持し、
+  H0の3件をtracked matrix/schemaの固定identity、volatile status非拘束、改ざん拒否へ置換した。修正後はllama focused
+  49件とH0 collected/selected `513/513`を193.852秒でPASSした。
 
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase12r-ci-portability-repair.md)
