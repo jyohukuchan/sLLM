@@ -4666,6 +4666,7 @@ sllm_completion_wait(sllm_completion_t *const raw_completion,
     }
     WaitActive wait_active(completion);
     const auto started = std::chrono::steady_clock::now();
+    uint32_t immediate_polls = 0U;
     for (;;) {
       const sllm_status_t status = poll_completion(completion, error_sink);
       if (completion->terminal && !completion->safe_to_release) {
@@ -4687,7 +4688,22 @@ sllm_completion_wait(sllm_completion_t *const raw_completion,
             error_sink, SLLM_STATUS_PUBLIC_TIMEOUT,
             "public completion wait timed out");
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      // Most inference kernels complete in tens of microseconds.  A fixed
+      // one-millisecond sleep here rounded every semantic submission up to a
+      // millisecond and dominated single-token decode.  Poll immediately for
+      // the short-kernel window, then yield and finally use a bounded sleep so
+      // long transfers do not monopolize a host core.  Timeout accounting and
+      // the fail-closed event query remain unchanged.
+      if (immediate_polls < 64U) {
+        ++immediate_polls;
+        continue;
+      }
+      if (immediate_polls < 128U) {
+        ++immediate_polls;
+        std::this_thread::yield();
+        continue;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(25));
     }
   } catch (...) {
     return sllm_public_runtime::write_error(

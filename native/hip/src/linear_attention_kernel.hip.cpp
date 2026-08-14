@@ -1,3 +1,10 @@
+// Portions derived from llama.cpp.
+// Provenance: THIRD_PARTY_NOTICES.md#llama-cpp-phase9-gdn-layout-001
+// Upstream: https://github.com/ggml-org/llama.cpp @
+// f5919bf458ef190468b5c329bb293f8a54a1e69c,
+// ggml/src/ggml-cuda/gated_delta_net.cu
+// SPDX-License-Identifier: MIT
+
 #include "linear_attention_kernel_internal.hpp"
 
 #include <cmath>
@@ -36,6 +43,23 @@ float_to_bf16_rne_bits(const float value) noexcept {
 
 __device__ __forceinline__ float softplus(const float value) noexcept {
   return fmaxf(value, 0.0F) + log1pf(expf(-fabsf(value)));
+}
+
+__device__ __forceinline__ uint64_t recurrent_state_index(
+    const uint64_t state_base, const uint32_t dimension,
+    const uint32_t key_dimension, const uint32_t head_dim) noexcept {
+#if defined(__gfx1030__)
+  // RDNA2 benefits from the wave-coalesced transposed state layout adapted
+  // from llama.cpp gated_delta_net.cu at fixed commit
+  // f5919bf458ef190468b5c329bb293f8a54a1e69c.
+  return state_base + static_cast<uint64_t>(key_dimension) * head_dim +
+         dimension;
+#else
+  // On the measured RDNA4 target, retaining one contiguous state row per
+  // thread is faster. The state is private to this exact-target runtime.
+  return state_base + static_cast<uint64_t>(dimension) * head_dim +
+         key_dimension;
+#endif
 }
 
 } // namespace
@@ -107,12 +131,16 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     return;
   }
   const uint32_t qk_head = value_head / (value_heads / qk_heads);
-  const uint64_t state_row =
-      (static_cast<uint64_t>(value_head) * head_dim + dimension) * head_dim;
+  const uint64_t state_base =
+      static_cast<uint64_t>(value_head) * head_dim * head_dim;
+  // The recurrent matrix is private runtime state, so its physical layout can
+  // be exact-target selected while the BF16/FP32 numerical boundaries and
+  // transactional double-buffer publication remain unchanged.
   for (uint32_t key_dimension = 0U; key_dimension != head_dim;
        ++key_dimension) {
-    next_recurrent_state[state_row + key_dimension] =
-        previous_recurrent_state[state_row + key_dimension];
+    const uint64_t state_index =
+        recurrent_state_index(state_base, dimension, key_dimension, head_dim);
+    next_recurrent_state[state_index] = previous_recurrent_state[state_index];
   }
 
   __shared__ float q_values[sllm_linear_attention_kernel::kHeadDim];
@@ -162,13 +190,17 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
 
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
-      next_recurrent_state[state_row + key_dimension] *= decay;
+      const uint64_t state_index =
+          recurrent_state_index(state_base, dimension, key_dimension, head_dim);
+      next_recurrent_state[state_index] *= decay;
     }
     float previous_projection = 0.0F;
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
-      previous_projection += next_recurrent_state[state_row + key_dimension] *
-                             k_values[key_dimension];
+      const uint64_t state_index =
+          recurrent_state_index(state_base, dimension, key_dimension, head_dim);
+      previous_projection +=
+          next_recurrent_state[state_index] * k_values[key_dimension];
     }
     const float value = bf16_to_float(
         convolved_qkv[qkv_row +
@@ -179,7 +211,8 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     float current_projection = 0.0F;
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
-      const uint64_t index = state_row + key_dimension;
+      const uint64_t index =
+          recurrent_state_index(state_base, dimension, key_dimension, head_dim);
       const float updated = next_recurrent_state[index] +
                             beta * residual * k_values[key_dimension];
       next_recurrent_state[index] = updated;

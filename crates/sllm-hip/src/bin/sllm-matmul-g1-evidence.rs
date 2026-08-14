@@ -427,19 +427,19 @@ fn validate_dispatch(
                 "matmul.bf16_fp32.v1",
                 "sllm_matmul_bf16_fp32_v1",
             )
-        } else if shape.m == 1 && shape.k >= 1024 && shape.n >= 1024 && target == "gfx1201" {
+        } else if shape.m > 1 && target == "gfx1201" {
             (
                 4,
                 shape.n as u32,
-                "matmul.hipblas.gemm_ex.decode.v1",
+                "matmul.hipblas.gemm_ex.v2",
                 "hipblasGemmEx",
             )
         } else if shape.m == 1 {
             (
                 3,
                 shape.n as u32,
-                "matmul.bf16_fp32.decode.v2",
-                "sllm_matmul_bf16_fp32_decode_v2",
+                "matmul.bf16_fp32.decode.v3",
+                "sllm_matmul_bf16_fp32_decode_v3",
             )
         } else {
             (

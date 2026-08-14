@@ -14,17 +14,16 @@ constexpr const char *kLogicalKernelId = "matmul.bf16_fp32.v1";
 constexpr const char *kDeviceSymbol = "sllm_matmul_bf16_fp32_v1";
 constexpr const char *kPrefillLogicalKernelId = "matmul.bf16_fp32.tiled16.v2";
 constexpr const char *kPrefillDeviceSymbol = "sllm_matmul_bf16_fp32_tiled16_v2";
-constexpr const char *kDecodeLogicalKernelId = "matmul.bf16_fp32.decode.v2";
-constexpr const char *kDecodeDeviceSymbol = "sllm_matmul_bf16_fp32_decode_v2";
-constexpr const char *kHipBlasDecodeLogicalKernelId =
-    "matmul.hipblas.gemm_ex.decode.v1";
-constexpr const char *kHipBlasDecodeDeviceSymbol = "hipblasGemmEx";
+constexpr const char *kDecodeLogicalKernelId = "matmul.bf16_fp32.decode.v3";
+constexpr const char *kDecodeDeviceSymbol = "sllm_matmul_bf16_fp32_decode_v3";
+constexpr const char *kHipBlasLogicalKernelId = "matmul.hipblas.gemm_ex.v2";
+constexpr const char *kHipBlasDeviceSymbol = "hipblasGemmEx";
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
   PrefillTiled16 = 2U,
   DecodeReduction = 3U,
-  HipBlasDecode = 4U,
+  HipBlas = 4U,
 };
 
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
@@ -34,16 +33,17 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
   if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
     return KernelVariant::Baseline;
   }
-  if (m == 1U && k >= 1024U && n >= 1024U && target != nullptr &&
-      std::strcmp(target, "gfx1201") == 0) {
-    return KernelVariant::HipBlasDecode;
+  (void)k;
+  (void)n;
+  if (m > 1U && target != nullptr && std::strcmp(target, "gfx1201") == 0) {
+    return KernelVariant::HipBlas;
   }
   return m == 1U ? KernelVariant::DecodeReduction
                  : KernelVariant::PrefillTiled16;
 }
 
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
-  return variant == KernelVariant::HipBlasDecode ? kHipBlasDecodeLogicalKernelId
+  return variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReduction
              ? kDecodeLogicalKernelId
              : (variant == KernelVariant::PrefillTiled16
@@ -52,7 +52,7 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 }
 
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
-  return variant == KernelVariant::HipBlasDecode ? kHipBlasDecodeDeviceSymbol
+  return variant == KernelVariant::HipBlas ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReduction
              ? kDecodeDeviceSymbol
              : (variant == KernelVariant::PrefillTiled16 ? kPrefillDeviceSymbol
@@ -61,7 +61,7 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
 
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n) noexcept {
-  return variant == KernelVariant::HipBlasDecode ? static_cast<uint32_t>(n)
+  return variant == KernelVariant::HipBlas ? static_cast<uint32_t>(n)
          : variant == KernelVariant::DecodeReduction
              ? static_cast<uint32_t>(n)
              : (variant == KernelVariant::PrefillTiled16

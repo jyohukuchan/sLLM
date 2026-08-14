@@ -1,3 +1,10 @@
+// Portions derived from llama.cpp.
+// Provenance: THIRD_PARTY_NOTICES.md#llama-cpp-phase9-mmvf-001
+// Upstream: https://github.com/ggml-org/llama.cpp @
+// f5919bf458ef190468b5c329bb293f8a54a1e69c,
+// ggml/src/ggml-cuda/mmvf.cu
+// SPDX-License-Identifier: MIT
+
 #include "matmul_kernel_internal.hpp"
 
 #include <cstdint>
@@ -94,8 +101,14 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_tiled16_v2(
 
 // Decode is a matrix-vector product. One workgroup owns one output column and
 // reduces K cooperatively; this avoids launching mostly idle 16x16 tiles.
+//
+// The paired BF16 loads and two-level wave reduction are adapted from the
+// floating MMVF organization in llama.cpp mmvf.cu at fixed commit
+// f5919bf458ef190468b5c329bb293f8a54a1e69c. The ggml tensor/runtime and
+// fusion machinery are deliberately not imported; this kernel retains sLLM's
+// BF16 input/output and FP32 accumulation contract.
 extern "C" __global__
-__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v2(
+__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
     const uint16_t *const activation, const uint16_t *const weight,
     uint16_t *const output, const uint64_t k, const uint64_t n) {
   const uint64_t column = blockIdx.x;
@@ -103,22 +116,53 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v2(
     return;
   }
   float partial = 0.0F;
-  for (uint64_t reduction = threadIdx.x; reduction < k;
-       reduction += blockDim.x) {
-    partial += bf16_to_float(activation[reduction]) *
-               bf16_to_float(weight[column * k + reduction]);
-  }
-  __shared__ float reductions[256];
-  reductions[threadIdx.x] = partial;
-  __syncthreads();
-  for (uint32_t stride = 128U; stride != 0U; stride >>= 1U) {
-    if (threadIdx.x < stride) {
-      reductions[threadIdx.x] += reductions[threadIdx.x + stride];
+  const uint16_t *const weight_row = weight + column * k;
+  const bool paired =
+      (k & UINT64_C(1)) == 0U && ((reinterpret_cast<uintptr_t>(activation) |
+                                   reinterpret_cast<uintptr_t>(weight_row)) &
+                                  static_cast<uintptr_t>(3U)) == 0U;
+  if (paired) {
+    const auto *const activation_pairs =
+        reinterpret_cast<const uint32_t *>(activation);
+    const auto *const weight_pairs =
+        reinterpret_cast<const uint32_t *>(weight_row);
+    const uint64_t pair_count = k / 2U;
+    for (uint64_t pair = threadIdx.x; pair < pair_count; pair += blockDim.x) {
+      const uint32_t activation_pair = activation_pairs[pair];
+      const uint32_t weight_pair = weight_pairs[pair];
+      partial += bf16_to_float(static_cast<uint16_t>(activation_pair)) *
+                 bf16_to_float(static_cast<uint16_t>(weight_pair));
+      partial += bf16_to_float(static_cast<uint16_t>(activation_pair >> 16U)) *
+                 bf16_to_float(static_cast<uint16_t>(weight_pair >> 16U));
     }
-    __syncthreads();
+  } else {
+    for (uint64_t reduction = threadIdx.x; reduction < k;
+         reduction += blockDim.x) {
+      partial += bf16_to_float(activation[reduction]) *
+                 bf16_to_float(weight_row[reduction]);
+    }
   }
-  if (threadIdx.x == 0U) {
-    output[column] = float_to_bf16_rne_bits(reductions[0]);
+
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial += __shfl_down(partial, offset, 32);
+  }
+  __shared__ float wave_sums[8];
+  const uint32_t lane = threadIdx.x & 31U;
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave] = partial;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial = lane < 8U ? wave_sums[lane] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial += __shfl_down(partial, offset, 32);
+    }
+    if (lane == 0U) {
+      output[column] = float_to_bf16_rne_bits(partial);
+    }
   }
 }
 
@@ -128,11 +172,11 @@ hipError_t launch(const uint16_t *const activation,
                   const uint64_t m, const uint64_t k, const uint64_t n,
                   const KernelVariant variant,
                   const hipStream_t stream) noexcept {
-  if (variant == KernelVariant::HipBlasDecode) {
+  if (variant == KernelVariant::HipBlas) {
     return hipErrorInvalidValue;
   }
   if (variant == KernelVariant::DecodeReduction) {
-    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_v2,
+    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_v3,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
                        stream, activation, weight, output, k, n);
   } else if (variant == KernelVariant::PrefillTiled16) {

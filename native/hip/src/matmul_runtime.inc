@@ -410,7 +410,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         plan->matmul_metadata.n, arch_name);
     hipError_t launch_status = hipSuccess;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlasDecode) {
+    if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlas) {
       if (plan->context->matmul_blas_handle == nullptr) {
         launch_status = hipErrorInvalidHandle;
       } else {

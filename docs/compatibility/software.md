@@ -212,6 +212,20 @@ Phase 8のproduction attentionはFA2-styleだけである。RDNA4 `gfx1200`/`gfx
 FlashAttention-3-like pathは将来のtarget-specific比較課題であり、このevidenceやPhase 8完了条件には
 含めない。
 
+### 2026-08-14 Phase 9 engine-structure evidence
+
+同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0 tupleで、
+canonical V620 `gfx1030`とR9700 `gfx1201`のtarget別release binaryを実行した。HIP Graph PoC、Matmul
+17 case、4B short-odd/32x32、2B V620、9B R9700をHIP-only、fallbackなし、cleanup 0でPASSした。
+R9700 optimized serverのraw OpenAI non-stream/SSEもPASSし、shutdown時のmodel/request/workspace current
+bytesは0だった。
+
+4B short-odd中央値はV620がTTFT/E2E 0.306/0.855秒、prefill/decode 56.91/29.69 tok/s、R9700が
+0.051/0.490秒、377.46/37.20 tok/sである。これは該当dirty integration candidateとlocal tupleの限定evidenceで、
+immutable release identity、GA kernel 6.8、別ROCm root、別GPU/SKU、multi-request、長時間安定性を証明しない。
+software lifecycleは`experimental`のままとする。詳細は
+[Phase 9 history](../history/2026/08/11-20/phase9-engine-structural-optimization.md)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

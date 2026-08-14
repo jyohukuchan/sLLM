@@ -167,6 +167,29 @@ non-stream、SSE、stop、HIP dispatch後disconnect、1023/1024/1025 logical cap
 mixed-GPU hostで複数GPUを可視化したままglobal physical indexを渡す構成は対応外とし、stable UUIDによる
 単独可視化と論理device 0を必須運用条件とする。他SKU、別tuple、multi-GPU、長時間安定性へ一般化しない。
 
+### 2026-08-14 Phase 9 engine-structure evidence
+
+同じlocal tupleとcanonical V620 `gfx1030` / R9700 `gfx1201`で、HIP Graph capture/replay、BF16
+M=1 MMVF v3、Qwen3.5 GDN private state layout、same-stream completion segment、target別prefill providerを
+実行した。HIP Graph PoCはsLLM kernel 1 nodeとhipBLAS混在2 nodeでpointer/scalar更新、独立oracle、cleanupを
+両targetでPASSした。productionはrequestごとのgraph instantiateを行わず、KV appendを明示境界とする
+segment pathを採用したため、PoC結果をfull production graph対応へ一般化しない。
+
+Matmul 17 caseは両targetでexact target、numerical/classification oracle、fallbackなし、cleanup 0をPASSした。
+M=1,K=2560,N=9216はV620 259.282 us、R9700 75.002 usで、M=1は両targetのMMVF v3を選択する。
+M>1はV620のtiled16を維持し、R9700だけcontext-lifetime hipBLAS GEMMExを選択する。GDN stateはV620だけ
+wave-coalesced transposed layout、R9700はthread-contiguous rowであり、別RDNA2/RDNA4 targetへ推論しない。
+
+4B short-odd 3 warmup + 10 measured中央値はV620がTTFT 0.306 s、prefill 56.91、decode 29.69 tok/s、
+E2E 0.855 s、R9700が0.051 s、377.46、37.20 tok/s、0.490 sだった。HIP-only、fallbackなし、resident/peak
+VRAMは8,411,592,192/8,540,569,292 bytes、cleanup 0である。32/32、2B V620、9B R9700、R9700の
+OpenAI non-stream/SSEもPASSした。scopeはQwen3.5 BF16 single requestと明示したshapeだけであり、
+multi-request、production全体のgraph replay、別SKU/tuple、長時間安定性を証明しない。
+
+残差profileはmemory-bound M=1 matvecを支配要因とし、full attentionは支配的でなかった。RDNA4 FA3-likeは
+引き続き将来のtarget-specific比較であり、Phase 9 evidenceへ含めない。詳細値とdigestは
+`ci/matrix/phase9-profile-summary-v1.json`を正とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

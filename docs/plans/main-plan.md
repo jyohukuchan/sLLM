@@ -237,6 +237,8 @@
 ## 開発運用上の決定
 
 - Gitで追跡するのはsource、文書、小さなfixture、manifest、hash、summaryとし、model、binary、raw trace/profile、large model slice、生成物は追跡しない。詳細は[repository hygiene方針](../development/repository-hygiene.md)を正本とする。
+- registered worktreeは有効な並行開発・evidence用途を持つため、個数だけで作業やpushを停止しない。9個以上、
+  missing/prunable registration、clean・unlocked・非mainで14日超の候補は整理を促す警告とし、自動削除しない。
 - 無人での進行を優先しつつsecret exposureを最小化する。専用local hostでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentがtask scope内で`sudo -n`を使う。恒久方針は[credential方針](../security/credentials.md)を正本とする。
 - 現在の既定profileは`trusted-solo-development`とし、外部contribution実行時とrelease時の要件を分離する。使っていないprofileの要件は現在の開発をblockしない。
 - main agentは調査・実装を直接行える。subagentは並列化、分離、専門的contextに効果がある場合だけ任意に使い、subagent利用や特定の`codex exec`実行方式を完了条件にしない。
@@ -276,18 +278,22 @@
 8. BF16を最適化する。
    - RDNA2。
    - RDNA4。
-9. model本体のFP8 W8A8に対応する。
+9. 実行エンジンの構造最適化を行う。
+   - dtype非依存のdecode graph/segment実行とhost同期削減。
+   - BF16 M=1 GEMV/MMVF、Qwen3.5 GDN、MLP・RMSNorm等のprofile-driven fusion。
+   - prefill providerを実shapeで再評価し、llama.cppとの差をhost、launch、kernel、memoryへ再分解する。
+10. model本体のFP8 W8A8に対応する。
    - RDNA4。
    - RDNA2。
-10. FP8/BF16実装をCDNA3へ移植する。
-11. MI300X単体でCDNA3実機確認を行う。
-12. google/gemma-4-12Bへ対応する。
-13. Weight NVFP4へ対応する。
-14. KV cache FP8/NVFP4へ対応する。
-15. MTP、visionへ対応する。
-16. Gemma4またはQwen3.5のMoEへ対応する。
-17. 残りの初期バージョン機能を実装する。
-18. 人間がREADMEを整備し、発表する。
+11. FP8/BF16実装をCDNA3へ移植する。
+12. MI300X単体でCDNA3実機確認を行う。
+13. google/gemma-4-12Bへ対応する。
+14. Weight NVFP4へ対応する。
+15. KV cache FP8/NVFP4へ対応する。
+16. MTP、visionへ対応する。
+17. Gemma4またはQwen3.5のMoEへ対応する。
+18. 残りの初期バージョン機能を実装する。
+19. 人間がREADMEを整備し、発表する。
 
 ## Phase概要と進捗
 
@@ -413,12 +419,31 @@
 - 計画は[Phase 8 archive](archive/2026/08/11-20/phase8-bf16-optimization.md)、詳細は
   [Phase 8 history](../history/2026/08/11-20/phase8-bf16-optimization.md)を正とする。
 
+### Phase 9: 実行エンジン構造最適化（完了）
+
+- true completion境界の固定1 ms sleepをadaptive pollへ置換し、same-stream submission ownerをKV/terminal
+  segmentまで保持した。境界後の各opはblocking waitせずterminal queryだけを行い、transactional state、
+  vAttention owner、prepared semantic planを維持した。
+- kernel-only/hipBLAS混在HIP Graph PoCを両targetでPASSした。productionはrequestごとのinstantiateを避け、
+  KV appendを明示cutとするsegment pathを選択した。full production graph replayは残差共通最適化backlogとする。
+- llama.cpp固定commitからboundedにadaptしたBF16 MMVF v3をM=1へ採用し、V620だけQwen GDN recurrent
+  stateをwave-coalesced配置にした。R9700のM>1 prefillはhipBLAS GEMMEx、V620はtiled16を選択した。
+- 4B short-odd中央値はV620でTTFT 0.306秒、E2E 0.855秒、prefill 56.91、decode 29.69 tok/s、R9700で
+  0.051秒、0.490秒、377.46、37.20 tok/sとなった。Phase 8比E2Eは約11.3倍/18.2倍、固定llama.cppとの差は
+  約1.81倍/1.48倍まで縮小した。2B/9B spot、32/32、Matmul 17 case、OpenAI non-stream/SSEもPASSした。
+- 残差は主にmemory-bound M=1 matvecとhost launchであり、full attentionは支配要因ではない。次はPhase 10の
+  model本体FP8 W8A8へ進み、production graph/command-listとMLP fusionはfresh profile後の共通backlogとする。
+- 詳細は[Phase 9 archive](archive/2026/08/11-20/phase9-engine-structural-optimization.md)、判断と実績は
+  [Phase 9 history](../history/2026/08/11-20/phase9-engine-structural-optimization.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 8まで完了した。詳細evidenceをこの文書へ重複掲載せず、対応するarchive/historyを正とする。
-- 開発順序の次はPhase 9のmodel本体FP8 W8A8である。Phase 9 active planと受入条件は未固定であり、
-  RDNA4を先に成立させてからRDNA2へ適用する。Phase 8の残差性能backlogとRDNA4 FA3-likeは
-  非blocking follow-upとして別管理する。
+- Phase 9まで完了した。次はPhase 10のmodel本体FP8 W8A8であり、CDNA3移植はPhase 11、MI300X実機確認は
+  Phase 12、Gemma 4はPhase 13、Weight NVFP4はPhase 14とする。
+- Phase 9でdtype非依存のcompletion/segment骨格とtarget別BF16 providerを固定した。Phase 10はこの境界を
+  再利用してFP8 encoding、weight layout、kernel/providerを追加する。Phase 14開始前にもfresh profileで
+  memory-bound matvec、production graph/command-list、MLP fusionの優先順位を再確認する。RDNA4 FA3-likeは
+  attentionが支配要因になった時の非blocking follow-upとして別管理する。
 - Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の
   non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
   [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。

@@ -55,6 +55,32 @@ struct AttentionPreprocessExecution {
     position_mode: AttentionPreprocessPositionMode,
 }
 
+#[derive(Clone, Copy)]
+struct StatefulExecution {
+    token_count: u64,
+    start_position: u64,
+    expected_length: u64,
+}
+
+/// Completion owners retained until an explicit execution-segment boundary.
+/// All submissions use the request's single ordered HIP stream, so a boundary
+/// event proves that earlier work is terminal before these owners are polled.
+/// Retaining the owners also keeps every buffer and transactional state alive.
+enum PendingSegmentSubmission {
+    Semantic {
+        label: String,
+        submission: Box<Submission>,
+    },
+    CausalAttention {
+        label: String,
+        submission: Box<CausalAttentionSubmission>,
+    },
+    LinearAttention {
+        label: String,
+        submission: Box<LinearAttentionSubmission>,
+    },
+}
+
 /// Immutable, request-local dispatch audit published after a successful
 /// transition.  The counters are accumulated from accepted backend evidence;
 /// they are not estimates of graph size.
@@ -1177,10 +1203,11 @@ impl QwenExecutionCore {
     ) -> Result<Vec<i32>, QwenExecutionError> {
         let nodes = self.graph.nodes().to_vec();
         let mut argmax = None;
+        let mut pending = Vec::new();
         for node in &nodes {
             match node.kind() {
                 QwenGraphNodeKind::Semantic(_) => {
-                    let output = self.execute_semantic(node, token_count)?;
+                    let output = self.execute_semantic(node, token_count, &mut pending)?;
                     if let Some(output) = output {
                         if argmax.replace(output).is_some() {
                             return Err(QwenExecutionError::InvalidGraph(
@@ -1209,30 +1236,43 @@ impl QwenExecutionCore {
                         start_position,
                         position_mode,
                     },
+                    &mut pending,
                 )?,
-                QwenGraphNodeKind::FullKvAppend { layer, state } => {
-                    self.execute_kv_append(node, layer, state, token_count, start_position)?
-                }
+                QwenGraphNodeKind::FullKvAppend { layer, state } => self.execute_kv_append(
+                    node,
+                    layer,
+                    state,
+                    token_count,
+                    start_position,
+                    &mut pending,
+                )?,
                 QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
                     .execute_causal_attention(
                         node,
                         layer,
                         state,
-                        token_count,
-                        start_position,
-                        expected_length,
+                        StatefulExecution {
+                            token_count,
+                            start_position,
+                            expected_length,
+                        },
+                        &mut pending,
                     )?,
                 QwenGraphNodeKind::LinearAttentionState { layer, state, .. } => self
                     .execute_linear_attention(
                         node,
                         layer,
                         state,
-                        token_count,
-                        start_position,
-                        expected_length,
+                        StatefulExecution {
+                            token_count,
+                            start_position,
+                            expected_length,
+                        },
+                        &mut pending,
                     )?,
             }
         }
+        self.flush_segment(&mut pending)?;
         argmax.ok_or_else(|| {
             QwenExecutionError::InvalidGraph("graph has no argmax output node".to_owned())
         })
@@ -1325,6 +1365,7 @@ impl QwenExecutionCore {
         &self,
         node: &QwenGraphNode,
         token_count: u64,
+        pending: &mut Vec<PendingSegmentSubmission>,
     ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
         let operation = node.operation().ok_or_else(|| {
             QwenExecutionError::InvalidGraph(format!(
@@ -1363,11 +1404,19 @@ impl QwenExecutionCore {
             output_bindings,
             Some(token_count),
         )?;
-        wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
-        self.record_dispatch(submission.dispatch())?;
         if kind != SemanticOpKind::Argmax {
+            pending.push(PendingSegmentSubmission::Semantic {
+                label: node.label().to_owned(),
+                submission: Box::new(submission),
+            });
             return Ok(None);
         }
+        // The terminal argmax completion is the final stream-ordered segment
+        // boundary. Once it succeeds, every earlier completion can be checked
+        // without serially sleeping between individual semantic operations.
+        wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
+        self.flush_segment(pending)?;
+        self.record_dispatch(submission.dispatch())?;
         if node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(
                 "argmax node must have exactly one output".to_owned(),
@@ -1396,6 +1445,7 @@ impl QwenExecutionCore {
         &self,
         node: &QwenGraphNode,
         execution: AttentionPreprocessExecution,
+        pending: &mut Vec<PendingSegmentSubmission>,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 5 || node.outputs().len() != 3 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1422,10 +1472,11 @@ impl QwenExecutionCore {
         let outputs = self.bind_many(node.outputs(), execution.token_count, AccessMode::Write)?;
         // Position is part of this descriptor, so decode steps with the same
         // token count are not interchangeable prepared operations.
-        let mut submission =
-            self.submit_semantic(node.label(), descriptor, inputs, outputs, None)?;
-        wait_submission_success(&mut submission, self.completion_timeout, node.label())?;
-        self.record_dispatch(submission.dispatch())?;
+        let submission = self.submit_semantic(node.label(), descriptor, inputs, outputs, None)?;
+        pending.push(PendingSegmentSubmission::Semantic {
+            label: node.label().to_owned(),
+            submission: Box::new(submission),
+        });
         let _ = execution.layer;
         Ok(())
     }
@@ -1437,6 +1488,7 @@ impl QwenExecutionCore {
         descriptor: KvStateDescriptor,
         token_count: u64,
         start_position: u64,
+        pending: &mut Vec<PendingSegmentSubmission>,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 2 || !node.outputs().is_empty() {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1456,6 +1508,10 @@ impl QwenExecutionCore {
             start_position,
         )?;
         wait_kv_append_success(&mut submission, self.completion_timeout, node.label())?;
+        // KV publication is an unavoidable state boundary. The append event
+        // is after all earlier work on the stream, so drain the preceding
+        // segment now and then publish this state transition.
+        self.flush_segment(pending)?;
         self.record_dispatch(submission.dispatch())
     }
 
@@ -1464,9 +1520,8 @@ impl QwenExecutionCore {
         node: &QwenGraphNode,
         layer: u32,
         state_descriptor: KvStateDescriptor,
-        token_count: u64,
-        start_position: u64,
-        expected_length: u64,
+        execution: StatefulExecution,
+        pending: &mut Vec<PendingSegmentSubmission>,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 1 || node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1475,16 +1530,22 @@ impl QwenExecutionCore {
             )));
         }
         let state = self.kv_state(layer, state_descriptor)?;
-        let descriptor =
-            CausalAttentionDescriptor::new(start_position, token_count, expected_length)
-                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-        let query = self.bind(node.inputs()[0], token_count, AccessMode::Read)?;
-        let output = self.bind(node.outputs()[0], token_count, AccessMode::Write)?;
-        let mut submission =
+        let descriptor = CausalAttentionDescriptor::new(
+            execution.start_position,
+            execution.token_count,
+            execution.expected_length,
+        )
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let query = self.bind(node.inputs()[0], execution.token_count, AccessMode::Read)?;
+        let output = self.bind(node.outputs()[0], execution.token_count, AccessMode::Write)?;
+        let submission =
             self.session
                 .causal_attention(state, &self.queue, query, output, descriptor)?;
-        wait_causal_attention_success(&mut submission, self.completion_timeout, node.label())?;
-        self.record_dispatch(submission.dispatch())
+        pending.push(PendingSegmentSubmission::CausalAttention {
+            label: node.label().to_owned(),
+            submission: Box::new(submission),
+        });
+        Ok(())
     }
 
     fn execute_linear_attention(
@@ -1492,9 +1553,8 @@ impl QwenExecutionCore {
         node: &QwenGraphNode,
         layer: u32,
         state_descriptor: LinearAttentionStateDescriptor,
-        token_count: u64,
-        start_position: u64,
-        expected_length: u64,
+        execution: StatefulExecution,
+        pending: &mut Vec<PendingSegmentSubmission>,
     ) -> Result<(), QwenExecutionError> {
         if node.inputs().len() != 8 || node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -1503,8 +1563,8 @@ impl QwenExecutionCore {
             )));
         }
         let state = self.linear_state(layer, state_descriptor)?;
-        let inputs = self.bind_many(node.inputs(), token_count, AccessMode::Read)?;
-        let output = self.bind(node.outputs()[0], token_count, AccessMode::Write)?;
+        let inputs = self.bind_many(node.inputs(), execution.token_count, AccessMode::Read)?;
+        let output = self.bind(node.outputs()[0], execution.token_count, AccessMode::Write)?;
         let bindings = LinearAttentionBindings::new(
             inputs[0].clone(),
             inputs[1].clone(),
@@ -1516,14 +1576,43 @@ impl QwenExecutionCore {
             inputs[7].clone(),
             output,
         );
-        let descriptor =
-            LinearAttentionDescriptor::new(start_position, token_count, expected_length)
-                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-        let mut submission =
-            self.session
-                .linear_attention(state, &self.queue, bindings, descriptor)?;
-        wait_linear_attention_success(&mut submission, self.completion_timeout, node.label())?;
-        self.record_dispatch(submission.dispatch())
+        let descriptor = LinearAttentionDescriptor::new(
+            execution.start_position,
+            execution.token_count,
+            execution.expected_length,
+        )
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let submission = self
+            .session
+            .linear_attention(state, &self.queue, bindings, descriptor)?;
+        pending.push(PendingSegmentSubmission::LinearAttention {
+            label: node.label().to_owned(),
+            submission: Box::new(submission),
+        });
+        Ok(())
+    }
+
+    fn flush_segment(
+        &self,
+        pending: &mut Vec<PendingSegmentSubmission>,
+    ) -> Result<(), QwenExecutionError> {
+        for mut retained in pending.drain(..) {
+            match &mut retained {
+                PendingSegmentSubmission::Semantic { label, submission } => {
+                    require_terminal_success(label, submission.query()?)?;
+                    self.record_dispatch(submission.dispatch())?;
+                }
+                PendingSegmentSubmission::CausalAttention { label, submission } => {
+                    require_terminal_success(label, submission.query()?)?;
+                    self.record_dispatch(submission.dispatch())?;
+                }
+                PendingSegmentSubmission::LinearAttention { label, submission } => {
+                    require_terminal_success(label, submission.query()?)?;
+                    self.record_dispatch(submission.dispatch())?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn record_dispatch(&self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
@@ -2832,22 +2921,6 @@ fn wait_submission_success(
 
 fn wait_kv_append_success(
     submission: &mut KvStateAppendSubmission,
-    timeout: Duration,
-    stage: &str,
-) -> Result<(), QwenExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
-}
-
-fn wait_causal_attention_success(
-    submission: &mut CausalAttentionSubmission,
-    timeout: Duration,
-    stage: &str,
-) -> Result<(), QwenExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
-}
-
-fn wait_linear_attention_success(
-    submission: &mut LinearAttentionSubmission,
     timeout: Duration,
     stage: &str,
 ) -> Result<(), QwenExecutionError> {

@@ -1,0 +1,226 @@
+{
+  "schema_version": "phase9-profile-summary-v1",
+  "profile_id": "qwen35-bf16-single-request-phase9-v1",
+  "recorded_at": "2026-08-14",
+  "candidate": {
+    "base_commit": "7328b8be889e2a424f322518f3fe5f8df0547b7d",
+    "state": "dirty-integration-candidate",
+    "model_lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "rocm": "7.14.0",
+    "llvm_major": 23,
+    "wavefront_size": 32
+  },
+  "protocol": {
+    "batch_size": 1,
+    "warmups": 3,
+    "measured": 10,
+    "correctness_control_requests": 1,
+    "raw_reports": "local-only; SHA-256 values below bind the reports",
+    "llama_cpp_commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c"
+  },
+  "optimizations": {
+    "completion": "adaptive immediate/yield/25us polling at true boundaries",
+    "execution": "same-stream segment retention; per-op completions queried only after KV/terminal boundary",
+    "decode_matvec": "BF16 paired-load wave32 MMVF v3 for M=1 on both targets",
+    "gdn": "wave-coalesced recurrent state layout on gfx1030; contiguous row on gfx1201",
+    "prefill": "tiled16 on gfx1030; hipBLAS GEMMEx for M>1 on gfx1201",
+    "full_attention": "unchanged; post-A4 profile did not identify it as a dominant residual"
+  },
+  "hip_graph_poc": [
+    {
+      "target": "gfx1030",
+      "result": "PASS",
+      "kernel_nodes": 1,
+      "mixed_hipblas_nodes": 2,
+      "kernel_average_replay_with_update_ns": 25921,
+      "mixed_average_replay_with_update_ns": 35718,
+      "pointer_scalar_update": true,
+      "cleanup_terminal": true,
+      "raw_report_sha256": "884f09c76416cab2cea5d8a0c91e75b0e7a4c16fc12dbb274f03b8a99460c0e6"
+    },
+    {
+      "target": "gfx1201",
+      "result": "PASS",
+      "kernel_nodes": 1,
+      "mixed_hipblas_nodes": 2,
+      "kernel_average_replay_with_update_ns": 14967,
+      "mixed_average_replay_with_update_ns": 16262,
+      "pointer_scalar_update": true,
+      "cleanup_terminal": true,
+      "raw_report_sha256": "1682d965680123b8dd105de93775f05ec108c352b1beb1b49a4fea3d495f59e1"
+    }
+  ],
+  "targets": [
+    {
+      "target": "gfx1030",
+      "product": "AMD Radeon Pro V620",
+      "short_odd": {
+        "input_tokens": 17,
+        "output_tokens": 17,
+        "phase8": {
+          "ttft_seconds_median": 1.09873475,
+          "e2e_seconds_median": 9.65332349,
+          "prefill_tokens_per_second_median": 15.555081819067265,
+          "decode_tokens_per_second_median": 1.8760524454234915
+        },
+        "phase9": {
+          "ttft_seconds_median": 0.306193734,
+          "e2e_seconds_median": 0.854733572,
+          "prefill_tokens_per_second_median": 56.91321471280253,
+          "decode_tokens_per_second_median": 29.692471546214858,
+          "tpot_seconds_median": 0.033771929,
+          "fallback_used": false,
+          "cleanup_terminal_zero": true,
+          "submissions_per_request": 7956,
+          "kernels_per_request": 8364,
+          "resident_vram_bytes": 8411592192,
+          "peak_vram_bytes": 8540569292,
+          "raw_report_sha256": "50c5be7fd2ea020d9e6832f5b6d4750ff7e1f4bf591e6758435ddbfb11487154"
+        },
+        "fixed_llama_cpp": {
+          "ttft_seconds_median": 0.082284902,
+          "e2e_seconds_median": 0.4727804225,
+          "prefill_tokens_per_second_median": 208.0750050270876,
+          "decode_tokens_per_second_median": 41.00401974516577
+        }
+      },
+      "surrogate_32x32": {
+        "ttft_seconds_median": 0.314628252,
+        "e2e_seconds_median": 1.351277024,
+        "prefill_tokens_per_second_median": 103.89980347124893,
+        "decode_tokens_per_second_median": 30.19199056608986,
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "submissions_per_request": 14976,
+        "kernels_per_request": 15744,
+        "raw_report_sha256": "7ba160fbd58564e1b60476f6079e018b2c4ef64080fdc53e98087f383a078b7f"
+      },
+      "matmul_oracle": {
+        "result": "PASS",
+        "cases": 17,
+        "large_m1_kernel_ns": 259282,
+        "raw_report_sha256": "2cd5112a092479339df52a708ca126466db60464a1d7e1c66922bca1f4cbeefa"
+      }
+    },
+    {
+      "target": "gfx1201",
+      "product": "AMD Radeon AI PRO R9700",
+      "short_odd": {
+        "input_tokens": 17,
+        "output_tokens": 17,
+        "phase8": {
+          "ttft_seconds_median": 0.683373641,
+          "e2e_seconds_median": 8.8907367425,
+          "prefill_tokens_per_second_median": 25.10172797625555,
+          "decode_tokens_per_second_median": 1.9513821885073428
+        },
+        "phase9": {
+          "ttft_seconds_median": 0.051448891,
+          "e2e_seconds_median": 0.489728226,
+          "prefill_tokens_per_second_median": 377.4576266068371,
+          "decode_tokens_per_second_median": 37.195327435558525,
+          "tpot_seconds_median": 0.026917256,
+          "fallback_used": false,
+          "cleanup_terminal_zero": true,
+          "submissions_per_request": 7956,
+          "kernels_per_request": 8364,
+          "resident_vram_bytes": 8411592192,
+          "peak_vram_bytes": 8540569292,
+          "raw_report_sha256": "fe3dd37628e2ce99f46cb14af8b0df1411ddcc6bde1daeccc19ada74fd4dff5d"
+        },
+        "fixed_llama_cpp": {
+          "ttft_seconds_median": 0.02463295,
+          "e2e_seconds_median": 0.3309201265,
+          "prefill_tokens_per_second_median": 706.7666832189,
+          "decode_tokens_per_second_median": 52.27143024607773
+        }
+      },
+      "surrogate_32x32": {
+        "ttft_seconds_median": 0.06791038,
+        "e2e_seconds_median": 0.935709361,
+        "prefill_tokens_per_second_median": 524.8814473238493,
+        "decode_tokens_per_second_median": 36.435549282048726,
+        "fallback_used": false,
+        "cleanup_terminal_zero": true,
+        "submissions_per_request": 14976,
+        "kernels_per_request": 15744,
+        "raw_report_sha256": "46e07deb05e78e9e547c41333dc41fcc15b02afa414671b49ee26a9f235f0e07"
+      },
+      "matmul_oracle": {
+        "result": "PASS",
+        "cases": 17,
+        "large_m1_kernel_ns": 75002,
+        "raw_report_sha256": "5a6c0731cc738aadddcf64a921886e9684f00572617cb4596b4088842a9f1cf4"
+      }
+    }
+  ],
+  "integration": {
+    "model_spot_checks": [
+      {
+        "model": "Qwen3.5-2B",
+        "target": "gfx1030",
+        "ttft_seconds_median": 0.160457317,
+        "e2e_seconds_median": 0.478802458,
+        "prefill_tokens_per_second_median": 108.27982924423794,
+        "decode_tokens_per_second_median": 51.6427137324244,
+        "cleanup_terminal_zero": true,
+        "raw_report_sha256": "c9fa082f20b5bbf93090ea250bb1e1cc1e5cfaf32bae1cec484440e4ce6f456c"
+      },
+      {
+        "model": "Qwen3.5-9B",
+        "target": "gfx1201",
+        "ttft_seconds_median": 0.063949719,
+        "e2e_seconds_median": 0.68445429,
+        "prefill_tokens_per_second_median": 293.85682116788274,
+        "decode_tokens_per_second_median": 26.109515199631428,
+        "cleanup_terminal_zero": true,
+        "raw_report_sha256": "17ec071eccdd9263808300d5cd827537deef93cd1f1fd8e0137cf4edac9ddad6"
+      }
+    ],
+    "openai_service": {
+      "target": "gfx1201",
+      "result": "PASS",
+      "non_stream": true,
+      "sse": true,
+      "fallback_used": false,
+      "cleanup_terminal_zero": true,
+      "non_stream_sha256": "945b54d832113750156b343158b6eeec38c7dd2b153f4812c803b57756a6adbc",
+      "sse_sha256": "a10828a935b83b59303347e6b144b577c9c556f39dd4a44bf29e3cb952696970"
+    },
+    "o2": {
+      "protocol": "seven canonical 4B cases per target; one correctness control, three warmups, ten measured",
+      "result": "PASS",
+      "reports_passed": 14,
+      "reports_expected": 14,
+      "fallback_used": false,
+      "cleanup_terminal_zero": true,
+      "gfx1030": {
+        "prefill_long_e2e_seconds_median": 15.066176859,
+        "prefill_long_prefill_tokens_per_second_median": 106.98983990962307,
+        "prefill_long_decode_tokens_per_second_median": 23.300258661418546,
+        "decode_long_e2e_seconds_median": 9.049946966,
+        "decode_long_decode_tokens_per_second_median": 29.224219105600728,
+        "prefill_long_raw_report_sha256": "015f73adb433be87ca3ec65e74610eae80e26e5c1d3f538a52ce26e8b61ec238",
+        "decode_long_raw_report_sha256": "9fc74959a57ec842025f3aa71fe8c63c4cf5a00a5a8dd8eb95898ba686c15a70"
+      },
+      "gfx1201": {
+        "prefill_long_e2e_seconds_median": 5.818278302,
+        "prefill_long_prefill_tokens_per_second_median": 790.755303836177,
+        "prefill_long_decode_tokens_per_second_median": 28.33356336691571,
+        "decode_long_e2e_seconds_median": 4.490391978,
+        "decode_long_decode_tokens_per_second_median": 36.07745336132767,
+        "prefill_long_raw_report_sha256": "da37bd204f87dd897dcfdef5b0cc24e7932197a6c1b19b91ec5e4e6b1a1c8c49",
+        "decode_long_raw_report_sha256": "b7d2f9f03be0aa61571fefa3a3c47d8173dbb23d0f3efabfe678fa03f28fb803"
+      }
+    }
+  },
+  "residual": {
+    "gfx1030_short_odd_e2e_vs_llama_cpp": 1.8079,
+    "gfx1201_short_odd_e2e_vs_llama_cpp": 1.4799,
+    "gfx1030_decode_vs_llama_cpp": 0.7241,
+    "gfx1201_decode_vs_llama_cpp": 0.7116,
+    "dominant_gpu_cost": "memory-bound M=1 matvec",
+    "next_common_work": "production HIP Graph/command-list replay and gate-up/MLP fusion after a fresh profile",
+    "next_phase": "Phase 10 model-body FP8 W8A8"
+  }
+}

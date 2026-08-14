@@ -1,5 +1,82 @@
 # Third-party notices
 
+## llama-cpp-phase9-mmvf-001
+
+The Phase 9 BF16 M=1 matvec fast path adapts llama.cpp's paired-load and
+wave-reduction MMVF structure to sLLM's fixed BF16 semantic ABI.
+
+```yaml
+schema_version: 1
+id: llama-cpp-phase9-mmvf-001
+component: sLLM HIP BF16 decode matvec v3
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: f5919bf458ef190468b5c329bb293f8a54a1e69c
+  sources:
+    - path: ggml/src/ggml-cuda/mmvf.cu
+      git_blob: d7dbc8b992820c5da385575526a85a7524a6aaa2
+      sha256: 23b580ce14a45e71cc9be31047301d502be74a832084c16662985f93f533ba1c
+      url: https://github.com/ggml-org/llama.cpp/blob/f5919bf458ef190468b5c329bb293f8a54a1e69c/ggml/src/ggml-cuda/mmvf.cu
+local:
+  files:
+    - path: native/hip/src/matmul_kernel.hip.cpp
+      imported_sha256: pending-import-commit
+copyright:
+  - Copyright (c) 2023-2026 The ggml authors
+license:
+  spdx: MIT
+  file: docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+reuse:
+  mode: adapted
+  modifications:
+    - Removed ggml tensor, fusion, ID routing, CUDA graph, and generic type dependencies.
+    - Converted the input/output contract to BF16 with FP32 accumulation and checked scalar fallback for odd or unaligned reductions.
+    - Fixed wave32 launch geometry for the canonical AMD targets and retained the independent sLLM dispatch registry.
+import:
+  commit: pending-import-commit
+```
+
+## llama-cpp-phase9-gdn-layout-001
+
+The Phase 9 V620 recurrent GDN state layout adapts llama.cpp's wave-coalesced
+state-shard access. The R9700 retains sLLM's prior contiguous-row layout because
+the adapted layout regressed that target.
+
+```yaml
+schema_version: 1
+id: llama-cpp-phase9-gdn-layout-001
+component: sLLM Qwen3.5 linear-attention recurrent state layout
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: f5919bf458ef190468b5c329bb293f8a54a1e69c
+  sources:
+    - path: ggml/src/ggml-cuda/gated_delta_net.cu
+      git_blob: 1b431a724d7237121dea29ca9c82bcd4817337a7
+      sha256: fe5cfe4a35195fac999e8bd93d3ed18c68830096d4019bafa60e5da91d6ef4bf
+      url: https://github.com/ggml-org/llama.cpp/blob/f5919bf458ef190468b5c329bb293f8a54a1e69c/ggml/src/ggml-cuda/gated_delta_net.cu
+local:
+  files:
+    - path: native/hip/src/linear_attention_kernel.hip.cpp
+      imported_sha256: pending-import-commit
+copyright:
+  - Copyright (c) 2023-2026 The ggml authors
+license:
+  spdx: MIT
+  file: docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+reuse:
+  mode: adapted
+  modifications:
+    - Limited the adaptation to the private FP32 recurrent-state physical index mapping.
+    - Preserved sLLM's BF16 input, transactional state publication, public ABI, and numerical operation order.
+    - Enabled the transposed layout only for gfx1030 after real-GPU differential and performance testing.
+import:
+  commit: pending-import-commit
+```
+
 ## llama-cpp-profile-v1-sampling-001
 
 Portions of the profile-v1 sampler were ported from llama.cpp.

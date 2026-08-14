@@ -2,7 +2,7 @@
 
 > 最終更新: 2026-08-14
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized pathを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill providerを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -109,6 +109,12 @@ Phase 7ではcanonical V620/R9700のexact tupleをversioned recordに固定し�
 `gfx1036`、`gfx1200`、`gfx1201`、`gfx942`の10 targetをROCm 7.14.0でcompile-only検査する
 lifecycle profileを追加した。この10-target結果はcode object生成だけの証拠であり、
 canonical `gfx1030`/`gfx1201`以外の実機、SKU、software tupleを`project-verified`へ昇格しない。
+
+Phase 9では同じcanonical 2 targetでkernel-only/hipBLAS mixed HIP Graph PoC、BF16 M=1 MMVF v3、
+target別GDN state layout、completion segment、4B direct engineを追加検証した。short-odd中央値はV620で
+TTFT/E2E 0.306/0.855秒、decode 29.69 tok/s、R9700で0.051/0.490秒、37.20 tok/sだった。
+これはexact target、Qwen3.5 BF16 single request、該当shape/providerの`project-verified` evidenceである。
+production全体のHIP Graph replay、別SKU、multi-request、別software tuple、長時間安定性は証明しない。
 
 ### software.mdとの関係
 
