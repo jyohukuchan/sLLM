@@ -1,0 +1,57 @@
+{
+  "schema_version": "phase7-ci-profiles-v1",
+  "matrix_id": "phase7-ci-profiles-v1",
+  "revision": 2,
+  "claims": {
+    "performance_hard_gate": false,
+    "compile_proves_runtime": false,
+    "cpu_proves_gpu": false
+  },
+  "workflow": {
+    "path": ".github/workflows/phase7-lifecycle.yml",
+    "daily_cron": "17 18 * * *",
+    "weekly_cron": "47 18 * * 6",
+    "manual_profiles": ["daily", "weekly", "release"],
+    "release_event": "published",
+    "permissions": "contents:read"
+  },
+  "compile_targets": ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1200", "gfx1201", "gfx942"],
+  "profiles": [
+    {
+      "name": "daily",
+      "trigger": "daily-schedule",
+      "host_rows": ["h0"],
+      "compile_targets": ["gfx1030", "gfx1201"],
+      "gpu_tuples": ["local-v620-gfx1030-rocm714-hwe617", "local-r9700-gfx1201-rocm714-hwe617"],
+      "gpu_tiers": ["tier_g0", "tier_g3", "tier_g4", "tier_p1"],
+      "performance_lane": "p0-observation",
+      "retention_days": 30,
+      "timeout_minutes": 90,
+      "blocking": false
+    },
+    {
+      "name": "weekly",
+      "trigger": "weekly-schedule",
+      "host_rows": ["h0", "h1", "h2"],
+      "compile_targets": ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1200", "gfx1201", "gfx942"],
+      "gpu_tuples": ["local-v620-gfx1030-rocm714-hwe617", "local-r9700-gfx1201-rocm714-hwe617"],
+      "gpu_tiers": ["tier_g0", "tier_g3", "tier_g4", "tier_p1"],
+      "performance_lane": "p1-weekly",
+      "retention_days": 30,
+      "timeout_minutes": 360,
+      "blocking": false
+    },
+    {
+      "name": "release",
+      "trigger": "manual-or-published-release",
+      "host_rows": ["h0", "h1", "h2"],
+      "compile_targets": ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1200", "gfx1201", "gfx942"],
+      "gpu_tuples": ["local-v620-gfx1030-rocm714-hwe617", "local-r9700-gfx1201-rocm714-hwe617"],
+      "gpu_tiers": ["tier_g0", "tier_g3", "tier_g4", "tier_p1"],
+      "performance_lane": "p1-release",
+      "retention_days": 90,
+      "timeout_minutes": 360,
+      "blocking": true
+    }
+  ]
+}

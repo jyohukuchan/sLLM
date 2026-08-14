@@ -105,6 +105,11 @@ non-stream/SSE/stop/disconnect service pathを追加検証した。これは単�
 限定scopeだけを`project-verified`とする。複数GPU可視のprocess、global physical indexによるworker選択、
 multi-GPU servingは検証範囲外である。
 
+Phase 7ではcanonical V620/R9700のexact tupleをversioned recordに固定し、`gfx1030`〜
+`gfx1036`、`gfx1200`、`gfx1201`、`gfx942`の10 targetをROCm 7.14.0でcompile-only検査する
+lifecycle profileを追加した。この10-target結果はcode object生成だけの証拠であり、
+canonical `gfx1030`/`gfx1201`以外の実機、SKU、software tupleを`project-verified`へ昇格しない。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

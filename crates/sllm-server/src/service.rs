@@ -16,8 +16,8 @@ use futures_util::stream::{self, Stream};
 use serde::Serialize;
 
 use crate::api::{
-    ApiErrorV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES, TokenUsageV1,
-    parse_chat_completion_request,
+    ApiErrorV1, ChatCompatibilityProfileV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES,
+    ReasoningOptionsV1, TokenUsageV1, parse_chat_completion_request_for_profile,
 };
 use crate::runtime::{GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1};
 
@@ -26,6 +26,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Debug, Default)]
 pub struct ServerConfigV1 {
     bearer_token: Option<String>,
+    compatibility_profile: ChatCompatibilityProfileV1,
 }
 
 impl ServerConfigV1 {
@@ -40,7 +41,16 @@ impl ServerConfigV1 {
                 "bearer token configuration is invalid",
             ));
         }
-        Ok(Self { bearer_token })
+        Ok(Self {
+            bearer_token,
+            compatibility_profile: ChatCompatibilityProfileV1::Strict,
+        })
+    }
+
+    pub fn openwebui_compatible(bearer_token: Option<String>) -> Result<Self, ApiErrorV1> {
+        let mut config = Self::new(bearer_token)?;
+        config.compatibility_profile = ChatCompatibilityProfileV1::OpenWebUi;
+        Ok(config)
     }
 }
 
@@ -112,7 +122,10 @@ async fn create_chat_completion(
             .into_response();
         }
     };
-    let request = match parse_chat_completion_request(&body) {
+    let request = match parse_chat_completion_request_for_profile(
+        &body,
+        state.config.compatibility_profile,
+    ) {
         Ok(request) => request,
         Err(error) => return error.into_response(),
     };
@@ -120,7 +133,7 @@ async fn create_chat_completion(
         Some(model) => model,
         None => return ApiErrorV1::model_not_found(request.model()).into_response(),
     };
-    let context = ResponseContextV1::new(model.alias());
+    let context = ResponseContextV1::new(model.alias(), request.reasoning());
     let stream_response = request.stream();
     let receiver = match state.scheduler.submit(model, request) {
         Ok(receiver) => receiver,
@@ -177,11 +190,16 @@ async fn non_stream_chat_completion(
     mut receiver: GenerationReceiverV1,
     context: ResponseContextV1,
 ) -> Response {
-    let mut text = String::new();
+    let mut splitter = ReasoningSplitterV1::new(context.reasoning);
+    let mut content = String::new();
+    let mut reasoning_content = String::new();
     while let Some(event) = receiver.recv().await {
         match event {
-            SchedulerEventV1::Delta(delta) => text.push_str(&delta),
+            SchedulerEventV1::Delta(delta) => {
+                append_split_parts(splitter.feed(&delta), &mut content, &mut reasoning_content);
+            }
             SchedulerEventV1::Finished(completion) => {
+                append_split_parts(splitter.finish(), &mut content, &mut reasoning_content);
                 return axum::Json(ChatCompletionResponseV1 {
                     id: &context.id,
                     object: "chat.completion",
@@ -191,7 +209,11 @@ async fn non_stream_chat_completion(
                         index: 0,
                         message: AssistantMessageV1 {
                             role: "assistant",
-                            content: &text,
+                            content: &content,
+                            reasoning_content: context
+                                .reasoning
+                                .separate_reasoning()
+                                .then_some(reasoning_content.as_str()),
                         },
                         logprobs: None,
                         finish_reason: completion.finish_reason,
@@ -210,49 +232,59 @@ fn stream_chat_completion(
     receiver: GenerationReceiverV1,
     context: ResponseContextV1,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let reasoning = context.reasoning;
     let state = StreamStateV1 {
         receiver,
         context,
         role_pending: true,
         queued: VecDeque::new(),
         terminal: false,
+        splitter: ReasoningSplitterV1::new(reasoning),
     };
     Sse::new(stream::unfold(state, |mut state| async move {
-        if let Some(event) = state.queued.pop_front() {
-            return Some((Ok(event), state));
-        }
-        if state.terminal {
-            return None;
-        }
-        if state.role_pending {
-            state.role_pending = false;
-            let chunk = StreamChunkV1::role(&state.context);
-            return Some((Ok(json_event(&chunk)), state));
-        }
-        match state.receiver.recv().await {
-            Some(SchedulerEventV1::Delta(delta)) => {
-                let chunk = StreamChunkV1::content(&state.context, &delta);
-                Some((Ok(json_event(&chunk)), state))
+        loop {
+            if let Some(event) = state.queued.pop_front() {
+                return Some((Ok(event), state));
             }
-            Some(SchedulerEventV1::Finished(completion)) => {
-                let chunk = StreamChunkV1::finished(
-                    &state.context,
-                    completion.finish_reason,
-                    completion.usage,
-                );
-                state.queued.push_back(Event::default().data("[DONE]"));
-                state.terminal = true;
-                Some((Ok(json_event(&chunk)), state))
+            if state.terminal {
+                return None;
             }
-            Some(SchedulerEventV1::Failed(error)) => {
-                state.terminal = true;
-                Some((Ok(json_event(&error.envelope())), state))
+            if state.role_pending {
+                state.role_pending = false;
+                let chunk = StreamChunkV1::role(&state.context);
+                return Some((Ok(json_event(&chunk)), state));
             }
-            None => {
-                state.terminal = true;
-                let error =
-                    ApiErrorV1::generation_failed("generation ended without a terminal event");
-                Some((Ok(json_event(&error.envelope())), state))
+            match state.receiver.recv().await {
+                Some(SchedulerEventV1::Delta(delta)) => {
+                    for part in state.splitter.feed(&delta) {
+                        let chunk = StreamChunkV1::delta(&state.context, &part);
+                        state.queued.push_back(json_event(&chunk));
+                    }
+                }
+                Some(SchedulerEventV1::Finished(completion)) => {
+                    for part in state.splitter.finish() {
+                        let chunk = StreamChunkV1::delta(&state.context, &part);
+                        state.queued.push_back(json_event(&chunk));
+                    }
+                    let chunk = StreamChunkV1::finished(
+                        &state.context,
+                        completion.finish_reason,
+                        completion.usage,
+                    );
+                    state.queued.push_back(json_event(&chunk));
+                    state.queued.push_back(Event::default().data("[DONE]"));
+                    state.terminal = true;
+                }
+                Some(SchedulerEventV1::Failed(error)) => {
+                    state.terminal = true;
+                    return Some((Ok(json_event(&error.envelope())), state));
+                }
+                None => {
+                    state.terminal = true;
+                    let error =
+                        ApiErrorV1::generation_failed("generation ended without a terminal event");
+                    return Some((Ok(json_event(&error.envelope())), state));
+                }
             }
         }
     }))
@@ -266,12 +298,164 @@ fn json_event(value: &impl Serialize) -> Event {
     })
 }
 
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+#[derive(Debug)]
+struct SplitPartV1 {
+    content: Option<String>,
+    reasoning_content: Option<String>,
+}
+
+#[derive(Debug)]
+struct ReasoningSplitterV1 {
+    separate: bool,
+    in_reasoning: bool,
+    opening_checked: bool,
+    trim_content_prefix: bool,
+    pending: String,
+}
+
+impl ReasoningSplitterV1 {
+    fn new(options: ReasoningOptionsV1) -> Self {
+        Self {
+            separate: options.separate_reasoning(),
+            in_reasoning: options.enabled(),
+            opening_checked: !options.enabled(),
+            trim_content_prefix: false,
+            pending: String::new(),
+        }
+    }
+
+    fn feed(&mut self, delta: &str) -> Vec<SplitPartV1> {
+        if !self.separate {
+            return vec![SplitPartV1 {
+                content: Some(delta.to_owned()),
+                reasoning_content: None,
+            }];
+        }
+        if !self.in_reasoning {
+            let content = self.trim_content(delta);
+            return (!content.is_empty())
+                .then_some(SplitPartV1 {
+                    content: Some(content),
+                    reasoning_content: None,
+                })
+                .into_iter()
+                .collect();
+        }
+
+        self.pending.push_str(delta);
+        if !self.opening_checked {
+            if self.pending.len() < THINK_OPEN.len() && THINK_OPEN.starts_with(&self.pending) {
+                return Vec::new();
+            }
+            if self.pending.starts_with(THINK_OPEN) {
+                self.pending.drain(..THINK_OPEN.len());
+                while matches!(self.pending.as_bytes().first(), Some(b'\r' | b'\n')) {
+                    self.pending.remove(0);
+                }
+            }
+            self.opening_checked = true;
+        }
+
+        if let Some(close) = self.pending.find(THINK_CLOSE) {
+            let reasoning = self.pending[..close].to_owned();
+            let remainder = self.pending[close + THINK_CLOSE.len()..].to_owned();
+            self.pending.clear();
+            self.in_reasoning = false;
+            self.trim_content_prefix = true;
+            let content = self.trim_content(&remainder);
+            let mut parts = Vec::new();
+            if !reasoning.is_empty() {
+                parts.push(SplitPartV1 {
+                    content: None,
+                    reasoning_content: Some(reasoning),
+                });
+            }
+            if !content.is_empty() {
+                parts.push(SplitPartV1 {
+                    content: Some(content),
+                    reasoning_content: None,
+                });
+            }
+            return parts;
+        }
+
+        let indices = self
+            .pending
+            .char_indices()
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let keep = THINK_CLOSE.chars().count().saturating_sub(1);
+        if indices.len() <= keep {
+            return Vec::new();
+        }
+        let split = indices[indices.len() - keep];
+        let reasoning = self.pending[..split].to_owned();
+        self.pending.drain(..split);
+        vec![SplitPartV1 {
+            content: None,
+            reasoning_content: Some(reasoning),
+        }]
+    }
+
+    fn finish(&mut self) -> Vec<SplitPartV1> {
+        if !self.separate || self.pending.is_empty() {
+            return Vec::new();
+        }
+        let value = std::mem::take(&mut self.pending);
+        if self.in_reasoning {
+            vec![SplitPartV1 {
+                content: None,
+                reasoning_content: Some(value),
+            }]
+        } else {
+            let content = self.trim_content(&value);
+            (!content.is_empty())
+                .then_some(SplitPartV1 {
+                    content: Some(content),
+                    reasoning_content: None,
+                })
+                .into_iter()
+                .collect()
+        }
+    }
+
+    fn trim_content(&mut self, value: &str) -> String {
+        if !self.trim_content_prefix {
+            return value.to_owned();
+        }
+        let trimmed = value.trim_start_matches(['\r', '\n']);
+        if !trimmed.is_empty() {
+            self.trim_content_prefix = false;
+        }
+        trimmed.to_owned()
+    }
+}
+
+fn append_split_parts(
+    parts: Vec<SplitPartV1>,
+    content: &mut String,
+    reasoning_content: &mut String,
+) {
+    for part in parts {
+        if let Some(value) = part.content {
+            content.push_str(&value);
+        }
+        if let Some(value) = part.reasoning_content {
+            reasoning_content.push_str(&value);
+        }
+    }
+}
+
 struct StreamStateV1 {
     receiver: GenerationReceiverV1,
     context: ResponseContextV1,
     role_pending: bool,
     queued: VecDeque<Event>,
     terminal: bool,
+    splitter: ReasoningSplitterV1,
 }
 
 #[derive(Clone, Debug)]
@@ -279,10 +463,11 @@ struct ResponseContextV1 {
     id: String,
     created: u64,
     model: String,
+    reasoning: ReasoningOptionsV1,
 }
 
 impl ResponseContextV1 {
-    fn new(model: &str) -> Self {
+    fn new(model: &str, reasoning: ReasoningOptionsV1) -> Self {
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|duration| duration.as_secs())
@@ -292,6 +477,7 @@ impl ResponseContextV1 {
             id: format!("chatcmpl-sllm-{created:016x}{counter:016x}"),
             created,
             model: model.to_owned(),
+            reasoning,
         }
     }
 }
@@ -332,6 +518,8 @@ struct ChatCompletionChoiceV1<'a> {
 struct AssistantMessageV1<'a> {
     role: &'static str,
     content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -352,18 +540,20 @@ impl<'a> StreamChunkV1<'a> {
             StreamDeltaV1 {
                 role: Some("assistant"),
                 content: Some(""),
+                reasoning_content: None,
             },
             None,
             None,
         )
     }
 
-    fn content(context: &'a ResponseContextV1, content: &'a str) -> Self {
+    fn delta(context: &'a ResponseContextV1, part: &'a SplitPartV1) -> Self {
         Self::new(
             context,
             StreamDeltaV1 {
                 role: None,
-                content: Some(content),
+                content: part.content.as_deref(),
+                reasoning_content: part.reasoning_content.as_deref(),
             },
             None,
             None,
@@ -380,6 +570,7 @@ impl<'a> StreamChunkV1<'a> {
             StreamDeltaV1 {
                 role: None,
                 content: None,
+                reasoning_content: None,
             },
             Some(finish_reason),
             Some(usage),
@@ -422,4 +613,6 @@ struct StreamDeltaV1<'a> {
     role: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<&'a str>,
 }

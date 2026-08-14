@@ -197,7 +197,7 @@ GitHub Actions実装では、各required jobのreport生成とupload、および
 | `pull_request` / `merge_group` | external-contribution lane。現在はinactive・nonblocking | 直接使用しない | 将来の外部貢献向け。trusted-soloの完了条件ではない |
 | maintainerによる信頼済み実行 | draft/integrationの影響範囲に応じて実行 | laneに応じたG0〜G3 | default trusted-solo-development。初期は専用local host、将来は隔離・使い捨てrunner |
 | protected `main` push | integration/releaseの影響範囲に応じて実行 | final relevant matrix | release/push laneの適用確認 |
-| daily schedule | smoke | 代表1 tuple | health、flaky、短い性能観測 |
+| daily schedule | smoke | 利用可能なcanonical tuple一覧 | health、flaky、短い性能観測 |
 | weekly schedule | full host | 利用可能な明示tuple一覧 | broad correctness、compatibility、性能履歴 |
 | protected release | full host | release対象の全明示tuple | release lane。明示的に有効化した場合だけblocking |
 
@@ -377,6 +377,8 @@ GPUに影響する変更は、実GPU evidenceが得られるまで「compile済�
 - G4のtuple evidenceをcompatibility文書とhistoryへ反映する。
 - P0を観測として開始し、十分な履歴取得後にP1の回帰閾値を決める。
 - llama.cppとの同条件比較を追加する。
+
+実施状況: Phase 5でcanonical V620/R9700のengine performance baselineとllama.cpp専用wrapper比較を完了した。Phase 7でdaily/weekly/release profile、canonical 2 tupleのversioned compatibility record、10 exact targetのcompile-only matrix、trusted self-hosted GPU境界を実装した。P0/P1の観測値は承認済み閾値が得られるまで非blockingとし、compile-onlyを実機互換性へ読み替えない。
 
 ## featureの完了条件
 

@@ -30,6 +30,7 @@ struct Config {
     listen: SocketAddr,
     model: String,
     api_key_env: Option<String>,
+    openwebui_compatibility: bool,
     queue_capacity: usize,
     event_capacity: usize,
     request_timeout: Duration,
@@ -69,6 +70,18 @@ fn parse_args() -> Result<Config, String> {
         .remove("--model")
         .unwrap_or_else(|| "qwen3.5-4b".to_owned());
     let api_key_env = values.remove("--api-key-env");
+    let compatibility_profile = values
+        .remove("--compatibility-profile")
+        .unwrap_or_else(|| "strict".to_owned());
+    let openwebui_compatibility = match compatibility_profile.as_str() {
+        "strict" => false,
+        "openwebui" => true,
+        _ => {
+            return Err(format!(
+                "compatibility profile must be strict or openwebui: {compatibility_profile}"
+            ));
+        }
+    };
     let queue_capacity = parse_default(&mut values, "--queue-capacity", 8_usize)?;
     let event_capacity = parse_default(&mut values, "--event-capacity", 16_usize)?;
     let request_timeout = Duration::from_secs(parse_default(
@@ -97,6 +110,7 @@ fn parse_args() -> Result<Config, String> {
         listen,
         model,
         api_key_env,
+        openwebui_compatibility,
         queue_capacity,
         event_capacity,
         request_timeout,
@@ -151,10 +165,16 @@ fn run(config: Config) -> Result<(), String> {
                 env::var(name).map_err(|_| format!("API key environment variable {name} is absent"))
             })
             .transpose()?;
+        let server_config = if config.openwebui_compatibility {
+            ServerConfigV1::openwebui_compatible(bearer)
+        } else {
+            ServerConfigV1::new(bearer)
+        }
+        .map_err(|error| error.to_string())?;
         let router = build_router_v1(
             registry,
             scheduler.clone(),
-            ServerConfigV1::new(bearer).map_err(|error| error.to_string())?,
+            server_config,
         );
         let listener = tokio::net::TcpListener::bind(config.listen)
             .await
@@ -169,6 +189,7 @@ fn run(config: Config) -> Result<(), String> {
                 "listen": address.to_string(),
                 "target": backend.target(),
                 "model_fingerprint": backend.model_fingerprint(),
+                "compatibility_profile": if config.openwebui_compatibility { "openwebui" } else { "strict" },
             })
         );
         axum::serve(listener, router)
@@ -211,5 +232,5 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }

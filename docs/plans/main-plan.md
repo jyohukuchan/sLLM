@@ -383,12 +383,28 @@
 - 計画は[Phase 6 archive](archive/2026/08/11-20/openai-chat-completions-v1.md)、詳細は
   [Phase 6 history](../history/2026/08/11-20/openai-chat-completions-v1.md)を正とする。
 
+### Phase 7: CI/CDの定期・互換性・性能・release拡張（完了）
+
+- daily、weekly、releaseのversioned profileとGitHub Actions lifecycle workflowを追加し、
+  GitHub-hosted host/compile jobとtrusted self-hosted GPU jobを分離した。GIMPS終了後の運用変更により、
+  dailyはcanonical V620 `gfx1030`とR9700 `gfx1201`の短い観測を選択する。
+- compatibility compileは`gfx1030`〜`gfx1036`、`gfx1200`、`gfx1201`、`gfx942`の10 exact targetを
+  独立rowとし、Code Objectのexact targetとROCm rootを検査する。compile-only結果を実機互換性に
+  読み替えない。
+- daily/weekly artifactは30日、release evidenceは90日保持する。性能は観測値であり、
+  承認済み閾値がないためhard gateにしない。
+- 計画は[Phase 7 archive](archive/2026/08/11-20/phase7-ci-cd-expansion.md)、詳細は
+  [Phase 7 history](../history/2026/08/11-20/phase7-ci-cd-expansion.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 6まで完了した。詳細evidenceをこの文書へ重複掲載せず、対応するarchive/historyを正とする。
-- Phase 6はAMD vAttention再現、Paged Attention比較、KV memory方式選択、共有generation service、
-  OpenAI-compatible Chat Completions profile v1、production single-GPU serverとcanonical両GPUのA6統合まで
-  完了した。次のactive phaseは未開始であり、新しい受入条件は別計画で固定する。
+- Phase 7まで完了した。詳細evidenceをこの文書へ重複掲載せず、対応するarchive/historyを正とする。
+- Phase 7は定期・releaseのprofile選択、trusted runner境界、10 exact targetのcompile-only compatibility、
+  既存Phase 5 runnerの短時間GPU観測への再利用まで完了した。次はPhase 8のBF16最適化だが、
+  active planと受入条件は未固定である。
+- Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の
+  non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
+  [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。
 - H3 required昇格はnon-requiredのまま観測し、20回以上・7日以上の条件を満たした時点で
   昇格だけをreviewする。Phase 4〜6をblockしない。
 - 現行運用はtrusted-solo-developmentとし、draft/integration/release/docs-onlyの扱いは

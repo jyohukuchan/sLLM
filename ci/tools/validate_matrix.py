@@ -37,6 +37,7 @@ ENGINE_PERFORMANCE_RENDER_SUITE_ID = "h0-engine-performance-render-tokenize-cont
 LLAMA_PHASE5_SUITE_ID = "h0-llama-phase5-contract"
 VATTENTION_A0_SUITE_ID = "h0-vattention-a0-contract"
 VATTENTION_A1_SUITE_ID = "h0-vattention-a1-contract"
+PHASE7_SUITE_ID = "h0-phase7-lifecycle-contract"
 EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
     "p1.engine-performance.schema",
     "p1.engine-performance.runner",
@@ -46,6 +47,34 @@ EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
 EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
 EXPECTED_VATTENTION_A0_TEST_IDS = ["phase6.vattention-a0.contract"]
 EXPECTED_VATTENTION_A1_TEST_IDS = ["phase6.vattention-a1.contract"]
+EXPECTED_PHASE7_TEST_IDS = [
+    "phase7.lifecycle.contract",
+    "phase7.lifecycle.negative",
+    "phase7.compatibility-compile.contract",
+    "phase7.gpu-observation.contract",
+    "phase7.workflow.contract",
+]
+EXPECTED_PHASE7_PATH_RULES = {
+    ".github/workflows/phase7-lifecycle.yml",
+    "ci/matrix/phase7-ci-profiles-v1.json",
+    "ci/matrix/phase7-compatibility-v1.json",
+    "ci/schema/phase7-ci-profiles-v1.schema.json",
+    "ci/schema/phase7-compatibility-v1.schema.json",
+    "ci/schema/phase7-compatibility-compile-report-v1.schema.json",
+    "ci/schema/phase7-gpu-observation-v1.schema.json",
+    "ci/tools/phase7_lifecycle.py",
+    "ci/tools/run_phase7_compatibility_compile.py",
+    "ci/tools/run_phase7_gpu_observation.py",
+    "ci/tests/test_phase7_lifecycle.py",
+    "ci/tests/test_phase7_compatibility_compile.py",
+    "ci/tests/test_phase7_observation.py",
+    "ci/tools/engine_performance_common.py",
+    "ci/tools/create_engine_build_identity.py",
+    "ci/tools/run_engine_performance.py",
+    "ci/tools/validate_json_manifests.py",
+    "docs/models/locks/qwen3.5-4b-bf16.json",
+    "native/hip/src/hip_compile_probe.hip.cpp",
+}
 EXPECTED_VATTENTION_A0_PATH_RULES = {
     "ci/tools/vattention_a0_probe.hip.cpp",
     "ci/tools/run_vattention_a0.py",
@@ -803,6 +832,45 @@ def validate_vattention_a1_registration(
             raise ContractError(f"vAttention A1 path is not explicitly registered: {path}")
 
 
+def validate_phase7_registration(
+    suites: dict[str, object], host: dict[str, object], paths: dict[str, object]
+) -> None:
+    """Require exact offline H0 coverage for Phase 7 profile/workflow contracts."""
+
+    suite_by_id = {suite["suite_id"]: suite for suite in suites["suites"]}
+    suite = suite_by_id.get(PHASE7_SUITE_ID)
+    expected_attributes = {key: False for key in ALLOWED_ATTRIBUTES}
+    expected_commands = [
+        {
+            "command_id": "phase7-lifecycle-validator",
+            "argv": ["{python}", "ci/tools/phase7_lifecycle.py", "validate"],
+        },
+        {
+            "command_id": "phase7-lifecycle-tests",
+            "argv": [
+                "{python}", "-m", "unittest", "ci.tests.test_phase7_lifecycle",
+                "ci.tests.test_phase7_compatibility_compile",
+                "ci.tests.test_phase7_observation",
+            ],
+        },
+    ]
+    if suite is None:
+        raise ContractError("missing Phase 7 lifecycle host contract suite")
+    if suite["tier"] != "tier_h0" or suite["marker"] != "tier_h0":
+        raise ContractError("Phase 7 lifecycle contract has the wrong tier/marker")
+    if suite["attributes"] != expected_attributes:
+        raise ContractError("Phase 7 lifecycle host contract must be offline and GPU-free")
+    if suite["test_ids"] != EXPECTED_PHASE7_TEST_IDS or suite["commands"] != expected_commands:
+        raise ContractError("Phase 7 lifecycle host contract registration drifted")
+    rows = {row["row_id"]: row for row in host["rows"]}
+    if PHASE7_SUITE_ID not in rows["h0"]["suite_ids"]:
+        raise ContractError("Phase 7 lifecycle contract is not owned by H0")
+    rules_by_pattern = {rule["pattern"]: set(rule["suite_ids"]) for rule in paths["rules"]}
+    for path in EXPECTED_PHASE7_PATH_RULES:
+        if PHASE7_SUITE_ID not in rules_by_pattern.get(path, set()):
+            raise ContractError(f"Phase 7 path is not explicitly registered: {path}")
+
+
 def validate_cargo_toolchain_registration(suites: dict[str, object]) -> None:
     """Allow the development pin everywhere, with one exact MSRV exception."""
 
@@ -840,12 +908,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 25:
-            raise ContractError("suites-v1 identity is not revision 25")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 18:
-            raise ContractError("host-v1 identity is not revision 18")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 39:
-            raise ContractError("path-to-suite-v1 identity is not revision 39")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 26:
+            raise ContractError("suites-v1 identity is not revision 26")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 19:
+            raise ContractError("host-v1 identity is not revision 19")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 40:
+            raise ContractError("path-to-suite-v1 identity is not revision 40")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:
@@ -989,6 +1057,7 @@ def main() -> int:
         validate_phase5_suite_registration(suites, host, paths)
         validate_vattention_a0_registration(suites, host, paths)
         validate_vattention_a1_registration(suites, host, paths)
+        validate_phase7_registration(suites, host, paths)
         for g1_path in EXPECTED_G1_STATIC_PATH_RULES:
             if G1_STATIC_SUITE_ID not in rules_by_pattern.get(g1_path, set()):
                 raise ContractError(f"G1 path is not explicitly registered to the H0 static suite: {g1_path}")

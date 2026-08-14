@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase7-ci-profiles-v1.schema.json",
+  "title": "sLLM Phase 7 lifecycle profiles v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "revision", "claims", "workflow", "compile_targets", "profiles"],
+  "properties": {
+    "schema_version": {"const": "phase7-ci-profiles-v1"},
+    "matrix_id": {"const": "phase7-ci-profiles-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "claims": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["performance_hard_gate", "compile_proves_runtime", "cpu_proves_gpu"],
+      "properties": {
+        "performance_hard_gate": {"const": false},
+        "compile_proves_runtime": {"const": false},
+        "cpu_proves_gpu": {"const": false}
+      }
+    },
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "daily_cron", "weekly_cron", "manual_profiles", "release_event", "permissions"],
+      "properties": {
+        "path": {"const": ".github/workflows/phase7-lifecycle.yml"},
+        "daily_cron": {"type": "string", "minLength": 1},
+        "weekly_cron": {"type": "string", "minLength": 1},
+        "manual_profiles": {"const": ["daily", "weekly", "release"]},
+        "release_event": {"const": "published"},
+        "permissions": {"const": "contents:read"}
+      }
+    },
+    "compile_targets": {
+      "const": ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1200", "gfx1201", "gfx942"]
+    },
+    "profiles": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {"$ref": "#/$defs/profile"}
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "trigger", "host_rows", "compile_targets", "gpu_tuples", "gpu_tiers", "performance_lane", "retention_days", "timeout_minutes", "blocking"],
+      "properties": {
+        "name": {"enum": ["daily", "weekly", "release"]},
+        "trigger": {"enum": ["daily-schedule", "weekly-schedule", "manual-or-published-release"]},
+        "host_rows": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["h0", "h1", "h2"]}
+        },
+        "compile_targets": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"pattern": "^gfx[0-9]+$"}
+        },
+        "gpu_tuples": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["local-v620-gfx1030-rocm714-hwe617", "local-r9700-gfx1201-rocm714-hwe617"]}
+        },
+        "gpu_tiers": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"]}
+        },
+        "performance_lane": {"enum": ["p0-observation", "p1-weekly", "p1-release"]},
+        "retention_days": {"enum": [30, 90]},
+        "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 360},
+        "blocking": {"type": "boolean"}
+      }
+    }
+  }
+}

@@ -12,8 +12,7 @@ use sllm_core::{
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
-    GenerationServiceV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, ThinkingModeV1,
-    TokenizerFrontendV1,
+    GenerationServiceV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenizerFrontendV1,
 };
 use sllm_hip::HipBackend;
 
@@ -299,7 +298,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 .collect(),
             options: Qwen35RenderOptionsV1 {
                 add_generation_prompt: true,
-                thinking: ThinkingModeV1::Disabled,
+                thinking: request.reasoning().thinking(),
             },
         };
         let prompt = service.prepare_input(&input).map_err(|error| {

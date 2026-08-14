@@ -10,7 +10,8 @@ mod runtime;
 mod service;
 
 pub use api::{
-    ApiErrorV1, ChatCompletionRequestV1, ChatMessageV1, ErrorCodeV1, FinishReasonV1, TokenUsageV1,
+    ApiErrorV1, ChatCompatibilityProfileV1, ChatCompletionRequestV1, ChatMessageV1, ErrorCodeV1,
+    FinishReasonV1, ReasoningOptionsV1, TokenUsageV1,
 };
 pub use production::{
     ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,

@@ -157,9 +157,8 @@ different visible GPU. Multi-GPU serving remains outside profile v1.
 This deployment condition does not change the JSON or SSE compatibility claim.
 The production backend uses the same transport-independent generation service as
 the CLI, keeps the model resident between requests, and creates and releases
-request-local KV/linear state for each request. Profile v1 uses the locked Qwen
-chat template with thinking disabled; it does not expose a reasoning-control
-request field.
+request-local KV/linear state for each request. An omitted extension continues to
+use the locked Qwen chat template with thinking disabled.
 
 ## sLLM extensions
 
@@ -172,6 +171,57 @@ engine-specific behavior.
 An extension is opt-in. An unrecognized member inside `sllm` is also an error; it
 is not silently ignored. Extension fields are not part of the compatibility claim
 and must be documented and versioned independently.
+
+### Thinking and separated reasoning extension
+
+Qwen thinking is enabled per request with this closed extension:
+
+```json
+{
+  "sllm": {
+    "thinking": "enabled",
+    "separate_reasoning": true
+  }
+}
+```
+
+`thinking` is `enabled` or `disabled` and defaults to `disabled` when the `sllm`
+object or member is absent. `separate_reasoning` defaults to `false` and is valid
+only with `thinking: "enabled"`. The enabled mode is passed to the verified fixed
+Qwen renderer; it does not execute an arbitrary client-supplied template.
+
+With separation enabled, a non-stream response adds `reasoning_content` to the
+assistant message and keeps only the final answer in `content`. An SSE response
+uses `delta.reasoning_content` for thinking and `delta.content` for the final
+answer. The stateful separator recognizes `<think>` and `</think>` even when a tag
+crosses backend delta boundaries, and does not expose the tags themselves. If
+generation finishes before `</think>`, all generated text is reasoning and final
+`content` is empty. Usage continues to report total completion tokens; no
+reasoning-token sub-count is claimed.
+
+The direct `reasoning_content` response member is an opt-in sLLM wire extension
+chosen for existing client interoperability. It is not part of the pinned OpenAI
+profile-v1 compatibility claim. Requests keep all sLLM-specific controls under the
+top-level `sllm` object. For multi-turn round trips, an assistant input message may
+carry a string `reasoning_content` beside its string `content`; the verified Qwen
+renderer normalizes that history. The field is rejected on system and user
+messages and remains outside the pinned compatibility claim.
+
+### OpenWebUI compatibility profile
+
+The server defaults to the strict profile and continues to reject legacy
+`max_tokens`. A deployment that needs OpenWebUI's legacy request shape can opt in:
+
+```console
+sllm-server [required model and GPU options] \
+  --compatibility-profile openwebui
+```
+
+Only that profile accepts `max_tokens` as an alias for
+`max_completion_tokens`, with the same integer range of 1–4,096. Sending both
+names is an error. All other strict field, role, content, sampling, error, and SSE
+rules remain unchanged. The ready event reports the selected compatibility
+profile so deployments can audit which behavior is active.
 
 ## Deferred API surface
 

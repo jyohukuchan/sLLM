@@ -168,6 +168,21 @@ software lifecycleは`experimental`のままとし、複数GPU可視process、gl
 別tuple、multi-GPU serving、長時間安定性は証明しない。詳細は
 [Phase 6 history](../history/2026/08/11-20/openai-chat-completions-v1.md)を正とする。
 
+### 2026-08-14 Phase 7 lifecycle evidence
+
+daily/weekly/releaseのprofileはcanonical V620 `gfx1030` / R9700 `gfx1201`をこの文書と同じ
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、exact UUID/BDFへ
+固定する。GIMPS終了後の運用変更によりdailyもcanonical 2 GPUを観測し、全profileでforeign workloadを
+性能PASSへ混ぜない既存Phase 5 preflightを再利用する。
+
+local dirty candidateのdaily smokeでR9700 `gfx1201`、Qwen3.5-4B short-oddをwarmup 3回・計測10回
+実行し、fallbackなし、health/cleanup PASSを確認した。中央値はTTFT 2.862 s、prefill
+5.951 token/s、decode 1.672 token/s、E2E 12.440 s、resident/peak VRAM 8.412/8.541 GBだった。
+GIMPS終了後のprofile revision 2ではcanonical 2 GPUを2/2 PASSし、V620中央値はTTFT 7.574 s、
+prefill 2.246 token/s、decode 0.863 token/s、E2E 26.110 s、resident/peak VRAM 8.412/8.541 GBだった。
+これは観測pathの再現性であり、immutable release evidence、性能優位性、長時間安定性を証明しない。
+software lifecycleは`experimental`のままとする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

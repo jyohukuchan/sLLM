@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase7-gpu-observation-v1.schema.json",
+  "title": "sLLM Phase 7 GPU lifecycle observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "profile", "performance_lane", "executed_tiers", "claims", "candidate", "model", "rows", "cleanup"],
+  "properties": {
+    "schema_version": {"const": "phase7-gpu-observation-v1"},
+    "state": {"const": "PASS"},
+    "profile": {"enum": ["daily", "weekly", "release"]},
+    "performance_lane": {"enum": ["p0-observation", "p1-weekly", "p1-release"]},
+    "executed_tiers": {"const": ["tier_g0", "tier_g3", "tier_g4", "tier_p1"]},
+    "claims": {
+      "const": {"performance_hard_gate": false, "optimized": false, "faster": false, "compatibility_lifecycle": "experimental"}
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree", "immutable"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "immutable": {"type": "boolean"}
+      }
+    },
+    "model": {
+      "const": {"repo_id": "Qwen/Qwen3.5-4B", "resolved_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a", "lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"}
+    },
+    "rows": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tuple_id", "target", "row_id", "report_sha256", "raw_sha256", "metrics", "health", "fallback", "cleanup"],
+        "properties": {
+          "tuple_id": {"enum": ["local-v620-gfx1030-rocm714-hwe617", "local-r9700-gfx1201-rocm714-hwe617"]},
+          "target": {"enum": ["gfx1030", "gfx1201"]},
+          "row_id": {"type": "string", "pattern": "^engine-performance-direct-4b-gfx(1030|1201)-short-odd$"},
+          "report_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "metrics": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["ttft_ns", "prefill_ns", "tpot_ns", "decode_token_per_s", "prefill_token_per_s", "e2e_ns", "resident_vram_bytes", "peak_vram_bytes"],
+            "properties": {
+              "ttft_ns": {"$ref": "#/$defs/stats"},
+              "prefill_ns": {"$ref": "#/$defs/stats"},
+              "tpot_ns": {"$ref": "#/$defs/stats"},
+              "decode_token_per_s": {"$ref": "#/$defs/stats"},
+              "prefill_token_per_s": {"$ref": "#/$defs/stats"},
+              "e2e_ns": {"$ref": "#/$defs/stats"},
+              "resident_vram_bytes": {"$ref": "#/$defs/stats"},
+              "peak_vram_bytes": {"$ref": "#/$defs/stats"}
+            }
+          },
+          "health": {"const": "PASS"},
+          "fallback": {"const": false},
+          "cleanup": {"const": "PASS"}
+        }
+      }
+    },
+    "cleanup": {"const": "PASS"}
+  },
+  "$defs": {
+    "stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["median", "p10", "p90", "mad", "min", "max", "count"],
+      "properties": {
+        "median": {"type": "number", "minimum": 0},
+        "p10": {"type": "number", "minimum": 0},
+        "p90": {"type": "number", "minimum": 0},
+        "mad": {"type": "number", "minimum": 0},
+        "min": {"type": "number", "minimum": 0},
+        "max": {"type": "number", "minimum": 0},
+        "count": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase7-compatibility-v1.schema.json",
+  "title": "sLLM Phase 7 compatibility records v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "matrix_id", "revision", "tuples"],
+  "properties": {
+    "schema_version": {"const": "phase7-compatibility-v1"},
+    "matrix_id": {"const": "phase7-compatibility-v1"},
+    "revision": {"type": "integer", "minimum": 1},
+    "tuples": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "compatibility-tuple-v1.schema.json"}
+    }
+  }
+}

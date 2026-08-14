@@ -115,6 +115,11 @@ sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 | consumer RDNA 2 / RX 6000系 | `gfx1030`の掲載だけでは同じtargetを持つ全consumer SKUの公式対応にならない。[Radeon Linux support matrix](https://rocm.docs.amd.com/projects/radeon-ryzen/en/latest/docs/compatibility/compatibilityrad/native_linux/native_linux_compatibility.html)に完全なSKU/OS構成が掲載された場合だけ`vendor-supported`を付ける | `[unverified]` |
 | `gfx1031`–`gfx1036` | LLVMのcode target定義は製品構成のvendor supportではない | `[unverified]` |
 
+Phase 7のlocal draft compileではROCm 7.14.0の`amdclang++`を使い、`gfx1030`〜`gfx1036`、
+`gfx1200`、`gfx1201`、`gfx942`の10 exact targetでlink後のCode Object V6 bundleとdevice metadataが
+要求targetに一致することを確認した。これはcompile-only draft evidenceであり、この表の
+evidence分類や`experimental`のlifecycleを変更しない。
+
 commit `f393d688a051d2b73c8773d8a930a711592609bc`に結び付くformal G0/G1 evidenceの範囲は、canonical exact `gfx1030`/`gfx1201` artifactのidentity/healthと、1、3、17、255、256、257 byteのallocation、copy、diagnostic dispatch、completion、byte-exact copy-backだけである。Code Object V6、wave32、target別ELF flags、artifact metadata、実loader pathを検証したが、このG0/G1 evidence単独ではcapability profile、resource gate、semantic数値kernel、model、性能を証明しない。後続A0/A1 evidenceは以下に別scopeとして追加し、いずれもtarget全体や別SKUへ一般化しない。完全なsoftware tupleと実行結果は[software compatibility](software.md)に記録する。
 
 Phase 6 A0では同じcanonical 2 targetについてHIP VMM capability、minimum/recommended granularity、

@@ -144,3 +144,38 @@ python3 ci/tools/local_hygiene.py --output .local-artifacts/ci/local-hygiene.jso
 ## GitHub Actions
 
 `.github/workflows/host-required.yml` runs H0, H1, and H2 as independent GitHub-hosted CPU jobs with hard timeouts of 8, 10, and 8 minutes. It checks out `github.sha` without persisted credentials, installs the hash-locked host environment before testing, and invokes every row in strict identity mode. The `host-required` job always runs and is the stable branch-protection check. Official actions are pinned to complete commit SHAs. The workflow does not use a self-hosted or GPU runner and does not run H3.
+
+`.github/workflows/phase7-lifecycle.yml` is the scheduled and release lifecycle entry point. Its
+versioned source of truth is `ci/matrix/phase7-ci-profiles-v1.json`:
+
+- `daily` runs at `17 18 * * *` UTC and selects the canonical V620 `gfx1030` and R9700 `gfx1201`
+  short correctness/performance observations. V620 returned to the daily set after its GIMPS workload ended.
+- `weekly` runs at `47 18 * * 6` UTC and selects the two canonical tuples, H0/H1/H2, and all ten
+  explicit compatibility compile targets.
+- `release` is selected by `workflow_dispatch` or a published release and uses the release retention
+  and blocking policy.
+
+Profile selection and compatibility compilation run on GitHub-hosted workers. GPU rows require the
+trusted labels `self-hosted`, `sllm-semantic-g1`, and `rocm-7.14`; public pull requests never enter
+that path. Scheduled artifacts are retained for 30 days and release evidence for 90 days. The
+performance lane is observational until an independently justified threshold is approved, so a
+metric delta alone is not a lifecycle failure. GPU PASS still requires the exact tuple, numerical
+result, no fallback, health, and cleanup checks.
+
+Local contract and selection checks do not claim a GPU run:
+
+```bash
+python3 ci/tools/phase7_lifecycle.py validate
+python3 ci/tools/phase7_lifecycle.py resolve \
+  --event workflow_dispatch --requested-profile daily \
+  --output /tmp/sllm-phase7-daily-selection.json
+python3 -m unittest \
+  ci.tests.test_phase7_lifecycle \
+  ci.tests.test_phase7_compatibility_compile \
+  ci.tests.test_phase7_observation
+```
+
+The compile-only runner validates one exact target at a time and deletes its generated ELF after
+reporting. A successful compile must not be described as runtime or hardware compatibility. The GPU
+observation controller reuses the Phase 5 direct-engine runner and emits only a compact bounded
+summary; raw traces and generated binaries are not uploaded.

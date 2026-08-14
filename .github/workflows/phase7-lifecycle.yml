@@ -1,0 +1,268 @@
+name: phase7-lifecycle
+
+on:
+  schedule:
+    - cron: "17 18 * * *"
+    - cron: "47 18 * * 6"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Phase 7 lifecycle profile
+        required: true
+        type: choice
+        options:
+          - daily
+          - weekly
+          - release
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase7-lifecycle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  select-profile:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      profile: ${{ steps.resolve.outputs.profile }}
+      host_rows: ${{ steps.resolve.outputs.host_rows }}
+      compile_targets: ${{ steps.resolve.outputs.compile_targets }}
+      gpu_tuples: ${{ steps.resolve.outputs.gpu_tuples }}
+      retention_days: ${{ steps.resolve.outputs.retention_days }}
+      timeout_minutes: ${{ steps.resolve.outputs.timeout_minutes }}
+      blocking: ${{ steps.resolve.outputs.blocking }}
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install hash-locked host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Resolve exact lifecycle profile
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SCHEDULE: ${{ github.event.schedule || '' }}
+          REQUESTED_PROFILE: ${{ inputs.profile || '' }}
+          RELEASE_ACTION: ${{ github.event.action || '' }}
+        run: |
+          set -eu
+          mkdir -p .local-artifacts/phase7-selection
+          args=(
+            python3 ci/tools/phase7_lifecycle.py resolve
+            --event "$EVENT_NAME"
+            --output .local-artifacts/phase7-selection/selection.json
+            --github-output "$GITHUB_OUTPUT"
+          )
+          if [ -n "$EVENT_SCHEDULE" ]; then args+=(--schedule "$EVENT_SCHEDULE"); fi
+          if [ -n "$REQUESTED_PROFILE" ]; then args+=(--requested-profile "$REQUESTED_PROFILE"); fi
+          if [ -n "$RELEASE_ACTION" ]; then args+=(--release-action "$RELEASE_ACTION"); fi
+          "${args[@]}"
+      - name: Upload profile selection
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase7-profile-selection
+          path: .local-artifacts/phase7-selection/selection.json
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(steps.resolve.outputs.retention_days) }}
+
+  host-contracts:
+    needs: [select-profile]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12.10"
+      - name: Install hash-locked host requirements
+        run: >-
+          python3 -m pip install --disable-pip-version-check --no-input
+          --require-hashes --only-binary=:all: --no-deps
+          -r ci/requirements-host.txt
+      - name: Install pinned Rust toolchains
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt --component clippy
+          rustup toolchain install 1.85.0 --profile minimal
+      - name: Prefetch locked Rust dependencies
+        run: cargo +1.97.1 fetch --locked
+      - name: Bind hosted build tools to canonical paths
+        run: |
+          set -eu
+          for tool in cargo cmake; do
+            source_path="$(command -v "$tool")"
+            if [ ! -e "/usr/bin/$tool" ]; then
+              sudo ln -s "$source_path" "/usr/bin/$tool"
+            fi
+            test -x "/usr/bin/$tool"
+          done
+      - name: Run selected immutable host rows
+        env:
+          HOST_ROWS: ${{ needs.select-profile.outputs.host_rows }}
+        run: |
+          set -eu
+          python3 - "$HOST_ROWS" <<'PY'
+          import json
+          import subprocess
+          import sys
+          rows = json.loads(sys.argv[1])
+          if not rows or any(row not in {"h0", "h1", "h2"} for row in rows):
+              raise SystemExit("invalid Phase 7 host row selection")
+          for row in rows:
+              subprocess.run([
+                  sys.executable, "ci/tools/run_host_suite.py", "--row", row,
+                  "--output-dir", f".local-artifacts/phase7-host/{row}",
+                  "--strict-ci", "--expected-reviewed-sha", "${{ github.sha }}",
+                  "--expected-tested-sha", "${{ github.sha }}",
+                  "--expected-workflow-sha", "${{ github.sha }}",
+              ], check=True)
+          PY
+      - name: Upload selected host reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase7-host-reports
+          path: .local-artifacts/phase7-host/*/report.json*
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(needs.select-profile.outputs.retention_days) }}
+
+  compatibility-compile:
+    needs: [select-profile]
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.select-profile.outputs.compile_targets) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      PHASE7_IMAGE_REFERENCE: docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7
+      PHASE7_IMAGE_CONFIG_DIGEST: sha256:4c91c0d850e38a40fd669dd043ab42e9bad9a2b8a38e3f873c5a4eaced9f28cf
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pull pinned ROCm compiler image
+        run: |
+          set -eu
+          docker pull "$PHASE7_IMAGE_REFERENCE"
+          test "$(docker image inspect --format '{{.Id}}' "$PHASE7_IMAGE_REFERENCE")" = "$PHASE7_IMAGE_CONFIG_DIGEST"
+      - name: Compile and inspect exact target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/.local-artifacts/phase7-compile/$TARGET"
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount "type=bind,src=$GITHUB_WORKSPACE/.local-artifacts/phase7-compile/$TARGET,dst=/output" \
+            --mount "type=bind,src=/usr/bin/git,dst=/usr/local/bin/git,readonly" \
+            --env HOME=/tmp/phase7-home \
+            --env SLLM_H3_NETWORK_DISABLED=1 \
+            --workdir /workspace \
+            "$PHASE7_IMAGE_REFERENCE" \
+            python3 ci/tools/run_phase7_compatibility_compile.py \
+              --target "$TARGET" --output-dir /output --rocm-root /opt/rocm \
+              --strict-ci --expected-sha "${{ github.sha }}"
+      - name: Upload exact-target compile report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase7-compile-${{ matrix.target }}
+          path: .local-artifacts/phase7-compile/${{ matrix.target }}/report.json*
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(needs.select-profile.outputs.retention_days) }}
+
+  gpu-observation:
+    needs: [select-profile]
+    runs-on: [self-hosted, sllm-semantic-g1, rocm-7.14]
+    timeout-minutes: ${{ fromJSON(needs.select-profile.outputs.timeout_minutes) }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download exact profile selection
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: phase7-profile-selection
+          path: .local-artifacts/phase7-selection
+      - name: Run selected GPU observation serially
+        run: >-
+          python3 ci/tools/run_phase7_gpu_observation.py
+          --selection .local-artifacts/phase7-selection/selection.json
+          --output-dir .local-artifacts/phase7-gpu
+          --strict-ci
+          --expected-sha "${{ github.sha }}"
+      - name: Upload compact GPU observation
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase7-gpu-observation-${{ needs.select-profile.outputs.profile }}
+          path: .local-artifacts/phase7-gpu/summary.json*
+          if-no-files-found: error
+          retention-days: ${{ fromJSON(needs.select-profile.outputs.retention_days) }}
+      - name: Remove local lifecycle artifacts
+        if: ${{ always() }}
+        run: |
+          set -eu
+          if [ -d .local-artifacts/phase7-selection ]; then
+            rm -rf -- .local-artifacts/phase7-selection
+          fi
+          if [ -d .local-artifacts/phase7-gpu ]; then
+            rm -rf -- .local-artifacts/phase7-gpu
+          fi
+
+  lifecycle-complete:
+    if: ${{ always() }}
+    needs: [select-profile, host-contracts, compatibility-compile, gpu-observation]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - name: Require every selected Phase 7 job
+        env:
+          SELECT_RESULT: ${{ needs.select-profile.result }}
+          HOST_RESULT: ${{ needs.host-contracts.result }}
+          COMPILE_RESULT: ${{ needs.compatibility-compile.result }}
+          GPU_RESULT: ${{ needs.gpu-observation.result }}
+        run: |
+          set -eu
+          test "$SELECT_RESULT" = success
+          test "$HOST_RESULT" = success
+          test "$COMPILE_RESULT" = success
+          test "$GPU_RESULT" = success

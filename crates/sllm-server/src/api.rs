@@ -8,7 +8,7 @@ use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 use sllm_core::SamplingParametersV1;
-use sllm_frontend::{GenerationConfigV1, Qwen35ChatMessageV1};
+use sllm_frontend::{GenerationConfigV1, Qwen35ChatMessageV1, ThinkingModeV1};
 
 pub const MAX_REQUEST_BODY_BYTES: usize = 1_048_576;
 pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 256;
@@ -27,6 +27,7 @@ const SUPPORTED_FIELDS: &[&str] = &[
     "frequency_penalty",
     "stream",
     "n",
+    "sllm",
 ];
 
 const KNOWN_UNSUPPORTED_FIELDS: &[&str] = &[
@@ -52,6 +53,40 @@ const KNOWN_UNSUPPORTED_FIELDS: &[&str] = &[
     "user",
     "web_search_options",
 ];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChatCompatibilityProfileV1 {
+    #[default]
+    Strict,
+    OpenWebUi,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReasoningOptionsV1 {
+    thinking: ThinkingModeV1,
+    separate_reasoning: bool,
+}
+
+impl ReasoningOptionsV1 {
+    pub const fn disabled() -> Self {
+        Self {
+            thinking: ThinkingModeV1::Disabled,
+            separate_reasoning: false,
+        }
+    }
+
+    pub const fn thinking(self) -> ThinkingModeV1 {
+        self.thinking
+    }
+
+    pub const fn separate_reasoning(self) -> bool {
+        self.separate_reasoning
+    }
+
+    pub const fn enabled(self) -> bool {
+        matches!(self.thinking, ThinkingModeV1::Enabled)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorCodeV1 {
@@ -250,6 +285,7 @@ pub struct ChatCompletionRequestV1 {
     messages: Vec<ChatMessageV1>,
     generation: GenerationConfigV1,
     stream: bool,
+    reasoning: ReasoningOptionsV1,
 }
 
 impl ChatCompletionRequestV1 {
@@ -267,6 +303,10 @@ impl ChatCompletionRequestV1 {
 
     pub const fn stream(&self) -> bool {
         self.stream
+    }
+
+    pub const fn reasoning(&self) -> ReasoningOptionsV1 {
+        self.reasoning
     }
 }
 
@@ -305,11 +345,27 @@ struct WireChatCompletionRequest {
     temperature: Option<f32>,
     top_p: Option<f32>,
     max_completion_tokens: Option<u32>,
+    max_tokens: Option<u32>,
     stop: Option<WireStop>,
     presence_penalty: Option<f32>,
     frequency_penalty: Option<f32>,
     stream: Option<bool>,
     n: Option<u32>,
+    sllm: Option<WireSllmOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSllmOptions {
+    thinking: Option<WireThinkingMode>,
+    separate_reasoning: Option<bool>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum WireThinkingMode {
+    Enabled,
+    Disabled,
 }
 
 #[derive(Deserialize)]
@@ -317,6 +373,7 @@ struct WireChatCompletionRequest {
 struct WireMessage {
     role: String,
     content: Value,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -326,8 +383,16 @@ enum WireStop {
     Many(Vec<String>),
 }
 
+#[cfg(test)]
 pub(crate) fn parse_chat_completion_request(
     body: &[u8],
+) -> Result<ChatCompletionRequestV1, ApiErrorV1> {
+    parse_chat_completion_request_for_profile(body, ChatCompatibilityProfileV1::Strict)
+}
+
+pub(crate) fn parse_chat_completion_request_for_profile(
+    body: &[u8],
+    profile: ChatCompatibilityProfileV1,
 ) -> Result<ChatCompletionRequestV1, ApiErrorV1> {
     let strict = serde_json::from_slice::<StrictValue>(body)
         .map_err(|error| ApiErrorV1::invalid_json(error.to_string(), None))?;
@@ -341,7 +406,9 @@ pub(crate) fn parse_chat_completion_request(
         .copied()
         .collect::<BTreeSet<_>>();
     for field in object.keys() {
-        if supported.contains(field.as_str()) {
+        if supported.contains(field.as_str())
+            || (profile == ChatCompatibilityProfileV1::OpenWebUi && field == "max_tokens")
+        {
             continue;
         }
         let _is_known_standard_field = known_unsupported.contains(field.as_str());
@@ -377,8 +444,14 @@ pub(crate) fn parse_chat_completion_request(
                 ApiErrorV1::invalid_value(param.clone(), "message content must be a string")
             }
         })?;
+        let reasoning_content = message.reasoning_content;
         let inner = match message.role.as_str() {
             "system" => {
+                if reasoning_content.is_some() {
+                    return Err(ApiErrorV1::unsupported(format!(
+                        "messages[{index}].reasoning_content"
+                    )));
+                }
                 if index != 0 || system_seen {
                     return Err(ApiErrorV1::invalid_value(
                         format!("messages[{index}].role"),
@@ -389,10 +462,15 @@ pub(crate) fn parse_chat_completion_request(
                 Qwen35ChatMessageV1::system(content)
             }
             "user" => {
+                if reasoning_content.is_some() {
+                    return Err(ApiErrorV1::unsupported(format!(
+                        "messages[{index}].reasoning_content"
+                    )));
+                }
                 user_seen = true;
                 Qwen35ChatMessageV1::user(content)
             }
-            "assistant" => Qwen35ChatMessageV1::assistant(content, None),
+            "assistant" => Qwen35ChatMessageV1::assistant(content, reasoning_content),
             "developer" | "tool" | "function" => {
                 return Err(ApiErrorV1::unsupported(format!("messages[{index}].role")));
             }
@@ -431,13 +509,26 @@ pub(crate) fn parse_chat_completion_request(
         };
         ApiErrorV1::invalid_value(param, text)
     })?;
-    let max_completion_tokens = wire
-        .max_completion_tokens
-        .unwrap_or(DEFAULT_MAX_COMPLETION_TOKENS);
+    if wire.max_completion_tokens.is_some() && wire.max_tokens.is_some() {
+        return Err(ApiErrorV1::invalid_value(
+            "max_tokens",
+            "max_tokens and max_completion_tokens cannot both be specified",
+        ));
+    }
+    let (max_completion_tokens, max_tokens_param) =
+        match (wire.max_completion_tokens, wire.max_tokens) {
+            (Some(value), None) => (value, "max_completion_tokens"),
+            (None, Some(value)) if profile == ChatCompatibilityProfileV1::OpenWebUi => {
+                (value, "max_tokens")
+            }
+            (None, Some(_)) => return Err(ApiErrorV1::unsupported("max_tokens")),
+            (None, None) => (DEFAULT_MAX_COMPLETION_TOKENS, "max_completion_tokens"),
+            (Some(_), Some(_)) => unreachable!("handled above"),
+        };
     if !(1..=MAX_COMPLETION_TOKENS).contains(&max_completion_tokens) {
         return Err(ApiErrorV1::invalid_value(
-            "max_completion_tokens",
-            "max_completion_tokens must be in [1,4096]",
+            max_tokens_param,
+            format!("{max_tokens_param} must be in [1,4096]"),
         ));
     }
     let stop_strings = match wire.stop {
@@ -455,12 +546,33 @@ pub(crate) fn parse_chat_completion_request(
     };
     let generation = GenerationConfigV1::new(max_completion_tokens, sampling, stop_strings)
         .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
+    let reasoning = match wire.sllm {
+        None => ReasoningOptionsV1::disabled(),
+        Some(options) => {
+            let thinking = match options.thinking.unwrap_or(WireThinkingMode::Disabled) {
+                WireThinkingMode::Enabled => ThinkingModeV1::Enabled,
+                WireThinkingMode::Disabled => ThinkingModeV1::Disabled,
+            };
+            let separate_reasoning = options.separate_reasoning.unwrap_or(false);
+            if separate_reasoning && !matches!(thinking, ThinkingModeV1::Enabled) {
+                return Err(ApiErrorV1::invalid_value(
+                    "sllm.separate_reasoning",
+                    "separate_reasoning requires sllm.thinking=enabled",
+                ));
+            }
+            ReasoningOptionsV1 {
+                thinking,
+                separate_reasoning,
+            }
+        }
+    };
 
     Ok(ChatCompletionRequestV1 {
         model: wire.model,
         messages,
         generation,
         stream: wire.stream.unwrap_or(false),
+        reasoning,
     })
 }
 
@@ -735,5 +847,71 @@ mod tests {
         let error = parse_chat_completion_request(&body).unwrap_err();
         assert_eq!(error.param(), Some("messages"));
         assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+    }
+
+    #[test]
+    fn reasoning_extension_is_typed_and_fail_closed() {
+        let request = parse_chat_completion_request(&valid(
+            r#", "sllm":{"thinking":"enabled","separate_reasoning":true}"#,
+        ))
+        .unwrap();
+        assert!(request.reasoning().enabled());
+        assert!(request.reasoning().separate_reasoning());
+
+        let error = parse_chat_completion_request(&valid(
+            r#", "sllm":{"thinking":"disabled","separate_reasoning":true}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(error.param(), Some("sllm.separate_reasoning"));
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+    }
+
+    #[test]
+    fn openwebui_max_tokens_alias_is_separate_from_strict_profile() {
+        let body = valid(r#", "max_tokens":37"#);
+        let strict = parse_chat_completion_request(&body).unwrap_err();
+        assert_eq!(strict.param(), Some("max_tokens"));
+        assert_eq!(strict.code(), ErrorCodeV1::UnsupportedParameter);
+
+        let compatible =
+            parse_chat_completion_request_for_profile(&body, ChatCompatibilityProfileV1::OpenWebUi)
+                .unwrap();
+        assert_eq!(compatible.generation().max_new_tokens(), 37);
+
+        for extra in [
+            r#", "max_tokens":0"#,
+            r#", "max_tokens":4097"#,
+            r#", "max_tokens":17, "max_completion_tokens":17"#,
+        ] {
+            assert!(
+                parse_chat_completion_request_for_profile(
+                    &valid(extra),
+                    ChatCompatibilityProfileV1::OpenWebUi,
+                )
+                .is_err(),
+                "{extra}"
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_reasoning_history_round_trips_into_the_typed_renderer() {
+        let body = br#"{"model":"qwen","messages":[{"role":"user","content":"Q1"},{"role":"assistant","content":"A1","reasoning_content":"R1"},{"role":"user","content":"Q2"}]}"#;
+        let request = parse_chat_completion_request(body).unwrap();
+        assert_eq!(
+            request.messages()[1].inner(),
+            &Qwen35ChatMessageV1::assistant("A1", Some("R1".to_owned()))
+        );
+
+        for role in ["system", "user"] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "qwen",
+                "messages": [{"role": role, "content": "x", "reasoning_content": "no"}],
+            }))
+            .unwrap();
+            let error = parse_chat_completion_request(&body).unwrap_err();
+            assert_eq!(error.param(), Some("messages[0].reasoning_content"));
+            assert_eq!(error.code(), ErrorCodeV1::UnsupportedParameter);
+        }
     }
 }

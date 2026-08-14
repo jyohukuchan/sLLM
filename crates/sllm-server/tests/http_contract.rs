@@ -146,17 +146,27 @@ fn router(
     event_capacity: usize,
     bearer: Option<&str>,
 ) -> (Router, SchedulerV1) {
+    router_with_config(
+        backend,
+        queue_capacity,
+        event_capacity,
+        ServerConfigV1::new(bearer.map(str::to_owned)).unwrap(),
+    )
+}
+
+fn router_with_config(
+    backend: Arc<dyn ChatGenerationBackendV1>,
+    queue_capacity: usize,
+    event_capacity: usize,
+    config: ServerConfigV1,
+) -> (Router, SchedulerV1) {
     let entry = ModelRegistryEntryV1::new("qwen-test", 1_700_000_000, "sllm", FINGERPRINT, backend)
         .unwrap();
     let registry = ModelRegistryV1::new(vec![entry]).unwrap();
     let scheduler = SchedulerV1::new(
         SchedulerConfigV1::new(queue_capacity, event_capacity, Duration::from_secs(5)).unwrap(),
     );
-    let app = build_router_v1(
-        registry,
-        scheduler.clone(),
-        ServerConfigV1::new(bearer.map(str::to_owned)).unwrap(),
-    );
+    let app = build_router_v1(registry, scheduler.clone(), config);
     (app, scheduler)
 }
 
@@ -726,6 +736,142 @@ async fn pinned_profile_fixture_matches_raw_http_and_sse() {
 
     scheduler.shutdown();
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reasoning_extension_separates_tags_for_non_stream_and_sse() {
+    let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(ScriptBackend {
+        deltas: vec![
+            "<thi".to_owned(),
+            "nk>\nrea".to_owned(),
+            "son</thi".to_owned(),
+            "nk>\n\nans".to_owned(),
+            "wer".to_owned(),
+        ],
+        finish_reason: FinishReasonV1::Stop,
+        usage: TokenUsageV1::new(3, 5).unwrap(),
+        fail_after: None,
+        cancelled: Arc::new(AtomicUsize::new(0)),
+    });
+    let (app, scheduler) = router(backend, 4, 2, None);
+    let (address, server) = serve(app).await;
+    let body = |stream| {
+        serde_json::to_vec(&serde_json::json!({
+            "model": "qwen-test",
+            "messages": [{"role": "user", "content": "why"}],
+            "stream": stream,
+            "max_completion_tokens": 17,
+            "sllm": {"thinking": "enabled", "separate_reasoning": true}
+        }))
+        .unwrap()
+    };
+
+    let non_stream = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            &body(false),
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(non_stream.status, 200);
+    let response = non_stream.json();
+    assert_eq!(
+        response["choices"][0]["message"]["reasoning_content"],
+        "reason"
+    );
+    assert_eq!(response["choices"][0]["message"]["content"], "answer");
+    assert!(
+        !String::from_utf8(non_stream.body)
+            .unwrap()
+            .contains("<think>")
+    );
+
+    let streaming = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            &body(true),
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(streaming.status, 200);
+    let stream_body = String::from_utf8(streaming.body).unwrap();
+    let chunks = stream_body
+        .split("\n\n")
+        .filter_map(|block| block.strip_prefix("data: "))
+        .filter(|data| *data != "[DONE]")
+        .map(|data| serde_json::from_str::<Value>(data).unwrap())
+        .collect::<Vec<_>>();
+    let reasoning = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["reasoning_content"].as_str())
+        .collect::<String>();
+    let content = chunks
+        .iter()
+        .filter_map(|chunk| chunk["choices"][0]["delta"]["content"].as_str())
+        .collect::<String>();
+    assert_eq!(reasoning, "reason");
+    assert_eq!(content, "answer");
+    assert!(!stream_body.contains("<think>"));
+    assert!(stream_body.ends_with("data: [DONE]\n\n"));
+
+    scheduler.shutdown();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openwebui_max_tokens_alias_requires_the_compatibility_profile() {
+    let make_backend = || -> Arc<dyn ChatGenerationBackendV1> {
+        Arc::new(ScriptBackend {
+            deltas: vec!["ok".to_owned()],
+            finish_reason: FinishReasonV1::Stop,
+            usage: TokenUsageV1::new(1, 1).unwrap(),
+            fail_after: None,
+            cancelled: Arc::new(AtomicUsize::new(0)),
+        })
+    };
+    let body =
+        br#"{"model":"qwen-test","messages":[{"role":"user","content":"hi"}],"max_tokens":17}"#;
+
+    let (strict_app, strict_scheduler) = router(make_backend(), 2, 2, None);
+    let (strict_address, strict_server) = serve(strict_app).await;
+    let strict = raw_http(
+        strict_address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            body,
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(strict.status, 400);
+    assert_eq!(strict.json()["error"]["param"], "max_tokens");
+    strict_scheduler.shutdown();
+    strict_server.abort();
+
+    let config = ServerConfigV1::openwebui_compatible(None).unwrap();
+    let (compatible_app, compatible_scheduler) = router_with_config(make_backend(), 2, 2, config);
+    let (compatible_address, compatible_server) = serve(compatible_app).await;
+    let compatible = raw_http(
+        compatible_address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            body,
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(compatible.status, 200);
+    assert_eq!(compatible.json()["choices"][0]["message"]["content"], "ok");
+    compatible_scheduler.shutdown();
+    compatible_server.abort();
 }
 
 async fn wait_until(timeout: Duration, condition: impl Fn() -> bool) {

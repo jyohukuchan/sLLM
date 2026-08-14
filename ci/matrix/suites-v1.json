@@ -1,7 +1,7 @@
 {
   "schema_version": "suites-v1",
   "registry_id": "sLLM-host-suites",
-  "revision": 25,
+  "revision": 26,
   "allowed_tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_h3_rmsnorm", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"],
   "allowed_attributes": ["requires_gpu", "requires_model", "slow", "network", "quarantined"],
   "suites": [
@@ -220,6 +220,17 @@
       "commands": [
         {"command_id": "openai-profile-v1-validator", "argv": ["{python}", "ci/tools/validate_openai_profile_v1.py"]},
         {"command_id": "openai-profile-v1-tests", "argv": ["{python}", "-m", "unittest", "ci.tests.test_openai_profile_v1", "ci.tests.test_openai_profile_differential", "ci.tests.test_openai_a6_evidence_runner"]}
+      ]
+    },
+    {
+      "suite_id": "h0-phase7-lifecycle-contract",
+      "tier": "tier_h0",
+      "marker": "tier_h0",
+      "attributes": {"requires_gpu": false, "requires_model": false, "slow": false, "network": false, "quarantined": false},
+      "test_ids": ["phase7.lifecycle.contract", "phase7.lifecycle.negative", "phase7.compatibility-compile.contract", "phase7.gpu-observation.contract", "phase7.workflow.contract"],
+      "commands": [
+        {"command_id": "phase7-lifecycle-validator", "argv": ["{python}", "ci/tools/phase7_lifecycle.py", "validate"]},
+        {"command_id": "phase7-lifecycle-tests", "argv": ["{python}", "-m", "unittest", "ci.tests.test_phase7_lifecycle", "ci.tests.test_phase7_compatibility_compile", "ci.tests.test_phase7_observation"]}
       ]
     },
     {

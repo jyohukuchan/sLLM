@@ -64,6 +64,18 @@ SEMANTIC_G1_SCHEMA_FILES = {
     "ci/schema/rmsnorm-semantic-g1-report-v1.schema.json",
     "ci/schema/rmsnorm-semantic-g1-aggregate-v1.schema.json",
 }
+PHASE7_WORKFLOW_PATH = ".github/workflows/phase7-lifecycle.yml"
+PHASE7_WORKFLOW_NAME = "phase7-lifecycle"
+PHASE7_WORKFLOW_JOBS = {
+    "select-profile", "host-contracts", "compatibility-compile",
+    "gpu-observation", "lifecycle-complete",
+}
+PHASE7_ACTIONS = {
+    "checkout": "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803",
+    "setup_python": "actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1",
+    "upload": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "download": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+}
 G2_SCHEMA_FILES = {
     "ci/schema/rmsnorm-g2-matrix-v1.schema.json",
     "ci/schema/rmsnorm-g2-model-slice-v1.schema.json",
@@ -1309,6 +1321,121 @@ def validate_semantic_g1_workflow(path: Path, document: dict[str, object]) -> li
     return []
 
 
+def validate_phase7_workflow(path: Path, document: dict[str, object]) -> list[str]:
+    """Validate the scheduled/manual Phase 7 lifecycle workflow boundary."""
+
+    from phase7_lifecycle import validate_contracts
+
+    profile, _compatibility = validate_contracts(ROOT)
+    workflow = profile["workflow"]
+    expected_trigger = {
+        "schedule": [
+            {"cron": workflow["daily_cron"]},
+            {"cron": workflow["weekly_cron"]},
+        ],
+        "workflow_dispatch": {
+            "inputs": {
+                "profile": {
+                    "description": "Phase 7 lifecycle profile",
+                    "required": True,
+                    "type": "choice",
+                    "options": workflow["manual_profiles"],
+                }
+            }
+        },
+        "release": {"types": [workflow["release_event"]]},
+    }
+    if document.get("name") != PHASE7_WORKFLOW_NAME:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 workflow name drifted")
+    if _workflow_trigger(document) != expected_trigger:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 trigger/profile mapping drifted")
+    if document.get("permissions") != {"contents": "read"}:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 permissions must be contents:read")
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict) or set(jobs) != PHASE7_WORKFLOW_JOBS:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 job topology drifted")
+    _validate_action_pins(path, jobs)
+
+    select = jobs["select-profile"]
+    host = jobs["host-contracts"]
+    compile_job = jobs["compatibility-compile"]
+    gpu = jobs["gpu-observation"]
+    complete = jobs["lifecycle-complete"]
+    for name, job in jobs.items():
+        if not isinstance(job, dict) or job.get("permissions") != {"contents": "read"}:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 job {name} permissions drifted")
+    if select.get("runs-on") != "ubuntu-24.04" or select.get("timeout-minutes") != 5:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 profile selector runner drifted")
+    if host.get("needs") != ["select-profile"] or host.get("runs-on") != "ubuntu-24.04":
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 host job boundary drifted")
+    if compile_job.get("needs") != ["select-profile"] or compile_job.get("runs-on") != "ubuntu-24.04":
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 compatibility runner drifted")
+    strategy = compile_job.get("strategy")
+    if not isinstance(strategy, dict) or strategy.get("fail-fast") is not False or strategy.get("matrix") != {
+        "target": "${{ fromJSON(needs.select-profile.outputs.compile_targets) }}"
+    }:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 exact-target matrix is not profile-driven")
+    if gpu.get("needs") != ["select-profile"] or gpu.get("runs-on") != ["self-hosted", "sllm-semantic-g1", "rocm-7.14"]:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 trusted GPU runner boundary drifted")
+    if complete.get("if") != "${{ always() }}" or complete.get("needs") != [
+        "select-profile", "host-contracts", "compatibility-compile", "gpu-observation"
+    ]:
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 final fail-closed job drifted")
+
+    def steps_text(job: dict[str, object]) -> str:
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 job has no steps")
+        return "\n".join(str(step.get("run", "")) for step in steps if isinstance(step, dict))
+
+    select_text = steps_text(select)
+    host_text = steps_text(host)
+    compile_text = steps_text(compile_job)
+    gpu_text = steps_text(gpu)
+    complete_text = steps_text(complete)
+    for fragment in ("ci/tools/phase7_lifecycle.py resolve", "--github-output"):
+        if fragment not in select_text:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 selector is missing {fragment}")
+    for fragment in ("ci/tools/run_host_suite.py", "--strict-ci", "--expected-reviewed-sha"):
+        if fragment not in host_text:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 host execution is missing {fragment}")
+    for fragment in ("--network none", "ci/tools/run_phase7_compatibility_compile.py", "--strict-ci", "--expected-sha"):
+        if fragment not in compile_text:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 compatibility execution is missing {fragment}")
+    for fragment in ("ci/tools/run_phase7_gpu_observation.py", "--strict-ci", "--expected-sha"):
+        if fragment not in gpu_text:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 GPU execution is missing {fragment}")
+    for variable in ("SELECT_RESULT", "HOST_RESULT", "COMPILE_RESULT", "GPU_RESULT"):
+        if variable not in complete_text:
+            raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 final job omits {variable}")
+
+    actual_actions = [
+        step.get("uses")
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if isinstance(job, dict) and isinstance(step, dict) and "uses" in step
+    ]
+    allowed_actions = set(PHASE7_ACTIONS.values())
+    if not actual_actions or any(action not in allowed_actions for action in actual_actions):
+        raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 action set drifted")
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps", []):
+            if not isinstance(step, dict) or step.get("uses") != PHASE7_ACTIONS["upload"]:
+                continue
+            inputs = step.get("with")
+            if not isinstance(inputs, dict) or inputs.get("retention-days") not in {
+                "${{ fromJSON(steps.resolve.outputs.retention_days) }}",
+                "${{ fromJSON(needs.select-profile.outputs.retention_days) }}",
+            }:
+                raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 retention is not profile-driven")
+            upload_path = str(inputs.get("path", ""))
+            if not any(name in upload_path for name in ("selection.json", "report.json", "summary.json")):
+                raise ContractError(f"{path.relative_to(ROOT)}: Phase 7 uploads an unbounded/raw artifact")
+    return []
+
+
 def validate_workflow(path: Path, document: dict[str, object]) -> list[str]:
     """Dispatch to the host-required or independent H3 workflow profile."""
 
@@ -1320,6 +1447,8 @@ def validate_workflow(path: Path, document: dict[str, object]) -> list[str]:
         return validate_rmsnorm_h3_workflow(path, document)
     if path.name == Path(SEMANTIC_G1_WORKFLOW_PATH).name or document.get("name") == SEMANTIC_G1_WORKFLOW_NAME:
         return validate_semantic_g1_workflow(path, document)
+    if path.name == Path(PHASE7_WORKFLOW_PATH).name or document.get("name") == PHASE7_WORKFLOW_NAME:
+        return validate_phase7_workflow(path, document)
     return validate_host_workflow(path, document)
 
 
@@ -1352,6 +1481,8 @@ def main() -> int:
             raise ContractError("RMSNorm H3 matrix is not registered for manifest validation")
         if not (ROOT / SEMANTIC_G1_WORKFLOW_PATH).is_file():
             raise ContractError("semantic RMSNorm G1 workflow is not registered for manifest validation")
+        if not (ROOT / PHASE7_WORKFLOW_PATH).is_file():
+            raise ContractError("Phase 7 lifecycle workflow is not registered for manifest validation")
         if not (ROOT / G2_MATRIX).is_file() or not (ROOT / G2_TOLERANCE).is_file():
             raise ContractError("real-weight G2 matrix/tolerance is not registered for manifest validation")
         if (
@@ -1409,6 +1540,9 @@ def main() -> int:
         validate_lock_file(ROOT / MODEL_LOCK_PATH, schema_path=ROOT / MODEL_LOCK_SCHEMA)
         validate_g2_contracts(ROOT)
         validate_p0_contracts(ROOT)
+        from phase7_lifecycle import validate_contracts as validate_phase7_contracts
+
+        validate_phase7_contracts(ROOT)
         if validate_matrix_main() != 0:
             errors.append("matrix/path/test/marker registry validation failed")
     except (ContractError, OSError, ValueError, ImportError, RuntimeError) as exc:

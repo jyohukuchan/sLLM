@@ -1,0 +1,37 @@
+{
+  "schema_version": "phase7-compatibility-v1",
+  "matrix_id": "phase7-compatibility-v1",
+  "revision": 1,
+  "tuples": [
+    {
+      "schema_version": "compatibility-tuple-v1",
+      "tuple_id": "local-v620-gfx1030-rocm714-hwe617",
+      "status": "experimental",
+      "os": {"name": "Ubuntu", "version": "24.04.4 LTS", "arch": "x86_64"},
+      "kernel": {"release": "6.17.0-35-generic"},
+      "driver": {"name": "amdgpu", "version": "6.16.13"},
+      "rocm": {"release": "7.14.0", "runtime": "71460850", "library_path": "/opt/rocm/core-7.14/lib"},
+      "compiler": {"name": "AMD clang", "version": "23.0.0git", "cxx_standard": "c++17"},
+      "gpu": {"product": "AMD Radeon Pro V620", "uuid": "GPU-76a08c022586fed6", "bdf": "0000:03:00.0", "exact_target": "gfx1030", "wave_size": 32},
+      "codegen": {"target": "gfx1030", "code_object": "V6", "xnack": "unsupported", "sramecc": "unsupported"},
+      "capabilities": {"profile": "rdna2-gfx1030-phase6", "fp8": false, "matrix_engine": false},
+      "test": {"tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"], "seed": 1729, "timeout_seconds": 21600},
+      "identity": {"manifest_sha256": "b8ad41a3f35c693b98fc6629e5997413726fb8e9ad8dc16de21a49c20a874d8f", "source": "Phase 6 A6 report; Phase 5 P1 and earlier tier evidence are linked by history"}
+    },
+    {
+      "schema_version": "compatibility-tuple-v1",
+      "tuple_id": "local-r9700-gfx1201-rocm714-hwe617",
+      "status": "experimental",
+      "os": {"name": "Ubuntu", "version": "24.04.4 LTS", "arch": "x86_64"},
+      "kernel": {"release": "6.17.0-35-generic"},
+      "driver": {"name": "amdgpu", "version": "6.16.13"},
+      "rocm": {"release": "7.14.0", "runtime": "71460850", "library_path": "/opt/rocm/core-7.14/lib"},
+      "compiler": {"name": "AMD clang", "version": "23.0.0git", "cxx_standard": "c++17"},
+      "gpu": {"product": "AMD Radeon AI PRO R9700", "uuid": "GPU-a8e9ddefa2d60f55", "bdf": "0000:07:00.0", "exact_target": "gfx1201", "wave_size": 32},
+      "codegen": {"target": "gfx1201", "code_object": "V6", "xnack": "unsupported", "sramecc": "unsupported"},
+      "capabilities": {"profile": "rdna4-gfx1201-phase6", "fp8": true, "matrix_engine": true},
+      "test": {"tiers": ["tier_h0", "tier_h1", "tier_h2", "tier_h3", "tier_g0", "tier_g1", "tier_g2", "tier_g3", "tier_g4", "tier_p0", "tier_p1"], "seed": 1729, "timeout_seconds": 21600},
+      "identity": {"manifest_sha256": "0648e41bb3a92ac60b82223a15b8ef2540ec9db7354da0ba29ecb5bf8c1f845f", "source": "Phase 6 A6 report; Phase 5 P1 and earlier tier evidence are linked by history"}
+    }
+  ]
+}

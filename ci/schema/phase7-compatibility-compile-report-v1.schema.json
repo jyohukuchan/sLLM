@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase7-compatibility-compile-report-v1.schema.json",
+  "title": "sLLM Phase 7 exact-target compatibility compile report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "claim", "target", "candidate", "toolchain", "artifact", "execution"],
+  "properties": {
+    "schema_version": {"const": "phase7-compatibility-compile-report-v1"},
+    "state": {"const": "PASS"},
+    "claim": {
+      "const": {"compile_only": true, "runtime_verified": false, "numerics_verified": false, "performance_verified": false}
+    },
+    "target": {"enum": ["gfx1030", "gfx1031", "gfx1032", "gfx1033", "gfx1034", "gfx1035", "gfx1036", "gfx1200", "gfx1201", "gfx942"]},
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "tree", "immutable"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "immutable": {"type": "boolean"}
+      }
+    },
+    "toolchain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rocm_root", "rocm_release", "compiler", "compiler_version", "code_object", "wave_size"],
+      "properties": {
+        "rocm_root": {"type": "string", "minLength": 1},
+        "rocm_release": {"const": "7.14.0"},
+        "compiler": {"type": "string", "minLength": 1},
+        "compiler_version": {"type": "string", "minLength": 1},
+        "code_object": {"const": "V6"},
+        "wave_size": {"const": 32}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["device_sha256", "device_bytes", "bundle_ids", "metadata_target", "retained"],
+      "properties": {
+        "device_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "device_bytes": {"type": "integer", "minimum": 1},
+        "bundle_ids": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "metadata_target": {"type": "string", "pattern": "^gfx[0-9]+$"},
+        "retained": {"const": false}
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started_at", "finished_at", "duration_seconds", "network_isolated", "commands", "cleanup"],
+      "properties": {
+        "started_at": {"type": "string", "format": "date-time"},
+        "finished_at": {"type": "string", "format": "date-time"},
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "network_isolated": {"type": "boolean"},
+        "commands": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "argv_sha256", "exit_code"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1},
+              "argv_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "exit_code": {"const": 0}
+            }
+          }
+        },
+        "cleanup": {"const": "PASS"}
+      }
+    }
+  }
+}
