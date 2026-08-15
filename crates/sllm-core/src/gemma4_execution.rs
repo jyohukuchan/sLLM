@@ -15,7 +15,8 @@ use crate::gemma4::Gemma4LayerType;
 use crate::gemma4_graph::{GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphNodeKind, Gemma4NormRole};
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
 use crate::prepared_execution::{
-    ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, PreparedExecutionAudit,
+    ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, PreparedCachePolicy,
+    PreparedDynamicIdentity, PreparedExecutionAudit, PreparedSemanticCache,
     require_terminal_success,
 };
 use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
@@ -188,6 +189,7 @@ impl std::error::Error for Gemma4ExecutionLayoutError {}
 pub struct Gemma4ProvisionedBuffers {
     session: Arc<ExecutionSession>,
     buffers: Vec<ExecutionBuffer>,
+    prepared_semantics: Arc<PreparedSemanticCache>,
 }
 
 /// Immutable Gemma weights and constants retained across request owners.
@@ -738,11 +740,11 @@ impl Gemma4ProvisionedBuffers {
             .collect()
     }
 
-    /// Reuses immutable model allocations, constants, and request K/V state
-    /// for a new shape/position layout. Transition-local workspace, token,
-    /// and position buffers are freshly allocated. This is the production
-    /// prefill-to-decode ownership boundary; weights and published K/V are not
-    /// uploaded or copied through the host.
+    /// Reuses immutable model allocations, request K/V state, and compatible
+    /// request-local workspace for a new shape/position layout. The initial
+    /// prefill allocation is the capacity owner; decode views may narrow it
+    /// but never replace it with per-token device allocations. Weights and
+    /// published K/V are not uploaded or copied through the host.
     pub fn rebind_transition(
         &self,
         current_layout: &Gemma4ExecutionLayout,
@@ -761,7 +763,10 @@ impl Gemma4ProvisionedBuffers {
             let buffer = match &tensor.backing {
                 Gemma4TensorBacking::ModelWeight { .. }
                 | Gemma4TensorBacking::ConstantBf16 { .. }
-                | Gemma4TensorBacking::RequestKv { .. } => {
+                | Gemma4TensorBacking::RequestKv { .. }
+                | Gemma4TensorBacking::Workspace
+                | Gemma4TensorBacking::TokenIds
+                | Gemma4TensorBacking::Positions => {
                     let current = current_layout
                         .tensors
                         .iter()
@@ -779,12 +784,6 @@ impl Gemma4ProvisionedBuffers {
                     .get(*tensor_id)
                     .cloned()
                     .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("alias source is absent"))?,
-                Gemma4TensorBacking::Workspace
-                | Gemma4TensorBacking::TokenIds
-                | Gemma4TensorBacking::Positions => self
-                    .session
-                    .allocate_with_category(tensor.view.end_offset(), AllocationCategory::Workspace)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
             };
             if tensor.view.end_offset() > buffer.size_bytes() {
                 return Err(Gemma4ExecutionLayoutError::invalid(
@@ -796,6 +795,7 @@ impl Gemma4ProvisionedBuffers {
         Ok(Self {
             session: Arc::clone(&self.session),
             buffers,
+            prepared_semantics: Arc::clone(&self.prepared_semantics),
         })
     }
 
@@ -1038,13 +1038,22 @@ impl Gemma4ProvisionedBuffers {
                 }
 
                 for append in self.bind_kv_appends(layout, node)? {
-                    let submission = self.submit_bound(append, queue)?;
+                    let submission =
+                        self.submit_bound(append, queue, PreparedCachePolicy::Transient)?;
                     pending
                         .retain_semantic(format!("{}.kv_append", graph_node.label()), submission);
                 }
 
                 let operation = self.bind_node(layout, node)?;
-                let mut submission = self.submit_bound(operation, queue)?;
+                let cache_policy = if node.descriptor.kind() == SemanticOpKind::CausalAttention {
+                    PreparedCachePolicy::Transient
+                } else {
+                    PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(
+                        graph.token_count(),
+                        0,
+                    ))
+                };
+                let mut submission = self.submit_bound(operation, queue, cache_policy)?;
                 let boundary = planned.boundary_after();
                 if boundary.is_none() {
                     pending.retain_semantic(graph_node.label(), submission);
@@ -1258,6 +1267,7 @@ impl Gemma4ProvisionedBuffers {
         &self,
         operation: Arc<BoundSemanticOp>,
         queue: &ExecutionQueue,
+        cache_policy: PreparedCachePolicy,
     ) -> Result<crate::Submission, Gemma4ExecutionLayoutError> {
         match self.session.supports(operation.descriptor()) {
             PrepareSupport::Supported => {}
@@ -1269,8 +1279,14 @@ impl Gemma4ProvisionedBuffers {
             }
         }
         let prepared = self
-            .session
-            .prepare(operation)
+            .prepared_semantics
+            .prepare(
+                self.session.as_ref(),
+                operation.descriptor().as_ref().clone(),
+                operation.inputs().to_vec(),
+                operation.outputs().to_vec(),
+                cache_policy,
+            )
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         self.session
             .submit(&prepared, queue)
@@ -1314,7 +1330,11 @@ pub fn provision_gemma4_execution_buffers(
         }
         buffers.push(buffer);
     }
-    Ok(Gemma4ProvisionedBuffers { session, buffers })
+    Ok(Gemma4ProvisionedBuffers {
+        session,
+        buffers,
+        prepared_semantics: Arc::new(PreparedSemanticCache::default()),
+    })
 }
 
 fn provision_gemma4_request_buffers(
@@ -1356,7 +1376,11 @@ fn provision_gemma4_request_buffers(
         }
         buffers.push(buffer);
     }
-    Ok(Gemma4ProvisionedBuffers { session, buffers })
+    Ok(Gemma4ProvisionedBuffers {
+        session,
+        buffers,
+        prepared_semantics: Arc::new(PreparedSemanticCache::default()),
+    })
 }
 
 fn require_transfer_success(

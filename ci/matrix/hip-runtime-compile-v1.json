@@ -265,11 +265,11 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "60dfc915c8a0ffb63584a7ce506c49258e2fdc58473eafcf56e0d7153e45c907"
+        "sha256": "ba225366f1b812a8ea1f70c5fd4bc2034157bc1d929dfbbd034eb5f3a7d5fc66"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "753d30182bc924d5bd6c52ccdb2a1e85c77bdeda9e63036a59b987e8d6b38c26"
+        "sha256": "1a9bc3296def0482bf1d45e1e5b5ed9f7afe7f5c1689543945712cc4ec442fcb"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
@@ -332,7 +332,7 @@
         "sha256": "3d8e5ec1de3a03ff9ec345a56653eeb8944e7ae9a4f78e5f9d9abc7752bbd6c5"
       }
     ],
-    "source_set_sha256": "1a582cf164881dfb7d4a44dea6257993a21a268a02bb29ae8893020a48f732dd"
+    "source_set_sha256": "1556950c9bd1dbc299943319c3e356e8478e66d7acbe3deba4b4d265bc4a83e1"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

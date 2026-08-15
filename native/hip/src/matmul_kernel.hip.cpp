@@ -287,7 +287,8 @@ matmul_bf16_decode_body(const uint16_t *const activation,
     const uint64_t pair_count = k / 2U;
     for (uint64_t pair = threadIdx.x; pair < pair_count; pair += blockDim.x) {
       const uint32_t activation_pair = activation_pairs[pair];
-      const uint32_t weight_pair = weight_pairs[pair];
+      const uint32_t weight_pair =
+          __builtin_nontemporal_load(weight_pairs + pair);
       partial += bf16_to_float(static_cast<uint16_t>(activation_pair)) *
                  bf16_to_float(static_cast<uint16_t>(weight_pair));
       partial += bf16_to_float(static_cast<uint16_t>(activation_pair >> 16U)) *
@@ -325,7 +326,7 @@ matmul_bf16_decode_body(const uint16_t *const activation,
 }
 
 extern "C" __global__
-__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v3(
+__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_v4(
     const uint16_t *const activation, const uint16_t *const weight,
     uint16_t *const output, const uint64_t k, const uint64_t n) {
   matmul_bf16_decode_body<32U, 8U>(activation, weight, output, k, n);
@@ -380,7 +381,7 @@ hipError_t launch(const uint16_t *const activation,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
                        stream, activation, weight, output, k, n);
   } else if (variant == KernelVariant::DecodeReduction) {
-    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_v3,
+    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_v4,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
                        stream, activation, weight, output, k, n);
   } else if (variant == KernelVariant::PrefillTiled16) {

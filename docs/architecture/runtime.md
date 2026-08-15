@@ -131,9 +131,11 @@ cache、pending submission enum、flush loop、completion wait policyを持た�
 
 Gemma 4 adapterも同じplan/transition/segment/transactionを使い、48 layer・958 nodeのtensor/buffer layoutだけを所有する。
 immutable weight/constant/ordered queueは`Gemma4ResidentModel`が保持し、request ownerはtoken/position、workspace、連続BF16
-K/Vだけを持つ。decode tailはpublished attention prefixと同じbufferのchecked offsetへappendし、state-publicationと
-terminal-readbackの両boundary完了後だけ長さを公開する。greedyではArgmaxだけを返し、sampling時だけ最終BF16 logits rowを
-bounded chunkでreadbackしてからtransactionをcommitする。
+K/Vだけを持つ。prefill allocationをrequest capacity ownerとし、decode viewが収まる同名・同backing workspaceを再bindする。
+prepared semanticもrequest内でexact descriptor/buffer/view/dynamic identityが一致する場合だけ再利用し、position/state依存の
+attentionとKV appendはtransientを維持する。decode tailはpublished attention prefixと同じbufferのchecked offsetへappendし、
+state-publicationとterminal-readbackの両boundary完了後だけ長さを公開する。greedyではArgmaxだけを返し、sampling時だけ最終
+BF16 logits rowをbounded chunkでreadbackしてからtransactionをcommitする。
 
 ## DType と量子化 encoding
 

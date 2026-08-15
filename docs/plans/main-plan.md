@@ -520,19 +520,22 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
 
 ### Phase 15: Weight NVFP4（計画済み）
 
-- Phase 14後にQwen/Gemmaのfresh profileと共通RDNA2/RDNA4最適化bridgeを行ってから着手する。
+- Phase 14後のQwen/Gemma fresh profileと共通RDNA2/RDNA4最適化bridgeは2026-08-15に完了した。Gemmaの
+  request workspace/prepared semantic再利用と、両model/両GPU共通のM=1 BF16 matvec streaming loadを採用した。
+  R9700ではGemma `3/17`と`32/32`がfresh baseline比`+3.07%/+3.89%`、Qwen3.5-2B short-oddが
+  `+1.62%`で、V620にも明確な退行はなかった。attention非支配のためFA3-likeは除外した。
 - weight-only NVFP4としてvalue、block scale、tensor scale、packingをencoding/sidecar/loader/providerへ保持し、
   native、packed-dequant、emulation、converted pathを区別する。
 - 詳細は[Phase 15 active plan](active/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
 
 ## 現在の状態と次の作業
 
-- Phase 14まで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Weight NVFP4はPhase 15とする。
-  MI300Xを管理できない現在のlocal forward実行対象はQwen/Gemma共通RDNA性能bridgeである。
+- Phase 14と共通RDNA性能bridgeまで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Weight NVFP4は
+  Phase 15とする。MI300Xを管理できない現在のlocal forward実行対象はPhase 15である。
 - MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。
-  次は共通RDNA性能bridge、Phase 15の順に進め、Phase 16〜18の詳細計画とlocal-only実装へ続ける。
+  共通RDNA性能bridgeを完了したため、次はPhase 15へ進め、Phase 16〜18の詳細計画とlocal-only実装へ続ける。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで

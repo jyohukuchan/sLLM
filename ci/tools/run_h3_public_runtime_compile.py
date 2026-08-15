@@ -165,7 +165,7 @@ KERNEL_SYMBOLS = (
     "sllm_kv_state_bf16_to_f16_token_major_v2",
     "sllm_linear_attention_causal_conv_silu_v1",
     "sllm_linear_attention_recurrent_gated_norm_v1",
-    "sllm_matmul_bf16_fp32_decode_v3",
+    "sllm_matmul_bf16_fp32_decode_v4",
     "sllm_matmul_bf16_fp32_decode_wave64_v1",
     "sllm_matmul_bf16_fp32_tiled16_v2",
     "sllm_matmul_bf16_fp32_v1",

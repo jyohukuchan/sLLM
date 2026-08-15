@@ -14,8 +14,8 @@ constexpr const char *kLogicalKernelId = "matmul.bf16_fp32.v1";
 constexpr const char *kDeviceSymbol = "sllm_matmul_bf16_fp32_v1";
 constexpr const char *kPrefillLogicalKernelId = "matmul.bf16_fp32.tiled16.v2";
 constexpr const char *kPrefillDeviceSymbol = "sllm_matmul_bf16_fp32_tiled16_v2";
-constexpr const char *kDecodeLogicalKernelId = "matmul.bf16_fp32.decode.v3";
-constexpr const char *kDecodeDeviceSymbol = "sllm_matmul_bf16_fp32_decode_v3";
+constexpr const char *kDecodeLogicalKernelId = "matmul.bf16_fp32.decode.v4";
+constexpr const char *kDecodeDeviceSymbol = "sllm_matmul_bf16_fp32_decode_v4";
 constexpr const char *kDecodeWave64LogicalKernelId =
     "matmul.bf16_fp32.decode.wave64.v1";
 constexpr const char *kDecodeWave64DeviceSymbol =

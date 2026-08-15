@@ -161,4 +161,12 @@
 - 最終host evidenceはH0 `513/513`、H1 `421/421`、H2 `36/36` PASSである。workspace Rust test/clippy、C++
   format/static、manifest/schema/workflow、matrix registration、dependency closureもPASSし、Phase 14を完了した。
 
+## 2026-08-15: post-closeout共通RDNA性能bridge
+
+- Phase 14のclosed identityからQwen/Gemma共通profileを取得した結果、Gemmaのdecode BF16 matvecがdevice timeの
+  `84.28%`、attentionが`4.07%`であり、RDNA4 FA3-likeは選ばなかった。
+- request workspace/prepared semantic再利用とM=1 BF16 matvec streaming loadを採用した。Gemma R9700のfresh
+  baseline比で`3/17` `+3.07%`、`32/32` `+3.89%`、V620でも二つ目のcandidate前後に退行なしを確認した。
+  詳細なQwen値、profile分類、oracleは[共通RDNA性能bridge履歴](cross-model-rdna-performance-bridge.md)を正とする。
+
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase14-gemma4-dense.md)

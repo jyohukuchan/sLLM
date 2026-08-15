@@ -19,6 +19,11 @@ FP4 native arithmeticを使うこと、実用的に高速であることを別�
 - Phase 14後のfresh profileで、NVFP4前に行う共通RDNA最適化候補の採否が記録されている。
 - NVFP4の公式format/value/scale/tensor-scale規則と、参照実装source revisionを固定できる。
 
+共通RDNA性能bridgeは2026-08-15に候補二つを採用した。現行BF16開始baselineはR9700でGemma
+`3/17` `14.221 tok/s`、`32/32` `13.949 tok/s`、Qwen3.5-2B short-odd `66.490 tok/s`、V620で
+Gemma `11.768/11.398 tok/s`、Qwen short-odd `54.942 tok/s`とする。詳細は
+[bridge履歴](../../../../../history/2026/08/11-20/cross-model-rdna-performance-bridge.md)を正とする。
+
 Phase 12 MI300X実機PASSは開始条件にしない。CDNA3でnative NVFP4を推測または主張しない。
 
 ## 固定する製品契約

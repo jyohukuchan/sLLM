@@ -438,8 +438,8 @@ fn validate_dispatch(
             (
                 3,
                 shape.n as u32,
-                "matmul.bf16_fp32.decode.v3",
-                "sllm_matmul_bf16_fp32_decode_v3",
+                "matmul.bf16_fp32.decode.v4",
+                "sllm_matmul_bf16_fp32_decode_v4",
             )
         } else {
             (

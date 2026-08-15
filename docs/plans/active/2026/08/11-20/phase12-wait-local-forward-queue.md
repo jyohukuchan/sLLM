@@ -74,6 +74,10 @@ Gemma 4 Denseの完了はqueueのcheckpointであり、`/goal`の完了条件で
 
 ### Q3: Qwen/Gemma共通のRDNA2・RDNA4性能bridge
 
+> 状態: completed（2026-08-15）
+
+[詳細plan](../../../../archive/2026/08/11-20/cross-model-rdna-performance-bridge.md)を正とする。
+
 これは新しいPhase番号を挿入せず、Phase 14完了後かつPhase 15開始前のprofile-driven bridgeとする。
 
 #### Q2-A0: fresh profile
@@ -101,6 +105,8 @@ full attentionが代表wall timeの支配要因へ移らない限り、RDNA4 FA3
 - 採否と残差をPhase 14 history、Phase 15開始時baseline、main planへ記録してQ4へ進む。
 
 ### Q4: Phase 15 Weight NVFP4
+
+> 状態: next（2026-08-15）
 
 正本は[Phase 15 plan](phase15-weight-nvfp4.md)とする。
 
