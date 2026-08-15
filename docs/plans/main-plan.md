@@ -316,6 +316,8 @@
    - Phase 15Oとして、model本体のFP8/NVFP4量子化pathをdecodeとprefillに分け、Phase 16より前に最適化する。
      - decodeはdynamic FP8 activation量子化とFP8/NVFP4 M=1 providerを最適化する。
      - prefillはFP8 hipBLASLt solutionとNVFP4 packed-dequant tiled providerを最適化する。
+   - Phase 15Qとして、Unsloth NVFP4 checkpointを使い、現行NVFP4の品質差を量子化algorithm、format ceiling、
+     format mapping/runtimeへ切り分ける。
 16. KV cache FP8/NVFP4へ対応する。
 17. MTP、visionへ対応する。
 18. Gemma4またはQwen3.5のMoEへ対応する。
@@ -582,9 +584,18 @@ candidateを再確認した。
   `correctness-only`、NVFP4はaccuracy budget超過のため両targetとも`correctness-only opt-in`を維持する。
 - 詳細は[Phase 15O archive](archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)を正とする。
 
+### Phase 15Q: Unsloth NVFP4品質要因の切り分け（計画済み）
+
+- `unsloth/gemma-4-12b-it-NVFP4`のMLP weight payloadと、同じBF16 sourceから作るsLLM min-max NVFP4を、
+  同じ144 tensor、BF16 activation/attention、FP16 KV、sLLM providerで比較する。
+- Unsloth公開checkpointはMLP W4A4、attention W8A8、KV FP8のmixed-precisionであるため、そのままのend-to-end比較を
+  primary attributionに使わない。独立decoder、matched weight-only比較、bounded scale-searchの順でalgorithmとformatを分ける。
+- 詳細は[Phase 15Q active plan](active/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 15Oまで完了した。次はPhase 16 KV cache FP8/NVFP4へ進む。
+- Phase 15Oまで完了した。次はPhase 15Q Unsloth NVFP4品質要因の切り分けであり、量子化algorithmと
+  E2M1/block-16 formatの寄与をmatched comparisonで確定してからPhase 16 KV cache FP8/NVFP4へ進む。
 - 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと
   量子化sidecarは移行完了まで維持し、この決定だけを理由にPhase 16を自動開始または繰り下げない。
 - MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
