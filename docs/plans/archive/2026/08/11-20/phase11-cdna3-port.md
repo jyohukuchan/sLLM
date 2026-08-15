@@ -126,7 +126,7 @@ layer/head/dtype/context別の必要byteを計算し、capacity超過をallocati
 
 ## 終了時更新先
 
-- [Phase 12 active plan](../../../../active/2026/08/11-20/phase12-mi300x-validation.md)
+- [Phase 12 archive](phase12-mi300x-validation.md)
 - [メイン計画](../../../../main-plan.md)
 - [AMD GPU互換性](../../../../../compatibility/amd-gpu.md)
 - [software互換性](../../../../../compatibility/software.md)

@@ -142,8 +142,8 @@ fn parse_config() -> Result<Config, String> {
                 let value = arguments
                     .next()
                     .ok_or_else(|| "--target requires a value".to_owned())?;
-                if !matches!(value.as_str(), "gfx1030" | "gfx1201") {
-                    return Err("--target must be gfx1030 or gfx1201".to_owned());
+                if !matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+                    return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
                 }
                 target = Some(value);
             }
@@ -427,12 +427,19 @@ fn validate_dispatch(
                 "matmul.bf16_fp32.v1",
                 "sllm_matmul_bf16_fp32_v1",
             )
-        } else if shape.m > 1 && target == "gfx1201" {
+        } else if shape.m > 1 && matches!(target, "gfx1201" | "gfx942") {
             (
                 4,
                 shape.n as u32,
                 "matmul.hipblas.gemm_ex.v2",
                 "hipblasGemmEx",
+            )
+        } else if shape.m == 1 && target == "gfx942" {
+            (
+                7,
+                shape.n as u32,
+                "matmul.bf16_fp32.decode.wave64.v1",
+                "sllm_matmul_bf16_fp32_decode_wave64_v1",
             )
         } else if shape.m == 1 {
             (

@@ -18,8 +18,8 @@ use crate::rmsnorm::TensorBinding;
 use crate::runtime::{
     CompletionState, Context, Queue, RuntimeError, RuntimeStatus,
     enqueue_linear_attention_completion_cleanup, enqueue_linear_attention_state_cleanup, ensure_ok,
-    release_linear_attention_completion_once, release_linear_attention_state_once, result_error,
-    sink,
+    gcn_arch_matches, logical_gcn_arch_name, release_linear_attention_completion_once,
+    release_linear_attention_state_once, result_error, sink,
 };
 
 const ERROR_CAPACITY: usize = 256;
@@ -450,7 +450,8 @@ fn validate_dispatch(
     layout: LinearAttentionLayout,
     expected_target: Option<&str>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
-    let target = read_c_string(&info.gcn_arch_name);
+    let observed_target = read_c_string(&info.gcn_arch_name);
+    let target = logical_gcn_arch_name(&observed_target).to_owned();
     let kernel_symbol = read_c_string(&info.kernel_symbol);
     let conv_device_symbol = read_c_string(&info.conv_device_symbol);
     let recurrent_device_symbol = read_c_string(&info.recurrent_device_symbol);
@@ -479,7 +480,7 @@ fn validate_dispatch(
         && kernel_symbol == KERNEL_SYMBOL
         && conv_device_symbol == CONV_DEVICE_SYMBOL
         && recurrent_device_symbol == RECURRENT_DEVICE_SYMBOL
-        && expected_target.is_none_or(|expected| expected == target)
+        && expected_target.is_none_or(|expected| gcn_arch_matches(expected, &observed_target))
         && info.reserved.iter().all(|value| *value == 0);
     if !valid {
         return Err(RuntimeError::local(

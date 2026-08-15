@@ -27,14 +27,27 @@ use crate::rmsnorm::TensorBinding;
 use crate::runtime::{
     CompletionState, Context, Queue, RuntimeError, RuntimeStatus,
     enqueue_causal_completion_cleanup, enqueue_kv_completion_cleanup, enqueue_kv_state_cleanup,
-    enqueue_kv_view_cleanup, ensure_ok, release_causal_completion_once, release_kv_completion_once,
-    release_kv_state_once, release_kv_view_once, result_error, sink,
+    enqueue_kv_view_cleanup, ensure_ok, gcn_arch_matches, logical_gcn_arch_name,
+    release_causal_completion_once, release_kv_completion_once, release_kv_state_once,
+    release_kv_view_once, result_error, sink,
 };
 
 const ERROR_CAPACITY: usize = 256;
 const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_token_major.v2";
 const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_token_major_v2";
+
+fn selected_memory_kind_for_target(expected_target: Option<&str>) -> u32 {
+    if expected_target == Some("gfx942") {
+        sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+    } else {
+        sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+    }
+}
+
+fn selected_memory_kind(context: &Context) -> u32 {
+    selected_memory_kind_for_target(context.expected_target())
+}
 
 struct KvStateInner {
     raw: usize,
@@ -102,7 +115,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED,
+            memory_kind: selected_memory_kind(context),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
@@ -956,7 +969,8 @@ fn validate_append_info(
     request: KvStateAppendRequest,
     descriptor: KvStateDescriptor,
 ) -> Result<KvAppendEvidence, RuntimeError> {
-    let target = c_string(&info.gcn_arch_name);
+    let observed_target = c_string(&info.gcn_arch_name);
+    let target = logical_gcn_arch_name(&observed_target).to_owned();
     let expected_target = context.expected_target();
     let expected_grid = request
         .token_count()
@@ -982,7 +996,7 @@ fn validate_append_info(
         || info.reserved0 != 0
         || info.reserved != [0; 8]
         || info.end_position > descriptor.capacity()
-        || expected_target.is_some_and(|expected| expected != target)
+        || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidKvAppendDescriptor,
@@ -1014,7 +1028,8 @@ fn validate_causal_attention_info(
     committed_kv_length: u64,
     descriptor: KvStateDescriptor,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
-    let target = c_string(&info.gcn_arch_name);
+    let observed_target = c_string(&info.gcn_arch_name);
+    let target = logical_gcn_arch_name(&observed_target).to_owned();
     let query_count = committed_kv_length
         .checked_sub(start_position)
         .ok_or_else(|| {
@@ -1049,7 +1064,7 @@ fn validate_causal_attention_info(
         || c_string(&info.device_symbol) != "sllm_causal_attention_online_softmax_gqa_v2"
         || info.reserved != [0; 8]
         || committed_kv_length > descriptor.capacity()
-        || expected_target.is_some_and(|expected| expected != target)
+        || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidCausalAttentionDescriptor,
@@ -1191,6 +1206,22 @@ pub fn expected_storage_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gfx942_keeps_the_fixed_contiguous_resident_provider() {
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx942")),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx1201")),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(None),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+        );
+    }
 
     #[test]
     fn fp16_oracle_covers_special_and_rounding_cases() {

@@ -73,7 +73,7 @@ generic binaryへ黙ってfallbackしてよいとは限らない。特に`gfx9-4
 | --- | --- | --- | --- | --- |
 | RDNA 2 | `gfx1030`–`gfx1036` | `gfx10-3-generic`、Code Object V6+ | `experimental` | `unverified` |
 | RDNA 4 | `gfx1200`, `gfx1201` | `gfx12-generic`、Code Object V6+ | `experimental` | `unverified` |
-| CDNA 3 | `gfx942` | 初期FP8 pathでは使用しない | `experimental` | `unverified` |
+| CDNA 3 | `gfx942` | 初期FP8 pathでは使用しない | `experimental` | `project-verified`（下記Hot Aisle tuple/scope限定） |
 
 [ROCm 7.14.0 release notes](https://rocm.docs.amd.com/en/docs-7.14.0/about/release-notes.html)は、ROCm componentと公式対象製品をexact target単位で掲載する。generic processorのcoverage、compilerがtargetを生成できること、製品・OS構成のvendor supportは別の事実である。
 
@@ -99,7 +99,7 @@ sLLMがhipBLASLt 1.4.1のFP8 GEMM pathを使用する場合の初期contract候�
 - exact `gfx1200`/`gfx1201`: `hipblaslt_f8`/`hipblaslt_bf8`を使う。
 - model storage encoding、sLLM kernel input、hipBLASLt datatypeが異なる場合は明示的に変換し、FNUZとOCP payloadを再解釈しない。
 
-`gfx942`はPhase 11でexact compile/linkとhost oracleまで完了した実機未検証contractである。`gfx1201`はPhase 10で実装・local実機検証済みだが、
+`gfx942`はPhase 11のexact compile/link/host oracleに加え、Phase 12のHot Aisle MI300X VFで実機検証した。`gfx1201`はPhase 10で実装・local実機検証済みだが、
 hipBLASLt表だけをhardware全体の対応根拠にせず、exact target、runtime capability、library query、
 shape/alignmentをすべて満たしたproblemだけdispatchする。
 
@@ -109,13 +109,17 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
   BF16 conversionを実装・検証した。RDNA2 pathをnative FP8と表記しない。R9700 nativeはVRAMを削減したが
   BF16より遅いためopt-in、V620 emulationはcorrectness-onlyとする。
 - Phase 11はexact `gfx942`、wave64、FNUZ FP8への実装、compile/link、host oracleを完了し、model storageの
-  E4M3FNをload時に数値変換する。実機evidenceはまだない。
+  E4M3FNをload時にFNUZ residentへrebasingする。Phase 12ではHot Aisle MI300X VF x1、Ubuntu 24.04、
+  kernel `6.8.0-124-generic`、amdgpu `6.16.13`、ROCm 7.14.0/HIP 7.14.60850、
+  `gfx942:sramecc+:xnack-`、wave64、304 CUのtupleでoperator、4B/9B model、service、performanceを実機PASSした。
   `gfx9-4-generic`やOCP/FNUZ payloadのraw reinterpretを使わない。
 - AMDの公開MI300X llama.cpp例は`gfx942:sramecc+:xnack-`、wave64、VMMなしを報告している。この情報は
   sLLMのHot Aisle VM実測ではないため`vendor-published observation`として扱い、Phase 12 preflightで
   `hipDeviceAttributeVirtualMemoryManagementSupported`を再取得する。
 - VMMなしのtargetには、同じtoken-major FP16 K/Vとattention ABIを使う`contiguous-resident` KV providerを
-  capabilityで明示選択する。VMM対応targetのvAttentionを廃止せず、Paged Attentionへ暗黙に切り替えない。
+  capabilityで選択する。Phase 12の比較条件を固定するためexact `gfx942`は実測VMM=trueでも同providerを明示選択し、
+  1023/1024/1025 capacity、cancel/recovery、cleanup zeroを確認した。他のVMM対応targetのvAttentionは廃止せず、
+  Paged Attentionへ暗黙に切り替えない。
 
 ### Phase 15 Weight NVFP4
 
@@ -131,9 +135,21 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 - Hot Aisle MI300X x1の結果は、完全なVM/software tuple、single GPU、実行したop/model/shapeだけへ限定する。
   MI300A/MI325X、multi-GPU、bare metalへ自動的に一般化しない。
 
+### Phase 15O model量子化path最適化
+
+- exact `gfx1201`のnative FP8は、同じOCP W8A8/hipBLASLt contractの前段dynamic量子化をwave reduction/native pair
+  conversionへ更新した。R9700 Qwen3.5-4B 32/32でprefill `+5.89%`、decode `+10.69%`となったが、BF16よりなお遅く、
+  provider状態は`opt-in production`のままである。exact `gfx1030` emulationも`correctness-only`から変更しない。
+- NVFP4はM=1の従来packed-dequantと、M>1でpacked weight K tileを8 row共有するprefill providerへ分離した。
+  M=32 operatorはR9700で59.29〜59.51%、V620で51.21〜56.68%低遅延となり、resident/peak VRAMは不変だった。
+  accuracy最大KLD `0.2637523`は既定budget超過のため、両targetとも`correctness-only opt-in`を維持する。
+- Phase 15O期間にはMI300Xが存在せず、新しいexact `gfx942` candidateは有効化していない。R9700/V620の結果を
+  CDNA3へ移植せず、Phase 12で検証した既存gfx942 provider scopeも変更しない。
+
 詳細な実装・実機順は[Phase 10](../plans/archive/2026/08/11-20/phase10-fp8-w8a8.md)、
 [Phase 11](../plans/archive/2026/08/11-20/phase11-cdna3-port.md)、
-[Phase 12](../plans/active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
+[Phase 12](../plans/archive/2026/08/11-20/phase12-mi300x-validation.md)、
+[Phase 15O](../plans/archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)を正とする。
 
 ## 製品別evidence
 

@@ -142,6 +142,25 @@ def amd_smi(command: str, gpu: int | None = None) -> object:
     return json.loads(result.stdout)
 
 
+def optional_amd_smi(command: str, gpu: int | None = None) -> object:
+    """Capture provider-blocked telemetry as unavailable, never as zero."""
+    try:
+        return amd_smi(command, gpu)
+    except subprocess.CalledProcessError as exc:
+        return {
+            "state": "unavailable",
+            "command": command,
+            "returncode": exc.returncode,
+            "stderr": exc.stderr.strip(),
+        }
+
+
+def metric_observation(target: str, gpu: int) -> object:
+    if target == "gfx942":
+        return optional_amd_smi("metric", gpu)
+    return amd_smi("metric", gpu)
+
+
 def process_count(document: object, gpu: int) -> int:
     if not isinstance(document, list):
         raise RuntimeError("amd-smi process output is not a list")
@@ -173,12 +192,12 @@ def main() -> int:
     parser.add_argument("--device-index", type=int, required=True)
     parser.add_argument("--amd-smi-index", type=int, required=True)
     parser.add_argument("--gpu-uuid", required=True)
-    parser.add_argument("--target", choices=("gfx1030", "gfx1201"), required=True)
+    parser.add_argument("--target", choices=("gfx1030", "gfx1201", "gfx942"), required=True)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--client-python", type=Path, required=True)
     args = parser.parse_args()
     pre_static = amd_smi("static", args.amd_smi_index)
-    pre_metric = amd_smi("metric", args.amd_smi_index)
+    pre_metric = metric_observation(args.target, args.amd_smi_index)
     pre_processes = process_count(amd_smi("process"), args.amd_smi_index)
     env = dict(os.environ)
     for name in ("HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL"):
@@ -284,7 +303,7 @@ def main() -> int:
         raise RuntimeError("full-model service page-boundary audits are absent")
     if any(audit["physical_page_bytes"] <= 0 or audit["committed_kv_bytes"] <= 0 for audit in boundary):
         raise RuntimeError("page-boundary physical KV evidence is absent")
-    post_metric = amd_smi("metric", args.amd_smi_index)
+    post_metric = metric_observation(args.target, args.amd_smi_index)
     post_processes = process_count(amd_smi("process"), args.amd_smi_index)
     if post_processes != pre_processes:
         raise RuntimeError("GPU process count did not return to pre-run value")

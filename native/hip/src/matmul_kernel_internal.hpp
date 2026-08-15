@@ -29,9 +29,17 @@ constexpr const char *kFp8EmulationLogicalKernelId =
     "matmul.fp8.outer.byte_decode.v1";
 constexpr const char *kFp8EmulationDeviceSymbol =
     "sllm_matmul_fp8_outer_emulation_v1";
-constexpr const char *kNvfp4LogicalKernelId =
+constexpr const char *kNvfp4DecodeLogicalKernelId =
+    "matmul.nvfp4.block16.decode.packed_dequant.v1";
+constexpr const char *kNvfp4DecodeDeviceSymbol =
+    "sllm_matmul_nvfp4_block16_packed_dequant_v1";
+constexpr const char *kNvfp4PrefillLogicalKernelId =
+    "matmul.nvfp4.block16.prefill.row8_tiled256.v2";
+constexpr const char *kNvfp4PrefillDeviceSymbol =
+    "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2";
+constexpr const char *kNvfp4BaselineLogicalKernelId =
     "matmul.nvfp4.block16.packed_dequant.v1";
-constexpr const char *kNvfp4DeviceSymbol =
+constexpr const char *kNvfp4BaselineDeviceSymbol =
     "sllm_matmul_nvfp4_block16_packed_dequant_v1";
 
 enum class KernelVariant : uint32_t {
@@ -42,8 +50,32 @@ enum class KernelVariant : uint32_t {
   Fp8Native = 5U,
   Fp8Emulation = 6U,
   DecodeReductionWave64 = 7U,
-  Nvfp4PackedDequant = 8U,
+  Nvfp4DecodePackedDequant = 8U,
+  Nvfp4PrefillRow8Tiled256 = 9U,
+  Nvfp4BaselinePackedDequant = 10U,
 };
+
+inline KernelVariant select_nvfp4_variant(const uint64_t m) noexcept {
+  const char *const force_baseline =
+      std::getenv("SLLM_NVFP4_FORCE_BASELINE");
+  if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
+    return KernelVariant::Nvfp4BaselinePackedDequant;
+  }
+  return m == 1U ? KernelVariant::Nvfp4DecodePackedDequant
+                 : KernelVariant::Nvfp4PrefillRow8Tiled256;
+}
+
+inline bool target_is(const char *const target,
+                      const char *const expected) noexcept {
+  if (target == nullptr || expected == nullptr) {
+    return false;
+  }
+  if (std::strcmp(target, expected) == 0) {
+    return true;
+  }
+  return std::strcmp(expected, "gfx942") == 0 &&
+         std::strcmp(target, "gfx942:sramecc+:xnack-") == 0;
+}
 
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
                                     const uint64_t n,
@@ -54,12 +86,10 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
   }
   (void)k;
   (void)n;
-  if (m > 1U && target != nullptr &&
-      (std::strcmp(target, "gfx1201") == 0 ||
-       std::strcmp(target, "gfx942") == 0)) {
+  if (m > 1U && (target_is(target, "gfx1201") || target_is(target, "gfx942"))) {
     return KernelVariant::HipBlas;
   }
-  return m == 1U ? (target != nullptr && std::strcmp(target, "gfx942") == 0
+  return m == 1U ? (target_is(target, "gfx942")
                         ? KernelVariant::DecodeReductionWave64
                         : KernelVariant::DecodeReduction)
                  : KernelVariant::PrefillTiled16;
@@ -68,7 +98,12 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   return variant == KernelVariant::Fp8Native      ? kFp8NativeLogicalKernelId
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationLogicalKernelId
-         : variant == KernelVariant::Nvfp4PackedDequant ? kNvfp4LogicalKernelId
+         : variant == KernelVariant::Nvfp4DecodePackedDequant
+             ? kNvfp4DecodeLogicalKernelId
+         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
+             ? kNvfp4PrefillLogicalKernelId
+         : variant == KernelVariant::Nvfp4BaselinePackedDequant
+             ? kNvfp4BaselineLogicalKernelId
          : variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64LogicalKernelId
@@ -82,7 +117,12 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   return variant == KernelVariant::Fp8Native      ? kFp8NativeDeviceSymbol
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationDeviceSymbol
-         : variant == KernelVariant::Nvfp4PackedDequant ? kNvfp4DeviceSymbol
+         : variant == KernelVariant::Nvfp4DecodePackedDequant
+             ? kNvfp4DecodeDeviceSymbol
+         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
+             ? kNvfp4PrefillDeviceSymbol
+         : variant == KernelVariant::Nvfp4BaselinePackedDequant
+             ? kNvfp4BaselineDeviceSymbol
          : variant == KernelVariant::HipBlas            ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64DeviceSymbol
@@ -95,7 +135,11 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n) noexcept {
   return variant == KernelVariant::Fp8Native ? static_cast<uint32_t>(n)
-         : variant == KernelVariant::Nvfp4PackedDequant
+         : variant == KernelVariant::Nvfp4DecodePackedDequant
+             ? static_cast<uint32_t>(n)
+         : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
+             ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
+         : variant == KernelVariant::Nvfp4BaselinePackedDequant
              ? static_cast<uint32_t>(m * n)
          : variant == KernelVariant::Fp8Emulation
              ? static_cast<uint32_t>((m * n + kWorkgroupSize - 1U) /

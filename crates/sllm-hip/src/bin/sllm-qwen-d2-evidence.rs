@@ -113,8 +113,8 @@ fn parse_config_from(arguments: impl IntoIterator<Item = String>) -> Result<Conf
                 "--device-index",
             )?,
             "--target" => {
-                if value != "gfx1030" && value != "gfx1201" {
-                    return Err("--target must be gfx1030 or gfx1201".to_owned());
+                if !matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+                    return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
                 }
                 set_once(&mut target, value, "--target")?;
             }

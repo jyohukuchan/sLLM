@@ -526,6 +526,9 @@ def parse_response(data: bytes, *, expected_target: str, expected_device_index: 
     expected_elements = math.prod(expected_shape)
     expected_rows = math.prod(expected_shape[:-1])
     epsilon_bits_expected = struct.unpack("<I", struct.pack("<f", expected_epsilon))[0]
+    expected_kernel_id = 2 if expected_target == "gfx942" else 1
+    expected_kernel_symbol = "rmsnorm.baseline.wave64.v1" if expected_target == "gfx942" else KERNEL_SYMBOL
+    expected_device_symbol = "sllm_rmsnorm_baseline_wave64_v1" if expected_target == "gfx942" else DEVICE_SYMBOL
     if (
         not 1 <= rank <= 8 or tuple(shape[:rank]) != expected_shape or any(shape[rank:])
         or any((reserved, epsilon_reserved, extension_reserved, resource_reserved))
@@ -535,11 +538,11 @@ def parse_response(data: bytes, *, expected_target: str, expected_device_index: 
         raise RunnerError("runtime response shape/count/epsilon contract is invalid")
     if (
         target != expected_target or device_index != expected_device_index or backend != 1
-        or dispatch_id < 1 or dispatch_count != 1 or kernel_id != 1 or workgroup != 256 or grid != expected_rows
+        or dispatch_id < 1 or dispatch_count != 1 or kernel_id != expected_kernel_id or workgroup != 256 or grid != expected_rows
         or fallback_allowed != 0 or fallback_used != 0 or semantic_wire != 1 or contract_version != 1
         or accumulation_wire != 3 or (input_count, output_count, binding_count) != (2, 1, 3)
         or (cleanup_pending, cleanup_durable, cleanup_errors) != (0, 0, 0)
-        or kernel_symbol != KERNEL_SYMBOL or device_symbol != DEVICE_SYMBOL
+        or kernel_symbol != expected_kernel_symbol or device_symbol != expected_device_symbol
     ):
         raise RunnerError("runtime response dispatch/backend/fallback contract is invalid")
     observed_counts = {

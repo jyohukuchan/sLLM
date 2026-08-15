@@ -1,0 +1,584 @@
+//! Model-free numerical evidence for the public Qwen3.5 GDN state path.
+
+use std::env;
+use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde::Serialize;
+#[cfg(test)]
+use sllm_core::LinearAttentionLayout;
+use sllm_core::{
+    AccessMode, Backend, DType, Encoding, ExecutionSessionRequest, ExecutionState,
+    LinearAttentionBindings, LinearAttentionDescriptor, LinearAttentionStateDescriptor,
+    OwnedTensorBinding, TensorView,
+};
+use sllm_hip::HipBackend;
+
+const CASE_TOKENS: [usize; 3] = [1, 3, 17];
+const QK_HEADS: usize = 16;
+const VALUE_HEADS: usize = 32;
+const HEAD_DIM: usize = 128;
+const CONV_KERNEL: usize = 4;
+const QKV_WIDTH: usize = (2 * QK_HEADS + VALUE_HEADS) * HEAD_DIM;
+const OUTPUT_WIDTH: usize = VALUE_HEADS * HEAD_DIM;
+const WAIT: Duration = Duration::from_secs(30);
+
+#[derive(Debug)]
+struct Config {
+    device_index: u32,
+    target: String,
+}
+
+#[derive(Serialize)]
+struct CaseEvidence {
+    tokens: usize,
+    dispatch_count: u32,
+    recurrent_kernel_id: u32,
+    kernel_symbol: String,
+    recurrent_device_symbol: String,
+    max_abs_error: f32,
+    max_rel_error: f32,
+    state_length_after: u64,
+}
+
+#[derive(Serialize)]
+struct Report {
+    schema_version: &'static str,
+    state: &'static str,
+    target: String,
+    device_index: u32,
+    selected_backend: &'static str,
+    model_used: bool,
+    layout: [usize; 4],
+    cases: Vec<CaseEvidence>,
+    fallback_allowed: bool,
+    fallback_used: bool,
+    cpu_fallback_used: bool,
+    cleanup_retryable: usize,
+    cleanup_durable: usize,
+}
+
+fn parse_config() -> Result<Config, String> {
+    let mut device_index = None;
+    let mut target = None;
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device-index" => {
+                device_index = Some(
+                    args.next()
+                        .ok_or_else(|| "--device-index requires a value".to_owned())?
+                        .parse::<u32>()
+                        .map_err(|_| "--device-index must be a u32".to_owned())?,
+                );
+            }
+            "--target" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--target requires a value".to_owned())?;
+                if !matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+                    return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
+                }
+                target = Some(value);
+            }
+            other => return Err(format!("unexpected argument `{other}`")),
+        }
+    }
+    Ok(Config {
+        device_index: device_index.ok_or_else(|| "missing --device-index".to_owned())?,
+        target: target.ok_or_else(|| "missing --target".to_owned())?,
+    })
+}
+
+fn f32_to_bf16(value: f32) -> u16 {
+    let bits = value.to_bits();
+    if bits & 0x7f80_0000 == 0x7f80_0000 {
+        if bits & 0x007f_ffff != 0 {
+            return ((bits >> 16) as u16 & 0x803f) | 0x7fc0;
+        }
+        return (bits >> 16) as u16;
+    }
+    let upper = bits >> 16;
+    let lower = bits & 0xffff;
+    (upper + u32::from(lower > 0x8000 || (lower == 0x8000 && upper & 1 != 0))) as u16
+}
+
+fn bf16_to_f32(value: u16) -> f32 {
+    f32::from_bits(u32::from(value) << 16)
+}
+
+fn bf16_bytes(words: &[u16]) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+fn f32_bytes(words: &[f32]) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_le_bytes()).collect()
+}
+
+fn wait_success(
+    state: Result<ExecutionState, sllm_core::ExecutionError>,
+    label: &str,
+) -> Result<(), String> {
+    match state.map_err(|error| format!("{label}: {error}"))? {
+        ExecutionState::Success => Ok(()),
+        ExecutionState::Pending => Err(format!("{label} remained pending")),
+        ExecutionState::Failure => Err(format!("{label} reported failure")),
+    }
+}
+
+fn upload_binding(
+    session: &sllm_core::ExecutionSession,
+    queue: &sllm_core::ExecutionQueue,
+    dtype: DType,
+    shape: &[usize],
+    access: AccessMode,
+    bytes: Vec<u8>,
+) -> Result<(sllm_core::ExecutionBuffer, OwnedTensorBinding), String> {
+    let view = TensorView::with_encoding(dtype, Encoding::Unquantized, shape)
+        .map_err(|error| format!("tensor view failed: {error}"))?;
+    if view.payload_bytes() != bytes.len() as u64 {
+        return Err("input byte length does not match its tensor view".to_owned());
+    }
+    let buffer = session
+        .allocate(bytes.len() as u64)
+        .map_err(|error| format!("allocation failed: {error}"))?;
+    let mut upload = session
+        .upload(
+            queue,
+            buffer
+                .range(0, bytes.len() as u64)
+                .map_err(|error| error.to_string())?,
+            Arc::<[u8]>::from(bytes),
+        )
+        .map_err(|error| format!("upload failed: {error}"))?;
+    wait_success(upload.wait(WAIT), "upload")?;
+    let binding = session
+        .bind(&buffer, view, access)
+        .map_err(|error| format!("binding failed: {error}"))?;
+    Ok((buffer, binding))
+}
+
+#[allow(clippy::type_complexity)]
+fn inputs(
+    tokens: usize,
+) -> (
+    Vec<u16>,
+    Vec<u16>,
+    Vec<u16>,
+    Vec<u16>,
+    Vec<u16>,
+    Vec<f32>,
+    Vec<u16>,
+    Vec<f32>,
+) {
+    let qkv = (0..tokens * QKV_WIDTH)
+        .map(|index| f32_to_bf16(((index * 17 + 3) % 31) as f32 / 64.0 - 0.234375))
+        .collect();
+    let z = (0..tokens * OUTPUT_WIDTH)
+        .map(|index| f32_to_bf16(((index * 13 + 5) % 23) as f32 / 32.0 - 0.25))
+        .collect();
+    let b_input = (0..tokens * VALUE_HEADS)
+        .map(|index| f32_to_bf16(index as f32 / 32.0 - 0.125))
+        .collect();
+    let a_input = (0..tokens * VALUE_HEADS)
+        .map(|index| f32_to_bf16(index as f32 / 64.0 - 0.25))
+        .collect();
+    let mut conv_weight = vec![0_u16; QKV_WIDTH * CONV_KERNEL];
+    for channel in 0..QKV_WIDTH {
+        conv_weight[channel * CONV_KERNEL + CONV_KERNEL - 1] = f32_to_bf16(1.0);
+    }
+    let a_log = (0..VALUE_HEADS)
+        .map(|index| -0.75 + (index % 11) as f32 / 32.0)
+        .collect();
+    let dt_bias = (0..VALUE_HEADS)
+        .map(|index| f32_to_bf16(0.0625 + (index % 7) as f32 / 64.0))
+        .collect();
+    let norm_weight = (0..HEAD_DIM)
+        .map(|index| 0.75 + (index % 17) as f32 / 64.0)
+        .collect();
+    (
+        qkv,
+        z,
+        b_input,
+        a_input,
+        conv_weight,
+        a_log,
+        dt_bias,
+        norm_weight,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn oracle(
+    tokens: usize,
+    qkv: &[u16],
+    z: &[u16],
+    b_input: &[u16],
+    a_input: &[u16],
+    a_log: &[f32],
+    dt_bias: &[u16],
+    norm_weight: &[f32],
+) -> Vec<u16> {
+    let convolved: Vec<f32> = qkv
+        .iter()
+        .map(|&bits| {
+            let value = bf16_to_f32(bits);
+            bf16_to_f32(f32_to_bf16(value / (1.0 + (-value).exp())))
+        })
+        .collect();
+    let mut recurrent = vec![0.0_f32; VALUE_HEADS * HEAD_DIM * HEAD_DIM];
+    let mut result = vec![0_u16; tokens * OUTPUT_WIDTH];
+    for token in 0..tokens {
+        let row = token * QKV_WIDTH;
+        for value_head in 0..VALUE_HEADS {
+            let qk_head = value_head / (VALUE_HEADS / QK_HEADS);
+            let q_base = row + qk_head * HEAD_DIM;
+            let k_base = row + QK_HEADS * HEAD_DIM + qk_head * HEAD_DIM;
+            let mut q = convolved[q_base..q_base + HEAD_DIM].to_vec();
+            let mut k = convolved[k_base..k_base + HEAD_DIM].to_vec();
+            let q_inverse =
+                1.0 / (q.iter().map(|value| value * value).sum::<f32>() + 1.0e-6).sqrt();
+            let k_inverse =
+                1.0 / (k.iter().map(|value| value * value).sum::<f32>() + 1.0e-6).sqrt();
+            for dimension in 0..HEAD_DIM {
+                q[dimension] =
+                    bf16_to_f32(f32_to_bf16(q[dimension] * q_inverse)) / (HEAD_DIM as f32).sqrt();
+                k[dimension] = bf16_to_f32(f32_to_bf16(k[dimension] * k_inverse));
+            }
+            let scalar = token * VALUE_HEADS + value_head;
+            let beta = bf16_to_f32(f32_to_bf16(
+                1.0 / (1.0 + (-bf16_to_f32(b_input[scalar])).exp()),
+            ));
+            let a = bf16_to_f32(a_input[scalar]) + bf16_to_f32(dt_bias[value_head]);
+            let softplus = a.max(0.0) + (-a.abs()).exp().ln_1p();
+            let decay = (-a_log[value_head].exp() * softplus).exp();
+            let mut output_values = vec![0.0_f32; HEAD_DIM];
+            for dimension in 0..HEAD_DIM {
+                let state_offset = (value_head * HEAD_DIM + dimension) * HEAD_DIM;
+                let state_row = &mut recurrent[state_offset..state_offset + HEAD_DIM];
+                for value in state_row.iter_mut() {
+                    *value *= decay;
+                }
+                let previous = state_row
+                    .iter()
+                    .zip(&k)
+                    .map(|(state, key)| state * key)
+                    .sum::<f32>();
+                let value =
+                    convolved[row + 2 * QK_HEADS * HEAD_DIM + value_head * HEAD_DIM + dimension];
+                let residual = value - previous;
+                let mut projection = 0.0_f32;
+                for key_dimension in 0..HEAD_DIM {
+                    state_row[key_dimension] += beta * residual * k[key_dimension];
+                    projection += state_row[key_dimension] * q[key_dimension];
+                }
+                output_values[dimension] = bf16_to_f32(f32_to_bf16(projection));
+            }
+            let inverse_rms = 1.0
+                / (output_values.iter().map(|value| value * value).sum::<f32>() / HEAD_DIM as f32
+                    + 1.0e-6)
+                    .sqrt();
+            for dimension in 0..HEAD_DIM {
+                let normalized = bf16_to_f32(f32_to_bf16(output_values[dimension] * inverse_rms));
+                let output_index = token * OUTPUT_WIDTH + value_head * HEAD_DIM + dimension;
+                let z_value = bf16_to_f32(z[output_index]);
+                let z_silu = z_value / (1.0 + (-z_value).exp());
+                result[output_index] = f32_to_bf16(normalized * norm_weight[dimension] * z_silu);
+            }
+        }
+    }
+    result
+}
+
+fn run_case(
+    session: &sllm_core::ExecutionSession,
+    queue: &sllm_core::ExecutionQueue,
+    tokens: usize,
+    target: &str,
+) -> Result<CaseEvidence, String> {
+    let (qkv, z, b_input, a_input, conv_weight, a_log, dt_bias, norm_weight) = inputs(tokens);
+    let expected = oracle(
+        tokens,
+        &qkv,
+        &z,
+        &b_input,
+        &a_input,
+        &a_log,
+        &dt_bias,
+        &norm_weight,
+    );
+    let (_, qkv_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, QKV_WIDTH],
+        AccessMode::Read,
+        bf16_bytes(&qkv),
+    )?;
+    let (_, z_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, OUTPUT_WIDTH],
+        AccessMode::Read,
+        bf16_bytes(&z),
+    )?;
+    let (_, b_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(&b_input),
+    )?;
+    let (_, a_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(&a_input),
+    )?;
+    let (_, conv_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[QKV_WIDTH, 1, CONV_KERNEL],
+        AccessMode::Read,
+        bf16_bytes(&conv_weight),
+    )?;
+    let (_, a_log_binding) = upload_binding(
+        session,
+        queue,
+        DType::F32,
+        &[VALUE_HEADS],
+        AccessMode::Read,
+        f32_bytes(&a_log),
+    )?;
+    let (_, dt_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(&dt_bias),
+    )?;
+    let (_, norm_binding) = upload_binding(
+        session,
+        queue,
+        DType::F32,
+        &[HEAD_DIM],
+        AccessMode::Read,
+        f32_bytes(&norm_weight),
+    )?;
+    let output_bytes = tokens * OUTPUT_WIDTH * 2;
+    let output_buffer = session
+        .allocate(output_bytes as u64)
+        .map_err(|error| format!("output allocation failed: {error}"))?;
+    let output_view =
+        TensorView::with_encoding(DType::Bf16, Encoding::Unquantized, &[tokens, OUTPUT_WIDTH])
+            .map_err(|error| error.to_string())?;
+    let output_binding = session
+        .bind(&output_buffer, output_view, AccessMode::Write)
+        .map_err(|error| format!("output binding failed: {error}"))?;
+    let bindings = LinearAttentionBindings::new(
+        qkv_binding,
+        z_binding,
+        b_binding,
+        a_binding,
+        conv_binding,
+        a_log_binding,
+        dt_binding,
+        norm_binding,
+        output_binding,
+    );
+    let state_descriptor = LinearAttentionStateDescriptor::new_with_layout(
+        12,
+        tokens as u64,
+        QK_HEADS,
+        VALUE_HEADS,
+        HEAD_DIM,
+        CONV_KERNEL,
+    )
+    .map_err(|error| error.to_string())?;
+    let state = session
+        .create_linear_attention_state(state_descriptor)
+        .map_err(|error| format!("state creation failed: {error}"))?;
+    let descriptor = LinearAttentionDescriptor::new(0, tokens as u64, tokens as u64)
+        .map_err(|error| error.to_string())?;
+    let mut submission = session
+        .linear_attention(&state, queue, bindings, descriptor)
+        .map_err(|error| format!("GDN submission failed: {error}"))?;
+    let dispatch = submission.dispatch().clone();
+    if dispatch.dispatch_count != 2
+        || dispatch.kernel_id != 2
+        || dispatch.workgroup_size_x != 128
+        || dispatch.grid_size_x != VALUE_HEADS as u32
+        || dispatch.row_count != tokens as u64
+        || dispatch.normalized_size != HEAD_DIM as u64
+        || dispatch.fallback_allowed
+        || dispatch.fallback_used
+        || dispatch.kernel_symbol != "linear_attention.gdn.v1"
+        || dispatch.device_symbol != "sllm_linear_attention_recurrent_gated_norm_v1"
+        || dispatch.target != target
+    {
+        return Err(format!(
+            "GDN dispatch metadata violated the exact contract: {dispatch:?}"
+        ));
+    }
+    wait_success(submission.wait(WAIT), "GDN completion")?;
+    let state_length_after = state
+        .snapshot(session)
+        .map_err(|error| format!("state snapshot failed: {error}"))?
+        .length();
+    if state_length_after != tokens as u64 {
+        return Err("GDN state publication length mismatch".to_owned());
+    }
+    let mut readback = session
+        .readback(
+            queue,
+            output_buffer
+                .range(0, output_bytes as u64)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("output readback failed: {error}"))?;
+    wait_success(readback.wait(WAIT), "output readback")?;
+    let mut actual_bytes = vec![0_u8; output_bytes];
+    readback
+        .read_into(&mut actual_bytes)
+        .map_err(|error| format!("output read failed: {error}"))?;
+    let actual: Vec<u16> = actual_bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let mut max_abs_error = 0.0_f32;
+    let mut max_rel_error = 0.0_f32;
+    for (&actual_bits, &expected_bits) in actual.iter().zip(&expected) {
+        let actual = bf16_to_f32(actual_bits);
+        let expected = bf16_to_f32(expected_bits);
+        let absolute = (actual - expected).abs();
+        let relative = if expected == 0.0 {
+            absolute
+        } else {
+            absolute / expected.abs()
+        };
+        max_abs_error = max_abs_error.max(absolute);
+        max_rel_error = max_rel_error.max(relative);
+        if absolute > 0.015625 + 0.03125 * expected.abs() {
+            return Err(format!(
+                "GDN numerical mismatch for tokens={tokens}: actual={actual} expected={expected}"
+            ));
+        }
+    }
+    drop(readback);
+    drop(submission);
+    drop(state);
+    drop(output_buffer);
+    Ok(CaseEvidence {
+        tokens,
+        dispatch_count: dispatch.dispatch_count,
+        recurrent_kernel_id: dispatch.kernel_id,
+        kernel_symbol: dispatch.kernel_symbol,
+        recurrent_device_symbol: dispatch.device_symbol,
+        max_abs_error,
+        max_rel_error,
+        state_length_after,
+    })
+}
+
+fn run(config: &Config) -> Result<Report, String> {
+    let backend = HipBackend::connect().map_err(|error| format!("HIP connect failed: {error}"))?;
+    let session = backend
+        .open_execution_session(
+            ExecutionSessionRequest::new(config.device_index, config.target.clone())
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("session open failed: {error}"))?;
+    let result = (|| {
+        let queue = session
+            .create_queue()
+            .map_err(|error| format!("queue creation failed: {error}"))?;
+        let cases = CASE_TOKENS
+            .into_iter()
+            .map(|tokens| run_case(&session, &queue, tokens, &config.target))
+            .collect::<Result<Vec<_>, _>>();
+        drop(queue);
+        cases
+    })();
+    let cleanup = match session.shutdown(Duration::from_secs(16)) {
+        Ok(cleanup) => cleanup,
+        Err(cleanup_error) => {
+            return Err(match result {
+                Ok(_) => format!("session shutdown failed: {cleanup_error}"),
+                Err(case_error) => {
+                    format!("{case_error}; session shutdown also failed: {cleanup_error}")
+                }
+            });
+        }
+    };
+    let cases = result?;
+    if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+        return Err("GDN cleanup did not return to zero".to_owned());
+    }
+    Ok(Report {
+        schema_version: "linear-attention-g1-report-v1",
+        state: "PASS",
+        target: config.target.clone(),
+        device_index: config.device_index,
+        selected_backend: "hip",
+        model_used: false,
+        layout: [QK_HEADS, VALUE_HEADS, HEAD_DIM, CONV_KERNEL],
+        cases,
+        fallback_allowed: false,
+        fallback_used: false,
+        cpu_fallback_used: false,
+        cleanup_retryable: cleanup.retryable_cleanup,
+        cleanup_durable: cleanup.durable_quarantine,
+    })
+}
+
+fn main() -> ExitCode {
+    match parse_config().and_then(|config| run(&config)) {
+        Ok(report) => match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("linear-attention-g1 serialization failed: {error}");
+                ExitCode::from(2)
+            }
+        },
+        Err(error) => {
+            eprintln!("linear-attention-g1: {error}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_free_layout_keeps_the_production_head_boundary() {
+        let layout =
+            LinearAttentionLayout::new(QK_HEADS, VALUE_HEADS, HEAD_DIM, CONV_KERNEL).unwrap();
+        assert_eq!(layout.qkv_width(), QKV_WIDTH);
+        assert_eq!(layout.output_width(), OUTPUT_WIDTH);
+        assert_eq!(CASE_TOKENS, [1, 3, 17]);
+    }
+
+    #[test]
+    fn oracle_is_nonzero_and_stateful() {
+        let (qkv, z, b, a, _, a_log, dt, norm) = inputs(3);
+        let output = oracle(3, &qkv, &z, &b, &a, &a_log, &dt, &norm);
+        assert_eq!(output.len(), 3 * OUTPUT_WIDTH);
+        assert!(output.iter().any(|value| *value != 0));
+        assert_ne!(
+            &output[..OUTPUT_WIDTH],
+            &output[OUTPUT_WIDTH..2 * OUTPUT_WIDTH]
+        );
+    }
+}

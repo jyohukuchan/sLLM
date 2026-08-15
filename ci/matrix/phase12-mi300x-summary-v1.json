@@ -1,0 +1,144 @@
+{
+  "schema_version": "phase12-mi300x-summary-v1",
+  "state": "PASS",
+  "date": "2026-08-15",
+  "source": {
+    "base_revision": "a5e389be348442c4e99e97cc449fe3c356b8291f",
+    "base_tree": "d0ace3d9fac29dd60375f5d6263f42355658a3bd",
+    "implementation_delta_sha256": "78e3505697ec920ed179e6214f118a420feab208c53377f30665e2ac5cb702e2",
+    "identity_note": "Base revision plus the implementation-only tracked diff and sorted untracked implementation file digests; closeout documentation and evidence metadata are excluded.",
+    "sllm_cli": {"sha256": "4ac134cbf794dc7bd3702e85e7607cb82876160eb4e682bcf8409d9ff24ba052", "bytes": 10001008},
+    "sllm_server": {"sha256": "570776a246cce29fe4af8c106b35714f4ebd37f1a621e7eb279f943aa60007b7", "bytes": 11856088},
+    "target": "gfx942",
+    "code_object": 6,
+    "wave_size": 64,
+    "xnack": "off",
+    "sramecc": "on",
+    "generic_processor_version": 0
+  },
+  "hardware": {
+    "provider": "Hot Aisle",
+    "instance": "13 CPU core Small VM",
+    "gpu_count": 1,
+    "product": "AMD Instinct MI300X VF",
+    "actual_gcn_arch_name": "gfx942:sramecc+:xnack-",
+    "logical_target": "gfx942",
+    "compute_units": 304,
+    "wave_size": 64,
+    "hbm_bytes": 205822885888,
+    "bdf": "0000:ff:00.0",
+    "gpu_uuid": "GPU-cb0412d4d88cfa69",
+    "partition": "NPS1/SPX",
+    "vmm_supported": true,
+    "kv_provider_fixed": "contiguous-resident",
+    "foreign_gpu_processes_pre_post": [0, 0]
+  },
+  "software": {
+    "os": "Ubuntu 24.04",
+    "kernel": "6.8.0-124-generic",
+    "amdgpu": "6.16.13",
+    "rocm_root": "/opt/rocm/core-7.14",
+    "hip_runtime": "7.14.60850-0000000",
+    "hipblaslt_soname": "libhipblaslt.so.1.4",
+    "compiler": "AMD clang 23.0.0git",
+    "rocprofv3": "1.3.2",
+    "amd_smi_metric": {"state": "unavailable", "reason": "provider amd-smi Namespace.partition exception; values were not replaced with zero"}
+  },
+  "models": {
+    "qwen3_5_4b_bf16": {"lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae", "files": 13},
+    "qwen3_5_4b_fp8": {"sidecar_fingerprint": "sha256:6bf020c108ebe8deec168fc7193f97d74bf88805a40b414cc3df9266ab16d87f", "accuracy_report_sha256": "93a1dd36f6e76de7335b7226f8d2e9db7359fdb6780ecab23f915b0a91acb405", "max_kld": 0.025996861092685127, "all_top1_match": true},
+    "qwen3_5_9b_bf16": {"lock_fingerprint": "sha256:2d2bc642540e97d4681f8c66140e09f305f487476bb9fe238ca82a298febf893", "files": 15},
+    "qwen3_5_9b_fp8": {"sidecar_fingerprint": "sha256:ab55ebda538b5155b12c5198f403f3ab7017ba4d66429de0779b4505dbf18d0e", "accuracy_report_sha256": "f092ede6a6352d15591b60f0624fcf55b1dfc3df613611c240396fece62467f1", "max_kld": 0.010212244268229743, "all_top1_match": true}
+  },
+  "correctness": {
+    "preflight": "PASS",
+    "fp8_hipblaslt_shapes": 2,
+    "bf16_matmul_shapes": 17,
+    "elementwise_operations": 21,
+    "attention_preprocess_rope_cases": 8,
+    "kv_state_cases": 19,
+    "full_attention_cases": 16,
+    "output_gate_cases": 6,
+    "rmsnorm_wave64_cases": 7,
+    "gdn_cases": 3,
+    "generation": ["4B BF16 fixed/Unicode/stop", "4B FNUZ FP8 fixed/Unicode/stop", "9B BF16/FP8 spot"],
+    "fallback_used": false,
+    "cleanup_terminal_zero": true
+  },
+  "service": {
+    "report_sha256": "865d49a21e2f94532c1a754e6cadeec104c659145854982be47acbc671306083",
+    "kv_state_report_sha256": "94f5d9d1a64ddd0fdd8d262830e7fda9b03e98471ede673b1978e296a25f475e",
+    "full_attention_report_sha256": "a64912ddf0271a33f767a925908159c79507f04a53884dfd00cb6dba8495d490",
+    "openai_python": "3.1.0",
+    "capacity_tokens": [1023, 1024, 1025],
+    "features": ["raw non-stream", "raw SSE", "reasoning split", "official client", "disconnect/recovery", "two concurrent requests"],
+    "kv_memory_kind": "contiguous-resident",
+    "final_current_bytes": 0,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  },
+  "performance": {
+    "protocol": {"warmups": 3, "measured": 10, "batch_size": 1, "statistics": ["median", "p10", "p90", "MAD", "min", "max"]},
+    "rows": [
+      {"dtype": "BF16", "case": "short-odd", "ttft_ms_median": 38.5919765, "e2e_ms_median": 272.204799, "e2e_ms_mad": 0.441507, "prefill_tps_median": 518.0728104325013, "decode_tps_median": 72.06147120301142, "resident_bytes": 8411592192, "peak_bytes": 8540569292, "raw_sha256": "1f11a16ef2db61ee463ec34aba72984f8095f6fdfe7062cf9f711b583f7075a0"},
+      {"dtype": "BF16", "case": "32x32", "ttft_ms_median": 56.210797, "e2e_ms_median": 507.1855835, "e2e_ms_mad": 0.131056, "prefill_tps_median": 643.5365830249266, "decode_tps_median": 71.06210296720651, "resident_bytes": 8411592192, "peak_bytes": 8608921472, "raw_sha256": "b07724b7c2021853e24d683a459e3bed6c9df8157363ce43112a3fe3e380996d"},
+      {"dtype": "BF16", "case": "prefill-long", "ttft_ms_median": 1244.4197685, "e2e_ms_median": 4587.770724, "e2e_ms_mad": 0.877825, "prefill_tps_median": 832.138441269286, "decode_tps_median": 38.567243548677446, "resident_bytes": 8411592192, "peak_bytes": 13099918848, "raw_sha256": "9bad27d792c893b2518817701d70de1d8be3844d7651cb2bc486ad1c2011a399"},
+      {"dtype": "BF16", "case": "decode-long", "ttft_ms_median": 56.3642915, "e2e_ms_median": 3998.962971, "e2e_ms_mad": 1.9093575, "prefill_tps_median": 642.5715619653631, "decode_tps_median": 64.93147314660138, "resident_bytes": 8411592192, "peak_bytes": 8616261504, "raw_sha256": "fa3e3c2e3709a1211953caf274794b895d266830bea6b050f8c8ecfa110e7105"},
+      {"dtype": "FNUZ FP8", "case": "short-odd", "ttft_ms_median": 43.5982505, "e2e_ms_median": 354.001525, "e2e_ms_mad": 0.202683, "prefill_tps_median": 453.8324084609221, "decode_tps_median": 54.148405604907246, "resident_bytes": 4847029760, "peak_bytes": 4976006860, "raw_sha256": "fadd32ab8fa68abb3acef9f02edbac422b5d7a39a743ab7188660193a91ab0d4"},
+      {"dtype": "FNUZ FP8", "case": "32x32", "ttft_ms_median": 61.23675, "e2e_ms_median": 662.0631355, "e2e_ms_mad": 0.352448, "prefill_tps_median": 587.330632761874, "decode_tps_median": 53.27796060427492, "resident_bytes": 4847029760, "peak_bytes": 5044359040, "raw_sha256": "4e97543b3bf15848fcb5d6b1527442719a98fa473ceff114f91bc2561c715243"},
+      {"dtype": "FNUZ FP8", "case": "prefill-long", "ttft_ms_median": 1240.7564105, "e2e_ms_median": 5387.4426625, "e2e_ms_mad": 4.870946, "prefill_tps_median": 834.5056776600152, "decode_tps_median": 31.216184406147647, "resident_bytes": 4847029760, "peak_bytes": 9535356416, "raw_sha256": "24f265daf6fc16e94c731ca7896077065f5173aaffbbdfc59dc6c82b77eb58a8"},
+      {"dtype": "FNUZ FP8", "case": "decode-long", "ttft_ms_median": 61.232995, "e2e_ms_median": 5228.617908, "e2e_ms_mad": 1.4741685, "prefill_tps_median": 588.5003891073495, "decode_tps_median": 49.53187364156764, "resident_bytes": 4847029760, "peak_bytes": 5051699072, "raw_sha256": "8be2375716565d70aba7d524786697d41ed97a7f577549af430320ceab15f504"}
+    ],
+    "fp8_resident_reduction_fraction": 0.4237678611416924,
+    "fp8_e2e_ratio_range_vs_bf16": [1.174305122598363, 1.3074934541573178]
+  },
+  "llama_cpp": {
+    "commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "tree": "e9b6173953477054a4068884aa5fc9aeef6475e8",
+    "wrapper_source_sha256": "cd3bc39ce1b7374925398cb49fbdcf5c965259f5f15055a40e271f6ad625cd5e",
+    "wrapper_binary_sha256": "c4276e737c3ccb8dd59f356e7d2705e1e890ad6ddc8352dcee4dac43ffa70941",
+    "libggml_hip_sha256": "225505a572a06dfe112140a2e8fd75819e05280daf49f0645d15e80c168c16eb",
+    "offload_arches": ["gfx942"],
+    "gguf_sha256": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045",
+    "offloaded_layers": "33/33",
+    "rows": [
+      {"case": "short-odd", "ttft_ms_median": 9.49189, "e2e_ms_median": 109.00297, "decode_tps_median": 160.95749022798137, "raw_sha256": "86b0cde0c1cb23fffa87af18cc87aefc2ba3c23206bdd0d1a09201c567db4d59"},
+      {"case": "32x32", "ttft_ms_median": 10.440726, "e2e_ms_median": 197.4328785, "decode_tps_median": 165.8631121051805, "raw_sha256": "73b45e448cee62da76437c9cecb39f1da58491072311bbb2d0015bacf719b45e"},
+      {"case": "prefill-long", "ttft_ms_median": 76.375025, "e2e_ms_median": 822.0187635, "decode_tps_median": 170.35497813196608, "raw_sha256": "82f49b879b900ee8c4315748a99a21422690415a67fb6ecb9f9e94160a8d3164"},
+      {"case": "decode-long", "ttft_ms_median": 10.630521, "e2e_ms_median": 1511.122064, "decode_tps_median": 169.95467586876111, "raw_sha256": "5ff8ae235b731946fcce4716f250ac4f06dbd0f66ffafbe7f3c2529486e67d56"}
+    ],
+    "sllm_bf16_e2e_ratio_range": [2.49722369032697, 5.5811021934172675]
+  },
+  "trace": {
+    "case": "Qwen3.5-4B BF16 Hello, 3 generated tokens",
+    "kernel_dispatch_count": 1476,
+    "generate_report_sha256": "01bef9eab4cab07e647dff3c6402bbe7176493392b39bcb9bee8e29ac4d32515",
+    "rocprofv3_json_sha256": "96d1f923bfc87f0bb2c6b58929b3879b4706e57b6c53c38fcbeed3e6647f9e9a",
+    "summary_sha256": "27e769dbd66bbcb16bf3ebb8d1972d2aaedf0d541c91eb86332c9a8ebabc7c29"
+  },
+  "review": {
+    "integration_review": "PASS after one finding",
+    "finding": "Limit provider-blocked amd-smi metric telemetry to gfx942 so existing RDNA evidence remains fail-closed.",
+    "focused_re_review": "PASS",
+    "workspace_tests": "PASS",
+    "workspace_clippy_warnings": 0,
+    "llama_and_openai_runner_tests": 53,
+    "format": "PASS",
+    "diff_check": "PASS"
+  },
+  "scope_limits": [
+    "Hot Aisle MI300X VF x1 tuple only",
+    "single GPU and batch size 1",
+    "no MI300A, MI325X, bare-metal, multi-GPU, P2P, RCCL, RDMA, or RoCE claim",
+    "no generic gfx9-4 FP8 claim",
+    "FP8 versus llama.cpp BF16 is not a like-for-like dtype comparison"
+  ],
+  "terminal": {
+    "vm_deletion_required": true,
+    "vm_deleted": true,
+    "phase_complete": true,
+    "deletion_confirmed_by": "user",
+    "deletion_confirmed_on": "2026-08-15",
+    "post_delete_ssh": "connection-timeout"
+  }
+}

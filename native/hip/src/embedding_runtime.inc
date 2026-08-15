@@ -299,7 +299,7 @@ extern "C" sllm_status_t sllm_embedding_execute(
           "HIP gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       execute_guard.disarm();
       (void)rollback_reserved_elementwise_submission(plan, queue, error_sink);
       return sllm_public_runtime::write_error(

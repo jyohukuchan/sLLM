@@ -24,6 +24,20 @@ const ERROR_CAPACITY: usize = 256;
 const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const DROP_WAIT_TIMEOUT_MS: u32 = 0;
 
+pub(crate) const MI300X_PHASE12_GCN_ARCH: &str = "gfx942:sramecc+:xnack-";
+
+pub(crate) fn logical_gcn_arch_name(target: &str) -> &str {
+    if target == MI300X_PHASE12_GCN_ARCH {
+        "gfx942"
+    } else {
+        target
+    }
+}
+
+pub(crate) fn gcn_arch_matches(expected: &str, actual: &str) -> bool {
+    expected == actual || (expected == "gfx942" && actual == MI300X_PHASE12_GCN_ARCH)
+}
+
 #[cfg(test)]
 static FORCED_RMSNORM_PLAN_RELEASE: Mutex<Option<(RuntimeStatus, bool)>> = Mutex::new(None);
 #[cfg(test)]

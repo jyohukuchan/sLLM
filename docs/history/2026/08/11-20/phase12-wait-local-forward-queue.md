@@ -1,5 +1,12 @@
 # Phase 12待機中のローカル先行実行キュー履歴
 
+## 2026-08-15: queue完了とPhase 12への切替
+
+- Q0 Phase 12R、Q1 Phase 13、Q2 Phase 14、Q3 cross-model RDNA性能bridge、Q4 Phase 15を完了した。
+- Q5はユーザーの当時の明示指示により前goalの対象外であり、Phase 16以降の変更は開始しなかった。
+- ユーザーの新しい明示指示でPhase 12を開始した。実行中local work unitがないことを記録し、本planをarchiveへ移した。
+- このcloseoutはPhase 12完了またはMI300X PASSを意味しない。
+
 ## 2026-08-15: Phase 12Rを先頭へ追加
 
 - ユーザー指示によるCI修正をPhase 12Rへ割り当て、local forward queueの先頭へ追加した。
@@ -22,4 +29,4 @@
   続く枯渇防止tailを追加した。
 - Hot Aisle VMを起動しない境界と、帰宅後にlatest mainからPhase 12 candidateを再buildする規則を明記した。
 
-[対応する計画](../../../../plans/active/2026/08/11-20/phase12-wait-local-forward-queue.md)
+[対応する計画](../../../../plans/archive/2026/08/11-20/phase12-wait-local-forward-queue.md)

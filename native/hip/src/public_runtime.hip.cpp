@@ -256,6 +256,9 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
 
 namespace {
 
+bool matches_runtime_gcn_arch(const char *actual,
+                              const char *expected) noexcept;
+
 struct Fp8LtPlan;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
@@ -2252,10 +2255,10 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant =
-      metadata.nvfp4 ? ::sllm_matmul_kernel::KernelVariant::Nvfp4PackedDequant
+      metadata.nvfp4 ? ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m)
       : metadata.fp8_outer
-          ? ((std::strcmp(arch_name, "gfx1201") == 0 ||
-              std::strcmp(arch_name, "gfx942") == 0)
+          ? ((matches_runtime_gcn_arch(arch_name, "gfx1201") ||
+              matches_runtime_gcn_arch(arch_name, "gfx942"))
                  ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
                  : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
           : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
@@ -2439,6 +2442,21 @@ bool copy_property(char *const destination,
   std::memset(destination, 0, destination_capacity);
   std::memcpy(destination, source, length);
   return true;
+}
+
+// HIP exposes the MI300X feature tuple as part of gcnArchName on the Hot
+// Aisle VF. Keep the public logical target at gfx942, but accept only the
+// exact Phase 12 SRAM-ECC/XNACK tuple rather than arbitrary feature suffixes.
+bool matches_runtime_gcn_arch(const char *const actual,
+                              const char *const expected) noexcept {
+  if (actual == nullptr || expected == nullptr) {
+    return false;
+  }
+  if (std::strcmp(actual, expected) == 0) {
+    return true;
+  }
+  return std::strcmp(expected, "gfx942") == 0 &&
+         std::strcmp(actual, "gfx942:sramecc+:xnack-") == 0;
 }
 
 sllm_status_t get_device_properties(const uint32_t device_index,
@@ -4223,9 +4241,9 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     }
     const std::size_t actual_length = static_cast<std::size_t>(
         static_cast<const char *>(actual_terminator) - properties.gcnArchName);
-    if (actual_length != expected_length ||
-        std::memcmp(info->expected_gcn_arch_name, properties.gcnArchName,
-                    expected_length) != 0) {
+    if (actual_length == 0U ||
+        !matches_runtime_gcn_arch(properties.gcnArchName,
+                                  info->expected_gcn_arch_name)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
           "requested device gcnArchName does not match exactly");
@@ -4237,8 +4255,8 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     }
     std::unique_ptr<Context> candidate(new Context(info->device_index));
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    if (std::strcmp(properties.gcnArchName, "gfx1201") == 0 ||
-        std::strcmp(properties.gcnArchName, "gfx942") == 0) {
+    if (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942")) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
       const hipblasStatus_t lt_status =
@@ -5962,7 +5980,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
     const int expected_wavefront =
-        std::strcmp(properties.gcnArchName, "gfx942") == 0 ? 64 : 32;
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942") ? 64 : 32;
     if (properties.warpSize != expected_wavefront) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -5974,7 +5992,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           "RMSNorm provider wavefront differs from the exact target contract");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
@@ -6444,7 +6462,7 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
@@ -7741,7 +7759,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
     const int expected_wavefront =
-        std::strcmp(arch_name, "gfx942") == 0 ? 64 : 32;
+        matches_runtime_gcn_arch(arch_name, "gfx942") ? 64 : 32;
     if (properties.warpSize != expected_wavefront) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
@@ -7753,7 +7771,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV state provider wavefront differs from the exact target contract");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
                                            error_sink)) {

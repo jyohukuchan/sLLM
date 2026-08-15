@@ -725,7 +725,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           "linear attention gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
           "linear attention device target does not match the compiled exact "

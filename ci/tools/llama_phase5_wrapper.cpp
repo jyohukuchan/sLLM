@@ -275,7 +275,10 @@ const char *expected_uuid(const std::string &target) {
   if (target == "gfx1201") {
     return "GPU-a8e9ddefa2d60f55";
   }
-  throw std::runtime_error("target must be gfx1030 or gfx1201");
+  if (target == "gfx942") {
+    return "GPU-cb0412d4d88cfa69";
+  }
+  throw std::runtime_error("target must be gfx1030, gfx1201, or gfx942");
 }
 
 bool is_stop(llama_token token) { return token == kStopA || token == kStopB; }
@@ -449,7 +452,7 @@ Options parse_options(int argc, char **argv) {
   const std::vector<std::pair<const char *, size_t>> cases = {
       {"minimum", 1},        {"short-odd", 17},     {"boundary-255", 255},
       {"boundary-256", 256}, {"boundary-257", 257}, {"prefill-long", 1024},
-      {"decode-long", 32},
+      {"32x32", 32},        {"decode-long", 32},
   };
   bool known_case = false;
   for (const auto &item : cases) {
@@ -892,7 +895,7 @@ std::string run(const Options &options) {
 
 void print_help(const char *executable) {
   std::cout << "usage: " << executable
-            << " --model PATH --model-sha256 SHA256 --target gfx1030|gfx1201\n"
+            << " --model PATH --model-sha256 SHA256 --target gfx1030|gfx1201|gfx942\n"
             << "  --row-id ID --case-id CASE --input-token-ids CSV "
                "--max-new-tokens N\n"
             << "  --warmup-requests 3 --measured-requests 10 --batch-size 1 "

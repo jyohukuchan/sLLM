@@ -131,8 +131,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                 weight->accounting, output->accounting);
             return property_status;
           }
-          if (std::strcmp(properties.gcnArchName, "gfx1201") == 0 ||
-              std::strcmp(properties.gcnArchName, "gfx942") == 0) {
+          if (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
+              matches_runtime_gcn_arch(properties.gcnArchName, "gfx942")) {
             auto *const activation_scales = reinterpret_cast<float *>(
                 static_cast<uint8_t *>(candidate->matmul_workspace) +
                 scale_offset);
@@ -391,7 +391,7 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;
@@ -493,8 +493,8 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       launch_status = hipErrorInvalidValue;
 #else
-      if (std::strcmp(arch_name, "gfx1201") != 0 &&
-          std::strcmp(arch_name, "gfx1030") != 0) {
+      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
         launch_status = hipErrorNotSupported;
       } else {
         const auto *const packed_weight =
@@ -540,14 +540,14 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
             plan->matmul_metadata.fp8_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ,
             queue->stream);
         if (launch_status == hipSuccess) {
-          if (std::strcmp(arch_name, "gfx1201") == 0 ||
-              std::strcmp(arch_name, "gfx942") == 0) {
+          if (matches_runtime_gcn_arch(arch_name, "gfx1201") ||
+              matches_runtime_gcn_arch(arch_name, "gfx942")) {
             std::lock_guard<std::mutex> lt_lock(
                 plan->context->matmul_lt_mutex);
             launch_status = launch_fp8_lt_plan(plan->fp8_lt_plan, quantized,
                                                fp8_weight, output,
                                                queue->stream);
-          } else if (std::strcmp(arch_name, "gfx1030") == 0) {
+          } else if (matches_runtime_gcn_arch(arch_name, "gfx1030")) {
             launch_status = ::sllm_matmul_kernel::launch_fp8_emulation(
                 quantized, activation_scales, fp8_weight, weight_scales,
                 output, plan->matmul_metadata.m, plan->matmul_metadata.k,

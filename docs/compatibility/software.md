@@ -90,25 +90,30 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 | Lifecycle | Ubuntu | Kernel | ROCm | GPU と artifact 条件 | 備考 |
 | --- | --- | --- | --- | --- | --- |
 | `experimental` | 24.04.4 LTS | GA 6.8 | build/runtime とも 7.14.0 | GPU、target、features ごとに個別 tuple | 主開発候補。現時点では sLLM 実機検証結果なし |
-| `planned` | Hot Aisleで選択可能な24.04 LTS image | provider imageの実測値 | build/runtime 7.14.0を要求 | MI300X x1、exact `gfx942`、feature付きtarget別artifact | Phase 12で完全tupleを取得する。VMのvirtualization方式を含む |
+| `experimental` | Hot Aisle Ubuntu 24.04 | `6.8.0-124-generic`、amdgpu `6.16.13` | canonical user-space 7.14.0、HIP `7.14.60850`、hipBLASLt 1.4 | MI300X VF x1、`gfx942:sramecc+:xnack-`、exact `gfx942` artifact | Phase 12 `project-verified` scope。SR-IOV VF、single GPU、実行済みoperator/model/service/performanceに限定 |
 | `planned` | 26.04 LTS | GA 7.0 | 7.14.0 | GPU、target、features ごとに個別 tuple | 将来検証候補 |
 
 - Ubuntu 24.04.4 LTS、GA kernel 6.8、ROCm 7.14.0 の組み合わせを主系統候補とする。具体的な driver、GPU、target/features、dynamic library path まで確定した tuple だけを evidence の対象にする。
-- Hot Aisle MI300X VMはPhase 12の一時的な実機tuple候補である。公開hardware仕様からOS point release、kernel、
-  amdgpu、ROCm、partition、VMM、dynamic library pathを推測せず、最初のpreflightで取得する。provider imageが
-  project標準と異なる場合、driverを無断交換せず、同releaseのself-contained ROCm user-space rootが成立するかを
-  先に確認する。成立しないtupleを別releaseへのsilent fallbackでPASSにしない。
+- Hot Aisle MI300X VMのPhase 12実測tupleはUbuntu 24.04、kernel `6.8.0-124-generic`、amdgpu `6.16.13`、
+  MI300X VF、NPS1/SPX、VMM=trueである。provider driverを交換せず、provider imageの別ROCmをproduction pathに
+  混ぜず、canonical `/opt/rocm/core-7.14`からHIP/hipBLAS/hipBLASLtを解決した。温度・電力は`amd-smi metric`の
+  provider例外により取得不能で、0ではなく`unavailable`である。このtupleのevidenceを別OS/kernel/driver、
+  bare metal、MI300A/MI325X、multi-GPUへ移植しない。
 - Phase 10 local FP8 providerはROCm 7.14.0 / hipBLASLt 1.4.1を使用する。exact `gfx1201`はOCP E4M3FN
   native、exact `gfx1030`はemulationまたはload時BF16 conversionであり、別ROCm release、別target、
   CDNA3 FNUZの互換性を証明しない。
 - Phase 11のROCm 7.14.0 local buildはexact `gfx942`、Code Object V6、wave64、`xnack=off`、`sramecc=on`を
-  compile/linkした。これはHot Aisle VMのdriver/runtime、hipBLASLt FNUZ solution、数値実行を証明せず、
-  software tupleの`project-verified`昇格はPhase 12 preflight/operator結果まで行わない。
+  compile/linkした。Phase 12では上記Hot Aisle tupleでhipBLASLt FNUZ、wave64 operator、4B/9B BF16/FP8、
+  contiguous-resident KV、OpenAI service、fixed llama.cpp比較を実機PASSし、そのscopeだけを
+  `project-verified`とする。lifecycleは広い互換性保証を避けるため`experimental`のまま維持する。
 - Phase 15のROCm 7.14.0 local runtimeではexact `gfx1030`/`gfx1201`、Code Object V6、wave32のtarget別binaryで
   weight NVFP4 packed-dequantを実行した。Qwen full-model、CLI/OpenAI service、cleanupの証拠はこのtupleに限定する。
   closeout再計測時にR9700だけ既存binaryを含むkernel imageがdriverから拒否されたため、その試行はPASSに含めず、
   Phase中に取得済みのR9700証拠とV620の最終再実行を分けて記録する。後続のtarget別performance binaryではR9700の
   short-odd/32-32 BF16/NVFP4 4 rowが再びPASSしたが、先行失敗試行を遡って成功扱いにはしない。
+- Phase 15Oは同じlocal ROCm 7.14.0 tupleでexact `gfx1030`/`gfx1201`のNVFP4 decode/prefill providerと、exact
+  `gfx1201`のFP8 dynamic量子化を実機検証した。target別release build、operator、full model、OpenAI service、cleanupを
+  PASSした範囲だけを`project-verified`とし、別ROCm、別SKU、未実行のexact `gfx942`へ一般化しない。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、sLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 

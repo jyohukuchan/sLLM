@@ -1,8 +1,9 @@
-//! Focused numerical evidence for the Phase 10 public FP8 matmul path.
+//! Focused numerical evidence for the public FP8 matmul path.
 //!
-//! Both providers consume the same OCP E4M3FN values and outer FP32 scales.
-//! gfx1201 must report native hipBLASLt execution; gfx1030 must report the
-//! explicit byte-decode emulation provider. CPU work is an oracle only.
+//! gfx1201 consumes OCP E4M3FN, gfx942 consumes numerically converted CDNA3
+//! E4M3FNUZ, and gfx1030 uses the explicit byte-decode emulation provider.
+//! gfx1201 and gfx942 must report native hipBLASLt execution. CPU work is an
+//! oracle only.
 
 use std::env;
 use std::process::ExitCode;
@@ -13,7 +14,8 @@ use serde::Serialize;
 use sllm_core::{
     AccessMode, Backend, BoundSemanticOp, DType, Encoding, ExecutionSessionRequest, ExecutionState,
     Fp8ResidentRepresentation, Fp8ScaleGranularity, SemanticOpDescriptor, SemanticOpKind,
-    TensorView, quantize_e4m3fn_outer_rows,
+    TensorView, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fnuz, encode_e4m3fnuz,
+    quantize_e4m3fn_outer_rows,
 };
 use sllm_hip::HipBackend;
 
@@ -50,6 +52,7 @@ struct CaseReport {
     kernel_symbol: String,
     device_symbol: String,
     kernel_elapsed_ns: u64,
+    kernel_elapsed_samples_ns: Vec<u64>,
     max_abs_error: f32,
     max_relative_error: f32,
 }
@@ -60,12 +63,33 @@ struct Report {
     state: &'static str,
     target: String,
     device_index: u32,
+    resident_dtype: &'static str,
     provider: &'static str,
     fallback_allowed: bool,
     fallback_used: bool,
     cases: Vec<CaseReport>,
     cleanup_retryable: usize,
     cleanup_durable: usize,
+}
+
+fn quantize_e4m3fnuz_outer_rows(input: &[f32], rows: usize, columns: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut values = Vec::with_capacity(input.len());
+    let mut scales = Vec::with_capacity(rows);
+    for row in input.chunks_exact(columns).take(rows) {
+        let maximum = row.iter().copied().map(f32::abs).fold(0.0_f32, f32::max);
+        let scale = if maximum == 0.0 { 1.0 } else { maximum / 240.0 };
+        scales.push(scale);
+        values.extend(row.iter().map(|value| encode_e4m3fnuz(*value / scale)));
+    }
+    (values, scales)
+}
+
+fn dequantize_e4m3fnuz(values: &[u8], scales: &[f32], columns: usize) -> Vec<f32> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| decode_e4m3fnuz(*value) * scales[index / columns])
+        .collect()
 }
 
 fn bf16(value: f32) -> u16 {
@@ -128,8 +152,13 @@ fn run_case(
         .map_err(|error| format!("activation oracle quantization: {error}"))?;
     let weight_fp8 = quantize_e4m3fn_outer_rows(&weight_f32, shape.n, shape.k)
         .map_err(|error| format!("weight quantization: {error}"))?;
+    let fnuz = target == "gfx942";
 
-    let mut weight_storage = weight_fp8.values.clone();
+    let mut weight_storage = if fnuz {
+        convert_e4m3fn_to_e4m3fnuz(&weight_fp8.values)
+    } else {
+        weight_fp8.values.clone()
+    };
     for scale in &weight_fp8.scales {
         weight_storage.extend_from_slice(&scale.to_le_bytes());
     }
@@ -166,8 +195,13 @@ fn run_case(
 
     let activation_view = TensorView::contiguous(DType::Bf16, &[shape.m, shape.k])
         .map_err(|error| error.to_string())?;
+    let resident_dtype = if fnuz {
+        DType::F8E4M3FnuZ
+    } else {
+        DType::F8E4M3Fn
+    };
     let weight_view = TensorView::with_encoding(
-        DType::F8E4M3Fn,
+        resident_dtype,
         Encoding::Fp8Scaled {
             granularity: Fp8ScaleGranularity::OuterDimension,
             scale_dtype: DType::F32,
@@ -208,11 +242,42 @@ fn run_case(
     let prepared = session
         .prepare(operation)
         .map_err(|error| format!("prepare: {error}"))?;
-    let mut submission = session
-        .submit(&prepared, queue)
-        .map_err(|error| format!("submit: {error}"))?;
-    let dispatch = submission.dispatch().clone();
-    let expected_kernel = if target == "gfx1201" { 5 } else { 6 };
+    let benchmark = env::var("SLLM_FP8_BENCHMARK").as_deref() == Ok("1");
+    let warmups = if benchmark { 3 } else { 0 };
+    let measured = if benchmark { 10 } else { 1 };
+    for _ in 0..warmups {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| format!("warmup submit: {error}"))?;
+        wait_ok(submission.wait(WAIT), "matmul warmup")?;
+    }
+    let mut dispatch = None;
+    let mut last_submission = None;
+    let mut kernel_elapsed_samples_ns = Vec::with_capacity(measured);
+    for iteration in 0..measured {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| format!("submit: {error}"))?;
+        if dispatch.is_none() {
+            dispatch = Some(submission.dispatch().clone());
+        }
+        wait_ok(submission.wait(WAIT), "matmul")?;
+        kernel_elapsed_samples_ns.push(
+            submission
+                .kernel_elapsed_ns()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "missing GPU timing".to_owned())?,
+        );
+        if iteration + 1 == measured {
+            last_submission = Some(submission);
+        }
+    }
+    let dispatch = dispatch.ok_or_else(|| "no measured dispatch".to_owned())?;
+    let expected_kernel = if matches!(target, "gfx1201" | "gfx942") {
+        5
+    } else {
+        6
+    };
     if dispatch.dispatch_count != 2
         || dispatch.kernel_id != expected_kernel
         || dispatch.fallback_allowed
@@ -221,12 +286,11 @@ fn run_case(
     {
         return Err(format!("unexpected FP8 dispatch metadata: {dispatch:?}"));
     }
-    wait_ok(submission.wait(WAIT), "matmul")?;
-    let kernel_elapsed_ns = submission
-        .kernel_elapsed_ns()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "missing GPU timing".to_owned())?;
-    let mut readback = submission
+    let kernel_elapsed_ns = *kernel_elapsed_samples_ns
+        .last()
+        .ok_or_else(|| "no GPU timing samples".to_owned())?;
+    let mut readback = last_submission
+        .ok_or_else(|| "missing final submission".to_owned())?
         .start_output_readback(0)
         .map_err(|error| error.to_string())?;
     wait_ok(readback.wait(WAIT), "readback")?;
@@ -235,8 +299,17 @@ fn run_case(
         .read_into(&mut actual_bytes)
         .map_err(|error| error.to_string())?;
 
-    let activation_dequantized = activation_fp8.dequantize();
-    let weight_dequantized = weight_fp8.dequantize();
+    let (activation_dequantized, weight_dequantized) = if fnuz {
+        let (activation_values, activation_scales) =
+            quantize_e4m3fnuz_outer_rows(&activation_f32, shape.m, shape.k);
+        let weight_values = convert_e4m3fn_to_e4m3fnuz(&weight_fp8.values);
+        (
+            dequantize_e4m3fnuz(&activation_values, &activation_scales, shape.k),
+            dequantize_e4m3fnuz(&weight_values, &weight_fp8.scales, shape.k),
+        )
+    } else {
+        (activation_fp8.dequantize(), weight_fp8.dequantize())
+    };
     let mut max_abs_error = 0.0_f32;
     let mut max_relative_error = 0.0_f32;
     for row in 0..shape.m {
@@ -270,14 +343,15 @@ fn run_case(
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
         kernel_elapsed_ns,
+        kernel_elapsed_samples_ns,
         max_abs_error,
         max_relative_error,
     })
 }
 
 fn run(device_index: u32, target: String) -> Result<Report, String> {
-    if !matches!(target.as_str(), "gfx1030" | "gfx1201") {
-        return Err("target must be gfx1030 or gfx1201".to_owned());
+    if !matches!(target.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+        return Err("target must be gfx1030, gfx1201, or gfx942".to_owned());
     }
     let backend = HipBackend::connect().map_err(|error| error.to_string())?;
     let request = ExecutionSessionRequest::new(device_index, target.clone())
@@ -287,7 +361,34 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
         .map_err(|error| error.to_string())?;
     let cases_result = (|| {
         let queue = session.create_queue().map_err(|error| error.to_string())?;
-        CASES
+        let benchmark = env::var("SLLM_FP8_BENCHMARK").as_deref() == Ok("1");
+        let cases = if benchmark {
+            vec![
+                Shape {
+                    m: 1,
+                    k: 2560,
+                    n: 9216,
+                },
+                Shape {
+                    m: 1,
+                    k: 9216,
+                    n: 2560,
+                },
+                Shape {
+                    m: 32,
+                    k: 2560,
+                    n: 9216,
+                },
+                Shape {
+                    m: 32,
+                    k: 9216,
+                    n: 2560,
+                },
+            ]
+        } else {
+            CASES.to_vec()
+        };
+        cases
             .iter()
             .copied()
             .enumerate()
@@ -301,11 +402,17 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
     if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
         return Err("nonzero cleanup state".to_owned());
     }
+    let resident_dtype = if target == "gfx942" {
+        "e4m3fnuz"
+    } else {
+        "e4m3fn"
+    };
     Ok(Report {
-        schema_version: "phase10-fp8-matmul-v1",
+        schema_version: "sllm-fp8-matmul-v2",
         state: "PASS",
         target,
         device_index,
+        resident_dtype,
         provider: if expected_native(&cases) {
             "hipblaslt-native"
         } else {
@@ -330,7 +437,7 @@ fn main() -> ExitCode {
             .parse::<u32>()
             .map_err(|_| "device index must be u32".to_owned())
             .and_then(|device| run(device, target.clone())),
-        _ => Err("usage: sllm-fp8-matmul-evidence DEVICE_INDEX gfx1030|gfx1201".to_owned()),
+        _ => Err("usage: sllm-fp8-matmul-evidence DEVICE_INDEX gfx1030|gfx1201|gfx942".to_owned()),
     };
     match result {
         Ok(report) => match serde_json::to_string(&report) {

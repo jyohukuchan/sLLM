@@ -139,6 +139,10 @@ artifact全体と各source/value/block-scale/tensor-scale hashを固定する。
 E2M1、K-axis block 16、OCP E4M3FN scale、FP32 tensor scaleを必須とし、missing/extra/range/shape/hash/provider不一致を
 load前に拒否する。Qwen3.5-2Bのrepository外sidecarは186 tensor、772,236,184 byteで二回のartifact SHA-256が一致した。
 
+Phase 15OのFP8/NVFP4最適化は実行providerだけを変更し、上記sidecar bytes、manifest、source lock fingerprint、
+scale/packing規則を変更しない。decode/prefill provider IDとkernel symbolはdispatch auditへ含めるが、派生artifact identityを
+置き換える情報ではない。runtimeは同じverified sidecarをloadし、requestごとの全weight展開を行わない。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

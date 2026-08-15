@@ -24,7 +24,8 @@
 ## 初期バージョンの主要要件
 
 - Linuxのみを対象とする。
-- safetensors形式のモデルを読み込む。
+- 初期実装ではsafetensors形式のモデルを読み込む。最終的な公開runtimeのモデル入力と
+  配布artifactはGGUFへ統一し、safetensorsは変換・開発用の入力へ移す。
 - GUI以外の全機能をCLIから利用可能にする。
 - AMD GPUを最初のbackendとし、RDNA2、RDNA4、CDNA3を対象候補とする。
 - GPU操作、device memory、queue/event、operator dispatch、kernelはC++/HIPで実装する。
@@ -187,6 +188,22 @@
 - model aliasは特定のlock fingerprintへ結び付ける。
 - 詳細は `docs/models/model-lock.md` を正とする。
 
+### ユーザー向けモデルコンテナ
+
+- 2026-08-15のユーザー明示決定により、最終的な公開runtimeのモデル入力と配布artifactを
+  GGUFへ統一する。ホビーユーザーにsafetensors shard、量子化sidecar、tokenizer等の
+  複数artifactを個別管理させず、推論に必要なweight、scale、model metadata、tokenizer、
+  vocabulary、chat templateを原則として単一GGUFへ収容する。
+- 初期縦切りで実装したsafetensors direct loadと現在の量子化sidecarは、GGUF変換が完了するまでの
+  開発・移行経路として扱う。最終的な公開runtimeではGGUFを正本とし、safetensorsは変換toolの
+  入力として残せる。runtime内部のderived cacheは許容するが、別のユーザー管理artifactにはしない。
+- GGUFコンテナへの統一は、Q8_0、Q4_K等の一般的なllama.cpp量子化形式を自動的に対応対象へ
+  加える決定ではない。対応するtensor encodingと実行経路は別に決定する。
+- safetensorsからGGUFへ変換する場合は、変換元lock fingerprint、変換toolのrepositoryとcommit、
+  引数・設定、出力全体のSHA-256を記録する。runtimeのmodel lockはGGUF本体、metadata、tensor inventoryを
+  検証対象とする。標準GGUFとの互換性を優先し、独自metadataまたはtensor typeが必要な場合は明示的に
+  versioningする。
+
 ## 外部実装の参照とコード流用
 
 - llama.cppとvLLMから、実装前に技術上の要点を抽出する。
@@ -296,17 +313,23 @@
    - model-neutral fixtureと既存Qwen pathで、別model adapterが同じ高速な実行骨格を利用できることを確認する。
 14. google/gemma-4-12Bへ対応する。
 15. Weight NVFP4へ対応する。
+   - Phase 15Oとして、model本体のFP8/NVFP4量子化pathをdecodeとprefillに分け、Phase 16より前に最適化する。
+     - decodeはdynamic FP8 activation量子化とFP8/NVFP4 M=1 providerを最適化する。
+     - prefillはFP8 hipBLASLt solutionとNVFP4 packed-dequant tiled providerを最適化する。
 16. KV cache FP8/NVFP4へ対応する。
 17. MTP、visionへ対応する。
 18. Gemma4またはQwen3.5のMoEへ対応する。
-19. 残りの初期バージョン機能を実装する。
+19. 残りの初期バージョン機能を実装し、ユーザー向けモデル入力と配布artifactをGGUFへ統一する。
+   - safetensorsと量子化sidecarから、推論に必要な情報を収容した単一GGUFへの変換経路を用意する。
+   - 公開runtimeはGGUFを正本として読み込み、変換元と出力をmodel lockで再現可能に固定する。
 20. 人間がREADMEを整備し、発表する。
 
 Phase 12のMI300Xを管理できない期間は、Phase番号と依存関係を維持したままPhase 13以降のlocal-only workを
 先行できる。現在のGitHub CI不整合は製品Phaseを繰り下げず、Phase 12待機中のremediation subphase
 `Phase 12R`としてPhase 13より先に修復する。実行順序、停止条件、Gemma 4後の共通RDNA性能bridge、枯渇防止tailは
-[Phase 12待機中のローカル先行実行キュー](active/2026/08/11-20/phase12-wait-local-forward-queue.md)を正とする。
-Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` candidateを再buildする。
+[Phase 12待機中のローカル先行実行キュー](archive/2026/08/11-20/phase12-wait-local-forward-queue.md)を正とする。
+待機queueのQ0〜Q4完了後、2026-08-15のユーザー明示指示でPhase 12を開始し、latest mainからexact `gfx942`
+candidateを再確認した。
 
 ## Phase概要と進捗
 
@@ -473,7 +496,7 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   production `native-fnuz` graph/service、MI300X dry-run runnerを完成した。実機PASSと性能値はPhase 12で取得する。
 - 詳細は[Phase 11 archive](archive/2026/08/11-20/phase11-cdna3-port.md)を正とする。
 
-### Phase 12: Hot Aisle MI300X単体実機確認（計画済み）
+### Phase 12: Hot Aisle MI300X単体実機確認（完了）
 
 - Hot AisleのMI300X x1 Small VMを用い、exact `gfx942`のBF16/FNUZ FP8、wave64、contiguous-resident KV、
   4B/9B model、service、性能、llama.cpp比較をfail-closedに確認する。
@@ -481,7 +504,15 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   bare-metal固有挙動、別CDNA3 SKUは証拠範囲外とする。
 - 利用時間はclean candidateで合計10〜12 GPU時間、現実的な上限16時間とする。2〜3時間のpreflightと
   6〜8時間のintegration/performanceを別sessionにし、必要な場合だけ追加4時間を別日に使う。
-- 詳細は[Phase 12 active plan](active/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
+- P12-A0は実測identity、ROCm 7.14同一root、VMM/FNUZ/profiler/tiny runtime、exact gfx942 build/loadをPASSした。
+  P12-A1はfeature suffix付きMI300X device名のfail-closed正規化、wave64 RMSNorm、GDNを含むoperator matrixを
+  native数値oracleでPASSした。P12-A2は4B/9B BF16/FNUZ FP8、top-1/KLD、fixed/Unicode/stop generationをPASSした。
+- P12-A3は実測VMM=trueでもPhase固定条件どおりexact gfx942を`contiguous-resident` KVへ明示固定し、1023/1024/1025、
+  OpenAI raw/SSE/client/reasoning/disconnect/並行request、shutdown zeroをPASSした。P12-A4は4B BF16/FP8の4 caseを
+  3 warmup＋10 measuredし、FP8のresident VRAM 42.4%減とE2E 17〜31%低下を記録した。同じBF16/token条件の
+  fixed llama.cppにはsLLM E2Eで2.50〜5.58倍の差が残る。integration review、focused re-review、文書/evidence監査、
+  repository外への証拠退避を完了し、ユーザー管理VMの削除と旧endpointの到達不能を確認してPhase 12を完了した。
+- 詳細は[Phase 12 archive](archive/2026/08/11-20/phase12-mi300x-validation.md)を正とする。
 
 ### Phase 12R: CI portability repairとlocal/remote verification整理（完了）
 
@@ -540,22 +571,33 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   V620で約21〜22%、R9700で約20〜22%低下し、R9700 prefill/TTFTは大幅退行した。memory削減だけでdefaultへ昇格しない。
 - 詳細は[Phase 15 archive](archive/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
 
+### Phase 15O: FP8/NVFP4 model量子化path最適化（完了）
+
+- 2026-08-15のユーザー明示指示により、Phase 16より前に実行するbridge phaseとして追加した。
+- FP8はdynamic activation量子化をwave reduction/native pair conversionへ更新し、R9700の代表M=1/M=32 shapeで
+  7.48〜29.36%低遅延、Qwen3.5-4B 32/32でprefill `+5.89%`、decode `+10.69%`、E2E `-9.27%`となった。
+- NVFP4 decode候補は改善せず棄却して従来device kernelを維持した。prefillはpacked weight K tileを最大8 M rowで
+  共有するproviderを採用し、M=32 operatorでR9700 59.29〜59.51%、V620 51.21〜56.68%低遅延となった。
+- resident/peak、sidecar、数値/fail-closed contractは不変。FP8 R9700は`opt-in production`、V620 emulationは
+  `correctness-only`、NVFP4はaccuracy budget超過のため両targetとも`correctness-only opt-in`を維持する。
+- 詳細は[Phase 15O archive](archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)を正とする。
+
 ## 現在の状態と次の作業
 
-- Phase 15 Weight NVFP4まで完了した。hardware検証順ではPhase 12のMI300X実機確認が残るが、2026-08-15の
-  ユーザー明示指示により現在のgoalはPhase 15完了を終端とする。
-- MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
+- Phase 15Oまで完了した。次はPhase 16 KV cache FP8/NVFP4へ進む。
+- 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと
+  量子化sidecarは移行完了まで維持し、この決定だけを理由にPhase 16を自動開始または繰り下げない。
+- MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。
-  共通RDNA性能bridgeとPhase 15まで完了した。Phase 16以降は別の明示指示で再開する。
+  共通RDNA性能bridgeとPhase 15を完了後、MI300X Phase 12も完了した。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで
   memory-bound matvec、production graph/command-list、MLP fusionの優先順位を再確認する。RDNA4 FA3-likeは
   attentionが支配要因になった時の非blocking follow-upとして別管理する。
-- Phase 11でMI300XのVMMなしに備える`contiguous-resident` KV providerを実装した。Phase 12はHot Aisle MI300X x1
-  Small VMを標準10〜12 GPU時間、上限16時間の二回構成で検証する。単一VMの性能証拠をmulti-GPU、bare metal、
-  MI300A/MI325Xへ一般化しない。
+- Phase 11でMI300XのVMMなしに備える`contiguous-resident` KV providerを実装した。Phase 12ではHot Aisle MI300X x1
+  Small VMで検証し、単一VMの性能証拠をmulti-GPU、bare metal、MI300A/MI325Xへ一般化しない範囲で記録した。
 - Phase 7完了後のAPI拡張として、opt-in Qwen thinking、`reasoning_content`と最終`content`の
   non-stream/SSE分離、strictと分けたOpenWebUI `max_tokens`互換profileを追加した。互換範囲は
   [OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。

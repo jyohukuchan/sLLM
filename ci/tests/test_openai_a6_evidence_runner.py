@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from ci.tools.run_openai_a6_gpu import parse_sse, process_count
+from ci.tools.run_openai_a6_gpu import metric_observation, parse_sse, process_count
 
 
 class OpenAIA6EvidenceRunnerTests(unittest.TestCase):
@@ -28,6 +29,17 @@ class OpenAIA6EvidenceRunnerTests(unittest.TestCase):
         busy = [{"gpu": 1, "process_list": [{"process_info": "123 sllm-server"}]}]
         self.assertEqual(process_count(empty, 1), 0)
         self.assertEqual(process_count(busy, 1), 1)
+
+    def test_only_gfx942_can_record_provider_blocked_metrics_as_unavailable(self) -> None:
+        with patch(
+            "ci.tools.run_openai_a6_gpu.optional_amd_smi", return_value={"state": "unavailable"}
+        ) as optional, patch(
+            "ci.tools.run_openai_a6_gpu.amd_smi", return_value={"temperature": 42}
+        ) as required:
+            self.assertEqual(metric_observation("gfx942", 0), {"state": "unavailable"})
+            self.assertEqual(metric_observation("gfx1201", 2), {"temperature": 42})
+        optional.assert_called_once_with("metric", 0)
+        required.assert_called_once_with("metric", 2)
 
 
 if __name__ == "__main__":

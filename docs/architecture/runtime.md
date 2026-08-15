@@ -147,6 +147,11 @@ descriptor/cache identityはencoding、scale layout、provider、exact target、
 requestごとにunpackせず、packed weightからBF16 activationとの積をFP32 accumulateしてBF16 outputを返す。
 exact `gfx1030`/`gfx1201`以外、scale欠落、provider未指定、runtime failureではBF16/FP8へfallbackしない。
 
+Phase 15Oではformatを変更せず、FP8 activation量子化をwave reduction/native pair conversionへ更新した。FP8は
+activation量子化とhipBLASLtの2 dispatch、NVFP4は1 dispatchを維持する。NVFP4はM=1のdecode provider ID 8と、
+K=256のweight tileを最大8 M rowで共有するM>1 prefill provider ID 9へ分離する。prefill展開はworkgroup内LDSだけで、
+resident BF16 weightを作らない。prepare/runtime failure時の別dtype/provider fallbackは引き続き禁止する。
+
 ## KV cache layout
 
 KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期方式はHIP VMMのvirtual-contiguous FP16 KVで、storage layoutはtoken-major `[capacity, kv_heads, head_dim]`である。create時に最大logical capacityのVAをreserveし、append前に必要なK/V physical pageだけをcommitする。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。
@@ -155,9 +160,10 @@ schedulerとgeneration serviceはopaqueなKV state/resource、logical token rang
 
 Phase 11でVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
 contiguous attention pointerを保つ`contiguous-resident` providerを追加した。logical capacity分を通常のdevice
-allocationで確保し、VMM capability=falseのprepare時に選択する。これはPaged Attentionへの方針変更でも
-実行時error後のfallbackでもない。VMM capability=trueのtargetは既存virtual-contiguous providerを維持する。
-必要byte、capacity、selected provider、resident allocationはdiagnostic/auditへ残す。
+allocationで確保する。Phase 12のHot Aisle MI300X VFはVMM capability=trueだったが、開始時に固定した比較条件を
+維持するためexact `gfx942`はcreate時にこのproviderを明示選択する。他targetはcapability-selectedのままで、
+VMM capability=trueなら既存virtual-contiguous providerを維持する。これはPaged Attentionへの方針変更でも
+実行時error後のfallbackでもない。必要byte、capacity、selected provider、resident allocationはdiagnostic/auditへ残す。
 
 Phase 8のproduction causal attentionは、Qwen3.5のhead dim 256を一workgroupで協調reductionし、scoreの
 再計算とthread-0 softmaxを一pass online softmaxへ置き換えたFA2-style pathである。opaque KV owner、

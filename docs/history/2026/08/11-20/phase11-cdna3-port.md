@@ -36,4 +36,4 @@
   `d80e9361d58f5eb461335b4a580ff97b54f9da8ebdfe5b54b8319bda91072d52`だった。binary自体はrepository外の
   local build artifactであり追跡しない。
 - local compileはMI300X実行、FNUZ hipBLASLt solution support、gfx942数値、性能を証明しない。これらは
-  [Phase 12](../../../../plans/active/2026/08/11-20/phase12-mi300x-validation.md)でfail-closedに取得する。
+  [Phase 12](../../../../plans/archive/2026/08/11-20/phase12-mi300x-validation.md)でfail-closedに取得した。

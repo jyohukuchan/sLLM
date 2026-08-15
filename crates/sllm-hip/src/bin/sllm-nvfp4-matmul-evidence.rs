@@ -18,8 +18,12 @@ use sllm_hip::HipBackend;
 
 const WAIT: Duration = Duration::from_secs(30);
 const SHUTDOWN: Duration = Duration::from_secs(16);
-const KERNEL_SYMBOL: &str = "matmul.nvfp4.block16.packed_dequant.v1";
-const DEVICE_SYMBOL: &str = "sllm_matmul_nvfp4_block16_packed_dequant_v1";
+const DECODE_KERNEL_SYMBOL: &str = "matmul.nvfp4.block16.decode.packed_dequant.v1";
+const DECODE_DEVICE_SYMBOL: &str = "sllm_matmul_nvfp4_block16_packed_dequant_v1";
+const PREFILL_KERNEL_SYMBOL: &str = "matmul.nvfp4.block16.prefill.row8_tiled256.v2";
+const PREFILL_DEVICE_SYMBOL: &str = "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2";
+const BASELINE_KERNEL_SYMBOL: &str = "matmul.nvfp4.block16.packed_dequant.v1";
+const BASELINE_DEVICE_SYMBOL: &str = "sllm_matmul_nvfp4_block16_packed_dequant_v1";
 
 #[derive(Clone, Copy)]
 struct Shape {
@@ -55,6 +59,7 @@ struct CaseReport {
     kernel_symbol: String,
     device_symbol: String,
     kernel_elapsed_ns: u64,
+    kernel_elapsed_samples_ns: Vec<u64>,
     max_abs_error: f32,
     max_relative_error: f32,
 }
@@ -214,26 +219,60 @@ fn run_case(
     let prepared = session
         .prepare(operation)
         .map_err(|error| format!("prepare: {error}"))?;
-    let mut submission = session
-        .submit(&prepared, queue)
-        .map_err(|error| format!("submit: {error}"))?;
-    let dispatch = submission.dispatch().clone();
+    let benchmark = env::var("SLLM_NVFP4_BENCHMARK").as_deref() == Ok("1");
+    let warmups = if benchmark { 3 } else { 0 };
+    let measured = if benchmark { 10 } else { 1 };
+    let mut dispatch = None;
+    for _ in 0..warmups {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| format!("warmup submit: {error}"))?;
+        wait_ok(submission.wait(WAIT), "matmul warmup")?;
+    }
+    let mut kernel_elapsed_samples_ns = Vec::with_capacity(measured);
+    let mut last_submission = None;
+    for iteration in 0..measured {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| format!("submit: {error}"))?;
+        if dispatch.is_none() {
+            dispatch = Some(submission.dispatch().clone());
+        }
+        wait_ok(submission.wait(WAIT), "matmul")?;
+        kernel_elapsed_samples_ns.push(
+            submission
+                .kernel_elapsed_ns()
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "missing GPU timing".to_owned())?,
+        );
+        if iteration + 1 == measured {
+            last_submission = Some(submission);
+        }
+    }
+    let dispatch = dispatch.ok_or_else(|| "no measured dispatch".to_owned())?;
+    let force_baseline = env::var("SLLM_NVFP4_FORCE_BASELINE").as_deref() == Ok("1");
+    let (expected_id, expected_kernel, expected_device) = if force_baseline {
+        (10, BASELINE_KERNEL_SYMBOL, BASELINE_DEVICE_SYMBOL)
+    } else if shape.m == 1 {
+        (8, DECODE_KERNEL_SYMBOL, DECODE_DEVICE_SYMBOL)
+    } else {
+        (9, PREFILL_KERNEL_SYMBOL, PREFILL_DEVICE_SYMBOL)
+    };
     if dispatch.dispatch_count != 1
-        || dispatch.kernel_id != 8
-        || dispatch.kernel_symbol != KERNEL_SYMBOL
-        || dispatch.device_symbol != DEVICE_SYMBOL
+        || dispatch.kernel_id != expected_id
+        || dispatch.kernel_symbol != expected_kernel
+        || dispatch.device_symbol != expected_device
         || dispatch.fallback_allowed
         || dispatch.fallback_used
         || dispatch.target != target
     {
         return Err(format!("unexpected NVFP4 dispatch metadata: {dispatch:?}"));
     }
-    wait_ok(submission.wait(WAIT), "matmul")?;
-    let kernel_elapsed_ns = submission
-        .kernel_elapsed_ns()
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "missing GPU timing".to_owned())?;
-    let mut readback = submission
+    let kernel_elapsed_ns = *kernel_elapsed_samples_ns
+        .last()
+        .ok_or_else(|| "no GPU timing samples".to_owned())?;
+    let mut readback = last_submission
+        .ok_or_else(|| "missing final submission".to_owned())?
         .start_output_readback(0)
         .map_err(|error| error.to_string())?;
     wait_ok(readback.wait(WAIT), "readback")?;
@@ -278,6 +317,7 @@ fn run_case(
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
         kernel_elapsed_ns,
+        kernel_elapsed_samples_ns,
         max_abs_error,
         max_relative_error,
     })
@@ -295,7 +335,34 @@ fn run(device_index: u32, target: String) -> Result<Report, String> {
         .map_err(|error| error.to_string())?;
     let cases_result = (|| {
         let queue = session.create_queue().map_err(|error| error.to_string())?;
-        CASES
+        let benchmark = env::var("SLLM_NVFP4_BENCHMARK").as_deref() == Ok("1");
+        let cases = if benchmark {
+            vec![
+                Shape {
+                    m: 1,
+                    k: 2048,
+                    n: 6144,
+                },
+                Shape {
+                    m: 1,
+                    k: 6144,
+                    n: 2048,
+                },
+                Shape {
+                    m: 32,
+                    k: 2048,
+                    n: 6144,
+                },
+                Shape {
+                    m: 32,
+                    k: 6144,
+                    n: 2048,
+                },
+            ]
+        } else {
+            CASES.to_vec()
+        };
+        cases
             .iter()
             .copied()
             .enumerate()

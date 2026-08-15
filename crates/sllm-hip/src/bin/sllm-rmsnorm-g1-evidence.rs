@@ -36,9 +36,13 @@ const MAX_OUTPUT_BYTES: u64 = OUTPUT_HEADER_BYTES as u64 + MAX_ELEMENTS * BF16_B
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const CLEANUP_ATTEMPTS: usize = 16;
 const HIP_BACKEND: u32 = 1;
+// Wave32 aliases remain the default fixtures used by the protocol unit tests.
+#[cfg(test)]
 const RMSNORM_KERNEL_ID: u32 = 1;
 const RMSNORM_WORKGROUP: u32 = 256;
+#[cfg(test)]
 const KERNEL_SYMBOL: &str = "rmsnorm.baseline.wave32.v1";
+#[cfg(test)]
 const DEVICE_SYMBOL: &str = "sllm_rmsnorm_baseline_wave32_v1";
 const RMSNORM_SEMANTIC_OP_WIRE: u32 = 1;
 const RMSNORM_CONTRACT_VERSION: u32 = 1;
@@ -271,8 +275,10 @@ fn parse_config() -> Result<Config, String> {
                 let value = args
                     .next()
                     .ok_or_else(|| invalid("--target requires a value"))?;
-                if value != "gfx1030" && value != "gfx1201" {
-                    return Err(invalid("--target must be exactly gfx1030 or gfx1201"));
+                if value != "gfx1030" && value != "gfx1201" && value != "gfx942" {
+                    return Err(invalid(
+                        "--target must be exactly gfx1030, gfx1201, or gfx942",
+                    ));
                 }
                 target = Some(value);
             }
@@ -312,11 +318,24 @@ fn validate_dispatch(
     request: &Request,
     target: &str,
 ) -> Result<(), String> {
+    let (kernel_id, kernel_symbol, device_symbol) = if target == "gfx942" {
+        (
+            2,
+            "rmsnorm.baseline.wave64.v1",
+            "sllm_rmsnorm_baseline_wave64_v1",
+        )
+    } else {
+        (
+            1,
+            "rmsnorm.baseline.wave32.v1",
+            "sllm_rmsnorm_baseline_wave32_v1",
+        )
+    };
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
         || dispatch.dispatch_count != 1
-        || dispatch.kernel_id != RMSNORM_KERNEL_ID
+        || dispatch.kernel_id != kernel_id
         || dispatch.workgroup_size_x != RMSNORM_WORKGROUP
         || dispatch.grid_size_x != request.row_count as u32
         || dispatch.row_count != request.row_count
@@ -324,8 +343,8 @@ fn validate_dispatch(
         || dispatch.backend != HIP_BACKEND
         || dispatch.fallback_allowed
         || dispatch.fallback_used
-        || dispatch.kernel_symbol != KERNEL_SYMBOL
-        || dispatch.device_symbol != DEVICE_SYMBOL
+        || dispatch.kernel_symbol != kernel_symbol
+        || dispatch.device_symbol != device_symbol
         || dispatch.target != target
     {
         return Err(invalid(

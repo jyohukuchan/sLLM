@@ -54,7 +54,7 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "886ea01b5b7ae5554df66cb8c605952d6b1a52bfb085f779e6184bffbceeda42"
+          "sha256": "73c41d5fc85a10e36d6de2b904b7ee710dfc49773dae5a2f53f4a6c1539f1e17"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -69,7 +69,7 @@
           "sha256": "f7a061cf121a47f248dc7ae539f2b3a7d53e706c0976b27bad9a3e8b346cb152"
         }
       ],
-      "source_set_sha256": "0ad9d9d29731cafc7739c738ca78cc8613be5fb87c82d81c84e75c0985f24089"
+      "source_set_sha256": "18bd8b39eb4cca93d370f6b961a0f380a6bb5090dd7dbba6d400300dc058519d"
     },
     "binding_build": {
       "canonical_order": [
@@ -147,11 +147,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "256807eb6a49832c56cee25e34640ac96d4223669283c7b312202b33cd8bb263"
+          "sha256": "bd49dfc6d539e9ae00152f04c36b42a3f411dbe6f384fac127a67962f628eec9"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "fc46b6899758a37003dd7a0f1f68a4b277287fc261f4f7a32c35cbfd809ac658"
+          "sha256": "60631096424498575d647ccca3bddef83acdc678832c558db59aa318d686f3de"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -178,7 +178,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "9d7ef655687c9e94d3dc190a2ceda5c21fdcce11518c5a3b3fc718b3b21e0ece"
+      "source_set_sha256": "dda1c91da18cd67eb4d85fe239d9a3422a373804e8c53621bbd4d1bebe5e7382"
     }
   },
   "source_symbol_map": [

@@ -40,7 +40,7 @@ use crate::weights::{
 };
 use crate::{
     AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
-    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fn,
+    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, decode_e4m3fn,
 };
 
 /// Output published by a fully completed Qwen request transition.
@@ -1009,8 +1009,8 @@ impl QwenProvisionSource for Fp8FnuzProvisionSource {
             .sidecar
             .read_tensor_bytes(binding.tensor_name())
             .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-        let mut combined = convert_e4m3fn_to_e4m3fnuz(&values);
-        combined.extend_from_slice(&scales);
+        let (mut combined, rebased_scales) = rebase_e4m3fn_outer_rows_to_fnuz(&values, &scales)?;
+        combined.extend_from_slice(&rebased_scales);
         if u64::try_from(combined.len()).ok() != Some(destination.size_bytes()) {
             return Err(QwenExecutionError::InvalidRequest(format!(
                 "FNUZ resident allocation differs for {}",
@@ -1037,6 +1037,41 @@ impl QwenProvisionSource for Fp8FnuzProvisionSource {
         }
         .read_scale_bytes(tensor_name, expected_length)
     }
+}
+
+fn rebase_e4m3fn_outer_rows_to_fnuz(
+    values: &[u8],
+    scales: &[u8],
+) -> Result<(Vec<u8>, Vec<u8>), QwenExecutionError> {
+    if scales.is_empty() || scales.len() % 4 != 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "FNUZ resident scale payload is not a non-empty FP32 array".to_owned(),
+        ));
+    }
+    let mut rebased_values = Vec::with_capacity(values.len());
+    for &bits in values {
+        if bits & 0x7f == 0x7f {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FNUZ resident conversion refuses an OCP NaN byte".to_owned(),
+            ));
+        }
+        // For every finite nonzero code, FNUZ decodes the same byte to
+        // exactly half the OCP value. Preserve the byte and compensate once
+        // in the outer-row scale; map OCP negative zero away from FNUZ NaN.
+        rebased_values.push(if bits == 0x80 { 0 } else { bits });
+    }
+    let mut rebased_scales = Vec::with_capacity(scales.len());
+    for bytes in scales.chunks_exact(4) {
+        let scale = f32::from_le_bytes(bytes.try_into().expect("four-byte scale chunk"));
+        let rebased = scale * 2.0;
+        if !scale.is_finite() || scale <= 0.0 || !rebased.is_finite() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "FNUZ resident conversion requires positive finite FP32 scales".to_owned(),
+            ));
+        }
+        rebased_scales.extend_from_slice(&rebased.to_le_bytes());
+    }
+    Ok((rebased_values, rebased_scales))
 }
 
 impl QwenProvisionSource for Nvfp4ProvisionSource {
@@ -2731,7 +2766,7 @@ fn shape_matches(shape: &[usize], expected: &[u64]) -> Result<bool, QwenExecutio
 }
 
 fn is_fp8_weight_view(view: &TensorView) -> bool {
-    view.dtype() == DType::F8E4M3Fn
+    matches!(view.dtype(), DType::F8E4M3Fn | DType::F8E4M3FnuZ)
         && view.encoding()
             == Encoding::Fp8Scaled {
                 granularity: Fp8ScaleGranularity::OuterDimension,
@@ -3471,6 +3506,43 @@ mod tests {
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
+
+    #[test]
+    fn resident_fp8_weight_view_accepts_ocp_and_fnuz_storage() {
+        let encoding = Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::OuterDimension,
+            scale_dtype: DType::F32,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        };
+        for dtype in [DType::F8E4M3Fn, DType::F8E4M3FnuZ] {
+            let view = TensorView::with_encoding(dtype, encoding, &[3, 17]).unwrap();
+            assert!(is_fp8_weight_view(&view));
+        }
+        assert!(!is_fp8_weight_view(
+            &TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap()
+        ));
+    }
+
+    #[test]
+    fn fnuz_resident_rebase_preserves_every_finite_ocp_value() {
+        let values = (0_u8..=u8::MAX)
+            .filter(|bits| bits & 0x7f != 0x7f)
+            .collect::<Vec<_>>();
+        let source_scale = 1.25_f32;
+        let (rebased, scales) =
+            rebase_e4m3fn_outer_rows_to_fnuz(&values, &source_scale.to_le_bytes()).unwrap();
+        let rebased_scale = f32::from_le_bytes(scales.try_into().unwrap());
+        assert_eq!(rebased_scale, 2.5);
+        for (&source, &destination) in values.iter().zip(&rebased) {
+            assert_eq!(
+                decode_e4m3fn(source) * source_scale,
+                crate::decode_e4m3fnuz(destination) * rebased_scale,
+                "OCP byte 0x{source:02x}",
+            );
+        }
+        assert!(rebase_e4m3fn_outer_rows_to_fnuz(&[0x7f], &1.0_f32.to_le_bytes()).is_err());
+        assert!(rebase_e4m3fn_outer_rows_to_fnuz(&[0], &(-1.0_f32).to_le_bytes()).is_err());
+    }
 
     /// Host-only source for the structural fixture. It deliberately does not
     /// expose a `VerifiedCache` or pretend to validate model bytes; production

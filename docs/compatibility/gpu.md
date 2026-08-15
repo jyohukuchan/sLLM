@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-14
+> 最終更新: 2026-08-15
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4 packed-dequantを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4とPhase 15Oのmodel量子化最適化を検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -115,6 +115,12 @@ target別GDN state layout、completion segment、4B direct engineを追加検証
 TTFT/E2E 0.306/0.855秒、decode 29.69 tok/s、R9700で0.051/0.490秒、37.20 tok/sだった。
 これはexact target、Qwen3.5 BF16 single request、該当shape/providerの`project-verified` evidenceである。
 production全体のHIP Graph replay、別SKU、multi-request、別software tuple、長時間安定性は証明しない。
+
+Phase 12ではHot Aisle MI300X VF x1の完全tupleで、feature付き実device名
+`gfx942:sramecc+:xnack-`をexact logical `gfx942` artifactへfail-closedに対応づけ、wave64 BF16、FNUZ FP8、
+contiguous-resident KV、4B/9B model、OpenAI service、4B performanceを実機検証した。このscopeを
+`project-verified`とするが、MI300A/MI325X、別MI300X VM/image、bare metal、multi-GPU、generic `gfx9-4`、
+未実行model/shapeへ一般化しない。VMM=trueでもPhase 12の固定比較条件としてgfx942だけresident providerを明示選択した。
 
 ### software.mdとの関係
 

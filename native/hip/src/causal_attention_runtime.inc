@@ -308,7 +308,7 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
           "HIP gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       execute_guard.disarm();
       (void)rollback_reserved_causal_attention(state, queue, {query, output},
                                                error_sink);

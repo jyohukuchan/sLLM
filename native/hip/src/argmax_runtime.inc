@@ -293,7 +293,7 @@ sllm_argmax_execute(const sllm_argmax_plan_t *const raw_plan,
           "HIP gcnArchName is not NUL terminated or is too long");
     }
 #if defined(SLLM_HIP_COMPILE_TARGET)
-    if (std::strcmp(arch_name, SLLM_HIP_COMPILE_TARGET) != 0) {
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
       if (!rollback_reserved_argmax_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
         return SLLM_STATUS_INTERNAL_ERROR;

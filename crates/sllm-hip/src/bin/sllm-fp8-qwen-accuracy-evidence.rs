@@ -9,8 +9,8 @@ use std::time::Duration;
 use serde::Serialize;
 use sllm_core::{
     Backend, ExecutionSessionRequest, QwenResidentModel, VerifiedFp8Sidecar,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_verified_weight_load_plan, read_model_lock,
-    verify_fp8_sidecar,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_verified_weight_load_plan, read_model_lock, verify_fp8_sidecar,
 };
 use sllm_hip::HipBackend;
 
@@ -56,6 +56,9 @@ fn execute_logits(
     );
     let plan = build_verified_weight_load_plan(&lock, &cache).map_err(|error| error.to_string())?;
     let seed_graph = match &sidecar {
+        Some(sidecar) if target == "gfx942" => {
+            build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, 1, 7)
+        }
         Some(sidecar) => build_qwen35_fp8_graph(&lock, &plan, sidecar, 1, 7),
         None => build_qwen35_graph(&lock, &plan, 1, 7),
     }
@@ -68,6 +71,14 @@ fn execute_logits(
         .map_err(|error| error.to_string())?;
     let result = (|| {
         let resident = match &sidecar {
+            Some(sidecar) if target == "gfx942" => QwenResidentModel::new_fp8_fnuz(
+                Arc::clone(&session),
+                seed_graph,
+                plan.clone(),
+                Arc::clone(&cache),
+                Arc::clone(sidecar),
+                COMPLETION_TIMEOUT,
+            ),
             Some(sidecar) => QwenResidentModel::new_fp8(
                 Arc::clone(&session),
                 seed_graph,
@@ -89,6 +100,9 @@ fn execute_logits(
         for input in CASES {
             let token_count = input.len() as u64;
             let graph = match &sidecar {
+                Some(sidecar) if target == "gfx942" => {
+                    build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, token_count, token_count + 1)
+                }
                 Some(sidecar) => {
                     build_qwen35_fp8_graph(&lock, &plan, sidecar, token_count, token_count + 1)
                 }
@@ -210,12 +224,17 @@ fn run(arguments: &[String]) -> Result<Report, String> {
             "full-model FP8 accuracy gate failed: all_top1={all_top1_match} max_kld={max_kld}"
         ));
     }
+    let provider = if target == "gfx942" {
+        "native-fnuz"
+    } else {
+        "native-ocp-e4m3fn-outer-f32"
+    };
     Ok(Report {
         schema_version: "phase10-fp8-qwen-accuracy-v1",
         state: "PASS",
         target,
         device_index,
-        provider: "native-ocp-e4m3fn-outer-f32",
+        provider,
         sidecar_fingerprint: sidecar.manifest_fingerprint().to_owned(),
         cases: reports,
         max_kld,

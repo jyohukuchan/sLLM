@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase12-mi300x-summary-v1.schema.json",
+  "title": "Phase 12 Hot Aisle MI300X validation summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "date",
+    "source",
+    "hardware",
+    "software",
+    "models",
+    "correctness",
+    "service",
+    "performance",
+    "llama_cpp",
+    "trace",
+    "review",
+    "scope_limits",
+    "terminal"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase12-mi300x-summary-v1"},
+    "state": {"const": "PASS"},
+    "date": {"type": "string", "format": "date"},
+    "source": {"$ref": "#/$defs/object"},
+    "hardware": {"$ref": "#/$defs/object"},
+    "software": {"$ref": "#/$defs/object"},
+    "models": {"$ref": "#/$defs/object"},
+    "correctness": {"$ref": "#/$defs/object"},
+    "service": {"$ref": "#/$defs/object"},
+    "performance": {"$ref": "#/$defs/object"},
+    "llama_cpp": {"$ref": "#/$defs/object"},
+    "trace": {"$ref": "#/$defs/object"},
+    "review": {"$ref": "#/$defs/object"},
+    "scope_limits": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vm_deletion_required", "vm_deleted", "phase_complete", "deletion_confirmed_by", "deletion_confirmed_on", "post_delete_ssh"],
+      "properties": {
+        "vm_deletion_required": {"const": true},
+        "vm_deleted": {"const": true},
+        "phase_complete": {"const": true},
+        "deletion_confirmed_by": {"const": "user"},
+        "deletion_confirmed_on": {"type": "string", "format": "date"},
+        "post_delete_ssh": {"const": "connection-timeout"}
+      }
+    }
+  },
+  "$defs": {
+    "object": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    }
+  }
+}

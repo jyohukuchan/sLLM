@@ -85,7 +85,7 @@ fn parse_config() -> Result<Config, String> {
                         .map_err(|_| "--device-index must be a u32".to_owned())?,
                 );
             }
-            "--target" if matches!(value.as_str(), "gfx1030" | "gfx1201") => {
+            "--target" if matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") => {
                 target = Some(value);
             }
             "--weight-shard" => weight_shard = Some(PathBuf::from(value)),
@@ -96,7 +96,7 @@ fn parse_config() -> Result<Config, String> {
                         .map_err(|_| "--weight-offset must be a u64".to_owned())?,
                 );
             }
-            "--target" => return Err("--target must be gfx1030 or gfx1201".to_owned()),
+            "--target" => return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned()),
             _ => return Err(format!("unexpected argument `{argument}`")),
         }
     }

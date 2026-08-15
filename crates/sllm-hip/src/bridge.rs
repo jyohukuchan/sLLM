@@ -31,6 +31,7 @@ use crate::kv_state::{
 use crate::linear_attention::{
     LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
 };
+use crate::runtime::logical_gcn_arch_name;
 use crate::{
     ArgmaxDescriptor, AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo,
     AttentionPreprocessSubmission, Buffer, Completion, CompletionState, Context,
@@ -1179,6 +1180,10 @@ fn map_async_error(error: RuntimeError) -> ExecutionError {
     }
 }
 
+fn logical_dispatch_target(target: String) -> String {
+    logical_gcn_arch_name(&target).to_owned()
+}
+
 fn dispatch_from_rmsnorm(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: dispatch.abi_version,
@@ -1195,7 +1200,7 @@ fn dispatch_from_rmsnorm(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1215,7 +1220,7 @@ fn dispatch_from_elementwise(dispatch: ElementwiseDispatchInfo) -> DispatchEvide
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1235,7 +1240,7 @@ fn dispatch_from_embedding(dispatch: EmbeddingDispatchInfo) -> DispatchEvidence 
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1255,7 +1260,7 @@ fn dispatch_from_matmul(dispatch: MatmulDispatchInfo) -> DispatchEvidence {
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1275,7 +1280,7 @@ fn dispatch_from_argmax(dispatch: ArgmaxDispatchInfo) -> DispatchEvidence {
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1297,7 +1302,7 @@ fn dispatch_from_attention_preprocess(
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1317,7 +1322,7 @@ fn dispatch_from_rotary(dispatch: RotaryDispatchInfo) -> DispatchEvidence {
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1337,7 +1342,7 @@ fn dispatch_from_windowed_attention(dispatch: WindowedAttentionDispatchInfo) -> 
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.gcn_arch_name,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
     }
 }
 
@@ -1357,7 +1362,7 @@ fn dispatch_from_kv_append(dispatch: KvAppendEvidence) -> DispatchEvidence {
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.target,
+        target: logical_dispatch_target(dispatch.target),
     }
 }
 
@@ -1377,7 +1382,7 @@ fn dispatch_from_causal_attention(dispatch: CausalAttentionEvidence) -> Dispatch
         fallback_used: dispatch.fallback_used,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
-        target: dispatch.target,
+        target: logical_dispatch_target(dispatch.target),
     }
 }
 
@@ -1397,7 +1402,7 @@ fn dispatch_from_linear_attention(dispatch: LinearAttentionEvidence) -> Dispatch
         fallback_used: false,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.recurrent_device_symbol,
-        target: dispatch.target,
+        target: logical_dispatch_target(dispatch.target),
     }
 }
 
@@ -1409,6 +1414,18 @@ mod tests {
         ExecutionSessionRequest, SemanticOpDescriptor, SplitHalfRotaryContract, TensorView,
         WindowedCausalAttentionContract,
     };
+
+    #[test]
+    fn mi300x_feature_tuple_has_one_fail_closed_logical_normalization() {
+        assert_eq!(
+            logical_dispatch_target("gfx942:sramecc+:xnack-".to_owned()),
+            "gfx942"
+        );
+        assert_eq!(
+            logical_dispatch_target("gfx942:sramecc+:xnack+".to_owned()),
+            "gfx942:sramecc+:xnack+"
+        );
+    }
     use std::sync::Barrier;
     use std::thread;
 

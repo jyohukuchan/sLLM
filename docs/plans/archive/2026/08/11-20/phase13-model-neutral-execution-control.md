@@ -3,7 +3,7 @@
 > 状態: complete
 > 作成日: 2026-08-14
 
-[Phase 12待機中のローカル先行実行キュー](../../../../active/2026/08/11-20/phase12-wait-local-forward-queue.md)ではPhase 12RのCI portability repairに
+[Phase 12待機中のローカル先行実行キュー](phase12-wait-local-forward-queue.md)ではPhase 12RのCI portability repairに
 続いて本Phaseを実行する。Phase 12を完了扱いにせず、MI300X VMを起動しない。
 
 ## 目的

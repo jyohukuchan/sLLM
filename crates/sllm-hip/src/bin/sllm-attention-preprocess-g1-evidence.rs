@@ -173,8 +173,10 @@ fn parse_config() -> Result<Config, String> {
                 let value = arguments
                     .next()
                     .ok_or_else(|| "--target requires a value".to_owned())?;
-                if !matches!(value.as_str(), "gfx1030" | "gfx1201") {
-                    return Err("--target must be the exact gfx1030 or gfx1201 target".to_owned());
+                if !matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+                    return Err(
+                        "--target must be the exact gfx1030, gfx1201, or gfx942 target".to_owned(),
+                    );
                 }
                 target = Some(value);
             }

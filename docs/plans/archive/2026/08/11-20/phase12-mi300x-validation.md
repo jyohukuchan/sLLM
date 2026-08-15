@@ -1,7 +1,9 @@
 # Phase 12: Hot Aisle MI300X単体実機確認
 
-> 状態: ready
+> 状態: completed
 > 作成日: 2026-08-14
+> 開始日: 2026-08-15
+> 完了日: 2026-08-15
 
 ## Phase 11 handoff
 
@@ -9,6 +11,63 @@
   production `native-fnuz`統合を完了した。
 - `python3 ci/tools/run_phase11_mi300x_candidate.py --dry-run`で、全6 profileと所要時間見積りをVM取得前に検査する。
 - local candidateはMI300X実行をclaimしない。最初の実行主張は本Phaseのpreflight/operator reportから開始する。
+
+## 開始時の固定状態
+
+- ユーザーの2026-08-15の明示指示によりPhase 12を開始した。受入条件1〜6とQwen3.5 4B/9B BF16/FP8、
+  contiguous-resident KV、service、性能比較のmatrixは変更しない。
+- 開始sourceはcommit `a5e389be348442c4e99e97cc449fe3c356b8291f`、tree
+  `d0ace3d9fac29dd60375f5d6263f42355658a3bd`で、開始時点の`main`と`origin/main`は一致し作業treeはcleanだった。
+- `python3 ci/tools/run_phase11_mi300x_candidate.py --dry-run`は6 profile、推定435分でPASSした。
+  これは計画/schema検査であり、GPU実行またはMI300X PASSではない。
+- Phase 12専用の短命ED25519 SSH keyをlocal hostへ作成した。fingerprintは
+  `SHA256:YNhBwZGNGfdNnlg7yDLpXzDcic0vls6MDAGD67/PLvM`で、private keyはrepository外のmode `0600`に保持する。
+  VM endpoint、remote user、host key fingerprintを確認してから接続する。
+
+## 実行進捗
+
+- P12-A0は2026-08-15にPASSした。Hot Aisle 13 CPU core Small VM、Ubuntu 24.04、kernel
+  `6.8.0-124-generic`、amdgpu `6.16.13`、MI300X VF x1、`gfx942:sramecc+:xnack-`、wave64、304 CU、
+  205,822,885,888 bytes HBM、BDF `0000:ff:00.0`、HIP UUID `GPU-cb0412d4d88cfa69`を取得した。
+- provider imageのROCm 7.2.4とdriverを交換せず、project標準のROCm 7.14.0/LLVM 23 user-space rootを
+  `/opt/rocm/core-7.14`へ追加した。production logical root `/opt/rocm`の全componentはこのrootへ解決し、HIP runtimeは
+  `7.14.60850-0000000`、hipBLASLt SONAMEは`libhipblaslt.so.1.4`である。
+- VMM attributeは想定と異なり`true`だったが、固定した`contiguous-resident` providerを変更しない。process共有なし、
+  tiny kernel `41 -> 42`、event、allocation/copy、FNUZ zero-workspace solution 8件、rocprofv3 kernel/memory trace、
+  exact `gfx942` production build/loadを確認し、first-hour判断はGOとした。
+- P12-A1は2026-08-15にPASSした。HIPの実device名がfeature suffix付きであることを受け、任意suffixを許さず
+  `gfx942:sramecc+:xnack-`だけを論理`gfx942`へ正規化するdraft修正を加えた。FNUZ FP8 hipBLASLt 2 shape、
+  BF16 MMVF/GEMM 17 shape、elementwise 21 operation、RoPE/preprocess 8 case、KV state 19 case、full attention
+  16 case、output gate 6 caseを数値oracle、native dispatch、fallbackなし、cleanup zeroで確認した。
+- wave64 RMSNormは幅1/3/255/256/257/2560/4096の7 caseをkernel id 2と
+  `rmsnorm.baseline.wave64.v1`へ固定してPASSした。model-free GDNは実Qwen3.5 layout
+  `[qk_heads=16,value_heads=32,head_dim=128,conv_kernel=4]`でtoken 1/3/17を照合し、2 dispatch、状態length publication、
+  fallbackなし、cleanup zero、最大絶対誤差0.00390625でPASSした。
+- P12-A2を開始し、4B BF16 13 fileと9B BF16 15 fileをVMへ取得した。VM側lock fingerprintはそれぞれ
+  `sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae`と
+  `sha256:2d2bc642540e97d4681f8c66140e09f305f487476bb9fe238ca82a298febf893`へ一致した。
+- P12-A2はPASSした。4B BF16のfixed/Unicode/stop generation、4B FP8の同じgenerationと3 accuracy case、
+  9B BF16/FP8のspotをexact `gfx942`、全HIP dispatch、fallbackなし、cleanup zeroで確認した。4B/9B FP8の
+  最大KLDはそれぞれ`0.025997`/`0.010213`で全top-1がBF16と一致した。実機で見つかったFNUZ graph dtype拒否と、
+  OCP byteを単純数値変換してscaleを維持すると精度が低下する問題は、有限byte保持、negative zero正規化、
+  outer FP32 scaleの2倍rebasingへ修正した。
+- P12-A3はPASSした。実測VMMはtrueだったため初回service auditが`virtual-contiguous`を選んだが、Phase 12で固定した
+  provider条件と不一致として採用しなかった。exact `gfx942`だけを明示`contiguous-resident`へ固定し、KV state
+  19 case、full attention 16 case、serviceの1023/1024/1025 capacity、raw JSON/SSE、reasoning split、公式
+  OpenAI Python client 3.1.0、disconnect/recovery、並行requestをfocused rerunした。全requestはHIP-only、
+  `contiguous-resident`、request/workspace cleanup zeroで、終了前後のGPU process数は0/0、最終allocationは0だった。
+  MI300X VFの`amd-smi metric`はprovider toolの例外で取得不能なため、温度・電力を0とせず`unavailable`で記録した。
+- P12-A4はPASSした。4B BF16/FP8のshort-odd、32/32、prefill-long、decode-longを各3 warmup＋10 measuredで
+  実行した。BF16のE2E中央値は0.272/0.507/4.588/3.999秒、FP8は0.354/0.662/5.387/5.229秒で、FP8は
+  BF16より17.4〜30.7%遅かった。一方resident VRAMは8.412 GBから4.847 GBへ42.4%減った。fixed llama.cpp
+  `f5919bf458ef190468b5c329bb293f8a54a1e69c`、同じ4B revision/GGUF BF16/token条件のE2E中央値は
+  0.109/0.197/0.822/1.511秒で、sLLM BF16には2.50〜5.58倍の差が残った。全raw reportはmedian、p10、p90、
+  MADを算出可能な10 sampleを保持し、代表full-model rocprofv3 traceも取得した。
+- P12-A5はPASSした。integration reviewで、gfx942以外の既存service runnerまでtelemetry failureを許容しないよう
+  `amd-smi metric`の`unavailable`扱いをgfx942だけへ限定する指摘を修正した。workspace全test、clippy、
+  Phase 5 llama/OpenAI runner test、format、diff checkはPASSした。文書/schema/manifest/link監査もPASSし、raw report、
+  trace、比較binaryをrepository外へ退避した。ユーザーがHot Aisle VMを削除したことを確認し、旧endpointへのSSHが
+  timeoutした後、Phase 12専用SSH keyとknown-host entryを削除した。これをPhase 12の完了条件とする。
 
 ## 目的
 
@@ -19,7 +78,7 @@ VM固有tupleの証拠と、exact gfx942 kernelに一般化できる証拠を分
 ## MI300Xを管理できない期間の扱い
 
 Hot Aisle VMを継続管理できる時間が確保できるまでは本Phaseを`ready`で保持し、VMを作成・起動しない。
-その間は[ローカル先行実行キュー](phase12-wait-local-forward-queue.md)に従ってPhase 13以降を進めてよい。
+その間は[ローカル先行実行キュー](../../../../archive/2026/08/11-20/phase12-wait-local-forward-queue.md)に従ってPhase 13以降を進めてよい。
 これは本Phaseの完了、skip、順序変更を意味しない。
 
 先行変更後に本Phaseを開始する際は、その時点の最新mainからexact `gfx942` artifactを再buildし、dry-run、
