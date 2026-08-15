@@ -141,7 +141,11 @@ BF16 logits rowをbounded chunkでreadbackしてからtransactionをcommitする
 
 `DType` は BF16、FP16、FP8 など、要素の物理 scalar format を表す。量子化の scale、grouping、packing、codebook、tensor ごとの付加 metadata は `DType` に詰め込まず、独立した quantization encoding descriptor として表す。これにより、同じ低精度 storage dtype に複数の量子化方式を対応づけたり、weight、activation、KV cache で異なる encoding 制約を表現できる。
 
-MVP の Qwen3.5-4B は BF16 の unquantized encoding だけを実装する。それでも descriptor は `DType` と encoding を別 field として運び、未対応 encoding は capability query または prepare で明示的に拒否する。未知の encoding を unquantized と解釈してはならない。
+Qwen production graphはBF16、FP8、weight-only NVFP4のlinear bindingを同じ構造へ差し替える。NVFP4 v1はU8 packed
+E2M1 value、K-axis block 16のOCP E4M3FN scale、tensorごとのFP32 scaleを別resident rangeとして所有し、
+descriptor/cache identityはencoding、scale layout、provider、exact target、sidecar fingerprintを含む。`packed-dequant`は
+requestごとにunpackせず、packed weightからBF16 activationとの積をFP32 accumulateしてBF16 outputを返す。
+exact `gfx1030`/`gfx1201`以外、scale欠落、provider未指定、runtime failureではBF16/FP8へfallbackしない。
 
 ## KV cache layout
 

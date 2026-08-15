@@ -1266,7 +1266,13 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
                 scale_dtype: DType::F32,
                 resident: Fp8ResidentRepresentation::PackedBytes,
             };
-    if !bf16_weight && !fp8_weight {
+    let nvfp4_weight = weight.dtype() == DType::U8
+        && weight.encoding()
+            == Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            };
+    if !bf16_weight && !fp8_weight && !nvfp4_weight {
         return Err(OpError::MatmulWeightContract);
     }
     Ok(())

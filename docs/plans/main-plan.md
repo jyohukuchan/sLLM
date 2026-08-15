@@ -518,7 +518,7 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   H1 `421/421`、H2 `36/36` PASSであり、1回のintegration reviewとfindingだけのfocused re-reviewを完了した。
 - 詳細は[Phase 14 archive](archive/2026/08/11-20/phase14-gemma4-dense.md)を正とする。
 
-### Phase 15: Weight NVFP4（計画済み）
+### Phase 15: Weight NVFP4（完了）
 
 - Phase 14後のQwen/Gemma fresh profileと共通RDNA2/RDNA4最適化bridgeは2026-08-15に完了した。Gemmaの
   request workspace/prepared semantic再利用と、両model/両GPU共通のM=1 BF16 matvec streaming loadを採用した。
@@ -526,16 +526,24 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   `+1.62%`で、V620にも明確な退行はなかった。attention非支配のためFA3-likeは除外した。
 - weight-only NVFP4としてvalue、block scale、tensor scale、packingをencoding/sidecar/loader/providerへ保持し、
   native、packed-dequant、emulation、converted pathを区別する。
-- 詳細は[Phase 15 active plan](active/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
+- 2026-08-15にTransformer Engine v2.18をformat sourceとして固定し、E2M1、K-axis block 16 OCP E4M3FN scale、
+  FP32 tensor scaleのconverter/sidecar/loaderと、BF16 activationを使うpacked-dequant providerを実装した。
+  Qwen3.5-2B full sidecarは186 tensor、772,236,184 byteでbyte-identical再生成を確認した。
+- Qwen full-modelは両exact targetでtop-1 3/3一致したが最大KLD `0.2637523`が既定budget `0.05`を超えた。
+  Gemma 4-12B layer 0 gate sliceもtop-1 2/3だったため、thresholdを緩めず両targetとも
+  `correctness-only opt-in`とした。providerはnative FP4ではない。
+- V620ではresident 3,763,686,080 byteから1,790,406,056 byteへ52.43%削減した。CLIとOpenAI
+  non-stream/SSE/stop/Unicode/連続request/disconnect/cleanupをR9700で通した。
+- 詳細は[Phase 15 archive](archive/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
 
 ## 現在の状態と次の作業
 
-- Phase 14と共通RDNA性能bridgeまで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Weight NVFP4は
-  Phase 15とする。MI300Xを管理できない現在のlocal forward実行対象はPhase 15である。
+- Phase 15 Weight NVFP4まで完了した。hardware検証順ではPhase 12のMI300X実機確認が残るが、2026-08-15の
+  ユーザー明示指示により現在のgoalはPhase 15完了を終端とする。
 - MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。
-  共通RDNA性能bridgeを完了したため、次はPhase 15へ進め、Phase 16〜18の詳細計画とlocal-only実装へ続ける。
+  共通RDNA性能bridgeとPhase 15まで完了した。Phase 16以降は別の明示指示で再開する。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで

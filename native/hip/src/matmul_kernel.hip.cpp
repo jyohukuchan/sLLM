@@ -136,6 +136,13 @@ __device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) noexcept {
              : selected;
 }
 
+__device__ __forceinline__ float e2m1_to_float(const uint8_t bits) noexcept {
+  constexpr float positive[8] = {0.0F, 0.5F, 1.0F, 1.5F,
+                                 2.0F, 3.0F, 4.0F, 6.0F};
+  const float value = positive[bits & UINT8_C(0x07)];
+  return (bits & UINT8_C(0x08)) == 0U ? value : -value;
+}
+
 } // namespace
 
 extern "C" __global__
@@ -339,6 +346,55 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_wave64_v1(
   matmul_bf16_decode_body<64U, 4U>(activation, weight, output, k, n);
 }
 
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_nvfp4_block16_packed_dequant_v1(
+    const uint16_t *const activation, const uint8_t *const packed_weight,
+    const uint8_t *const block_scales, const float *const tensor_scale,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  const uint64_t output_index = blockIdx.x;
+  if (output_index >= m * n) {
+    return;
+  }
+  const uint64_t row = output_index / n;
+  const uint64_t column = output_index - row * n;
+  const uint64_t blocks_per_weight_row = (k + UINT64_C(15)) / UINT64_C(16);
+  float partial = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const uint64_t weight_index = column * k + inner;
+    const uint8_t packed =
+        __builtin_nontemporal_load(packed_weight + weight_index / UINT64_C(2));
+    const uint8_t code = (weight_index & UINT64_C(1)) == 0U
+                             ? packed & UINT8_C(0x0f)
+                             : packed >> 4U;
+    const float scale = e4m3fn_to_float(
+        block_scales[column * blocks_per_weight_row + inner / UINT64_C(16)]);
+    partial += bf16_to_float(activation[row * k + inner]) *
+               e2m1_to_float(code) * scale * tensor_scale[0];
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial += __shfl_down(partial, offset, 32U);
+  }
+  __shared__ float wave_sums[8];
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave] = partial;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial = lane < 8U ? wave_sums[lane] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial += __shfl_down(partial, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[output_index] = float_to_bf16_rne_bits(partial);
+    }
+  }
+}
+
 namespace sllm_matmul_kernel {
 hipError_t launch_fp8_quantize(const uint16_t *const activation,
                                uint8_t *const quantized, float *const scales,
@@ -365,6 +421,19 @@ hipError_t launch_fp8_emulation(const uint8_t *const activation,
   hipLaunchKernelGGL(sllm_matmul_fp8_outer_emulation_v1, dim3(blocks),
                      dim3(kWorkgroupSize), 0U, stream, activation,
                      activation_scales, weight, weight_scales, output, m, k, n);
+  return hipGetLastError();
+}
+
+hipError_t launch_nvfp4(const uint16_t *const activation,
+                        const uint8_t *const packed_weight,
+                        const uint8_t *const block_scales,
+                        const float *const tensor_scale, uint16_t *const output,
+                        const uint64_t m, const uint64_t k, const uint64_t n,
+                        const hipStream_t stream) noexcept {
+  hipLaunchKernelGGL(sllm_matmul_nvfp4_block16_packed_dequant_v1,
+                     dim3(static_cast<uint32_t>(m * n)), dim3(kWorkgroupSize),
+                     0U, stream, activation, packed_weight, block_scales,
+                     tensor_scale, output, m, k, n);
   return hipGetLastError();
 }
 

@@ -40,7 +40,7 @@ use crate::weights::{
 };
 use crate::{
     AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
-    VerifiedFp8Sidecar, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fn,
+    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, convert_e4m3fn_to_e4m3fnuz, decode_e4m3fn,
 };
 
 /// Output published by a fully completed Qwen request transition.
@@ -405,6 +405,37 @@ impl QwenResidentModel {
             ));
         }
         let source = Fp8ProvisionSource { cache, sidecar };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Provision packed weight-only NVFP4 residency. Text-linear values and
+    /// their block/tensor scales come from one independently verified sidecar;
+    /// all other tensors remain verified BF16 source weights.
+    pub fn new_nvfp4(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        cache: Arc<VerifiedCache>,
+        sidecar: Arc<VerifiedNvfp4Sidecar>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if graph.fp8_sidecar_fingerprint() != Some(sidecar.manifest_fingerprint()) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "NVFP4 graph and sidecar identities differ".to_owned(),
+            ));
+        }
+        if cache.lock_fingerprint != plan.lock_fingerprint
+            || sidecar.source_lock_fingerprint() != plan.lock_fingerprint
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "NVFP4 source cache, sidecar, and plan identities differ".to_owned(),
+            ));
+        }
+        let source = Nvfp4ProvisionSource { cache, sidecar };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -827,6 +858,11 @@ struct Fp8ConvertedProvisionSource {
     sidecar: Arc<VerifiedFp8Sidecar>,
 }
 
+struct Nvfp4ProvisionSource {
+    cache: Arc<VerifiedCache>,
+    sidecar: Arc<VerifiedNvfp4Sidecar>,
+}
+
 impl QwenProvisionSource for VerifiedProvisionSource {
     fn upload_weight(
         &self,
@@ -988,6 +1024,83 @@ impl QwenProvisionSource for Fp8FnuzProvisionSource {
             &combined,
             completion_timeout,
             "FNUZ weight/scale upload",
+        )
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        VerifiedProvisionSource {
+            cache: Arc::clone(&self.cache),
+        }
+        .read_scale_bytes(tensor_name, expected_length)
+    }
+}
+
+impl QwenProvisionSource for Nvfp4ProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let Some(tensor) = self.sidecar.tensor(binding.tensor_name()) else {
+            return VerifiedProvisionSource {
+                cache: Arc::clone(&self.cache),
+            }
+            .upload_weight(
+                plan,
+                binding,
+                session,
+                queue,
+                destination,
+                completion_timeout,
+            );
+        };
+        if tensor.shape.as_slice() != binding.shape() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "NVFP4 sidecar shape differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        let (values, block_scales, tensor_scale) = self
+            .sidecar
+            .read_tensor_bytes(binding.tensor_name())
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let unaligned = values
+            .len()
+            .checked_add(block_scales.len())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("NVFP4 resident size overflowed".to_owned())
+            })?;
+        let tensor_scale_offset = unaligned.checked_add(3).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("NVFP4 scale alignment overflowed".to_owned())
+        })? & !3;
+        let expected = tensor_scale_offset.checked_add(4).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("NVFP4 resident size overflowed".to_owned())
+        })?;
+        if u64::try_from(expected).ok() != Some(destination.size_bytes()) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "NVFP4 resident allocation differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        let mut combined = values;
+        combined.extend_from_slice(&block_scales);
+        combined.resize(tensor_scale_offset, 0);
+        combined.extend_from_slice(&tensor_scale);
+        upload_buffer_bytes(
+            session,
+            queue,
+            &destination,
+            &combined,
+            completion_timeout,
+            "NVFP4 value/block/tensor-scale upload",
         )
     }
 
@@ -2334,8 +2447,9 @@ fn validate_graph_plan(
         let source_dtype = tensor.view().dtype() == model_dtype(binding.dtype())?
             && tensor.view().encoding() == Encoding::Unquantized;
         let fp8_dtype = is_fp8_weight_view(tensor.view());
+        let nvfp4_dtype = is_nvfp4_weight_view(tensor.view());
         if tensor.backing() != QwenGraphTensorBacking::Owned
-            || (!source_dtype && !fp8_dtype)
+            || (!source_dtype && !fp8_dtype && !nvfp4_dtype)
             || !shape_matches(tensor.view().shape(), binding.shape())?
         {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -2627,7 +2741,38 @@ fn is_fp8_weight_view(view: &TensorView) -> bool {
         && view.shape().len() == 2
 }
 
+fn is_nvfp4_weight_view(view: &TensorView) -> bool {
+    view.dtype() == DType::U8
+        && view.encoding()
+            == Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            }
+        && view.shape().len() == 2
+}
+
 fn resident_weight_bytes(view: &TensorView) -> Result<u64, QwenExecutionError> {
+    if is_nvfp4_weight_view(view) {
+        let rows = u64::try_from(view.shape()[0]).map_err(|_| {
+            QwenExecutionError::InvalidGraph("NVFP4 row count does not fit u64".to_owned())
+        })?;
+        let columns = u64::try_from(view.shape()[1]).map_err(|_| {
+            QwenExecutionError::InvalidGraph("NVFP4 column count does not fit u64".to_owned())
+        })?;
+        let blocks = rows.checked_mul(columns.div_ceil(16)).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("NVFP4 block count overflowed".to_owned())
+        })?;
+        let unaligned = view.payload_bytes().checked_add(blocks).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("NVFP4 resident bytes overflowed".to_owned())
+        })?;
+        return unaligned
+            .checked_add(3)
+            .map(|bytes| bytes & !3)
+            .and_then(|bytes| bytes.checked_add(4))
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("NVFP4 resident bytes overflowed".to_owned())
+            });
+    }
     if !is_fp8_weight_view(view) {
         return Ok(view.payload_bytes());
     }

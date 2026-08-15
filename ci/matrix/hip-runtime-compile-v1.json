@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "017d16e5fea2d0f0c87e84bee5b44caa3fa853aea5382c5c824e20e43930a94d"
+        "sha256": "68be3b461634256f97c90d31bf40a7f0656be4d632af05834c5702b266eceef6"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "94905111ced129215a9455e98fc6b84936885281167eba880eed9235f6550cca"
+        "sha256": "886ea01b5b7ae5554df66cb8c605952d6b1a52bfb085f779e6184bffbceeda42"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
       }
     ],
-    "source_set_sha256": "6b67de250c1c50dca3b68b51fe6c9996e2e056b1657000e2340ed4d9f196f1de"
+    "source_set_sha256": "f6103e7674932b6c6553602774f4d97e5ab944991a16e3ba77b1c64a2fc116a0"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -105,7 +105,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "017d16e5fea2d0f0c87e84bee5b44caa3fa853aea5382c5c824e20e43930a94d"
+        "sha256": "68be3b461634256f97c90d31bf40a7f0656be4d632af05834c5702b266eceef6"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -257,27 +257,27 @@
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
-        "sha256": "cac2d590d274bfa4611a976771842008b9bd3dea74bb103fde48b45f88b784e9"
+        "sha256": "be9c943ac0d03c92a2e6bdde70ea592a6efeb9acf17993c21760e8df9ba79d9e"
       },
       {
         "path": "native/hip/src/matmul_api.hpp",
-        "sha256": "e59ce2e7b8232d9397f77800b1b72e44989395b576e2d508320fb9e2b879345b"
+        "sha256": "254255a2279937f2504f1b3b0406870a70b3856f717cbac4584faf05d953dbbf"
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "ba225366f1b812a8ea1f70c5fd4bc2034157bc1d929dfbbd034eb5f3a7d5fc66"
+        "sha256": "005c754f178e3ce605517217c4a9e361e0a4685bea63693a33a53922dc454e97"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "1a9bc3296def0482bf1d45e1e5b5ed9f7afe7f5c1689543945712cc4ec442fcb"
+        "sha256": "b25a4cd6ce2bd7fc662b841b585ebd5155711f0a9eb6d0f02793749363888739"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "88dd09eec1509a3aa8ab20759549955c6bdb805ee300499011718d579a396ad2"
+        "sha256": "2d1af28c9cee652777cf85984a0828d7d0466d82858e26820f29546b5734e246"
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "94905111ced129215a9455e98fc6b84936885281167eba880eed9235f6550cca"
+        "sha256": "886ea01b5b7ae5554df66cb8c605952d6b1a52bfb085f779e6184bffbceeda42"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -332,7 +332,7 @@
         "sha256": "3d8e5ec1de3a03ff9ec345a56653eeb8944e7ae9a4f78e5f9d9abc7752bbd6c5"
       }
     ],
-    "source_set_sha256": "1556950c9bd1dbc299943319c3e356e8478e66d7acbe3deba4b4d265bc4a83e1"
+    "source_set_sha256": "395c7262ada066c5cc20e92fb504ebc7dc57908aa8dec5ba64a009c155ecd915"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

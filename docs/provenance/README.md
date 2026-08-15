@@ -148,6 +148,15 @@ MI300X candidate runnerはAMD/ROCmの公開datatype/API contractとsLLM既存実
 source expressionのcopy、adapt、portはなく、Phase 9で既に記録したllama.cpp由来MMVF organizationの
 wave64化は同じ既存provenance範囲に含まれる。`THIRD_PARTY_NOTICES.md`への新規import追加はない。
 
+## Phase 15 NVFP4 implementation record
+
+Phase 15はNVIDIA Transformer Engine v2.18、annotated tag `62f366a50b8e5a96fac7f123a554ab4db928b2a9`、peeled commit
+`27486e03cfc1fa41f6932dcecdc47c71c47eac3e`（BSD-3-Clause）の公開format documentationとrecipe contractを、
+E2M1 code point、OCP E4M3FN block scale、FP32 tensor scale、zero/underflow挙動を固定する参照sourceとして使用した。
+sLLMのRust converter/oracleとHIP packed-dequant kernelは独立実装であり、Transformer EngineのCUDA kernel、training recipe
+source expression、swizzle/RHT実装をcopy、adapt、portしていない。したがって`THIRD_PARTY_NOTICES.md`へ直接importを
+追加せず、format-source identityとlicenseをsidecar manifest、量子化contract、Phase historyへ記録する。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

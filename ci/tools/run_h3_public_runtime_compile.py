@@ -171,6 +171,7 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_bf16_fp32_v1",
     "sllm_matmul_bf16_to_fp8_outer_v1",
     "sllm_matmul_fp8_outer_emulation_v1",
+    "sllm_matmul_nvfp4_block16_packed_dequant_v1",
     "sllm_rmsnorm_baseline_wave32_v1",
     "sllm_rmsnorm_baseline_wave64_v1",
     "sllm_rotary_split_half_bf16_fp32_v1",

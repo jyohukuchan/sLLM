@@ -62,6 +62,7 @@ fn print_help() {
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--fp8-manifest PATH --fp8-artifact PATH]");
+    println!("  [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant]");
     println!("  [--fp8-provider native|native-fnuz|emulation|converted-bf16]");
 }
 

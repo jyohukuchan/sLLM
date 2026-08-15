@@ -8,9 +8,10 @@ use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
     Gemma4ResidentModel, ModelLock, OsSamplingRandom, QwenResidentModel, ReviewedModelLock,
-    VerifiedFp8Sidecar, WeightLoadPlan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_graph, build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan,
-    read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
+    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, WeightLoadPlan, build_qwen35_fp8_fnuz_graph,
+    build_qwen35_fp8_graph, build_qwen35_graph, build_qwen35_nvfp4_graph,
+    build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan, read_model_lock,
+    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
@@ -74,6 +75,7 @@ impl QwenBackendConfigV1 {
                 ("native", "gfx1201")
                     | ("native-fnuz", "gfx942")
                     | ("emulation" | "converted-bf16", "gfx1030")
+                    | ("nvfp4-packed-dequant", "gfx1030" | "gfx1201")
             );
             if !valid {
                 return Err(BackendErrorV1::new(
@@ -172,6 +174,7 @@ struct QwenBackendStateV1 {
     target: String,
     model_ready_current_bytes: u64,
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
+    nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     fp8_provider: Option<String>,
 }
 
@@ -223,34 +226,62 @@ impl QwenChatBackendV1 {
         let plan = build_verified_weight_load_plan(&lock, &cache).map_err(|error| {
             BackendErrorV1::new(format!("verified model load plan failed: {error}"))
         })?;
-        let sidecar = match (&config.fp8_manifest_path, &config.fp8_artifact_path) {
-            (Some(manifest), Some(artifact)) => Some(Arc::new(
+        let nvfp4_requested = config.fp8_provider.as_deref() == Some("nvfp4-packed-dequant");
+        let nvfp4_sidecar = match (
+            nvfp4_requested,
+            &config.fp8_manifest_path,
+            &config.fp8_artifact_path,
+        ) {
+            (true, Some(manifest), Some(artifact)) => Some(Arc::new(
+                verify_nvfp4_sidecar(manifest, artifact, &config.lock_path, &lock).map_err(
+                    |error| {
+                        BackendErrorV1::new(format!("NVFP4 sidecar validation failed: {error}"))
+                    },
+                )?,
+            )),
+            (true, _, _) => unreachable!("validated NVFP4 configuration has paired paths"),
+            (false, _, _) => None,
+        };
+        let sidecar = match (
+            nvfp4_requested,
+            &config.fp8_manifest_path,
+            &config.fp8_artifact_path,
+        ) {
+            (false, Some(manifest), Some(artifact)) => Some(Arc::new(
                 verify_fp8_sidecar(manifest, artifact, &config.lock_path, &lock).map_err(
                     |error| BackendErrorV1::new(format!("FP8 sidecar validation failed: {error}")),
                 )?,
             )),
-            (None, None) => None,
+            (false, None, None) | (true, _, _) => None,
             _ => unreachable!("validated FP8 configuration has paired paths"),
         };
-        let fp8_provider = sidecar.as_ref().map(|_| {
-            config
-                .fp8_provider
-                .clone()
-                .unwrap_or_else(|| match config.target.as_str() {
-                    "gfx1201" => "native".to_owned(),
-                    "gfx942" => "native-fnuz".to_owned(),
-                    _ => "converted-bf16".to_owned(),
-                })
-        });
-        let seed_graph = match (&sidecar, fp8_provider.as_deref()) {
-            (Some(_), Some("converted-bf16")) | (None, None) => {
-                build_qwen35_graph(&lock, &plan, 1, 1)
+        let fp8_provider = if nvfp4_requested {
+            Some("nvfp4-packed-dequant".to_owned())
+        } else {
+            sidecar.as_ref().map(|_| {
+                config
+                    .fp8_provider
+                    .clone()
+                    .unwrap_or_else(|| match config.target.as_str() {
+                        "gfx1201" => "native".to_owned(),
+                        "gfx942" => "native-fnuz".to_owned(),
+                        _ => "converted-bf16".to_owned(),
+                    })
+            })
+        };
+        let seed_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+            build_qwen35_nvfp4_graph(&lock, &plan, nvfp4_sidecar, 1, 1)
+        } else {
+            match (&sidecar, fp8_provider.as_deref()) {
+                (Some(_), Some("converted-bf16")) | (None, None) => {
+                    build_qwen35_graph(&lock, &plan, 1, 1)
+                }
+                (Some(sidecar), Some("native-fnuz")) => {
+                    build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, 1, 1)
+                }
+                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(&lock, &plan, sidecar, 1, 1),
+                _ => unreachable!("validated FP8 configuration has a selected provider"),
             }
-            (Some(sidecar), Some("native-fnuz")) => {
-                build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, 1, 1)
-            }
-            (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(&lock, &plan, sidecar, 1, 1),
-            _ => unreachable!("validated FP8 configuration has a selected provider"),
         }
         .map_err(|error| {
             BackendErrorV1::new(format!("resident seed graph construction failed: {error}"))
@@ -264,39 +295,52 @@ impl QwenChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
             })?;
-        let resident = match (&sidecar, fp8_provider.as_deref()) {
-            (Some(sidecar), Some("converted-bf16")) => QwenResidentModel::new_fp8_converted_bf16(
+        let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+            QwenResidentModel::new_nvfp4(
                 Arc::clone(&session),
                 seed_graph,
                 plan.clone(),
                 Arc::clone(&cache),
-                Arc::clone(sidecar),
+                Arc::clone(nvfp4_sidecar),
                 config.completion_timeout,
-            ),
-            (Some(sidecar), Some("native-fnuz")) => QwenResidentModel::new_fp8_fnuz(
-                Arc::clone(&session),
-                seed_graph,
-                plan.clone(),
-                Arc::clone(&cache),
-                Arc::clone(sidecar),
-                config.completion_timeout,
-            ),
-            (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
-                Arc::clone(&session),
-                seed_graph,
-                plan.clone(),
-                Arc::clone(&cache),
-                Arc::clone(sidecar),
-                config.completion_timeout,
-            ),
-            (None, None) => QwenResidentModel::new(
-                Arc::clone(&session),
-                seed_graph,
-                plan.clone(),
-                Arc::clone(&cache),
-                config.completion_timeout,
-            ),
-            _ => unreachable!("validated FP8 configuration has a selected provider"),
+            )
+        } else {
+            match (&sidecar, fp8_provider.as_deref()) {
+                (Some(sidecar), Some("converted-bf16")) => {
+                    QwenResidentModel::new_fp8_converted_bf16(
+                        Arc::clone(&session),
+                        seed_graph,
+                        plan.clone(),
+                        Arc::clone(&cache),
+                        Arc::clone(sidecar),
+                        config.completion_timeout,
+                    )
+                }
+                (Some(sidecar), Some("native-fnuz")) => QwenResidentModel::new_fp8_fnuz(
+                    Arc::clone(&session),
+                    seed_graph,
+                    plan.clone(),
+                    Arc::clone(&cache),
+                    Arc::clone(sidecar),
+                    config.completion_timeout,
+                ),
+                (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
+                    Arc::clone(&session),
+                    seed_graph,
+                    plan.clone(),
+                    Arc::clone(&cache),
+                    Arc::clone(sidecar),
+                    config.completion_timeout,
+                ),
+                (None, None) => QwenResidentModel::new(
+                    Arc::clone(&session),
+                    seed_graph,
+                    plan.clone(),
+                    Arc::clone(&cache),
+                    config.completion_timeout,
+                ),
+                _ => unreachable!("validated FP8 configuration has a selected provider"),
+            }
         }
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
         let ready = session.memory_snapshot();
@@ -324,6 +368,7 @@ impl QwenChatBackendV1 {
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar,
+                nvfp4_sidecar,
                 fp8_provider,
             })),
             audits: Mutex::new(Vec::new()),
@@ -600,25 +645,35 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let state_capacity = prompt_tokens
             .checked_add(u64::from(request.generation().max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
-        let graph = match (&state.sidecar, state.fp8_provider.as_deref()) {
-            (Some(_), Some("converted-bf16")) | (None, None) => {
-                build_qwen35_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
+        let graph = if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
+            build_qwen35_nvfp4_graph(
+                &state.lock,
+                &state.plan,
+                nvfp4_sidecar,
+                prompt_tokens,
+                state_capacity,
+            )
+        } else {
+            match (&state.sidecar, state.fp8_provider.as_deref()) {
+                (Some(_), Some("converted-bf16")) | (None, None) => {
+                    build_qwen35_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
+                }
+                (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
+                    &state.lock,
+                    &state.plan,
+                    sidecar,
+                    prompt_tokens,
+                    state_capacity,
+                ),
+                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                    &state.lock,
+                    &state.plan,
+                    sidecar,
+                    prompt_tokens,
+                    state_capacity,
+                ),
+                _ => unreachable!("validated FP8 server state has a selected provider"),
             }
-            (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
-                &state.lock,
-                &state.plan,
-                sidecar,
-                prompt_tokens,
-                state_capacity,
-            ),
-            (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                &state.lock,
-                &state.plan,
-                sidecar,
-                prompt_tokens,
-                state_capacity,
-            ),
-            _ => unreachable!("validated FP8 server state has a selected provider"),
         }
         .map_err(|error| BackendErrorV1::new(format!("request graph failed: {error}")))?;
         let mut owner = state
@@ -710,6 +765,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 None => "bf16".to_owned(),
                 Some("converted-bf16") => "bf16-converted-from-ocp-e4m3fn".to_owned(),
                 Some("native-fnuz") => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32".to_owned(),
+                Some("nvfp4-packed-dequant") => "nvfp4-e2m1-block16-e4m3fn-tensor-f32".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
             fp8_provider: state.fp8_provider.clone(),

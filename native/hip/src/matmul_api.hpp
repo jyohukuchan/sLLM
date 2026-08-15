@@ -24,8 +24,10 @@ struct DescriptorMetadata final {
   uint64_t output_elements;
   uint64_t weight_value_bytes;
   uint64_t weight_scale_offset;
+  uint64_t weight_tensor_scale_offset;
   uint32_t fp8_dtype;
   bool fp8_outer;
+  bool nvfp4;
 };
 
 sllm_status_t validate_descriptor_prefix(const sllm_matmul_desc_t *descriptor,

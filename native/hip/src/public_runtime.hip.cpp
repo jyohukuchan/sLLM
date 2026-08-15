@@ -2252,7 +2252,8 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant =
-      metadata.fp8_outer
+      metadata.nvfp4 ? ::sllm_matmul_kernel::KernelVariant::Nvfp4PackedDequant
+      : metadata.fp8_outer
           ? ((std::strcmp(arch_name, "gfx1201") == 0 ||
               std::strcmp(arch_name, "gfx942") == 0)
                  ? ::sllm_matmul_kernel::KernelVariant::Fp8Native

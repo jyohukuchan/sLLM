@@ -65,9 +65,24 @@ fn parse_args() -> Result<Config, String> {
         "device index",
     )?;
     let target = take_required(&mut values, "--target")?;
-    let fp8_manifest = values.remove("--fp8-manifest").map(PathBuf::from);
-    let fp8_artifact = values.remove("--fp8-artifact").map(PathBuf::from);
-    let fp8_provider = values.remove("--fp8-provider");
+    let fp8_manifest = values
+        .remove("--fp8-manifest")
+        .or_else(|| values.remove("--nvfp4-manifest"))
+        .map(PathBuf::from);
+    let fp8_artifact = values
+        .remove("--fp8-artifact")
+        .or_else(|| values.remove("--nvfp4-artifact"))
+        .map(PathBuf::from);
+    let fp8_provider = match values.remove("--nvfp4-provider") {
+        Some(provider) if provider == "packed-dequant" => {
+            if values.contains_key("--fp8-provider") {
+                return Err("FP8 and NVFP4 providers are mutually exclusive".to_owned());
+            }
+            Some("nvfp4-packed-dequant".to_owned())
+        }
+        Some(_) => return Err("--nvfp4-provider must be packed-dequant".to_owned()),
+        None => values.remove("--fp8-provider"),
+    };
     let listen = parse_value(
         &values
             .remove("--listen")
@@ -304,5 +319,5 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }

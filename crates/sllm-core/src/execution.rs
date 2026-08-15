@@ -4889,8 +4889,8 @@ mod tests {
                 &session,
                 crate::DType::U8,
                 crate::Encoding::Nvfp4 {
-                    block_size: 32,
-                    scale_dtype: crate::DType::Bf16,
+                    block_size: 16,
+                    scale_dtype: crate::DType::F8E4M3Fn,
                 },
                 &[1, 4, 256],
                 &[1024, 256, 1],

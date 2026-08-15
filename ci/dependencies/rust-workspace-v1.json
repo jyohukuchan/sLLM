@@ -140,6 +140,20 @@
           "doctest": false
         },
         {
+          "name": "verify_nvfp4_sidecar",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "weight_contract",
           "kind": [
             "test"
@@ -423,6 +437,34 @@
         },
         {
           "name": "sllm-matmul-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-nvfp4-matmul-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-nvfp4-qwen-accuracy-evidence",
           "kind": [
             "bin"
           ],

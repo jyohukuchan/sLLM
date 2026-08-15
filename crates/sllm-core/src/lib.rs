@@ -17,6 +17,8 @@ mod handles;
 mod kv_state;
 mod linear_attention;
 mod model;
+mod nvfp4;
+mod nvfp4_sidecar;
 mod op;
 mod prepared_execution;
 mod qwen_execution;
@@ -104,6 +106,14 @@ pub use model::{
     read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
     verify_gemma4_model_cache, verify_model_cache,
 };
+pub use nvfp4::{
+    E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,
+    decode_e2m1, encode_e2m1, quantize_nvfp4_weights, select_nvfp4_provider,
+};
+pub use nvfp4_sidecar::{
+    Nvfp4SidecarError, Nvfp4SidecarTensor, Nvfp4TensorBytes, VerifiedNvfp4Sidecar,
+    verify_nvfp4_sidecar,
+};
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
@@ -125,6 +135,7 @@ pub use qwen_graph::{
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_qwen35_nvfp4_graph,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
@@ -183,7 +194,7 @@ mod tests {
                 DType::U8,
                 Encoding::Nvfp4 {
                     block_size: 16,
-                    scale_dtype: DType::F32,
+                    scale_dtype: DType::F8E4M3Fn,
                 },
                 &[17],
                 &[1],
@@ -203,7 +214,7 @@ mod tests {
             DType::U8,
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[0],
         )
@@ -215,7 +226,7 @@ mod tests {
             DType::U8,
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[15],
         )
@@ -224,7 +235,7 @@ mod tests {
             DType::U8,
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[16],
         )
@@ -233,14 +244,16 @@ mod tests {
             DType::U8,
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[17],
         )
         .expect("second block boundary");
-        assert_eq!(fifteen.span_bytes(), 8 + 2);
-        assert_eq!(sixteen.span_bytes(), 8 + 2);
-        assert_eq!(seventeen.span_bytes(), 9 + 4);
+        // The logical TensorView spans packed values only. Block and tensor
+        // scales are separately resident resources owned by the weight plan.
+        assert_eq!(fifteen.span_bytes(), 8);
+        assert_eq!(sixteen.span_bytes(), 8);
+        assert_eq!(seventeen.span_bytes(), 9);
     }
 
     #[test]
@@ -256,26 +269,26 @@ mod tests {
         assert_eq!(
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             }
             .storage_bytes(DType::U8, u64::MAX),
-            Ok(0xA000_0000_0000_0000)
+            Ok(0x8000_0000_0000_0000)
         );
         assert_eq!(
             Encoding::Nvfp4 {
                 block_size: 2,
-                scale_dtype: DType::F16,
+                scale_dtype: DType::F8E4M3Fn,
             }
             .storage_bytes(DType::U8, u64::MAX),
-            Err(EncodingError::SizeOverflow)
+            Err(EncodingError::InvalidNvfp4BlockSize { block_size: 2 })
         );
         assert_eq!(
             Encoding::Nvfp4 {
-                block_size: 1,
+                block_size: 16,
                 scale_dtype: DType::F32,
             }
             .storage_bytes(DType::U8, u64::MAX),
-            Err(EncodingError::SizeOverflow)
+            Err(EncodingError::Nvfp4BlockScaleMustBeE4M3Fn { dtype: DType::F32 })
         );
         assert!(matches!(
             TensorView::with_encoding(
@@ -286,7 +299,9 @@ mod tests {
                 },
                 &[1],
             ),
-            Err(TensorError::InvalidEncoding(EncodingError::ZeroBlockSize))
+            Err(TensorError::InvalidEncoding(
+                EncodingError::InvalidNvfp4BlockSize { block_size: 0 }
+            ))
         ));
     }
 
@@ -531,8 +546,8 @@ mod tests {
         let encoded = TensorView::with_encoding(
             DType::U8,
             Encoding::Nvfp4 {
-                block_size: 32,
-                scale_dtype: DType::Bf16,
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[3, 17],
         )
@@ -542,8 +557,8 @@ mod tests {
             OpError::ArgmaxUnsupportedEncoding {
                 tensor: ArgmaxTensor::Logits,
                 actual: Encoding::Nvfp4 {
-                    block_size: 32,
-                    scale_dtype: DType::Bf16,
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
                 },
             }
         );
@@ -630,8 +645,8 @@ mod tests {
             TensorView::with_encoding(
                 DType::U8,
                 Encoding::Nvfp4 {
-                    block_size: 32,
-                    scale_dtype: DType::Bf16,
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
                 },
                 &[33],
             )
@@ -640,8 +655,8 @@ mod tests {
                 kind: SemanticOpKind::Copy,
                 tensor: ElementwiseTensor::Input0,
                 actual: Encoding::Nvfp4 {
-                    block_size: 32,
-                    scale_dtype: DType::Bf16,
+                    block_size: 16,
+                    scale_dtype: DType::F8E4M3Fn,
                 },
             },
         );
@@ -975,7 +990,7 @@ mod tests {
             DType::U8,
             Encoding::Nvfp4 {
                 block_size: 16,
-                scale_dtype: DType::F32,
+                scale_dtype: DType::F8E4M3Fn,
             },
             &[3],
         )
@@ -990,7 +1005,7 @@ mod tests {
                 tensor: RmsNormTensor::RawScale,
                 actual: Encoding::Nvfp4 {
                     block_size: 16,
-                    scale_dtype: DType::F32,
+                    scale_dtype: DType::F8E4M3Fn,
                 }
             })
         ));
@@ -1380,7 +1395,7 @@ mod tests {
                     DType::U8,
                     Encoding::Nvfp4 {
                         block_size: 16,
-                        scale_dtype: DType::F32,
+                        scale_dtype: DType::F8E4M3Fn,
                     },
                     &shape,
                 )

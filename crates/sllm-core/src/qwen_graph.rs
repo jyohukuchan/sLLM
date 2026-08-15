@@ -593,6 +593,91 @@ pub fn build_qwen35_fp8_fnuz_graph(
     )
 }
 
+/// Build the production Qwen3.5 graph with every text-linear weight in a
+/// verified weight-only NVFP4 sidecar represented as packed E2M1 plus
+/// block16 E4M3FN and tensor FP32 scales.
+pub fn build_qwen35_nvfp4_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &crate::VerifiedNvfp4Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    if sidecar.source_lock_fingerprint() != lock.fingerprint() {
+        return Err(QwenGraphError::InvalidModel(
+            "NVFP4 sidecar source identity differs from the model lock".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    let max_position = lock.model.architecture.text_config.max_position_embeddings;
+    if state_capacity > max_position {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut tensor_names = BTreeSet::new();
+    for tensor in sidecar.tensors() {
+        let binding = by_name.get(tensor.name.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "NVFP4 sidecar tensor is not a required Qwen weight: {}",
+                tensor.name
+            ))
+        })?;
+        if tensor.shape.as_slice() != binding.shape.as_slice()
+            || !is_fp8_linear_consumer(binding.consumer.role)
+            || !tensor_names.insert(tensor.name.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "NVFP4 sidecar tensor differs from its graph binding: {}",
+                tensor.name
+            )));
+        }
+    }
+    let expected: BTreeSet<_> = bindings
+        .iter()
+        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
+        .map(|binding| binding.tensor_name.clone())
+        .collect();
+    if tensor_names != expected {
+        return Err(QwenGraphError::InvalidPlan(
+            "NVFP4 sidecar does not cover the exact text-linear weight set".to_owned(),
+        ));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: tensor_names,
+        fp8_dtype: Some(DType::U8),
+        fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
+    })?
+    .build()
+}
+
 fn build_qwen35_fp8_graph_with_dtype(
     lock: &ModelLock,
     plan: &WeightLoadPlan,
@@ -2524,15 +2609,19 @@ fn fp8_weight_view(shape: &[u64], dtype: DType) -> Result<TensorView, QwenGraphE
             usize::try_from(dimension).map_err(|_| QwenGraphError::Overflow("FP8 tensor shape"))
         })
         .collect::<Result<_, _>>()?;
-    Ok(TensorView::with_encoding(
-        dtype,
+    let encoding = if dtype == DType::U8 {
+        Encoding::Nvfp4 {
+            block_size: 16,
+            scale_dtype: DType::F8E4M3Fn,
+        }
+    } else {
         Encoding::Fp8Scaled {
             granularity: Fp8ScaleGranularity::OuterDimension,
             scale_dtype: DType::F32,
             resident: Fp8ResidentRepresentation::PackedBytes,
-        },
-        &shape,
-    )?)
+        }
+    };
+    Ok(TensorView::with_encoding(dtype, encoding, &shape)?)
 }
 
 fn key(layer: u32, role: WeightConsumer) -> WeightConsumerKey {

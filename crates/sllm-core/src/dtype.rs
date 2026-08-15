@@ -60,7 +60,10 @@ pub enum Encoding {
     Unquantized,
     /// Packed four-bit values with one scale per block.
     ///
-    /// This is a descriptor only in Phase 1. No backend in this phase accepts it.
+    /// `scale_dtype` is the separately resident block-scale dtype. Weight
+    /// NVFP4 v1 additionally requires one separately resident FP32 tensor
+    /// scale. The logical view covers packed values only; resident layout owns
+    /// and validates both scale regions explicitly.
     Nvfp4 {
         block_size: usize,
         scale_dtype: DType,
@@ -123,14 +126,14 @@ impl Encoding {
                 block_size,
                 scale_dtype,
             } => {
-                if block_size == 0 {
-                    return Err(EncodingError::ZeroBlockSize);
+                if block_size != 16 {
+                    return Err(EncodingError::InvalidNvfp4BlockSize { block_size });
                 }
                 if dtype != DType::U8 {
                     return Err(EncodingError::PackedStorageMustBeU8 { dtype });
                 }
-                if !matches!(scale_dtype, DType::Bf16 | DType::F16 | DType::F32) {
-                    return Err(EncodingError::InvalidScaleDType { dtype: scale_dtype });
+                if scale_dtype != DType::F8E4M3Fn {
+                    return Err(EncodingError::Nvfp4BlockScaleMustBeE4M3Fn { dtype: scale_dtype });
                 }
                 Ok(())
             }
@@ -166,21 +169,7 @@ impl Encoding {
             Self::Unquantized => elements
                 .checked_mul(dtype.size_bytes())
                 .ok_or(EncodingError::SizeOverflow),
-            Self::Nvfp4 {
-                block_size,
-                scale_dtype,
-            } => {
-                let packed_values = elements / 2 + u64::from(elements % 2 != 0);
-                let block_size =
-                    u64::try_from(block_size).map_err(|_| EncodingError::SizeOverflow)?;
-                let blocks = elements / block_size + u64::from(elements % block_size != 0);
-                let scales = blocks
-                    .checked_mul(scale_dtype.size_bytes())
-                    .ok_or(EncodingError::SizeOverflow)?;
-                packed_values
-                    .checked_add(scales)
-                    .ok_or(EncodingError::SizeOverflow)
-            }
+            Self::Nvfp4 { .. } => Ok(elements / 2 + u64::from(elements % 2 != 0)),
             Self::Fp8Scaled { resident, .. } => elements
                 .checked_mul(match resident {
                     Fp8ResidentRepresentation::PackedBytes => 1,
@@ -194,7 +183,9 @@ impl Encoding {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EncodingError {
     ZeroBlockSize,
+    InvalidNvfp4BlockSize { block_size: usize },
     PackedStorageMustBeU8 { dtype: DType },
+    Nvfp4BlockScaleMustBeE4M3Fn { dtype: DType },
     Fp8StorageRequired { dtype: DType },
     InvalidScaleDType { dtype: DType },
     ConvertedBf16MustUseTensorScale,
@@ -205,6 +196,9 @@ impl fmt::Display for EncodingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ZeroBlockSize => formatter.write_str("encoding block size must be non-zero"),
+            Self::InvalidNvfp4BlockSize { block_size } => {
+                write!(formatter, "NVFP4 block size must be 16, got {block_size}")
+            }
             Self::PackedStorageMustBeU8 { dtype } => {
                 write!(formatter, "packed NVFP4 storage must use u8, got {dtype}")
             }
@@ -212,6 +206,12 @@ impl fmt::Display for EncodingError {
                 write!(
                     formatter,
                     "scaled FP8 storage must use an E4M3 dtype, got {dtype}"
+                )
+            }
+            Self::Nvfp4BlockScaleMustBeE4M3Fn { dtype } => {
+                write!(
+                    formatter,
+                    "NVFP4 block scale must use OCP E4M3FN, got {dtype}"
                 )
             }
             Self::InvalidScaleDType { dtype } => {

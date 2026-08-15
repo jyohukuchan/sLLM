@@ -83,7 +83,13 @@ impl MatmulDescriptor {
     }
 
     fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
-        let op_version = if matches!(
+        let op_version = if self.weight.view().encoding()
+            == (sllm_core::Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: sllm_core::DType::F8E4M3Fn,
+            }) {
+            sys::SLLM_HIP_MATMUL_NVFP4_VERSION
+        } else if matches!(
             self.weight.view().dtype(),
             sllm_core::DType::F8E4M3Fn | sllm_core::DType::F8E4M3FnuZ
         ) {

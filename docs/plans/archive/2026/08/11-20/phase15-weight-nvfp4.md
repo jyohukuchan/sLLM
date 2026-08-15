@@ -1,6 +1,6 @@
 # Phase 15: Weight NVFP4
 
-> 状態: planned
+> 状態: complete
 > 作成日: 2026-08-15
 
 ## 目的
@@ -156,3 +156,12 @@ native FP4と表記しない。
 - 同じwork unitの2回reject、1時間以上の機能進捗停止、検証/docs 30%超、見積り1.5倍超では追加runを止めて記録する。
 
 [対応する履歴](../../../../../history/2026/08/11-20/phase15-weight-nvfp4.md)
+
+## 完了結果
+
+- P15-A0〜A4: official format lock、独立codec/oracle、deterministic converter、fail-closed sidecar loader、
+  exact `gfx1030`/`gfx1201` packed-dequant providerを完了した。`gfx942`はcompile/descriptorだけである。
+- P15-A5/A6: Qwen3.5-2B full sidecarと両GPU full accuracy、Gemma 4-12B real-weight slice、R9700 CLI/service、
+  V620 resident/high-waterを取得した。Qwen最大KLD `0.2637523`とGemma top-1 2/3によりdefault化しない。
+- P15-A7: 両targetをcorrectness-only opt-inとし、native FP4 claimを行わない。互換性、runtime、model lock、
+  provenance、main plan、historyを同期し、本planをarchiveする。

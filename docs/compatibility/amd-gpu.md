@@ -116,6 +116,15 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
   `hipDeviceAttributeVirtualMemoryManagementSupported`を再取得する。
 - VMMなしのtargetには、同じtoken-major FP16 K/Vとattention ABIを使う`contiguous-resident` KV providerを
   capabilityで明示選択する。VMM対応targetのvAttentionを廃止せず、Paged Attentionへ暗黙に切り替えない。
+
+### Phase 15 Weight NVFP4
+
+- exact `gfx1201`と`gfx1030`は同じ`packed-dequant` providerを実GPUで検証した。これはpacked E2M1を直接消費するが、
+  native FP4 arithmetic、vendor library FP4 GEMM、W4A4を意味しない。
+- M=1/M>1、K/N 15/16/17および31/32/33を含む7 caseを両targetで独立FP32 oracleへ照合し、fallbackなしでPASSした。
+- Qwen3.5-2Bのtop-1は両targetで3/3一致したが最大KLD `0.2637523`が既定`0.05`を超えたため、両targetとも
+  `correctness-only opt-in`である。VRAM削減や短caseの速度だけでdefaultへ昇格しない。
+- exact `gfx942`はdescriptorとcompile-only対象に留め、実行、native FP4、性能のclaimはない。
 - Hot Aisle MI300X x1の結果は、完全なVM/software tuple、single GPU、実行したop/model/shapeだけへ限定する。
   MI300A/MI325X、multi-GPU、bare metalへ自動的に一般化しない。
 

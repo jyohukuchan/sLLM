@@ -104,6 +104,10 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Phase 11のROCm 7.14.0 local buildはexact `gfx942`、Code Object V6、wave64、`xnack=off`、`sramecc=on`を
   compile/linkした。これはHot Aisle VMのdriver/runtime、hipBLASLt FNUZ solution、数値実行を証明せず、
   software tupleの`project-verified`昇格はPhase 12 preflight/operator結果まで行わない。
+- Phase 15のROCm 7.14.0 local runtimeではexact `gfx1030`/`gfx1201`、Code Object V6、wave32のtarget別binaryで
+  weight NVFP4 packed-dequantを実行した。Qwen full-model、CLI/OpenAI service、cleanupの証拠はこのtupleに限定する。
+  closeout再計測時にR9700だけ既存binaryを含むkernel imageがdriverから拒否されたため、その試行はPASSに含めず、
+  Phase中に取得済みのR9700証拠とV620の最終再実行を分けて記録する。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、sLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 

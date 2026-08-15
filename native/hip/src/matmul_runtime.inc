@@ -489,7 +489,30 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         plan->matmul_metadata.m, plan->matmul_metadata.k,
         plan->matmul_metadata.n, arch_name);
     hipError_t launch_status = hipSuccess;
-    if (plan->matmul_metadata.fp8_outer) {
+    if (plan->matmul_metadata.nvfp4) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      launch_status = hipErrorInvalidValue;
+#else
+      if (std::strcmp(arch_name, "gfx1201") != 0 &&
+          std::strcmp(arch_name, "gfx1030") != 0) {
+        launch_status = hipErrorNotSupported;
+      } else {
+        const auto *const packed_weight =
+            static_cast<const uint8_t *>(weight_storage);
+        const auto *const block_scales =
+            static_cast<const uint8_t *>(weight_storage) +
+            plan->matmul_metadata.weight_value_bytes;
+        const auto *const tensor_scale = reinterpret_cast<const float *>(
+            static_cast<const uint8_t *>(weight_storage) +
+            (plan->matmul_metadata.weight_tensor_scale_offset -
+             plan->matmul_metadata.weight.byte_offset));
+        launch_status = ::sllm_matmul_kernel::launch_nvfp4(
+            activation, packed_weight, block_scales, tensor_scale, output,
+            plan->matmul_metadata.m, plan->matmul_metadata.k,
+            plan->matmul_metadata.n, queue->stream);
+      }
+#endif
+    } else if (plan->matmul_metadata.fp8_outer) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       launch_status = hipErrorInvalidValue;
 #else

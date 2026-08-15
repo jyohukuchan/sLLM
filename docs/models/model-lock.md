@@ -133,6 +133,12 @@ model alias/fingerprintはsource lockとsidecar manifest identityの双方へ結
 再解釈してはならない。Phase 11のgfx942 pathは、同じverified sidecarをload時に数値変換したE4M3FNUZ resident
 representationとして監査し、source model lockや派生artifact自体は変更しない。
 
+Phase 15のweight NVFP4は`sllm-nvfp4-sidecar-v1`を使う。manifestはverified BF16 source lock、Transformer Engine
+v2.18/commit `27486e03cfc1fa41f6932dcecdc47c71c47eac3e`、converter script hashとNumPy version、tensor選択、
+artifact全体と各source/value/block-scale/tensor-scale hashを固定する。各recordはrank-2 logical shape、low-nibble-first
+E2M1、K-axis block 16、OCP E4M3FN scale、FP32 tensor scaleを必須とし、missing/extra/range/shape/hash/provider不一致を
+load前に拒否する。Qwen3.5-2Bのrepository外sidecarは186 tensor、772,236,184 byteで二回のartifact SHA-256が一致した。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

@@ -106,15 +106,19 @@ full attentionが代表wall timeの支配要因へ移らない限り、RDNA4 FA3
 
 ### Q4: Phase 15 Weight NVFP4
 
-> 状態: next（2026-08-15）
+> 状態: complete（2026-08-15）
 
-正本は[Phase 15 plan](phase15-weight-nvfp4.md)とする。
+正本は[Phase 15 archive](../../../../archive/2026/08/11-20/phase15-weight-nvfp4.md)とする。
 
 1. P15-A0/A1でNVFP4 value、block scale、tensor scale、derived artifact、encoding contractを固定する。
 2. P15-A2/A3でconverter/oracle、sidecar、loader、provider選択を実装する。
 3. P15-A4でRDNA4 production candidateとRDNA2 explicit emulation/conversionを分ける。
 4. P15-A5/A6でQwen/Gemma slice、full model、精度、VRAM、性能を確認する。
 5. P15-A7でservice、互換性、provenance、historyを同期し、Phase 15を完了してQ5へ進む。
+
+2026-08-15にQ4を完了した。Qwen full-modelは両exact RDNA targetでtop-1 3/3一致したがKLD budgetを超え、
+Gemma sliceはtop-1 2/3だったため、NVFP4 packed-dequantは両targetともcorrectness-only opt-inとした。
+当初のQ5継続条件は、同日のユーザー明示指示「Phase 15まで終わらせたらgoalを完了扱い」により本goalには適用しない。
 
 ### Q5: 枯渇防止tail queue
 

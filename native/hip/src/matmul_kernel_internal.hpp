@@ -29,6 +29,10 @@ constexpr const char *kFp8EmulationLogicalKernelId =
     "matmul.fp8.outer.byte_decode.v1";
 constexpr const char *kFp8EmulationDeviceSymbol =
     "sllm_matmul_fp8_outer_emulation_v1";
+constexpr const char *kNvfp4LogicalKernelId =
+    "matmul.nvfp4.block16.packed_dequant.v1";
+constexpr const char *kNvfp4DeviceSymbol =
+    "sllm_matmul_nvfp4_block16_packed_dequant_v1";
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
@@ -38,6 +42,7 @@ enum class KernelVariant : uint32_t {
   Fp8Native = 5U,
   Fp8Emulation = 6U,
   DecodeReductionWave64 = 7U,
+  Nvfp4PackedDequant = 8U,
 };
 
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
@@ -63,7 +68,8 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
   return variant == KernelVariant::Fp8Native      ? kFp8NativeLogicalKernelId
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationLogicalKernelId
-         : variant == KernelVariant::HipBlas      ? kHipBlasLogicalKernelId
+         : variant == KernelVariant::Nvfp4PackedDequant ? kNvfp4LogicalKernelId
+         : variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64LogicalKernelId
          : variant == KernelVariant::DecodeReduction
@@ -76,7 +82,8 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
   return variant == KernelVariant::Fp8Native      ? kFp8NativeDeviceSymbol
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationDeviceSymbol
-         : variant == KernelVariant::HipBlas      ? kHipBlasDeviceSymbol
+         : variant == KernelVariant::Nvfp4PackedDequant ? kNvfp4DeviceSymbol
+         : variant == KernelVariant::HipBlas            ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64DeviceSymbol
          : variant == KernelVariant::DecodeReduction
@@ -88,6 +95,8 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n) noexcept {
   return variant == KernelVariant::Fp8Native ? static_cast<uint32_t>(n)
+         : variant == KernelVariant::Nvfp4PackedDequant
+             ? static_cast<uint32_t>(m * n)
          : variant == KernelVariant::Fp8Emulation
              ? static_cast<uint32_t>((m * n + kWorkgroupSize - 1U) /
                                      kWorkgroupSize)
@@ -116,6 +125,12 @@ hipError_t launch_fp8_emulation(const uint8_t *activation,
                                 const float *weight_scales, uint16_t *output,
                                 uint64_t m, uint64_t k, uint64_t n,
                                 hipStream_t stream) noexcept;
+
+hipError_t launch_nvfp4(const uint16_t *activation,
+                        const uint8_t *packed_weight,
+                        const uint8_t *block_scales, const float *tensor_scale,
+                        uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
+                        hipStream_t stream) noexcept;
 
 } // namespace sllm_matmul_kernel
 
