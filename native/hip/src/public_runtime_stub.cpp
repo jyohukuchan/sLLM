@@ -1416,6 +1416,35 @@ sllm_kv_state_create(const sllm_context_t *const context,
 }
 
 extern "C" sllm_status_t
+sllm_kv_state_create_v2(const sllm_context_t *const context,
+                        const sllm_kv_state_create_info_v2_t *const info,
+                        sllm_kv_state_t **const state,
+                        sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (state != nullptr) {
+      *state = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        sllm_kv_state::validate_state_create_info_v2(info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (context == nullptr || state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV state v2 context or output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state v2 create stub");
+  }
+}
+
+extern "C" sllm_status_t
 sllm_kv_state_release(sllm_kv_state_t **const state,
                       sllm_error_sink_t *const error_sink) noexcept {
   try {

@@ -152,6 +152,7 @@ pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_M: u64 = 262_144;
 pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_KV: u64 = 262_144;
 pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_KV_STATE_VERSION: u32 = 2;
+pub const SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_VIEW_INFO_VERSION: u32 = 2;
 pub const SLLM_HIP_KV_APPEND_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_HEAD_COUNT: u32 = 4;
@@ -160,6 +161,8 @@ pub const SLLM_HIP_KV_MAX_CAPACITY: u64 = 262_144;
 pub const SLLM_HIP_KV_MAX_M: u64 = 262_144;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1: u32 = 1;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2: u32 = 2;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1: u32 = 3;
+pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1: u32 = 4;
 pub const SLLM_HIP_KV_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_KV_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_KV_DEVICE_SYMBOL_MAX: u32 = 64;
@@ -167,10 +170,14 @@ pub const SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS: u32 = 1;
 pub const SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED: u32 = 0;
 pub const SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT: u32 = 2;
 pub const SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR: u32 = 1;
+pub const SLLM_HIP_KV_ENCODING_FP16_V1: u32 = 0;
+pub const SLLM_HIP_KV_ENCODING_FP8_V1: u32 = 1;
+pub const SLLM_HIP_KV_ENCODING_NVFP4_V1: u32 = 2;
 pub const SLLM_HIP_CAUSAL_ATTENTION_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2: u32 = 2;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3: u32 = 3;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE: u32 = 256;
@@ -800,6 +807,28 @@ pub struct sllm_kv_state_create_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_kv_state_create_info_v2_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub create_info_version: u32,
+    pub reserved0: u32,
+    pub session_id: u64,
+    pub layer_id: u32,
+    pub flags: u32,
+    pub capacity_tokens: u64,
+    pub head_count: u32,
+    pub head_dim: u32,
+    pub memory_kind: u32,
+    pub layout: u32,
+    pub dtype: u32,
+    pub encoding: u32,
+    pub block_size: u32,
+    pub scale_dtype: u32,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_kv_view_info_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1246,6 +1275,12 @@ unsafe extern "C" {
     pub fn sllm_kv_state_create(
         context: *const sllm_context_t,
         info: *const sllm_kv_state_create_info_t,
+        state: *mut *mut sllm_kv_state_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_create_v2(
+        context: *const sllm_context_t,
+        info: *const sllm_kv_state_create_info_v2_t,
         state: *mut *mut sllm_kv_state_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;

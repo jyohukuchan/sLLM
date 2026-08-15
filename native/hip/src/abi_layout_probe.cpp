@@ -270,6 +270,13 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_HEAD_DIM);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_MAX_CAPACITY);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_FP16_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_FP8_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_NVFP4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);
   SLLM_PRINT_CONSTANT(SLLM_BACKEND_HIP);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_READ);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_WRITE);
@@ -953,6 +960,33 @@ int main() {
       << " head_dim=" << offsetof(sllm_kv_state_create_info_t, head_dim)
       << " memory_kind=" << offsetof(sllm_kv_state_create_info_t, memory_kind)
       << " layout=" << offsetof(sllm_kv_state_create_info_t, layout) << '\n';
+  std::cout
+      << "layout sllm_kv_state_create_info_v2_t size="
+      << sizeof(sllm_kv_state_create_info_v2_t)
+      << " align=" << alignof(sllm_kv_state_create_info_v2_t) << " struct_size="
+      << offsetof(sllm_kv_state_create_info_v2_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_kv_state_create_info_v2_t, abi_version)
+      << " create_info_version="
+      << offsetof(sllm_kv_state_create_info_v2_t, create_info_version)
+      << " reserved0=" << offsetof(sllm_kv_state_create_info_v2_t, reserved0)
+      << " session_id=" << offsetof(sllm_kv_state_create_info_v2_t, session_id)
+      << " layer_id=" << offsetof(sllm_kv_state_create_info_v2_t, layer_id)
+      << " flags=" << offsetof(sllm_kv_state_create_info_v2_t, flags)
+      << " capacity_tokens="
+      << offsetof(sllm_kv_state_create_info_v2_t, capacity_tokens)
+      << " head_count=" << offsetof(sllm_kv_state_create_info_v2_t, head_count)
+      << " head_dim=" << offsetof(sllm_kv_state_create_info_v2_t, head_dim)
+      << " memory_kind="
+      << offsetof(sllm_kv_state_create_info_v2_t, memory_kind)
+      << " layout=" << offsetof(sllm_kv_state_create_info_v2_t, layout)
+      << " dtype=" << offsetof(sllm_kv_state_create_info_v2_t, dtype)
+      << " encoding=" << offsetof(sllm_kv_state_create_info_v2_t, encoding)
+      << " block_size=" << offsetof(sllm_kv_state_create_info_v2_t, block_size)
+      << " scale_dtype="
+      << offsetof(sllm_kv_state_create_info_v2_t, scale_dtype)
+      << " reserved=" << offsetof(sllm_kv_state_create_info_v2_t, reserved)
+      << '\n';
   std::cout
       << "layout sllm_kv_view_info_t size=" << sizeof(sllm_kv_view_info_t)
       << " align=" << alignof(sllm_kv_view_info_t)

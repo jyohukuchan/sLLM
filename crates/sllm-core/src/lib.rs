@@ -86,8 +86,8 @@ pub use handles::{
     QueueHandle,
 };
 pub use kv_state::{
-    CausalAttentionDescriptor, KvMemoryKind, KvPhysicalMemorySnapshot, KvStateAppendRequest,
-    KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot,
+    CausalAttentionDescriptor, KvCacheEncoding, KvMemoryKind, KvPhysicalMemorySnapshot,
+    KvStateAppendRequest, KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -137,8 +137,9 @@ pub use qwen_graph::{
     QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
-    build_qwen35_nvfp4_graph,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{

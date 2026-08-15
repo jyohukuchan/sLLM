@@ -3776,6 +3776,121 @@ bool kv_state_create_snapshot_contract() {
   return valid && release_queue(&queue) && release_context(&context);
 }
 
+bool kv_lowbit_create_query_and_recipe_contract() {
+  fake_hip::reset();
+  const std::size_t baseline_allocations = fake_hip::live_allocations();
+  sllm_context_t *context = nullptr;
+  if (!create_context(&context)) {
+    return false;
+  }
+  Error error;
+  sllm_kv_state_create_info_v2_t create{};
+  create.struct_size = sizeof(create);
+  create.abi_version = SLLM_HIP_ABI_VERSION;
+  create.create_info_version = SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
+  create.session_id = 0x16U;
+  create.layer_id = 16U;
+  create.capacity_tokens = 257U;
+  create.head_count = 4U;
+  create.head_dim = 256U;
+  create.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT;
+  create.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+  create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  create.encoding = SLLM_HIP_KV_ENCODING_FP8_V1;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_F32;
+
+  const auto query_recipe = [&](const uint32_t expected_dtype,
+                                const uint32_t expected_encoding,
+                                const uint64_t bytes_per_plane) {
+    sllm_kv_state_t *state = nullptr;
+    if (!expect_status(
+            sllm_kv_state_create_v2(context, &create, &state, &error.sink),
+            SLLM_STATUS_OK, "low-bit KV create", error) ||
+        state == nullptr) {
+      return false;
+    }
+    sllm_kv_view_info_t view{};
+    view.struct_size = sizeof(view);
+    view.abi_version = SLLM_HIP_ABI_VERSION;
+    view.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+    const bool valid =
+        expect_status(sllm_kv_state_query(state, &view, &error.sink),
+                      SLLM_STATUS_OK, "low-bit KV query", error) &&
+        view.dtype == expected_dtype && view.encoding == expected_encoding &&
+        view.memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
+        view.mapped_token_capacity == create.capacity_tokens &&
+        view.tokens_per_page == 1U &&
+        view.committed_bytes_per_plane == bytes_per_plane;
+    if (!valid) {
+      std::cerr << "low-bit KV query metadata mismatch: dtype=" << view.dtype
+                << " encoding=" << view.encoding
+                << " memory_kind=" << view.memory_kind
+                << " mapped=" << view.mapped_token_capacity
+                << " tokens_per_page=" << view.tokens_per_page
+                << " committed=" << view.committed_bytes_per_plane
+                << " expected_committed=" << bytes_per_plane << '\n';
+    }
+    sllm_kv_view_t *snapshot = nullptr;
+    uint8_t output[2]{};
+    sllm_hip_kv_readback_request_t readback{};
+    readback.struct_size = sizeof(readback);
+    readback.abi_version = SLLM_HIP_KV_EVIDENCE_ABI_VERSION;
+    readback.plane = SLLM_HIP_KV_EVIDENCE_PLANE_K;
+    readback.byte_length = sizeof(output);
+    readback.host_capacity = sizeof(output);
+    readback.host_output = output;
+    bool readback_rejected =
+        expect_status(sllm_kv_state_snapshot(state, &snapshot, &error.sink),
+                      SLLM_STATUS_OK, "low-bit KV snapshot", error) &&
+        snapshot != nullptr;
+    if (snapshot != nullptr) {
+      readback.view = snapshot;
+      readback_rejected =
+          expect_status(sllm_hip_kv_view_readback(&readback, &error.sink),
+                        SLLM_STATUS_UNSUPPORTED_ENCODING,
+                        "low-bit KV v1 readback rejection", error) &&
+          readback_rejected;
+      readback_rejected =
+          expect_status(sllm_kv_view_release(&snapshot, &error.sink),
+                        SLLM_STATUS_OK, "low-bit KV snapshot release", error) &&
+          snapshot == nullptr && readback_rejected;
+    }
+    return expect_status(sllm_kv_state_release(&state, &error.sink),
+                         SLLM_STATUS_OK, "low-bit KV release", error) &&
+           state == nullptr && valid && readback_rejected;
+  };
+
+  bool valid = query_recipe(
+      SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
+      create.capacity_tokens * (4U * 256U + 4U * sizeof(float)));
+  create.dtype = SLLM_TENSOR_DTYPE_U8;
+  create.encoding = SLLM_HIP_KV_ENCODING_NVFP4_V1;
+  create.block_size = 16U;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  valid = valid && query_recipe(SLLM_TENSOR_DTYPE_U8,
+                                SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
+                                create.capacity_tokens *
+                                    (4U * (256U / 2U) + 4U * (256U / 16U) +
+                                     4U * sizeof(float)));
+  create.block_size = 15U;
+  sllm_kv_state_t *invalid_state = nullptr;
+  valid = valid &&
+          expect_status(sllm_kv_state_create_v2(context, &create,
+                                                &invalid_state, &error.sink),
+                        SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+                        "invalid NVFP4 KV recipe", error) &&
+          invalid_state == nullptr;
+  const bool context_released = release_context(&context);
+  const std::size_t live_allocations = fake_hip::live_allocations();
+  if (!valid || !context_released || live_allocations != baseline_allocations) {
+    std::cerr << "low-bit KV cleanup mismatch: valid=" << valid
+              << " context_released=" << context_released
+              << " live_allocations=" << live_allocations
+              << " baseline_allocations=" << baseline_allocations << '\n';
+  }
+  return valid && context_released && live_allocations == baseline_allocations;
+}
+
 bool kv_capability_selected_contiguous_resident_contract() {
   fake_hip::reset();
   fake_hip::set_vmm_supported(false);
@@ -4751,6 +4866,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(linear_attention_transaction_and_lifetime_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_same_buffer_disjoint_lifecycle_contract)
   SLLM_RUN_KV_CONTRACT(kv_state_create_snapshot_contract)
+  SLLM_RUN_KV_CONTRACT(kv_lowbit_create_query_and_recipe_contract)
   SLLM_RUN_KV_CONTRACT(kv_capability_selected_contiguous_resident_contract)
   SLLM_RUN_KV_CONTRACT(kv_evidence_readback_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_layout_and_transaction_contract)

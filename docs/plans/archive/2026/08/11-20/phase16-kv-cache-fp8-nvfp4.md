@@ -1,6 +1,6 @@
 # Phase 16: KV cache FP8/NVFP4
 
-> 状態: planned
+> 状態: 完了（canonical exact `gfx1030`/`gfx1201`実機closeout済み）
 > 作成日: 2026-08-16
 
 ## 目的

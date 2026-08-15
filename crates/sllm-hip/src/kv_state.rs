@@ -1,4 +1,4 @@
-//! C3a2 request-local FP16 KV state ownership and append transactions.
+//! C3a2 request-local FP16/FP8/NVFP4 KV ownership and append transactions.
 //!
 //! Native KV handles are deliberately kept opaque. The only Rust-visible
 //! state is copied metadata; the two device allocations and their strides
@@ -17,8 +17,8 @@ use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sllm_core::{
-    DType, Encoding, ExecutionSessionId, KvMemoryKind, KvStateAppendRequest, KvStateDescriptor,
-    KvStateId, KvStateSnapshot,
+    DType, Encoding, ExecutionSessionId, KvCacheEncoding, KvMemoryKind, KvStateAppendRequest,
+    KvStateDescriptor, KvStateId, KvStateSnapshot,
 };
 use sllm_hip_sys as sys;
 
@@ -36,6 +36,29 @@ const ERROR_CAPACITY: usize = 256;
 const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_token_major.v2";
 const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_token_major_v2";
+
+fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
+    match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => (
+            sys::SLLM_TENSOR_DTYPE_F16,
+            sys::SLLM_HIP_KV_ENCODING_FP16_V1,
+            0,
+            0,
+        ),
+        KvCacheEncoding::Fp8E4M3Fn => (
+            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+            sys::SLLM_HIP_KV_ENCODING_FP8_V1,
+            0,
+            sys::SLLM_TENSOR_DTYPE_F32,
+        ),
+        KvCacheEncoding::Nvfp4 => (
+            sys::SLLM_TENSOR_DTYPE_U8,
+            sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
+            16,
+            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+        ),
+    }
+}
 
 fn selected_memory_kind_for_target(expected_target: Option<&str>) -> u32 {
     if expected_target == Some("gfx942") {
@@ -106,9 +129,12 @@ impl KvStateResource {
             ));
         }
         let context_raw = context.raw_handle()?;
-        let info = sys::sllm_kv_state_create_info_t {
-            struct_size: size_of::<sys::sllm_kv_state_create_info_t>() as u32,
+        let (dtype, encoding, block_size, scale_dtype) = native_kv_storage(descriptor);
+        let info = sys::sllm_kv_state_create_info_v2_t {
+            struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
+            create_info_version: sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION,
+            reserved0: 0,
             session_id: session_id.raw(),
             layer_id: descriptor.layer_id(),
             flags: 0,
@@ -117,12 +143,22 @@ impl KvStateResource {
             head_dim: descriptor.layout().head_dim() as u32,
             memory_kind: selected_memory_kind(context),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
+            dtype,
+            encoding,
+            block_size,
+            scale_dtype,
+            reserved: [0; 4],
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
         let mut raw_state = std::ptr::null_mut();
         let raw = unsafe {
-            sys::sllm_kv_state_create(context_raw.as_ptr(), &info, &mut raw_state, &mut error_sink)
+            sys::sllm_kv_state_create_v2(
+                context_raw.as_ptr(),
+                &info,
+                &mut raw_state,
+                &mut error_sink,
+            )
         };
         ensure_ok(raw, &error_buffer, error_sink.message_length)?;
         let raw_state = NonNull::new(raw_state).ok_or_else(|| {
@@ -876,13 +912,27 @@ fn validate_view_info(
         .ok_or_else(|| {
             RuntimeError::local(RuntimeStatus::MetadataOverflow, "KV stride overflow")
         })?;
+    let (expected_dtype, expected_encoding) = match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => (
+            sys::SLLM_TENSOR_DTYPE_F16,
+            sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
+        ),
+        KvCacheEncoding::Fp8E4M3Fn => (
+            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
+        ),
+        KvCacheEncoding::Nvfp4 => (
+            sys::SLLM_TENSOR_DTYPE_U8,
+            sys::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
+        ),
+    };
     if info.struct_size != size_of::<sys::sllm_kv_view_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
         || info.info_version != sys::SLLM_HIP_KV_VIEW_INFO_VERSION
         || info.session_id != session_id.raw()
         || info.layer_id != descriptor.layer_id()
-        || info.dtype != sys::SLLM_TENSOR_DTYPE_F16
-        || info.encoding != sys::SLLM_TENSOR_ENCODING_UNQUANTIZED
+        || info.dtype != expected_dtype
+        || info.encoding != expected_encoding
         || info.head_count != layout.heads() as u32
         || info.head_dim != layout.head_dim() as u32
         || !matches!(
@@ -972,17 +1022,45 @@ fn validate_append_info(
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
     let expected_target = context.expected_target();
-    let expected_grid = request
+    let (expected_kernel_id, expected_kernel, expected_device) = match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2,
+            KERNEL_SYMBOL,
+            DEVICE_SYMBOL,
+        ),
+        KvCacheEncoding::Fp8E4M3Fn => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1,
+            "kv_state.bf16_to_fp8_token_major.v1",
+            "sllm_kv_state_bf16_to_fp8_token_major_v1",
+        ),
+        KvCacheEncoding::Nvfp4 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1,
+            "kv_state.bf16_to_nvfp4_token_major.v1",
+            "sllm_kv_state_bf16_to_nvfp4_token_major_v1",
+        ),
+    };
+    let expected_rows = request
         .token_count()
         .checked_mul(descriptor.layout().heads() as u64)
-        .and_then(|value| u32::try_from(value).ok());
+        .ok_or_else(|| RuntimeError::local(RuntimeStatus::MetadataOverflow, "KV grid overflow"))?;
+    let expected_grid = if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+        expected_rows
+            .checked_mul(descriptor.layout().head_dim() as u64)
+            .and_then(|elements| {
+                elements.checked_add(u64::from(sys::SLLM_HIP_KV_WORKGROUP_SIZE) - 1)
+            })
+            .map(|elements| elements / u64::from(sys::SLLM_HIP_KV_WORKGROUP_SIZE))
+            .and_then(|value| u32::try_from(value).ok())
+    } else {
+        u32::try_from(expected_rows).ok()
+    };
     if info.struct_size != size_of::<sys::sllm_kv_append_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
         || info.info_version != sys::SLLM_HIP_KV_APPEND_INFO_VERSION
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count != 1
-        || info.kernel_id != sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2
+        || info.kernel_id != expected_kernel_id
         || info.workgroup_size_x != sys::SLLM_HIP_KV_WORKGROUP_SIZE
         || Some(info.grid_size_x) != expected_grid
         || info.start_position != request.start_position()
@@ -991,8 +1069,8 @@ fn validate_append_info(
         || info.commit_allowed != 1
         || info.fallback_allowed != 0
         || info.fallback_used != 0
-        || c_string(&info.kernel_symbol) != KERNEL_SYMBOL
-        || c_string(&info.device_symbol) != DEVICE_SYMBOL
+        || c_string(&info.kernel_symbol) != expected_kernel
+        || c_string(&info.device_symbol) != expected_device
         || info.reserved0 != 0
         || info.reserved != [0; 8]
         || info.end_position > descriptor.capacity()
@@ -1042,13 +1120,27 @@ fn validate_causal_attention_info(
         .checked_mul((descriptor.layout().heads() * 4) as u64)
         .and_then(|value| u32::try_from(value).ok());
     let expected_target = context.expected_target();
+    let (expected_kernel_id, expected_kernel, expected_device) =
+        if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
+                "causal_attention.online_softmax_gqa.v2",
+                "sllm_causal_attention_online_softmax_gqa_v2",
+            )
+        } else {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
+                "causal_attention.online_softmax_gqa.packed_kv.v3",
+                "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+            )
+        };
     if info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
         || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
         || info.dispatch_count != 1
-        || info.kernel_id != sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2
+        || info.kernel_id != expected_kernel_id
         || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
         || Some(info.grid_size_x) != expected_grid
         || info.query_count != query_count
@@ -1060,8 +1152,8 @@ fn validate_causal_attention_info(
         || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
         || info.fallback_allowed != 0
         || info.fallback_used != 0
-        || c_string(&info.kernel_symbol) != "causal_attention.online_softmax_gqa.v2"
-        || c_string(&info.device_symbol) != "sllm_causal_attention_online_softmax_gqa_v2"
+        || c_string(&info.kernel_symbol) != expected_kernel
+        || c_string(&info.device_symbol) != expected_device
         || info.reserved != [0; 8]
         || committed_kv_length > descriptor.capacity()
         || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
@@ -1260,6 +1352,7 @@ mod tests {
     #[test]
     fn abi_layout_fields_have_expected_rust_sizes() {
         assert_eq!(size_of::<sys::sllm_kv_state_create_info_t>(), 48);
+        assert_eq!(size_of::<sys::sllm_kv_state_create_info_v2_t>(), 88);
         assert_eq!(size_of::<sys::sllm_kv_view_info_t>(), 192);
         assert_eq!(size_of::<sys::sllm_kv_append_desc_t>(), 416);
         assert_eq!(size_of::<sys::sllm_kv_append_info_t>(), 304);

@@ -173,6 +173,58 @@ validate_state_create_info(const sllm_kv_state_create_info_t *const info,
 }
 
 sllm_status_t
+validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+        "KV state v2 create info is null");
+  }
+  const sllm_status_t struct_status =
+      exact_struct(info->struct_size, info->abi_version, sizeof(*info), sink,
+                   "KV state v2 create info has an unsupported struct size");
+  if (struct_status != SLLM_STATUS_OK) {
+    return struct_status;
+  }
+  const uint32_t head_count =
+      info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
+  const uint32_t head_dim =
+      info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
+  const bool fp16 = info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
+                    info->dtype == SLLM_TENSOR_DTYPE_F16 &&
+                    info->block_size == 0U && info->scale_dtype == 0U;
+  const bool fp8 = info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 &&
+                   info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+                   info->block_size == 0U &&
+                   info->scale_dtype == SLLM_TENSOR_DTYPE_F32;
+  const bool nvfp4 = info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&
+                     info->dtype == SLLM_TENSOR_DTYPE_U8 &&
+                     info->block_size == 16U &&
+                     info->scale_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  if (info->create_info_version != SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION ||
+      info->reserved0 != 0U || !all_zero(info->reserved, 4U) ||
+      info->flags != 0U || info->session_id == 0U ||
+      info->capacity_tokens == 0U ||
+      info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
+      (head_count != 2U && head_count != 4U) || head_dim == 0U ||
+      head_dim > SLLM_HIP_KV_HEAD_DIM ||
+      (info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED &&
+       info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+       info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
+      info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR ||
+      (!fp16 && !fp8 && !nvfp4)) {
+    return sllm_public_runtime::write_error(
+        sink,
+        info->reserved0 != 0U || !all_zero(info->reserved, 4U)
+            ? SLLM_STATUS_RESERVED_NONZERO
+            : SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+        "KV state v2 create info has an invalid version, shape, provider, or "
+        "encoding recipe");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
 validate_append_prefix(const sllm_kv_append_desc_t *const descriptor,
                        sllm_error_sink_t *const sink) noexcept {
   if (descriptor == nullptr) {

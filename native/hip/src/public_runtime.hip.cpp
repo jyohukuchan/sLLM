@@ -203,33 +203,54 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
 
 namespace sllm_kv_state_kernel {
 hipError_t launch(const uint16_t *const key_input,
-                  const uint16_t *const value_input, uint16_t *const key_output,
-                  uint16_t *const value_output, const uint32_t token_count,
+                  const uint16_t *const value_input, void *const key_output,
+                  void *const value_output, void *const key_scales,
+                  void *const value_scales, float *const key_outer_scales,
+                  float *const value_outer_scales, const uint32_t token_count,
                   const uint64_t capacity_tokens, const uint64_t start_position,
                   const uint32_t head_count, const uint32_t head_dim,
-                  const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const hipStream_t stream) noexcept {
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
   (void)head_count;
   (void)head_dim;
+  if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+    return hipErrorInvalidValue;
+  }
   return fake_hip::kv_state_append_launch(
-      key_input, value_input, key_output, value_output, token_count,
-      capacity_tokens, start_position, stream);
+      key_input, value_input, static_cast<uint16_t *>(key_output),
+      static_cast<uint16_t *>(value_output), token_count, capacity_tokens,
+      start_position, stream);
 }
 } // namespace sllm_kv_state_kernel
 
 namespace sllm_causal_attention_kernel {
-hipError_t launch(const uint16_t *const query, const uint16_t *const key,
-                  const uint16_t *const value, uint16_t *const output,
+hipError_t launch(const uint16_t *const query, const void *const key,
+                  const void *const value, const void *const key_scales,
+                  const void *const value_scales,
+                  const float *const key_outer_scales,
+                  const float *const value_outer_scales, uint16_t *const output,
                   const uint32_t query_count, const uint64_t capacity_tokens,
                   const uint64_t start_position,
                   const uint64_t committed_kv_length, const uint32_t q_heads,
                   const uint32_t kv_heads, const uint32_t head_dim,
-                  const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const hipStream_t stream) noexcept {
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
   (void)q_heads;
   (void)kv_heads;
   (void)head_dim;
+  if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+    return hipErrorInvalidValue;
+  }
   return fake_hip::causal_attention_launch(
-      query, key, value, output, query_count, capacity_tokens, start_position,
-      committed_kv_length, stream);
+      query, static_cast<const uint16_t *>(key),
+      static_cast<const uint16_t *>(value), output, query_count,
+      capacity_tokens, start_position, committed_kv_length, stream);
 }
 } // namespace sllm_causal_attention_kernel
 
@@ -537,6 +558,15 @@ struct KvState final : QuarantineNode {
   Buffer *value_buffer;
   KvVmmPlane key_plane;
   KvVmmPlane value_plane;
+  KvVmmPlane key_scale_plane;
+  KvVmmPlane value_scale_plane;
+  KvVmmPlane key_outer_scale_plane;
+  KvVmmPlane value_outer_scale_plane;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint64_t value_bytes_per_token;
+  uint64_t scale_bytes_per_token;
+  uint64_t outer_scale_bytes_per_token;
   uint64_t physical_page_bytes;
   uint64_t tokens_per_page;
   uint64_t mapped_token_capacity;
@@ -558,6 +588,14 @@ struct KvState final : QuarantineNode {
           const uint32_t head_count_value, const uint32_t head_dim_value,
           Buffer *const key_value, Buffer *const value_value,
           KvVmmPlane &&key_plane_value, KvVmmPlane &&value_plane_value,
+          KvVmmPlane &&key_scale_plane_value,
+          KvVmmPlane &&value_scale_plane_value,
+          KvVmmPlane &&key_outer_scale_plane_value,
+          KvVmmPlane &&value_outer_scale_plane_value,
+          const uint32_t dtype_value, const uint32_t encoding_value,
+          const uint64_t value_bytes_per_token_value,
+          const uint64_t scale_bytes_per_token_value,
+          const uint64_t outer_scale_bytes_per_token_value,
           const uint64_t page_bytes_value, const uint64_t context_token)
       : QuarantineNode(HandleKind::KvState), context(context_value),
         context_identity(context_token), state_identity(0U),
@@ -566,14 +604,21 @@ struct KvState final : QuarantineNode {
         head_dim(head_dim_value), key_buffer(key_value),
         value_buffer(value_value), key_plane(std::move(key_plane_value)),
         value_plane(std::move(value_plane_value)),
+        key_scale_plane(std::move(key_scale_plane_value)),
+        value_scale_plane(std::move(value_scale_plane_value)),
+        key_outer_scale_plane(std::move(key_outer_scale_plane_value)),
+        value_outer_scale_plane(std::move(value_outer_scale_plane_value)),
+        dtype(dtype_value), encoding(encoding_value),
+        value_bytes_per_token(value_bytes_per_token_value),
+        scale_bytes_per_token(scale_bytes_per_token_value),
+        outer_scale_bytes_per_token(outer_scale_bytes_per_token_value),
         physical_page_bytes(page_bytes_value),
-        tokens_per_page(page_bytes_value /
-                        (static_cast<uint64_t>(head_count_value) *
-                         head_dim_value * UINT64_C(2))),
-        mapped_token_capacity(std::min(
-            capacity_value,
-            key_plane.mapped_bytes / (static_cast<uint64_t>(head_count_value) *
-                                      head_dim_value * UINT64_C(2)))),
+        tokens_per_page(encoding_value == SLLM_HIP_KV_ENCODING_FP16_V1
+                            ? page_bytes_value / value_bytes_per_token_value
+                            : 1U),
+        mapped_token_capacity(
+            std::min(capacity_value,
+                     key_plane.mapped_bytes / value_bytes_per_token_value)),
         committed_bytes_per_plane(
             std::min(key_plane.mapped_bytes, value_plane.mapped_bytes)),
         memory_kind(key_plane.contiguous
@@ -582,7 +627,32 @@ struct KvState final : QuarantineNode {
         accounting(), published_length(0U), generation(0U),
         transition_token(0U), transition_start(0U), transition_count(0U),
         transition_end(0U), commit_allowed(false), view_count(0U),
-        release_active(false) {}
+        release_active(false) {
+    const auto include_plane = [this](const KvVmmPlane &key,
+                                      const KvVmmPlane &value,
+                                      const uint64_t bytes_per_token) {
+      if (bytes_per_token == 0U) {
+        return;
+      }
+      mapped_token_capacity = std::min(
+          mapped_token_capacity,
+          std::min(key.mapped_bytes, value.mapped_bytes) / bytes_per_token);
+      committed_bytes_per_plane +=
+          std::min(key.mapped_bytes, value.mapped_bytes);
+    };
+    include_plane(key_scale_plane, value_scale_plane, scale_bytes_per_token);
+    include_plane(key_outer_scale_plane, value_outer_scale_plane,
+                  outer_scale_bytes_per_token);
+    if (memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT &&
+        encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+      physical_page_bytes = value_bytes_per_token + scale_bytes_per_token +
+                            outer_scale_bytes_per_token;
+    } else if (memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
+               encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+      tokens_per_page =
+          std::max(UINT64_C(1), page_bytes_value / value_bytes_per_token);
+    }
+  }
 };
 
 struct KvView final : QuarantineNode {
@@ -6703,8 +6773,12 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   sllm_kv_state::initialize_view_info(info);
   info->session_id = state->session_id;
   info->layer_id = state->layer_id;
-  info->dtype = SLLM_TENSOR_DTYPE_F16;
-  info->encoding = SLLM_TENSOR_ENCODING_UNQUANTIZED;
+  info->dtype = state->dtype;
+  info->encoding = state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                       ? SLLM_TENSOR_ENCODING_UNQUANTIZED
+                       : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                              ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+                              : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
   info->head_count = state->head_count;
   info->head_dim = state->head_dim;
   info->memory_kind = state->memory_kind;
@@ -6731,14 +6805,25 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
 void fill_kv_append_info(sllm_kv_append_info_t *const info,
                          const uint64_t dispatch_id, const uint64_t start,
                          const uint64_t count, const uint64_t end,
-                         const uint32_t head_count,
+                         const uint32_t head_count, const uint32_t head_dim,
+                         const uint32_t encoding,
                          const char *const arch_name) noexcept {
   sllm_kv_state::initialize_append_info(info);
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2;
+  info->kernel_id =
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2
+          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1
+                 : SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
   info->workgroup_size_x = SLLM_HIP_KV_WORKGROUP_SIZE;
-  info->grid_size_x = static_cast<uint32_t>(count * head_count);
+  info->grid_size_x =
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? static_cast<uint32_t>((count * head_count * head_dim +
+                                   SLLM_HIP_KV_WORKGROUP_SIZE - 1U) /
+                                  SLLM_HIP_KV_WORKGROUP_SIZE)
+          : static_cast<uint32_t>(count * head_count);
   info->start_position = start;
   info->token_count = count;
   info->end_position = end;
@@ -6747,10 +6832,18 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_KV_KERNEL_SYMBOL_MAX,
-      ::sllm_kv_state_kernel::kLogicalKernelId);
-  sllm_public_runtime::copy_fixed_string(info->device_symbol,
-                                         SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
-                                         ::sllm_kv_state_kernel::kDeviceSymbol);
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? ::sllm_kv_state_kernel::kLogicalKernelId
+          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                 ? ::sllm_kv_state_kernel::kFp8LogicalKernelId
+                 : ::sllm_kv_state_kernel::kNvfp4LogicalKernelId));
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? ::sllm_kv_state_kernel::kDeviceSymbol
+          : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                 ? ::sllm_kv_state_kernel::kFp8DeviceSymbol
+                 : ::sllm_kv_state_kernel::kNvfp4DeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -6872,6 +6965,45 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
                      const sllm_kv_state_create_info_t *const info,
                      sllm_kv_state_t **const raw_state,
                      sllm_error_sink_t *const error_sink) noexcept {
+  if (raw_state != nullptr) {
+    *raw_state = nullptr;
+  }
+  const sllm_status_t sink_status =
+      sllm_public_runtime::validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  const sllm_status_t info_status =
+      sllm_kv_state::validate_state_create_info(info, error_sink);
+  if (info_status != SLLM_STATUS_OK) {
+    return info_status;
+  }
+  const sllm_kv_state_create_info_v2_t v2 = {
+      sizeof(sllm_kv_state_create_info_v2_t),
+      SLLM_HIP_ABI_VERSION,
+      SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION,
+      0U,
+      info->session_id,
+      info->layer_id,
+      info->flags,
+      info->capacity_tokens,
+      info->head_count,
+      info->head_dim,
+      info->memory_kind,
+      info->layout,
+      SLLM_TENSOR_DTYPE_F16,
+      SLLM_HIP_KV_ENCODING_FP16_V1,
+      0U,
+      0U,
+      {0U, 0U, 0U, 0U}};
+  return sllm_kv_state_create_v2(raw_context, &v2, raw_state, error_sink);
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
+                        const sllm_kv_state_create_info_v2_t *const info,
+                        sllm_kv_state_t **const raw_state,
+                        sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (raw_state != nullptr) {
       *raw_state = nullptr;
@@ -6882,7 +7014,7 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
       return sink_status;
     }
     const sllm_status_t info_status =
-        sllm_kv_state::validate_state_create_info(info, error_sink);
+        sllm_kv_state::validate_state_create_info_v2(info, error_sink);
     if (info_status != SLLM_STATUS_OK) {
       return info_status;
     }
@@ -6928,10 +7060,27 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
         info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
     const uint32_t head_dim =
         info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
-    uint64_t elements = info->capacity_tokens * head_count;
-    elements *= head_dim;
-    const std::size_t allocation_bytes =
-        static_cast<std::size_t>(elements * UINT64_C(2));
+    const uint64_t row_elements = static_cast<uint64_t>(head_count) * head_dim;
+    const uint64_t value_bytes_per_token =
+        info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+            ? row_elements * UINT64_C(2)
+            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                   ? row_elements
+                   : static_cast<uint64_t>(head_count) *
+                         ((static_cast<uint64_t>(head_dim) + 1U) / 2U));
+    const uint64_t scale_bytes_per_token =
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+            ? static_cast<uint64_t>(head_count) * UINT64_C(4)
+            : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+                   ? static_cast<uint64_t>(head_count) *
+                         ((static_cast<uint64_t>(head_dim) + 15U) / 16U)
+                   : 0U);
+    const uint64_t outer_scale_bytes_per_token =
+        info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+            ? static_cast<uint64_t>(head_count) * UINT64_C(4)
+            : 0U;
+    const uint64_t allocation_bytes =
+        info->capacity_tokens * value_bytes_per_token;
     hipMemAllocationProp allocation_properties{};
     allocation_properties.type = hipMemAllocationTypePinned;
     allocation_properties.location.type = hipMemLocationTypeDevice;
@@ -6940,8 +7089,6 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
     hipError_t key_status =
         hipMemGetAllocationGranularity(&page_bytes, &allocation_properties,
                                        hipMemAllocationGranularityRecommended);
-    const uint64_t bytes_per_token =
-        static_cast<uint64_t>(head_count) * head_dim * UINT64_C(2);
     int vmm_supported = 0;
     const hipError_t capability_status = hipDeviceGetAttribute(
         &vmm_supported, hipDeviceAttributeVirtualMemoryManagementSupported,
@@ -6959,7 +7106,7 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
             : info->memory_kind;
     if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
       key_status = hipSuccess;
-      page_bytes = static_cast<std::size_t>(bytes_per_token);
+      page_bytes = static_cast<std::size_t>(value_bytes_per_token);
     }
     if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
         vmm_supported == 0) {
@@ -6970,53 +7117,59 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
           "explicit virtual-contiguous KV requires HIP VMM capability");
     }
     if (key_status == hipSuccess &&
-        (page_bytes == 0U || page_bytes % bytes_per_token != 0U ||
+        (page_bytes == 0U ||
          allocation_bytes >
              std::numeric_limits<std::size_t>::max() - (page_bytes - 1U))) {
       key_status = hipErrorInvalidValue;
     }
-    const uint64_t reservation_bytes =
-        key_status == hipSuccess
-            ? ((static_cast<uint64_t>(allocation_bytes) + page_bytes - 1U) /
-               page_bytes) *
-                  page_bytes
-            : 0U;
     KvVmmPlane key_plane;
     KvVmmPlane value_plane;
-    if (key_status == hipSuccess) {
+    KvVmmPlane key_scale_plane;
+    KvVmmPlane value_scale_plane;
+    KvVmmPlane key_outer_scale_plane;
+    KvVmmPlane value_outer_scale_plane;
+    const auto reserve_plane =
+        [&](KvVmmPlane &plane, const uint64_t bytes_per_token) -> hipError_t {
+      if (bytes_per_token == 0U) {
+        return hipSuccess;
+      }
       if (sllm_public_runtime::FaultInjector::consume(
               sllm_public_runtime::FaultPoint::NativeCreationFailure)) {
-        key_status = hipErrorUnknown;
-      } else if (selected_memory_kind ==
-                 SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
-        key_status =
-            key_plane.reserve_contiguous(allocation_bytes, bytes_per_token);
-      } else {
-        key_status =
-            key_plane.reserve(allocation_bytes, reservation_bytes, page_bytes);
+        return hipErrorUnknown;
       }
+      const uint64_t logical = info->capacity_tokens * bytes_per_token;
+      if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
+        return plane.reserve_contiguous(logical, bytes_per_token);
+      }
+      const uint64_t reservation =
+          ((logical + page_bytes - 1U) / page_bytes) * page_bytes;
+      return plane.reserve(logical, reservation, page_bytes);
+    };
+    if (key_status == hipSuccess) {
+      key_status = reserve_plane(key_plane, value_bytes_per_token);
+    }
+    if (key_status == hipSuccess) {
+      key_status = reserve_plane(value_plane, value_bytes_per_token);
+    }
+    if (key_status == hipSuccess) {
+      key_status = reserve_plane(key_scale_plane, scale_bytes_per_token);
+    }
+    if (key_status == hipSuccess) {
+      key_status = reserve_plane(value_scale_plane, scale_bytes_per_token);
+    }
+    if (key_status == hipSuccess) {
+      key_status =
+          reserve_plane(key_outer_scale_plane, outer_scale_bytes_per_token);
+    }
+    if (key_status == hipSuccess) {
+      key_status =
+          reserve_plane(value_outer_scale_plane, outer_scale_bytes_per_token);
     }
     if (key_status != hipSuccess) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
       return hip_failure(error_sink, key_status,
-                         "reserve selected KV K buffer");
-    }
-    const hipError_t value_status =
-        sllm_public_runtime::FaultInjector::consume(
-            sllm_public_runtime::FaultPoint::NativeCreationFailure)
-            ? hipErrorUnknown
-            : (selected_memory_kind ==
-                       SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
-                   ? value_plane.reserve_contiguous(allocation_bytes,
-                                                    bytes_per_token)
-                   : value_plane.reserve(allocation_bytes, reservation_bytes,
-                                         page_bytes));
-    if (value_status != hipSuccess) {
-      (void)rollback_child(context, error_sink,
-                           "KV state provisional accounting rollback failed");
-      return hip_failure(error_sink, value_status,
-                         "reserve selected KV V buffer");
+                         "reserve selected KV value or scale plane");
     }
     std::unique_ptr<Buffer> key_buffer;
     std::unique_ptr<Buffer> value_buffer;
@@ -7029,7 +7182,11 @@ sllm_kv_state_create(const sllm_context_t *const raw_context,
       candidate = std::make_unique<KvState>(
           context, info->session_id, info->layer_id, info->capacity_tokens,
           head_count, head_dim, key_buffer.get(), value_buffer.get(),
-          std::move(key_plane), std::move(value_plane), page_bytes,
+          std::move(key_plane), std::move(value_plane),
+          std::move(key_scale_plane), std::move(value_scale_plane),
+          std::move(key_outer_scale_plane), std::move(value_outer_scale_plane),
+          info->dtype, info->encoding, value_bytes_per_token,
+          scale_bytes_per_token, outer_scale_bytes_per_token, page_bytes,
           context_token);
     } catch (...) {
       (void)rollback_child(context, error_sink,
@@ -7157,17 +7314,33 @@ sllm_kv_state_release(sllm_kv_state_t **const raw_state,
     }
     const hipError_t key_status = state->key_plane.release_checked();
     const hipError_t value_status = state->value_plane.release_checked();
+    const hipError_t key_scale_status =
+        state->key_scale_plane.release_checked();
+    const hipError_t value_scale_status =
+        state->value_scale_plane.release_checked();
+    const hipError_t key_outer_status =
+        state->key_outer_scale_plane.release_checked();
+    const hipError_t value_outer_status =
+        state->value_outer_scale_plane.release_checked();
     state->key_buffer->device_pointer = nullptr;
     state->value_buffer->device_pointer = nullptr;
-    if (key_status != hipSuccess || value_status != hipSuccess) {
+    if (key_status != hipSuccess || value_status != hipSuccess ||
+        key_scale_status != hipSuccess || value_scale_status != hipSuccess ||
+        key_outer_status != hipSuccess || value_outer_status != hipSuccess) {
       {
         std::lock_guard<std::mutex> registry_lock(registry_mutex);
         unregister_handle(*raw_state);
         *raw_state = nullptr;
       }
       retain_poisoned(state, state->context);
-      return hip_failure(error_sink,
-                         key_status != hipSuccess ? key_status : value_status,
+      const hipError_t first_status =
+          key_status != hipSuccess           ? key_status
+          : value_status != hipSuccess       ? value_status
+          : key_scale_status != hipSuccess   ? key_scale_status
+          : value_scale_status != hipSuccess ? value_scale_status
+          : key_outer_status != hipSuccess   ? key_outer_status
+                                             : value_outer_status;
+      return hip_failure(error_sink, first_status,
                          "release virtual KV state buffers");
     }
 
@@ -7467,6 +7640,11 @@ sllm_hip_kv_view_readback(const sllm_hip_kv_readback_request_t *const request,
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
           "KV evidence readback state is releasing or unsafe");
+    }
+    if (state->encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED_ENCODING,
+          "KV evidence readback v1 supports only FP16 value planes");
     }
     if (view->context_identity != state->context_identity ||
         view->state_identity != state->state_identity ||
@@ -7782,13 +7960,6 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV state device target does not match the compiled exact target");
     }
 #endif
-    const uint64_t bytes_per_token = static_cast<uint64_t>(state->head_count) *
-                                     state->head_dim * UINT64_C(2);
-    const uint64_t required_bytes = metadata.end_position * bytes_per_token;
-    const uint64_t required_mapped_bytes =
-        ((required_bytes + state->physical_page_bytes - 1U) /
-         state->physical_page_bytes) *
-        state->physical_page_bytes;
     hipMemAllocationProp allocation_properties{};
     allocation_properties.type = hipMemAllocationTypePinned;
     allocation_properties.location.type = hipMemLocationTypeDevice;
@@ -7797,17 +7968,41 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     hipMemAccessDesc access{};
     access.location = allocation_properties.location;
     access.flags = hipMemAccessFlagsProtReadWrite;
-    hipError_t grow_status = state->key_plane.grow(
-        required_mapped_bytes, allocation_properties, access);
+    const auto grow_plane = [&](KvVmmPlane &plane,
+                                const uint64_t bytes_per_token) -> hipError_t {
+      if (bytes_per_token == 0U) {
+        return hipSuccess;
+      }
+      const uint64_t required_bytes = metadata.end_position * bytes_per_token;
+      const uint64_t required_mapped_bytes =
+          plane.contiguous
+              ? required_bytes
+              : ((required_bytes + plane.page_bytes - 1U) / plane.page_bytes) *
+                    plane.page_bytes;
+      return plane.grow(required_mapped_bytes, allocation_properties, access);
+    };
+    hipError_t grow_status =
+        grow_plane(state->key_plane, state->value_bytes_per_token);
     if (grow_status == hipSuccess) {
-      grow_status = state->value_plane.grow(required_mapped_bytes,
-                                            allocation_properties, access);
+      grow_status =
+          grow_plane(state->value_plane, state->value_bytes_per_token);
     }
-    state->committed_bytes_per_plane = std::min(
-        state->key_plane.mapped_bytes, state->value_plane.mapped_bytes);
-    state->mapped_token_capacity =
-        std::min(state->capacity_tokens,
-                 state->committed_bytes_per_plane / bytes_per_token);
+    if (grow_status == hipSuccess) {
+      grow_status =
+          grow_plane(state->key_scale_plane, state->scale_bytes_per_token);
+    }
+    if (grow_status == hipSuccess) {
+      grow_status =
+          grow_plane(state->value_scale_plane, state->scale_bytes_per_token);
+    }
+    if (grow_status == hipSuccess) {
+      grow_status = grow_plane(state->key_outer_scale_plane,
+                               state->outer_scale_bytes_per_token);
+    }
+    if (grow_status == hipSuccess) {
+      grow_status = grow_plane(state->value_outer_scale_plane,
+                               state->outer_scale_bytes_per_token);
+    }
     if (grow_status != hipSuccess) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
@@ -7816,6 +8011,31 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       }
       return hip_failure(error_sink, grow_status,
                          "grow virtual KV physical commitment");
+    }
+    state->committed_bytes_per_plane =
+        std::min(state->key_plane.mapped_bytes,
+                 state->value_plane.mapped_bytes) +
+        std::min(state->key_scale_plane.mapped_bytes,
+                 state->value_scale_plane.mapped_bytes) +
+        std::min(state->key_outer_scale_plane.mapped_bytes,
+                 state->value_outer_scale_plane.mapped_bytes);
+    state->mapped_token_capacity = std::min(
+        state->capacity_tokens, std::min(state->key_plane.mapped_bytes,
+                                         state->value_plane.mapped_bytes) /
+                                    state->value_bytes_per_token);
+    if (state->scale_bytes_per_token != 0U) {
+      state->mapped_token_capacity =
+          std::min(state->mapped_token_capacity,
+                   std::min(state->key_scale_plane.mapped_bytes,
+                            state->value_scale_plane.mapped_bytes) /
+                       state->scale_bytes_per_token);
+    }
+    if (state->outer_scale_bytes_per_token != 0U) {
+      state->mapped_token_capacity =
+          std::min(state->mapped_token_capacity,
+                   std::min(state->key_outer_scale_plane.mapped_bytes,
+                            state->value_outer_scale_plane.mapped_bytes) /
+                       state->outer_scale_bytes_per_token);
     }
     try {
       candidate = std::make_unique<Completion>(
@@ -7900,11 +8120,13 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         byte_pointer(value_input, metadata.value_input.byte_offset));
     const hipError_t launch_status = ::sllm_kv_state_kernel::launch(
         key_input_pointer, value_input_pointer,
-        static_cast<uint16_t *>(state->key_buffer->device_pointer),
-        static_cast<uint16_t *>(state->value_buffer->device_pointer),
+        state->key_buffer->device_pointer, state->value_buffer->device_pointer,
+        state->key_scale_plane.address, state->value_scale_plane.address,
+        static_cast<float *>(state->key_outer_scale_plane.address),
+        static_cast<float *>(state->value_outer_scale_plane.address),
         static_cast<uint32_t>(metadata.token_count), state->capacity_tokens,
         metadata.start_position, state->head_count, state->head_dim,
-        queue->stream);
+        state->encoding, queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -7921,7 +8143,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     }
     fill_kv_append_info(append_info, dispatch_id, metadata.start_position,
                         metadata.token_count, metadata.end_position,
-                        state->head_count, arch_name);
+                        state->head_count, state->head_dim, state->encoding,
+                        arch_name);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

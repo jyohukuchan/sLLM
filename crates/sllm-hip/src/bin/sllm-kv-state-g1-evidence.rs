@@ -377,8 +377,8 @@ fn run_normal_case(
         .map_err(|error| format!("normal KV snapshot failed: {error}"))?;
     let expected_length = start_position + u64::try_from(m).unwrap_or(u64::MAX);
     let metadata_layout = snapshot.layout().storage_shape(capacity) == [capacity, 4, 256]
-        && snapshot.layout().dtype() == DType::F16
-        && snapshot.layout().encoding() == Encoding::Unquantized;
+        && snapshot.descriptor().dtype() == DType::F16
+        && snapshot.descriptor().encoding() == Encoding::Unquantized;
     let normal_length_generation = snapshot.length() == expected_length;
     let actual_k = read_plane(
         session,

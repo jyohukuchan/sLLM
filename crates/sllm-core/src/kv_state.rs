@@ -1,21 +1,62 @@
 //! Typed, backend-neutral request-local full-attention KV state contracts.
 //!
 //! The state is deliberately not a semantic operation.  Its storage and
-//! length are owned by the backend, while these types make the fixed C3a2
-//! layout and append admission rules explicit at the core boundary.
+//! length are owned by the backend, while these types make the C3a2 geometry,
+//! versioned physical encoding, and append admission rules explicit at the
+//! core boundary.
 
 use std::fmt;
 use std::num::NonZeroU64;
 
 use crate::execution::{ExecutionSessionId, KvStateId};
-use crate::{DType, Encoding};
+use crate::{DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 
-/// The only C3a2 KV storage layout.
+/// Versioned physical encoding selected for a request-local KV state.
 ///
-/// Each of K and V is a separate contiguous-address unquantized FP16 buffer
-/// with token-major shape `[capacity, 4, 256]`. Physical ownership may use
-/// virtual-contiguous VMM pages or a contiguous-resident allocation. Query-head
-/// repetition is performed by attention, not materialized in this state.
+/// This is backend metadata, not a user-facing generation option. The model
+/// runtime chooses it from the loaded model recipe and target capabilities.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum KvCacheEncoding {
+    #[default]
+    Fp16,
+    Fp8E4M3Fn,
+    Nvfp4,
+}
+
+impl KvCacheEncoding {
+    pub const fn dtype(self) -> DType {
+        match self {
+            Self::Fp16 => DType::F16,
+            Self::Fp8E4M3Fn => DType::F8E4M3Fn,
+            Self::Nvfp4 => DType::U8,
+        }
+    }
+
+    pub const fn encoding(self) -> Encoding {
+        match self {
+            Self::Fp16 => Encoding::Unquantized,
+            Self::Fp8E4M3Fn => Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            Self::Nvfp4 => Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+        }
+    }
+}
+
+/// Backend-neutral KV geometry. Physical dtype and quantization encoding live
+/// on [`KvStateDescriptor`], so geometry-only callers cannot accidentally
+/// infer FP16 storage for a low-bit state.
+///
+/// Each of K and V has a separate contiguous-address token-major value plane
+/// with logical shape `[capacity, heads, head_dim]`. A descriptor selects FP16,
+/// FP8 plus an outer scale plane, or packed NVFP4 plus block/outer scale planes.
+/// Physical ownership may use virtual-contiguous VMM pages or resident
+/// allocations. Query-head repetition is performed by attention, not stored.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct KvStateLayout {
     heads: usize,
@@ -34,8 +75,6 @@ impl Default for KvStateLayout {
 impl KvStateLayout {
     pub const HEADS: usize = 4;
     pub const HEAD_DIM: usize = 256;
-    pub const DTYPE: DType = DType::F16;
-    pub const ENCODING: Encoding = Encoding::Unquantized;
 
     pub fn new(heads: usize, head_dim: usize) -> Result<Self, KvStateError> {
         if heads == 0 || head_dim == 0 {
@@ -50,14 +89,6 @@ impl KvStateLayout {
 
     pub const fn head_dim(self) -> usize {
         self.head_dim
-    }
-
-    pub const fn dtype(self) -> DType {
-        Self::DTYPE
-    }
-
-    pub const fn encoding(self) -> Encoding {
-        Self::ENCODING
     }
 
     pub const fn storage_shape(self, capacity: u64) -> [u64; 3] {
@@ -159,6 +190,7 @@ pub struct KvStateDescriptor {
     layer_id: u32,
     capacity: NonZeroU64,
     layout: KvStateLayout,
+    cache_encoding: KvCacheEncoding,
 }
 
 impl KvStateDescriptor {
@@ -168,6 +200,7 @@ impl KvStateDescriptor {
             layer_id,
             capacity,
             layout: KvStateLayout::default(),
+            cache_encoding: KvCacheEncoding::Fp16,
         })
     }
 
@@ -182,6 +215,23 @@ impl KvStateDescriptor {
             layer_id,
             capacity,
             layout: KvStateLayout::new(heads, head_dim)?,
+            cache_encoding: KvCacheEncoding::Fp16,
+        })
+    }
+
+    pub fn new_with_storage(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+        cache_encoding: KvCacheEncoding,
+    ) -> Result<Self, KvStateError> {
+        let capacity = NonZeroU64::new(capacity).ok_or(KvStateError::ZeroCapacity)?;
+        Ok(Self {
+            layer_id,
+            capacity,
+            layout: KvStateLayout::new(heads, head_dim)?,
+            cache_encoding,
         })
     }
 
@@ -202,11 +252,34 @@ impl KvStateDescriptor {
     }
 
     pub const fn dtype(self) -> DType {
-        KvStateLayout::DTYPE
+        self.cache_encoding.dtype()
     }
 
     pub const fn encoding(self) -> Encoding {
-        KvStateLayout::ENCODING
+        self.cache_encoding.encoding()
+    }
+
+    pub const fn cache_encoding(self) -> KvCacheEncoding {
+        self.cache_encoding
+    }
+
+    /// Resident bytes for K or V, including separately owned scale planes.
+    /// The complete state owns two such composites.
+    pub fn resident_bytes_per_plane(self) -> Option<u64> {
+        let capacity = self.capacity();
+        let heads = u64::try_from(self.layout.heads()).ok()?;
+        let head_dim = u64::try_from(self.layout.head_dim()).ok()?;
+        let bytes_per_token = match self.cache_encoding {
+            KvCacheEncoding::Fp16 => heads.checked_mul(head_dim)?.checked_mul(2)?,
+            KvCacheEncoding::Fp8E4M3Fn => heads
+                .checked_mul(head_dim)?
+                .checked_add(heads.checked_mul(4)?)?,
+            KvCacheEncoding::Nvfp4 => heads
+                .checked_mul(head_dim.div_ceil(2))?
+                .checked_add(heads.checked_mul(head_dim.div_ceil(16))?)?
+                .checked_add(heads.checked_mul(4)?)?,
+        };
+        capacity.checked_mul(bytes_per_token)
     }
 }
 
@@ -452,8 +525,8 @@ mod tests {
 
         assert_eq!(layout.heads(), 4);
         assert_eq!(layout.head_dim(), 256);
-        assert_eq!(layout.dtype(), DType::F16);
-        assert_eq!(layout.encoding(), Encoding::Unquantized);
+        assert_eq!(descriptor.dtype(), DType::F16);
+        assert_eq!(descriptor.encoding(), Encoding::Unquantized);
         assert_eq!(descriptor.storage_shape(), [257, 4, 256]);
         assert_eq!(descriptor.layer_id(), 7);
         assert_eq!(descriptor.capacity(), 257);
@@ -476,6 +549,22 @@ mod tests {
                 capacity: 1,
             })
         );
+    }
+
+    #[test]
+    fn lowbit_descriptors_include_scale_planes_in_resident_bytes() {
+        let fp16 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp16).unwrap();
+        let fp8 = KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp8E4M3Fn)
+            .unwrap();
+        let nvfp4 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 257, KvCacheEncoding::Nvfp4).unwrap();
+        assert_eq!(fp16.resident_bytes_per_plane(), Some(257 * 2048));
+        assert_eq!(fp8.resident_bytes_per_plane(), Some(257 * 1040));
+        assert_eq!(nvfp4.resident_bytes_per_plane(), Some(257 * 600));
+        assert_eq!(fp8.dtype(), DType::F8E4M3Fn);
+        assert_eq!(nvfp4.dtype(), DType::U8);
+        assert_ne!(fp16, fp8);
     }
 
     #[test]

@@ -30,6 +30,10 @@ sllm_status_t
 validate_state_create_info(const sllm_kv_state_create_info_t *info,
                            sllm_error_sink_t *sink) noexcept;
 
+sllm_status_t
+validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *info,
+                              sllm_error_sink_t *sink) noexcept;
+
 sllm_status_t validate_append_prefix(const sllm_kv_append_desc_t *descriptor,
                                      sllm_error_sink_t *sink) noexcept;
 

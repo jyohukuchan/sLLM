@@ -550,6 +550,7 @@ pub fn build_qwen35_graph(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         fp8_sidecar_fingerprint: None,
+        kv_cache_encoding: crate::KvCacheEncoding::Fp16,
     })?;
     builder.build()
 }
@@ -571,6 +572,30 @@ pub fn build_qwen35_fp8_graph(
         token_count,
         state_capacity,
         DType::F8E4M3Fn,
+        crate::KvCacheEncoding::Fp16,
+    )
+}
+
+/// Build a verified FP8-weight graph with an internally selected KV encoding.
+/// Normal model loading uses FP16 unless model metadata explicitly specifies a
+/// different recipe; evidence and first-class model adapters may call this
+/// entry point after validating that metadata.
+pub fn build_qwen35_fp8_graph_with_kv_cache_encoding(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedFp8Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_fp8_graph_with_dtype(
+        lock,
+        plan,
+        sidecar,
+        token_count,
+        state_capacity,
+        DType::F8E4M3Fn,
+        kv_cache_encoding,
     )
 }
 
@@ -590,6 +615,7 @@ pub fn build_qwen35_fp8_fnuz_graph(
         token_count,
         state_capacity,
         DType::F8E4M3FnuZ,
+        crate::KvCacheEncoding::Fp16,
     )
 }
 
@@ -602,6 +628,25 @@ pub fn build_qwen35_nvfp4_graph(
     sidecar: &crate::VerifiedNvfp4Sidecar,
     token_count: u64,
     state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_nvfp4_graph_with_kv_cache_encoding(
+        lock,
+        plan,
+        sidecar,
+        token_count,
+        state_capacity,
+        crate::KvCacheEncoding::Fp16,
+    )
+}
+
+/// Build a verified NVFP4-weight graph with an internally selected KV recipe.
+pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    sidecar: &crate::VerifiedNvfp4Sidecar,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
 ) -> Result<QwenGraph, QwenGraphError> {
     if sidecar.source_lock_fingerprint() != lock.fingerprint() {
         return Err(QwenGraphError::InvalidModel(
@@ -674,6 +719,7 @@ pub fn build_qwen35_nvfp4_graph(
         fp8_tensor_names: tensor_names,
         fp8_dtype: Some(DType::U8),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
+        kv_cache_encoding,
     })?
     .build()
 }
@@ -685,6 +731,7 @@ fn build_qwen35_fp8_graph_with_dtype(
     token_count: u64,
     state_capacity: u64,
     fp8_dtype: DType,
+    kv_cache_encoding: crate::KvCacheEncoding,
 ) -> Result<QwenGraph, QwenGraphError> {
     if sidecar.source_lock_fingerprint() != lock.fingerprint() {
         return Err(QwenGraphError::InvalidModel(
@@ -757,6 +804,7 @@ fn build_qwen35_fp8_graph_with_dtype(
         fp8_tensor_names,
         fp8_dtype: Some(fp8_dtype),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
+        kv_cache_encoding,
     })?
     .build()
 }
@@ -1392,6 +1440,7 @@ struct GraphBuilderConfig {
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
+    kv_cache_encoding: crate::KvCacheEncoding,
 }
 
 struct GraphBuilder {
@@ -1406,6 +1455,7 @@ struct GraphBuilder {
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
+    kv_cache_encoding: crate::KvCacheEncoding,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
     nodes: Vec<QwenGraphNode>,
@@ -1428,6 +1478,7 @@ impl GraphBuilder {
             fp8_tensor_names,
             fp8_dtype,
             fp8_sidecar_fingerprint,
+            kv_cache_encoding,
         } = config;
         let bindings = bindings
             .into_iter()
@@ -1450,6 +1501,7 @@ impl GraphBuilder {
             fp8_tensor_names,
             fp8_dtype,
             fp8_sidecar_fingerprint,
+            kv_cache_encoding,
             tensors: Vec::new(),
             producers: Vec::new(),
             nodes: Vec::new(),
@@ -1483,13 +1535,14 @@ impl GraphBuilder {
             let layer = layer as u32;
             match layer_type {
                 LayerType::FullAttention => {
-                    let descriptor = KvStateDescriptor::new_with_layout(
+                    let descriptor = KvStateDescriptor::new_with_storage(
                         layer,
                         self.state_capacity,
                         usize::try_from(self.dimensions.kv_heads)
                             .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
                         usize::try_from(self.dimensions.head_dim)
                             .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
+                        self.kv_cache_encoding,
                     )
                     .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
                     self.add_state(
@@ -1555,7 +1608,13 @@ impl GraphBuilder {
         encoding: Encoding,
         shape: Vec<u64>,
     ) -> Result<(), QwenGraphError> {
-        let (strides, byte_size) = checked_layout(dtype, encoding, &shape)?;
+        let (strides, encoded_byte_size) = checked_layout(dtype, encoding, &shape)?;
+        let byte_size = match descriptor {
+            QwenGraphStateDescriptor::Kv(kv) => kv
+                .resident_bytes_per_plane()
+                .ok_or(QwenGraphError::Overflow("KV resident bytes"))?,
+            QwenGraphStateDescriptor::Linear(_) => encoded_byte_size,
+        };
         self.total_state_bytes = self
             .total_state_bytes
             .checked_add(byte_size)
@@ -2177,13 +2236,14 @@ impl GraphBuilder {
             vec![],
             vec![],
         )?;
-        let kv = KvStateDescriptor::new_with_layout(
+        let kv = KvStateDescriptor::new_with_storage(
             layer,
             self.state_capacity,
             usize::try_from(self.dimensions.kv_heads)
                 .map_err(|_| QwenGraphError::Overflow("KV heads"))?,
             usize::try_from(self.dimensions.head_dim)
                 .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
+            self.kv_cache_encoding,
         )
         .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
         let kv_node = self.add_typed(
@@ -2837,6 +2897,7 @@ mod tests {
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
+            kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         })
         .expect("fixture bindings")
         .build()
@@ -3356,6 +3417,7 @@ mod tests {
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
+            kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());

@@ -323,7 +323,7 @@
 16. KV cache FP8/NVFP4へ対応する。
    - FP8 KVを先に、同じopaque KV encoding/layout境界へNVFP4を追加する。
    - append時に新規tokenだけを量子化し、attentionは全cacheのFP16/BF16 mirrorを作らず直接消費する。
-   - 詳細は[Phase 16 active plan](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
+   - 詳細は[Phase 16 archive](archive/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
    - Phase 16Fとして、提供元NVFP4/MXFP4 modelをfirst-class inputへ統合する。
      - Phase 16のFP8 KV後に、Unsloth Gemma 4 12BのW4A4 MLP、W8A8 attention、FP8 KV、BF16/ignoreという
        mixed recipeをartifact metadataどおりに実行する。
@@ -634,12 +634,13 @@ candidateを再確認した。
   Unsloth primary artifactがFP8 KVを要求するためPhase 16の後、MTP/visionの前に置く。詳細は
   [Phase 16F active plan](active/2026/08/11-20/phase16f-first-class-fp4-model-input.md)を正とする。
 
-### Phase 16: KV cache FP8/NVFP4（計画済み）
+### Phase 16: KV cache FP8/NVFP4（完了）
 
-- FP8 KVを先に完成させ、同じopaque state、VMM virtual-contiguous/contiguous-resident、transaction境界へNVFP4を追加する。
-- K/V value/scale plane、append、attention direct consumption、quality、capacity、cancel/recovery、VRAM/performanceを
-  exact `gfx1030`/`gfx1201`とNumPy oracleで検証する。全cache FP16/BF16 mirrorや別encoding fallbackを採用しない。
-- 詳細は[Phase 16 active plan](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
+- 同じopaque state、VMM virtual-contiguous/contiguous-resident、transaction境界へFP8/NVFP4 value/scale plane、append、
+  packed attention direct consumptionを追加した。全cache FP16/BF16 mirrorや別encoding fallbackは作らない。
+- exact `gfx1030`/`gfx1201`で各encoding 17 case、独立NumPy oracle、capacity、nonfinite、cleanup、実committed byteをPASSした。
+  `gfx942`はcompile/link-onlyでありGPU PASSではない。詳細は
+  [Phase 16 archive](archive/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
 
 ### Phase 16F: first-class FP4 model input（計画済み）
 
@@ -661,12 +662,12 @@ candidateを再確認した。
 
 | 順序 | Phase | 主要成果 | 先行理由・依存 |
 | ---: | --- | --- | --- |
-| 1 | Phase 16 | FP8/NVFP4 KV append・attention・capacity・quality | first-class Unsloth mixed recipeのFP8 KV依存を先に満たす |
-| 2 | Phase 16F | NVFP4 full mixed artifact、MXFP4/MXFP8 encoding/import | 仮のFP16 KV代用を避け、提供元artifactを忠実に検証する |
-| 3 | Phase 17 | Qwen3.5 MTP、次にvision、最後にcombined smoke | speculative stateは量子化を含むopaque KV contract安定後に実装する |
-| 4 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
-| 5 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
-| 6 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
+| 完了 | Phase 16 | FP8/NVFP4 KV append・attention・capacity・quality | first-class Unsloth mixed recipeのFP8 KV依存を満たした |
+| 1 | Phase 16F | NVFP4 full mixed artifact、MXFP4/MXFP8 encoding/import | 仮のFP16 KV代用を避け、提供元artifactを忠実に検証する |
+| 2 | Phase 17 | Qwen3.5 MTP、次にvision、最後にcombined smoke | speculative stateは量子化を含むopaque KV contract安定後に実装する |
+| 3 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
+| 4 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
+| 5 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
 
 Phase 18以降で残る具体項目はMoE、GGUF converter/runtime、request batching、chunked prefill、KV/会話/model lockの
 簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMAである。Responses API、
@@ -675,8 +676,8 @@ Phase 16〜17の実装で確定する共通descriptorと実測残差を見て固
 
 ## 現在の状態と次の作業
 
-- Phase 15Qまで完了し、Phase 16、Phase 16F、Phase 17の詳細active planを作成した。次は
-  [Phase 16 KV cache FP8/NVFP4](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)である。
+- Phase 16まで完了した。次は
+  [Phase 16F first-class FP4 model input](active/2026/08/11-20/phase16f-first-class-fp4-model-input.md)である。
   Phase 15Qの結果から、model本体のNVFP4品質には
   activation-aware calibrationの改善余地とE2M1/block-16 configuration ceilingの両方が寄与すると確定した。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、

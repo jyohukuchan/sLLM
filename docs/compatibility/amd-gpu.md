@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-14
+> 最終更新: 2026-08-16
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
 
@@ -171,11 +171,22 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 - この比較はRDNA2/RDNA4のpacked-dequant W4A16だけを証明する。Unsloth公開checkpointのW4A4、attention W8A8、FP8 KV、
   NVIDIA native FP4性能、CDNA3へ一般化しない。
 
+### Phase 16 FP8/NVFP4 KV cache
+
+- exact `gfx1030`/`gfx1201`で、opaque KV stateへのFP8 E4M3FNとpacked NVFP4 append、value/scale plane、
+  packed attention direct consumptionを各17 case実行した。独立oracle一致、provider metadata、fallback false、
+  cleanup 0を確認し、request全体のFP16/BF16 KV mirrorは作らない。
+- KV=8193でallocator granularityを含むcommitted byteはFP16 `18,874,368`に対しFP8 `12,582,912`、
+  NVFP4 `10,485,760`だった。短contextではscale planeの最小pageにより理論削減率と一致しない。
+- exact `gfx942`はROCm 7.14.0でcompile/linkしただけであり、Phase 12の既存FP16 KV evidenceを低bit KVへ拡張しない。
+  通常Qwen loaderはweight metadataからKV encodingを推測せずFP16を維持し、検証済みmodel recipeだけが低bit KVを選べる。
+
 詳細な実装・実機順は[Phase 10](../plans/archive/2026/08/11-20/phase10-fp8-w8a8.md)、
 [Phase 11](../plans/archive/2026/08/11-20/phase11-cdna3-port.md)、
 [Phase 12](../plans/archive/2026/08/11-20/phase12-mi300x-validation.md)、
 [Phase 15O](../plans/archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)、
-[Phase 15Q](../plans/archive/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)を正とする。
+[Phase 15Q](../plans/archive/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)、
+[Phase 16](../plans/archive/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
 
 ## 製品別evidence
 

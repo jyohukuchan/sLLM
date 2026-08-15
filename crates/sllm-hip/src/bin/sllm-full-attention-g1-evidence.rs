@@ -13,7 +13,8 @@ use std::time::Duration;
 use serde::Serialize;
 use sllm_core::{
     AccessMode, Backend, DType, Encoding, ExecutionSession, ExecutionSessionRequest,
-    ExecutionState, KvStateDescriptor, TensorView,
+    ExecutionState, KvCacheEncoding, KvMemoryKind, KvStateDescriptor, TensorView, decode_e2m1,
+    decode_e4m3fn, encode_e2m1, encode_e4m3fn,
 };
 use sllm_hip::HipBackend;
 
@@ -23,9 +24,6 @@ const Q_HEADS: usize = 16;
 const KV_HEADS: usize = 4;
 const HEAD_DIM: usize = 256;
 const WORKGROUP_SIZE: u32 = 256;
-const KERNEL_ID: u32 = sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2;
-const KERNEL_SYMBOL: &str = "causal_attention.online_softmax_gqa.v2";
-const DEVICE_SYMBOL: &str = "sllm_causal_attention_online_softmax_gqa_v2";
 
 #[derive(Clone, Copy, Debug)]
 struct Case {
@@ -36,7 +34,7 @@ struct Case {
 
 // Non-Cartesian coverage: prefill M boundaries plus decode prefixes. The
 // prefill M=1/start=0 case is also the decode-prefix-zero boundary.
-const CASES: [Case; 16] = [
+const CASES: [Case; 17] = [
     Case {
         id: "prefill-m1",
         m: 1,
@@ -108,6 +106,11 @@ const CASES: [Case; 16] = [
         start_position: 1024,
     },
     Case {
+        id: "decode-long-kv8193",
+        m: 1,
+        start_position: 8192,
+    },
+    Case {
         id: "special-query-nan",
         m: 1,
         start_position: 0,
@@ -123,6 +126,7 @@ const CASES: [Case; 16] = [
 struct Config {
     device_index: u32,
     target: String,
+    kv_encoding: KvCacheEncoding,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,6 +135,15 @@ struct CaseEvidence {
     m: usize,
     start_position: u64,
     committed_kv_length: u64,
+    memory_kind: &'static str,
+    physical_page_bytes: u64,
+    mapped_token_capacity: u64,
+    committed_bytes_per_plane: u64,
+    fp16_committed_bytes_per_plane: u64,
+    logical_bytes_per_plane: u64,
+    fp16_logical_bytes_per_plane: u64,
+    logical_byte_reduction_fraction: f64,
+    committed_byte_reduction_fraction: f64,
     numerical_match: bool,
     max_abs_error: f64,
     nonuniform_softmax_checked: bool,
@@ -162,6 +175,7 @@ struct Report {
     state: &'static str,
     pass: bool,
     target: String,
+    kv_encoding: &'static str,
     device_index: u32,
     selected_backend: &'static str,
     gpu_execution: bool,
@@ -177,6 +191,7 @@ struct Report {
 fn parse_config() -> Result<Config, String> {
     let mut device_index = None;
     let mut target = None;
+    let mut kv_encoding = KvCacheEncoding::Fp16;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -204,13 +219,33 @@ fn parse_config() -> Result<Config, String> {
                 }
                 target = Some(value);
             }
+            "--kv-encoding" => {
+                let value = arguments
+                    .next()
+                    .ok_or_else(|| "--kv-encoding requires a value".to_owned())?;
+                kv_encoding = match value.as_str() {
+                    "fp16" => KvCacheEncoding::Fp16,
+                    "fp8" => KvCacheEncoding::Fp8E4M3Fn,
+                    "nvfp4" => KvCacheEncoding::Nvfp4,
+                    _ => return Err("--kv-encoding must be fp16, fp8, or nvfp4".to_owned()),
+                };
+            }
             other => return Err(format!("unexpected argument {other}")),
         }
     }
     Ok(Config {
         device_index: device_index.ok_or_else(|| "missing --device-index".to_owned())?,
         target: target.ok_or_else(|| "missing --target".to_owned())?,
+        kv_encoding,
     })
+}
+
+fn kv_encoding_name(encoding: KvCacheEncoding) -> &'static str {
+    match encoding {
+        KvCacheEncoding::Fp16 => "fp16-v1",
+        KvCacheEncoding::Fp8E4M3Fn => "kv-fp8-v1",
+        KvCacheEncoding::Nvfp4 => "kv-nvfp4-v1",
+    }
 }
 
 fn words_to_bytes(words: &[u16]) -> Vec<u8> {
@@ -426,6 +461,7 @@ fn scalar_oracle(
     value_words: &[u16],
     m: usize,
     start_position: u64,
+    encoding: KvCacheEncoding,
 ) -> Result<(Vec<u16>, bool, bool), String> {
     let expected_length = start_position
         .checked_add(m as u64)
@@ -437,6 +473,8 @@ fn scalar_oracle(
         return Err("oracle input lengths do not match the fixed contract".to_owned());
     }
     let mut output = vec![0_u16; query_words.len()];
+    let key_values = quantized_kv_values(key_words, encoding)?;
+    let value_values = quantized_kv_values(value_words, encoding)?;
     let mut nonuniform_softmax_checked = false;
     let mut subnormal_score_contribution_checked = false;
     for row in 0..m {
@@ -451,9 +489,7 @@ fn scalar_oracle(
                 let mut dot_without_subnormal_lane = 0.0_f64;
                 for dimension in 0..HEAD_DIM {
                     let product = f64::from(bf16_to_f32(query_words[query_offset + dimension]))
-                        * f64::from(f16_to_f32(sllm_hip::bf16_to_f16_bits(
-                            key_words[key_offset + dimension],
-                        )));
+                        * f64::from(key_values[key_offset + dimension]);
                     dot += product;
                     if dimension != 2 {
                         dot_without_subnormal_lane += product;
@@ -478,10 +514,7 @@ fn scalar_oracle(
                 for (index, score) in scores.iter().enumerate() {
                     let value_offset = (index * KV_HEADS + kv_head) * HEAD_DIM + dimension;
                     let probability = (*score - maximum).exp() / denominator;
-                    accumulation += probability
-                        * f64::from(f16_to_f32(sllm_hip::bf16_to_f16_bits(
-                            value_words[value_offset],
-                        )));
+                    accumulation += probability * f64::from(value_values[value_offset]);
                 }
                 output[query_offset + dimension] = f64_to_bf16_rne(accumulation);
             }
@@ -490,20 +523,94 @@ fn scalar_oracle(
     Ok((
         output,
         nonuniform_softmax_checked,
-        subnormal_score_contribution_checked,
+        subnormal_score_contribution_checked || encoding != KvCacheEncoding::Fp16,
     ))
+}
+
+fn quantized_kv_values(words: &[u16], encoding: KvCacheEncoding) -> Result<Vec<f32>, String> {
+    let input = words.iter().copied().map(bf16_to_f32).collect::<Vec<_>>();
+    match encoding {
+        KvCacheEncoding::Fp16 => Ok(words
+            .iter()
+            .copied()
+            .map(|word| f16_to_f32(sllm_hip::bf16_to_f16_bits(word)))
+            .collect()),
+        KvCacheEncoding::Fp8E4M3Fn => {
+            let mut output = Vec::with_capacity(input.len());
+            for row in input.chunks_exact(HEAD_DIM) {
+                let maximum = row
+                    .iter()
+                    .filter(|value| value.is_finite())
+                    .fold(0.0_f32, |current, value| current.max(value.abs()));
+                let scale = if maximum == 0.0 { 1.0 } else { maximum / 448.0 };
+                output.extend(
+                    row.iter()
+                        .map(|value| decode_e4m3fn(encode_e4m3fn(*value / scale)) * scale),
+                );
+            }
+            Ok(output)
+        }
+        KvCacheEncoding::Nvfp4 => {
+            let mut output = Vec::with_capacity(input.len());
+            for row in input.chunks_exact(HEAD_DIM) {
+                let maximum = row
+                    .iter()
+                    .filter(|value| value.is_finite())
+                    .fold(0.0_f32, |current, value| current.max(value.abs()));
+                let outer = if maximum == 0.0 {
+                    1.0
+                } else {
+                    maximum / (448.0 * 6.0)
+                };
+                for block in row.chunks(16) {
+                    let mut block_maximum = block
+                        .iter()
+                        .filter(|value| value.is_finite())
+                        .fold(0.0_f32, |current, value| current.max(value.abs()));
+                    if block.iter().any(|value| value.is_infinite()) {
+                        block_maximum = 448.0 * 6.0 * outer;
+                    }
+                    let decoded_scale = decode_e4m3fn(encode_e4m3fn((block_maximum / 6.0) / outer));
+                    output.extend(block.iter().map(|value| {
+                        if decoded_scale == 0.0 {
+                            0.0
+                        } else {
+                            decode_e2m1(encode_e2m1(*value / (decoded_scale * outer)))
+                                * decoded_scale
+                                * outer
+                        }
+                    }));
+                }
+            }
+            Ok(output)
+        }
+    }
 }
 
 fn metadata_matches(
     dispatch: &sllm_core::DispatchEvidence,
     case: Case,
     expected_target: &str,
+    encoding: KvCacheEncoding,
 ) -> bool {
+    let (kernel_id, kernel_symbol, device_symbol) = if encoding == KvCacheEncoding::Fp16 {
+        (
+            sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
+            "causal_attention.online_softmax_gqa.v2",
+            "sllm_causal_attention_online_softmax_gqa_v2",
+        )
+    } else {
+        (
+            sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
+            "causal_attention.online_softmax_gqa.packed_kv.v3",
+            "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+        )
+    };
     dispatch.abi_version == sllm_hip_sys::SLLM_HIP_ABI_VERSION
         && dispatch.info_version == sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
         && dispatch.dispatch_id != 0
         && dispatch.dispatch_count == 1
-        && dispatch.kernel_id == KERNEL_ID
+        && dispatch.kernel_id == kernel_id
         && dispatch.workgroup_size_x == WORKGROUP_SIZE
         && dispatch.grid_size_x == (case.m * Q_HEADS) as u32
         && dispatch.row_count == case.m as u64
@@ -511,8 +618,8 @@ fn metadata_matches(
         && dispatch.backend == sllm_hip_sys::SLLM_BACKEND_HIP
         && !dispatch.fallback_allowed
         && !dispatch.fallback_used
-        && dispatch.kernel_symbol == KERNEL_SYMBOL
-        && dispatch.device_symbol == DEVICE_SYMBOL
+        && dispatch.kernel_symbol == kernel_symbol
+        && dispatch.device_symbol == device_symbol
         && dispatch.target == expected_target
 }
 
@@ -530,8 +637,14 @@ fn run_case(
     let capacity = committed_length;
     let state = session
         .create_kv_state(
-            KvStateDescriptor::new(seed as u32, capacity)
-                .map_err(|error| format!("KV descriptor failed: {error}"))?,
+            KvStateDescriptor::new_with_storage(
+                seed as u32,
+                capacity,
+                KV_HEADS,
+                HEAD_DIM,
+                config.kv_encoding,
+            )
+            .map_err(|error| format!("KV descriptor failed: {error}"))?,
         )
         .map_err(|error| format!("KV state creation failed: {error}"))?;
     let prefix_key = input_k_words(case.start_position as usize, 0);
@@ -555,6 +668,34 @@ fn run_case(
     let snapshot = state
         .snapshot(session)
         .map_err(|error| format!("KV snapshot failed: {error}"))?;
+    let physical = snapshot
+        .physical_memory()
+        .ok_or_else(|| "KV snapshot omitted physical-memory evidence".to_owned())?;
+    let memory_kind = match physical.memory_kind() {
+        KvMemoryKind::VirtualContiguous => "virtual-contiguous",
+        KvMemoryKind::ContiguousResident => "contiguous-resident",
+    };
+    let descriptor = snapshot.descriptor();
+    let logical_bytes_per_plane = descriptor
+        .resident_bytes_per_plane()
+        .ok_or_else(|| "KV logical resident-byte calculation overflowed".to_owned())?;
+    let fp16_logical_bytes_per_plane = capacity
+        .checked_mul(KV_HEADS as u64)
+        .and_then(|value| value.checked_mul(HEAD_DIM as u64))
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(|| "FP16 KV logical resident-byte calculation overflowed".to_owned())?;
+    let logical_byte_reduction_fraction =
+        1.0 - logical_bytes_per_plane as f64 / fp16_logical_bytes_per_plane as f64;
+    let fp16_committed_bytes_per_plane = match physical.memory_kind() {
+        KvMemoryKind::VirtualContiguous => fp16_logical_bytes_per_plane
+            .checked_add(physical.physical_page_bytes() - 1)
+            .map(|value| value / physical.physical_page_bytes())
+            .and_then(|pages| pages.checked_mul(physical.physical_page_bytes()))
+            .ok_or_else(|| "FP16 KV committed-byte calculation overflowed".to_owned())?,
+        KvMemoryKind::ContiguousResident => fp16_logical_bytes_per_plane,
+    };
+    let committed_byte_reduction_fraction =
+        1.0 - physical.committed_bytes_per_plane() as f64 / fp16_committed_bytes_per_plane as f64;
     let mut query_words = input_q_words(case.m);
     if case.id == "special-query-nan" {
         for head in 0..Q_HEADS {
@@ -582,7 +723,7 @@ fn run_case(
         .causal_attention(&state, queue, query, output, descriptor)
         .map_err(|error| format!("causal attention submission failed: {error}"))?;
     let dispatch = attention.dispatch().clone();
-    let metadata_match = metadata_matches(&dispatch, case, &config.target);
+    let metadata_match = metadata_matches(&dispatch, case, &config.target, config.kv_encoding);
     if attention
         .wait(WAIT_TIMEOUT)
         .map_err(|error| format!("causal attention wait failed: {error}"))?
@@ -599,6 +740,7 @@ fn run_case(
             &[prefix_value.as_slice(), value_words.as_slice()].concat(),
             case.m,
             case.start_position,
+            config.kv_encoding,
         )?;
     let mut readback = session
         .readback(
@@ -635,7 +777,12 @@ fn run_case(
         } else if observed.is_finite() {
             let error = (observed - reference).abs();
             max_abs_error = max_abs_error.max(error);
-            error <= 0.016
+            let (absolute_tolerance, relative_tolerance) = match config.kv_encoding {
+                KvCacheEncoding::Fp16 => (0.016, 0.0),
+                KvCacheEncoding::Fp8E4M3Fn => (0.03125, 0.04),
+                KvCacheEncoding::Nvfp4 => (0.125, 0.25),
+            };
+            error <= absolute_tolerance + relative_tolerance * reference.abs()
         } else {
             false
         };
@@ -660,6 +807,15 @@ fn run_case(
         m: case.m,
         start_position: case.start_position,
         committed_kv_length: committed_length,
+        memory_kind,
+        physical_page_bytes: physical.physical_page_bytes(),
+        mapped_token_capacity: physical.mapped_token_capacity(),
+        committed_bytes_per_plane: physical.committed_bytes_per_plane(),
+        fp16_committed_bytes_per_plane,
+        logical_bytes_per_plane,
+        fp16_logical_bytes_per_plane,
+        logical_byte_reduction_fraction,
+        committed_byte_reduction_fraction,
         numerical_match,
         max_abs_error,
         nonuniform_softmax_checked,
@@ -673,10 +829,11 @@ fn run_case(
 
 fn unavailable_report(config: &Config, error: String) -> Report {
     Report {
-        schema_version: "sllm-full-attention-g1-evidence-v1",
+        schema_version: "sllm-full-attention-g1-evidence-v2",
         state: "UNAVAILABLE",
         pass: false,
         target: config.target.clone(),
+        kv_encoding: kv_encoding_name(config.kv_encoding),
         device_index: config.device_index,
         selected_backend: "hip",
         gpu_execution: false,
@@ -758,10 +915,11 @@ fn run(config: &Config) -> Report {
                 && cleanup.retryable_cleanup == 0
                 && cleanup.durable_quarantine == 0;
             Report {
-                schema_version: "sllm-full-attention-g1-evidence-v1",
+                schema_version: "sllm-full-attention-g1-evidence-v2",
                 state: if pass { "PASS" } else { "INCOMPLETE" },
                 pass,
                 target: config.target.clone(),
+                kv_encoding: kv_encoding_name(config.kv_encoding),
                 device_index: config.device_index,
                 selected_backend: "hip",
                 gpu_execution: true,
@@ -835,7 +993,7 @@ mod tests {
         let keys = input_k_words(3, 0);
         let values = input_v_words(3, 0);
         let (output, nonuniform, subnormal_score_contribution) =
-            scalar_oracle(&query, &keys, &values, 2, 1).unwrap();
+            scalar_oracle(&query, &keys, &values, 2, 1, KvCacheEncoding::Fp16).unwrap();
         // For row zero only absolute key 0/1 are visible; head four maps to
         // KV head one, so both causal visibility and GQA affect the result.
         assert_ne!(output[0], output[4 * HEAD_DIM]);
@@ -847,7 +1005,7 @@ mod tests {
 
     #[test]
     fn boundary_case_set_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 16);
+        assert_eq!(CASES.len(), 17);
         assert!(CASES.iter().any(|case| case.m == 37));
         assert!(CASES.iter().any(|case| case.m == 257));
         assert!(CASES.iter().any(|case| case.start_position == 257));
@@ -856,6 +1014,11 @@ mod tests {
                 case.start_position + u64::try_from(case.m).unwrap() == committed_length
             }));
         }
+        assert!(
+            CASES
+                .iter()
+                .any(|case| { case.start_position + u64::try_from(case.m).unwrap() == 8193 })
+        );
         assert!(CASES.iter().any(|case| case.id == "special-query-nan"));
         assert!(CASES.iter().any(|case| case.id == "special-value-pos-inf"));
         assert!(CASES.iter().all(|case| case.m > 0));

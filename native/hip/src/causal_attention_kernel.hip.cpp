@@ -40,6 +40,54 @@ __device__ float bf16_to_f32(const uint16_t raw) noexcept {
   return __uint_as_float(static_cast<uint32_t>(raw) << 16U);
 }
 
+__device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
+  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
+  if (exponent == 0U) {
+    return mantissa == 0U
+               ? copysignf(0.0F, sign)
+               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -9);
+  }
+  if (exponent == 0x0fU && mantissa == 0x07U) {
+    return NAN;
+  }
+  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
+         ldexpf(1.0F, static_cast<int>(exponent) - 7);
+}
+
+__device__ float e2m1_to_f32(const uint8_t bits) noexcept {
+  constexpr float positive[8] = {0.0F, 0.5F, 1.0F, 1.5F,
+                                 2.0F, 3.0F, 4.0F, 6.0F};
+  const float value = positive[bits & 0x07U];
+  return (bits & 0x08U) == 0U ? value : -value;
+}
+
+__device__ float load_kv(const void *const values, const void *const scales,
+                         const float *const outer_scales,
+                         const uint32_t encoding, const uint64_t row,
+                         const uint32_t dimension,
+                         const uint32_t head_dim) noexcept {
+  if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
+    return f16_to_f32(
+        static_cast<const uint16_t *>(values)[row * head_dim + dimension]);
+  }
+  if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1) {
+    return e4m3fn_to_f32(static_cast<const uint8_t *>(
+               values)[row * head_dim + dimension]) *
+           static_cast<const float *>(scales)[row];
+  }
+  const uint64_t packed_per_row = (static_cast<uint64_t>(head_dim) + 1U) / 2U;
+  const uint64_t blocks_per_row = (static_cast<uint64_t>(head_dim) + 15U) / 16U;
+  const uint8_t packed = static_cast<const uint8_t *>(
+      values)[row * packed_per_row + dimension / 2U];
+  const uint8_t code = (dimension & 1U) == 0U ? packed & 0x0fU : packed >> 4U;
+  return e2m1_to_f32(code) *
+         e4m3fn_to_f32(static_cast<const uint8_t *>(
+             scales)[row * blocks_per_row + dimension / 16U]) *
+         outer_scales[row];
+}
+
 __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
   const uint32_t bits = __float_as_uint(value);
   constexpr uint32_t exponent_mask = UINT32_C(0x7f800000);
@@ -65,11 +113,13 @@ __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
 
 #pragma clang fp contract(off)
 __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
-    const uint16_t *const query, const uint16_t *const key,
-    const uint16_t *const value, uint16_t *const output,
-    const uint32_t query_count, const uint64_t /*capacity_tokens*/,
-    const uint64_t start_position, const uint64_t committed_kv_length,
-    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim) {
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t /*capacity_tokens*/, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t encoding) {
   if (blockIdx.x >= query_count * q_heads) {
     return;
   }
@@ -102,11 +152,13 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
   float accumulation = 0.0F;
   for (uint64_t key_position = 0U; key_position <= query_position;
        ++key_position) {
-    const uint64_t key_base = (key_position * kv_heads + kv_head) * head_dim;
-    reductions[dimension] = dimension < head_dim
-                                ? bf16_to_f32(query_row[dimension]) *
-                                      f16_to_f32(key[key_base + dimension])
-                                : 0.0F;
+    const uint64_t kv_row = key_position * kv_heads + kv_head;
+    reductions[dimension] =
+        dimension < head_dim
+            ? bf16_to_f32(query_row[dimension]) *
+                  load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
+                          dimension, head_dim)
+            : 0.0F;
     __syncthreads();
     for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
          stride != 0U; stride >>= 1U) {
@@ -126,8 +178,10 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     }
     __syncthreads();
     if (dimension < head_dim) {
-      accumulation = accumulation * rescale +
-                     contribution * f16_to_f32(value[key_base + dimension]);
+      accumulation =
+          accumulation * rescale +
+          contribution * load_kv(value, value_scales, value_outer_scales,
+                                 encoding, kv_row, dimension, head_dim);
     }
     __syncthreads();
   }
@@ -138,19 +192,26 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
 
 } // namespace
 
-hipError_t launch(const uint16_t *const query, const uint16_t *const key,
-                  const uint16_t *const value, uint16_t *const output,
+hipError_t launch(const uint16_t *const query, const void *const key,
+                  const void *const value, const void *const key_scales,
+                  const void *const value_scales,
+                  const float *const key_outer_scales,
+                  const float *const value_outer_scales, uint16_t *const output,
                   const uint32_t query_count, const uint64_t capacity_tokens,
                   const uint64_t start_position,
                   const uint64_t committed_kv_length, const uint32_t q_heads,
                   const uint32_t kv_heads, const uint32_t head_dim,
-                  const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const hipStream_t stream) noexcept {
   if (query == nullptr || key == nullptr || value == nullptr ||
       output == nullptr || query_count == 0U ||
       query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
       committed_kv_length == 0U || q_heads == 0U || kv_heads == 0U ||
       q_heads % kv_heads != 0U || head_dim == 0U ||
-      head_dim > SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE) {
+      head_dim > SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE ||
+      (encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
+       (key_scales == nullptr || value_scales == nullptr)) ||
+      (encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&
+       (key_outer_scales == nullptr || value_outer_scales == nullptr))) {
     return hipErrorInvalidValue;
   }
   const uint64_t block_count = static_cast<uint64_t>(query_count) * q_heads;
@@ -160,8 +221,9 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
   hipLaunchKernelGGL(
       causal_attention_kernel, dim3(static_cast<uint32_t>(block_count)),
       dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
-      value, output, query_count, capacity_tokens, start_position,
-      committed_kv_length, q_heads, kv_heads, head_dim);
+      value, key_scales, value_scales, key_outer_scales, value_outer_scales,
+      output, query_count, capacity_tokens, start_position, committed_kv_length,
+      q_heads, kv_heads, head_dim, encoding);
   return hipGetLastError();
 }
 
