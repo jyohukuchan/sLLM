@@ -1,5 +1,17 @@
 # Phase 15Q Unsloth NVFP4品質要因切り分け履歴
 
+## 2026-08-16: FP4公式入力と内部状態の再整理
+
+- ユーザー決定により、提供元NVFP4 PTQ/QAT checkpointとMXFP4/MXFP8 QAT/native modelをfirst-class model inputとして扱う。
+  Phase 15Qの`correctness-only opt-in`はS0/U0/O0というsLLM製W4A16 PTQ converter candidateの不採用を表した過去の
+  evidence labelへscopeし、NVFP4/MXFP4 encoding、提供元artifact、同一artifactを正しく実行するproviderへ一般化しない。
+- BF16 sourceから作るsLLM PTQには従来KLD budgetを維持する。提供元PTQ/QATは同じquantized artifactのreference実行と
+  task評価、BF16正本を持たないnative low-bit modelはartifact fidelity、reference実行、task評価で判定する。
+- 最終GGUFではdtype/encodingにかかわらず同じload/generate/serve操作を使い、providerを自動選択する。量子化artifactの選択を
+  十分なユーザー意思とし、低bitを理由とする許可flag、確認、通常警告を追加しない。内部ではruntime成熟度、provider優先順位、
+  converter品質、model evidenceを独立管理する。
+- この時点では製品・受入・interface方針だけを更新し、新しいPhase、詳細計画、source implementationは作成していない。
+
 ## 2026-08-15: 実装・実機検証・closeout
 
 ### Artifactとsource identity

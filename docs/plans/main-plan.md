@@ -318,6 +318,8 @@
      - prefillはFP8 hipBLASLt solutionとNVFP4 packed-dequant tiled providerを最適化する。
    - Phase 15Qとして、Unsloth NVFP4 checkpointを使い、現行NVFP4の品質差を量子化algorithm、format ceiling、
      format mapping/runtimeへ切り分ける。
+   - 提供元が公開するNVFP4 PTQ/QAT checkpointと、MXFP4/MXFP8でQATまたはnative公開されたmodelをfirst-class model
+     inputとして扱う。sLLMがBF16から生成するPTQ converterの品質判定と、提供元quantized/native modelのsupport判定を分ける。
 16. KV cache FP8/NVFP4へ対応する。
 17. MTP、visionへ対応する。
 18. Gemma4またはQwen3.5のMoEへ対応する。
@@ -485,7 +487,8 @@ candidateを再確認した。
 - 公式Qwen3.5 FP8は27B以上が中心であるため、小型第三者checkpointを基準にせず、公式27B FP8はPhase 12の
   追加interop spotとする。
 - R9700 32/32でresident VRAMをBF16比約42.4%削減したが、prefill/decode/E2Eは低下したためdefaultへ
-  昇格しない。native FP8はopt-in、V620 emulationはcorrectness-only、V620 `converted-bf16`は明示pathとする。
+  昇格しない。当時の内部evidenceではR9700 native、V620 emulation、V620 `converted-bf16`を別provider scopeとして記録した。
+  これは最終CLIへ異なる許可操作を要求する区分ではない。
 - 詳細は[Phase 10 archive](archive/2026/08/11-20/phase10-fp8-w8a8.md)を正とする。
 
 ### Phase 11: FP8/BF16のCDNA3移植（完了）
@@ -564,7 +567,7 @@ candidateを再確認した。
   Qwen3.5-2B full sidecarは186 tensor、772,236,184 byteでbyte-identical再生成を確認した。
 - Qwen full-modelは両exact targetでtop-1 3/3一致したが最大KLD `0.2637523`が既定budget `0.05`を超えた。
   Gemma 4-12B layer 0 gate sliceもtop-1 2/3だったため、thresholdを緩めず両targetとも
-  `correctness-only opt-in`とした。providerはnative FP4ではない。
+  sLLM製PTQ converter candidateを採用しなかった。providerはnative FP4ではなく、このmodel品質判定とruntime correctnessは分ける。
 - V620ではresident 3,763,686,080 byteから1,790,406,056 byteへ52.43%削減した。CLIとOpenAI
   non-stream/SSE/stop/Unicode/連続request/disconnect/cleanupをR9700で通した。
 - sidecarのdevice payloadは量子化対象BF16 weight比`0.281250271`で、理論`4.5/16`と一致する。全residentには
@@ -580,8 +583,8 @@ candidateを再確認した。
   7.48〜29.36%低遅延、Qwen3.5-4B 32/32でprefill `+5.89%`、decode `+10.69%`、E2E `-9.27%`となった。
 - NVFP4 decode候補は改善せず棄却して従来device kernelを維持した。prefillはpacked weight K tileを最大8 M rowで
   共有するproviderを採用し、M=32 operatorでR9700 59.29〜59.51%、V620 51.21〜56.68%低遅延となった。
-- resident/peak、sidecar、数値/fail-closed contractは不変。FP8 R9700は`opt-in production`、V620 emulationは
-  `correctness-only`、NVFP4はaccuracy budget超過のため両targetとも`correctness-only opt-in`を維持する。
+- resident/peak、sidecar、数値/fail-closed contractは不変。FP8のtarget別provider優先順位は維持し、NVFP4はaccuracy
+  budget超過のsLLM製PTQ converter candidateだけを不採用とした。historical status labelはユーザー向け起動modeではない。
 - 詳細は[Phase 15O archive](archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)を正とする。
 
 ### Phase 15Q: Unsloth NVFP4品質要因の切り分け（完了）
@@ -594,13 +597,32 @@ candidateを再確認した。
   `62.50%→76.04%`へ改善し、activation-aware calibrationの寄与を確認した。
 - U0のweight MSEは全144 tensorでS0より悪く、改善位置もR9700 66/96、V620 61/96に留まった。最大KLDは
   `9.1781`/`7.5777`で既存budget `0.05`を超えたため、原因はalgorithmだけでも数学的な型限界だけでもない`mixed`と判定した。
-  O0 weight-MSE searchも採用せず、NVFP4は両targetで`correctness-only opt-in`を維持する。
+  O0 weight-MSE searchも採用せず、S0/U0/O0をsLLM製PTQ converter candidateとして採用しない。この判定を提供元QAT/native
+  checkpoint、NVFP4/MXFP4 encoding、または同じquantized artifactを正しく実行するruntime providerのsupport判定へ転用しない。
 - 詳細は[Phase 15Q archive](archive/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)を正とする。
+
+### FP4 model inputと内部状態の製品方針（決定済み、詳細計画未作成）
+
+- NVFP4とOCP MXFP4を公式model input経路へ置く。NVFP4、MXFP4、対応するFP8/MXFP8 activation、model固有のmixed-precision
+  recipeは別encodingとしてfail-closedに解釈し、異なるscale/group/layoutを同じ「FP4」として推測しない。
+- sLLMがBF16 sourceから生成するPTQ artifactは、対応するBF16とのKLD、top-1、task品質でconverter採否を決め、既存budgetを
+  暗黙に緩和しない。提供元PTQ/QAT checkpointは同じquantized artifactのreference runtime、提供元評価、task oracleで判定する。
+  BF16が正本として存在しないnative low-bit modelへBF16 KLD gateを要求しない。
+- `default`、`opt-in production`、`correctness-only opt-in`はユーザーに選択、確認、警告を要求するCLI modeにしない。
+  量子化artifactを選ぶこと自体をユーザーの選択とし、低bitの一般的trade-offを理由とする警告を通常出力へ追加しない。
+- 内部ではruntime成熟度、target別provider優先順位、converter品質、model/evidence scopeを独立に保持する。通常起動はartifact metadataと
+  exact targetからproviderを自動選択し、開発・benchmark用の明示provider overrideだけを任意に残す。破損artifact、未対応encoding、
+  実行不能targetは警告付き継続ではなくerrorにする。
+- 最終GGUFではBF16、FP8、NVFP4、MXFP4に同じユーザー操作を使い、encoding/providerはloader内部で解決する。現行の
+  safetensors＋sidecar＋provider引数は移行中の開発interfaceであり、最終UX contractではない。
+- この決定は製品・受入・interface方針だけを固定する。対象model、phase順序、実装checkpoint、GPU matrixを含む詳細計画はまだ作成しない。
 
 ## 現在の状態と次の作業
 
 - Phase 15Qまで完了した。次はPhase 16 KV cache FP8/NVFP4である。Phase 15Qの結果から、model本体のNVFP4品質には
   activation-aware calibrationの改善余地とE2M1/block-16 configuration ceilingの両方が寄与すると確定した。
+- 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
+  起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
 - 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと
   量子化sidecarは移行完了まで維持し、この決定だけを理由にPhase 16を自動開始または繰り下げない。
 - MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、

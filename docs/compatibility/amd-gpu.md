@@ -107,7 +107,7 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 
 - Phase 10はexact `gfx1201`でOCP E4M3FN native W8A8、exact `gfx1030`で明示的なW8A8 emulationと
   BF16 conversionを実装・検証した。RDNA2 pathをnative FP8と表記しない。R9700 nativeはVRAMを削減したが
-  BF16より遅いためopt-in、V620 emulationはcorrectness-onlyとする。
+  BF16より遅いため自動provider優先順位を上げず、V620 emulationとは別の内部evidence scopeとして記録する。
 - Phase 11はexact `gfx942`、wave64、FNUZ FP8への実装、compile/link、host oracleを完了し、model storageの
   E4M3FNをload時にFNUZ residentへrebasingする。Phase 12ではHot Aisle MI300X VF x1、Ubuntu 24.04、
   kernel `6.8.0-124-generic`、amdgpu `6.16.13`、ROCm 7.14.0/HIP 7.14.60850、
@@ -121,13 +121,24 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
   1023/1024/1025 capacity、cancel/recovery、cleanup zeroを確認した。他のVMM対応targetのvAttentionは廃止せず、
   Paged Attentionへ暗黙に切り替えない。
 
+### Low-bit modelのstatusとユーザーinterface
+
+- `default`、`opt-in production`、`correctness-only opt-in`は過去のprovider/converter採否を説明する内部evidence表現であり、
+  ユーザーへ別の起動command、許可flag、確認、通常警告を要求するcompatibility modeではない。
+- 最終GGUF loaderはBF16、FP8、NVFP4、MXFP4を同じ操作で読み、artifact metadataとexact targetからverified providerを
+  自動選択する。provider overrideは開発・benchmark用に限定し、通常利用では量子化artifactの選択を十分なユーザー意思とする。
+- target別runtime成熟度、provider優先順位、sLLM製PTQ converter品質、提供元PTQ/QAT/native model evidenceを分離する。
+  converterのKLD不採用をencoding/provider全体へ一般化せず、提供元低bit modelへ存在しないBF16比較を要求しない。
+- packed-dequantを通常経路として選べてもRDNA2/RDNA4/CDNA3のnative FP4とは呼ばない。破損artifact、未対応encoding、
+  実行不能targetは警告付きfallbackではなくerrorにする。
+
 ### Phase 15 Weight NVFP4
 
 - exact `gfx1201`と`gfx1030`は同じ`packed-dequant` providerを実GPUで検証した。これはpacked E2M1を直接消費するが、
   native FP4 arithmetic、vendor library FP4 GEMM、W4A4を意味しない。
 - M=1/M>1、K/N 15/16/17および31/32/33を含む7 caseを両targetで独立FP32 oracleへ照合し、fallbackなしでPASSした。
-- Qwen3.5-2Bのtop-1は両targetで3/3一致したが最大KLD `0.2637523`が既定`0.05`を超えたため、両targetとも
-  `correctness-only opt-in`である。VRAM削減や短caseの速度だけでdefaultへ昇格しない。
+- Qwen3.5-2Bのtop-1は両targetで3/3一致したが最大KLD `0.2637523`が既定`0.05`を超えたため、このsLLM製PTQ artifactを
+  推奨converter結果として採用しない。providerのdispatch correctnessと、別の提供元QAT/native artifactのmodel品質は独立に判定する。
 - direct-engine follow-upではBF16比でresidentを52.43%削減した一方、NVFP4 decodeはV620で約21〜22%、R9700で
   約20〜22%低下し、R9700のprefill/TTFTは大幅に退行した。これは両target共通のpacked-dequant実装の結果であり、
   RDNA4 native FP4性能として一般化しない。
@@ -139,10 +150,10 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 
 - exact `gfx1201`のnative FP8は、同じOCP W8A8/hipBLASLt contractの前段dynamic量子化をwave reduction/native pair
   conversionへ更新した。R9700 Qwen3.5-4B 32/32でprefill `+5.89%`、decode `+10.69%`となったが、BF16よりなお遅く、
-  provider状態は`opt-in production`のままである。exact `gfx1030` emulationも`correctness-only`から変更しない。
+  自動provider優先順位は変更しない。exact `gfx1030` emulationも別targetの性能証拠として扱う。
 - NVFP4はM=1の従来packed-dequantと、M>1でpacked weight K tileを8 row共有するprefill providerへ分離した。
   M=32 operatorはR9700で59.29〜59.51%、V620で51.21〜56.68%低遅延となり、resident/peak VRAMは不変だった。
-  accuracy最大KLD `0.2637523`は既定budget超過のため、両targetとも`correctness-only opt-in`を維持する。
+  accuracy最大KLD `0.2637523`は既定budget超過のため、当該sLLM製PTQ converter candidateを採用しない。
 - Phase 15O期間にはMI300Xが存在せず、新しいexact `gfx942` candidateは有効化していない。R9700/V620の結果を
   CDNA3へ移植せず、Phase 12で検証した既存gfx942 provider scopeも変更しない。
 
@@ -156,7 +167,7 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
   `9.1781`/`7.5777`でbudget `0.05`を大幅に超えた。
 - weight MSEだけをbounded searchしたO0は120/144 tensorでS0を改善したが、full-model median KLDは`0.2880`/`0.3433`、
   最大は`14.4025`/`6.4180`だった。activation-aware algorithmの寄与は確認できたが、同一format内で全caseを救済できず、
-  両targetのNVFP4は`correctness-only opt-in`を維持する。
+  S0/U0/O0 converter candidateを採用しない。この結果は提供元QAT/native checkpointのsupport状態ではない。
 - この比較はRDNA2/RDNA4のpacked-dequant W4A16だけを証明する。Unsloth公開checkpointのW4A4、attention W8A8、FP8 KV、
   NVIDIA native FP4性能、CDNA3へ一般化しない。
 

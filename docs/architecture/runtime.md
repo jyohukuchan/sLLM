@@ -158,6 +158,29 @@ activation量子化とhipBLASLtの2 dispatch、NVFP4は1 dispatchを維持する
 K=256のweight tileを最大8 M rowで共有するM>1 prefill provider ID 9へ分離する。prefill展開はworkgroup内LDSだけで、
 resident BF16 weightを作らない。prepare/runtime failure時の別dtype/provider fallbackは引き続き禁止する。
 
+## 量子化modelの選択と内部状態
+
+公開runtimeの最終interfaceはmodel artifactを指定する同一操作をBF16、FP8、NVFP4、MXFP4へ使う。GGUF metadataとexact targetから
+encoding、mixed-precision recipe、providerをloaderが自動解決し、低bit modelだけに追加の許可flag、確認prompt、通常警告を要求しない。
+量子化済みartifactの選択をユーザーの明示選択とみなす。provider名やscale layoutは`doctor`、明示的なdiagnostic、benchmark reportで
+確認可能にするが、通常のgenerate/server応答へ品質警告を注入しない。
+
+現行の`--fp8-manifest`、`--nvfp4-manifest`、artifact path、provider引数はsafetensors＋sidecar移行期間の開発interfaceであり、
+`default`、`opt-in production`、`correctness-only opt-in`というevidence記述を実装するユーザー向けmodeではない。明示provider指定を
+残す場合も、通常選択ではなく開発・benchmark用overrideとする。artifact hash/schema不一致、targetで実装されていないencoding、
+memory/shape contract不成立は自動変換や警告付き継続をせずerrorにする。
+
+内部状態は一つの序列へ潰さず、少なくとも次を独立に記録する。
+
+- runtime成熟度: `supported / experimental / unsupported`。loader/provider実装の安全性と完全性を表す。
+- provider選択: exact targetごとの自動優先順位と、実際に選択したexecution pathを表す。
+- converter品質: sLLM製PTQ recipeが対応BF16 sourceから許容範囲内の品質を維持するかを表す。
+- model evidence: 提供元PTQ/QAT、native low-bit、sLLM変換の別と、reference runtime、task、GPU targetの検証scopeを表す。
+
+BF16 sourceがあるsLLM製PTQにはBF16 KLD budgetを適用できる。提供元PTQ/QATは同じquantized checkpointのreference実行とtask評価、
+BF16を正本として公開しないnative low-bit modelはartifact fidelity、reference実行、task評価で判定する。converter不採用をencodingまたは
+runtime providerの不支持へ転用せず、逆に正しいdecodeだけでmodel task品質を証明したとも扱わない。
+
 ## KV cache layout
 
 KV cache は通常の tensor descriptor に加え、layer、K/V の分離または interleave、token/block addressing、head grouping、stride、dtype、quantization encoding を表せる layout descriptor を持つ。Phase 6の初期方式はHIP VMMのvirtual-contiguous FP16 KVで、storage layoutはtoken-major `[capacity, kv_heads, head_dim]`である。create時に最大logical capacityのVAをreserveし、append前に必要なK/V physical pageだけをcommitする。model weight/activation の BF16 と KV cache の FP16 を同一 dtype として扱わない。

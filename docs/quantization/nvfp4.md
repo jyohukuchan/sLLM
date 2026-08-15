@@ -75,4 +75,23 @@ uniform replacement rule.
 
 The result does not remove the format/configuration ceiling. U0 improved only 66/96 `gfx1201` positions and 61/96 `gfx1030` positions; its
 maximum KLD remained `9.1781`/`7.5777`, far above the unchanged `0.05` budget. No candidate is adopted as a default or production promotion.
-NVFP4 remains `correctness-only opt-in`; sensitive-tensor mixed precision and a reproducible activation-aware converter remain follow-ups.
+S0/U0/O0 therefore remain unadopted sLLM PTQ converter candidates; sensitive-tensor mixed precision and a reproducible activation-aware
+converter remain follow-ups. This result does not classify vendor PTQ/QAT checkpoints, native low-bit models, the NVFP4 encoding, or a runtime
+that faithfully executes the same quantized artifact as `correctness-only`.
+
+## First-class FP4 model input policy
+
+NVFP4 and OCP MXFP4 are first-class model input formats, not debug-only formats. Their contracts remain distinct: current NVFP4 uses E2M1,
+block-16 E4M3 scale, and a global FP32 scale, while MXFP4 uses E2M1 with block-32 E8M0 microscaling. W4A16, W4A4, MXFP4/MXFP8, FP8 attention,
+and FP8 KV are model recipe properties and must be read from locked artifact metadata rather than inferred from a generic FP4 label.
+
+Quality gates depend on artifact provenance:
+
+- sLLM-created PTQ from BF16 keeps the corresponding BF16 KLD, top-1, and task-quality gates;
+- vendor PTQ/QAT uses exact decode, the same quantized checkpoint in a reference runtime, and relevant task/evaluation retention;
+- a native low-bit model without a BF16 source uses artifact fidelity, reference-runtime behavior, and task evaluation, not a nonexistent BF16 KLD.
+
+The choice of a quantized artifact is sufficient user intent. The final GGUF interface uses the same load/generate/serve commands for BF16,
+FP8, NVFP4, and MXFP4, automatically selecting a verified provider for the exact target. Low-bit precision alone does not trigger a warning or
+confirmation. Provider details are optional diagnostics; corrupt metadata, unsupported encodings, and impossible target contracts fail closed.
+The present safetensors sidecar and provider flags are transitional development interfaces.
