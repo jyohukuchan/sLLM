@@ -321,11 +321,26 @@
    - 提供元が公開するNVFP4 PTQ/QAT checkpointと、MXFP4/MXFP8でQATまたはnative公開されたmodelをfirst-class model
      inputとして扱う。sLLMがBF16から生成するPTQ converterの品質判定と、提供元quantized/native modelのsupport判定を分ける。
 16. KV cache FP8/NVFP4へ対応する。
+   - FP8 KVを先に、同じopaque KV encoding/layout境界へNVFP4を追加する。
+   - append時に新規tokenだけを量子化し、attentionは全cacheのFP16/BF16 mirrorを作らず直接消費する。
+   - 詳細は[Phase 16 active plan](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
+   - Phase 16Fとして、提供元NVFP4/MXFP4 modelをfirst-class inputへ統合する。
+     - Phase 16のFP8 KV後に、Unsloth Gemma 4 12BのW4A4 MLP、W8A8 attention、FP8 KV、BF16/ignoreという
+       mixed recipeをartifact metadataどおりに実行する。
+     - NVIDIA Gemma 4 31B NVFP4はlocal 32 GiBへworkspace込みで収まらないためschema/reference対象、OCP MXFP4/MXFP8と
+       Kimi K3はencoding/import対象とし、未実装MoE/architectureをFP4非対応と混同しない。
+     - 詳細は[Phase 16F active plan](active/2026/08/11-20/phase16f-first-class-fp4-model-input.md)を正とする。
 17. MTP、visionへ対応する。
+   - fixed Qwen3.5-4BのMTP text-onlyを先に完成させ、draft/verify/accept、greedy同値、stochastic sampling、
+     accepted prefixだけのKV publicationをgeneration serviceへ統合する。
+   - MTP単独closeout後に同じmodelのprocessor、vision encoder/projector、multimodal prompt、Chat Completions image inputを実装する。
+   - 詳細は[Phase 17 active plan](active/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
 18. Gemma4またはQwen3.5のMoEへ対応する。
 19. 残りの初期バージョン機能を実装し、ユーザー向けモデル入力と配布artifactをGGUFへ統一する。
    - safetensorsと量子化sidecarから、推論に必要な情報を収容した単一GGUFへの変換経路を用意する。
    - 公開runtimeはGGUFを正本として読み込み、変換元と出力をmodel lockで再現可能に固定する。
+   - Phase 19内ではGGUF統一を先に行い、その共通model input上でrequest batching/chunked prefill、簡易永続化、
+     残るmodel/KV形式を順に計画する。詳細な分割と受入条件はPhase 17 closeout時の実装状況から別途固定する。
 20. 人間がREADMEを整備し、発表する。
 
 Phase 12のMI300Xを管理できない期間は、Phase番号と依存関係を維持したままPhase 13以降のlocal-only workを
@@ -601,7 +616,7 @@ candidateを再確認した。
   checkpoint、NVFP4/MXFP4 encoding、または同じquantized artifactを正しく実行するruntime providerのsupport判定へ転用しない。
 - 詳細は[Phase 15Q archive](archive/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)を正とする。
 
-### FP4 model inputと内部状態の製品方針（決定済み、詳細計画未作成）
+### FP4 model inputと内部状態の製品方針（決定済み、Phase 16F計画済み）
 
 - NVFP4とOCP MXFP4を公式model input経路へ置く。NVFP4、MXFP4、対応するFP8/MXFP8 activation、model固有のmixed-precision
   recipeは別encodingとしてfail-closedに解釈し、異なるscale/group/layoutを同じ「FP4」として推測しない。
@@ -615,16 +630,60 @@ candidateを再確認した。
   実行不能targetは警告付き継続ではなくerrorにする。
 - 最終GGUFではBF16、FP8、NVFP4、MXFP4に同じユーザー操作を使い、encoding/providerはloader内部で解決する。現行の
   safetensors＋sidecar＋provider引数は移行中の開発interfaceであり、最終UX contractではない。
-- この決定は製品・受入・interface方針だけを固定する。対象model、phase順序、実装checkpoint、GPU matrixを含む詳細計画はまだ作成しない。
+- 2026-08-16に残タスクの依存関係を見直し、first-class FP4 full-model integrationをPhase 16Fとして詳細計画化した。
+  Unsloth primary artifactがFP8 KVを要求するためPhase 16の後、MTP/visionの前に置く。詳細は
+  [Phase 16F active plan](active/2026/08/11-20/phase16f-first-class-fp4-model-input.md)を正とする。
+
+### Phase 16: KV cache FP8/NVFP4（計画済み）
+
+- FP8 KVを先に完成させ、同じopaque state、VMM virtual-contiguous/contiguous-resident、transaction境界へNVFP4を追加する。
+- K/V value/scale plane、append、attention direct consumption、quality、capacity、cancel/recovery、VRAM/performanceを
+  exact `gfx1030`/`gfx1201`とNumPy oracleで検証する。全cache FP16/BF16 mirrorや別encoding fallbackを採用しない。
+- 詳細は[Phase 16 active plan](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)を正とする。
+
+### Phase 16F: first-class FP4 model input（計画済み）
+
+- `unsloth/gemma-4-12b-it-NVFP4`をprimaryに、W4A4 MLP、W8A8 attention、Phase 16 FP8 KV、BF16/ignoreの
+  mixed recipeをmodel pathだけから自動検出し、同じCLI/server操作で実行する。
+- NVIDIA Gemma 4 31Bはschema/model-lock/reference、OCP MXFP4/MXFP8とKimi K3はencoding/import boundaryへ固定する。
+  Kimi full modelはMoE/architectureとhardware capacityの後続課題であり、encoding supportと分ける。
+- 詳細は[Phase 16F active plan](active/2026/08/11-20/phase16f-first-class-fp4-model-input.md)を正とする。
+
+### Phase 17: Qwen3.5 MTP、vision（計画済み）
+
+- fixed Qwen3.5-4BのMTP 15 tensorを先に消費し、greedy同値、stochastic verify/accept、accepted KV prefix、
+  stop/cancel/service、target別性能選択を完成させる。
+- MTP単独PASS後にvision 297 tensor、locked processor、image cache、multimodal prompt、CLI local imageとChat Completions
+  Base64 data URLを実装する。初期serverはHTTP(S) image fetch/Files APIを行わない。
+- 詳細は[Phase 17 active plan](active/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
+
+## 残タスクと改訂した実行順序
+
+| 順序 | Phase | 主要成果 | 先行理由・依存 |
+| ---: | --- | --- | --- |
+| 1 | Phase 16 | FP8/NVFP4 KV append・attention・capacity・quality | first-class Unsloth mixed recipeのFP8 KV依存を先に満たす |
+| 2 | Phase 16F | NVFP4 full mixed artifact、MXFP4/MXFP8 encoding/import | 仮のFP16 KV代用を避け、提供元artifactを忠実に検証する |
+| 3 | Phase 17 | Qwen3.5 MTP、次にvision、最後にcombined smoke | speculative stateは量子化を含むopaque KV contract安定後に実装する |
+| 4 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
+| 5 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
+| 6 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
+
+Phase 18以降で残る具体項目はMoE、GGUF converter/runtime、request batching、chunked prefill、KV/会話/model lockの
+簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMAである。Responses API、
+LMCache、RadixAttention、将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。Phase 18/19の詳細分割は、
+Phase 16〜17の実装で確定する共通descriptorと実測残差を見て固定し、現在の3計画へ先行実装を混ぜない。
 
 ## 現在の状態と次の作業
 
-- Phase 15Qまで完了した。次はPhase 16 KV cache FP8/NVFP4である。Phase 15Qの結果から、model本体のNVFP4品質には
+- Phase 15Qまで完了し、Phase 16、Phase 16F、Phase 17の詳細active planを作成した。次は
+  [Phase 16 KV cache FP8/NVFP4](active/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)である。
+  Phase 15Qの結果から、model本体のNVFP4品質には
   activation-aware calibrationの改善余地とE2M1/block-16 configuration ceilingの両方が寄与すると確定した。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
   起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
 - 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと
-  量子化sidecarは移行完了まで維持し、この決定だけを理由にPhase 16を自動開始または繰り下げない。
+  量子化sidecarは移行完了まで維持する。Phase 16Fのcontainer-neutral encoding/recipe descriptorをGGUFへ引き渡すが、
+  最終GGUF writer/runtimeをPhase 16Fへ前倒ししない。
 - MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。
