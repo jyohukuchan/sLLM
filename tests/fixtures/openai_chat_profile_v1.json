@@ -72,8 +72,8 @@
       "param": "messages[0].role"
     },
     {
-      "case_id": "multipart-content",
-      "body": {"model": "qwen-test", "messages": [{"role": "user", "content": [{"type": "text", "text": "x"}]}]},
+      "case_id": "multipart-non-user-content",
+      "body": {"model": "qwen-test", "messages": [{"role": "assistant", "content": [{"type": "text", "text": "x"}]}]},
       "status": 400,
       "code": "unsupported_parameter",
       "param": "messages[0].content"

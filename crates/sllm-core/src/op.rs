@@ -1467,7 +1467,13 @@ fn validate_attention_preprocess(
             token_count: u64::from(contract.token_count()),
         }
     })?;
-    let expected_shapes: [&[usize]; 8] = [
+    let position_shape = inputs[4].shape();
+    if position_shape != [token_count] && position_shape != [token_count, 3] {
+        return Err(OpError::AttentionPreprocessShapeMismatch {
+            tensor: AttentionPreprocessTensor::Positions,
+        });
+    }
+    let expected_shapes: [&[usize]; 7] = [
         &[
             token_count,
             contract.q_heads() as usize,
@@ -1480,7 +1486,6 @@ fn validate_attention_preprocess(
         ],
         &[contract.q_heads() as usize, contract.head_dim() as usize],
         &[contract.kv_heads() as usize, contract.head_dim() as usize],
-        &[token_count],
         &[
             token_count,
             contract.q_heads() as usize,
@@ -1497,8 +1502,12 @@ fn validate_attention_preprocess(
             contract.head_dim() as usize,
         ],
     ];
-    for (index, (tensor, role)) in tensors.into_iter().enumerate() {
-        if tensor.shape() != expected_shapes[index] {
+    for (expected, (tensor, role)) in expected_shapes.into_iter().zip(
+        tensors
+            .into_iter()
+            .filter(|(_, role)| !matches!(role, AttentionPreprocessTensor::Positions)),
+    ) {
+        if tensor.shape() != expected {
             return Err(OpError::AttentionPreprocessShapeMismatch { tensor: role });
         }
     }

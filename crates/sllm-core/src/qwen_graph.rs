@@ -14,7 +14,9 @@ use crate::model::{
 };
 use crate::op::{OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind};
 use crate::weights::{
-    WeightClassification, WeightConsumer, WeightConsumerKey, WeightLoadPlan, build_weight_load_plan,
+    QWEN35_MTP_CONSUMER_LAYER, QwenComponentSelection, WeightClassification, WeightConsumer,
+    WeightConsumerKey, WeightLoadPlan, build_qwen_component_weight_load_plan,
+    build_weight_load_plan,
 };
 use crate::{DType, Encoding, TensorError, TensorView};
 use crate::{Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar};
@@ -263,6 +265,9 @@ pub enum QwenGraphNodeKind {
         kv_heads: u32,
         head_dim: u32,
     },
+    /// Selects caller-supplied full prompt embeddings during multimodal
+    /// prefill and the ordinary embedding gather during subsequent decode.
+    MultimodalEmbeddingSelect,
     FullKvAppend {
         layer: u32,
         state: KvStateDescriptor,
@@ -436,11 +441,21 @@ pub struct QwenGraph {
     states: Vec<QwenGraphState>,
     total_state_bytes: u64,
     fp8_sidecar_fingerprint: Option<String>,
+    mtp: bool,
+    multimodal: bool,
 }
 
 impl QwenGraph {
     pub fn fp8_sidecar_fingerprint(&self) -> Option<&str> {
         self.fp8_sidecar_fingerprint.as_deref()
+    }
+
+    pub const fn is_mtp(&self) -> bool {
+        self.mtp
+    }
+
+    pub const fn is_multimodal(&self) -> bool {
+        self.multimodal
     }
 }
 
@@ -551,8 +566,99 @@ pub fn build_qwen35_graph(
         fp8_dtype: None,
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+        mtp: false,
+        multimodal: false,
     })?;
     builder.build()
+}
+
+/// Build the text decoder graph whose prefill embedding rows and three-axis
+/// mRoPE positions are supplied by the typed multimodal prompt assembler.
+/// Decode remains the ordinary shared embedding path.
+pub fn build_qwen35_multimodal_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > lock.model.architecture.text_config.max_position_embeddings {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: lock.model.architecture.text_config.max_position_embeddings,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: BTreeSet::new(),
+        fp8_dtype: None,
+        fp8_sidecar_fingerprint: None,
+        kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+        mtp: false,
+        multimodal: true,
+    })?
+    .build()
+}
+
+/// Build the single-token Qwen3.5 MTP draft graph. The graph consumes the
+/// target decoder hidden row before its final RMSNorm and the next token ID,
+/// and owns an independent one-layer KV state. Prompt catch-up intentionally
+/// submits one row at a time so the `(h[p-1], token[p])` shift is explicit.
+pub fn build_qwen35_mtp_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if state_capacity > lock.model.architecture.text_config.max_position_embeddings {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: lock.model.architecture.text_config.max_position_embeddings,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_mtp_plan(lock, plan)?;
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: vec![LayerType::FullAttention],
+        dimensions,
+        token_count: 1,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: BTreeSet::new(),
+        fp8_dtype: None,
+        fp8_sidecar_fingerprint: None,
+        kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+        mtp: true,
+        multimodal: false,
+    })?
+    .build()
 }
 
 /// Build the same production Qwen3.5 graph with every text-linear weight that
@@ -720,6 +826,8 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
         fp8_dtype: Some(DType::U8),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
     })?
     .build()
 }
@@ -805,6 +913,8 @@ fn build_qwen35_fp8_graph_with_dtype(
         fp8_dtype: Some(fp8_dtype),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
     })?
     .build()
 }
@@ -1128,6 +1238,108 @@ fn validate_plan(
     Ok((required, known_unconsumed))
 }
 
+fn validate_mtp_plan(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
+    if plan.schema_version != lock.schema_version
+        || plan.repo_id != lock.model.repo_id
+        || plan.resolved_revision != lock.model.resolved_revision
+        || plan.lock_fingerprint != lock.fingerprint()
+        || !plan.tied_embeddings
+    {
+        return Err(QwenGraphError::InvalidPlan(
+            "MTP plan identity or tied embedding differs from the lock".to_owned(),
+        ));
+    }
+    validate_non_overlapping_source_ranges(plan)?;
+    let descriptors = plan
+        .entries
+        .iter()
+        .map(|entry| TensorDescriptor {
+            tensor_name: entry.tensor_name.clone(),
+            source_file: entry.source_file.clone(),
+            dtype: entry.dtype,
+            shape: entry.shape.clone(),
+            header_length_field_bytes: 8,
+            header_length_bytes: 0,
+            data_buffer_start: entry.source_range[0],
+            data_offset_basis: "safetensors-data-buffer".to_owned(),
+            data_offsets: [
+                0,
+                entry.source_range[1].saturating_sub(entry.source_range[0]),
+            ],
+            absolute_byte_range: entry.source_range,
+            byte_size: entry.source_range[1].saturating_sub(entry.source_range[0]),
+        })
+        .collect::<Vec<_>>();
+    let canonical = build_qwen_component_weight_load_plan(
+        lock,
+        descriptors.iter(),
+        QwenComponentSelection::MTP_ONLY,
+    )
+    .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+    if &canonical != plan {
+        return Err(QwenGraphError::InvalidPlan(
+            "MTP plan entries or digest are not canonical".to_owned(),
+        ));
+    }
+    let mut required = Vec::new();
+    let mut known_unconsumed = BTreeSet::new();
+    for entry in &plan.entries {
+        match entry.classification {
+            WeightClassification::Required => {
+                let consumer = entry.consumer.ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(format!(
+                        "MTP required tensor has no consumer: {}",
+                        entry.tensor_name
+                    ))
+                })?;
+                required.push(QwenGraphWeightBinding {
+                    consumer,
+                    tensor_name: entry.tensor_name.clone(),
+                    classification: entry.classification,
+                    dtype: entry.dtype,
+                    shape: entry.shape.clone(),
+                    source_range: entry.source_range,
+                    destination_start: entry.destination_start.ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(format!(
+                            "MTP required tensor has no destination: {}",
+                            entry.tensor_name
+                        ))
+                    })?,
+                });
+            }
+            WeightClassification::KnownUnconsumed => {
+                known_unconsumed.insert(entry.tensor_name.clone());
+            }
+            WeightClassification::ConfigConditional => {
+                return Err(QwenGraphError::InvalidPlan(format!(
+                    "unexpected MTP config-conditional tensor: {}",
+                    entry.tensor_name
+                )));
+            }
+        }
+    }
+    required.sort_by_key(|binding| binding.consumer);
+    if required.len() != 16
+        || required
+            .iter()
+            .filter(|binding| binding.tensor_name.starts_with("mtp."))
+            .count()
+            != 15
+        || !required
+            .iter()
+            .any(|binding| binding.tensor_name == "model.language_model.embed_tokens.weight")
+    {
+        return Err(QwenGraphError::InvalidPlan(
+            "MTP plan must contain exactly 15 MTP tensors plus the shared embedding/head"
+                .to_owned(),
+        ));
+    }
+    Ok((required, known_unconsumed))
+}
+
 fn validate_non_overlapping_source_ranges(plan: &WeightLoadPlan) -> Result<(), QwenGraphError> {
     let mut ranges: BTreeMap<&str, Vec<[u64; 2]>> = BTreeMap::new();
     for entry in &plan.entries {
@@ -1441,6 +1653,8 @@ struct GraphBuilderConfig {
     fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
+    mtp: bool,
+    multimodal: bool,
 }
 
 struct GraphBuilder {
@@ -1456,6 +1670,8 @@ struct GraphBuilder {
     fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
+    mtp: bool,
+    multimodal: bool,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
     nodes: Vec<QwenGraphNode>,
@@ -1479,12 +1695,19 @@ impl GraphBuilder {
             fp8_dtype,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
+            mtp,
+            multimodal,
         } = config;
         let bindings = bindings
             .into_iter()
             .map(|binding| (binding.consumer, binding))
             .collect::<BTreeMap<_, _>>();
-        if bindings.len() != expected_consumers(&layer_types, dimensions.tied_embeddings).len() {
+        let expected_binding_count = if mtp {
+            16
+        } else {
+            expected_consumers(&layer_types, dimensions.tied_embeddings).len()
+        };
+        if bindings.len() != expected_binding_count {
             return Err(QwenGraphError::InvalidPlan(
                 "graph binding map is not one-to-one".to_owned(),
             ));
@@ -1502,6 +1725,8 @@ impl GraphBuilder {
             fp8_dtype,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
+            mtp,
+            multimodal,
             tensors: Vec::new(),
             producers: Vec::new(),
             nodes: Vec::new(),
@@ -1512,8 +1737,13 @@ impl GraphBuilder {
     }
 
     fn build(mut self) -> Result<QwenGraph, QwenGraphError> {
-        self.build_states()?;
-        self.build_graph()?;
+        if self.mtp {
+            self.build_mtp_state()?;
+            self.build_mtp_graph()?;
+        } else {
+            self.build_states()?;
+            self.build_graph()?;
+        }
         Ok(QwenGraph {
             model_fingerprint: self.model_fingerprint,
             plan_digest: self.plan_digest,
@@ -1527,6 +1757,8 @@ impl GraphBuilder {
             states: self.states,
             total_state_bytes: self.total_state_bytes,
             fp8_sidecar_fingerprint: self.fp8_sidecar_fingerprint,
+            mtp: self.mtp,
+            multimodal: self.multimodal,
         })
     }
 
@@ -1599,6 +1831,358 @@ impl GraphBuilder {
         Ok(())
     }
 
+    fn build_mtp_state(&mut self) -> Result<(), QwenGraphError> {
+        let descriptor = KvStateDescriptor::new_with_storage(
+            QWEN35_MTP_CONSUMER_LAYER as u32,
+            self.state_capacity,
+            usize::try_from(self.dimensions.kv_heads)
+                .map_err(|_| QwenGraphError::Overflow("MTP KV heads"))?,
+            usize::try_from(self.dimensions.head_dim)
+                .map_err(|_| QwenGraphError::Overflow("MTP head dimension"))?,
+            self.kv_cache_encoding,
+        )
+        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        self.add_state(
+            QWEN35_MTP_CONSUMER_LAYER as u32,
+            QwenGraphStateKind::FullKey,
+            QwenGraphStateDescriptor::Kv(descriptor),
+            descriptor.dtype(),
+            descriptor.encoding(),
+            descriptor.storage_shape().to_vec(),
+        )?;
+        self.add_state(
+            QWEN35_MTP_CONSUMER_LAYER as u32,
+            QwenGraphStateKind::FullValue,
+            QwenGraphStateDescriptor::Kv(descriptor),
+            descriptor.dtype(),
+            descriptor.encoding(),
+            descriptor.storage_shape().to_vec(),
+        )?;
+        Ok(())
+    }
+
+    fn build_mtp_graph(&mut self) -> Result<(), QwenGraphError> {
+        let layer = QWEN35_MTP_CONSUMER_LAYER as u32;
+        let token_ids = self.add_tensor("input.token_ids", view(DType::I32, &[1])?);
+        let positions = self.add_tensor("input.positions", view(DType::I32, &[1])?);
+        let target_hidden = self.add_tensor(
+            "input.target_hidden",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        let shared_key = WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::EmbeddingAndTiedOutput,
+        };
+        let embedding_weight = self.weight_tensor(shared_key)?;
+        let embedding = self.add_tensor(
+            "embedding.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        self.add_semantic(
+            "embedding",
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Embedding,
+                vec![
+                    self.tensors[embedding_weight].view.clone(),
+                    self.tensors[token_ids].view.clone(),
+                ],
+                vec![self.tensors[embedding].view.clone()],
+            )?,
+            vec![embedding_weight, token_ids],
+            vec![embedding],
+            vec![],
+            vec![shared_key],
+        )?;
+
+        let embedding_norm_weight = self.weight_tensor(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::MtpEmbeddingNorm,
+        })?;
+        let hidden_norm_weight = self.weight_tensor(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::MtpHiddenNorm,
+        })?;
+        let embedding_norm = self.add_tensor(
+            "mtp.embedding_rmsnorm.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        let hidden_norm = self.add_tensor(
+            "mtp.hidden_rmsnorm.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        for (label, input, weight, output, role) in [
+            (
+                "mtp.embedding_rmsnorm",
+                embedding,
+                embedding_norm_weight,
+                embedding_norm,
+                WeightConsumer::MtpEmbeddingNorm,
+            ),
+            (
+                "mtp.hidden_rmsnorm",
+                target_hidden,
+                hidden_norm_weight,
+                hidden_norm,
+                WeightConsumer::MtpHiddenNorm,
+            ),
+        ] {
+            self.add_semantic(
+                label,
+                SemanticOpDescriptor::new_rms_norm(
+                    vec![
+                        self.tensors[input].view.clone(),
+                        self.tensors[weight].view.clone(),
+                    ],
+                    vec![self.tensors[output].view.clone()],
+                    1.0e-6,
+                    RmsNormScaleMode::OffsetOne,
+                )?,
+                vec![input, weight],
+                vec![output],
+                vec![],
+                vec![WeightConsumerKey { layer: None, role }],
+            )?;
+        }
+
+        // One-row catch-up makes both halves contiguous subviews while still
+        // keeping concatenation entirely on the device.
+        let fusion_input = self.add_tensor(
+            "mtp.concat.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden * 2])?,
+        );
+        let half_bytes = self
+            .dimensions
+            .hidden
+            .checked_mul(2)
+            .ok_or(QwenGraphError::Overflow("MTP concat half bytes"))?;
+        let left = self.add_unproduced_alias(
+            "mtp.concat.embedding_half",
+            fusion_input,
+            TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[1, self.dimensions.hidden as usize],
+                &[self.dimensions.hidden as usize, 1],
+                0,
+            )?,
+        )?;
+        let right = self.add_unproduced_alias(
+            "mtp.concat.hidden_half",
+            fusion_input,
+            TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[1, self.dimensions.hidden as usize],
+                &[self.dimensions.hidden as usize, 1],
+                half_bytes,
+            )?,
+        )?;
+        let copy_left = self.add_semantic(
+            "mtp.concat.copy_embedding",
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![self.tensors[embedding_norm].view.clone()],
+                vec![self.tensors[left].view.clone()],
+            )?,
+            vec![embedding_norm],
+            vec![left],
+            vec![],
+            vec![],
+        )?;
+        let copy_right = self.add_semantic(
+            "mtp.concat.copy_hidden",
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![self.tensors[hidden_norm].view.clone()],
+                vec![self.tensors[right].view.clone()],
+            )?,
+            vec![hidden_norm],
+            vec![right],
+            vec![],
+            vec![],
+        )?;
+        let fusion_weight_key = WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::MtpFusion,
+        };
+        let fusion_weight = self.weight_tensor(fusion_weight_key)?;
+        let fusion = self.add_tensor(
+            "mtp.fusion.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        self.add_semantic(
+            "mtp.fusion_matmul",
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![
+                    self.tensors[fusion_input].view.clone(),
+                    self.tensors[fusion_weight].view.clone(),
+                ],
+                vec![self.tensors[fusion].view.clone()],
+            )?,
+            vec![fusion_input, fusion_weight],
+            vec![fusion],
+            vec![copy_left, copy_right],
+            vec![fusion_weight_key],
+        )?;
+
+        let input_norm_key = key(layer, WeightConsumer::InputNorm);
+        let input_norm_weight = self.weight_tensor(input_norm_key)?;
+        let normed =
+            self.activation(layer, "input_rmsnorm.output", &[1, self.dimensions.hidden])?;
+        self.add_semantic(
+            &format!("layer.{layer}.input_rmsnorm"),
+            SemanticOpDescriptor::new_rms_norm(
+                vec![
+                    self.tensors[fusion].view.clone(),
+                    self.tensors[input_norm_weight].view.clone(),
+                ],
+                vec![self.tensors[normed].view.clone()],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            )?,
+            vec![fusion, input_norm_weight],
+            vec![normed],
+            vec![],
+            vec![input_norm_key],
+        )?;
+        let attention_residual = self.build_full_attention(layer, normed, positions)?;
+
+        let post_key = key(layer, WeightConsumer::PostAttentionNorm);
+        let post_weight = self.weight_tensor(post_key)?;
+        let post_normed = self.activation(
+            layer,
+            "post_attention_rmsnorm.output",
+            &[1, self.dimensions.hidden],
+        )?;
+        self.add_semantic(
+            &format!("layer.{layer}.post_attention_rmsnorm"),
+            SemanticOpDescriptor::new_rms_norm(
+                vec![
+                    self.tensors[attention_residual].view.clone(),
+                    self.tensors[post_weight].view.clone(),
+                ],
+                vec![self.tensors[post_normed].view.clone()],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            )?,
+            vec![attention_residual, post_weight],
+            vec![post_normed],
+            vec![],
+            vec![post_key],
+        )?;
+        let gate_weight = self.weight_tensor(key(layer, WeightConsumer::MlpGate))?;
+        let up_weight = self.weight_tensor(key(layer, WeightConsumer::MlpUp))?;
+        let down_weight = self.weight_tensor(key(layer, WeightConsumer::MlpDown))?;
+        let gate = self.activation(layer, "mlp.gate.output", &[1, self.dimensions.intermediate])?;
+        let up = self.activation(layer, "mlp.up.output", &[1, self.dimensions.intermediate])?;
+        self.add_matmul(
+            &format!("layer.{layer}.mlp_gate_matmul"),
+            post_normed,
+            gate_weight,
+            gate,
+            WeightConsumer::MlpGate,
+            layer,
+        )?;
+        self.add_matmul(
+            &format!("layer.{layer}.mlp_up_matmul"),
+            post_normed,
+            up_weight,
+            up,
+            WeightConsumer::MlpUp,
+            layer,
+        )?;
+        let silu = self.activation(
+            layer,
+            "mlp.silu_mul.output",
+            &[1, self.dimensions.intermediate],
+        )?;
+        self.add_semantic(
+            &format!("layer.{layer}.mlp_silu_mul"),
+            SemanticOpDescriptor::new(
+                SemanticOpKind::SiluMul,
+                vec![
+                    self.tensors[gate].view.clone(),
+                    self.tensors[up].view.clone(),
+                ],
+                vec![self.tensors[silu].view.clone()],
+            )?,
+            vec![gate, up],
+            vec![silu],
+            vec![],
+            vec![],
+        )?;
+        let down = self.activation(layer, "mlp.down.output", &[1, self.dimensions.hidden])?;
+        self.add_matmul(
+            &format!("layer.{layer}.mlp_down_matmul"),
+            silu,
+            down_weight,
+            down,
+            WeightConsumer::MlpDown,
+            layer,
+        )?;
+        let residual =
+            self.activation(layer, "mlp.residual.output", &[1, self.dimensions.hidden])?;
+        self.add_add(
+            &format!("layer.{layer}.mlp_residual_add"),
+            attention_residual,
+            down,
+            residual,
+        )?;
+
+        let final_key = WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::MtpFinalNorm,
+        };
+        let final_weight = self.weight_tensor(final_key)?;
+        let final_norm = self.add_tensor(
+            "final_rmsnorm.output",
+            view(DType::Bf16, &[1, self.dimensions.hidden])?,
+        );
+        self.add_semantic(
+            "final_rmsnorm",
+            SemanticOpDescriptor::new_rms_norm(
+                vec![
+                    self.tensors[residual].view.clone(),
+                    self.tensors[final_weight].view.clone(),
+                ],
+                vec![self.tensors[final_norm].view.clone()],
+                1.0e-6,
+                RmsNormScaleMode::OffsetOne,
+            )?,
+            vec![residual, final_weight],
+            vec![final_norm],
+            vec![],
+            vec![final_key],
+        )?;
+        let logits = self.add_tensor(
+            "tied_lm_head.logits",
+            view(DType::Bf16, &[1, self.dimensions.vocab])?,
+        );
+        self.add_matmul(
+            "tied_lm_head_matmul",
+            final_norm,
+            embedding_weight,
+            logits,
+            WeightConsumer::EmbeddingAndTiedOutput,
+            u32::MAX,
+        )?;
+        let output = self.add_tensor("argmax.output", view(DType::I32, &[1])?);
+        self.add_semantic(
+            "argmax",
+            SemanticOpDescriptor::new(
+                SemanticOpKind::Argmax,
+                vec![self.tensors[logits].view.clone()],
+                vec![self.tensors[output].view.clone()],
+            )?,
+            vec![logits],
+            vec![output],
+            vec![],
+            vec![],
+        )?;
+        Ok(())
+    }
+
     fn add_state(
         &mut self,
         layer: u32,
@@ -1634,7 +2218,14 @@ impl GraphBuilder {
 
     fn build_graph(&mut self) -> Result<(), QwenGraphError> {
         let token_ids = self.add_tensor("input.token_ids", view(DType::I32, &[self.token_count])?);
-        let positions = self.add_tensor("input.positions", view(DType::I32, &[self.token_count])?);
+        let positions = self.add_tensor(
+            "input.positions",
+            if self.multimodal {
+                view(DType::I32, &[self.token_count, 3])?
+            } else {
+                view(DType::I32, &[self.token_count])?
+            },
+        );
         let embedding_role = if self.dimensions.tied_embeddings {
             WeightConsumer::EmbeddingAndTiedOutput
         } else {
@@ -1665,6 +2256,26 @@ impl GraphBuilder {
                 role: embedding_role,
             }],
         )?;
+
+        if self.multimodal {
+            let supplied = self.add_tensor(
+                "input.multimodal_embeddings",
+                view(DType::Bf16, &[self.token_count, self.dimensions.hidden])?,
+            );
+            let selected = self.add_tensor(
+                "multimodal.embedding.output",
+                view(DType::Bf16, &[self.token_count, self.dimensions.hidden])?,
+            );
+            self.add_typed(
+                "multimodal.embedding_select",
+                QwenGraphNodeKind::MultimodalEmbeddingSelect,
+                vec![hidden, supplied],
+                vec![selected],
+                vec![],
+                vec![],
+            )?;
+            hidden = selected;
+        }
 
         for (layer_index, layer_type) in self.layer_types.clone().into_iter().enumerate() {
             let layer = layer_index as u32;
@@ -2348,7 +2959,9 @@ impl GraphBuilder {
     }
 
     fn layer_input_for_residual(&self, layer: u32) -> Result<usize, QwenGraphError> {
-        let input_label = if layer == 0 {
+        let input_label = if self.mtp && layer == QWEN35_MTP_CONSUMER_LAYER as u32 {
+            "mtp.fusion.output".to_owned()
+        } else if layer == 0 {
             "embedding.output".to_owned()
         } else {
             format!("layer.{}.mlp.residual.output", layer - 1)
@@ -2637,6 +3250,34 @@ impl GraphBuilder {
         Ok(id)
     }
 
+    fn add_unproduced_alias(
+        &mut self,
+        name: &str,
+        source: usize,
+        alias_view: TensorView,
+    ) -> Result<usize, QwenGraphError> {
+        let source_view = self.tensors.get(source).ok_or_else(|| {
+            QwenGraphError::InvalidPlan("alias source tensor is absent".to_owned())
+        })?;
+        if source_view.view.dtype() != alias_view.dtype()
+            || source_view.view.encoding() != alias_view.encoding()
+            || alias_view.end_offset() > source_view.view.payload_bytes()
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "subview alias lies outside its backing tensor".to_owned(),
+            ));
+        }
+        let id = self.tensors.len();
+        self.tensors.push(QwenGraphTensor {
+            id,
+            name: name.to_owned(),
+            view: alias_view,
+            backing: QwenGraphTensorBacking::Alias { tensor_id: source },
+        });
+        self.producers.push(None);
+        Ok(id)
+    }
+
     fn weight_tensor(&mut self, consumer: WeightConsumerKey) -> Result<usize, QwenGraphError> {
         if let Some(&id) = self.weight_tensors.get(&consumer) {
             return Ok(id);
@@ -2744,6 +3385,11 @@ pub(crate) fn qwen35_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
 }
 
 #[cfg(test)]
+pub(crate) fn qwen35_mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
+    tests::mtp_execution_fixture()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{build_weight_load_plan, read_model_lock};
@@ -2825,8 +3471,84 @@ mod tests {
                 vec![1],
             ));
         }
-        for index in 0..mtp_count {
-            specs.push((format!("mtp.synthetic_{index}"), TensorDType::Bf16, vec![1]));
+        if mtp_count == 15 {
+            specs.extend([
+                (
+                    "mtp.fc.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560, 5120],
+                ),
+                (
+                    "mtp.layers.0.input_layernorm.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560],
+                ),
+                (
+                    "mtp.layers.0.mlp.down_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560, 9216],
+                ),
+                (
+                    "mtp.layers.0.mlp.gate_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![9216, 2560],
+                ),
+                (
+                    "mtp.layers.0.mlp.up_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![9216, 2560],
+                ),
+                (
+                    "mtp.layers.0.post_attention_layernorm.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560],
+                ),
+                (
+                    "mtp.layers.0.self_attn.k_norm.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![256],
+                ),
+                (
+                    "mtp.layers.0.self_attn.k_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![1024, 2560],
+                ),
+                (
+                    "mtp.layers.0.self_attn.o_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560, 4096],
+                ),
+                (
+                    "mtp.layers.0.self_attn.q_norm.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![256],
+                ),
+                (
+                    "mtp.layers.0.self_attn.q_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![8192, 2560],
+                ),
+                (
+                    "mtp.layers.0.self_attn.v_proj.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![1024, 2560],
+                ),
+                ("mtp.norm.weight".to_owned(), TensorDType::Bf16, vec![2560]),
+                (
+                    "mtp.pre_fc_norm_embedding.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560],
+                ),
+                (
+                    "mtp.pre_fc_norm_hidden.weight".to_owned(),
+                    TensorDType::Bf16,
+                    vec![2560],
+                ),
+            ]);
+        } else {
+            for index in 0..mtp_count {
+                specs.push((format!("mtp.synthetic_{index}"), TensorDType::Bf16, vec![1]));
+            }
         }
 
         let mut source_index = 0;
@@ -2864,6 +3586,19 @@ mod tests {
         (graph, plan)
     }
 
+    pub(super) fn mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
+        let lock = fixed_lock();
+        let descriptors = synthetic_descriptors(&lock, 297, 15);
+        let plan = build_qwen_component_weight_load_plan(
+            &lock,
+            descriptors.iter(),
+            QwenComponentSelection::MTP_ONLY,
+        )
+        .expect("MTP component plan builds");
+        let graph = build_qwen35_mtp_graph(&lock, &plan, 17).expect("MTP fixture graph builds");
+        (graph, plan)
+    }
+
     fn fixture_bindings(schedule: &[LayerType]) -> Vec<QwenGraphWeightBinding> {
         let dimensions = fixed_dimensions();
         expected_consumers(schedule, true)
@@ -2898,6 +3633,8 @@ mod tests {
             fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+            mtp: false,
+            multimodal: false,
         })
         .expect("fixture bindings")
         .build()
@@ -2992,6 +3729,35 @@ mod tests {
             assert!(graph.weight_binding("model.visual.synthetic_0").is_err());
             assert!(graph.weight_binding("not-a-weight").is_err());
         }
+    }
+
+    #[test]
+    fn mtp_graph_consumes_exact_component_and_shared_head() {
+        let lock = fixed_lock();
+        let descriptors = synthetic_descriptors(&lock, 297, 15);
+        let plan = build_qwen_component_weight_load_plan(
+            &lock,
+            descriptors.iter(),
+            QwenComponentSelection::MTP_ONLY,
+        )
+        .expect("MTP component plan builds");
+        let graph = build_qwen35_mtp_graph(&lock, &plan, 257).expect("MTP graph builds");
+        assert_eq!(graph.token_count(), 1);
+        assert_eq!(graph.weight_bindings().len(), 16);
+        assert_eq!(graph.states().len(), 2);
+        assert!(
+            graph
+                .nodes()
+                .iter()
+                .any(|node| node.label() == "mtp.fusion_matmul")
+        );
+        assert!(
+            graph
+                .nodes()
+                .iter()
+                .any(|node| node.label() == "layer.32.kv_append")
+        );
+        assert_eq!(graph.nodes().last().unwrap().label(), "argmax");
     }
 
     #[test]
@@ -3418,6 +4184,8 @@ mod tests {
             fp8_dtype: None,
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+            mtp: false,
+            multimodal: false,
         })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());

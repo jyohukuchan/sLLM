@@ -260,6 +260,13 @@ local tupleで、exact `gfx1030`/`gfx1201`のW4A4、static FP8 KV、Unsloth Gemm
 OpenAI non-stream/SSEを実行した。全実行はHIP-only、fallbackなし、shutdown cleanup 0だった。software lifecycleは
 `experimental`のままで、別runtime/driver/kernelへ一般化しない。
 
+### 2026-08-16 Phase 17 MTP/vision tuple
+
+Phase 16Fと同じlocal software tupleで、exact V620 `gfx1030`とR9700 `gfx1201`のQwen3.5-4B MTP、vision、
+multimodal text prefill/decodeを実行した。vision projected digestはtarget別浮動小数演算により異なるが、各target内のreplayは一致し、
+全dispatch HIP、fallbackなし、cleanup 0だった。R9700ではCLI local PNGから1 token生成もPASSした。MTP逐次verifyは性能採用せず、
+通常serviceはtarget-onlyを維持する。software lifecycleは`experimental`のままで、別tupleやlow-bit visionへ一般化しない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

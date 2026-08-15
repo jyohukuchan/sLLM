@@ -127,6 +127,12 @@ Unsloth Gemma 4 12B mixed full graphを実機検証した。この限定scopeは
 runtimeを未実行のためmodel evidence lifecycleは`experimental`である。NVIDIA Gemma 4 31B NVFP4とKimi K3 MXは
 metadata/encoding handoffのみであり、AMDまたはNVIDIA full-model execution evidenceではない。
 
+Phase 17では同じcanonical 2 targetでQwen3.5-4B MTP real-weight componentとvision 297 tensorを実行した。
+visionは256 patch token/64 visual token、multimodal text prefill+decode、deterministic replay、HIP-only、fallbackなし、cleanup 0を
+両targetでPASSした。MTPもdraft `[198,248044]`、target verify `[198,248045,248045]`、accepted 1で一致したが、現行の
+逐次verifyはtarget forward数を減らさないため通常providerはtarget-onlyを維持する。このevidenceは固定model/image geometry、
+single request、BF16 visionに限り、別SKU、video、low-bit vision、性能優位性へ一般化しない。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

@@ -25,7 +25,7 @@ sLLM behavior for requests outside that subset. The
 is an implementation reference and a peer for differential comparison; it is not
 the sLLM API specification.
 
-## Initial endpoints
+## Initial endpoints and multimodal revision
 
 ### `GET /v1/models`
 
@@ -37,7 +37,9 @@ model-lock fingerprint as specified in
 
 ### `POST /v1/chat/completions`
 
-The initial profile accepts one text chat and produces one text completion.
+The original profile accepts one text chat and produces one text completion.
+Phase 17 adds the versioned multimodal input subset below without changing the
+response or SSE shape for text-only clients.
 
 Required request fields:
 
@@ -64,7 +66,7 @@ Supported generation fields are:
 The server validates the ranges and types defined by the pinned OpenAI schema. It
 must reject any request containing an unsupported field or value even when the
 rest of the request is valid; it must not silently coerce or discard it.
-Profile-v1 resource limits further cap the JSON body at 1 MiB, the model alias at
+Phase 17 resource limits cap the JSON body at 96 MiB so two bounded Base64 images fit, the model alias at
 256 UTF-8 bytes, messages at 1,024 entries, and `max_completion_tokens` at
 1–4,096. A `stop` array contains 1–4 nonempty, unique strings; the total stop
 payload is also bounded by the request-body limit.
@@ -123,13 +125,31 @@ field, and any recognized-but-unsupported field or value return an appropriate
 particular, profile v1 rejects:
 
 - tools, function calling, tool choice, and tool messages;
-- image, video, or audio content;
+- image content outside the Phase 17 subset below, and all video or audio content;
 - `logprobs` and `top_logprobs`;
 - structured output and `response_format`;
 - `seed` and reproducibility claims involving `system_fingerprint`;
 - `n` with any value other than `1`;
 - multipart message content and non-text output; and
 - other pinned-schema fields not explicitly listed as supported above.
+
+### Phase 17 image-content subset
+
+For Qwen3.5 BF16, a `user` message may use an ordered `content` array containing
+`{"type":"text","text":"..."}` and
+`{"type":"image_url","image_url":{"url":"data:image/...;base64,..."}}` parts.
+Part order is preserved. One or two unique images are accepted; image parts on
+system/assistant messages, unknown part types, empty text, duplicate images,
+HTTP(S) URLs, Files API IDs, and `detail` values other than omitted or `auto`
+are errors. The server never performs an outbound image fetch.
+
+PNG, JPEG, WebP, and a single-frame GIF are selected from magic bytes and must
+match the data-URL MIME. Encoded bytes, decoded pixel area, aspect ratio, image
+count, and total visual tokens are bounded before execution. Existing string
+`content`, response objects, error envelopes, and SSE framing are unchanged.
+CLI users may supply up to two trusted local files with repeated `--image PATH`;
+the images are placed before the final user message text. This local-file form
+is not an HTTP compatibility field.
 
 Authentication and deployment policy are outside this payload-compatibility
 profile. A deployment that requires authentication should use the standard

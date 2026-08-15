@@ -155,6 +155,12 @@ SHA-256、importer script hash、`weight_global_scale`のreciprocal変換、`inp
 MLP 144 tensorを必須とする。1〜144 tensorのsubsetはlayer感度診断だけに使え、manifestの`gemma-mlp-subset`選択とsidecar
 fingerprintが一致しないrequestへの再bindを拒否する。
 
+Phase 17では既存Qwen3.5-4B lockを変更せず、locked catalogからMTP 15 tensorとvision 297 tensorをcomponent-enabled
+manifestへ昇格する。manifestはexact repo/revision/model fingerprint、全tensor name/shape/dtype/source range、shared embedding、
+special token、processor geometryを検査する。text-only weight planは従来どおりこれらをloadせず、MTP/visionを選択した経路だけが
+required componentとして消費する。画像bytes、decoded raster、patch列、projected embeddingはderived model artifactではなく
+request-local dataであり、lockやrepositoryへ保存しない。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

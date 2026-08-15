@@ -252,6 +252,19 @@ CLI/serverはBF16とprovider low-bit artifactを同じmodel-directory引数か�
 通常警告を設けない。runtime/model evidenceの`experimental`分類は内部audit/documentationに留める。artifact source identity、
 recipe digest、topology plan、exact targetをresident identityに含め、異なるrecipe間でresident cacheを共有しない。
 
+### Qwen3.5 MTPとvision
+
+Phase 17のMTPはQwen固有の15 tensor manifest/graphをmodel-neutralなspeculative decisionとopaque transactionへ接続する。
+draftは公開stateを直接更新せず、greedy/stochastic verifierが返すaccepted prefixだけをcommit対象にする。canonical V620/R9700の
+現実装はdraft後のtarget verifyを逐次実行するためtarget-onlyより遅く、通常serviceは内部的にtarget-onlyを選ぶ。これはwire modeではなく、
+将来batched verifyが利益を示したtargetだけで切り替えるprovider判断である。
+
+visionはtext residentと別のlazy `QwenVisionResidentModel`を持つ。text-only requestはvision 297 tensorをdeviceへloadしない。
+画像requestはbounded decoder/processorを一度実行し、patch projectionと24 vision block、merger/projectorのdense演算を既存HIP
+semantic Matmulへ下ろす。画像埋め込みはtyped multimodal promptでimage-pad runだけを置換し、3-axis mRoPE positionをtext graphへ渡す。
+decodeでは通常token embeddingを使い、vision encodeを再実行しない。初期実装はBF16 text artifactだけをvisionと組み合わせ、
+vision weightのlow-bit化とcross-request image cacheは後続範囲とする。
+
 ## Build integration
 
 Cargo を top-level build entry point とする。`sllm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。

@@ -249,9 +249,15 @@ sllm_status_t validate_and_copy_descriptor(
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(&descriptor->positions, SLLM_TENSOR_DTYPE_I32, 1U,
+  if (descriptor->positions.rank != 1U && descriptor->positions.rank != 2U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_SHAPE_MISMATCH,
+        "positions tensor must have rank one or rank two");
+  }
+  status = validate_tensor(&descriptor->positions, SLLM_TENSOR_DTYPE_I32,
+                           descriptor->positions.rank,
                            &metadata->positions, sink,
-                           "positions tensor must have rank one");
+                           "positions tensor rank differs");
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -283,6 +289,7 @@ sllm_status_t validate_and_copy_descriptor(
   const uint64_t scale_q_shape[] = {q_heads, head_dim};
   const uint64_t scale_k_shape[] = {k_heads, head_dim};
   const uint64_t position_shape[] = {m};
+  const uint64_t mrope_position_shape[] = {m, 3U};
   const uint64_t q_output_shape[] = {m, q_heads, head_dim};
   if (m == 0U || m > SLLM_HIP_ATTENTION_PREPROCESS_MAX_M ||
       (q_heads != 8U && q_heads != 16U) || (k_heads != 2U && k_heads != 4U) ||
@@ -294,7 +301,8 @@ sllm_status_t validate_and_copy_descriptor(
       !exact_shape(metadata->k, 3U, k_shape) ||
       !exact_shape(metadata->q_raw_scale, 2U, scale_q_shape) ||
       !exact_shape(metadata->k_raw_scale, 2U, scale_k_shape) ||
-      !exact_shape(metadata->positions, 1U, position_shape) ||
+      (!exact_shape(metadata->positions, 1U, position_shape) &&
+       !exact_shape(metadata->positions, 2U, mrope_position_shape)) ||
       !exact_shape(metadata->q_output, 3U, q_output_shape) ||
       !exact_shape(metadata->gate_output, 3U, q_output_shape) ||
       !exact_shape(metadata->k_output, 3U, k_shape)) {
@@ -307,6 +315,7 @@ sllm_status_t validate_and_copy_descriptor(
   metadata->q_heads = static_cast<uint32_t>(q_heads);
   metadata->k_heads = static_cast<uint32_t>(k_heads);
   metadata->head_dim = static_cast<uint32_t>(head_dim);
+  metadata->position_components = metadata->positions.rank == 2U ? 3U : 1U;
   return SLLM_STATUS_OK;
 }
 

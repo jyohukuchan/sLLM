@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Router;
 use axum::body::{Body, to_bytes};
 use axum::extract::State;
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -109,18 +109,18 @@ async fn create_chat_completion(
     if let Err(error) = validate_content_type(request.headers()) {
         return error.into_response();
     }
+    if request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES as u64)
+    {
+        return request_too_large();
+    }
     let body = match to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
-        Err(_) => {
-            return ApiErrorV1::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "request body exceeds 1048576 bytes",
-                "invalid_request_error",
-                None,
-                ErrorCodeV1::RequestTooLarge,
-            )
-            .into_response();
-        }
+        Err(_) => return request_too_large(),
     };
     let request = match parse_chat_completion_request_for_profile(
         &body,
@@ -144,6 +144,17 @@ async fn create_chat_completion(
     } else {
         non_stream_chat_completion(receiver, context).await
     }
+}
+
+fn request_too_large() -> Response {
+    ApiErrorV1::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "request body exceeds 100663296 bytes",
+        "invalid_request_error",
+        None,
+        ErrorCodeV1::RequestTooLarge,
+    )
+    .into_response()
 }
 
 fn authorize(headers: &HeaderMap, config: &ServerConfigV1) -> Result<(), ApiErrorV1> {

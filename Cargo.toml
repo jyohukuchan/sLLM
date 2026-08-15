@@ -17,7 +17,9 @@ license = "MIT"
 
 [workspace.dependencies]
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio"] }
+base64 = { version = "=0.22.1" }
 futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
+image = { version = "=0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150" }
 serde_path_to_error = { version = "=0.1.20" }

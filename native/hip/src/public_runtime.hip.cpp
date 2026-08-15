@@ -177,6 +177,7 @@ hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
                   uint16_t *const gate_output, uint16_t *const k_output,
                   const uint32_t m, const uint32_t q_heads,
                   const uint32_t k_heads, const uint32_t head_dim,
+                  const uint32_t /*position_components*/,
                   const hipStream_t stream) noexcept {
   (void)q_heads;
   (void)k_heads;

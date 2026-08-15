@@ -287,6 +287,14 @@ R9700は既存単一GPU contractに従い`HIP_VISIBLE_DEVICES=2`で単独可視�
 これはpacked-dequant/packed-direct software providerのproject evidenceであり、RDNA native FP4 instruction、別SKU、別ROCm tuple、
 multi-GPU、same-artifact NVIDIA reference correctnessを証明しない。reference未実行のmodel evidenceは`experimental`とする。
 
+### 2026-08-16 Phase 17 Qwen3.5 MTP/vision evidence
+
+同じlocal tupleのV620 `gfx1030`とR9700 `gfx1201`で、fixed Qwen3.5-4BのMTP 15 tensorとvision 297 tensorを
+real-weight実行した。MTPは両targetでdraft/verify token、accepted prefix、deterministic replay、HIP-only、fallbackなし、cleanup 0を
+PASSしたが、逐次target verifyのため性能採用せず通常providerはtarget-onlyとした。visionは256 patch/64 visual token、projector、
+3-axis mRoPE text prefill、1 decodeを両targetでPASSした。targetごとのprojected digestはtarget内で再現し、異なるHIP数学provider間の
+bit一致は要求しない。別SKU、別画像geometry、video、low-bit visionへ一般化しない。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

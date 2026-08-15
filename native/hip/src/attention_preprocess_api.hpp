@@ -33,6 +33,7 @@ struct DescriptorMetadata final {
   uint32_t q_heads;
   uint32_t k_heads;
   uint32_t head_dim;
+  uint32_t position_components;
 };
 
 sllm_status_t

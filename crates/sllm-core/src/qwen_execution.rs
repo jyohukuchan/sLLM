@@ -48,6 +48,7 @@ use crate::{
 pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
+    hidden_states_bf16: Option<Vec<u16>>,
     committed_length: u64,
 }
 
@@ -199,6 +200,12 @@ impl QwenExecutionOutput {
     /// one BF16 row and convert it to finite-width F32 host values.
     pub fn last_logits(&self) -> Option<&[f32]> {
         self.last_logits.as_deref()
+    }
+
+    /// Target hidden rows before the final output RMSNorm, in row-major BF16.
+    /// This is published only by the explicit MTP hook methods.
+    pub fn hidden_states_bf16(&self) -> Option<&[u16]> {
+        self.hidden_states_bf16.as_deref()
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -621,6 +628,25 @@ impl QwenExecutionRequest {
         self.core.prefill_with_last_logits(token_ids)
     }
 
+    pub fn prefill_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.prefill_with_mtp_state(token_ids)
+    }
+
+    /// Runs a typed multimodal prefill with complete prompt embeddings and
+    /// three-axis `[temporal,height,width]` mRoPE positions.
+    pub fn prefill_multimodal_with_last_logits(
+        &mut self,
+        token_ids: &[i32],
+        embeddings_bf16: &[u16],
+        positions: &[[i32; 3]],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .prefill_multimodal(token_ids, embeddings_bf16, positions)
+    }
+
     /// Runs exactly one decode token at the current committed position.
     pub fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode(token_id)
@@ -632,6 +658,31 @@ impl QwenExecutionRequest {
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode_with_last_logits(token_id)
+    }
+
+    pub fn decode_with_mtp_state(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_with_mtp_state(token_id)
+    }
+
+    /// Runs one MTP row. `target_hidden_bf16` must contain exactly 2560 BF16
+    /// values and the graph must expose the typed MTP hidden input.
+    pub fn prefill_mtp(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.prefill_mtp(token_id, target_hidden_bf16)
+    }
+
+    pub fn decode_mtp(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_mtp(token_id, target_hidden_bf16)
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -765,6 +816,7 @@ struct QwenExecutionCore {
     prepared_semantics: PreparedSemanticCache,
     lifecycle: ExecutionTransaction,
     committed_length: u64,
+    rope_position_delta: i64,
     last_output: Option<QwenExecutionOutput>,
 }
 
@@ -1425,6 +1477,7 @@ impl QwenExecutionCore {
             prepared_semantics: PreparedSemanticCache::default(),
             lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
+            rope_position_delta: 0,
             last_output: None,
         };
         core.ensure_state_lengths(0)?;
@@ -1512,6 +1565,7 @@ impl QwenExecutionCore {
             prepared_semantics: PreparedSemanticCache::default(),
             lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
+            rope_position_delta: 0,
             last_output: None,
         };
         core.ensure_state_lengths(0)?;
@@ -1519,20 +1573,53 @@ impl QwenExecutionCore {
     }
 
     fn prefill(&mut self, token_ids: &[i32]) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(token_ids, false)
+        self.prefill_impl(token_ids, false, false, None, None)
     }
 
     fn prefill_with_last_logits(
         &mut self,
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(token_ids, true)
+        self.prefill_impl(token_ids, true, false, None, None)
+    }
+
+    fn prefill_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_impl(token_ids, true, true, None, None)
+    }
+
+    fn prefill_multimodal(
+        &mut self,
+        token_ids: &[i32],
+        embeddings_bf16: &[u16],
+        positions: &[[i32; 3]],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_impl(
+            token_ids,
+            true,
+            false,
+            None,
+            Some((embeddings_bf16, positions)),
+        )
+    }
+
+    fn prefill_mtp(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_impl(&[token_id], true, true, Some(target_hidden_bf16), None)
     }
 
     fn prefill_impl(
         &mut self,
         token_ids: &[i32],
         include_last_logits: bool,
+        include_hidden_states: bool,
+        target_hidden_bf16: Option<&[u16]>,
+        multimodal: Option<(&[u16], &[[i32; 3]])>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -1555,24 +1642,44 @@ impl QwenExecutionCore {
             token_ids,
             AttentionPreprocessPositionMode::Prefill,
             include_last_logits,
+            include_hidden_states,
+            target_hidden_bf16,
+            multimodal,
         )
     }
 
     fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, false)
+        self.decode_impl(token_id, false, false, None)
     }
 
     fn decode_with_last_logits(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true)
+        self.decode_impl(token_id, true, false, None)
+    }
+
+    fn decode_with_mtp_state(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, true, true, None)
+    }
+
+    fn decode_mtp(
+        &mut self,
+        token_id: i32,
+        target_hidden_bf16: &[u16],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, true, true, Some(target_hidden_bf16))
     }
 
     fn decode_impl(
         &mut self,
         token_id: i32,
         include_last_logits: bool,
+        include_hidden_states: bool,
+        target_hidden_bf16: Option<&[u16]>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -1586,6 +1693,9 @@ impl QwenExecutionCore {
             &[token_id],
             AttentionPreprocessPositionMode::DecodeContinuation,
             include_last_logits,
+            include_hidden_states,
+            target_hidden_bf16,
+            None,
         )
     }
 
@@ -1594,6 +1704,9 @@ impl QwenExecutionCore {
         token_ids: &[i32],
         position_mode: AttentionPreprocessPositionMode,
         include_last_logits: bool,
+        include_hidden_states: bool,
+        target_hidden_bf16: Option<&[u16]>,
+        multimodal: Option<(&[u16], &[[i32; 3]])>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         let token_count = u64::try_from(token_ids.len()).map_err(|_| {
             QwenExecutionError::InvalidRequest("token count does not fit u64".to_owned())
@@ -1632,6 +1745,55 @@ impl QwenExecutionCore {
             ));
         }
         validate_input_token_ids(token_ids)?;
+        let expects_multimodal = self.graph.is_multimodal();
+        if (start_position == 0 && expects_multimodal) != multimodal.is_some()
+            || (!expects_multimodal && multimodal.is_some())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "multimodal graph/input mode differs".to_owned(),
+            ));
+        }
+        let rope_start_position = if start_position == 0 {
+            0
+        } else {
+            let committed = i64::try_from(start_position).map_err(|_| {
+                QwenExecutionError::InvalidRequest("committed position does not fit i64".to_owned())
+            })?;
+            u64::try_from(
+                committed
+                    .checked_add(self.rope_position_delta)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "decode mRoPE position overflowed".to_owned(),
+                        )
+                    })?,
+            )
+            .map_err(|_| {
+                QwenExecutionError::InvalidRequest("decode mRoPE position is negative".to_owned())
+            })?
+        };
+        let next_rope_delta = multimodal
+            .map(|(_, positions)| {
+                let maximum = positions
+                    .iter()
+                    .flat_map(|position| position.iter())
+                    .copied()
+                    .max()
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "multimodal positions are empty".to_owned(),
+                        )
+                    })?;
+                i64::from(maximum)
+                    .checked_add(1)
+                    .and_then(|next| next.checked_sub(i64::try_from(expected_length).ok()?))
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "multimodal position delta overflowed".to_owned(),
+                        )
+                    })
+            })
+            .transpose()?;
 
         // A stale state before any new upload/dispatch is an admission error,
         // not a graph-wide partial mutation. Once the guard begins, every
@@ -1639,21 +1801,39 @@ impl QwenExecutionCore {
         self.ensure_state_lengths(start_position)?;
         let mut guard = self.lifecycle.begin()?;
 
-        self.upload_runtime_inputs(token_ids, start_position, token_count)?;
-        let output =
-            self.lower_graph(token_count, start_position, expected_length, position_mode)?;
+        self.upload_runtime_inputs(
+            token_ids,
+            rope_start_position,
+            token_count,
+            target_hidden_bf16,
+            multimodal,
+        )?;
+        let output = self.lower_graph(
+            token_count,
+            start_position,
+            rope_start_position,
+            expected_length,
+            position_mode,
+        )?;
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count))
+            .transpose()?;
+        let hidden_states_bf16 = include_hidden_states
+            .then(|| self.read_hidden_states(token_count))
             .transpose()?;
         self.ensure_state_lengths(expected_length)?;
 
         let output = QwenExecutionOutput {
             token_ids: output,
             last_logits,
+            hidden_states_bf16,
             committed_length: expected_length,
         };
         guard.commit()?;
         self.committed_length = expected_length;
+        if let Some(delta) = next_rope_delta {
+            self.rope_position_delta = delta;
+        }
         self.last_output = Some(output.clone());
         Ok(output)
     }
@@ -1662,6 +1842,7 @@ impl QwenExecutionCore {
         &self,
         token_count: u64,
         start_position: u64,
+        rope_start_position: u64,
         expected_length: u64,
         position_mode: AttentionPreprocessPositionMode,
     ) -> Result<Vec<i32>, QwenExecutionError> {
@@ -1709,11 +1890,18 @@ impl QwenExecutionCore {
                         kv_heads,
                         head_dim,
                         token_count: transition.token_count(),
-                        start_position: transition.start_position(),
+                        start_position: rope_start_position,
                         position_mode,
                     },
                     &mut pending,
                 )?,
+                QwenGraphNodeKind::MultimodalEmbeddingSelect => self
+                    .execute_multimodal_embedding_select(
+                        node,
+                        transition.token_count(),
+                        position_mode,
+                        &mut pending,
+                    )?,
                 QwenGraphNodeKind::FullKvAppend { layer, state } => self.execute_kv_append(
                     node,
                     layer,
@@ -1847,6 +2035,56 @@ impl QwenExecutionCore {
         decode_bf16_logits(&bytes)
     }
 
+    fn read_hidden_states(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
+        let final_norm = self
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| node.label() == "final_rmsnorm")
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("final RMSNorm node is absent".to_owned())
+            })?;
+        let hidden_id = *final_norm.inputs().first().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("final RMSNorm hidden input is absent".to_owned())
+        })?;
+        let view = self.view(hidden_id, token_count)?;
+        if view.dtype() != DType::Bf16
+            || view.shape()
+                != [
+                    usize::try_from(token_count).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "hidden token count does not fit usize".to_owned(),
+                        )
+                    })?,
+                    2_560,
+                ]
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "MTP hidden hook requires BF16 [tokens,2560] before final RMSNorm".to_owned(),
+            ));
+        }
+        let allocation = self.tensors.get(hidden_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("hidden state allocation is absent".to_owned())
+        })?;
+        let bytes = read_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &allocation.buffer,
+            &view,
+            self.completion_timeout,
+            "MTP hidden-state readback",
+        )?;
+        if bytes.len() % 2 != 0 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "MTP hidden-state byte count is odd".to_owned(),
+            ));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect())
+    }
+
     fn execute_semantic(
         &self,
         node: &QwenGraphNode,
@@ -1933,6 +2171,38 @@ impl QwenExecutionCore {
             )));
         }
         Ok(Some(decode_argmax_bytes(&bytes)?))
+    }
+
+    fn execute_multimodal_embedding_select(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        position_mode: AttentionPreprocessPositionMode,
+        pending: &mut ExecutionSegment,
+    ) -> Result<(), QwenExecutionError> {
+        if node.inputs().len() != 2 || node.outputs().len() != 1 {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "multimodal embedding selector {} has the wrong arity",
+                node.label()
+            )));
+        }
+        let selected_input = match position_mode {
+            AttentionPreprocessPositionMode::Prefill => node.inputs()[1],
+            AttentionPreprocessPositionMode::DecodeContinuation => node.inputs()[0],
+        };
+        let output = node.outputs()[0];
+        let input_view = self.view(selected_input, token_count)?;
+        let output_view = self.view(output, token_count)?;
+        let descriptor =
+            SemanticOpDescriptor::new(SemanticOpKind::Copy, vec![input_view], vec![output_view])?;
+        let submission = self.submit_semantic(
+            descriptor,
+            vec![self.bind(selected_input, token_count, AccessMode::Read)?],
+            vec![self.bind(output, token_count, AccessMode::Write)?],
+            PreparedCachePolicy::Transient,
+        )?;
+        pending.retain_semantic(node.label(), submission);
+        Ok(())
     }
 
     fn execute_attention_preprocess(
@@ -2187,13 +2457,43 @@ impl QwenExecutionCore {
         token_ids: &[i32],
         start_position: u64,
         token_count: u64,
+        target_hidden_bf16: Option<&[u16]>,
+        multimodal: Option<(&[u16], &[[i32; 3]])>,
     ) -> Result<(), QwenExecutionError> {
         let token_tensor = self.tensor_id("input.token_ids")?;
         let position_tensor = self.tensor_id("input.positions")?;
         let token_view = self.view(token_tensor, token_count)?;
         let position_view = self.view(position_tensor, token_count)?;
         let token_bytes = i32_bytes(token_ids);
-        let positions = position_bytes(start_position, token_count)?;
+        let positions = if self.graph.is_multimodal() {
+            if let Some((_, positions)) = multimodal {
+                if positions.len() != token_ids.len()
+                    || positions.iter().flatten().any(|position| {
+                        *position < 0
+                            || *position
+                                >= i32::try_from(
+                                    AttentionPreprocessContract::MAX_POSITION_EMBEDDINGS,
+                                )
+                                .expect("position contract fits i32")
+                    })
+                {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "multimodal position payload differs".to_owned(),
+                    ));
+                }
+                mrope_position_bytes(positions)
+            } else {
+                let position = i32::try_from(start_position).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "decode mRoPE position does not fit i32".to_owned(),
+                    )
+                })?;
+                let positions = vec![[position; 3]; token_ids.len()];
+                mrope_position_bytes(&positions)
+            }
+        } else {
+            position_bytes(start_position, token_count)?
+        };
         upload_exact_bytes(
             self.session.as_ref(),
             &self.queue,
@@ -2211,7 +2511,95 @@ impl QwenExecutionCore {
             &positions,
             self.completion_timeout,
             "position input upload",
-        )
+        )?;
+        match (
+            self.tensor_ids.get("input.multimodal_embeddings").copied(),
+            multimodal,
+        ) {
+            (Some(tensor_id), Some((words, _))) => {
+                let expected = usize::try_from(token_count)
+                    .ok()
+                    .and_then(|count| count.checked_mul(2_560))
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "multimodal embedding length overflowed".to_owned(),
+                        )
+                    })?;
+                if words.len() != expected {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "multimodal embedding words are {}, expected {expected}",
+                        words.len()
+                    )));
+                }
+                let bytes = words
+                    .iter()
+                    .flat_map(|word| word.to_le_bytes())
+                    .collect::<Vec<_>>();
+                let view = self.view(tensor_id, token_count)?;
+                upload_exact_bytes(
+                    self.session.as_ref(),
+                    &self.queue,
+                    &self.tensors[tensor_id].buffer,
+                    &view,
+                    &bytes,
+                    self.completion_timeout,
+                    "multimodal embedding upload",
+                )?;
+            }
+            (Some(_), None) if self.committed_length == 0 => {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "multimodal prefill embeddings are absent".to_owned(),
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "text graph does not accept multimodal embeddings".to_owned(),
+                ));
+            }
+            _ => {}
+        }
+        match (
+            self.tensor_ids.get("input.target_hidden").copied(),
+            target_hidden_bf16,
+        ) {
+            (Some(tensor_id), Some(words)) => {
+                let expected_words = usize::try_from(token_count)
+                    .ok()
+                    .and_then(|tokens| tokens.checked_mul(2_560))
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "MTP hidden-state length overflowed".to_owned(),
+                        )
+                    })?;
+                if words.len() != expected_words {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "MTP hidden-state words are {}, expected {expected_words}",
+                        words.len()
+                    )));
+                }
+                let mut bytes = Vec::with_capacity(words.len() * 2);
+                for word in words {
+                    bytes.extend_from_slice(&word.to_le_bytes());
+                }
+                let view = self.view(tensor_id, token_count)?;
+                upload_exact_bytes(
+                    self.session.as_ref(),
+                    &self.queue,
+                    &self.tensors[tensor_id].buffer,
+                    &view,
+                    &bytes,
+                    self.completion_timeout,
+                    "MTP target-hidden upload",
+                )
+            }
+            (Some(_), None) => Err(QwenExecutionError::InvalidRequest(
+                "MTP graph requires a target hidden-state row".to_owned(),
+            )),
+            (None, Some(_)) => Err(QwenExecutionError::InvalidRequest(
+                "text graph does not accept an MTP target hidden-state row".to_owned(),
+            )),
+            (None, None) => Ok(()),
+        }
     }
 
     fn ensure_state_lengths(&self, expected: u64) -> Result<(), QwenExecutionError> {
@@ -2974,7 +3362,6 @@ fn allocate_tensors(
                 })?;
                 if source.graph_view.dtype() != tensor.view().dtype()
                     || source.graph_view.encoding() != tensor.view().encoding()
-                    || source.graph_view.payload_bytes() != tensor.view().payload_bytes()
                     || tensor.view().end_offset() > source.buffer.size_bytes()
                 {
                     return Err(QwenExecutionError::InvalidGraph(format!(
@@ -3237,20 +3624,30 @@ fn create_states(
             }
         }
     }
-    let full_layers: BTreeSet<u32> = graph
-        .layer_types()
-        .iter()
-        .enumerate()
-        .filter_map(|(layer, ty)| (*ty == crate::LayerType::FullAttention).then_some(layer as u32))
-        .collect();
-    let linear_layers: BTreeSet<u32> = graph
-        .layer_types()
-        .iter()
-        .enumerate()
-        .filter_map(|(layer, ty)| {
-            (*ty == crate::LayerType::LinearAttention).then_some(layer as u32)
-        })
-        .collect();
+    let full_layers: BTreeSet<u32> = if graph.is_mtp() {
+        BTreeSet::from([crate::weights::QWEN35_MTP_CONSUMER_LAYER as u32])
+    } else {
+        graph
+            .layer_types()
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, ty)| {
+                (*ty == crate::LayerType::FullAttention).then_some(layer as u32)
+            })
+            .collect()
+    };
+    let linear_layers: BTreeSet<u32> = if graph.is_mtp() {
+        BTreeSet::new()
+    } else {
+        graph
+            .layer_types()
+            .iter()
+            .enumerate()
+            .filter_map(|(layer, ty)| {
+                (*ty == crate::LayerType::LinearAttention).then_some(layer as u32)
+            })
+            .collect()
+    };
     if kv_states.keys().copied().collect::<BTreeSet<_>>() != full_layers
         || linear_states.keys().copied().collect::<BTreeSet<_>>() != linear_layers
     {
@@ -3362,6 +3759,45 @@ fn upload_exact_bytes(
     Ok(())
 }
 
+fn read_exact_bytes(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    buffer: &ExecutionBuffer,
+    view: &TensorView,
+    timeout: Duration,
+    stage: &str,
+) -> Result<Vec<u8>, QwenExecutionError> {
+    let total = view.payload_bytes();
+    let maximum = session.max_transfer_bytes()?;
+    let mut bytes = Vec::with_capacity(usize::try_from(total).map_err(|_| {
+        QwenExecutionError::InvalidRequest(format!("{stage} byte count does not fit usize"))
+    })?);
+    let mut relative = 0_u64;
+    while relative < total {
+        let length = (total - relative).min(maximum);
+        let offset = view.byte_offset().checked_add(relative).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!("{stage} offset overflowed"))
+        })?;
+        let mut transfer = session.readback(queue, buffer.range(offset, length)?)?;
+        require_terminal_success(stage, transfer.wait(timeout)?)?;
+        let start = bytes.len();
+        bytes.resize(
+            start
+                + usize::try_from(length).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "{stage} chunk length does not fit usize"
+                    ))
+                })?,
+            0,
+        );
+        transfer.read_into(&mut bytes[start..])?;
+        relative = relative.checked_add(length).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!("{stage} progress overflowed"))
+        })?;
+    }
+    Ok(bytes)
+}
+
 fn upload_buffer_bytes(
     session: &ExecutionSession,
     queue: &ExecutionQueue,
@@ -3436,6 +3872,16 @@ fn position_bytes(start_position: u64, token_count: u64) -> Result<Vec<u8>, Qwen
         positions.extend_from_slice(&position.to_le_bytes());
     }
     Ok(positions)
+}
+
+fn mrope_position_bytes(positions: &[[i32; 3]]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(positions.len().saturating_mul(12));
+    for position in positions {
+        for component in position {
+            bytes.extend_from_slice(&component.to_le_bytes());
+        }
+    }
+    bytes
 }
 
 fn validate_input_token_ids(token_ids: &[i32]) -> Result<(), QwenExecutionError> {
@@ -4186,6 +4632,42 @@ mod tests {
             QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
                 .expect("structural fixture provisions");
         (core, source)
+    }
+
+    #[test]
+    fn mtp_graph_requires_hidden_row_and_advances_opaque_state() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            vec![12],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_mtp_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("MTP fixture provisions");
+        let first = core.prefill_mtp(7, &[0; 2_560]).expect("MTP prefill");
+        assert_eq!(first.token_ids(), &[11]);
+        assert_eq!(first.hidden_states_bf16().unwrap().len(), 2_560);
+        let second = core.decode_mtp(11, &[0; 2_560]).expect("MTP decode");
+        assert_eq!(second.token_ids(), &[12]);
+        assert_eq!(second.committed_length(), 2);
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "create-kv:32")
+        );
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "kv-append:32:1:1")
+        );
     }
 
     #[test]

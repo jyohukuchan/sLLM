@@ -1,6 +1,6 @@
 # Phase 17: Qwen3.5 MTP、vision
 
-> 状態: planned
+> 状態: completed (2026-08-16)
 > 作成日: 2026-08-16
 
 ## 目的
@@ -184,5 +184,15 @@ versioned API拡張として文書化する。
 - remote image取得が必要になった場合、本Phaseへ暗黙追加せず、outbound policy/resource/security contractを別途ユーザーと決める。
 - 同じwork unitの2回reject、review時間が実装時間超、1時間以上の機能進捗停止、検証/docs 30%超、見積り1.5倍超、
   acceptance変更時は追加探索を止めて同じwork unitを再計画する。
+
+## Closeout結果
+
+- MTP 15 tensor manifest/graph、shared embedding、target hidden-state seam、greedy/stochastic verifier、opaque transactionを実装した。
+  canonical 2 targetのreal-weight draft/verifyは一致したが、逐次verifyはtarget forwardを削減しないため、通常providerはtarget-onlyを選ぶ。
+- vision 297 tensor、bounded decoder/processor、HIP dense projection、24 block、merger/projector、typed embedding replacement、3-axis
+  mRoPE、lazy server resident、CLI local path、Chat Completions data URLを実装した。
+- V620/R9700でMTPとvision/multimodal textをHIP-only、fallbackなし、deterministic、cleanup 0でPASSした。MTPを性能採用したtargetが
+  ないためimage+MTP production matrixは非選択providerの追加gateにせず、imageはtarget-only text providerでcloseoutした。
+- low-bit modelのtext-only挙動を維持し、visionはBF16 text artifactに限定した。remote fetch、Files API、video、low-bit visionは非対象のまま。
 
 [対応する履歴](../../../../../history/2026/08/11-20/phase17-qwen35-mtp-vision.md)

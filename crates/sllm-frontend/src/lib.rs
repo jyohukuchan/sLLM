@@ -6,6 +6,7 @@ use std::borrow::Borrow;
 mod chat;
 mod generation;
 mod tokenizer;
+mod vision;
 
 pub use chat::{
     ChatFieldV1, ChatRenderError, QWEN35_CHAT_MAX_OUTPUT_BYTES, QWEN35_CHAT_RENDERER_VERSION,
@@ -22,6 +23,10 @@ pub use generation::{
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, SpecialTokenSnapshotV1, TokenIdContextV1,
     TokenIdsV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
+};
+pub use vision::{
+    BoundedImageBytesV1, DecodedRgbImageV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,
+    Qwen35VisionProcessorV1, VisionErrorV1, VisionImageFormatV1, VisionPatchPositionV1,
 };
 
 pub use sllm_core::{

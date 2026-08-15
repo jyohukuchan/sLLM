@@ -25,8 +25,12 @@ mod prepared_execution;
 mod quantized_model;
 mod qwen_execution;
 mod qwen_graph;
+mod qwen_mtp;
+mod qwen_vision;
+mod qwen_vision_execution;
 mod registry;
 mod sampling;
+mod speculative;
 mod tensor;
 mod weights;
 
@@ -149,19 +153,41 @@ pub use qwen_graph::{
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph, build_qwen35_mtp_graph,
+    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_qwen35_nvfp4_graph_with_kv_cache_encoding,
+};
+pub use qwen_mtp::{
+    QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,
+    QWEN35_MTP_TENSOR_COUNT, QwenMtpError, QwenMtpManifest, QwenMtpTensor,
+    build_qwen35_mtp_manifest, build_verified_qwen35_mtp_manifest,
+};
+pub use qwen_vision::{
+    QWEN35_VISION_DEPTH, QWEN35_VISION_HIDDEN_SIZE, QWEN35_VISION_INTERMEDIATE_SIZE,
+    QWEN35_VISION_OUTPUT_SIZE, QWEN35_VISION_TENSOR_COUNT, QwenVisionError, QwenVisionManifest,
+    QwenVisionProcessorContract, QwenVisionTensor, build_qwen35_vision_manifest,
+    build_verified_qwen35_vision_manifest,
+};
+pub use qwen_vision_execution::{
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenVisionExecutionError,
+    QwenVisionExecutionInput, QwenVisionExecutionOutput, QwenVisionResidentModel,
+    assemble_qwen35_multimodal_prompt,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
     OsSamplingRandom, ProfileSamplerV1, SamplingError, SamplingParametersV1, SamplingRandomSource,
 };
+pub use speculative::{
+    DraftToken, OpaqueStateCheckpoint, SpeculativeDecision, SpeculativeError,
+    SpeculativeTransaction, TokenDistribution, verify_greedy, verify_stochastic,
+};
 pub use tensor::{TensorError, TensorView};
 pub use weights::{
-    WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer, WeightConsumerKey,
-    WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError, WeightUploadError,
-    WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
-    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
+    QwenComponentSelection, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer,
+    WeightConsumerKey, WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError,
+    WeightUploadError, WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
+    build_qwen_component_weight_load_plan, build_unsloth_gemma4_nvfp4_weight_load_plan,
+    build_verified_gemma4_weight_load_plan, build_verified_qwen_component_weight_load_plan,
     build_verified_weight_load_plan, build_weight_load_plan, upload_verified_weight,
 };
 

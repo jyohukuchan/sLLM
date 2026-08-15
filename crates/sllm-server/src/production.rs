@@ -7,21 +7,26 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
-    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QwenResidentModel, ReviewedModelLock,
+    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QWEN35_4B_FINGERPRINT, QwenExecutionRequest,
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
+    QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
     VerifiedCache, VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4,
-    WeightLoadPlan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    WeightLoadPlan, assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph,
+    build_qwen35_fp8_graph, build_qwen35_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_unsloth_gemma4_nvfp4_weight_load_plan,
-    build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan, read_model_lock,
-    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
-    verify_unsloth_gemma4_nvfp4,
+    build_verified_gemma4_weight_load_plan, build_verified_qwen35_vision_manifest,
+    build_verified_weight_load_plan, read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
+    verify_nvfp4_sidecar, verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
-    GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
-    GenerationServiceV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, TokenizerFrontendV1, gemma4_generation_stop_policy,
+    GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
+    GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1,
+    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenizerFrontendV1,
+    gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
+use crate::api::ChatContentPartV1;
 use crate::{
     BackendCompletionV1, BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
     FinishReasonV1, GenerationDeltaSinkV1, TokenUsageV1,
@@ -179,6 +184,10 @@ struct QwenBackendStateV1 {
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     fp8_provider: Option<String>,
+    cache: Arc<VerifiedCache>,
+    vision_manifest: Option<QwenVisionManifest>,
+    vision_resident: Option<QwenVisionResidentModel>,
+    completion_timeout: Duration,
 }
 
 pub struct Gemma4ChatBackendV1 {
@@ -223,6 +232,15 @@ impl QwenChatBackendV1 {
         let cache = Arc::new(lock.verify_cache(&config.cache_path).map_err(|error| {
             BackendErrorV1::new(format!("model cache verification failed: {error}"))
         })?);
+        let vision_manifest = if lock.fingerprint() == QWEN35_4B_FINGERPRINT {
+            Some(
+                build_verified_qwen35_vision_manifest(&lock, &cache).map_err(|error| {
+                    BackendErrorV1::new(format!("vision manifest validation failed: {error}"))
+                })?,
+            )
+        } else {
+            None
+        };
         let tokenizer =
             TokenizerFrontendV1::from_verified_cache(&lock, &cache).map_err(|error| {
                 BackendErrorV1::new(format!("verified tokenizer construction failed: {error}"))
@@ -380,6 +398,10 @@ impl QwenChatBackendV1 {
                 sidecar,
                 nvfp4_sidecar,
                 fp8_provider,
+                cache,
+                vision_manifest,
+                vision_resident: None,
+                completion_timeout: config.completion_timeout,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -410,9 +432,14 @@ impl QwenChatBackendV1 {
             .take()
             .ok_or_else(|| BackendErrorV1::new("Qwen backend is already shut down"))?;
         let QwenBackendStateV1 {
-            resident, session, ..
+            resident,
+            vision_resident,
+            session,
+            model_ready_current_bytes,
+            ..
         } = state;
         drop(resident);
+        drop(vision_resident);
         let before_shutdown = session.memory_snapshot();
         if before_shutdown.current_bytes() != 0 {
             return Err(BackendErrorV1::new(format!(
@@ -437,7 +464,7 @@ impl QwenChatBackendV1 {
             target: self.identity.target.clone(),
             model_fingerprint: self.identity.model_fingerprint.clone(),
             plan_digest: self.identity.plan_digest.clone(),
-            model_ready_current_bytes: self.identity.model_ready_current_bytes,
+            model_ready_current_bytes,
             final_current_bytes: final_memory.current_bytes(),
             final_request_state_bytes: final_memory.request_state().current_bytes(),
             final_workspace_bytes: final_memory.workspace().current_bytes(),
@@ -690,12 +717,84 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let prompt = service.prepare_input(&input).map_err(|error| {
             BackendErrorV1::new(format!("generation input preparation failed: {error}"))
         })?;
+        let processed_images = request
+            .messages()
+            .iter()
+            .flat_map(|message| message.parts())
+            .filter_map(|part| match part {
+                ChatContentPartV1::Image(image) => Some(image),
+                ChatContentPartV1::Text(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let multimodal_prompt = if processed_images.is_empty() {
+            None
+        } else {
+            if state.sidecar.is_some() || state.nvfp4_sidecar.is_some() {
+                return Err(BackendErrorV1::new(
+                    "vision requests currently require the BF16 text artifact",
+                ));
+            }
+            let vision_manifest = state.vision_manifest.clone().ok_or_else(|| {
+                BackendErrorV1::new("vision requests require the fixed Qwen3.5-4B model")
+            })?;
+            if state.vision_resident.is_none() {
+                state.vision_resident = Some(
+                    QwenVisionResidentModel::new(
+                        Arc::clone(&state.session),
+                        Arc::clone(&state.cache),
+                        vision_manifest.clone(),
+                        state.completion_timeout,
+                    )
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("vision resident load failed: {error}"))
+                    })?,
+                );
+                let ready = state.session.memory_snapshot();
+                require_clean_request_memory(ready, "vision model-ready")?;
+                state.model_ready_current_bytes = ready.model_resident().current_bytes();
+            }
+            let vision = state
+                .vision_resident
+                .as_ref()
+                .expect("vision resident was initialized");
+            let images = processed_images
+                .iter()
+                .map(|image| {
+                    let output = vision
+                        .execute(&QwenVisionExecutionInput {
+                            grid_thw: image.grid_thw,
+                            patch_width: image.patch_width,
+                            patches: image.patches.clone(),
+                        })
+                        .map_err(|error| {
+                            BackendErrorV1::new(format!("vision encode failed: {error}"))
+                        })?;
+                    Ok(QwenMultimodalImageEmbedding {
+                        grid_thw: image.grid_thw,
+                        embeddings_bf16: output.embeddings_bf16().to_vec(),
+                    })
+                })
+                .collect::<Result<Vec<_>, BackendErrorV1>>()?;
+            Some(
+                assemble_qwen35_multimodal_prompt(
+                    state.cache.as_ref(),
+                    &prompt,
+                    vision_manifest.image_pad_token,
+                    &images,
+                )
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("multimodal prompt assembly failed: {error}"))
+                })?,
+            )
+        };
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
         let state_capacity = prompt_tokens
             .checked_add(u64::from(request.generation().max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
-        let graph = if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
+        let graph = if multimodal_prompt.is_some() {
+            build_qwen35_multimodal_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
+        } else if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
             build_qwen35_nvfp4_graph(
                 &state.lock,
                 &state.plan,
@@ -736,14 +835,30 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let mut random = OsSamplingRandom::for_parameters(request.generation().sampling())
             .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
-        let outcome = service.generate_tokens_with_sink(
-            &mut owner,
-            &prompt,
-            request.generation(),
-            cancellation,
-            &mut random,
-            &mut output_sink,
-        );
+        let outcome = if let Some(multimodal_prompt) = multimodal_prompt.as_ref() {
+            let mut executor = QwenMultimodalExecutorV1 {
+                inner: &mut owner,
+                prompt: multimodal_prompt,
+                prefilled: false,
+            };
+            service.generate_tokens_with_sink(
+                &mut executor,
+                &prompt,
+                request.generation(),
+                cancellation,
+                &mut random,
+                &mut output_sink,
+            )
+        } else {
+            service.generate_tokens_with_sink(
+                &mut owner,
+                &prompt,
+                request.generation(),
+                cancellation,
+                &mut random,
+                &mut output_sink,
+            )
+        };
         let dispatch = owner.audit_snapshot().ok();
         let memory = owner.memory_audit_snapshot().ok();
         drop(owner);
@@ -1037,6 +1152,81 @@ struct OutputSinkAdapterV1<'a> {
     inner: &'a mut dyn GenerationDeltaSinkV1,
 }
 
+struct QwenMultimodalExecutorV1<'a> {
+    inner: &'a mut QwenExecutionRequest,
+    prompt: &'a QwenMultimodalPrompt,
+    prefilled: bool,
+}
+
+impl GenerationExecutorV1 for QwenMultimodalExecutorV1<'_> {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        _include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "multimodal prefill was requested twice".to_owned(),
+            ));
+        }
+        let token_ids = input_token_ids
+            .iter()
+            .map(|token| i32::try_from(*token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .inner
+            .prefill_multimodal_with_last_logits(
+                &token_ids,
+                &self.prompt.embeddings_bf16,
+                &self.prompt.positions,
+            )
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.prefilled = true;
+        let device_argmax = output
+            .token_ids()
+            .last()
+            .copied()
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)
+            .and_then(|token| {
+                u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+            })?;
+        Ok(GenerationStepV1::new(
+            device_argmax,
+            output.last_logits().map(ToOwned::to_owned),
+        ))
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = if include_last_logits {
+            self.inner.decode_with_last_logits(token)
+        } else {
+            self.inner.decode(token)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let device_argmax = output
+            .token_ids()
+            .last()
+            .copied()
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)
+            .and_then(|token| {
+                u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+            })?;
+        Ok(GenerationStepV1::new(
+            device_argmax,
+            output.last_logits().map(ToOwned::to_owned),
+        ))
+    }
+
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+}
+
 impl GenerationOutputSinkV1 for OutputSinkAdapterV1<'_> {
     fn publish(&mut self, delta: &str) -> Result<(), GenerationServiceError> {
         self.inner
@@ -1066,7 +1256,15 @@ mod tests {
     use crate::ChatMessageV1;
 
     fn message(inner: Qwen35ChatMessageV1) -> ChatMessageV1 {
-        ChatMessageV1 { inner }
+        let content = match &inner {
+            Qwen35ChatMessageV1::System { content }
+            | Qwen35ChatMessageV1::User { content }
+            | Qwen35ChatMessageV1::Assistant { content, .. } => content.clone(),
+        };
+        ChatMessageV1 {
+            inner,
+            parts: vec![crate::api::ChatContentPartV1::Text(content)],
+        }
     }
 
     #[test]

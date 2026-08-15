@@ -181,6 +181,12 @@ impl VerifiedUnslothGemma4Nvfp4 {
                 "bcc0ec0398a9dd0b09586f835f17c05ed2cce99d958dd59ef629ce77e618ee49",
                 1024 * 1024,
             ),
+            crate::FrontendAssetKind::PreprocessorConfigJson => (
+                "processor_config.json",
+                1_382,
+                "6b938e76555b3e9946890770e1abcd442a4718f34041a58e8139dc8ad34545c9",
+                1024 * 1024,
+            ),
             crate::FrontendAssetKind::TokenizerJson => (
                 "tokenizer.json",
                 32_169_726,

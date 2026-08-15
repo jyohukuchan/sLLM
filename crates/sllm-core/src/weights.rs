@@ -16,6 +16,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub const WEIGHT_LOAD_CHUNK_BYTES: u64 = 16 * 1024 * 1024;
+/// Logical consumer layer reserved for the single Qwen3.5 MTP decoder block.
+/// Keeping it outside the text decoder's `0..32` namespace makes combined
+/// plans one-to-one without leaking an MTP-specific key type into executors.
+pub const QWEN35_MTP_CONSUMER_LAYER: u64 = 32;
 
 const PLAN_DOMAIN: &[u8] = b"sLLM-weight-load-plan-v1\0";
 const QWEN_SCHEMA_VERSION: &str = "model-lock-v1";
@@ -107,6 +111,10 @@ pub enum WeightConsumer {
     PostFeedforwardNorm,
     LayerScalar,
     AttentionKAndV,
+    MtpFusion,
+    MtpEmbeddingNorm,
+    MtpHiddenNorm,
+    MtpFinalNorm,
 }
 
 impl WeightConsumer {
@@ -140,6 +148,10 @@ impl WeightConsumer {
             Self::PostFeedforwardNorm => 26,
             Self::LayerScalar => 27,
             Self::AttentionKAndV => 28,
+            Self::MtpFusion => 29,
+            Self::MtpEmbeddingNorm => 30,
+            Self::MtpHiddenNorm => 31,
+            Self::MtpFinalNorm => 32,
         }
     }
 }
@@ -482,14 +494,52 @@ where
     })
 }
 
-/// Build the fixed Qwen3.5-4B load plan from already-verified descriptors.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QwenComponentSelection {
+    pub text: bool,
+    pub vision: bool,
+    pub mtp: bool,
+}
+
+impl QwenComponentSelection {
+    pub const TEXT_ONLY: Self = Self {
+        text: true,
+        vision: false,
+        mtp: false,
+    };
+    pub const TEXT_AND_MTP: Self = Self {
+        text: true,
+        vision: false,
+        mtp: true,
+    };
+    pub const ALL: Self = Self {
+        text: true,
+        vision: true,
+        mtp: true,
+    };
+    pub const MTP_ONLY: Self = Self {
+        text: false,
+        vision: false,
+        mtp: true,
+    };
+}
+
+/// Build the fixed Qwen3.5 load plan from already-verified descriptors.
 ///
-/// Input order is intentionally ignored. Entries are emitted in Rust `Ord`
-/// tensor-name order, and only loadable main-text entries consume destination
-/// space. Vision and MTP descriptors remain represented as known-unconsumed.
+/// The legacy entry point keeps the text-only contract. Component-enabled
+/// callers use [`build_qwen_component_weight_load_plan`] so selected vision or
+/// MTP tensors become required and receive exact destination ranges.
 pub fn build_weight_load_plan<'a>(
     lock: &ModelLock,
     descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    build_qwen_component_weight_load_plan(lock, descriptors, QwenComponentSelection::TEXT_ONLY)
+}
+
+pub fn build_qwen_component_weight_load_plan<'a>(
+    lock: &ModelLock,
+    descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+    selection: QwenComponentSelection,
 ) -> Result<WeightLoadPlan, WeightPlanError> {
     validate_fixed_lock(lock)?;
     let locked_files = locked_file_map(lock)?;
@@ -508,7 +558,20 @@ pub fn build_weight_load_plan<'a>(
 
     let architecture = &lock.model.architecture;
     let config = &architecture.text_config;
-    let expected_consumers = expected_consumers(&config.layer_types, config.tie_word_embeddings);
+    let mut selected_consumers = BTreeSet::new();
+    if selection.text {
+        selected_consumers.extend(expected_consumers(
+            &config.layer_types,
+            config.tie_word_embeddings,
+        ));
+    }
+    if selection.mtp {
+        selected_consumers.extend(expected_mtp_consumers());
+        selected_consumers.insert(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::EmbeddingAndTiedOutput,
+        });
+    }
     let mut observed_consumers = BTreeSet::new();
     let mut vision_count = 0_u64;
     let mut mtp_count = 0_u64;
@@ -517,36 +580,56 @@ pub fn build_weight_load_plan<'a>(
 
     for descriptor in by_name.values() {
         validate_descriptor(descriptor, &locked_files)?;
-        let (classification, consumer) = classify_descriptor(
+        let (mut classification, mut consumer) = classify_descriptor(
             descriptor,
             &config.layer_types,
             &architecture.vision.tensor_prefix,
             &architecture.mtp.tensor_prefix,
             config.tie_word_embeddings,
         )?;
-        if let Some(key) = consumer {
-            if !observed_consumers.insert(key) {
-                return Err(WeightPlanError::invalid(format!(
-                    "duplicate weight consumer: {key:?}"
-                )));
+        let is_vision = descriptor
+            .tensor_name
+            .starts_with(&architecture.vision.tensor_prefix);
+        let is_mtp = descriptor
+            .tensor_name
+            .starts_with(&architecture.mtp.tensor_prefix);
+        let is_shared_embedding =
+            descriptor.tensor_name == "model.language_model.embed_tokens.weight";
+        if !selection.text && !is_vision && !is_mtp {
+            classification = WeightClassification::KnownUnconsumed;
+            consumer = None;
+        }
+        if selection.mtp && is_shared_embedding {
+            classification = WeightClassification::Required;
+            consumer = Some(WeightConsumerKey {
+                layer: None,
+                role: WeightConsumer::EmbeddingAndTiedOutput,
+            });
+        }
+        if is_vision {
+            vision_count = vision_count
+                .checked_add(1)
+                .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
+            if selection.vision {
+                classification = WeightClassification::Required;
+            }
+        } else if is_mtp {
+            mtp_count = mtp_count
+                .checked_add(1)
+                .ok_or_else(|| WeightPlanError::invalid("MTP tensor count overflow"))?;
+            if selection.mtp {
+                classification = WeightClassification::Required;
+                consumer = Some(classify_mtp_consumer(&descriptor.tensor_name)?);
             }
         }
-        match classification {
-            WeightClassification::KnownUnconsumed => {
-                if descriptor
-                    .tensor_name
-                    .starts_with(&architecture.vision.tensor_prefix)
-                {
-                    vision_count = vision_count
-                        .checked_add(1)
-                        .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
-                } else {
-                    mtp_count = mtp_count
-                        .checked_add(1)
-                        .ok_or_else(|| WeightPlanError::invalid("MTP tensor count overflow"))?;
+        if classification == WeightClassification::Required {
+            if let Some(key) = consumer {
+                if !observed_consumers.insert(key) {
+                    return Err(WeightPlanError::invalid(format!(
+                        "duplicate weight consumer: {key:?}"
+                    )));
                 }
             }
-            WeightClassification::Required | WeightClassification::ConfigConditional => {}
         }
 
         let locked = locked_files
@@ -578,13 +661,13 @@ pub fn build_weight_load_plan<'a>(
         });
     }
 
-    if observed_consumers != expected_consumers {
-        let missing: Vec<_> = expected_consumers
+    if observed_consumers != selected_consumers {
+        let missing: Vec<_> = selected_consumers
             .difference(&observed_consumers)
             .copied()
             .collect();
         let unexpected: Vec<_> = observed_consumers
-            .difference(&expected_consumers)
+            .difference(&selected_consumers)
             .copied()
             .collect();
         return Err(WeightPlanError::invalid(format!(
@@ -625,6 +708,125 @@ pub fn build_weight_load_plan<'a>(
     })
 }
 
+fn classify_mtp_consumer(name: &str) -> Result<WeightConsumerKey, WeightPlanError> {
+    let (layer, role) = match name {
+        "mtp.fc.weight" => (None, WeightConsumer::MtpFusion),
+        "mtp.pre_fc_norm_embedding.weight" => (None, WeightConsumer::MtpEmbeddingNorm),
+        "mtp.pre_fc_norm_hidden.weight" => (None, WeightConsumer::MtpHiddenNorm),
+        "mtp.norm.weight" => (None, WeightConsumer::MtpFinalNorm),
+        "mtp.layers.0.input_layernorm.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::InputNorm)
+        }
+        "mtp.layers.0.post_attention_layernorm.weight" => (
+            Some(QWEN35_MTP_CONSUMER_LAYER),
+            WeightConsumer::PostAttentionNorm,
+        ),
+        "mtp.layers.0.mlp.gate_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpGate)
+        }
+        "mtp.layers.0.mlp.up_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpUp)
+        }
+        "mtp.layers.0.mlp.down_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::MlpDown)
+        }
+        "mtp.layers.0.self_attn.q_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionQ)
+        }
+        "mtp.layers.0.self_attn.k_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionK)
+        }
+        "mtp.layers.0.self_attn.v_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionV)
+        }
+        "mtp.layers.0.self_attn.o_proj.weight" => {
+            (Some(QWEN35_MTP_CONSUMER_LAYER), WeightConsumer::AttentionO)
+        }
+        "mtp.layers.0.self_attn.q_norm.weight" => (
+            Some(QWEN35_MTP_CONSUMER_LAYER),
+            WeightConsumer::AttentionQNorm,
+        ),
+        "mtp.layers.0.self_attn.k_norm.weight" => (
+            Some(QWEN35_MTP_CONSUMER_LAYER),
+            WeightConsumer::AttentionKNorm,
+        ),
+        _ => {
+            return Err(WeightPlanError::invalid(format!(
+                "unknown component-enabled MTP tensor: {name}"
+            )));
+        }
+    };
+    Ok(WeightConsumerKey { layer, role })
+}
+
+fn expected_mtp_consumers() -> BTreeSet<WeightConsumerKey> {
+    use WeightConsumer::*;
+    [
+        WeightConsumerKey {
+            layer: None,
+            role: MtpFusion,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: MtpEmbeddingNorm,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: MtpHiddenNorm,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: MtpFinalNorm,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: InputNorm,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: PostAttentionNorm,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: MlpGate,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: MlpUp,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: MlpDown,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionQ,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionK,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionV,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionO,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionQNorm,
+        },
+        WeightConsumerKey {
+            layer: Some(QWEN35_MTP_CONSUMER_LAYER),
+            role: AttentionKNorm,
+        },
+    ]
+    .into_iter()
+    .collect()
+}
+
 /// Thin wrapper that binds the plan to the verified cache fingerprint.
 pub fn build_verified_weight_load_plan(
     lock: &ModelLock,
@@ -636,6 +838,19 @@ pub fn build_verified_weight_load_plan(
         ));
     }
     build_weight_load_plan(lock, cache.tensors())
+}
+
+pub fn build_verified_qwen_component_weight_load_plan(
+    lock: &ModelLock,
+    cache: &VerifiedCache,
+    selection: QwenComponentSelection,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if cache.lock_fingerprint != lock.fingerprint() {
+        return Err(WeightPlanError::invalid(
+            "verified cache fingerprint differs from the model lock",
+        ));
+    }
+    build_qwen_component_weight_load_plan(lock, cache.tensors(), selection)
 }
 
 /// Build the exact Gemma 4 text-only load plan from verified direct-file

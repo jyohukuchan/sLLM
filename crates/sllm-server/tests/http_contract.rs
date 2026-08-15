@@ -419,20 +419,8 @@ async fn strict_http_error_matrix_uses_profile_envelopes() {
         assert_eq!(response.json()["error"]["code"], expected_code);
     }
 
-    let oversized = vec![b'x'; 1_048_577];
-    let response = raw_http(
-        address,
-        request_bytes(
-            "POST",
-            "/v1/chat/completions",
-            &oversized,
-            &[
-                "Authorization: Bearer secret",
-                "Content-Type: application/json",
-            ],
-        ),
-    )
-    .await;
+    let oversized = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\nContent-Length: 100663297\r\nConnection: close\r\n\r\n".to_vec();
+    let response = raw_http(address, oversized).await;
     assert_eq!(response.status, 413);
     assert_eq!(response.json()["error"]["code"], "request_too_large");
 

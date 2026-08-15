@@ -339,7 +339,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     const int32_t *const positions = static_cast<const int32_t *>(
         byte_pointer(plan->buffers[4], plan->metadata.positions.byte_offset));
     std::vector<int32_t> host_positions(
-        static_cast<std::size_t>(plan->metadata.m));
+        static_cast<std::size_t>(plan->metadata.m) *
+        plan->metadata.position_components);
     const hipError_t position_copy_status =
         hipMemcpyAsync(host_positions.data(), positions,
                        host_positions.size() * sizeof(int32_t),
@@ -355,10 +356,14 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
           "attention preprocess position validation synchronize");
     }
     for (std::size_t index = 0U; index != host_positions.size(); ++index) {
-      const int64_t expected =
-          static_cast<int64_t>(plan->metadata.start_position) +
-          static_cast<int64_t>(index);
-      if (host_positions[index] != static_cast<int32_t>(expected)) {
+      const int64_t expected = static_cast<int64_t>(plan->metadata.start_position) +
+          static_cast<int64_t>(index / plan->metadata.position_components);
+      const bool valid = plan->metadata.position_components == 1U
+          ? host_positions[index] == static_cast<int32_t>(expected)
+          : host_positions[index] >= 0 &&
+                host_positions[index] < static_cast<int32_t>(
+                    SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION);
+      if (!valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
             "attention preprocess position payload does not equal the "
@@ -441,7 +446,7 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
         plan->metadata.q_heads, plan->metadata.k_heads,
-        plan->metadata.head_dim,
+        plan->metadata.head_dim, plan->metadata.position_components,
         queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();

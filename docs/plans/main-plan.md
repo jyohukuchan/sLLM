@@ -334,7 +334,7 @@
    - fixed Qwen3.5-4BのMTP text-onlyを先に完成させ、draft/verify/accept、greedy同値、stochastic sampling、
      accepted prefixだけのKV publicationをgeneration serviceへ統合する。
    - MTP単独closeout後に同じmodelのprocessor、vision encoder/projector、multimodal prompt、Chat Completions image inputを実装する。
-   - 詳細は[Phase 17 active plan](active/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
+   - 詳細は[Phase 17 archive](archive/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
 18. Gemma4またはQwen3.5のMoEへ対応する。
 19. 残りの初期バージョン機能を実装し、ユーザー向けモデル入力と配布artifactをGGUFへ統一する。
    - safetensorsと量子化sidecarから、推論に必要な情報を収容した単一GGUFへの変換経路を用意する。
@@ -652,13 +652,16 @@ candidateを再確認した。
   V620/R9700でPASSした。same-artifact NVIDIA reference未実行のためmodel evidenceは`experimental`であり、通常UXは変えない。
 - 詳細は[Phase 16F archive](archive/2026/08/11-20/phase16f-first-class-fp4-model-input.md)を正とする。
 
-### Phase 17: Qwen3.5 MTP、vision（計画済み）
+### Phase 17: Qwen3.5 MTP、vision（完了）
 
-- fixed Qwen3.5-4BのMTP 15 tensorを先に消費し、greedy同値、stochastic verify/accept、accepted KV prefix、
-  stop/cancel/service、target別性能選択を完成させる。
-- MTP単独PASS後にvision 297 tensor、locked processor、image cache、multimodal prompt、CLI local imageとChat Completions
-  Base64 data URLを実装する。初期serverはHTTP(S) image fetch/Files APIを行わない。
-- 詳細は[Phase 17 active plan](active/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
+- fixed Qwen3.5-4BのMTP 15 tensorをcomponent manifest/graphへ昇格し、greedy/stochastic verify、opaque
+  transaction、real-weight deterministic GPU evidenceを実装した。canonical 2 targetでは逐次verifyがtarget-onlyより遅いため、
+  通常CLI/APIは内部的にtarget-only providerを選ぶ。MTP用の許可flagや品質警告は追加しない。
+- vision 297 tensor、bounded PNG/JPEG/WebP/non-animated GIF decode、locked processor、multimodal embedding/mRoPE、
+  lazy vision resident、CLI local image、Chat Completions Base64 data URLを実装した。HTTP(S) fetch/Files APIは行わない。
+- V620/R9700でvision→64 projected token→text prefill/decodeをHIP-only、fallbackなし、deterministic、cleanup 0でPASSし、
+  R9700の実CLI画像生成もPASSした。量子化text artifactのvision weight量子化は本Phaseへ広げていない。
+- 詳細は[Phase 17 archive](archive/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
 
 ## 残タスクと改訂した実行順序
 
@@ -666,10 +669,10 @@ candidateを再確認した。
 | ---: | --- | --- | --- |
 | 完了 | Phase 16 | FP8/NVFP4 KV append・attention・capacity・quality | first-class Unsloth mixed recipeのFP8 KV依存を満たした |
 | 完了 | Phase 16F | NVFP4 full mixed artifact、MXFP4/MXFP8 encoding/import | faithful provider artifact経路とGGUF handoffを固定した |
-| 1 | Phase 17 | Qwen3.5 MTP、次にvision、最後にcombined smoke | speculative stateは量子化を含むopaque KV contract安定後に実装する |
-| 2 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
-| 3 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
-| 4 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
+| 完了 | Phase 17 | Qwen3.5 MTP component、vision、multimodal CLI/API | canonical targetではMTP target-only選択、vision実機PASS |
+| 1 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
+| 2 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
+| 3 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
 
 Phase 18以降で残る具体項目はMoE、GGUF converter/runtime、request batching、chunked prefill、KV/会話/model lockの
 簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMAである。Responses API、
@@ -678,10 +681,9 @@ Phase 16〜17の実装で確定する共通descriptorと実測残差を見て固
 
 ## 現在の状態と次の作業
 
-- Phase 16まで完了した。次は
-  [Phase 16F first-class FP4 model input](archive/2026/08/11-20/phase16f-first-class-fp4-model-input.md)である。
-  Phase 15Qの結果から、model本体のNVFP4品質には
-  activation-aware calibrationの改善余地とE2M1/block-16 configuration ceilingの両方が寄与すると確定した。
+- Phase 17まで完了した。次はPhase 18でGemma4またはQwen3.5のMoE architecture、router/expert graph、
+  low-bit expert encodingの詳細計画を固定する。Phase 17のMTPはcanonical targetで性能採用せずtarget-onlyを維持し、
+  visionはfixed Qwen3.5-4B BF16のCLI/OpenAI経路まで実機closeoutした。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
   起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
 - 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと

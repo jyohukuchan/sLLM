@@ -63,6 +63,7 @@ fn print_help() {
     println!("  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32]");
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
+    println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");
     println!("  [--fp8-manifest PATH --fp8-artifact PATH]");
     println!("  [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant]");
     println!("  [--fp8-provider native|native-fnuz|emulation|converted-bf16]");

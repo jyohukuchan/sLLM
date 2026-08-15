@@ -166,6 +166,14 @@ Formats v1.0の公開format contractから独立実装し、W4A4/static-FP8 HIP 
 `THIRD_PARTY_NOTICES.md`へのcode import追加はない。model artifact自体はGitへ含めず、配布時のmodel license/noticeは
 runtime codeのMIT licenseと別に扱う。
 
+## Phase 17 MTP and vision implementation record
+
+Phase 17は固定Qwen3.5 model config/tensor catalog、公開Qwen multimodal processor contract、OpenAIの公開image-content wire
+documentationをdata/semantic sourceとして使用した。MTP/vision graph、processor、speculative verifier、HIP executionはsLLM既存の
+model-neutral contractと独立oracleから実装した。llama.cppはMTP tensor mappingとvision tensor organizationの技術参照に限り、
+新しいsource expressionのcopy/adapt/importはない。vLLM/SGLang sourceは参照・移植していない。このPhaseによる
+`THIRD_PARTY_NOTICES.md`へのcode import追加はない。model/image payloadはrepositoryへ含めない。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

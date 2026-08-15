@@ -5,20 +5,23 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
-    OsSamplingRandom, QwenExecutionRequest, QwenResidentModel, ReviewedModelLock,
+    OsSamplingRandom, QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
+    QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock,
     SamplingParametersV1, VerifiedCache, VerifiedUnslothGemma4Nvfp4, WeightClassification,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
-    build_qwen35_nvfp4_graph, build_unsloth_gemma4_nvfp4_weight_load_plan,
-    build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan, read_model_lock,
+    assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
+    build_verified_qwen35_vision_manifest, build_verified_weight_load_plan, read_model_lock,
     read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
     verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
-    DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
-    GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1, GenerationServiceV1,
-    GenerationStopControllerV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, ThinkingModeV1, TokenIdsV1, TokenizerFrontendV1,
-    gemma4_generation_stop_policy,
+    BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
+    GenerationExecutorV1, GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1,
+    GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopControllerV1,
+    GenerationStopPolicyV1, ProcessedVisionInputV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
+    Qwen35RenderOptionsV1, Qwen35VisionProcessorV1, ThinkingModeV1, TokenIdsV1,
+    TokenizerFrontendV1, gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -38,13 +41,64 @@ const MAX_NEW_TOKENS: u32 = 4096;
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum GenerationInput {
     Prompt(String),
     Messages {
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
     },
+}
+
+fn prepare_qwen_cli_images(
+    input: &GenerationInput,
+    image_paths: &[PathBuf],
+) -> Result<(GenerationInput, Vec<ProcessedVisionInputV1>), String> {
+    if image_paths.is_empty() {
+        return Ok((input.clone(), Vec::new()));
+    }
+    let GenerationInput::Messages { messages, options } = input else {
+        return Err("--image requires chat input via --message".to_owned());
+    };
+    let encoded = image_paths
+        .iter()
+        .map(|path| {
+            BoundedImageBytesV1::from_local_path(path)
+                .map_err(|error| format!("image `{}` could not be read: {error}", path.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let decoded = encoded
+        .iter()
+        .map(|image| {
+            image
+                .decode_rgb()
+                .map_err(|error| format!("local image could not be decoded: {error}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let processed = Qwen35VisionProcessorV1
+        .process_many(&decoded)
+        .map_err(|error| format!("local image preprocessing failed: {error}"))?;
+    let mut messages = messages.clone();
+    let Some(Qwen35ChatMessageV1::User { content }) = messages.last_mut() else {
+        return Err("--image requires the final --message to have role user".to_owned());
+    };
+    let mut prefix = String::new();
+    for image in &processed {
+        prefix.push_str("<|vision_start|>");
+        for _ in 0..image.visual_tokens {
+            prefix.push_str("<|image_pad|>");
+        }
+        prefix.push_str("<|vision_end|>");
+    }
+    prefix.push_str(content);
+    *content = prefix;
+    Ok((
+        GenerationInput::Messages {
+            messages,
+            options: *options,
+        },
+        processed,
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +169,7 @@ fn select_cli_fp8_provider(
 #[derive(Debug, PartialEq)]
 struct GenerateRequest {
     input: GenerationInput,
+    image_paths: Vec<PathBuf>,
     max_new_tokens: u32,
     sampling: SamplingParametersV1,
     stop_strings: Vec<String>,
@@ -123,6 +178,73 @@ struct GenerateRequest {
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<CliFp8Provider>,
+}
+
+struct CliQwenMultimodalExecutor<'a> {
+    inner: &'a mut QwenExecutionRequest,
+    prompt: &'a QwenMultimodalPrompt,
+    prefilled: bool,
+}
+
+impl GenerationExecutorV1 for CliQwenMultimodalExecutor<'_> {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        _include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "multimodal prefill was requested twice".to_owned(),
+            ));
+        }
+        let token_ids = input_token_ids
+            .iter()
+            .map(|token| i32::try_from(*token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .inner
+            .prefill_multimodal_with_last_logits(
+                &token_ids,
+                &self.prompt.embeddings_bf16,
+                &self.prompt.positions,
+            )
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.prefilled = true;
+        multimodal_step(output)
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = if include_last_logits {
+            self.inner.decode_with_last_logits(token)
+        } else {
+            self.inner.decode(token)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        multimodal_step(output)
+    }
+
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+fn multimodal_step(
+    output: sllm_core::QwenExecutionOutput,
+) -> Result<GenerationStepV1, GenerationServiceError> {
+    let argmax = output
+        .token_ids()
+        .last()
+        .copied()
+        .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+    Ok(GenerationStepV1::new(
+        u32::try_from(argmax).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+        output.last_logits().map(ToOwned::to_owned),
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -449,6 +571,9 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
+        if !request.image_paths.is_empty() {
+            return Err("--image is supported only by Qwen3.5 vision models".to_owned());
+        }
         if request.fp8_manifest.is_some()
             || request.fp8_artifact.is_some()
             || request.fp8_provider.is_some()
@@ -704,9 +829,11 @@ impl ModelFrontendBackend for ProductionBackend {
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
+        let (effective_input, processed_images) =
+            prepare_qwen_cli_images(&request.input, &request.image_paths)?;
         let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
             .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
-        let renderer = match &request.input {
+        let renderer = match &effective_input {
             GenerationInput::Prompt(_) => None,
             GenerationInput::Messages { messages, options } => {
                 let _ = (messages, options);
@@ -723,7 +850,7 @@ impl ModelFrontendBackend for ProductionBackend {
             self.lock.generation_stop_policy(),
         )
         .map_err(|error| format!("generation service could not be constructed: {error}"))?;
-        let (input_kind, service_input) = match &request.input {
+        let (input_kind, service_input) = match &effective_input {
             GenerationInput::Prompt(prompt) => {
                 ("prompt", ServiceGenerationInputV1::Prompt(prompt.clone()))
             }
@@ -777,9 +904,14 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 generation requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
+        if !processed_images.is_empty() && has_sidecar {
+            return Err("vision requests currently require the BF16 text artifact".to_owned());
+        }
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
-        let graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+        let graph = if !processed_images.is_empty() {
+            build_qwen35_multimodal_graph(&self.lock, &plan, input_len, state_capacity)
+        } else if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
             build_qwen35_nvfp4_graph(&self.lock, &plan, nvfp4_sidecar, input_len, state_capacity)
         } else {
             match (&sidecar, fp8_provider) {
@@ -912,6 +1044,43 @@ impl ModelFrontendBackend for ProductionBackend {
                 .map_err(|error| format!("Qwen request provisioning failed: {error}"))?;
                 (owner, None)
             };
+            let vision_bundle = if processed_images.is_empty() {
+                None
+            } else {
+                let manifest = build_verified_qwen35_vision_manifest(&self.lock, &self.cache)
+                    .map_err(|error| format!("vision manifest validation failed: {error}"))?;
+                let resident = QwenVisionResidentModel::new(
+                    Arc::clone(&session),
+                    Arc::clone(&self.cache),
+                    manifest.clone(),
+                    COMPLETION_TIMEOUT,
+                )
+                .map_err(|error| format!("vision resident provisioning failed: {error}"))?;
+                let images = processed_images
+                    .iter()
+                    .map(|image| {
+                        resident
+                            .execute(&QwenVisionExecutionInput {
+                                grid_thw: image.grid_thw,
+                                patch_width: image.patch_width,
+                                patches: image.patches.clone(),
+                            })
+                            .map(|output| QwenMultimodalImageEmbedding {
+                                grid_thw: image.grid_thw,
+                                embeddings_bf16: output.embeddings_bf16().to_vec(),
+                            })
+                            .map_err(|error| format!("vision encode failed: {error}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prompt = assemble_qwen35_multimodal_prompt(
+                    self.cache.as_ref(),
+                    &input,
+                    manifest.image_pad_token,
+                    &images,
+                )
+                .map_err(|error| format!("multimodal prompt assembly failed: {error}"))?;
+                Some((resident, prompt))
+            };
             let config = GenerationConfigV1::new(
                 request.max_new_tokens,
                 request.sampling,
@@ -921,9 +1090,17 @@ impl ModelFrontendBackend for ProductionBackend {
             let cancellation = GenerationCancellationV1::new();
             let mut random = OsSamplingRandom::for_parameters(request.sampling)
                 .map_err(|error| format!("sampling random source failed: {error}"))?;
-            let report = service
-                .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
-                .map_err(|error| format!("generation service failed: {error}"))?;
+            let report = if let Some((_, prompt)) = vision_bundle.as_ref() {
+                let mut executor = CliQwenMultimodalExecutor {
+                    inner: &mut owner,
+                    prompt,
+                    prefilled: false,
+                };
+                service.generate_tokens(&mut executor, &input, &config, &cancellation, &mut random)
+            } else {
+                service.generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
+            }
+            .map_err(|error| format!("generation service failed: {error}"))?;
             let audit = owner
                 .audit_snapshot()
                 .map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
@@ -975,6 +1152,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "all_dispatches_hip": audit.all_dispatches_hip(),
                     "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
                     "fp8_provider": fp8_provider.map(CliFp8Provider::label),
+                    "image_count": processed_images.len(),
                 },
             }))
         })();
@@ -1759,6 +1937,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut fp8_manifest = None;
     let mut fp8_artifact = None;
     let mut fp8_provider = None;
+    let mut image_paths = Vec::new();
     let mut message_bytes = 0_usize;
     let mut arguments = arguments.peekable();
 
@@ -1850,6 +2029,13 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     return Err("--prompt exceeds the 16 MiB input limit".to_owned());
                 }
                 set_once(&mut prompt, value, "--prompt")?;
+            }
+            "--image" if command == "generate" => {
+                let value = take_value(&mut arguments, "--image")?;
+                if image_paths.len() == 2 {
+                    return Err("generate accepts at most two --image PATH values".to_owned());
+                }
+                image_paths.push(PathBuf::from(value));
             }
             "--max-new-tokens" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--max-new-tokens")?;
@@ -2051,6 +2237,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             };
             Operation::Generate(GenerateRequest {
                 input,
+                image_paths,
                 max_new_tokens: max_new_tokens
                     .ok_or_else(|| "generate requires --max-new-tokens".to_owned())?,
                 sampling: SamplingParametersV1::new(
@@ -2639,6 +2826,32 @@ mod tests {
                 target,
                 ..
             }) if target == "gfx1201"
+        ));
+        let image = parse_args(
+            "generate",
+            &[
+                "--lock",
+                "lock.json",
+                "--cache",
+                "cache",
+                "--message",
+                "user:describe",
+                "--image",
+                "fixture.png",
+                "--max-new-tokens",
+                "3",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            image.operation,
+            Operation::Generate(GenerateRequest { ref image_paths, .. })
+                if image_paths == &[PathBuf::from("fixture.png")]
         ));
     }
 

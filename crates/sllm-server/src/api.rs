@@ -8,9 +8,12 @@ use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 use sllm_core::SamplingParametersV1;
-use sllm_frontend::{GenerationConfigV1, Qwen35ChatMessageV1, ThinkingModeV1};
+use sllm_frontend::{
+    BoundedImageBytesV1, GenerationConfigV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,
+    Qwen35ChatMessageV1, Qwen35VisionProcessorV1, ThinkingModeV1,
+};
 
-pub const MAX_REQUEST_BODY_BYTES: usize = 1_048_576;
+pub const MAX_REQUEST_BODY_BYTES: usize = 96 * 1024 * 1024;
 pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 256;
 pub const MAX_COMPLETION_TOKENS: u32 = 4_096;
 const MAX_MODEL_ALIAS_BYTES: usize = 256;
@@ -268,14 +271,25 @@ struct ErrorBodyV1<'a> {
     code: &'a str,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatContentPartV1 {
+    Text(String),
+    Image(ProcessedVisionInputV1),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatMessageV1 {
     pub(crate) inner: Qwen35ChatMessageV1,
+    pub(crate) parts: Vec<ChatContentPartV1>,
 }
 
 impl ChatMessageV1 {
     pub fn inner(&self) -> &Qwen35ChatMessageV1 {
         &self.inner
+    }
+
+    pub fn parts(&self) -> &[ChatContentPartV1] {
+        &self.parts
     }
 }
 
@@ -383,6 +397,160 @@ enum WireStop {
     Many(Vec<String>),
 }
 
+fn parse_text_message_content(
+    index: usize,
+    content: Value,
+) -> Result<(String, Vec<ChatContentPartV1>), ApiErrorV1> {
+    let param = format!("messages[{index}].content");
+    let text = content.as_str().ok_or_else(|| {
+        if content.is_array() || content.is_object() {
+            ApiErrorV1::unsupported(param.clone())
+        } else {
+            ApiErrorV1::invalid_value(param.clone(), "message content must be a string")
+        }
+    })?;
+    Ok((
+        text.to_owned(),
+        vec![ChatContentPartV1::Text(text.to_owned())],
+    ))
+}
+
+fn parse_user_message_content(
+    index: usize,
+    content: Value,
+    total_images: &mut usize,
+    total_visual_tokens: &mut u64,
+    image_seen: &mut BTreeSet<String>,
+) -> Result<(String, Vec<ChatContentPartV1>), ApiErrorV1> {
+    if content.is_string() {
+        return parse_text_message_content(index, content);
+    }
+    let values = content.as_array().ok_or_else(|| {
+        ApiErrorV1::invalid_value(
+            format!("messages[{index}].content"),
+            "user content must be a string or a content-part array",
+        )
+    })?;
+    if values.is_empty() {
+        return Err(ApiErrorV1::invalid_value(
+            format!("messages[{index}].content"),
+            "content-part array must not be empty",
+        ));
+    }
+    let processor = Qwen35VisionProcessorV1;
+    let mut trusted = String::new();
+    let mut parts = Vec::with_capacity(values.len());
+    let mut text_seen = BTreeSet::new();
+    for (part_index, value) in values.iter().enumerate() {
+        let param = format!("messages[{index}].content[{part_index}]");
+        let object = value
+            .as_object()
+            .ok_or_else(|| ApiErrorV1::invalid_value(&param, "content part must be an object"))?;
+        let kind = object.get("type").and_then(Value::as_str).ok_or_else(|| {
+            ApiErrorV1::invalid_value(format!("{param}.type"), "content part type is required")
+        })?;
+        match kind {
+            "text" => {
+                if object.keys().any(|key| key != "type" && key != "text") {
+                    return Err(ApiErrorV1::unsupported(param));
+                }
+                let text = object.get("text").and_then(Value::as_str).ok_or_else(|| {
+                    ApiErrorV1::invalid_value(
+                        format!("{param}.text"),
+                        "text content must be a string",
+                    )
+                })?;
+                if text.is_empty() || !text_seen.insert(text.to_owned()) {
+                    return Err(ApiErrorV1::invalid_value(
+                        format!("{param}.text"),
+                        "text content must be nonempty and unique within the message",
+                    ));
+                }
+                trusted.push_str(text);
+                parts.push(ChatContentPartV1::Text(text.to_owned()));
+            }
+            "image_url" => {
+                if object.keys().any(|key| key != "type" && key != "image_url") {
+                    return Err(ApiErrorV1::unsupported(param));
+                }
+                let image_url = object
+                    .get("image_url")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| {
+                        ApiErrorV1::invalid_value(
+                            format!("{param}.image_url"),
+                            "image_url must be an object",
+                        )
+                    })?;
+                if image_url.keys().any(|key| key != "url" && key != "detail") {
+                    return Err(ApiErrorV1::unsupported(format!("{param}.image_url")));
+                }
+                if let Some(detail) = image_url.get("detail") {
+                    if detail.as_str() != Some("auto") {
+                        return Err(ApiErrorV1::unsupported(format!("{param}.image_url.detail")));
+                    }
+                }
+                let url = image_url
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        ApiErrorV1::invalid_value(
+                            format!("{param}.image_url.url"),
+                            "image URL must be a string",
+                        )
+                    })?;
+                if !url.starts_with("data:image/") {
+                    return Err(ApiErrorV1::unsupported(format!("{param}.image_url.url")));
+                }
+                let encoded = BoundedImageBytesV1::from_data_url(url).map_err(|error| {
+                    ApiErrorV1::invalid_value(format!("{param}.image_url.url"), error.to_string())
+                })?;
+                let digest = encoded.digest_hex();
+                if !image_seen.insert(digest) {
+                    return Err(ApiErrorV1::invalid_value(
+                        format!("{param}.image_url.url"),
+                        "duplicate image content is unsupported",
+                    ));
+                }
+                *total_images = total_images.checked_add(1).ok_or_else(|| {
+                    ApiErrorV1::invalid_value("messages", "image count overflowed")
+                })?;
+                if *total_images > 2 {
+                    return Err(ApiErrorV1::invalid_value(
+                        "messages",
+                        "at most two images are supported",
+                    ));
+                }
+                let decoded = encoded.decode_rgb().map_err(|error| {
+                    ApiErrorV1::invalid_value(format!("{param}.image_url.url"), error.to_string())
+                })?;
+                let processed = processor.process(&decoded).map_err(|error| {
+                    ApiErrorV1::invalid_value(format!("{param}.image_url.url"), error.to_string())
+                })?;
+                *total_visual_tokens = total_visual_tokens
+                    .checked_add(processed.visual_tokens)
+                    .ok_or_else(|| {
+                        ApiErrorV1::invalid_value("messages", "visual token count overflowed")
+                    })?;
+                if *total_visual_tokens > MAX_TOTAL_VISUAL_TOKENS_V1 {
+                    return Err(ApiErrorV1::invalid_value(
+                        "messages",
+                        "total visual token limit exceeded",
+                    ));
+                }
+                trusted.push_str("<|vision_start|>");
+                for _ in 0..processed.visual_tokens {
+                    trusted.push_str("<|image_pad|>");
+                }
+                trusted.push_str("<|vision_end|>");
+                parts.push(ChatContentPartV1::Image(processed));
+            }
+            _ => return Err(ApiErrorV1::unsupported(format!("{param}.type"))),
+        }
+    }
+    Ok((trusted, parts))
+}
+
 #[cfg(test)]
 pub(crate) fn parse_chat_completion_request(
     body: &[u8],
@@ -435,17 +603,12 @@ pub(crate) fn parse_chat_completion_request_for_profile(
     let mut messages = Vec::with_capacity(wire.messages.len());
     let mut system_seen = false;
     let mut user_seen = false;
+    let mut total_images = 0_usize;
+    let mut total_visual_tokens = 0_u64;
+    let mut image_seen = BTreeSet::new();
     for (index, message) in wire.messages.into_iter().enumerate() {
-        let param = format!("messages[{index}].content");
-        let content = message.content.as_str().ok_or_else(|| {
-            if message.content.is_array() || message.content.is_object() {
-                ApiErrorV1::unsupported(param.clone())
-            } else {
-                ApiErrorV1::invalid_value(param.clone(), "message content must be a string")
-            }
-        })?;
         let reasoning_content = message.reasoning_content;
-        let inner = match message.role.as_str() {
+        let (inner, parts) = match message.role.as_str() {
             "system" => {
                 if reasoning_content.is_some() {
                     return Err(ApiErrorV1::unsupported(format!(
@@ -459,7 +622,8 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     ));
                 }
                 system_seen = true;
-                Qwen35ChatMessageV1::system(content)
+                let (content, parts) = parse_text_message_content(index, message.content)?;
+                (Qwen35ChatMessageV1::system(content), parts)
             }
             "user" => {
                 if reasoning_content.is_some() {
@@ -468,9 +632,22 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     )));
                 }
                 user_seen = true;
-                Qwen35ChatMessageV1::user(content)
+                let (content, parts) = parse_user_message_content(
+                    index,
+                    message.content,
+                    &mut total_images,
+                    &mut total_visual_tokens,
+                    &mut image_seen,
+                )?;
+                (Qwen35ChatMessageV1::user(content), parts)
             }
-            "assistant" => Qwen35ChatMessageV1::assistant(content, reasoning_content),
+            "assistant" => {
+                let (content, parts) = parse_text_message_content(index, message.content)?;
+                (
+                    Qwen35ChatMessageV1::assistant(content, reasoning_content),
+                    parts,
+                )
+            }
             "developer" | "tool" | "function" => {
                 return Err(ApiErrorV1::unsupported(format!("messages[{index}].role")));
             }
@@ -481,7 +658,7 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                 ));
             }
         };
-        messages.push(ChatMessageV1 { inner });
+        messages.push(ChatMessageV1 { inner, parts });
     }
     if !user_seen {
         return Err(ApiErrorV1::invalid_value(
@@ -706,9 +883,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_unsupported_duplicate_and_multipart_fail_closed() {
+    fn unknown_unsupported_and_duplicate_fields_fail_closed() {
         for (body, param, code) in [
-            (valid(r#", "tools":null"#), "tools", ErrorCodeV1::UnsupportedParameter),
+            (
+                valid(r#", "tools":null"#),
+                "tools",
+                ErrorCodeV1::UnsupportedParameter,
+            ),
             (
                 valid(r#", "response_format":{"type":"json_object"}"#),
                 "response_format",
@@ -724,7 +905,11 @@ mod tests {
                 "seed",
                 ErrorCodeV1::UnsupportedParameter,
             ),
-            (valid(r#", "mystery":1"#), "mystery", ErrorCodeV1::UnsupportedParameter),
+            (
+                valid(r#", "mystery":1"#),
+                "mystery",
+                ErrorCodeV1::UnsupportedParameter,
+            ),
             (valid(r#", "n":2"#), "n", ErrorCodeV1::UnsupportedParameter),
             (
                 br#"{"model":"qwen","messages":[{"role":"developer","content":"x"}]}"#.to_vec(),
@@ -737,14 +922,8 @@ mod tests {
                 ErrorCodeV1::UnsupportedParameter,
             ),
             (
-                br#"{"model":"qwen","messages":[{"role":"function","content":"x"}]}"#
-                    .to_vec(),
+                br#"{"model":"qwen","messages":[{"role":"function","content":"x"}]}"#.to_vec(),
                 "messages[0].role",
-                ErrorCodeV1::UnsupportedParameter,
-            ),
-            (
-                br#"{"model":"qwen","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}"#.to_vec(),
-                "messages[0].content",
                 ErrorCodeV1::UnsupportedParameter,
             ),
         ] {
@@ -757,6 +936,49 @@ mod tests {
             parse_chat_completion_request(duplicate).unwrap_err().code(),
             ErrorCodeV1::InvalidJson
         );
+        let multipart = br#"{"model":"qwen","messages":[{"role":"user","content":[{"type":"text","text":"x"}]}]}"#;
+        let request = parse_chat_completion_request(multipart).unwrap();
+        assert_eq!(
+            request.messages()[0].parts(),
+            [ChatContentPartV1::Text("x".to_owned())]
+        );
+        let remote = br#"{"model":"qwen","messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"https://example.test/a.png"}}]}]}"#;
+        let error = parse_chat_completion_request(remote).unwrap_err();
+        assert_eq!(error.code(), ErrorCodeV1::UnsupportedParameter);
+        assert_eq!(error.param(), Some("messages[0].content[0].image_url.url"));
+    }
+
+    #[test]
+    fn image_data_url_is_typed_and_duplicate_scope_is_the_whole_request() {
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAAA1UlEQVR42u3BMQEAAADCoPVP7WULoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAGwEtAAGey8LtAAAAAElFTkSuQmCC";
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": url, "detail": "auto"}},
+                    {"type": "text", "text": "describe"}
+                ]
+            }]
+        }))
+        .unwrap();
+        let request = parse_chat_completion_request(&body).unwrap();
+        assert!(matches!(
+            request.messages()[0].parts()[0],
+            ChatContentPartV1::Image(_)
+        ));
+
+        let duplicate = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}
+            ]
+        }))
+        .unwrap();
+        let error = parse_chat_completion_request(&duplicate).unwrap_err();
+        assert_eq!(error.param(), Some("messages[1].content[0].image_url.url"));
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
     }
 
     #[test]

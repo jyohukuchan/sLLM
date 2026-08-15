@@ -2865,6 +2865,7 @@ pub struct VerifiedCache {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrontendAssetKind {
     ConfigJson,
+    PreprocessorConfigJson,
     TokenizerJson,
     TokenizerConfigJson,
     ChatTemplateJinja,
@@ -2874,6 +2875,7 @@ impl FrontendAssetKind {
     fn specification(self) -> (&'static str, usize) {
         match self {
             Self::ConfigJson => ("config.json", MAX_CONFIG_JSON_BYTES),
+            Self::PreprocessorConfigJson => ("preprocessor_config.json", MAX_CONFIG_JSON_BYTES),
             Self::TokenizerJson => ("tokenizer.json", MAX_TOKENIZER_JSON_BYTES),
             Self::TokenizerConfigJson => ("tokenizer_config.json", MAX_TOKENIZER_CONFIG_JSON_BYTES),
             Self::ChatTemplateJinja => ("chat_template.jinja", MAX_CHAT_TEMPLATE_JINJA_BYTES),
@@ -4597,6 +4599,11 @@ mod tests {
     fn frontend_asset_specifications_match_locked_names_and_caps() {
         let specifications = [
             (FrontendAssetKind::ConfigJson, "config.json", 1024 * 1024),
+            (
+                FrontendAssetKind::PreprocessorConfigJson,
+                "preprocessor_config.json",
+                1024 * 1024,
+            ),
             (
                 FrontendAssetKind::TokenizerJson,
                 "tokenizer.json",
