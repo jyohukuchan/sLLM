@@ -534,6 +534,10 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   `correctness-only opt-in`とした。providerはnative FP4ではない。
 - V620ではresident 3,763,686,080 byteから1,790,406,056 byteへ52.43%削減した。CLIとOpenAI
   non-stream/SSE/stop/Unicode/連続request/disconnect/cleanupをR9700で通した。
+- sidecarのdevice payloadは量子化対象BF16 weight比`0.281250271`で、理論`4.5/16`と一致する。全residentには
+  encoding非依存の1,018,251,968 byteがあるため、全体削減率52.43%は正常である。
+- 両GPUのQwen3.5-2B short-odd・32/32をBF16/NVFP4各3 warmup + 10 measuredで比較した。NVFP4 decodeは
+  V620で約21〜22%、R9700で約20〜22%低下し、R9700 prefill/TTFTは大幅退行した。memory削減だけでdefaultへ昇格しない。
 - 詳細は[Phase 15 archive](archive/2026/08/11-20/phase15-weight-nvfp4.md)を正とする。
 
 ## 現在の状態と次の作業

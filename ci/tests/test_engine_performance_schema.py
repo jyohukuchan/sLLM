@@ -323,6 +323,16 @@ class EnginePerformanceSchemaTests(unittest.TestCase):
         self.assertEqual(len(result["measured"]["samples"]), 10)
         self.assertEqual(result["config"]["input_token_ids"], contracts.resolved_row(row)["input_token_ids"])
 
+    def test_direct_schema_accepts_explicit_nvfp4_packed_dequant_identity(self) -> None:
+        result = result_for(first_row())
+        result["audit"]["weight_encoding"] = "nvfp4-e2m1-block16-e4m3fn-tensor-f32"
+        result["audit"]["fp8_provider"] = "nvfp4-packed-dequant"
+        contracts.schema_validate(result, contracts.DIRECT_SCHEMA_PATH, "NVFP4 direct result")
+
+        result["audit"]["fp8_provider"] = "implicit-nvfp4"
+        with self.assertRaises(ContractError):
+            contracts.schema_validate(result, contracts.DIRECT_SCHEMA_PATH, "invalid NVFP4 direct result")
+
     def test_stop_semantics_reject_short_max_and_nonterminal_stop_token(self) -> None:
         policy = {"stop_token_ids": [248046, 248044], "visible_stop_tokens": False}
         contracts.validate_stop_semantics(

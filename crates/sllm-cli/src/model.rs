@@ -1000,28 +1000,60 @@ impl ModelFrontendBackend for ProductionBackend {
         let model_load_start_ns = timing.model_load_start_ns();
         let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
             .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
-        let sidecar = match (&request.fp8_manifest, &request.fp8_artifact) {
-            (Some(manifest), Some(artifact)) => Some(Arc::new(
+        let nvfp4_requested = request.fp8_provider == Some(CliFp8Provider::Nvfp4PackedDequant);
+        let nvfp4_sidecar = match (
+            nvfp4_requested,
+            &request.fp8_manifest,
+            &request.fp8_artifact,
+        ) {
+            (true, Some(manifest), Some(artifact)) => Some(Arc::new(
+                verify_nvfp4_sidecar(manifest, artifact, &self.lock_path, &self.lock)
+                    .map_err(|error| format!("NVFP4 sidecar verification failed: {error}"))?,
+            )),
+            (true, _, _) => {
+                return Err(
+                    "NVFP4 benchmark requires manifest, artifact, and --nvfp4-provider packed-dequant"
+                        .to_owned(),
+                );
+            }
+            (false, _, _) => None,
+        };
+        let sidecar = match (
+            nvfp4_requested,
+            &request.fp8_manifest,
+            &request.fp8_artifact,
+        ) {
+            (false, Some(manifest), Some(artifact)) => Some(Arc::new(
                 verify_fp8_sidecar(manifest, artifact, &self.lock_path, &self.lock)
                     .map_err(|error| format!("FP8 sidecar verification failed: {error}"))?,
             )),
-            (None, None) => None,
+            (false, None, None) => None,
+            (true, _, _) => None,
             _ => return Err("FP8 benchmark requires both manifest and artifact".to_owned()),
         };
+        let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
         let fp8_provider =
-            select_cli_fp8_provider(sidecar.is_some(), request.fp8_provider, &request.target)?;
-        let first_graph = match (&sidecar, fp8_provider) {
-            (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+            select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
+        let first_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+            build_qwen35_nvfp4_graph(&self.lock, &plan, nvfp4_sidecar, input_len, state_capacity)
+        } else {
+            match (&sidecar, fp8_provider) {
+                (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                    build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                }
+                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => build_qwen35_fp8_fnuz_graph(
+                    &self.lock,
+                    &plan,
+                    sidecar,
+                    input_len,
+                    state_capacity,
+                ),
+                (Some(sidecar), Some(_)) => {
+                    build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
+                }
+                (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+                _ => unreachable!("quantized provider selection validated sidecar state"),
             }
-            (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
-                build_qwen35_fp8_fnuz_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
-            }
-            (Some(sidecar), Some(_)) => {
-                build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
-            }
-            (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
-            _ => unreachable!("FP8 provider selection validated sidecar state"),
         }
         .map_err(|error| {
             format!("benchmark graph does not satisfy the fixed Qwen contract: {error}")
@@ -1035,43 +1067,54 @@ impl ModelFrontendBackend for ProductionBackend {
             .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
 
         let execution = (|| -> Result<Value, String> {
-            let resident = match (&sidecar, fp8_provider) {
-                (Some(sidecar), Some(CliFp8Provider::ConvertedBf16)) => {
-                    QwenResidentModel::new_fp8_converted_bf16(
+            let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+                QwenResidentModel::new_nvfp4(
+                    Arc::clone(&session),
+                    first_graph,
+                    plan.clone(),
+                    Arc::clone(&self.cache),
+                    Arc::clone(nvfp4_sidecar),
+                    COMPLETION_TIMEOUT,
+                )
+            } else {
+                match (&sidecar, fp8_provider) {
+                    (Some(sidecar), Some(CliFp8Provider::ConvertedBf16)) => {
+                        QwenResidentModel::new_fp8_converted_bf16(
+                            Arc::clone(&session),
+                            first_graph,
+                            plan.clone(),
+                            Arc::clone(&self.cache),
+                            Arc::clone(sidecar),
+                            COMPLETION_TIMEOUT,
+                        )
+                    }
+                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                        QwenResidentModel::new_fp8_fnuz(
+                            Arc::clone(&session),
+                            first_graph,
+                            plan.clone(),
+                            Arc::clone(&self.cache),
+                            Arc::clone(sidecar),
+                            COMPLETION_TIMEOUT,
+                        )
+                    }
+                    (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
                         Arc::clone(&session),
                         first_graph,
                         plan.clone(),
                         Arc::clone(&self.cache),
                         Arc::clone(sidecar),
                         COMPLETION_TIMEOUT,
-                    )
-                }
-                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
-                    QwenResidentModel::new_fp8_fnuz(
+                    ),
+                    (None, None) => QwenResidentModel::new(
                         Arc::clone(&session),
                         first_graph,
                         plan.clone(),
                         Arc::clone(&self.cache),
-                        Arc::clone(sidecar),
                         COMPLETION_TIMEOUT,
-                    )
+                    ),
+                    _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
-                (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
-                    Arc::clone(&session),
-                    first_graph,
-                    plan.clone(),
-                    Arc::clone(&self.cache),
-                    Arc::clone(sidecar),
-                    COMPLETION_TIMEOUT,
-                ),
-                (None, None) => QwenResidentModel::new(
-                    Arc::clone(&session),
-                    first_graph,
-                    plan.clone(),
-                    Arc::clone(&self.cache),
-                    COMPLETION_TIMEOUT,
-                ),
-                _ => unreachable!("FP8 provider selection validated sidecar state"),
             }
             .map_err(|error| format!("Qwen resident model provisioning failed: {error}"))?;
             let model_ready_ns = timing.now_ns();
@@ -1081,28 +1124,40 @@ impl ModelFrontendBackend for ProductionBackend {
                 validate_model_ready_snapshot(&model_ready_memory)?;
             let ready_model_current_bytes = model_ready_snapshot.model_resident().current_bytes();
 
-            let control_graph = match (&sidecar, fp8_provider) {
-                (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                    build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                }
-                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
-                    build_qwen35_fp8_fnuz_graph(
+            let control_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+                build_qwen35_nvfp4_graph(
+                    &self.lock,
+                    &plan,
+                    nvfp4_sidecar,
+                    input_len,
+                    state_capacity,
+                )
+            } else {
+                match (&sidecar, fp8_provider) {
+                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                        build_qwen35_fp8_fnuz_graph(
+                            &self.lock,
+                            &plan,
+                            sidecar,
+                            input_len,
+                            state_capacity,
+                        )
+                    }
+                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                         &self.lock,
                         &plan,
                         sidecar,
                         input_len,
                         state_capacity,
-                    )
+                    ),
+                    (None, None) => {
+                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                    }
+                    _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
-                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                    &self.lock,
-                    &plan,
-                    sidecar,
-                    input_len,
-                    state_capacity,
-                ),
-                (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
-                _ => unreachable!("FP8 provider selection validated sidecar state"),
             }
             .map_err(|error| {
                 format!("benchmark correctness-control graph does not satisfy the Qwen contract: {error}")
@@ -1218,30 +1273,40 @@ impl ModelFrontendBackend for ProductionBackend {
                     _ => return Err("benchmark lane and input shape do not match".to_owned()),
                 };
                 validate_fixed_input_token_ids(seed_input.as_slice(), input.as_slice())?;
-                let graph = match (&sidecar, fp8_provider) {
-                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    }
-                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
-                        build_qwen35_fp8_fnuz_graph(
+                let graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+                    build_qwen35_nvfp4_graph(
+                        &self.lock,
+                        &plan,
+                        nvfp4_sidecar,
+                        input_len,
+                        state_capacity,
+                    )
+                } else {
+                    match (&sidecar, fp8_provider) {
+                        (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                            build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                        }
+                        (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                            build_qwen35_fp8_fnuz_graph(
+                                &self.lock,
+                                &plan,
+                                sidecar,
+                                input_len,
+                                state_capacity,
+                            )
+                        }
+                        (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                             &self.lock,
                             &plan,
                             sidecar,
                             input_len,
                             state_capacity,
-                        )
+                        ),
+                        (None, None) => {
+                            build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                        }
+                        _ => unreachable!("quantized provider selection validated sidecar state"),
                     }
-                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                        &self.lock,
-                        &plan,
-                        sidecar,
-                        input_len,
-                        state_capacity,
-                    ),
-                    (None, None) => {
-                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    }
-                    _ => unreachable!("FP8 provider selection validated sidecar state"),
                 }
                 .map_err(|error| {
                     format!("benchmark request graph does not satisfy the Qwen contract: {error}")
@@ -1483,7 +1548,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
-                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
+                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
                     "fp8_provider": fp8_provider.map(CliFp8Provider::label),
                     "request_model_load_count": 0,
                     "model_reused": true,
@@ -1651,17 +1716,17 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 PathBuf::from(take_value(&mut arguments, "--fp8-artifact")?),
                 "--fp8-artifact",
             )?,
-            "--nvfp4-manifest" if command == "generate" => set_once(
+            "--nvfp4-manifest" if command == "generate" || command == "benchmark" => set_once(
                 &mut fp8_manifest,
                 PathBuf::from(take_value(&mut arguments, "--nvfp4-manifest")?),
                 "--nvfp4-manifest",
             )?,
-            "--nvfp4-artifact" if command == "generate" => set_once(
+            "--nvfp4-artifact" if command == "generate" || command == "benchmark" => set_once(
                 &mut fp8_artifact,
                 PathBuf::from(take_value(&mut arguments, "--nvfp4-artifact")?),
                 "--nvfp4-artifact",
             )?,
-            "--nvfp4-provider" if command == "generate" => {
+            "--nvfp4-provider" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--nvfp4-provider")?;
                 if value != "packed-dequant" {
                     return Err("--nvfp4-provider must be packed-dequant".to_owned());
@@ -2437,6 +2502,49 @@ mod tests {
                 measured: 10,
                 ..
             })
+        ));
+        let nvfp4_benchmark = parse_args(
+            "benchmark",
+            &[
+                "--lock",
+                "lock.json",
+                "--cache",
+                "cache",
+                "--lane",
+                "direct",
+                "--row-id",
+                "nvfp4-host-test",
+                "--model-size",
+                "2B",
+                "--case-id",
+                "short-odd",
+                "--input-token-ids",
+                "1,3,17",
+                "--max-new-tokens",
+                "17",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--greedy",
+                "--nvfp4-manifest",
+                "sidecar.json",
+                "--nvfp4-artifact",
+                "sidecar.safetensors",
+                "--nvfp4-provider",
+                "packed-dequant",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            nvfp4_benchmark.operation,
+            Operation::Benchmark(BenchmarkRequest {
+                fp8_manifest: Some(ref manifest),
+                fp8_artifact: Some(ref artifact),
+                fp8_provider: Some(CliFp8Provider::Nvfp4PackedDequant),
+                ..
+            }) if manifest.as_path() == std::path::Path::new("sidecar.json")
+                && artifact.as_path() == std::path::Path::new("sidecar.safetensors")
         ));
         let unicode = parse_args(
             "generate",

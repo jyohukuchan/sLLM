@@ -853,12 +853,13 @@
             "bf16",
             "bf16-converted-from-ocp-e4m3fn",
             "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+            "nvfp4-e2m1-block16-e4m3fn-tensor-f32",
             "ocp-e4m3fn-outer-f32"
           ]
         },
         "fp8_provider": {
           "type": ["string", "null"],
-          "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16"]
+          "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16", "nvfp4-packed-dequant"]
         },
         "request_model_load_count": {
           "const": 0

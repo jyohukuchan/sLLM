@@ -124,6 +124,9 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 - M=1/M>1、K/N 15/16/17および31/32/33を含む7 caseを両targetで独立FP32 oracleへ照合し、fallbackなしでPASSした。
 - Qwen3.5-2Bのtop-1は両targetで3/3一致したが最大KLD `0.2637523`が既定`0.05`を超えたため、両targetとも
   `correctness-only opt-in`である。VRAM削減や短caseの速度だけでdefaultへ昇格しない。
+- direct-engine follow-upではBF16比でresidentを52.43%削減した一方、NVFP4 decodeはV620で約21〜22%、R9700で
+  約20〜22%低下し、R9700のprefill/TTFTは大幅に退行した。これは両target共通のpacked-dequant実装の結果であり、
+  RDNA4 native FP4性能として一般化しない。
 - exact `gfx942`はdescriptorとcompile-only対象に留め、実行、native FP4、性能のclaimはない。
 - Hot Aisle MI300X x1の結果は、完全なVM/software tuple、single GPU、実行したop/model/shapeだけへ限定する。
   MI300A/MI325X、multi-GPU、bare metalへ自動的に一般化しない。

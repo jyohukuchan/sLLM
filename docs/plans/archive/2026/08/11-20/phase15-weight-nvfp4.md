@@ -162,6 +162,8 @@ native FP4と表記しない。
 - P15-A0〜A4: official format lock、独立codec/oracle、deterministic converter、fail-closed sidecar loader、
   exact `gfx1030`/`gfx1201` packed-dequant providerを完了した。`gfx942`はcompile/descriptorだけである。
 - P15-A5/A6: Qwen3.5-2B full sidecarと両GPU full accuracy、Gemma 4-12B real-weight slice、R9700 CLI/service、
-  V620 resident/high-waterを取得した。Qwen最大KLD `0.2637523`とGemma top-1 2/3によりdefault化しない。
+  V620 resident/high-waterを取得した。follow-upで両GPUのBF16/NVFP4 short-odd・32/32を各3 warmup + 10 measuredで
+  比較し、resident 52.43%削減と、NVFP4 decode約20〜22%低下、R9700 prefill/TTFT大幅退行を確認した。
+  Qwen最大KLD `0.2637523`とGemma top-1 2/3によりdefault化しない。
 - P15-A7: 両targetをcorrectness-only opt-inとし、native FP4 claimを行わない。互換性、runtime、model lock、
   provenance、main plan、historyを同期し、本planをarchiveする。

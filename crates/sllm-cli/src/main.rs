@@ -52,6 +52,8 @@ fn print_help() {
     println!("direct: --lane direct --lock PATH --cache PATH --row-id ID --model-size 2B|4B|9B");
     println!("  --case-id ID --input-token-ids IDS --max-new-tokens N --device-index N");
     println!("  --target gfx1030|gfx1201|gfx942 --greedy [--warmups N] [--measured N]");
+    println!("  [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider PROVIDER]");
+    println!("  [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant]");
     println!(
         "render-tokenize: --lane render-tokenize --message ROLE:CONTENT (same execution flags)"
     );
