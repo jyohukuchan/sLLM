@@ -785,6 +785,129 @@ pub fn build_verified_gemma4_weight_load_plan(
     build_gemma4_weight_load_plan(lock, cache.tensors())
 }
 
+/// Build the Gemma execution topology directly from the verified first-class
+/// Unsloth artifact. Source ranges describe encoded values; they are never
+/// presented as BF16 upload ranges. The resulting plan remains bound to the
+/// reviewed Gemma architecture lock while its repository/revision identify
+/// the actual low-bit source.
+pub fn build_unsloth_gemma4_nvfp4_weight_load_plan(
+    lock: &crate::gemma4::Gemma4ModelLock,
+    artifact: &crate::VerifiedUnslothGemma4Nvfp4,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if lock.schema_version != "model-lock-v2"
+        || !crate::gemma4::is_reviewed_gemma4_identity(lock)
+        || !lock.model.architecture.text.tie_word_embeddings
+        || lock.model.architecture.text.layer_types != crate::gemma4::reviewed_layer_schedule()
+    {
+        return Err(WeightPlanError::invalid(
+            "model identity is not the reviewed Gemma 4 dense contract",
+        ));
+    }
+    let mut descriptors = BTreeMap::new();
+    for descriptor in artifact.tensors() {
+        if descriptors
+            .insert(descriptor.logical_name.as_str(), descriptor)
+            .is_some()
+        {
+            return Err(WeightPlanError::invalid(
+                "quantized artifact contains a duplicate logical tensor",
+            ));
+        }
+    }
+    let expected_consumers = expected_gemma4_consumers();
+    let mut observed_consumers = BTreeSet::new();
+    let mut audio_count = 0_u64;
+    let mut vision_count = 0_u64;
+    let mut entries = Vec::with_capacity(descriptors.len());
+    let mut destination_cursor = 0_u64;
+    for descriptor in descriptors.values() {
+        let (classification, consumer) = classify_gemma4_name(&descriptor.logical_name)?;
+        if let Some(key) = consumer {
+            if !observed_consumers.insert(key) {
+                return Err(WeightPlanError::invalid(format!(
+                    "duplicate quantized weight consumer: {key:?}"
+                )));
+            }
+        }
+        if classification == WeightClassification::KnownUnconsumed {
+            if descriptor.logical_name.starts_with("model.embed_audio.") {
+                audio_count = audio_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("audio tensor count overflow"))?;
+            } else {
+                vision_count = vision_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
+            }
+        }
+        let logical_bytes = descriptor
+            .logical_shape
+            .iter()
+            .try_fold(2_u64, |bytes, dimension| bytes.checked_mul(*dimension))
+            .ok_or_else(|| WeightPlanError::invalid("logical tensor bytes overflow"))?;
+        let destination_start = if classification == WeightClassification::KnownUnconsumed {
+            None
+        } else {
+            let start = destination_cursor;
+            destination_cursor = destination_cursor
+                .checked_add(logical_bytes)
+                .ok_or_else(|| WeightPlanError::invalid("destination size overflow"))?;
+            Some(start)
+        };
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.logical_name.clone(),
+            classification,
+            consumer,
+            dtype: TensorDType::Bf16,
+            shape: descriptor.logical_shape.clone(),
+            source_file: "model.safetensors".to_owned(),
+            locked_file_size: crate::UNSLOTH_GEMMA4_NVFP4_MODEL_SIZE,
+            locked_file_sha256: crate::UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256.to_owned(),
+            source_range: descriptor.value_range,
+            destination_start,
+            chunks: Vec::new(),
+        });
+    }
+    if observed_consumers != expected_consumers
+        || audio_count != lock.model.architecture.audio.tensor_count
+        || vision_count != lock.model.architecture.vision.tensor_count
+        || entries.len() as u64 != lock.model.tensor_contract.tensor_count
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "quantized Gemma consumer/count contract differs: consumers={}/{}, audio={audio_count}/{}, vision={vision_count}/{}, all={}/{}",
+            observed_consumers.len(),
+            expected_consumers.len(),
+            lock.model.architecture.audio.tensor_count,
+            lock.model.architecture.vision.tensor_count,
+            entries.len(),
+            lock.model.tensor_contract.tensor_count
+        )));
+    }
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version: "quantized-model-plan-v1",
+            repo_id: artifact.repository(),
+            resolved_revision: artifact.resolved_revision(),
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: true,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: "quantized-model-plan-v1".to_owned(),
+        repo_id: artifact.repository().to_owned(),
+        resolved_revision: artifact.resolved_revision().to_owned(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: true,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
+}
+
 fn validate_fixed_lock(lock: &ModelLock) -> Result<(), WeightPlanError> {
     let config = &lock.model.architecture.text_config;
     if lock.schema_version != QWEN_SCHEMA_VERSION || reviewed_qwen35_spec(lock).is_none() {
@@ -836,7 +959,12 @@ fn locked_file_map_from_files(
 fn classify_gemma4_descriptor(
     descriptor: &TensorDescriptor,
 ) -> Result<(WeightClassification, Option<WeightConsumerKey>), WeightPlanError> {
-    let name = descriptor.tensor_name.as_str();
+    classify_gemma4_name(descriptor.tensor_name.as_str())
+}
+
+fn classify_gemma4_name(
+    name: &str,
+) -> Result<(WeightClassification, Option<WeightConsumerKey>), WeightPlanError> {
     let top_level = match name {
         "model.language_model.embed_tokens.weight" => Some(WeightConsumer::EmbeddingAndTiedOutput),
         "model.language_model.norm.weight" => Some(WeightConsumer::FinalNorm),

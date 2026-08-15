@@ -551,7 +551,24 @@ pub fn build_gemma4_graph(
         .map_err(|_| Gemma4GraphError::InvalidModel)?;
     let expected_plan = build_gemma4_weight_load_plan(lock, expected_catalog.values())
         .map_err(|_| Gemma4GraphError::InvalidModel)?;
-    if plan != &expected_plan {
+    let first_class_quantized = plan.schema_version == "quantized-model-plan-v1"
+        && plan.repo_id == crate::UNSLOTH_GEMMA4_NVFP4_REPOSITORY
+        && plan.resolved_revision == crate::UNSLOTH_GEMMA4_NVFP4_REVISION
+        && plan.lock_fingerprint == lock.fingerprint()
+        && plan.entries.len() == expected_plan.entries.len()
+        && plan
+            .entries
+            .iter()
+            .zip(&expected_plan.entries)
+            .all(|(actual, expected)| {
+                actual.tensor_name == expected.tensor_name
+                    && actual.classification == expected.classification
+                    && actual.consumer == expected.consumer
+                    && actual.dtype == expected.dtype
+                    && actual.shape == expected.shape
+                    && actual.destination_start == expected.destination_start
+            });
+    if plan != &expected_plan && !first_class_quantized {
         return Err(Gemma4GraphError::InvalidWeightPlan);
     }
 

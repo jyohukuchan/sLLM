@@ -181,12 +181,13 @@ sllm_status_t validate_and_copy_descriptor(
         "causal attention range is outside the bounded KV capacity");
   }
   if ((metadata->query.q_heads != 8U && metadata->query.q_heads != 16U) ||
-      metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM ||
+      (metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
+       metadata->query.head_dim != SLLM_HIP_KV_MAX_HEAD_DIM) ||
       metadata->output.q_heads != metadata->query.q_heads ||
       metadata->output.head_dim != metadata->query.head_dim) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "causal attention Q/output must share a reviewed [M,Hq,256] shape");
+        "causal attention Q/output must share a reviewed [M,Hq,256|512] shape");
   }
   if (descriptor->query.buffer == descriptor->output.buffer &&
       intervals_overlap(metadata->query, metadata->output)) {

@@ -1070,13 +1070,17 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ);\n\
              println!(\"const SLLM_HIP_KV_HEAD_COUNT={{}}\", bindings::SLLM_HIP_KV_HEAD_COUNT);\n\
              println!(\"const SLLM_HIP_KV_HEAD_DIM={{}}\", bindings::SLLM_HIP_KV_HEAD_DIM);\n\
+             println!(\"const SLLM_HIP_KV_MAX_HEAD_DIM={{}}\", bindings::SLLM_HIP_KV_MAX_HEAD_DIM);\n\
              println!(\"const SLLM_HIP_KV_MAX_CAPACITY={{}}\", bindings::SLLM_HIP_KV_MAX_CAPACITY);\n\
              println!(\"const SLLM_HIP_KV_STATE_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_VERSION);\n\
              println!(\"const SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION);\n\
+             println!(\"const SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_FP16_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP16_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_FP8_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_V1);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_FP8_STATIC_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_NVFP4_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_NVFP4_V1);\n\
              println!(\"const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);\n\
              println!(\"const SLLM_BACKEND_HIP={{}}\", bindings::SLLM_BACKEND_HIP);\n\
@@ -1112,6 +1116,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_FP8_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_FP8_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_NVFP4_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_NVFP4_VERSION);\n\
+             println!(\"const SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2);\n\
@@ -1120,6 +1125,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_HIPBLASLT_FP8_OUTER_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_PACKED_DEQUANT_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_PACKED_DEQUANT_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_W4A4_PACKED_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_W4A4_PACKED_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MATMUL_WORKGROUP_SIZE);\n\
@@ -1176,6 +1182,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_ENCODING_UNQUANTIZED={{}}\", bindings::SLLM_TENSOR_ENCODING_UNQUANTIZED);\n\
              println!(\"const SLLM_TENSOR_ENCODING_FP8_OUTER_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_FP8_OUTER_F32);\n\
              println!(\"const SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);\n\
+             println!(\"const SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32);\n\
              println!(\"const SLLM_RMSNORM_ACCUMULATION_F32={{}}\", bindings::SLLM_RMSNORM_ACCUMULATION_F32);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_DIRECT={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_DIRECT);\n\

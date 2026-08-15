@@ -173,7 +173,10 @@ fn run(config: Config) -> Result<(), String> {
                     || config.fp8_artifact.is_some()
                     || config.fp8_provider.is_some()
                 {
-                    return Err("Gemma 4 server profile supports locked BF16 weights only".to_owned());
+                    return Err(
+                        "Gemma 4 first-class model input does not accept development sidecar flags"
+                            .to_owned(),
+                    );
                 }
                 ActiveBackend::Gemma(Arc::new(
                     Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {

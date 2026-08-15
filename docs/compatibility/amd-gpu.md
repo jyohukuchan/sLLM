@@ -277,6 +277,16 @@ multi-request、production全体のgraph replay、別SKU/tuple、長時間安定
 引き続き将来のtarget-specific比較であり、Phase 9 evidenceへ含めない。詳細値とdigestは
 `ci/matrix/phase9-profile-summary-v1.json`を正とする。
 
+### 2026-08-16 Phase 16F mixed NVFP4 evidence
+
+同じlocal tupleのV620 `gfx1030`とR9700 `gfx1201`で、dynamic block-16 NVFP4 W4A4 12境界case、static FP8 KV
+17 case、Unsloth Gemma 4 12B mixed full graph 8 transitionをPASSした。full graphはresident 9,201,189,600 byte、
+peak accounted 9,221,491,952 byte、fallbackなし、cleanup 0で、両targetの生成token列は`[532; 8]`だった。
+R9700は既存単一GPU contractに従い`HIP_VISIBLE_DEVICES=2`で単独可視化し、論理device 0へ接続した。
+
+これはpacked-dequant/packed-direct software providerのproject evidenceであり、RDNA native FP4 instruction、別SKU、別ROCm tuple、
+multi-GPU、same-artifact NVIDIA reference correctnessを証明しない。reference未実行のmodel evidenceは`experimental`とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

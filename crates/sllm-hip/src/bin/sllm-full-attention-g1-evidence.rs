@@ -226,8 +226,13 @@ fn parse_config() -> Result<Config, String> {
                 kv_encoding = match value.as_str() {
                     "fp16" => KvCacheEncoding::Fp16,
                     "fp8" => KvCacheEncoding::Fp8E4M3Fn,
+                    "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
                     "nvfp4" => KvCacheEncoding::Nvfp4,
-                    _ => return Err("--kv-encoding must be fp16, fp8, or nvfp4".to_owned()),
+                    _ => {
+                        return Err(
+                            "--kv-encoding must be fp16, fp8, fp8-static, or nvfp4".to_owned()
+                        );
+                    }
                 };
             }
             other => return Err(format!("unexpected argument {other}")),
@@ -244,6 +249,7 @@ fn kv_encoding_name(encoding: KvCacheEncoding) -> &'static str {
     match encoding {
         KvCacheEncoding::Fp16 => "fp16-v1",
         KvCacheEncoding::Fp8E4M3Fn => "kv-fp8-v1",
+        KvCacheEncoding::Fp8E4M3FnStatic => "kv-fp8-static-v1",
         KvCacheEncoding::Nvfp4 => "kv-nvfp4-v1",
     }
 }
@@ -550,6 +556,10 @@ fn quantized_kv_values(words: &[u16], encoding: KvCacheEncoding) -> Result<Vec<f
             }
             Ok(output)
         }
+        KvCacheEncoding::Fp8E4M3FnStatic => Ok(input
+            .into_iter()
+            .map(|value| decode_e4m3fn(encode_e4m3fn(value)))
+            .collect()),
         KvCacheEncoding::Nvfp4 => {
             let mut output = Vec::with_capacity(input.len());
             for row in input.chunks_exact(HEAD_DIM) {
@@ -635,17 +645,20 @@ fn run_case(
         .checked_add(case.m as u64)
         .ok_or_else(|| "case committed length overflow".to_owned())?;
     let capacity = committed_length;
-    let state = session
-        .create_kv_state(
-            KvStateDescriptor::new_with_storage(
-                seed as u32,
-                capacity,
-                KV_HEADS,
-                HEAD_DIM,
-                config.kv_encoding,
-            )
-            .map_err(|error| format!("KV descriptor failed: {error}"))?,
+    let descriptor = if config.kv_encoding == KvCacheEncoding::Fp8E4M3FnStatic {
+        KvStateDescriptor::new_with_static_fp8(seed as u32, capacity, KV_HEADS, HEAD_DIM, 1.0, 1.0)
+    } else {
+        KvStateDescriptor::new_with_storage(
+            seed as u32,
+            capacity,
+            KV_HEADS,
+            HEAD_DIM,
+            config.kv_encoding,
         )
+    }
+    .map_err(|error| format!("KV descriptor failed: {error}"))?;
+    let state = session
+        .create_kv_state(descriptor)
         .map_err(|error| format!("KV state creation failed: {error}"))?;
     let prefix_key = input_k_words(case.start_position as usize, 0);
     let prefix_value = input_v_words(case.start_position as usize, seed + 1);
@@ -780,6 +793,7 @@ fn run_case(
             let (absolute_tolerance, relative_tolerance) = match config.kv_encoding {
                 KvCacheEncoding::Fp16 => (0.016, 0.0),
                 KvCacheEncoding::Fp8E4M3Fn => (0.03125, 0.04),
+                KvCacheEncoding::Fp8E4M3FnStatic => (0.03125, 0.04),
                 KvCacheEncoding::Nvfp4 => (0.125, 0.25),
             };
             error <= absolute_tolerance + relative_tolerance * reference.abs()

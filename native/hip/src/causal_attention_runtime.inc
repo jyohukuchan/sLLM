@@ -229,7 +229,9 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
             error_sink, SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH,
             "causal attention length does not equal the committed KV snapshot");
       }
-      if (metadata.query.q_heads != state->head_count * 4U ||
+      const uint32_t gqa_ratio = metadata.query.q_heads / state->head_count;
+      if (metadata.query.q_heads % state->head_count != 0U ||
+          (gqa_ratio != 2U && gqa_ratio != 4U && gqa_ratio != 16U) ||
           metadata.query.head_dim != state->head_dim) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_SHAPE_MISMATCH,

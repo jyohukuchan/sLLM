@@ -23,8 +23,8 @@ use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
 use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, Encoding, ExecutionBuffer,
     ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding, PrepareSupport,
-    TensorDType, TensorView, VerifiedCache, VerifiedNvfp4Sidecar, WeightUploadRequest,
-    upload_verified_weight,
+    QuantizedTensorEncoding, ScalePlaneRole, TensorDType, TensorView, VerifiedCache,
+    VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest, upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -205,6 +205,7 @@ struct Gemma4ResidentInner {
     lock: crate::Gemma4ModelLock,
     plan: WeightLoadPlan,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
+    quantized_model: Option<Arc<VerifiedUnslothGemma4Nvfp4>>,
     immutable: BTreeMap<String, (Gemma4TensorBacking, ExecutionBuffer)>,
     completion_timeout: Duration,
 }
@@ -276,6 +277,7 @@ pub struct Gemma4ExecutionRequest {
     committed_length: u64,
     binding_generation: u64,
     audit: Option<Gemma4ExecutionAudit>,
+    opaque_kv_states: Option<BTreeMap<u32, crate::KvState>>,
 }
 
 impl fmt::Debug for Gemma4ResidentModel {
@@ -317,6 +319,55 @@ impl Gemma4ResidentModel {
             Some(sidecar),
             completion_timeout,
         )
+    }
+
+    /// Uploads the provider artifact directly and binds its complete mixed
+    /// recipe to the existing Gemma graph. No BF16 source cache or sidecar is
+    /// involved.
+    pub fn new_quantized(
+        session: Arc<ExecutionSession>,
+        lock: crate::Gemma4ModelLock,
+        plan: WeightLoadPlan,
+        artifact: Arc<VerifiedUnslothGemma4Nvfp4>,
+        completion_timeout: Duration,
+    ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        if completion_timeout.is_zero()
+            || lock.fingerprint() != plan.lock_fingerprint
+            || plan.repo_id != artifact.repository()
+            || plan.resolved_revision != artifact.resolved_revision()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "quantized Gemma resident identity or completion timeout differs",
+            ));
+        }
+        let graph = crate::build_gemma4_graph(&lock, &plan, 1, 0, 1)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let layout = build_gemma4_quantized_execution_layout(&graph, &plan, &artifact)?;
+        let queue = session
+            .create_queue()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let buffers = provision_gemma4_execution_buffers(Arc::clone(&session), &layout)?;
+        buffers.upload_immutable_quantized(
+            &layout,
+            &plan,
+            &artifact,
+            &queue,
+            completion_timeout,
+        )?;
+        let immutable = buffers.immutable_buffers(&layout)?;
+        drop(buffers);
+        Ok(Self {
+            inner: Arc::new(Gemma4ResidentInner {
+                session,
+                queue,
+                lock,
+                plan,
+                nvfp4_sidecar: None,
+                quantized_model: Some(artifact),
+                immutable,
+                completion_timeout,
+            }),
+        })
     }
 
     fn new_with_nvfp4(
@@ -365,6 +416,7 @@ impl Gemma4ResidentModel {
                 lock,
                 plan,
                 nvfp4_sidecar: sidecar,
+                quantized_model: None,
                 immutable,
                 completion_timeout,
             }),
@@ -391,17 +443,56 @@ impl Gemma4ResidentModel {
             state_capacity,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = match self.inner.nvfp4_sidecar.as_deref() {
-            Some(sidecar) => {
-                build_gemma4_nvfp4_execution_layout(&graph, &self.inner.plan, sidecar)?
+        let layout = if let Some(artifact) = self.inner.quantized_model.as_deref() {
+            build_gemma4_quantized_execution_layout(&graph, &self.inner.plan, artifact)?
+        } else {
+            match self.inner.nvfp4_sidecar.as_deref() {
+                Some(sidecar) => {
+                    build_gemma4_nvfp4_execution_layout(&graph, &self.inner.plan, sidecar)?
+                }
+                None => build_gemma4_execution_layout(&graph, &self.inner.plan)?,
             }
-            None => build_gemma4_execution_layout(&graph, &self.inner.plan)?,
         };
         let buffers = provision_gemma4_request_buffers(
             Arc::clone(&self.inner.session),
             &layout,
             &self.inner.immutable,
         )?;
+        let opaque_kv_states = self
+            .inner
+            .quantized_model
+            .as_deref()
+            .map(|artifact| {
+                graph
+                    .kv_descriptors()
+                    .iter()
+                    .map(|descriptor| {
+                        let scales = artifact.kv_scale(descriptor.layer).ok_or_else(|| {
+                            Gemma4ExecutionLayoutError::invalid(
+                                "quantized Gemma static KV scale is absent",
+                            )
+                        })?;
+                        let state_descriptor = crate::KvStateDescriptor::new_with_static_fp8(
+                            descriptor.layer,
+                            descriptor.capacity,
+                            descriptor.heads as usize,
+                            descriptor.head_dim as usize,
+                            scales.key_decode_scale(),
+                            scales.value_decode_scale(),
+                        )
+                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                        let state = self
+                            .inner
+                            .session
+                            .create_kv_state(state_descriptor)
+                            .map_err(|error| {
+                                Gemma4ExecutionLayoutError::invalid(error.to_string())
+                            })?;
+                        Ok((descriptor.layer, state))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, Gemma4ExecutionLayoutError>>()
+            })
+            .transpose()?;
         Ok(Gemma4ExecutionRequest {
             _resident: Arc::clone(&self.inner),
             session: Arc::clone(&self.inner.session),
@@ -416,6 +507,7 @@ impl Gemma4ResidentModel {
             committed_length: 0,
             binding_generation: 0,
             audit: None,
+            opaque_kv_states,
         })
     }
 
@@ -540,9 +632,13 @@ impl Gemma4ExecutionRequest {
             self.state_capacity()?,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = match self._resident.nvfp4_sidecar.as_deref() {
-            Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
-            None => build_gemma4_execution_layout(&graph, &self.plan)?,
+        let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
+            build_gemma4_quantized_execution_layout(&graph, &self.plan, artifact)?
+        } else {
+            match self._resident.nvfp4_sidecar.as_deref() {
+                Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
+                None => build_gemma4_execution_layout(&graph, &self.plan)?,
+            }
         };
         let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
         buffers.upload_transition_inputs(
@@ -589,16 +685,23 @@ impl Gemma4ExecutionRequest {
             expected_backend: 1,
         };
         let output = if include_last_logits {
-            self.buffers.execute_transition_with_last_logits(
+            self.buffers.execute_transition_with_last_logits_and_kv(
                 &graph,
                 &self.layout,
                 &self.queue,
                 &self.state,
+                self.opaque_kv_states.as_ref(),
                 options,
             )
         } else {
-            self.buffers
-                .execute_transition(&graph, &self.layout, &self.queue, &self.state, options)
+            self.buffers.execute_transition_with_kv(
+                &graph,
+                &self.layout,
+                &self.queue,
+                &self.state,
+                self.opaque_kv_states.as_ref(),
+                options,
+            )
         }?;
         self.committed_length = output.state().committed_length;
         self.record_audit(output.audit())?;
@@ -886,6 +989,57 @@ impl Gemma4ProvisionedBuffers {
         )
     }
 
+    pub fn upload_immutable_quantized(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        plan: &WeightLoadPlan,
+        artifact: &VerifiedUnslothGemma4Nvfp4,
+        queue: &ExecutionQueue,
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        if completion_timeout.is_zero()
+            || queue.session_id() != self.session.id()
+            || layout.model_fingerprint != plan.lock_fingerprint
+            || layout.plan_digest != *plan.digest()
+            || plan.repo_id != artifact.repository()
+            || plan.resolved_revision != artifact.resolved_revision()
+            || layout.nvfp4_sidecar_fingerprint.as_deref() != Some(artifact.recipe_digest())
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "quantized immutable upload identity, queue, or timeout differs",
+            ));
+        }
+        for entry in &plan.entries {
+            if entry.classification == WeightClassification::KnownUnconsumed {
+                continue;
+            }
+            let tensor = layout
+                .tensors
+                .iter()
+                .find(|tensor| {
+                    matches!(&tensor.backing, Gemma4TensorBacking::ModelWeight { tensor_name } if tensor_name == &entry.tensor_name)
+                })
+                .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("quantized weight buffer is absent"))?;
+            let descriptor = artifact.tensor(&entry.tensor_name).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("quantized tensor descriptor is absent")
+            })?;
+            let resident_bytes = gemma_resident_weight_bytes(&tensor.view)?;
+            let destination = self
+                .buffer(tensor.id)?
+                .range(0, resident_bytes)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            upload_gemma_quantized_weight(
+                self.session.as_ref(),
+                queue,
+                &destination,
+                artifact,
+                descriptor,
+                completion_timeout,
+            )?;
+        }
+        self.upload_constants(layout, queue, completion_timeout)
+    }
+
     fn upload_immutable_source(
         &self,
         layout: &Gemma4ExecutionLayout,
@@ -966,6 +1120,15 @@ impl Gemma4ProvisionedBuffers {
             })
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         }
+        self.upload_constants(layout, queue, completion_timeout)
+    }
+
+    fn upload_constants(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
         for tensor in &layout.tensors {
             let Gemma4TensorBacking::ConstantBf16 { bits } = tensor.backing else {
                 continue;
@@ -1081,7 +1244,27 @@ impl Gemma4ProvisionedBuffers {
         request_state: &crate::Gemma4RequestState,
         options: Gemma4ExecutionOptions,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.execute_transition_impl(graph, layout, queue, request_state, options, false)
+        self.execute_transition_with_kv(graph, layout, queue, request_state, None, options)
+    }
+
+    fn execute_transition_with_kv(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+        options: Gemma4ExecutionOptions,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.execute_transition_impl(
+            graph,
+            layout,
+            queue,
+            request_state,
+            opaque_kv_states,
+            options,
+            false,
+        )
     }
 
     pub fn execute_transition_with_last_logits(
@@ -1092,15 +1275,44 @@ impl Gemma4ProvisionedBuffers {
         request_state: &crate::Gemma4RequestState,
         options: Gemma4ExecutionOptions,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.execute_transition_impl(graph, layout, queue, request_state, options, true)
+        self.execute_transition_with_last_logits_and_kv(
+            graph,
+            layout,
+            queue,
+            request_state,
+            None,
+            options,
+        )
     }
 
+    fn execute_transition_with_last_logits_and_kv(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+        options: Gemma4ExecutionOptions,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.execute_transition_impl(
+            graph,
+            layout,
+            queue,
+            request_state,
+            opaque_kv_states,
+            options,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn execute_transition_impl(
         &self,
         graph: &Gemma4Graph,
         layout: &Gemma4ExecutionLayout,
         queue: &ExecutionQueue,
         request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
         options: Gemma4ExecutionOptions,
         include_last_logits: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
@@ -1145,6 +1357,68 @@ impl Gemma4ProvisionedBuffers {
                     return Err(Gemma4ExecutionLayoutError::invalid(
                         "prepared graph and execution layout differ",
                     ));
+                }
+
+                if let Some(states) = opaque_kv_states
+                    && node.descriptor.kind() == SemanticOpKind::CausalAttention
+                {
+                    if planned.boundary_after().is_some()
+                        || node.kv_appends.len() != 2
+                        || node.inputs.is_empty()
+                        || node.outputs.len() != 1
+                    {
+                        return Err(Gemma4ExecutionLayoutError::invalid(
+                            "opaque Gemma attention layout or boundary differs",
+                        ));
+                    }
+                    let layer = graph_node.layer().ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid(
+                            "opaque Gemma attention node has no layer",
+                        )
+                    })?;
+                    let state = states.get(&layer).ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid("opaque Gemma KV state is absent")
+                    })?;
+                    let key =
+                        self.bind(layout, node.kv_appends[0].source_tensor, AccessMode::Read)?;
+                    let value =
+                        self.bind(layout, node.kv_appends[1].source_tensor, AccessMode::Read)?;
+                    let mut append = self
+                        .session
+                        .append_kv_state(
+                            state,
+                            queue,
+                            key,
+                            value,
+                            graph.start_position(),
+                            graph.start_position(),
+                        )
+                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                    require_terminal_success(
+                        &format!("{}.static_kv_append", graph_node.label()),
+                        append.wait(options.completion_timeout).map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(error.to_string())
+                        })?,
+                    )
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                    audit
+                        .record(append.dispatch())
+                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                    drop(append);
+                    let query = self.bind(layout, node.inputs[0], AccessMode::Read)?;
+                    let output = self.bind(layout, node.outputs[0], AccessMode::Write)?;
+                    let descriptor = crate::CausalAttentionDescriptor::new(
+                        graph.start_position(),
+                        graph.token_count(),
+                        graph.expected_length(),
+                    )
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                    let attention = self
+                        .session
+                        .causal_attention(state, queue, query, output, descriptor)
+                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                    pending.retain_causal_attention(graph_node.label(), attention);
+                    return Ok(());
                 }
 
                 for append in self.bind_kv_appends(layout, node)? {
@@ -1510,15 +1784,47 @@ fn require_transfer_success(
 
 fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {
     view.dtype() == DType::U8
-        && view.encoding()
-            == Encoding::Nvfp4 {
+        && matches!(
+            view.encoding(),
+            Encoding::Nvfp4 {
                 block_size: 16,
                 scale_dtype: DType::F8E4M3Fn,
+            } | Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            }
+        )
+        && view.shape().len() == 2
+}
+
+fn gemma_is_w4a4_weight(view: &TensorView) -> bool {
+    matches!(view.encoding(), Encoding::Nvfp4W4A4 { .. })
+}
+
+fn gemma_is_fp8_weight(view: &TensorView) -> bool {
+    matches!(view.dtype(), DType::F8E4M3Fn | DType::F8E4M3FnuZ)
+        && view.encoding()
+            == Encoding::Fp8Scaled {
+                granularity: crate::Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: crate::Fp8ResidentRepresentation::PackedBytes,
             }
         && view.shape().len() == 2
 }
 
 fn gemma_resident_weight_bytes(view: &TensorView) -> Result<u64, Gemma4ExecutionLayoutError> {
+    if gemma_is_fp8_weight(view) {
+        let rows = u64::try_from(view.shape()[0])
+            .map_err(|_| Gemma4ExecutionLayoutError::invalid("FP8 rows do not fit u64"))?;
+        return view
+            .payload_bytes()
+            .checked_add(
+                rows.checked_mul(4).ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("FP8 scale bytes overflowed")
+                })?,
+            )
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("FP8 resident bytes overflowed"));
+    }
     if !gemma_is_nvfp4_weight(view) {
         return Ok(view.payload_bytes());
     }
@@ -1533,8 +1839,121 @@ fn gemma_resident_weight_bytes(view: &TensorView) -> Result<u64, Gemma4Execution
         .checked_add(block_scales)
         .and_then(|bytes| bytes.checked_add(3))
         .map(|bytes| bytes & !3)
-        .and_then(|bytes| bytes.checked_add(4))
+        .and_then(|bytes| bytes.checked_add(if gemma_is_w4a4_weight(view) { 8 } else { 4 }))
         .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 resident bytes overflowed"))
+}
+
+fn upload_gemma_quantized_weight(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    artifact: &VerifiedUnslothGemma4Nvfp4,
+    descriptor: &crate::QuantizedTensorDescriptor,
+    completion_timeout: Duration,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let mut bytes = artifact
+        .read_source_range(descriptor.value_range)
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+    match descriptor.encoding {
+        QuantizedTensorEncoding::UnquantizedBf16 => {}
+        QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => {
+            let plane = descriptor
+                .scale_planes
+                .iter()
+                .find(|plane| plane.role == ScalePlaneRole::WeightChannel)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("FP8 channel scale is absent")
+                })?;
+            let source = artifact
+                .read_source_range(plane.source_range)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if source.len() % 2 != 0 {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "FP8 BF16 scale plane has an odd byte length",
+                ));
+            }
+            for chunk in source.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                let value = f32::from_bits(u32::from(bits) << 16);
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(Gemma4ExecutionLayoutError::invalid(
+                        "FP8 channel scale is non-positive or non-finite",
+                    ));
+                }
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
+            let block = descriptor
+                .scale_planes
+                .iter()
+                .find(|plane| plane.role == ScalePlaneRole::WeightBlock)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("NVFP4 block scale is absent")
+                })?;
+            bytes.extend_from_slice(
+                &artifact
+                    .read_source_range(block.source_range)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+            );
+            while bytes.len() & 3 != 0 {
+                bytes.push(0);
+            }
+            for role in [ScalePlaneRole::WeightOuter, ScalePlaneRole::InputOuter] {
+                let plane = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == role)
+                    .ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid("NVFP4 outer scale is absent")
+                    })?;
+                let decode = artifact
+                    .read_f32_reciprocal(plane)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                bytes.extend_from_slice(&decode.to_le_bytes());
+            }
+        }
+        QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0
+        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0 => {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "MX encoding is not part of the reviewed Gemma recipe",
+            ));
+        }
+    }
+    if u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "quantized resident bytes differ for {}: expected {}, got {}",
+            descriptor.logical_name,
+            destination.size_bytes(),
+            bytes.len()
+        )));
+    }
+    const MAX_TRANSFER_BYTES: usize = 1_073_741_824;
+    let mut relative = 0_u64;
+    for chunk in bytes.chunks(MAX_TRANSFER_BYTES) {
+        let chunk_len = u64::try_from(chunk.len()).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("quantized upload chunk does not fit u64")
+        })?;
+        let offset = destination
+            .offset_bytes()
+            .checked_add(relative)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("quantized upload offset overflowed")
+            })?;
+        let range = crate::BufferRange::new(destination.buffer().clone(), offset, chunk_len)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut transfer = session
+            .upload(queue, range, Arc::from(chunk))
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        require_transfer_success(
+            transfer.wait(completion_timeout),
+            "Gemma quantized weight upload",
+        )?;
+        relative = relative.checked_add(chunk_len).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("quantized upload length overflowed")
+        })?;
+    }
+    Ok(())
 }
 
 fn upload_gemma_nvfp4_weight(
@@ -1591,7 +2010,7 @@ pub fn build_gemma4_execution_layout(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, None)
+    build_gemma4_execution_layout_source(graph, plan, None, None)
 }
 
 pub fn build_gemma4_nvfp4_execution_layout(
@@ -1599,13 +2018,22 @@ pub fn build_gemma4_nvfp4_execution_layout(
     plan: &WeightLoadPlan,
     sidecar: &VerifiedNvfp4Sidecar,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, Some(sidecar))
+    build_gemma4_execution_layout_source(graph, plan, Some(sidecar), None)
+}
+
+pub fn build_gemma4_quantized_execution_layout(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    artifact: &VerifiedUnslothGemma4Nvfp4,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(graph, plan, None, Some(artifact))
 }
 
 fn build_gemma4_execution_layout_source(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
     sidecar: Option<&VerifiedNvfp4Sidecar>,
+    artifact: Option<&VerifiedUnslothGemma4Nvfp4>,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
     if graph.lock_fingerprint() != plan.lock_fingerprint
         || graph.weight_plan_digest() != plan.digest()
@@ -1614,7 +2042,12 @@ fn build_gemma4_execution_layout_source(
             "graph and weight-plan identity differ",
         ));
     }
-    let mut builder = LayoutBuilder::new(graph, plan, sidecar)?;
+    if sidecar.is_some() && artifact.is_some() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "sidecar and first-class quantized artifact are mutually exclusive",
+        ));
+    }
+    let mut builder = LayoutBuilder::new(graph, plan, sidecar, artifact)?;
     builder.build()?;
     builder.finish()
 }
@@ -1623,6 +2056,7 @@ struct LayoutBuilder<'a> {
     graph: &'a Gemma4Graph,
     plan: &'a WeightLoadPlan,
     nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
+    quantized_model: Option<&'a VerifiedUnslothGemma4Nvfp4>,
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
     weights: BTreeMap<String, usize>,
@@ -1639,6 +2073,7 @@ impl<'a> LayoutBuilder<'a> {
         graph: &'a Gemma4Graph,
         plan: &'a WeightLoadPlan,
         nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
+        quantized_model: Option<&'a VerifiedUnslothGemma4Nvfp4>,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if let Some(sidecar) = nvfp4_sidecar {
             if sidecar.source_lock_fingerprint() != graph.lock_fingerprint()
@@ -1653,6 +2088,7 @@ impl<'a> LayoutBuilder<'a> {
             graph,
             plan,
             nvfp4_sidecar,
+            quantized_model,
             tensors: Vec::new(),
             nodes: Vec::with_capacity(graph.nodes().len()),
             weights: BTreeMap::new(),
@@ -1680,20 +2116,31 @@ impl<'a> LayoutBuilder<'a> {
             entry.destination_start.ok_or_else(|| {
                 Gemma4ExecutionLayoutError::invalid("loadable weight has no destination offset")
             })?;
-            let view = match nvfp4_sidecar.and_then(|sidecar| sidecar.tensor(&entry.tensor_name)) {
-                Some(tensor) => {
-                    matched_nvfp4 += 1;
-                    if tensor.shape.as_slice() != entry.shape.as_slice()
-                        || !entry.tensor_name.contains(".mlp.")
-                        || !entry.tensor_name.ends_with("_proj.weight")
-                    {
-                        return Err(Gemma4ExecutionLayoutError::invalid(
-                            "NVFP4 tensor does not match one Gemma MLP weight",
-                        ));
-                    }
-                    nvfp4_tensor_view(&entry.shape)?
+            let view = if let Some(descriptor) =
+                quantized_model.and_then(|artifact| artifact.tensor(&entry.tensor_name))
+            {
+                if descriptor.logical_shape != entry.shape {
+                    return Err(Gemma4ExecutionLayoutError::invalid(
+                        "quantized tensor shape differs from the topology plan",
+                    ));
                 }
-                None => tensor_view(entry.dtype, &entry.shape, 0)?,
+                quantized_gemma_tensor_view(descriptor)?
+            } else {
+                match nvfp4_sidecar.and_then(|sidecar| sidecar.tensor(&entry.tensor_name)) {
+                    Some(tensor) => {
+                        matched_nvfp4 += 1;
+                        if tensor.shape.as_slice() != entry.shape.as_slice()
+                            || !entry.tensor_name.contains(".mlp.")
+                            || !entry.tensor_name.ends_with("_proj.weight")
+                        {
+                            return Err(Gemma4ExecutionLayoutError::invalid(
+                                "NVFP4 tensor does not match one Gemma MLP weight",
+                            ));
+                        }
+                        nvfp4_tensor_view(&entry.shape)?
+                    }
+                    None => tensor_view(entry.dtype, &entry.shape, 0)?,
+                }
             };
             let id = builder.push_tensor(
                 entry.tensor_name.clone(),
@@ -1808,8 +2255,12 @@ impl<'a> LayoutBuilder<'a> {
         Ok(Gemma4ExecutionLayout {
             model_fingerprint: self.graph.lock_fingerprint().to_owned(),
             nvfp4_sidecar_fingerprint: self
-                .nvfp4_sidecar
-                .map(|sidecar| sidecar.manifest_fingerprint().to_owned()),
+                .quantized_model
+                .map(|artifact| artifact.recipe_digest().to_owned())
+                .or_else(|| {
+                    self.nvfp4_sidecar
+                        .map(|sidecar| sidecar.manifest_fingerprint().to_owned())
+                }),
             plan_digest: *self.plan.digest(),
             tensors: self.tensors,
             nodes: self.nodes,
@@ -2330,6 +2781,46 @@ fn nvfp4_tensor_view(shape: &[u64]) -> Result<TensorView, Gemma4ExecutionLayoutE
         &shape,
     )
     .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+}
+
+fn quantized_gemma_tensor_view(
+    descriptor: &crate::QuantizedTensorDescriptor,
+) -> Result<TensorView, Gemma4ExecutionLayoutError> {
+    let shape = descriptor
+        .logical_shape
+        .iter()
+        .map(|dimension| {
+            usize::try_from(*dimension).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("quantized tensor extent does not fit usize")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (dtype, encoding) = match descriptor.encoding {
+        QuantizedTensorEncoding::UnquantizedBf16 => (DType::Bf16, Encoding::Unquantized),
+        QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => (
+            DType::F8E4M3Fn,
+            Encoding::Fp8Scaled {
+                granularity: crate::Fp8ScaleGranularity::OuterDimension,
+                scale_dtype: DType::F32,
+                resident: crate::Fp8ResidentRepresentation::PackedBytes,
+            },
+        ),
+        QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => (
+            DType::U8,
+            Encoding::Nvfp4W4A4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            },
+        ),
+        QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0
+        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0 => {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "MX encoding is not part of the reviewed Gemma recipe",
+            ));
+        }
+    };
+    TensorView::with_encoding(dtype, encoding, &shape)
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
 }
 
 fn tensor_view(

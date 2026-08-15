@@ -241,6 +241,17 @@ HIP dispatchのみ、fallbackなし、整合したphysical metadataを満たさ�
 可視化し、serverには論理device 0を渡す。HIP current deviceはthread-localなので、複数GPUを可視化したまま
 global physical indexをworkerへ渡す構成は初期対応外である。
 
+### First-class low-bit model input
+
+Phase 16Fではsource containerを`QuantizedTensorEncoding`、logical tensor role、value/scale plane、source range、
+mixed recipeへlowerする。Unsloth compressed-tensors importerと将来のGGUF readerはこの同じ境界を生成し、executorは
+containerを見ない。primary Gemma recipeはMLP W4A4、attention W8A8、static FP8 KV、BF16/ignoreを既存Gemma graphへ
+bindする。W4A16、FP16 KV、requestごとのBF16 weight展開、別provider fallbackを正常系に置かない。
+
+CLI/serverはBF16とprovider low-bit artifactを同じmodel-directory引数から自動判別し、低bit専用mode、許可flag、確認、
+通常警告を設けない。runtime/model evidenceの`experimental`分類は内部audit/documentationに留める。artifact source identity、
+recipe digest、topology plan、exact targetをresident identityに含め、異なるrecipe間でresident cacheを共有しない。
+
 ## Build integration
 
 Cargo を top-level build entry point とする。`sllm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。

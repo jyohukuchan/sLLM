@@ -253,6 +253,13 @@ immutable release identity、GA kernel 6.8、別ROCm root、別GPU/SKU、multi-r
 software lifecycleは`experimental`のままとする。詳細は
 [Phase 9 history](../history/2026/08/11-20/phase9-engine-structural-optimization.md)を正とする。
 
+### 2026-08-16 Phase 16F low-bit tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、LLVM 23の
+local tupleで、exact `gfx1030`/`gfx1201`のW4A4、static FP8 KV、Unsloth Gemma 4 12B full mixed graph、通常CLIと
+OpenAI non-stream/SSEを実行した。全実行はHIP-only、fallbackなし、shutdown cleanup 0だった。software lifecycleは
+`experimental`のままで、別runtime/driver/kernelへ一般化しない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

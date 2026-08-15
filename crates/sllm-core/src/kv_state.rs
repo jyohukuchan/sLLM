@@ -20,6 +20,9 @@ pub enum KvCacheEncoding {
     #[default]
     Fp16,
     Fp8E4M3Fn,
+    /// Provider-supplied layer-static E4M3 decode scales. Scale values live on
+    /// [`KvStateDescriptor`], not in this encoding tag.
+    Fp8E4M3FnStatic,
     Nvfp4,
 }
 
@@ -27,7 +30,7 @@ impl KvCacheEncoding {
     pub const fn dtype(self) -> DType {
         match self {
             Self::Fp16 => DType::F16,
-            Self::Fp8E4M3Fn => DType::F8E4M3Fn,
+            Self::Fp8E4M3Fn | Self::Fp8E4M3FnStatic => DType::F8E4M3Fn,
             Self::Nvfp4 => DType::U8,
         }
     }
@@ -35,7 +38,7 @@ impl KvCacheEncoding {
     pub const fn encoding(self) -> Encoding {
         match self {
             Self::Fp16 => Encoding::Unquantized,
-            Self::Fp8E4M3Fn => Encoding::Fp8Scaled {
+            Self::Fp8E4M3Fn | Self::Fp8E4M3FnStatic => Encoding::Fp8Scaled {
                 granularity: Fp8ScaleGranularity::OuterDimension,
                 scale_dtype: DType::F32,
                 resident: Fp8ResidentRepresentation::PackedBytes,
@@ -191,6 +194,8 @@ pub struct KvStateDescriptor {
     capacity: NonZeroU64,
     layout: KvStateLayout,
     cache_encoding: KvCacheEncoding,
+    static_key_scale_bits: u32,
+    static_value_scale_bits: u32,
 }
 
 impl KvStateDescriptor {
@@ -201,6 +206,8 @@ impl KvStateDescriptor {
             capacity,
             layout: KvStateLayout::default(),
             cache_encoding: KvCacheEncoding::Fp16,
+            static_key_scale_bits: 0,
+            static_value_scale_bits: 0,
         })
     }
 
@@ -216,6 +223,8 @@ impl KvStateDescriptor {
             capacity,
             layout: KvStateLayout::new(heads, head_dim)?,
             cache_encoding: KvCacheEncoding::Fp16,
+            static_key_scale_bits: 0,
+            static_value_scale_bits: 0,
         })
     }
 
@@ -232,7 +241,36 @@ impl KvStateDescriptor {
             capacity,
             layout: KvStateLayout::new(heads, head_dim)?,
             cache_encoding,
+            static_key_scale_bits: 0,
+            static_value_scale_bits: 0,
         })
+    }
+
+    pub fn new_with_static_fp8(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+        key_decode_scale: f32,
+        value_decode_scale: f32,
+    ) -> Result<Self, KvStateError> {
+        if !key_decode_scale.is_finite()
+            || key_decode_scale <= 0.0
+            || !value_decode_scale.is_finite()
+            || value_decode_scale <= 0.0
+        {
+            return Err(KvStateError::InvalidLayout);
+        }
+        let mut descriptor = Self::new_with_storage(
+            layer_id,
+            capacity,
+            heads,
+            head_dim,
+            KvCacheEncoding::Fp8E4M3FnStatic,
+        )?;
+        descriptor.static_key_scale_bits = key_decode_scale.to_bits();
+        descriptor.static_value_scale_bits = value_decode_scale.to_bits();
+        Ok(descriptor)
     }
 
     pub const fn layer_id(self) -> u32 {
@@ -263,6 +301,15 @@ impl KvStateDescriptor {
         self.cache_encoding
     }
 
+    pub fn static_fp8_scales(self) -> Option<(f32, f32)> {
+        (self.cache_encoding == KvCacheEncoding::Fp8E4M3FnStatic).then(|| {
+            (
+                f32::from_bits(self.static_key_scale_bits),
+                f32::from_bits(self.static_value_scale_bits),
+            )
+        })
+    }
+
     /// Resident bytes for K or V, including separately owned scale planes.
     /// The complete state owns two such composites.
     pub fn resident_bytes_per_plane(self) -> Option<u64> {
@@ -271,7 +318,7 @@ impl KvStateDescriptor {
         let head_dim = u64::try_from(self.layout.head_dim()).ok()?;
         let bytes_per_token = match self.cache_encoding {
             KvCacheEncoding::Fp16 => heads.checked_mul(head_dim)?.checked_mul(2)?,
-            KvCacheEncoding::Fp8E4M3Fn => heads
+            KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => heads
                 .checked_mul(head_dim)?
                 .checked_add(heads.checked_mul(4)?)?,
             KvCacheEncoding::Nvfp4 => heads

@@ -1,0 +1,9 @@
+{
+  "schema_version": "sllm-provider-metadata-lock-v1",
+  "repository": "moonshotai/Kimi-K3",
+  "resolved_revision": "9f62e4e9fffbd0a83ddd60e1c209d828994b3569",
+  "weight_encoding": "ocp-mxfp4-e2m1-block32-e8m0",
+  "activation_encoding": "ocp-mxfp8-block32-e8m0",
+  "scope": "encoding-and-import-handoff",
+  "unsupported_boundary": "architecture-and-moe"
+}

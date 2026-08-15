@@ -1,0 +1,9 @@
+{
+  "schema_version": "sllm-provider-metadata-lock-v1",
+  "repository": "nvidia/Gemma-4-31B-IT-NVFP4",
+  "resolved_revision": "4135a98a9b728a548947683219633b25682223ac",
+  "payload_shards": 4,
+  "payload_bytes": 32633477808,
+  "scope": "schema-and-reference-only",
+  "runtime_constraint": "resident payload plus workspace exceeds the canonical 32-GiB single-GPU target"
+}

@@ -72,7 +72,8 @@ __device__ float load_kv(const void *const values, const void *const scales,
     return f16_to_f32(
         static_cast<const uint16_t *>(values)[row * head_dim + dimension]);
   }
-  if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1) {
+  if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
     return e4m3fn_to_f32(static_cast<const uint8_t *>(
                values)[row * head_dim + dimension]) *
            static_cast<const float *>(scales)[row];
@@ -149,16 +150,19 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
   }
   __syncthreads();
 
-  float accumulation = 0.0F;
+  float accumulation0 = 0.0F;
+  float accumulation1 = 0.0F;
   for (uint64_t key_position = 0U; key_position <= query_position;
        ++key_position) {
     const uint64_t kv_row = key_position * kv_heads + kv_head;
-    reductions[dimension] =
-        dimension < head_dim
-            ? bf16_to_f32(query_row[dimension]) *
-                  load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
-                          dimension, head_dim)
-            : 0.0F;
+    reductions[dimension] = 0.0F;
+    for (uint32_t current = dimension; current < head_dim;
+         current += blockDim.x) {
+      reductions[dimension] +=
+          bf16_to_f32(query_row[current]) *
+          load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
+                  current, head_dim);
+    }
     __syncthreads();
     for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
          stride != 0U; stride >>= 1U) {
@@ -178,15 +182,28 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     }
     __syncthreads();
     if (dimension < head_dim) {
-      accumulation =
-          accumulation * rescale +
+      accumulation0 =
+          accumulation0 * rescale +
           contribution * load_kv(value, value_scales, value_outer_scales,
                                  encoding, kv_row, dimension, head_dim);
+    }
+    const uint32_t second = dimension + blockDim.x;
+    if (second < head_dim) {
+      accumulation1 =
+          accumulation1 * rescale +
+          contribution * load_kv(value, value_scales, value_outer_scales,
+                                 encoding, kv_row, second, head_dim);
     }
     __syncthreads();
   }
   if (dimension < head_dim) {
-    output_row[dimension] = f32_to_bf16_rne(accumulation / running_denominator);
+    output_row[dimension] =
+        f32_to_bf16_rne(accumulation0 / running_denominator);
+  }
+  const uint32_t second = dimension + blockDim.x;
+  if (second < head_dim) {
+    output_row[second] =
+        f32_to_bf16_rne(accumulation1 / running_denominator);
   }
 }
 
@@ -207,7 +224,7 @@ hipError_t launch(const uint16_t *const query, const void *const key,
       query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
       committed_kv_length == 0U || q_heads == 0U || kv_heads == 0U ||
       q_heads % kv_heads != 0U || head_dim == 0U ||
-      head_dim > SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE ||
+      head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
       (encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
        (key_scales == nullptr || value_scales == nullptr)) ||
       (encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&

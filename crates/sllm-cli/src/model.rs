@@ -4,12 +4,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sllm_core::{
-    Backend, ExecutionSessionRequest, Gemma4ExecutionRequest, Gemma4ModelLock, ModelLock,
+    Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
     OsSamplingRandom, QwenExecutionRequest, QwenResidentModel, ReviewedModelLock,
-    SamplingParametersV1, VerifiedCache, WeightClassification, build_qwen35_fp8_fnuz_graph,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_qwen35_nvfp4_graph,
+    SamplingParametersV1, VerifiedCache, VerifiedUnslothGemma4Nvfp4, WeightClassification,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_qwen35_nvfp4_graph, build_unsloth_gemma4_nvfp4_weight_load_plan,
     build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan, read_model_lock,
     read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
+    verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
     DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -323,33 +325,80 @@ struct ProductionBackend {
 
 struct GemmaProductionBackend {
     lock: Gemma4ModelLock,
-    cache: Arc<VerifiedCache>,
+    source: GemmaModelSource,
+}
+
+enum GemmaModelSource {
+    Bf16(Arc<VerifiedCache>),
+    Quantized(Arc<VerifiedUnslothGemma4Nvfp4>),
 }
 
 impl GemmaProductionBackend {
     fn open(lock: Gemma4ModelLock, request: &Request) -> Result<Self, String> {
-        let cache = lock
-            .verify_cache(&request.cache)
-            .map_err(|_| "model cache does not match the Gemma 4 lock".to_owned())?;
-        Ok(Self {
-            lock,
-            cache: Arc::new(cache),
-        })
+        let source = match lock.verify_cache(&request.cache) {
+            Ok(cache) => GemmaModelSource::Bf16(Arc::new(cache)),
+            Err(_) => GemmaModelSource::Quantized(Arc::new(
+                verify_unsloth_gemma4_nvfp4(&request.cache)
+                    .map_err(|_| "model directory is not a reviewed Gemma 4 artifact".to_owned())?,
+            )),
+        };
+        Ok(Self { lock, source })
+    }
+
+    fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
+        match &self.source {
+            GemmaModelSource::Bf16(cache) => {
+                TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, cache)
+            }
+            GemmaModelSource::Quantized(artifact) => {
+                TokenizerFrontendV1::from_gemma4_quantized_model(&self.lock, artifact)
+            }
+        }
+        .map_err(|error| format!("verified Gemma 4 tokenizer could not be constructed: {error}"))
     }
 }
 
 impl ModelFrontendBackend for GemmaProductionBackend {
     fn identity(&self) -> ModelIdentity {
+        let (repo_id, resolved_revision) = match &self.source {
+            GemmaModelSource::Bf16(_) => (
+                self.lock.model.repo_id.clone(),
+                self.lock.model.resolved_revision.clone(),
+            ),
+            GemmaModelSource::Quantized(artifact) => (
+                artifact.repository().to_owned(),
+                artifact.resolved_revision().to_owned(),
+            ),
+        };
         ModelIdentity {
-            repo_id: self.lock.model.repo_id.clone(),
-            resolved_revision: self.lock.model.resolved_revision.clone(),
+            repo_id,
+            resolved_revision,
             lock_fingerprint: self.lock.fingerprint().to_owned(),
         }
     }
 
     fn verify(&self) -> Result<Value, String> {
-        let plan = build_verified_gemma4_weight_load_plan(&self.lock, &self.cache)
-            .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?;
+        let (plan, verified_files, tensor_count, weight_encoding, recipe_digest) = match &self
+            .source
+        {
+            GemmaModelSource::Bf16(cache) => (
+                build_verified_gemma4_weight_load_plan(&self.lock, cache)
+                    .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?,
+                cache.files.len(),
+                cache.tensors().count(),
+                "bf16",
+                None,
+            ),
+            GemmaModelSource::Quantized(artifact) => (
+                build_unsloth_gemma4_nvfp4_weight_load_plan(&self.lock, artifact).map_err(
+                    |_| "quantized tensors do not form the Gemma 4 load plan".to_owned(),
+                )?,
+                7,
+                artifact.tensors().len(),
+                "mixed-nvfp4-w4a4-fp8-w8a8",
+                Some(artifact.recipe_digest()),
+            ),
+        };
         let loadable = plan
             .entries
             .iter()
@@ -358,30 +407,29 @@ impl ModelFrontendBackend for GemmaProductionBackend {
         Ok(json!({
             "kind": "verify-model",
             "model_kind": "gemma4-dense",
-            "prompt_mode": "raw-text-only",
-            "chat_template": null,
+            "prompt_mode": self.lock.model.tokenizer_contract.prompt_mode,
+            "chat_template": self.lock.supports_chat_messages(),
             "locked_files": self.lock.model.files.len(),
-            "verified_files": self.cache.files.len(),
-            "tensor_count": self.cache.tensors().count(),
+            "verified_files": verified_files,
+            "tensor_count": tensor_count,
             "weight_entries": plan.entries.len(),
             "loadable_entries": loadable,
             "known_unconsumed_entries": plan.entries.len() - loadable,
             "total_destination_bytes": plan.total_destination_bytes,
             "plan_digest": plan.digest_hex(),
+            "weight_encoding": weight_encoding,
+            "recipe_digest": recipe_digest,
         }))
     }
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| {
-                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
-            })?;
+        let tokenizer = self.tokenizer()?;
         let ids = tokenizer
             .encode(text)
             .map_err(|_| "text could not be tokenized".to_owned())?;
         Ok(json!({
             "kind": "tokenize",
-            "prompt_mode": "raw-text-only",
+            "prompt_mode": self.lock.model.tokenizer_contract.prompt_mode,
             "count": ids.len(),
             "token_ids": ids.as_slice(),
         }))
@@ -392,10 +440,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
     }
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| {
-                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
-            })?;
+        let tokenizer = self.tokenizer()?;
         let text = tokenizer
             .decode(ids, mode)
             .map_err(|_| "token IDs could not be decoded".to_owned())?;
@@ -409,7 +454,8 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             || request.fp8_provider.is_some()
         {
             return Err(
-                "Gemma 4 generation currently supports locked BF16 weights only".to_owned(),
+                "Gemma 4 first-class model input does not accept development sidecar flags"
+                    .to_owned(),
             );
         }
         let prompt = match &request.input {
@@ -420,10 +466,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
                 );
             }
         };
-        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| {
-                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
-            })?;
+        let tokenizer = self.tokenizer()?;
         let stop_policy = gemma4_generation_stop_policy(&self.lock)
             .map_err(|error| format!("Gemma stop policy is invalid: {error}"))?;
         let service = GenerationServiceV1::new(&tokenizer, None, &stop_policy)
@@ -436,8 +479,16 @@ impl ModelFrontendBackend for GemmaProductionBackend {
         let state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
-        let plan = build_verified_gemma4_weight_load_plan(&self.lock, &self.cache)
-            .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?;
+        let plan = match &self.source {
+            GemmaModelSource::Bf16(cache) => {
+                build_verified_gemma4_weight_load_plan(&self.lock, cache)
+                    .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?
+            }
+            GemmaModelSource::Quantized(artifact) => {
+                build_unsloth_gemma4_nvfp4_weight_load_plan(&self.lock, artifact)
+                    .map_err(|_| "quantized tensors do not form the Gemma 4 load plan".to_owned())?
+            }
+        };
         let plan_digest = plan.digest_hex();
         let model_fingerprint = self.lock.fingerprint().to_owned();
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
@@ -449,16 +500,26 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
 
         let execution = (|| -> Result<Value, String> {
-            let mut owner = Gemma4ExecutionRequest::new(
-                Arc::clone(&session),
-                self.lock.clone(),
-                plan,
-                self.cache.as_ref(),
-                input_len,
-                state_capacity,
-                COMPLETION_TIMEOUT,
-            )
-            .map_err(|error| format!("Gemma request provisioning failed: {error}"))?;
+            let resident = match &self.source {
+                GemmaModelSource::Bf16(cache) => Gemma4ResidentModel::new(
+                    Arc::clone(&session),
+                    self.lock.clone(),
+                    plan,
+                    cache,
+                    COMPLETION_TIMEOUT,
+                ),
+                GemmaModelSource::Quantized(artifact) => Gemma4ResidentModel::new_quantized(
+                    Arc::clone(&session),
+                    self.lock.clone(),
+                    plan,
+                    Arc::clone(artifact),
+                    COMPLETION_TIMEOUT,
+                ),
+            }
+            .map_err(|error| format!("Gemma resident provisioning failed: {error}"))?;
+            let mut owner = resident
+                .new_request(input_len, state_capacity)
+                .map_err(|error| format!("Gemma request provisioning failed: {error}"))?;
             let config = GenerationConfigV1::new(
                 request.max_new_tokens,
                 request.sampling,
@@ -518,7 +579,10 @@ impl ModelFrontendBackend for GemmaProductionBackend {
                     "segment_count": audit.segment_count(),
                     "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": true,
-                    "weight_encoding": "bf16",
+                    "weight_encoding": match &self.source {
+                        GemmaModelSource::Bf16(_) => "bf16",
+                        GemmaModelSource::Quantized(_) => "mixed-nvfp4-w4a4-fp8-w8a8",
+                    },
                     "fp8_provider": null,
                 },
             }))

@@ -122,6 +122,11 @@ contiguous-resident KV、4B/9B model、OpenAI service、4B performanceを実機�
 `project-verified`とするが、MI300A/MI325X、別MI300X VM/image、bare metal、multi-GPU、generic `gfx9-4`、
 未実行model/shapeへ一般化しない。VMM=trueでもPhase 12の固定比較条件としてgfx942だけresident providerを明示選択した。
 
+Phase 16Fではcanonical V620 `gfx1030`とR9700 `gfx1201`でNVFP4 dynamic-W4A4 operator、static-FP8 KV、
+Unsloth Gemma 4 12B mixed full graphを実機検証した。この限定scopeは`project-verified`だが、same-artifact NVIDIA reference
+runtimeを未実行のためmodel evidence lifecycleは`experimental`である。NVIDIA Gemma 4 31B NVFP4とKimi K3 MXは
+metadata/encoding handoffのみであり、AMDまたはNVIDIA full-model execution evidenceではない。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

@@ -1,0 +1,46 @@
+{
+  "schema_version": "sllm-provider-artifact-lock-v1",
+  "repository": "unsloth/gemma-4-12b-it-NVFP4",
+  "resolved_revision": "b1f649734b34aa5575b03d186abd1b9be3d0d5c4",
+  "architecture_lock": "gemma4-12b-it-bf16.json",
+  "files": {
+    "chat_template.jinja": {
+      "bytes": 18924,
+      "sha256": "845f1ee48e39fc942fe190da9df6a1c5db229e17a96ea08966ad1c9274e73d1b"
+    },
+    "config.json": {
+      "bytes": 7292,
+      "sha256": "bcc0ec0398a9dd0b09586f835f17c05ed2cce99d958dd59ef629ce77e618ee49"
+    },
+    "generation_config.json": {
+      "bytes": 255,
+      "sha256": "801ecff5b38d5a5f5072cd1fb0ee03afabed577fb754518266fea69453acfe6b"
+    },
+    "model.safetensors": {
+      "bytes": 9304966064,
+      "header_bytes": 179720,
+      "header_sha256": "23a75ce46a6f005f9e53d84b7b6b5d015cc9840620f1f44bdce7071603bd5d55",
+      "sha256": "7c2ee23298e7c3a9247e8947597dca5a38f8b791a0322487466d2bfad8ce704b"
+    },
+    "recipe.yaml": {
+      "bytes": 661,
+      "sha256": "bb19ac4f3bf8c4ffb9b88701bef8faf06c679ae9461751cc849375bb1731c17b"
+    },
+    "tokenizer.json": {
+      "bytes": 32169726,
+      "sha256": "adbaa8175acf7609b4359724f40eff359ec4fac1a8647eeb99d4422be708e1cf"
+    },
+    "tokenizer_config.json": {
+      "bytes": 2725,
+      "sha256": "de3d45511a4ab7320083c0a4b65ec834fcf3d6c1027002714fceead12d2a6b86"
+    }
+  },
+  "inventory": {
+    "logical_tensors": 677,
+    "mlp_nvfp4": 144,
+    "attention_fp8": 184,
+    "static_fp8_kv_layers": 48,
+    "recipe_digest": "sha256:e64f38576cffd36fac5f55d5e7c47846afdc59ef8ef5aec24b66f090aa8522e2",
+    "topology_plan_digest": "sha256:f53b2177336bbb4b8540fb32a063d90dbffd864660773b41d8f510c4631a6491"
+  }
+}

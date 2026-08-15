@@ -1,6 +1,6 @@
 # Phase 16F: first-class FP4 model input
 
-> 状態: planned
+> 状態: completed (2026-08-16)
 > 作成日: 2026-08-16
 
 ## 目的
@@ -158,6 +158,27 @@ Phase 16でFP8 KVを完成させた後にW4A4/attention/loaderを統合し、公
   tensor inventory、recipe selectorをhandoffする。
 - runtime、model lock、FP4仕様、GPU/software compatibility、provenance、main plan、historyを同期する。1回のintegration reviewと
   findingだけのfocused re-review後にarchiveし、Phase 17へ進む。
+
+## 完了結果
+
+- exact Unsloth artifactを7 fileのsize/SHA-256、safetensors header、1,389 physical tensor、677 logical tensor、selector、
+  48 layer static KV scaleまでresident allocation前に検証するcontainer-neutral importerへ固定した。通常loadはsidecarへ
+  書き戻さずsource rangeから直接uploadする。
+- MLP 144 projectionはdynamic block-16 NVFP4 activationとpacked W4A4、attention 184 projectionはW8A8、KVは
+  static FP8、残りはBF16/ignoreとして同じGemma graphへbindした。W4A16、FP16 KV、BF16 weight展開、fallbackは使わない。
+- W4A4のM/K/N境界12 caseとstatic FP8 KVの17 caseはcanonical V620 `gfx1030`とR9700 `gfx1201`で独立oracle、
+  exact provider、fallbackなし、cleanup 0をPASSした。W4A4 completion timingはactivation quantizationとlinearを含む2 dispatch
+  合計であり、個別event timingは未実装として性能主張から除外する。
+- primary full modelは両targetで9,201,189,600 resident byte、958 graph node、8 transitionを実行し、生成token列
+  `[532; 8]`、8,048 submission、10,672 kernel dispatch、fallbackなし、cleanup 0を一致させた。R9700はupload 10.458 s、
+  prefill 211 ms、decode 106--108 ms、V620はupload 12.096 s、prefill 677 ms、decode 628--651 msだった。
+- CLI `verify-model`/`tokenize`/`generate`とOpenAI non-stream/SSE serverは、量子化専用flagなしの同じmodel-directory引数で
+  artifactを自動検出した。R9700 serverの2 requestとshutdownはrequest/workspace/model resident current byte、retryable cleanup、
+  durable quarantineが全て0へ戻った。通常responseへlow-bit警告やquality fieldは追加していない。
+- same-artifact reference runtimeを適合NVIDIA hardwareで実行できなかったため、model evidenceは計画どおり
+  `experimental`に限定する。AMD full-graph一致をreference-logit一致へ読み替えない。この分類は別起動modeや警告を作らない。
+- OCP MXFP4/MXFP8の全code、E8M0 scale、block-32、odd tail decoder/fixtureと独立encodingを実装した。Kimi K3は
+  encodingではなくarchitecture/MoE未対応としてPhase 18へ渡す。NVIDIA 31Bは32 GiBを超えるためmetadata lock対象に限定した。
 
 ## 計測matrix
 

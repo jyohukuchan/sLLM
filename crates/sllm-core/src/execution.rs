@@ -2638,13 +2638,19 @@ fn validate_causal_attention_bindings(
     descriptor: CausalAttentionDescriptor,
     layout: KvStateLayout,
 ) -> Result<(), ExecutionError> {
-    let query_heads =
-        layout
-            .heads()
-            .checked_mul(4)
-            .ok_or_else(|| ExecutionError::InvalidRequest {
-                reason: "causal attention query head count overflowed".to_owned(),
-            })?;
+    let query_shape = query.view().shape();
+    if query_shape.len() != 3 || query_shape[1] % layout.heads() != 0 {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "causal attention query/KV head geometry differs".to_owned(),
+        });
+    }
+    let query_heads = query_shape[1];
+    let group_size = query_heads / layout.heads();
+    if !matches!(group_size, 2 | 4 | 16) {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "causal attention GQA group size is not reviewed".to_owned(),
+        });
+    }
     for (role, binding, required) in [
         ("causal attention query", query, AccessMode::Read),
         ("causal attention output", output, AccessMode::Write),

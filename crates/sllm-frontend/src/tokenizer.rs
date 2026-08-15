@@ -420,9 +420,7 @@ impl TokenizerFrontendV1 {
         })
     }
 
-    /// Construct the raw-text-only Gemma 4 frontend. The base model has no
-    /// chat template; this entry point validates only the exact tokenizer and
-    /// prepends the tokenizer's reviewed BOS post-processor on encode.
+    /// Construct a Gemma 4 frontend from the regular verified cache.
     pub fn from_gemma4_verified_cache(
         lock: &Gemma4ModelLock,
         cache: &VerifiedCache,
@@ -433,14 +431,25 @@ impl TokenizerFrontendV1 {
                 cache: cache.lock_fingerprint.clone(),
             });
         }
-        if lock.supports_chat_messages()
-            || lock.model.tokenizer_contract.prompt_mode != "raw-text-only"
-        {
-            return Err(TokenizerError::InvalidTokenizer);
-        }
         let bytes = cache
             .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        Self::from_gemma4_bytes(lock, bytes)
+    }
+
+    /// Construct the identical Gemma tokenizer contract from a first-class
+    /// provider artifact. The importer revalidates the asset hash on read.
+    pub fn from_gemma4_quantized_model(
+        lock: &Gemma4ModelLock,
+        artifact: &sllm_core::VerifiedUnslothGemma4Nvfp4,
+    ) -> Result<Self, TokenizerError> {
+        let bytes = artifact
+            .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
+            .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        Self::from_gemma4_bytes(lock, bytes)
+    }
+
+    fn from_gemma4_bytes(lock: &Gemma4ModelLock, bytes: Vec<u8>) -> Result<Self, TokenizerError> {
         let tokenizer =
             Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
         let contract = &lock.model.tokenizer_contract;
@@ -482,7 +491,7 @@ impl TokenizerFrontendV1 {
                 });
             }
         }
-        if special_roles.len() != expected_contents.len() {
+        if special_roles.len() != contract.special_token_ids.len() {
             return Err(TokenizerError::InvalidTokenizer);
         }
         let eos_id = checked_token_id(
@@ -497,9 +506,16 @@ impl TokenizerFrontendV1 {
             .iter()
             .map(|id| checked_token_id(*id, TokenIdContextV1::ContractEos))
             .collect::<Result<Vec<_>, _>>()?;
-        if stop_token_ids != [eos_id] {
+        let expected_stop_ids = lock
+            .model
+            .tokenizer_contract
+            .stop_token_ids
+            .iter()
+            .map(|id| checked_token_id(*id, TokenIdContextV1::ContractEos))
+            .collect::<Result<Vec<_>, _>>()?;
+        if stop_token_ids != expected_stop_ids || stop_token_ids.first() != Some(&eos_id) {
             return Err(TokenizerError::StopPolicyMismatch {
-                expected: vec![eos_id],
+                expected: expected_stop_ids,
                 actual: stop_token_ids,
             });
         }
@@ -519,7 +535,7 @@ impl TokenizerFrontendV1 {
             special_roles,
             config_eos: eos.clone(),
             tokenizer_eos: eos,
-            stop_token_ids: vec![eos_id],
+            stop_token_ids,
         };
         Ok(Self {
             tokenizer,
@@ -567,6 +583,14 @@ fn gemma4_special_token_contents() -> HashMap<&'static str, &'static str> {
         ("unk", "<unk>"),
         ("mask", "<mask>"),
         ("think", "<|think|>"),
+        ("tool_call_begin", "<|tool_call>"),
+        ("tool_call_end", "<tool_call|>"),
+        ("tool_response_begin", "<|tool_response>"),
+        ("tool_response_end", "<tool_response|>"),
+        ("channel_begin", "<|channel>"),
+        ("channel_end", "<channel|>"),
+        ("turn_begin", "<|turn>"),
+        ("turn_end", "<turn|>"),
         ("image_begin", "<|image>"),
         ("audio_begin", "<|audio>"),
         ("image", "<|image|>"),

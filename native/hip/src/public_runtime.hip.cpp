@@ -146,6 +146,19 @@ hipError_t launch_fp8_emulation(const uint8_t *, const float *, const uint8_t *,
                                 uint64_t, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
+
+hipError_t launch_nvfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
+                                 const float *, uint64_t, uint64_t,
+                                 hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_nvfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
+                             const uint8_t *, const float *, const float *,
+                             uint16_t *, uint64_t, uint64_t, uint64_t,
+                             hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
 } // namespace sllm_matmul_kernel
 
 namespace sllm_argmax_kernel {
@@ -209,13 +222,17 @@ hipError_t launch(const uint16_t *const key_input,
                   float *const value_outer_scales, const uint32_t token_count,
                   const uint64_t capacity_tokens, const uint64_t start_position,
                   const uint32_t head_count, const uint32_t head_dim,
-                  const uint32_t encoding, const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const float static_key_scale,
+                  const float static_value_scale,
+                  const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
   (void)key_outer_scales;
   (void)value_outer_scales;
   (void)head_count;
   (void)head_dim;
+  (void)static_key_scale;
+  (void)static_value_scale;
   if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
     return hipErrorInvalidValue;
   }
@@ -564,6 +581,8 @@ struct KvState final : QuarantineNode {
   KvVmmPlane value_outer_scale_plane;
   uint32_t dtype;
   uint32_t encoding;
+  float static_key_scale;
+  float static_value_scale;
   uint64_t value_bytes_per_token;
   uint64_t scale_bytes_per_token;
   uint64_t outer_scale_bytes_per_token;
@@ -593,6 +612,8 @@ struct KvState final : QuarantineNode {
           KvVmmPlane &&key_outer_scale_plane_value,
           KvVmmPlane &&value_outer_scale_plane_value,
           const uint32_t dtype_value, const uint32_t encoding_value,
+          const float static_key_scale_value,
+          const float static_value_scale_value,
           const uint64_t value_bytes_per_token_value,
           const uint64_t scale_bytes_per_token_value,
           const uint64_t outer_scale_bytes_per_token_value,
@@ -609,6 +630,8 @@ struct KvState final : QuarantineNode {
         key_outer_scale_plane(std::move(key_outer_scale_plane_value)),
         value_outer_scale_plane(std::move(value_outer_scale_plane_value)),
         dtype(dtype_value), encoding(encoding_value),
+        static_key_scale(static_key_scale_value),
+        static_value_scale(static_value_scale_value),
         value_bytes_per_token(value_bytes_per_token_value),
         scale_bytes_per_token(scale_bytes_per_token_value),
         outer_scale_bytes_per_token(outer_scale_bytes_per_token_value),
@@ -2325,7 +2348,9 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant =
-      metadata.nvfp4 ? ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m)
+      metadata.nvfp4_w4a4
+          ? ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed
+      : metadata.nvfp4 ? ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m)
       : metadata.fp8_outer
           ? ((matches_runtime_gcn_arch(arch_name, "gfx1201") ||
               matches_runtime_gcn_arch(arch_name, "gfx942"))
@@ -2333,7 +2358,8 @@ void initialize_matmul_dispatch_info(
                  : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
           : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
                                                  metadata.n, arch_name);
-  info->dispatch_count = metadata.fp8_outer ? 2U : 1U;
+  info->dispatch_count =
+      metadata.fp8_outer || metadata.nvfp4_w4a4 ? 2U : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -6776,7 +6802,8 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->dtype = state->dtype;
   info->encoding = state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
                        ? SLLM_TENSOR_ENCODING_UNQUANTIZED
-                       : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+                       : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+                                  state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                               ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
                               : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
   info->head_count = state->head_count;
@@ -6816,6 +6843,8 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
           ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2
           : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
                  ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1
                  : SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
   info->workgroup_size_x = SLLM_HIP_KV_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -6836,6 +6865,8 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
           ? ::sllm_kv_state_kernel::kLogicalKernelId
           : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
                  ? ::sllm_kv_state_kernel::kFp8LogicalKernelId
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                 ? ::sllm_kv_state_kernel::kFp8StaticLogicalKernelId
                  : ::sllm_kv_state_kernel::kNvfp4LogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
@@ -6843,6 +6874,8 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
           ? ::sllm_kv_state_kernel::kDeviceSymbol
           : (encoding == SLLM_HIP_KV_ENCODING_FP8_V1
                  ? ::sllm_kv_state_kernel::kFp8DeviceSymbol
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                 ? ::sllm_kv_state_kernel::kFp8StaticDeviceSymbol
                  : ::sllm_kv_state_kernel::kNvfp4DeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
@@ -7064,12 +7097,14 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
     const uint64_t value_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
             ? row_elements * UINT64_C(2)
-            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                    ? row_elements
                    : static_cast<uint64_t>(head_count) *
                          ((static_cast<uint64_t>(head_dim) + 1U) / 2U));
     const uint64_t scale_bytes_per_token =
-        info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
+        (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+         info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1)
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
             : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
                    ? static_cast<uint64_t>(head_count) *
@@ -7174,6 +7209,12 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
     std::unique_ptr<Buffer> key_buffer;
     std::unique_ptr<Buffer> value_buffer;
     std::unique_ptr<KvState> candidate;
+    float static_key_scale = 0.0F;
+    float static_value_scale = 0.0F;
+    if (info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
+      std::memcpy(&static_key_scale, &info->reserved[0], sizeof(float));
+      std::memcpy(&static_value_scale, &info->reserved[1], sizeof(float));
+    }
     try {
       key_buffer = std::make_unique<Buffer>(context, key_plane.address,
                                             allocation_bytes);
@@ -7185,9 +7226,9 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
           std::move(key_plane), std::move(value_plane),
           std::move(key_scale_plane), std::move(value_scale_plane),
           std::move(key_outer_scale_plane), std::move(value_outer_scale_plane),
-          info->dtype, info->encoding, value_bytes_per_token,
-          scale_bytes_per_token, outer_scale_bytes_per_token, page_bytes,
-          context_token);
+          info->dtype, info->encoding, static_key_scale, static_value_scale,
+          value_bytes_per_token, scale_bytes_per_token,
+          outer_scale_bytes_per_token, page_bytes, context_token);
     } catch (...) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
@@ -8126,7 +8167,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         static_cast<float *>(state->value_outer_scale_plane.address),
         static_cast<uint32_t>(metadata.token_count), state->capacity_tokens,
         metadata.start_position, state->head_count, state->head_dim,
-        state->encoding, queue->stream);
+        state->encoding, state->static_key_scale, state->static_value_scale,
+        queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,

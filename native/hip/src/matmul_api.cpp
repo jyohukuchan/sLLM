@@ -30,6 +30,7 @@ validate_tensor(const sllm_tensor_binding_t &binding,
                 TensorMetadata *const copied, const uint32_t expected_dtype,
                 const uint32_t expected_encoding, const uint64_t element_bytes,
                 const bool append_outer_scales, const bool packed_nvfp4,
+                const bool append_input_tensor_scale,
                 sllm_error_sink_t *const sink) noexcept {
   if (binding.struct_size != sizeof(binding)) {
     return sllm_public_runtime::write_error(
@@ -133,7 +134,7 @@ validate_tensor(const sllm_tensor_binding_t &binding,
     }
     payload_bytes =
         ((payload_bytes + block_scale_bytes + UINT64_C(3)) & ~UINT64_C(3)) +
-        UINT64_C(4);
+        (append_input_tensor_scale ? UINT64_C(8) : UINT64_C(4));
     if (sllm_public_runtime::add_overflows(binding.byte_offset,
                                            payload_bytes)) {
       return sllm_public_runtime::write_error(
@@ -190,7 +191,8 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   }
   if (descriptor->op_version != SLLM_HIP_MATMUL_VERSION &&
       descriptor->op_version != SLLM_HIP_MATMUL_FP8_VERSION &&
-      descriptor->op_version != SLLM_HIP_MATMUL_NVFP4_VERSION) {
+      descriptor->op_version != SLLM_HIP_MATMUL_NVFP4_VERSION &&
+      descriptor->op_version != SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
         "matmul descriptor version is unsupported");
@@ -201,10 +203,14 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
         "matmul descriptor reserved fields must be zero");
   }
   const bool fp8_outer = descriptor->op_version == SLLM_HIP_MATMUL_FP8_VERSION;
-  const bool nvfp4 = descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION;
+  const bool nvfp4_w4a4 =
+      descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
+  const bool nvfp4 = descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION ||
+                     nvfp4_w4a4;
   sllm_status_t status = validate_tensor(
       descriptor->activation, &metadata->activation, SLLM_TENSOR_DTYPE_BF16,
-      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, sink);
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, false,
+      sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -219,16 +225,20 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       descriptor->weight, &metadata->weight,
       nvfp4 ? SLLM_TENSOR_DTYPE_U8
             : (fp8_outer ? fp8_dtype : SLLM_TENSOR_DTYPE_BF16),
-      nvfp4 ? SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32
+      nvfp4 ? (nvfp4_w4a4
+                   ? SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32
+                   : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32)
             : (fp8_outer ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
                          : SLLM_TENSOR_ENCODING_UNQUANTIZED),
-      fp8_outer || nvfp4 ? UINT64_C(1) : UINT64_C(2), fp8_outer, nvfp4, sink);
+      fp8_outer || nvfp4 ? UINT64_C(1) : UINT64_C(2), fp8_outer, nvfp4,
+      nvfp4_w4a4, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
   status = validate_tensor(
       descriptor->output, &metadata->output, SLLM_TENSOR_DTYPE_BF16,
-      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, sink);
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, false,
+      sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -250,6 +260,7 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   }
   metadata->fp8_outer = fp8_outer;
   metadata->nvfp4 = nvfp4;
+  metadata->nvfp4_w4a4 = nvfp4_w4a4;
   metadata->fp8_dtype = fp8_outer ? fp8_dtype : 0U;
   metadata->weight_value_bytes =
       nvfp4 ? metadata->n * metadata->k / UINT64_C(2) +
@@ -271,8 +282,11 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
     metadata->weight_tensor_scale_offset =
         (metadata->weight_scale_offset + block_scale_bytes + UINT64_C(3)) &
         ~UINT64_C(3);
+    metadata->input_tensor_scale_offset =
+        nvfp4_w4a4 ? metadata->weight_tensor_scale_offset + UINT64_C(4) : 0U;
   } else {
     metadata->weight_tensor_scale_offset = 0U;
+    metadata->input_tensor_scale_offset = 0U;
   }
   return SLLM_STATUS_OK;
 }

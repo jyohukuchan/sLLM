@@ -1,6 +1,7 @@
 #include "kv_state_api.hpp"
 
 #include <cstring>
+#include <cmath>
 #include <limits>
 
 namespace sllm_kv_state {
@@ -85,12 +86,14 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
         "KV append inputs must be unquantized");
   }
   if (binding->rank != 3U ||
-      (binding->shape[1] != 2U && binding->shape[1] != 4U) ||
-      binding->shape[2] != SLLM_HIP_KV_HEAD_DIM || binding->shape[0] == 0U ||
+      (binding->shape[1] != 1U && binding->shape[1] != 2U &&
+       binding->shape[1] != 4U && binding->shape[1] != 8U) ||
+      binding->shape[2] == 0U ||
+      binding->shape[2] > SLLM_HIP_KV_MAX_HEAD_DIM || binding->shape[0] == 0U ||
       binding->shape[0] > SLLM_HIP_KV_MAX_M) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "KV append inputs must have a reviewed shape [M, Hkv, 256]");
+        "KV append inputs must have reviewed [M, Hkv, D] geometry");
   }
   if ((binding->byte_offset % UINT64_C(2)) != 0U) {
     return sllm_public_runtime::write_error(
@@ -197,25 +200,43 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
                    info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
                    info->block_size == 0U &&
                    info->scale_dtype == SLLM_TENSOR_DTYPE_F32;
+  float static_key_scale = 0.0F;
+  float static_value_scale = 0.0F;
+  std::memcpy(&static_key_scale, &info->reserved[0], sizeof(float));
+  std::memcpy(&static_value_scale, &info->reserved[1], sizeof(float));
+  const bool fp8_static =
+      info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+      info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+      info->block_size == 0U &&
+      info->scale_dtype == SLLM_TENSOR_DTYPE_F32 &&
+      std::isfinite(static_key_scale) && static_key_scale > 0.0F &&
+      std::isfinite(static_value_scale) && static_value_scale > 0.0F;
   const bool nvfp4 = info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 &&
                      info->dtype == SLLM_TENSOR_DTYPE_U8 &&
                      info->block_size == 16U &&
                      info->scale_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN;
-  if (info->create_info_version != SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION ||
-      info->reserved0 != 0U || !all_zero(info->reserved, 4U) ||
+  const bool version_matches =
+      (info->create_info_version == SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION &&
+       !fp8_static && all_zero(info->reserved, 4U)) ||
+      (info->create_info_version ==
+           SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION &&
+       fp8_static && all_zero(info->reserved + 2U, 2U));
+  if (!version_matches ||
+      info->reserved0 != 0U ||
       info->flags != 0U || info->session_id == 0U ||
       info->capacity_tokens == 0U ||
       info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
-      (head_count != 2U && head_count != 4U) || head_dim == 0U ||
-      head_dim > SLLM_HIP_KV_HEAD_DIM ||
+      (head_count != 1U && head_count != 2U && head_count != 4U &&
+       head_count != 8U) ||
+      head_dim == 0U || head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
       (info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED &&
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
       info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR ||
-      (!fp16 && !fp8 && !nvfp4)) {
+      (!fp16 && !fp8 && !fp8_static && !nvfp4)) {
     return sllm_public_runtime::write_error(
         sink,
-        info->reserved0 != 0U || !all_zero(info->reserved, 4U)
+        info->reserved0 != 0U
             ? SLLM_STATUS_RESERVED_NONZERO
             : SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
         "KV state v2 create info has an invalid version, shape, provider, or "

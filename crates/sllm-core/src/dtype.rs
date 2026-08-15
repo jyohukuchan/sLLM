@@ -68,6 +68,16 @@ pub enum Encoding {
         block_size: usize,
         scale_dtype: DType,
     },
+    /// Packed NVFP4 weights consumed through a W4A4 matmul contract.
+    ///
+    /// The resident weight region contains block scales followed by separate
+    /// FP32 decode-global scales for the weight and dynamically quantized
+    /// activation.  Keeping this distinct from [`Self::Nvfp4`] prevents the
+    /// weight-only W4A16 path from being selected accidentally.
+    Nvfp4W4A4 {
+        block_size: usize,
+        scale_dtype: DType,
+    },
     /// One byte per FP8 value with scales stored in a distinct resident region.
     ///
     /// Keeping scales out of the value payload makes the safetensors layout,
@@ -111,7 +121,7 @@ impl Encoding {
             Self::Unquantized => dtype.size_bytes(),
             // NVFP4 values are packed into bytes.  Scale alignment is an
             // internal encoding detail and does not change the view offset.
-            Self::Nvfp4 { .. } => 1,
+            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } => 1,
             Self::Fp8Scaled { resident, .. } => match resident {
                 Fp8ResidentRepresentation::PackedBytes => 1,
                 Fp8ResidentRepresentation::ConvertedBf16 => DType::Bf16.size_bytes(),
@@ -123,6 +133,10 @@ impl Encoding {
         match self {
             Self::Unquantized => Ok(()),
             Self::Nvfp4 {
+                block_size,
+                scale_dtype,
+            }
+            | Self::Nvfp4W4A4 {
                 block_size,
                 scale_dtype,
             } => {
@@ -169,7 +183,9 @@ impl Encoding {
             Self::Unquantized => elements
                 .checked_mul(dtype.size_bytes())
                 .ok_or(EncodingError::SizeOverflow),
-            Self::Nvfp4 { .. } => Ok(elements / 2 + u64::from(elements % 2 != 0)),
+            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } => {
+                Ok(elements / 2 + u64::from(elements % 2 != 0))
+            }
             Self::Fp8Scaled { resident, .. } => elements
                 .checked_mul(match resident {
                     Fp8ResidentRepresentation::PackedBytes => 1,

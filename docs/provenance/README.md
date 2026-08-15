@@ -157,6 +157,15 @@ sLLMのRust converter/oracleとHIP packed-dequant kernelは独立実装であり
 source expression、swizzle/RHT実装をcopy、adapt、portしていない。したがって`THIRD_PARTY_NOTICES.md`へ直接importを
 追加せず、format-source identityとlicenseをsidecar manifest、量子化contract、Phase historyへ記録する。
 
+## Phase 16F provider artifact implementation record
+
+Phase 16FのUnsloth/NVIDIA/Kimi repositoryはprovider artifactのschema、revision、mixed recipe、model capabilityを固定する
+data sourceとして使用し、runtime source expressionをcopy、adapt、portしていない。MXFP4/MXFP8 decoderはOCP Microscaling
+Formats v1.0の公開format contractから独立実装し、W4A4/static-FP8 HIP providerはsLLM既存NVFP4/FP8 codeと独立oracleを基に
+作成した。vLLM/SGLang sourceは参照・移植しておらず、llama.cppからの新規直接reuseもない。このPhaseによる
+`THIRD_PARTY_NOTICES.md`へのcode import追加はない。model artifact自体はGitへ含めず、配布時のmodel license/noticeは
+runtime codeのMIT licenseと別に扱う。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

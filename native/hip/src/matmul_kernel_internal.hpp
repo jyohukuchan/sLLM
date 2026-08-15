@@ -41,6 +41,10 @@ constexpr const char *kNvfp4BaselineLogicalKernelId =
     "matmul.nvfp4.block16.packed_dequant.v1";
 constexpr const char *kNvfp4BaselineDeviceSymbol =
     "sllm_matmul_nvfp4_block16_packed_dequant_v1";
+constexpr const char *kNvfp4W4A4LogicalKernelId =
+    "matmul.nvfp4.w4a4.block16.packed.v1";
+constexpr const char *kNvfp4W4A4DeviceSymbol =
+    "sllm_matmul_nvfp4_w4a4_block16_packed_v1";
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
@@ -53,6 +57,7 @@ enum class KernelVariant : uint32_t {
   Nvfp4DecodePackedDequant = 8U,
   Nvfp4PrefillRow8Tiled256 = 9U,
   Nvfp4BaselinePackedDequant = 10U,
+  Nvfp4W4A4Packed = 11U,
 };
 
 inline KernelVariant select_nvfp4_variant(const uint64_t m) noexcept {
@@ -104,6 +109,8 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kNvfp4PrefillLogicalKernelId
          : variant == KernelVariant::Nvfp4BaselinePackedDequant
              ? kNvfp4BaselineLogicalKernelId
+         : variant == KernelVariant::Nvfp4W4A4Packed
+             ? kNvfp4W4A4LogicalKernelId
          : variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64LogicalKernelId
@@ -123,6 +130,8 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kNvfp4PrefillDeviceSymbol
          : variant == KernelVariant::Nvfp4BaselinePackedDequant
              ? kNvfp4BaselineDeviceSymbol
+         : variant == KernelVariant::Nvfp4W4A4Packed
+             ? kNvfp4W4A4DeviceSymbol
          : variant == KernelVariant::HipBlas            ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64DeviceSymbol
@@ -140,6 +149,8 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Nvfp4PrefillRow8Tiled256
              ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
          : variant == KernelVariant::Nvfp4BaselinePackedDequant
+             ? static_cast<uint32_t>(m * n)
+         : variant == KernelVariant::Nvfp4W4A4Packed
              ? static_cast<uint32_t>(m * n)
          : variant == KernelVariant::Fp8Emulation
              ? static_cast<uint32_t>((m * n + kWorkgroupSize - 1U) /
@@ -175,6 +186,19 @@ hipError_t launch_nvfp4(const uint16_t *activation,
                         const uint8_t *block_scales, const float *tensor_scale,
                         uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
                         hipStream_t stream) noexcept;
+
+hipError_t launch_nvfp4_quantize(const uint16_t *activation,
+                                 uint8_t *packed_activation,
+                                 uint8_t *block_scales,
+                                 const float *input_tensor_scale, uint64_t m,
+                                 uint64_t k, hipStream_t stream) noexcept;
+
+hipError_t launch_nvfp4_w4a4(
+    const uint8_t *packed_activation, const uint8_t *activation_block_scales,
+    const uint8_t *packed_weight, const uint8_t *weight_block_scales,
+    const float *weight_tensor_scale, const float *input_tensor_scale,
+    uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
+    hipStream_t stream) noexcept;
 
 } // namespace sllm_matmul_kernel
 

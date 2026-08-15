@@ -17,10 +17,12 @@ mod handles;
 mod kv_state;
 mod linear_attention;
 mod model;
+mod mxfp;
 mod nvfp4;
 mod nvfp4_sidecar;
 mod op;
 mod prepared_execution;
+mod quantized_model;
 mod qwen_execution;
 mod qwen_graph;
 mod registry;
@@ -71,7 +73,7 @@ pub use gemma4_execution::{
     Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
     Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
     Gemma4TensorBacking, build_gemma4_execution_layout, build_gemma4_nvfp4_execution_layout,
-    provision_gemma4_execution_buffers,
+    build_gemma4_quantized_execution_layout, provision_gemma4_execution_buffers,
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
@@ -109,6 +111,7 @@ pub use model::{
     read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
     verify_gemma4_model_cache, verify_model_cache,
 };
+pub use mxfp::{MX_BLOCK_SIZE, MxElementFormat, MxError, decode_e8m0, decode_mxfp4, decode_mxfp8};
 pub use nvfp4::{
     E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,
     decode_e2m1, encode_e2m1, quantize_nvfp4_weights, select_nvfp4_provider,
@@ -127,6 +130,14 @@ pub use op::{
 pub use prepared_execution::{
     ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
     PreparedExecutionError, PreparedExecutionPlan, PreparedPlanNode, PreparedTransition,
+};
+pub use quantized_model::{
+    MixedPrecisionRecipe, QuantizedModelError, QuantizedScalePlane, QuantizedTensorDescriptor,
+    QuantizedTensorEncoding, QuantizedTensorRole, ScalePlaneRole, StaticFp8KvScale,
+    UNSLOTH_GEMMA4_NVFP4_HEADER_BYTES, UNSLOTH_GEMMA4_NVFP4_HEADER_SHA256,
+    UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256, UNSLOTH_GEMMA4_NVFP4_MODEL_SIZE,
+    UNSLOTH_GEMMA4_NVFP4_REPOSITORY, UNSLOTH_GEMMA4_NVFP4_REVISION, VerifiedUnslothGemma4Nvfp4,
+    verify_unsloth_gemma4_nvfp4,
 };
 pub use qwen_execution::{
     QwenExecutionAudit, QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest,
@@ -150,8 +161,8 @@ pub use weights::{
     WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer, WeightConsumerKey,
     WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError, WeightUploadError,
     WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
-    build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan,
-    build_weight_load_plan, upload_verified_weight,
+    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
+    build_verified_weight_load_plan, build_weight_load_plan, upload_verified_weight,
 };
 
 #[cfg(test)]

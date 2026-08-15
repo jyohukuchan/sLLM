@@ -294,3 +294,15 @@ and other v1 fields. The actual lock must validate against the schema and enumer
 all files used by the selected revision, including every shard named by its index.
 Derived artifacts require a future schema version; do not replace `derivation:
 null` inside `model-lock-v1`.
+
+## Provider low-bit artifact lock
+
+Phase 16Fの提供元low-bit checkpointは、architecture/tokenizer contractを既存reviewed lockから継承しつつ、provider artifact
+固有のrepository、full revision、全使用file size/SHA-256、container header、tensor inventory、mixed recipe digest、topology
+plan digestを追加lockで固定する。primary lockは
+[`unsloth-gemma4-12b-it-nvfp4.json`](locks/unsloth-gemma4-12b-it-nvfp4.json)である。
+
+このlockはBF16から生成したsidecarのderivationではなく、提供元が公開した独立artifact identityである。runtime importerは
+load前に全identityとselectorを検証し、architecture lockとlogical topologyが一致する場合だけcontainer-neutral descriptorへ
+lowerする。NVIDIA 31BとKimi K3のmetadata lockはbounded schema/referenceまたはarchitecture handoff用であり、full payloadを
+検証していない状態をfull-model supportへ昇格しない。

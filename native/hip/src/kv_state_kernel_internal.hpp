@@ -16,6 +16,10 @@ constexpr const char *kFp8LogicalKernelId =
     "kv_state.bf16_to_fp8_token_major.v1";
 constexpr const char *kFp8DeviceSymbol =
     "sllm_kv_state_bf16_to_fp8_token_major_v1";
+constexpr const char *kFp8StaticLogicalKernelId =
+    "kv_state.bf16_to_fp8_static_token_major.v1";
+constexpr const char *kFp8StaticDeviceSymbol =
+    "sllm_kv_state_bf16_to_fp8_token_major_v1";
 constexpr const char *kNvfp4LogicalKernelId =
     "kv_state.bf16_to_nvfp4_token_major.v1";
 constexpr const char *kNvfp4DeviceSymbol =
@@ -27,6 +31,7 @@ hipError_t launch(const uint16_t *key_input, const uint16_t *value_input,
                   float *value_outer_scales, uint32_t token_count,
                   uint64_t capacity_tokens, uint64_t start_position,
                   uint32_t head_count, uint32_t head_dim, uint32_t encoding,
+                  float static_key_scale, float static_value_scale,
                   hipStream_t stream) noexcept;
 
 } // namespace sllm_kv_state_kernel

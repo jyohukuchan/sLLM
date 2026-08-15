@@ -14,8 +14,10 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ExecutionOptions, Gemma4RequestState,
-    build_gemma4_execution_layout, build_gemma4_graph, build_verified_gemma4_weight_load_plan,
-    parse_gemma4_model_lock, provision_gemma4_execution_buffers,
+    Gemma4ResidentModel, build_gemma4_execution_layout, build_gemma4_graph,
+    build_gemma4_quantized_execution_layout, build_unsloth_gemma4_nvfp4_weight_load_plan,
+    build_verified_gemma4_weight_load_plan, parse_gemma4_model_lock,
+    provision_gemma4_execution_buffers, verify_unsloth_gemma4_nvfp4,
 };
 use sllm_hip::HipBackend;
 
@@ -36,7 +38,7 @@ struct Config {
 struct Report {
     schema_version: &'static str,
     state: &'static str,
-    model: &'static str,
+    model: String,
     resolved_revision: String,
     lock_fingerprint: String,
     target: String,
@@ -121,6 +123,9 @@ fn run(config: Config) -> Result<Report, String> {
         std::fs::read(&config.lock).map_err(|error| format!("cannot read Gemma lock: {error}"))?;
     let lock = parse_gemma4_model_lock(&lock_bytes)
         .map_err(|error| format!("invalid Gemma lock: {error}"))?;
+    if let Ok(artifact) = verify_unsloth_gemma4_nvfp4(&config.cache) {
+        return run_quantized(config, lock, Arc::new(artifact));
+    }
     let cache = lock
         .verify_cache(&config.cache)
         .map_err(|error| format!("Gemma cache verification failed: {error}"))?;
@@ -345,7 +350,7 @@ fn run(config: Config) -> Result<Report, String> {
     Ok(Report {
         schema_version: "gemma4-full-generation-evidence-v1",
         state: "PASS",
-        model: "google/gemma-4-12B",
+        model: "google/gemma-4-12B".to_owned(),
         resolved_revision: lock.model.resolved_revision.clone(),
         lock_fingerprint: lock.fingerprint().to_owned(),
         target: config.target,
@@ -374,6 +379,137 @@ fn run(config: Config) -> Result<Report, String> {
         boundary_count,
         fallback_used,
         reference_oracle_verified: true,
+        cleanup_retryable: cleanup.retryable_cleanup,
+        cleanup_durable: cleanup.durable_quarantine,
+    })
+}
+
+fn run_quantized(
+    config: Config,
+    lock: sllm_core::Gemma4ModelLock,
+    artifact: Arc<sllm_core::VerifiedUnslothGemma4Nvfp4>,
+) -> Result<Report, String> {
+    let plan = build_unsloth_gemma4_nvfp4_weight_load_plan(&lock, &artifact)
+        .map_err(|error| format!("quantized Gemma weight plan failed: {error}"))?;
+    let graph = build_gemma4_graph(&lock, &plan, 1, 0, 17)
+        .map_err(|error| format!("quantized Gemma graph failed: {error}"))?;
+    let layout = build_gemma4_quantized_execution_layout(&graph, &plan, &artifact)
+        .map_err(|error| format!("quantized Gemma layout failed: {error}"))?;
+    let backend = HipBackend::connect().map_err(|error| format!("HIP connect failed: {error}"))?;
+    let session = Arc::new(
+        backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(config.device_index, config.target.clone())
+                    .map_err(|error| format!("invalid execution request: {error}"))?,
+            )
+            .map_err(|error| format!("cannot open HIP execution session: {error}"))?,
+    );
+    let available_memory_bytes = session
+        .available_memory_bytes()
+        .map_err(|error| format!("cannot query available memory: {error}"))?;
+    let required = layout
+        .model_weight_bytes()
+        .checked_add(layout.workspace_bytes())
+        .and_then(|bytes| bytes.checked_add(layout.request_state_bytes()))
+        .ok_or_else(|| "quantized Gemma required memory overflowed".to_owned())?;
+    if available_memory_bytes.is_some_and(|available| required > available) {
+        return Err(format!(
+            "quantized Gemma exact layout requires {required} bytes but only {} are available",
+            available_memory_bytes.unwrap_or_default()
+        ));
+    }
+    let upload_started = Instant::now();
+    let resident = Gemma4ResidentModel::new_quantized(
+        Arc::clone(&session),
+        lock.clone(),
+        plan,
+        Arc::clone(&artifact),
+        COMPLETION_TIMEOUT,
+    )
+    .map_err(|error| format!("quantized Gemma resident upload failed: {error}"))?;
+    let upload_milliseconds = upload_started.elapsed().as_millis();
+    let mut request = resident
+        .new_request(1, 17)
+        .map_err(|error| format!("quantized Gemma request failed: {error}"))?;
+    let prefill_started = Instant::now();
+    let prefill = request
+        .prefill(&[config.token_id])
+        .map_err(|error| format!("quantized Gemma prefill failed: {error}"))?;
+    let prefill_milliseconds = prefill_started.elapsed().as_millis();
+    let mut current_token = *prefill
+        .token_ids()
+        .last()
+        .ok_or_else(|| "quantized Gemma prefill returned no token".to_owned())?;
+    let mut generated_token_ids = vec![current_token];
+    drop(prefill);
+    let mut decode_milliseconds = Vec::new();
+    for _ in 1..8 {
+        let started = Instant::now();
+        let output = request
+            .decode(current_token)
+            .map_err(|error| format!("quantized Gemma decode failed: {error}"))?;
+        decode_milliseconds.push(started.elapsed().as_millis());
+        current_token = *output
+            .token_ids()
+            .last()
+            .ok_or_else(|| "quantized Gemma decode returned no token".to_owned())?;
+        generated_token_ids.push(current_token);
+    }
+    let audit = request
+        .audit_snapshot()
+        .map_err(|error| format!("quantized Gemma audit failed: {error}"))?;
+    if audit.fallback_used() || audit.target() != config.target {
+        return Err("quantized Gemma execution was not exact HIP/no-fallback".to_owned());
+    }
+    let memory = request.memory_snapshot();
+    let committed_length = request.committed_length();
+    let state_generation = committed_length;
+    let submission_count = audit.submission_count();
+    let kernel_dispatch_count = audit.kernel_dispatch_count();
+    let segment_count = audit.segment_count();
+    let boundary_count = audit.boundary_count();
+    let backend = 1;
+    let fallback_used = audit.fallback_used();
+    drop(request);
+    drop(resident);
+    let cleanup = session
+        .shutdown(SHUTDOWN_TIMEOUT)
+        .map_err(|error| format!("session cleanup failed: {error}"))?;
+    if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+        return Err("session cleanup retained resources".to_owned());
+    }
+    Ok(Report {
+        schema_version: "gemma4-full-generation-evidence-v1",
+        state: "PASS",
+        model: artifact.repository().to_owned(),
+        resolved_revision: artifact.resolved_revision().to_owned(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        target: config.target,
+        device_index: config.device_index,
+        input_token_id: config.token_id,
+        generated_token_ids,
+        transitions: 8,
+        graph_nodes: graph.nodes().len(),
+        model_weight_bytes: layout.model_weight_bytes(),
+        workspace_bytes: layout.workspace_bytes(),
+        request_state_bytes: layout.request_state_bytes(),
+        available_memory_bytes,
+        peak_accounted_bytes: memory.high_water_bytes(),
+        model_resident_peak_bytes: memory.model_resident().high_water_bytes(),
+        workspace_peak_bytes: memory.workspace().high_water_bytes(),
+        request_state_peak_bytes: memory.request_state().high_water_bytes(),
+        upload_milliseconds,
+        prefill_milliseconds,
+        decode_milliseconds,
+        committed_length,
+        state_generation,
+        backend,
+        submission_count,
+        kernel_dispatch_count,
+        segment_count,
+        boundary_count,
+        fallback_used,
+        reference_oracle_verified: false,
         cleanup_retryable: cleanup.retryable_cleanup,
         cleanup_durable: cleanup.durable_quarantine,
     })

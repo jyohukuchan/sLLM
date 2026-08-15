@@ -147,7 +147,10 @@ extern "C" __global__ __launch_bounds__(
                                                      const uint64_t
                                                          start_position,
                                                      const uint32_t head_count,
-                                                     const uint32_t head_dim) {
+                                                     const uint32_t head_dim,
+                                                     const float fixed_key_scale,
+                                                     const float fixed_value_scale,
+                                                     const uint32_t static_mode) {
   const uint64_t row = blockIdx.x;
   if (row >= static_cast<uint64_t>(token_count) * head_count) {
     return;
@@ -160,14 +163,19 @@ extern "C" __global__ __launch_bounds__(
   __shared__ float key_maxima[SLLM_HIP_KV_WORKGROUP_SIZE];
   __shared__ float value_maxima[SLLM_HIP_KV_WORKGROUP_SIZE];
   const uint32_t dimension = threadIdx.x;
-  const float key_value = dimension < head_dim
-                              ? bf16_to_float(key_input[input_base + dimension])
-                              : 0.0F;
-  const float value_value =
-      dimension < head_dim ? bf16_to_float(value_input[input_base + dimension])
-                           : 0.0F;
-  key_maxima[dimension] = isfinite(key_value) ? fabsf(key_value) : 0.0F;
-  value_maxima[dimension] = isfinite(value_value) ? fabsf(value_value) : 0.0F;
+  float key_maximum = 0.0F;
+  float value_maximum = 0.0F;
+  for (uint32_t current = dimension; current < head_dim;
+       current += blockDim.x) {
+    const float key_value = bf16_to_float(key_input[input_base + current]);
+    const float value_value = bf16_to_float(value_input[input_base + current]);
+    key_maximum = fmaxf(key_maximum,
+                        isfinite(key_value) ? fabsf(key_value) : 0.0F);
+    value_maximum = fmaxf(value_maximum,
+                          isfinite(value_value) ? fabsf(value_value) : 0.0F);
+  }
+  key_maxima[dimension] = key_maximum;
+  value_maxima[dimension] = value_maximum;
   __syncthreads();
   for (uint32_t stride = blockDim.x / 2U; stride != 0U; stride >>= 1U) {
     if (dimension < stride) {
@@ -178,18 +186,24 @@ extern "C" __global__ __launch_bounds__(
     }
     __syncthreads();
   }
-  const float key_scale = key_maxima[0] == 0.0F ? 1.0F : key_maxima[0] / 448.0F;
+  const float key_scale = static_mode != 0U
+                              ? fixed_key_scale
+                              : (key_maxima[0] == 0.0F ? 1.0F
+                                                       : key_maxima[0] / 448.0F);
   const float value_scale =
-      value_maxima[0] == 0.0F ? 1.0F : value_maxima[0] / 448.0F;
+      static_mode != 0U
+          ? fixed_value_scale
+          : (value_maxima[0] == 0.0F ? 1.0F : value_maxima[0] / 448.0F);
   if (dimension == 0U) {
     key_scales[output_row] = key_scale;
     value_scales[output_row] = value_scale;
   }
-  if (dimension < head_dim) {
-    key_output[output_base + dimension] = float_to_e4m3fn(
-        bf16_to_float(key_input[input_base + dimension]) / key_scale);
-    value_output[output_base + dimension] = float_to_e4m3fn(
-        bf16_to_float(value_input[input_base + dimension]) / value_scale);
+  for (uint32_t current = dimension; current < head_dim;
+       current += blockDim.x) {
+    key_output[output_base + current] = float_to_e4m3fn(
+        bf16_to_float(key_input[input_base + current]) / key_scale);
+    value_output[output_base + current] = float_to_e4m3fn(
+        bf16_to_float(value_input[input_base + current]) / value_scale);
   }
 }
 
@@ -327,7 +341,9 @@ hipError_t launch(const uint16_t *const key_input,
                   float *const value_outer_scales, const uint32_t token_count,
                   const uint64_t capacity_tokens, const uint64_t start_position,
                   const uint32_t head_count, const uint32_t head_dim,
-                  const uint32_t encoding, const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const float static_key_scale,
+                  const float static_value_scale,
+                  const hipStream_t stream) noexcept {
   const uint64_t total = static_cast<uint64_t>(token_count) * head_count;
   const uint32_t grid_count =
       encoding == SLLM_HIP_KV_ENCODING_FP16_V1
@@ -343,13 +359,16 @@ hipError_t launch(const uint16_t *const key_input,
                        static_cast<uint16_t *>(key_output),
                        static_cast<uint16_t *>(value_output), token_count,
                        capacity_tokens, start_position, head_count, head_dim);
-  } else if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1) {
+  } else if (encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+             encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
     hipLaunchKernelGGL(
         sllm_kv_state_bf16_to_fp8_token_major_v1, grid, block, 0U, stream,
         key_input, value_input, static_cast<uint8_t *>(key_output),
         static_cast<uint8_t *>(value_output), static_cast<float *>(key_scales),
         static_cast<float *>(value_scales), token_count, start_position,
-        head_count, head_dim);
+        head_count, head_dim, static_key_scale, static_value_scale,
+        encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ? UINT32_C(1)
+                                                       : UINT32_C(0));
   } else if (encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1) {
     hipLaunchKernelGGL(
         sllm_kv_state_bf16_to_nvfp4_token_major_v1, grid, block, 0U, stream,

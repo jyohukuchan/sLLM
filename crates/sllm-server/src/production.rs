@@ -8,10 +8,12 @@ use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
     Gemma4ResidentModel, ModelLock, OsSamplingRandom, QwenResidentModel, ReviewedModelLock,
-    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, WeightLoadPlan, build_qwen35_fp8_fnuz_graph,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_qwen35_nvfp4_graph,
+    VerifiedCache, VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4,
+    WeightLoadPlan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_qwen35_nvfp4_graph, build_unsloth_gemma4_nvfp4_weight_load_plan,
     build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan, read_model_lock,
     read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
+    verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
@@ -28,6 +30,7 @@ use crate::{
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_KV_BYTES_PER_TOKEN: u64 = 344_064;
+const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
 
 #[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
@@ -194,6 +197,13 @@ struct Gemma4BackendStateV1 {
     session: Arc<ExecutionSession>,
     target: String,
     model_ready_current_bytes: u64,
+    weight_encoding: String,
+    kv_bytes_per_token: u64,
+}
+
+enum GemmaArtifactSourceV1 {
+    Bf16(VerifiedCache),
+    Quantized(Arc<VerifiedUnslothGemma4Nvfp4>),
 }
 
 #[derive(Clone)]
@@ -462,19 +472,40 @@ impl Gemma4ChatBackendV1 {
                 ));
             }
         };
-        let cache = lock.verify_cache(&config.cache_path).map_err(|error| {
-            BackendErrorV1::new(format!("model cache verification failed: {error}"))
+        let source = match lock.verify_cache(&config.cache_path) {
+            Ok(cache) => GemmaArtifactSourceV1::Bf16(cache),
+            Err(_) => GemmaArtifactSourceV1::Quantized(Arc::new(
+                verify_unsloth_gemma4_nvfp4(&config.cache_path).map_err(|error| {
+                    BackendErrorV1::new(format!("model artifact verification failed: {error}"))
+                })?,
+            )),
+        };
+        let quantized = matches!(&source, GemmaArtifactSourceV1::Quantized(_));
+        let tokenizer = match &source {
+            GemmaArtifactSourceV1::Bf16(cache) => {
+                TokenizerFrontendV1::from_gemma4_verified_cache(&lock, cache)
+            }
+            GemmaArtifactSourceV1::Quantized(artifact) => {
+                TokenizerFrontendV1::from_gemma4_quantized_model(&lock, artifact)
+            }
+        }
+        .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "verified Gemma tokenizer construction failed: {error}"
+            ))
         })?;
-        let tokenizer =
-            TokenizerFrontendV1::from_gemma4_verified_cache(&lock, &cache).map_err(|error| {
-                BackendErrorV1::new(format!(
-                    "verified Gemma tokenizer construction failed: {error}"
-                ))
-            })?;
         let stop_policy = gemma4_generation_stop_policy(&lock).map_err(|error| {
             BackendErrorV1::new(format!("Gemma stop policy construction failed: {error}"))
         })?;
-        let plan = build_verified_gemma4_weight_load_plan(&lock, &cache).map_err(|error| {
+        let plan = match &source {
+            GemmaArtifactSourceV1::Bf16(cache) => {
+                build_verified_gemma4_weight_load_plan(&lock, cache)
+            }
+            GemmaArtifactSourceV1::Quantized(artifact) => {
+                build_unsloth_gemma4_nvfp4_weight_load_plan(&lock, artifact)
+            }
+        }
+        .map_err(|error| {
             BackendErrorV1::new(format!("verified Gemma load plan failed: {error}"))
         })?;
         let backend = HipBackend::connect()
@@ -486,13 +517,22 @@ impl Gemma4ChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
             })?;
-        let resident = Gemma4ResidentModel::new(
-            Arc::clone(&session),
-            lock.clone(),
-            plan.clone(),
-            &cache,
-            config.completion_timeout,
-        )
+        let resident = match &source {
+            GemmaArtifactSourceV1::Bf16(cache) => Gemma4ResidentModel::new(
+                Arc::clone(&session),
+                lock.clone(),
+                plan.clone(),
+                cache,
+                config.completion_timeout,
+            ),
+            GemmaArtifactSourceV1::Quantized(artifact) => Gemma4ResidentModel::new_quantized(
+                Arc::clone(&session),
+                lock.clone(),
+                plan.clone(),
+                Arc::clone(artifact),
+                config.completion_timeout,
+            ),
+        }
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "model-ready")?;
@@ -518,6 +558,16 @@ impl Gemma4ChatBackendV1 {
                 session,
                 target: config.target,
                 model_ready_current_bytes,
+                weight_encoding: if quantized {
+                    "mixed-nvfp4-w4a4-fp8-w8a8".to_owned()
+                } else {
+                    "bf16".to_owned()
+                },
+                kv_bytes_per_token: if quantized {
+                    GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN
+                } else {
+                    GEMMA4_KV_BYTES_PER_TOKEN
+                },
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -917,7 +967,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 "failed".to_owned()
             },
             target: state.target.clone(),
-            weight_encoding: "bf16".to_owned(),
+            weight_encoding: state.weight_encoding.clone(),
             fp8_provider: None,
             prompt_tokens,
             requested_max_completion_tokens: request.generation().max_new_tokens(),
@@ -936,7 +986,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             kv_memory_kind: Some("contiguous-resident".to_owned()),
             tokens_per_page: None,
             mapped_kv_capacity_tokens: Some(state_capacity),
-            committed_kv_bytes: observed_length.checked_mul(GEMMA4_KV_BYTES_PER_TOKEN),
+            committed_kv_bytes: observed_length.checked_mul(state.kv_bytes_per_token),
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
             allocated_workspace_bytes: allocated.workspace().current_bytes(),
             cleanup_request_state_bytes: cleanup.request_state().current_bytes(),

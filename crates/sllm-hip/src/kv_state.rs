@@ -51,6 +51,12 @@ fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
             0,
             sys::SLLM_TENSOR_DTYPE_F32,
         ),
+        KvCacheEncoding::Fp8E4M3FnStatic => (
+            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+            sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+            0,
+            sys::SLLM_TENSOR_DTYPE_F32,
+        ),
         KvCacheEncoding::Nvfp4 => (
             sys::SLLM_TENSOR_DTYPE_U8,
             sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
@@ -130,10 +136,20 @@ impl KvStateResource {
         }
         let context_raw = context.raw_handle()?;
         let (dtype, encoding, block_size, scale_dtype) = native_kv_storage(descriptor);
+        let static_scales = descriptor.static_fp8_scales();
+        let mut reserved = [0_u32; 4];
+        if let Some((key, value)) = static_scales {
+            reserved[0] = key.to_bits();
+            reserved[1] = value.to_bits();
+        }
         let info = sys::sllm_kv_state_create_info_v2_t {
             struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            create_info_version: sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION,
+            create_info_version: if static_scales.is_some() {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
+            } else {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
+            },
             reserved0: 0,
             session_id: session_id.raw(),
             layer_id: descriptor.layer_id(),
@@ -147,7 +163,7 @@ impl KvStateResource {
             encoding,
             block_size,
             scale_dtype,
-            reserved: [0; 4],
+            reserved,
         };
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
@@ -417,6 +433,12 @@ impl KvStateResource {
             start_position,
             expected_kv_length,
             self.inner.descriptor,
+            u32::try_from(query.view().shape()[1]).map_err(|_| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidCausalAttentionDescriptor,
+                    "causal attention query head count does not fit u32",
+                )
+            })?,
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -921,6 +943,10 @@ fn validate_view_info(
             sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
             sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
         ),
+        KvCacheEncoding::Fp8E4M3FnStatic => (
+            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
+        ),
         KvCacheEncoding::Nvfp4 => (
             sys::SLLM_TENSOR_DTYPE_U8,
             sys::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
@@ -996,11 +1022,13 @@ fn validate_causal_attention_binding(
 ) -> Result<(), RuntimeError> {
     let view = binding.view();
     let layout = descriptor.layout();
-    let q_heads = layout.heads() * 4;
+    let q_heads = view.shape().get(1).copied().unwrap_or(0);
     if view.dtype() != DType::Bf16
         || view.encoding() != Encoding::Unquantized
         || view.shape().len() != 3
-        || view.shape()[1] != q_heads
+        || q_heads == 0
+        || q_heads % layout.heads() != 0
+        || !matches!(q_heads / layout.heads(), 2 | 4 | 16)
         || view.shape()[2] != layout.head_dim()
         || view.strides() != [q_heads * layout.head_dim(), layout.head_dim(), 1]
         || view.shape()[0] == 0
@@ -1031,6 +1059,11 @@ fn validate_append_info(
         KvCacheEncoding::Fp8E4M3Fn => (
             sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1,
             "kv_state.bf16_to_fp8_token_major.v1",
+            "sllm_kv_state_bf16_to_fp8_token_major_v1",
+        ),
+        KvCacheEncoding::Fp8E4M3FnStatic => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1,
+            "kv_state.bf16_to_fp8_static_token_major.v1",
             "sllm_kv_state_bf16_to_fp8_token_major_v1",
         ),
         KvCacheEncoding::Nvfp4 => (
@@ -1105,6 +1138,7 @@ fn validate_causal_attention_info(
     start_position: u64,
     committed_kv_length: u64,
     descriptor: KvStateDescriptor,
+    query_heads: u32,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -1117,7 +1151,7 @@ fn validate_causal_attention_info(
             )
         })?;
     let expected_grid = query_count
-        .checked_mul((descriptor.layout().heads() * 4) as u64)
+        .checked_mul(u64::from(query_heads))
         .and_then(|value| u32::try_from(value).ok());
     let expected_target = context.expected_target();
     let (expected_kernel_id, expected_kernel, expected_device) =
@@ -1146,7 +1180,7 @@ fn validate_causal_attention_info(
         || info.query_count != query_count
         || info.start_position != start_position
         || info.committed_kv_length != committed_kv_length
-        || info.q_heads != (descriptor.layout().heads() * 4) as u32
+        || info.q_heads != query_heads
         || info.kv_heads != descriptor.layout().heads() as u32
         || info.head_dim != descriptor.layout().head_dim() as u32
         || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
