@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import mmap
 import os
 import struct
@@ -101,6 +102,12 @@ def is_text_linear(name: str, metadata: dict[str, Any]) -> bool:
     ))
 
 
+def is_gemma_mlp(name: str) -> bool:
+    return name.startswith("model.language_model.layers.") and name.endswith(
+        (".mlp.gate_proj.weight", ".mlp.up_proj.weight", ".mlp.down_proj.weight")
+    )
+
+
 def bf16_to_fp32(raw: memoryview, shape: list[int]) -> np.ndarray:
     elements = int(np.prod(shape, dtype=np.int64))
     if len(raw) != elements * 2:
@@ -147,12 +154,17 @@ def encode_e2m1(values: np.ndarray) -> np.ndarray:
     return nearest_even(np.minimum(np.abs(values), FP4_MAX), E2M1_POSITIVE) | sign
 
 
-def quantize(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def quantize(matrix: np.ndarray, tensor_scale_multiplier: float = 1.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if matrix.ndim != 2 or not np.isfinite(matrix).all():
         raise ContractError("NVFP4 source must be a finite rank-2 matrix")
     rows, columns = matrix.shape
     global_amax = np.max(np.abs(matrix)).astype(np.float32)
-    tensor_scale = np.float32(1.0 if global_amax == 0 else global_amax / (FP8_MAX * FP4_MAX))
+    if not math.isfinite(tensor_scale_multiplier) or not 0.5 <= tensor_scale_multiplier <= 2.0:
+        raise ContractError("tensor scale multiplier must be finite and in [0.5,2.0]")
+    tensor_scale = np.float32(
+        (1.0 if global_amax == 0 else global_amax / (FP8_MAX * FP4_MAX))
+        * tensor_scale_multiplier
+    )
     blocks = (columns + BLOCK_SIZE - 1) // BLOCK_SIZE
     block_scale_bits = np.empty((rows, blocks), dtype=np.uint8)
     codes = np.zeros(matrix.size, dtype=np.uint8)
@@ -189,6 +201,10 @@ def quantize(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 def convert(args: argparse.Namespace) -> None:
     catalog = source_catalog(args.cache)
     selected = sorted(name for name, (_, _, metadata) in catalog.items() if is_text_linear(name, metadata))
+    if args.gemma_mlp_only:
+        selected = [name for name in selected if is_gemma_mlp(name)]
+        if len(selected) != 144:
+            raise ContractError(f"Gemma MLP selection must contain 144 tensors, got {len(selected)}")
     if args.tensor:
         requested = set(args.tensor)
         missing = requested.difference(selected)
@@ -197,6 +213,26 @@ def convert(args: argparse.Namespace) -> None:
         selected = [name for name in selected if name in requested]
     if not selected:
         raise ContractError("no NVFP4 tensor selected")
+
+    multipliers: dict[str, float] = {}
+    multiplier_sha256 = None
+    if args.tensor_scale_multipliers is not None:
+        document = json.loads(args.tensor_scale_multipliers.read_text())
+        tensor_records = document.get("tensors") if isinstance(document, dict) else None
+        if not isinstance(tensor_records, list):
+            raise ContractError("tensor scale multiplier report has no tensor records")
+        for record in tensor_records:
+            if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+                raise ContractError("tensor scale multiplier record differs")
+            multiplier = record.get("o0_tensor_scale_multiplier")
+            if not isinstance(multiplier, (int, float)) or not math.isfinite(multiplier):
+                raise ContractError("tensor scale multiplier is invalid")
+            multipliers[record["name"]] = float(multiplier)
+        missing = set(selected).difference(multipliers)
+        if missing:
+            raise ContractError(f"tensor scale multiplier set is missing selected tensors: {sorted(missing)}")
+        multipliers = {name: multipliers[name] for name in selected}
+        multiplier_sha256 = sha256_file(args.tensor_scale_multipliers)
 
     payloads: list[tuple[str, str, list[int], bytes]] = []
     records: list[dict[str, Any]] = []
@@ -208,7 +244,7 @@ def convert(args: argparse.Namespace) -> None:
             source_hash = sha256_bytes(source_bytes)
             matrix = bf16_to_fp32(source_bytes, metadata["shape"])
             source_bytes.release()
-            packed, block_scales, tensor_scale = quantize(matrix)
+            packed, block_scales, tensor_scale = quantize(matrix, multipliers.get(name, 1.0))
         value_name, block_name, tensor_name = name + VALUE_SUFFIX, name + BLOCK_SCALE_SUFFIX, name + TENSOR_SCALE_SUFFIX
         payloads.extend([
             (value_name, "U8", [packed.size], packed.tobytes()),
@@ -258,7 +294,23 @@ def convert(args: argparse.Namespace) -> None:
         "tool": {
             "repository": args.tool_repository, "commit": args.tool_commit,
             "path": "ci/tools/convert_nvfp4_sidecar.py", "sha256": sha256_file(Path(__file__).resolve()),
-            "numpy": np.__version__, "arguments": {"tensor": sorted(args.tensor)},
+            "numpy": np.__version__,
+            "arguments": {
+                "tensor": sorted(args.tensor),
+                **(
+                    {"selection": "gemma-mlp-144" if len(selected) == 144 else "gemma-mlp-subset"}
+                    if args.gemma_mlp_only
+                    else {}
+                ),
+                **(
+                    {
+                        "tensor_scale_multipliers_sha256": multiplier_sha256,
+                        "scale_objective": "sampled-weight-mse-independent-evaluation-set",
+                    }
+                    if multiplier_sha256 is not None
+                    else {}
+                ),
+            },
         },
         "artifact": {"path": args.output.name, "size_bytes": args.output.stat().st_size, "sha256": sha256_file(args.output), "tensor_count": len(records)},
         "tensors": records,
@@ -277,6 +329,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-repository", default="local")
     parser.add_argument("--tool-commit", default="working-tree")
     parser.add_argument("--tensor", action="append", default=[])
+    parser.add_argument("--gemma-mlp-only", action="store_true")
+    parser.add_argument("--tensor-scale-multipliers", type=Path)
     return parser.parse_args()
 
 

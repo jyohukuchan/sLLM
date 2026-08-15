@@ -43,3 +43,36 @@ fingerprint.
 
 Provider labels describe execution: `packed-dequant` consumes v1 packed residency directly, while `converted-bf16` expands once at model load.
 Neither is called `native`.
+
+## Phase 15Q matched Gemma 4 attribution
+
+Phase 15Q fixes `google/gemma-4-12B-it` revision
+`707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7` as the BF16 source and compares only its 144 MLP gate/up/down weights. Attention and all other
+weights remain BF16, activations remain BF16, and KV remains FP16. The Unsloth mixed W4A4/W8A8/FP8 checkpoint is not executed as the primary
+control.
+
+The importer reads `unsloth/gemma-4-12b-it-NVFP4` revision
+`b1f649734b34aa5575b03d186abd1b9be3d0d5c4` positionally. Its low-nibble-first E2M1 and E4M3 block-scale bytes are preserved. The
+compressed-tensors `weight_global_scale` is reciprocal, so the sLLM multiplicative tensor scale is exactly `1 / weight_global_scale`.
+`input_global_scale` is provenance only in this W4A16 comparison and is not applied. The independent decoder confirmed all 16 E2M1 codes,
+E4M3 values, ties, zero blocks, and non-aligned synthetic boundaries before the imported payload reached the GPU provider.
+
+The matched variants are:
+
+- `S0`: current per-tensor min-max scaling;
+- `U0`: the losslessly imported Unsloth `imatrix_mse` MLP payload;
+- `O0`: the same sLLM quantizer with a bounded per-tensor scale search minimizing sampled weight MSE.
+
+Across all 144 tensors, U0 weight MSE was worse than S0 in every tensor, with median U0/S0 MSE ratio `1.3933`. Nevertheless, over 32 fixed
+prompts and 96 teacher-forced positions, U0 reduced full-model median KLD from `0.3315` to `0.1619` on `gfx1201` and from `0.3715` to `0.1736`
+on `gfx1030`; top-1 agreement rose from `61.46%` to `79.17%` and from `62.50%` to `76.04%`. O0 improved sampled weight MSE in 120/144
+tensors but produced only `0.2880`/`0.3433` median KLD and inconsistent worst cases. Therefore weight-only MSE is not an adequate calibration
+objective for this model; activation-aware calibration has material value within the same E2M1/block-16 format.
+
+The layer intervention supports a mixed attribution. On `gfx1201`, U0 improved the single-layer median KLD at layers 0, 1, and 47, but the
+selected six-layer cumulative U0 case still reached maximum KLD `12.5620`. The benefit is therefore layer- and prompt-dependent rather than a
+uniform replacement rule.
+
+The result does not remove the format/configuration ceiling. U0 improved only 66/96 `gfx1201` positions and 61/96 `gfx1030` positions; its
+maximum KLD remained `9.1781`/`7.5777`, far above the unchanged `0.05` budget. No candidate is adopted as a default or production promotion.
+NVFP4 remains `correctness-only opt-in`; sensitive-tensor mixed precision and a reproducible activation-aware converter remain follow-ups.

@@ -1,6 +1,6 @@
 # Phase 15Q: Unsloth NVFP4品質要因の切り分け
 
-> 状態: ready
+> 状態: complete
 > 作成日: 2026-08-15
 
 ## 目的
@@ -106,7 +106,8 @@ primary結論後のsecondary caseとする。
 
 - cache容量を事前確認し、BF16約23.9 GB、Unsloth約9.3 GB、tokenizer/configを固定revisionで取得する。
 - LFS SHA-256、size、safetensors header/catalog、全tensor rangeを検証する。model payloadをGitへ追加しない。
-- 両checkpointの629 BF16/非量子化tensor、config、tokenizerを比較してsource ancestryを確定する。weightが異なる場合は
+- 両checkpointで同名かつ両方BF16の349 source tensor、config、tokenizerを比較してsource ancestryを確定する。Unsloth側の
+  残りBF16 entryはattention/input scale等の量子化metadataであり、source tensor数へ混ぜない。weightが異なる場合は
   repository historyから一致revisionを探し、見つからなければfull-model algorithm attributionをblockする。
 - Unsloth 144 MLP tensorについてpacked/scale/global-scale、shape、offset、alignment、input scaleをinventory化する。
   attention FP8とKV FP8はsecondary laneとして別表に分ける。
@@ -157,6 +158,39 @@ primary結論後のsecondary caseとする。
   別group/format、W4A4の有無を独立follow-upとして提示する。
 - runtime、model lock、compatibility、provenance、main plan、historyを同期し、1回のintegration reviewとfindingだけの
   focused re-reviewを行う。本planをarchiveしてからPhase 16を開始可能にする。
+
+## 実施結果
+
+- 固定したBF16/Unsloth artifactの完全hashとheader/catalogを検証し、両artifactに共通する349 BF16 source tensorが
+  byte-identicalであることを確認した。Unsloth側の残りBF16 entryは量子化metadataで、source tensorへ数えていない。
+- 独立decoderはE2M1全16 code、E4M3、nearest-even tie、zero block、non-aligned境界を確認した。Unslothの
+  `weight_global_scale`はreciprocalであり、sLLM sidecarの乗算scaleへ`1 / weight_global_scale`でlosslessにimportした。
+- 144 MLP tensorのsampled weight MSEではU0がS0を改善したtensorは0件で、U0/S0比medianは`1.3933`だった。
+  O0は120/144 tensorで改善したが、その改善はfull-model品質へ一貫して伝播しなかった。
+- exact `gfx1201`/`gfx1030`のoperator境界caseはすべてHIP dispatch、fallbackなしでPASSし、最大relative errorは
+  `0.0036375308`だった。32 fixed prompt・96位置のfull-model結果は次の通りである。
+
+| target | variant | KLD median / p90 / max | top-1一致 |
+| --- | --- | --- | ---: |
+| R9700 `gfx1201` | S0 | `0.3315 / 3.4727 / 11.7972` | `61.46%` |
+| R9700 `gfx1201` | U0 | `0.1619 / 2.3621 / 9.1781` | `79.17%` |
+| R9700 `gfx1201` | O0 | `0.2880 / 2.1219 / 14.4025` | `65.63%` |
+| V620 `gfx1030` | S0 | `0.3715 / 3.5324 / 5.1655` | `62.50%` |
+| V620 `gfx1030` | U0 | `0.1736 / 1.9045 / 7.5777` | `76.04%` |
+| V620 `gfx1030` | O0 | `0.3433 / 2.4327 / 6.4180` | `69.79%` |
+
+- U0がS0より低KLDだった位置はR9700 66/96、V620 61/96だった。R9700のlayer単独差し替えではU0が特に
+  layer 0/1/47を改善したが、選択6 layerの累積U0はmax KLD `12.5620`となり、改善はlayer/prompt依存だった。
+- 3 fixed greedy caseの最初のdivergence位置はS0が`[なし, 7, なし]`、U0/O0が`[0, 1, なし]`であり、
+  median KLDの改善は生成trajectoryの一貫改善を意味しなかった。
+- よって、activation-aware algorithmの寄与はmaterialだが一様ではなく、同じformat/configurationのceilingも残る
+  `mixed`と判定した。既存KLD budget `0.05`は変更せず、S0/U0/O0をdefaultまたはproductionへ採用しない。
+  NVFP4は両targetで`correctness-only opt-in`を維持する。M0はW4A4/attention W8A8/KV FP8の未実装差が混ざるため、
+  primary attribution後の必須caseにはせず実行していない。
+- B0 residentは`23,814,729,316` byte、candidate residentは`11,605,373,092` byteだった。両targetのfull runは
+  fallbackなし、nonfinite 0、cleanup 0で完了した。model、sidecar、raw reportはrepositoryへ追加していない。
+- integration reviewでCI Rust toolchainが`if let` chainを受理しない互換性findingを検出し、同じ意味のnested構文へ修正した。
+  focused re-reviewとworkspace、manifest、Markdown、exact target checkを通してcloseoutした。
 
 ## 計測matrix
 

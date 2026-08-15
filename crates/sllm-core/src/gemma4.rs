@@ -27,6 +27,13 @@ pub const GEMMA4_12B_HEADER_SHA256: &str =
     "e432b3ee11ff7f7d179ccbf3827af9669c03a0a28e603000d89c6e1b6c9d4bb7";
 pub const GEMMA4_12B_CATALOG_SHA256: &str =
     "24e705586f0bba5e1018951a9ee09aa02b1bfccd73f5c0a82e31e29fb7c2931f";
+pub const GEMMA4_12B_IT_REPO_ID: &str = "google/gemma-4-12B-it";
+pub const GEMMA4_12B_IT_REVISION: &str = "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7";
+pub const GEMMA4_12B_IT_ALIAS: &str = "gemma4-12b-it-bf16";
+pub const GEMMA4_12B_IT_FINGERPRINT: &str =
+    "sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d";
+pub const GEMMA4_12B_IT_HEADER_SHA256: &str =
+    "e432b3ee11ff7f7d179ccbf3827af9669c03a0a28e603000d89c6e1b6c9d4bb7";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Gemma4LayerType {
@@ -215,15 +222,26 @@ pub fn parse_gemma4_model_lock(bytes: &[u8]) -> Result<Gemma4ModelLock, ModelErr
     Ok(lock)
 }
 
+pub(crate) fn is_reviewed_gemma4_identity(lock: &Gemma4ModelLock) -> bool {
+    let base = lock.model.repo_id == GEMMA4_12B_REPO_ID
+        && lock.model.requested_revision == "main"
+        && lock.model.resolved_revision == GEMMA4_12B_REVISION
+        && lock.fingerprint == GEMMA4_12B_FINGERPRINT
+        && lock.aliases == [GEMMA4_12B_ALIAS.to_owned()];
+    let instruction = lock.model.repo_id == GEMMA4_12B_IT_REPO_ID
+        && lock.model.requested_revision == GEMMA4_12B_IT_REVISION
+        && lock.model.resolved_revision == GEMMA4_12B_IT_REVISION
+        && lock.fingerprint == GEMMA4_12B_IT_FINGERPRINT
+        && lock.aliases == [GEMMA4_12B_IT_ALIAS.to_owned()];
+    base || instruction
+}
+
 fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
     let invalid = |message: &str| ModelError::Invalid(message.to_owned());
+    let instruction = lock.fingerprint == GEMMA4_12B_IT_FINGERPRINT;
     if lock.schema_version != "model-lock-v2"
-        || lock.model.repo_id != GEMMA4_12B_REPO_ID
         || lock.model.repo_type != "model"
-        || lock.model.requested_revision != "main"
-        || lock.model.resolved_revision != GEMMA4_12B_REVISION
-        || lock.fingerprint != GEMMA4_12B_FINGERPRINT
-        || lock.aliases != [GEMMA4_12B_ALIAS.to_owned()]
+        || !is_reviewed_gemma4_identity(lock)
     {
         return Err(invalid("Gemma 4 lock immutable identity differs"));
     }
@@ -292,7 +310,12 @@ fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
         || tensor.header_length_field_bytes != 8
         || tensor.header_length_bytes != GEMMA4_12B_HEADER_LENGTH_BYTES
         || tensor.data_buffer_start != GEMMA4_12B_HEADER_LENGTH_BYTES + 8
-        || tensor.header_sha256 != GEMMA4_12B_HEADER_SHA256
+        || tensor.header_sha256
+            != if instruction {
+                GEMMA4_12B_IT_HEADER_SHA256
+            } else {
+                GEMMA4_12B_HEADER_SHA256
+            }
         || tensor.catalog_sha256 != GEMMA4_12B_CATALOG_SHA256
         || tensor.tensor_count != GEMMA4_12B_TENSOR_COUNT
         || tensor.text_tensor_count != GEMMA4_12B_TEXT_TENSOR_COUNT
@@ -304,7 +327,7 @@ fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
         return Err(invalid("Gemma 4 direct safetensors contract differs"));
     }
     let tokenizer = &lock.model.tokenizer_contract;
-    let expected_special_token_ids = BTreeMap::from([
+    let mut expected_special_token_ids = BTreeMap::from([
         ("audio".to_owned(), 258_881),
         ("audio_begin".to_owned(), 256_000),
         ("audio_end".to_owned(), 258_883),
@@ -319,15 +342,40 @@ fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
         ("unk".to_owned(), 3),
         ("video".to_owned(), 258_884),
     ]);
-    if tokenizer.files != ["tokenizer.json", "tokenizer_config.json"]
+    if instruction {
+        expected_special_token_ids.extend([
+            ("tool_call_begin".to_owned(), 48),
+            ("tool_call_end".to_owned(), 49),
+            ("tool_response_begin".to_owned(), 50),
+            ("tool_response_end".to_owned(), 51),
+            ("channel_begin".to_owned(), 100),
+            ("channel_end".to_owned(), 101),
+            ("turn_begin".to_owned(), 105),
+            ("turn_end".to_owned(), 106),
+        ]);
+    }
+    let tokenizer_profile_matches = if instruction {
+        tokenizer.files
+            == [
+                "chat_template.jinja",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            ]
+            && tokenizer.chat_template_path.as_deref() == Some("chat_template.jinja")
+            && tokenizer.prompt_mode == "chat-template"
+            && tokenizer.stop_token_ids == [1, 50, 106]
+    } else {
+        tokenizer.files == ["tokenizer.json", "tokenizer_config.json"]
+            && tokenizer.chat_template_path.is_none()
+            && tokenizer.prompt_mode == "raw-text-only"
+            && tokenizer.stop_token_ids == [1]
+    };
+    if !tokenizer_profile_matches
         || tokenizer.tokenizer_class != "GemmaTokenizer"
         || tokenizer.vocab_size != 262_144
-        || tokenizer.chat_template_path.is_some()
-        || tokenizer.prompt_mode != "raw-text-only"
         || tokenizer.special_token_ids != expected_special_token_ids
-        || tokenizer.stop_token_ids != [1]
     {
-        return Err(invalid("Gemma 4 base tokenizer contract differs"));
+        return Err(invalid("Gemma 4 tokenizer contract differs"));
     }
     let file_paths: BTreeSet<_> = lock
         .model
@@ -335,7 +383,7 @@ fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
         .iter()
         .map(|file| file.path.as_str())
         .collect();
-    let expected_paths = BTreeSet::from([
+    let mut expected_paths = BTreeSet::from([
         "README.md",
         "config.json",
         "generation_config.json",
@@ -343,6 +391,9 @@ fn validate_reviewed_lock(lock: &Gemma4ModelLock) -> Result<(), ModelError> {
         "tokenizer.json",
         "tokenizer_config.json",
     ]);
+    if instruction {
+        expected_paths.insert("chat_template.jinja");
+    }
     if file_paths != expected_paths || lock.model.files.len() != expected_paths.len() {
         return Err(invalid("Gemma 4 locked file set differs"));
     }
@@ -570,28 +621,38 @@ fn insert_shape(
 pub fn validate_gemma4_config(bytes: &[u8]) -> Result<(), ModelError> {
     let value = parse_model_source_json(bytes, "Gemma 4 config")?;
     let root = object(&value, "Gemma 4 config root")?;
-    require_keys(
-        root,
-        &[
-            "architectures",
-            "audio_config",
-            "audio_token_id",
-            "boa_token_id",
-            "boi_token_id",
-            "dtype",
-            "eoa_token_index",
-            "eoi_token_id",
-            "image_token_id",
-            "initializer_range",
-            "model_type",
-            "text_config",
-            "tie_word_embeddings",
-            "transformers_version",
-            "video_token_id",
-            "vision_config",
-        ],
-        "Gemma 4 config root",
-    )?;
+    let instruction = root.contains_key("eos_token_id");
+    let mut expected_fields = vec![
+        "architectures",
+        "audio_config",
+        "audio_token_id",
+        "boa_token_id",
+        "boi_token_id",
+        "dtype",
+        "eoa_token_index",
+        "eoi_token_id",
+        "image_token_id",
+        "initializer_range",
+        "model_type",
+        "text_config",
+        "tie_word_embeddings",
+        "transformers_version",
+        "video_token_id",
+        "vision_config",
+    ];
+    if instruction {
+        expected_fields.push("eos_token_id");
+    }
+    require_keys(root, &expected_fields, "Gemma 4 config root")?;
+    let instruction_eos_matches = !instruction
+        || root
+            .get("eos_token_id")
+            .and_then(Value::as_array)
+            .is_some_and(|values| {
+                values.len() == 2
+                    && values[0].as_u64() == Some(1)
+                    && values[1].as_u64() == Some(106)
+            });
     if string(root, "model_type")? != "gemma4_unified"
         || string(root, "dtype")? != "bfloat16"
         || !bool_value(root, "tie_word_embeddings")?
@@ -605,6 +666,7 @@ pub fn validate_gemma4_config(bytes: &[u8]) -> Result<(), ModelError> {
         || u64_value(root, "image_token_id")? != 258_880
         || u64_value(root, "video_token_id")? != 258_884
         || f64_value(root, "initializer_range")?.to_bits() != 0.02_f64.to_bits()
+        || !instruction_eos_matches
     {
         return Err(invalid("Gemma 4 top-level config differs"));
     }
@@ -824,6 +886,8 @@ mod tests {
     use super::*;
 
     const LOCK_BYTES: &[u8] = include_bytes!("../../../docs/models/locks/gemma4-12b-bf16.json");
+    const IT_LOCK_BYTES: &[u8] =
+        include_bytes!("../../../docs/models/locks/gemma4-12b-it-bf16.json");
     const CONFIG_BYTES: &[u8] =
         include_bytes!("../../../ci/fixtures/model-lock-v2/gemma4-config.json");
 
@@ -843,6 +907,14 @@ mod tests {
         assert!(!lock.supports_chat_messages());
         assert_eq!(lock.model.architecture.text.layer_types.len(), 48);
         assert_eq!(lock.model.tensor_contract.tensor_count, 677);
+    }
+
+    #[test]
+    fn instruction_lock_is_distinct_and_requires_its_chat_template() {
+        let lock = parse_gemma4_model_lock(IT_LOCK_BYTES).expect("instruction lock is valid");
+        assert_eq!(lock.fingerprint(), GEMMA4_12B_IT_FINGERPRINT);
+        assert!(lock.supports_chat_messages());
+        assert_eq!(lock.model.tokenizer_contract.stop_token_ids, [1, 50, 106]);
     }
 
     #[test]

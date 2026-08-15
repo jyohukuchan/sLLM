@@ -147,6 +147,12 @@ descriptor/cache identityはencoding、scale layout、provider、exact target、
 requestごとにunpackせず、packed weightからBF16 activationとの積をFP32 accumulateしてBF16 outputを返す。
 exact `gfx1030`/`gfx1201`以外、scale欠落、provider未指定、runtime failureではBF16/FP8へfallbackしない。
 
+Phase 15Qでは同じbindingをGemma 4のMLP gate/up/downへ接続した。`Gemma4ResidentModel::new_nvfp4`はverified Gemma source lockと
+sidecar fingerprintをresident identityへ含め、sidecarに存在するweightだけをpacked NVFP4 allocation/uploadへ置換し、残りを
+exact BF16 cacheからloadする。primary comparisonは144 MLP tensorを要求する。1〜143 tensorのpartial sidecarはlayer単独・累積
+感度診断専用で、decode rebindでも同じsidecar fingerprintを必須とする。いずれもrequestごとのBF16全weight展開や別providerへの
+fallbackを行わない。
+
 Phase 15Oではformatを変更せず、FP8 activation量子化をwave reduction/native pair conversionへ更新した。FP8は
 activation量子化とhipBLASLtの2 dispatch、NVFP4は1 dispatchを維持する。NVFP4はM=1のdecode provider ID 8と、
 K=256のweight tileを最大8 M rowで共有するM>1 prefill provider ID 9へ分離する。prefill展開はworkgroup内LDSだけで、

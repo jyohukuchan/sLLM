@@ -23,7 +23,8 @@ use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
 use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, Encoding, ExecutionBuffer,
     ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding, PrepareSupport,
-    TensorDType, TensorView, VerifiedCache, WeightUploadRequest, upload_verified_weight,
+    TensorDType, TensorView, VerifiedCache, VerifiedNvfp4Sidecar, WeightUploadRequest,
+    upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -124,6 +125,7 @@ impl Gemma4ExecutionNode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Gemma4ExecutionLayout {
     model_fingerprint: String,
+    nvfp4_sidecar_fingerprint: Option<String>,
     plan_digest: [u8; 32],
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
@@ -202,6 +204,7 @@ struct Gemma4ResidentInner {
     queue: ExecutionQueue,
     lock: crate::Gemma4ModelLock,
     plan: WeightLoadPlan,
+    nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     immutable: BTreeMap<String, (Gemma4TensorBacking, ExecutionBuffer)>,
     completion_timeout: Duration,
 }
@@ -295,6 +298,35 @@ impl Gemma4ResidentModel {
         cache: &VerifiedCache,
         completion_timeout: Duration,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        Self::new_with_nvfp4(session, lock, plan, cache, None, completion_timeout)
+    }
+
+    pub fn new_nvfp4(
+        session: Arc<ExecutionSession>,
+        lock: crate::Gemma4ModelLock,
+        plan: WeightLoadPlan,
+        cache: &VerifiedCache,
+        sidecar: Arc<VerifiedNvfp4Sidecar>,
+        completion_timeout: Duration,
+    ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        Self::new_with_nvfp4(
+            session,
+            lock,
+            plan,
+            cache,
+            Some(sidecar),
+            completion_timeout,
+        )
+    }
+
+    fn new_with_nvfp4(
+        session: Arc<ExecutionSession>,
+        lock: crate::Gemma4ModelLock,
+        plan: WeightLoadPlan,
+        cache: &VerifiedCache,
+        sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
+        completion_timeout: Duration,
+    ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if completion_timeout.is_zero()
             || lock.fingerprint() != plan.lock_fingerprint
             || cache.lock_fingerprint != plan.lock_fingerprint
@@ -305,12 +337,25 @@ impl Gemma4ResidentModel {
         }
         let graph = crate::build_gemma4_graph(&lock, &plan, 1, 0, 1)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = build_gemma4_execution_layout(&graph, &plan)?;
+        let layout = match sidecar.as_deref() {
+            Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &plan, sidecar)?,
+            None => build_gemma4_execution_layout(&graph, &plan)?,
+        };
         let queue = session
             .create_queue()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let buffers = provision_gemma4_execution_buffers(Arc::clone(&session), &layout)?;
-        buffers.upload_immutable(&layout, &plan, cache, &queue, completion_timeout)?;
+        match sidecar.as_deref() {
+            Some(sidecar) => buffers.upload_immutable_nvfp4(
+                &layout,
+                &plan,
+                cache,
+                sidecar,
+                &queue,
+                completion_timeout,
+            )?,
+            None => buffers.upload_immutable(&layout, &plan, cache, &queue, completion_timeout)?,
+        }
         let immutable = buffers.immutable_buffers(&layout)?;
         drop(buffers);
         Ok(Self {
@@ -319,6 +364,7 @@ impl Gemma4ResidentModel {
                 queue,
                 lock,
                 plan,
+                nvfp4_sidecar: sidecar,
                 immutable,
                 completion_timeout,
             }),
@@ -345,7 +391,12 @@ impl Gemma4ResidentModel {
             state_capacity,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = build_gemma4_execution_layout(&graph, &self.inner.plan)?;
+        let layout = match self.inner.nvfp4_sidecar.as_deref() {
+            Some(sidecar) => {
+                build_gemma4_nvfp4_execution_layout(&graph, &self.inner.plan, sidecar)?
+            }
+            None => build_gemma4_execution_layout(&graph, &self.inner.plan)?,
+        };
         let buffers = provision_gemma4_request_buffers(
             Arc::clone(&self.inner.session),
             &layout,
@@ -489,7 +540,10 @@ impl Gemma4ExecutionRequest {
             self.state_capacity()?,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = build_gemma4_execution_layout(&graph, &self.plan)?;
+        let layout = match self._resident.nvfp4_sidecar.as_deref() {
+            Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
+            None => build_gemma4_execution_layout(&graph, &self.plan)?,
+        };
         let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
         buffers.upload_transition_inputs(
             &layout,
@@ -751,6 +805,7 @@ impl Gemma4ProvisionedBuffers {
         next_layout: &Gemma4ExecutionLayout,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if current_layout.model_fingerprint != next_layout.model_fingerprint
+            || current_layout.nvfp4_sidecar_fingerprint != next_layout.nvfp4_sidecar_fingerprint
             || current_layout.plan_digest != next_layout.plan_digest
             || current_layout.model_weight_bytes != next_layout.model_weight_bytes
         {
@@ -809,6 +864,37 @@ impl Gemma4ProvisionedBuffers {
         queue: &ExecutionQueue,
         completion_timeout: Duration,
     ) -> Result<(), Gemma4ExecutionLayoutError> {
+        self.upload_immutable_source(layout, plan, cache, None, queue, completion_timeout)
+    }
+
+    pub fn upload_immutable_nvfp4(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        plan: &WeightLoadPlan,
+        cache: &VerifiedCache,
+        sidecar: &VerifiedNvfp4Sidecar,
+        queue: &ExecutionQueue,
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        self.upload_immutable_source(
+            layout,
+            plan,
+            cache,
+            Some(sidecar),
+            queue,
+            completion_timeout,
+        )
+    }
+
+    fn upload_immutable_source(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        plan: &WeightLoadPlan,
+        cache: &VerifiedCache,
+        sidecar: Option<&VerifiedNvfp4Sidecar>,
+        queue: &ExecutionQueue,
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
         if completion_timeout.is_zero()
             || queue.session_id() != self.session.id()
             || layout.model_fingerprint != plan.lock_fingerprint
@@ -823,9 +909,6 @@ impl Gemma4ProvisionedBuffers {
             let Some(_start) = entry.destination_start else {
                 continue;
             };
-            let length = entry.source_range[1]
-                .checked_sub(entry.source_range[0])
-                .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("weight range underflow"))?;
             let tensor = layout
                 .tensors
                 .iter()
@@ -839,10 +922,37 @@ impl Gemma4ProvisionedBuffers {
                 .ok_or_else(|| {
                     Gemma4ExecutionLayoutError::invalid("loadable weight buffer is absent")
                 })?;
+            let resident_bytes = gemma_resident_weight_bytes(&tensor.view)?;
             let destination = self
                 .buffer(tensor.id)?
-                .range(0, length)
+                .range(0, resident_bytes)
                 .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if let Some(sidecar_tensor) =
+                sidecar.and_then(|sidecar| sidecar.tensor(&entry.tensor_name))
+            {
+                if sidecar_tensor.shape.as_slice() != entry.shape.as_slice() {
+                    return Err(Gemma4ExecutionLayoutError::invalid(
+                        "NVFP4 sidecar shape differs from the weight plan",
+                    ));
+                }
+                upload_gemma_nvfp4_weight(
+                    self.session.as_ref(),
+                    queue,
+                    &destination,
+                    sidecar.expect("sidecar tensor requires a sidecar"),
+                    &entry.tensor_name,
+                    completion_timeout,
+                )?;
+                continue;
+            }
+            let length = entry.source_range[1]
+                .checked_sub(entry.source_range[0])
+                .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("weight range underflow"))?;
+            if resident_bytes != length {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "BF16 resident weight length differs from its source range",
+                ));
+            }
             upload_verified_weight(WeightUploadRequest {
                 plan,
                 expected_plan_digest: layout.plan_digest,
@@ -1303,7 +1413,7 @@ pub fn provision_gemma4_execution_buffers(
         let buffer = match tensor.backing {
             Gemma4TensorBacking::ModelWeight { .. } => session
                 .allocate_with_category(
-                    tensor.view.payload_bytes(),
+                    gemma_resident_weight_bytes(&tensor.view)?,
                     AllocationCategory::ModelResident,
                 )
                 .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
@@ -1398,6 +1508,75 @@ fn require_transfer_success(
     }
 }
 
+fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {
+    view.dtype() == DType::U8
+        && view.encoding()
+            == Encoding::Nvfp4 {
+                block_size: 16,
+                scale_dtype: DType::F8E4M3Fn,
+            }
+        && view.shape().len() == 2
+}
+
+fn gemma_resident_weight_bytes(view: &TensorView) -> Result<u64, Gemma4ExecutionLayoutError> {
+    if !gemma_is_nvfp4_weight(view) {
+        return Ok(view.payload_bytes());
+    }
+    let rows = u64::try_from(view.shape()[0])
+        .map_err(|_| Gemma4ExecutionLayoutError::invalid("NVFP4 rows do not fit u64"))?;
+    let columns = u64::try_from(view.shape()[1])
+        .map_err(|_| Gemma4ExecutionLayoutError::invalid("NVFP4 columns do not fit u64"))?;
+    let block_scales = rows
+        .checked_mul(columns.div_ceil(16))
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 block count overflowed"))?;
+    view.payload_bytes()
+        .checked_add(block_scales)
+        .and_then(|bytes| bytes.checked_add(3))
+        .map(|bytes| bytes & !3)
+        .and_then(|bytes| bytes.checked_add(4))
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 resident bytes overflowed"))
+}
+
+fn upload_gemma_nvfp4_weight(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    sidecar: &VerifiedNvfp4Sidecar,
+    tensor_name: &str,
+    completion_timeout: Duration,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let (values, block_scales, tensor_scale) = sidecar
+        .read_tensor_bytes(tensor_name)
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+    let unaligned = values
+        .len()
+        .checked_add(block_scales.len())
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 upload size overflowed"))?;
+    let tensor_scale_offset = unaligned
+        .checked_add(3)
+        .map(|bytes| bytes & !3)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 scale offset overflowed"))?;
+    let expected = tensor_scale_offset
+        .checked_add(4)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 upload size overflowed"))?;
+    if u64::try_from(expected).ok() != Some(destination.size_bytes()) {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "NVFP4 upload bytes differ from the resident allocation",
+        ));
+    }
+    let mut bytes = values;
+    bytes.extend_from_slice(&block_scales);
+    bytes.resize(tensor_scale_offset, 0);
+    bytes.extend_from_slice(&tensor_scale);
+    let mut transfer = session
+        .upload(queue, destination.clone(), Arc::from(bytes))
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+    require_transfer_success(
+        transfer.wait(completion_timeout),
+        "Gemma NVFP4 weight upload",
+    )
+}
+
 fn layout_token_count(layout: &Gemma4ExecutionLayout) -> Result<u64, Gemma4ExecutionLayoutError> {
     layout
         .tensors
@@ -1412,6 +1591,22 @@ pub fn build_gemma4_execution_layout(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(graph, plan, None)
+}
+
+pub fn build_gemma4_nvfp4_execution_layout(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    sidecar: &VerifiedNvfp4Sidecar,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(graph, plan, Some(sidecar))
+}
+
+fn build_gemma4_execution_layout_source(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    sidecar: Option<&VerifiedNvfp4Sidecar>,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
     if graph.lock_fingerprint() != plan.lock_fingerprint
         || graph.weight_plan_digest() != plan.digest()
     {
@@ -1419,7 +1614,7 @@ pub fn build_gemma4_execution_layout(
             "graph and weight-plan identity differ",
         ));
     }
-    let mut builder = LayoutBuilder::new(graph, plan)?;
+    let mut builder = LayoutBuilder::new(graph, plan, sidecar)?;
     builder.build()?;
     builder.finish()
 }
@@ -1427,6 +1622,7 @@ pub fn build_gemma4_execution_layout(
 struct LayoutBuilder<'a> {
     graph: &'a Gemma4Graph,
     plan: &'a WeightLoadPlan,
+    nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
     weights: BTreeMap<String, usize>,
@@ -1442,10 +1638,21 @@ impl<'a> LayoutBuilder<'a> {
     fn new(
         graph: &'a Gemma4Graph,
         plan: &'a WeightLoadPlan,
+        nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        if let Some(sidecar) = nvfp4_sidecar {
+            if sidecar.source_lock_fingerprint() != graph.lock_fingerprint()
+                || sidecar.tensors().len() > 144
+            {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "NVFP4 sidecar source identity or tensor count differs",
+                ));
+            }
+        }
         let mut builder = Self {
             graph,
             plan,
+            nvfp4_sidecar,
             tensors: Vec::new(),
             nodes: Vec::with_capacity(graph.nodes().len()),
             weights: BTreeMap::new(),
@@ -1456,6 +1663,7 @@ impl<'a> LayoutBuilder<'a> {
             workspace_bytes: 0,
             request_state_bytes: 0,
         };
+        let mut matched_nvfp4 = 0_usize;
         for entry in &plan.entries {
             if builder
                 .weight_entries
@@ -1472,7 +1680,21 @@ impl<'a> LayoutBuilder<'a> {
             entry.destination_start.ok_or_else(|| {
                 Gemma4ExecutionLayoutError::invalid("loadable weight has no destination offset")
             })?;
-            let view = tensor_view(entry.dtype, &entry.shape, 0)?;
+            let view = match nvfp4_sidecar.and_then(|sidecar| sidecar.tensor(&entry.tensor_name)) {
+                Some(tensor) => {
+                    matched_nvfp4 += 1;
+                    if tensor.shape.as_slice() != entry.shape.as_slice()
+                        || !entry.tensor_name.contains(".mlp.")
+                        || !entry.tensor_name.ends_with("_proj.weight")
+                    {
+                        return Err(Gemma4ExecutionLayoutError::invalid(
+                            "NVFP4 tensor does not match one Gemma MLP weight",
+                        ));
+                    }
+                    nvfp4_tensor_view(&entry.shape)?
+                }
+                None => tensor_view(entry.dtype, &entry.shape, 0)?,
+            };
             let id = builder.push_tensor(
                 entry.tensor_name.clone(),
                 view,
@@ -1481,6 +1703,13 @@ impl<'a> LayoutBuilder<'a> {
                 },
             )?;
             builder.weights.insert(entry.tensor_name.clone(), id);
+        }
+        if let Some(sidecar) = nvfp4_sidecar {
+            if matched_nvfp4 != sidecar.tensors().len() {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "NVFP4 sidecar contains a tensor outside the loadable Gemma MLP set",
+                ));
+            }
         }
         builder.token_ids = builder.push_tensor(
             "request.token_ids",
@@ -1565,12 +1794,26 @@ impl<'a> LayoutBuilder<'a> {
                 "execution nodes do not map one-to-one to graph nodes",
             ));
         }
+        let model_weight_bytes = self
+            .tensors
+            .iter()
+            .filter(|tensor| matches!(tensor.backing, Gemma4TensorBacking::ModelWeight { .. }))
+            .try_fold(0_u64, |total, tensor| {
+                total
+                    .checked_add(gemma_resident_weight_bytes(&tensor.view)?)
+                    .ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid("model resident bytes overflowed")
+                    })
+            })?;
         Ok(Gemma4ExecutionLayout {
             model_fingerprint: self.graph.lock_fingerprint().to_owned(),
+            nvfp4_sidecar_fingerprint: self
+                .nvfp4_sidecar
+                .map(|sidecar| sidecar.manifest_fingerprint().to_owned()),
             plan_digest: *self.plan.digest(),
             tensors: self.tensors,
             nodes: self.nodes,
-            model_weight_bytes: self.plan.total_destination_bytes,
+            model_weight_bytes,
             workspace_bytes: self.workspace_bytes,
             request_state_bytes: self.request_state_bytes,
         })
@@ -2067,6 +2310,26 @@ impl<'a> LayoutBuilder<'a> {
             .map(|id| Ok(self.tensor(*id)?.view.clone()))
             .collect()
     }
+}
+
+fn nvfp4_tensor_view(shape: &[u64]) -> Result<TensorView, Gemma4ExecutionLayoutError> {
+    let shape = shape
+        .iter()
+        .map(|dimension| {
+            usize::try_from(*dimension).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("NVFP4 tensor extent does not fit usize")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    TensorView::with_encoding(
+        DType::U8,
+        Encoding::Nvfp4 {
+            block_size: 16,
+            scale_dtype: DType::F8E4M3Fn,
+        },
+        &shape,
+    )
+    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
 }
 
 fn tensor_view(

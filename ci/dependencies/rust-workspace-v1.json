@@ -140,6 +140,20 @@
           "doctest": false
         },
         {
+          "name": "verify_gemma4_lock",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "verify_nvfp4_sidecar",
           "kind": [
             "example"
@@ -436,6 +450,20 @@
           "doctest": false
         },
         {
+          "name": "sllm-linear-attention-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-matmul-g1-evidence",
           "kind": [
             "bin"
@@ -479,6 +507,20 @@
         },
         {
           "name": "sllm-output-gate-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase15q-gemma-accuracy",
           "kind": [
             "bin"
           ],

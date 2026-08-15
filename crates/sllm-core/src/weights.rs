@@ -646,9 +646,7 @@ pub fn build_gemma4_weight_load_plan<'a>(
     descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
 ) -> Result<WeightLoadPlan, WeightPlanError> {
     if lock.schema_version != "model-lock-v2"
-        || lock.model.repo_id != crate::gemma4::GEMMA4_12B_REPO_ID
-        || lock.model.resolved_revision != crate::gemma4::GEMMA4_12B_REVISION
-        || lock.fingerprint() != crate::gemma4::GEMMA4_12B_FINGERPRINT
+        || !crate::gemma4::is_reviewed_gemma4_identity(lock)
         || !lock.model.architecture.text.tie_word_embeddings
         || lock.model.architecture.text.layer_types != crate::gemma4::reviewed_layer_schedule()
     {
@@ -1368,6 +1366,24 @@ mod tests {
             consumer("model.language_model.layers.47.post_feedforward_layernorm.weight"),
             Some(WeightConsumer::PostFeedforwardNorm)
         );
+    }
+
+    #[test]
+    fn gemma4_plan_accepts_the_exact_instruction_tuned_lock() {
+        let lock = crate::gemma4::parse_gemma4_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-it-bf16.json"
+        ))
+        .expect("reviewed Gemma 4 IT lock parses");
+        let catalog = crate::gemma4::expected_gemma4_tensor_catalog()
+            .expect("reviewed Gemma 4 catalog derives");
+        let plan = build_gemma4_weight_load_plan(&lock, catalog.values())
+            .expect("reviewed Gemma 4 IT load plan builds");
+        assert_eq!(plan.repo_id, crate::gemma4::GEMMA4_12B_IT_REPO_ID);
+        assert_eq!(
+            plan.lock_fingerprint,
+            crate::gemma4::GEMMA4_12B_IT_FINGERPRINT
+        );
+        assert_eq!(plan.total_destination_bytes, 23_814_700_640);
     }
 
     #[test]

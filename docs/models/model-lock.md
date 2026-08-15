@@ -143,6 +143,18 @@ Phase 15OのFP8/NVFP4最適化は実行providerだけを変更し、上記sideca
 scale/packing規則を変更しない。decode/prefill provider IDとkernel symbolはdispatch auditへ含めるが、派生artifact identityを
 置き換える情報ではない。runtimeは同じverified sidecarをloadし、requestごとの全weight展開を行わない。
 
+Phase 15Qは`google/gemma-4-12B-it` revision `707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7`を
+`model-lock-v2` fingerprint `sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d`で追加した。
+7 file、model artifact SHA-256 `5a84cb313260ac447237b890387116dfa8682e49a6b44bc585ae8353abbff18d`、complete
+safetensors header SHA-256 `e432b3ee11ff7f7d179ccbf3827af9669c03a0a28e603000d89c6e1b6c9d4bb7`、tokenizer SHA-256、
+chat template、stop IDsをexactに検証する。base model lockとのrepo/revision/fingerprintのORだけを許し、未知のGemma identityへ
+一般化しない。
+
+Unsloth import manifestも同じ`sllm-nvfp4-sidecar-v1`を使い、source BF16 lockに加えてquantized repository/revision、完全artifact
+SHA-256、importer script hash、`weight_global_scale`のreciprocal変換、`input_global_scale`未適用を固定する。full primary artifactは
+MLP 144 tensorを必須とする。1〜144 tensorのsubsetはlayer感度診断だけに使え、manifestの`gemma-mlp-subset`選択とsidecar
+fingerprintが一致しないrequestへの再bindを拒否する。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

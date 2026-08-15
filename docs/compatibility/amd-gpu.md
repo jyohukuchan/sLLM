@@ -146,10 +146,25 @@ shape/alignmentをすべて満たしたproblemだけdispatchする。
 - Phase 15O期間にはMI300Xが存在せず、新しいexact `gfx942` candidateは有効化していない。R9700/V620の結果を
   CDNA3へ移植せず、Phase 12で検証した既存gfx942 provider scopeも変更しない。
 
+### Phase 15Q Unsloth NVFP4品質attribution
+
+- R9700 exact `gfx1201`とV620 exact `gfx1030`で、Gemma 4 12B-itの同一BF16 source、MLP 144 tensor、BF16
+  activation/attention、FP16 KVを固定し、B0/S0/U0/O0を32 prompt・96 logit位置で比較した。両targetとも全dispatch HIP、
+  fallbackなし、nonfinite 0、cleanup 0だった。
+- U0 Unsloth `imatrix_mse` importはS0 min-maxよりmedian KLDをR9700 `0.3315→0.1619`、V620
+  `0.3715→0.1736`へ改善し、top-1一致も`61.46%→79.17%`、`62.50%→76.04%`へ改善した。一方、最大KLDは
+  `9.1781`/`7.5777`でbudget `0.05`を大幅に超えた。
+- weight MSEだけをbounded searchしたO0は120/144 tensorでS0を改善したが、full-model median KLDは`0.2880`/`0.3433`、
+  最大は`14.4025`/`6.4180`だった。activation-aware algorithmの寄与は確認できたが、同一format内で全caseを救済できず、
+  両targetのNVFP4は`correctness-only opt-in`を維持する。
+- この比較はRDNA2/RDNA4のpacked-dequant W4A16だけを証明する。Unsloth公開checkpointのW4A4、attention W8A8、FP8 KV、
+  NVIDIA native FP4性能、CDNA3へ一般化しない。
+
 詳細な実装・実機順は[Phase 10](../plans/archive/2026/08/11-20/phase10-fp8-w8a8.md)、
 [Phase 11](../plans/archive/2026/08/11-20/phase11-cdna3-port.md)、
 [Phase 12](../plans/archive/2026/08/11-20/phase12-mi300x-validation.md)、
-[Phase 15O](../plans/archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)を正とする。
+[Phase 15O](../plans/archive/2026/08/11-20/phase15o-model-quant-path-optimization.md)、
+[Phase 15Q](../plans/archive/2026/08/11-20/phase15q-unsloth-nvfp4-quality-attribution.md)を正とする。
 
 ## 製品別evidence
 

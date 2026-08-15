@@ -114,6 +114,9 @@ software compatibility tuple の lifecycle は次の四つに統一する。
 - Phase 15Oは同じlocal ROCm 7.14.0 tupleでexact `gfx1030`/`gfx1201`のNVFP4 decode/prefill providerと、exact
   `gfx1201`のFP8 dynamic量子化を実機検証した。target別release build、operator、full model、OpenAI service、cleanupを
   PASSした範囲だけを`project-verified`とし、別ROCm、別SKU、未実行のexact `gfx942`へ一般化しない。
+- Phase 15Qも同じROCm 7.14.0、Code Object V6、wave32のtarget別release buildを使い、R9700/V620でGemma 4 12B-it
+  BF16/S0/U0/O0のfull logits 96位置とlayer subsetを実行した。Unsloth artifactの取得・独立decodeはhost上で行い、model codeや
+  Python runtimeをproduction GPU processへloadしていない。この証拠をROCm release、GPU SKU、W4A4/FP8 KVへ一般化しない。
 - Ubuntu 26.04 LTS と ROCm 7.14.0 の組み合わせは将来検証する `planned` tuple とする。AMD が ROCm 7.14.0 で Ubuntu 26.04 を掲載していても、sLLM による実機検証なしに Ubuntu 24.04 の結果を移植しない。
 - 表にない Ubuntu、ROCm release、GPU の組み合わせは暗黙の `supported` としない。調査前は未分類であり、採用候補なら具体的な tuple を `planned` として追加する。
 

@@ -57,18 +57,21 @@ pub use fp8::{
 pub use fp8_sidecar::{Fp8SidecarError, Fp8SidecarTensor, VerifiedFp8Sidecar, verify_fp8_sidecar};
 pub use gemma4::{
     GEMMA4_12B_ALIAS, GEMMA4_12B_CATALOG_SHA256, GEMMA4_12B_FINGERPRINT,
-    GEMMA4_12B_HEADER_LENGTH_BYTES, GEMMA4_12B_HEADER_SHA256, GEMMA4_12B_REPO_ID,
-    GEMMA4_12B_REVISION, GEMMA4_12B_TENSOR_COUNT, GEMMA4_12B_TEXT_TENSOR_COUNT,
-    Gemma4ArchitectureContract, Gemma4ComponentContract, Gemma4ExcludedFile, Gemma4LayerType,
-    Gemma4LicenseContract, Gemma4LockedModel, Gemma4ModelLock, Gemma4RopeContract,
-    Gemma4SliceContract, Gemma4TensorContract, Gemma4TextConfigContract, Gemma4TokenizerContract,
-    parse_gemma4_model_lock, reviewed_layer_schedule, validate_gemma4_config,
+    GEMMA4_12B_HEADER_LENGTH_BYTES, GEMMA4_12B_HEADER_SHA256, GEMMA4_12B_IT_ALIAS,
+    GEMMA4_12B_IT_FINGERPRINT, GEMMA4_12B_IT_HEADER_SHA256, GEMMA4_12B_IT_REPO_ID,
+    GEMMA4_12B_IT_REVISION, GEMMA4_12B_REPO_ID, GEMMA4_12B_REVISION, GEMMA4_12B_TENSOR_COUNT,
+    GEMMA4_12B_TEXT_TENSOR_COUNT, Gemma4ArchitectureContract, Gemma4ComponentContract,
+    Gemma4ExcludedFile, Gemma4LayerType, Gemma4LicenseContract, Gemma4LockedModel, Gemma4ModelLock,
+    Gemma4RopeContract, Gemma4SliceContract, Gemma4TensorContract, Gemma4TextConfigContract,
+    Gemma4TokenizerContract, parse_gemma4_model_lock, reviewed_layer_schedule,
+    validate_gemma4_config,
 };
 pub use gemma4_execution::{
     Gemma4ExecutionAudit, Gemma4ExecutionLayout, Gemma4ExecutionLayoutError, Gemma4ExecutionNode,
     Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
     Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
-    Gemma4TensorBacking, build_gemma4_execution_layout, provision_gemma4_execution_buffers,
+    Gemma4TensorBacking, build_gemma4_execution_layout, build_gemma4_nvfp4_execution_layout,
+    provision_gemma4_execution_buffers,
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
@@ -112,7 +115,7 @@ pub use nvfp4::{
 };
 pub use nvfp4_sidecar::{
     Nvfp4SidecarError, Nvfp4SidecarTensor, Nvfp4TensorBytes, VerifiedNvfp4Sidecar,
-    verify_nvfp4_sidecar,
+    verify_gemma4_nvfp4_sidecar, verify_nvfp4_sidecar,
 };
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,

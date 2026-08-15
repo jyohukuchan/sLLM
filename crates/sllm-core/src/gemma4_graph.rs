@@ -6,7 +6,7 @@
 //! availability remains a backend preparation decision.
 
 use crate::gemma4::{
-    GEMMA4_12B_FINGERPRINT, Gemma4LayerType, Gemma4ModelLock, reviewed_layer_schedule,
+    Gemma4LayerType, Gemma4ModelLock, is_reviewed_gemma4_identity, reviewed_layer_schedule,
 };
 use crate::op::{
     OpError, RmsNormScaleMode, SemanticOpKind, SplitHalfRotaryContract,
@@ -532,7 +532,7 @@ pub fn build_gemma4_graph(
     start_position: u64,
     state_capacity: u64,
 ) -> Result<Gemma4Graph, Gemma4GraphError> {
-    if lock.fingerprint() != GEMMA4_12B_FINGERPRINT {
+    if !is_reviewed_gemma4_identity(lock) {
         return Err(Gemma4GraphError::InvalidModel);
     }
     if token_count == 0 {
@@ -1024,6 +1024,21 @@ mod tests {
         let catalog = crate::gemma4::expected_gemma4_tensor_catalog().unwrap();
         let plan = build_gemma4_weight_load_plan(&lock, catalog.values()).unwrap();
         (lock, plan)
+    }
+
+    #[test]
+    fn graph_accepts_the_exact_instruction_tuned_identity() {
+        let lock = crate::parse_gemma4_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-it-bf16.json"
+        ))
+        .unwrap();
+        let catalog = crate::gemma4::expected_gemma4_tensor_catalog().unwrap();
+        let plan = build_gemma4_weight_load_plan(&lock, catalog.values()).unwrap();
+        let graph = build_gemma4_graph(&lock, &plan, 3, 17, 257).unwrap();
+        assert_eq!(
+            graph.lock_fingerprint(),
+            crate::gemma4::GEMMA4_12B_IT_FINGERPRINT
+        );
     }
 
     #[test]

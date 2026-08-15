@@ -1,6 +1,6 @@
 //! Fail-closed validation for weight-only NVFP4 derived sidecars.
 
-use crate::{ModelLock, NVFP4_BLOCK_SIZE};
+use crate::{Gemma4ModelLock, ModelLock, NVFP4_BLOCK_SIZE};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -153,6 +153,22 @@ struct Tool {
 #[serde(deny_unknown_fields)]
 struct ToolArguments {
     tensor: Vec<String>,
+    #[serde(default)]
+    selection: Option<String>,
+    #[serde(default)]
+    tensor_scale_multipliers_sha256: Option<String>,
+    #[serde(default)]
+    scale_objective: Option<String>,
+    #[serde(default)]
+    source_repository: Option<String>,
+    #[serde(default)]
+    source_revision: Option<String>,
+    #[serde(default)]
+    source_artifact_sha256: Option<String>,
+    #[serde(default)]
+    global_scale_convention: Option<String>,
+    #[serde(default)]
+    input_global_scales_applied: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -200,6 +216,40 @@ pub fn verify_nvfp4_sidecar(
     source_lock_path: &Path,
     source_lock: &ModelLock,
 ) -> Result<VerifiedNvfp4Sidecar, Nvfp4SidecarError> {
+    verify_nvfp4_sidecar_identity(
+        manifest_path,
+        artifact_path,
+        source_lock_path,
+        &source_lock.model.repo_id,
+        &source_lock.model.resolved_revision,
+        &source_lock.fingerprint,
+    )
+}
+
+pub fn verify_gemma4_nvfp4_sidecar(
+    manifest_path: &Path,
+    artifact_path: &Path,
+    source_lock_path: &Path,
+    source_lock: &Gemma4ModelLock,
+) -> Result<VerifiedNvfp4Sidecar, Nvfp4SidecarError> {
+    verify_nvfp4_sidecar_identity(
+        manifest_path,
+        artifact_path,
+        source_lock_path,
+        &source_lock.model.repo_id,
+        &source_lock.model.resolved_revision,
+        &source_lock.fingerprint,
+    )
+}
+
+fn verify_nvfp4_sidecar_identity(
+    manifest_path: &Path,
+    artifact_path: &Path,
+    source_lock_path: &Path,
+    source_repo_id: &str,
+    source_revision: &str,
+    source_fingerprint: &str,
+) -> Result<VerifiedNvfp4Sidecar, Nvfp4SidecarError> {
     let manifest_bytes = bounded_read(manifest_path, MAX_MANIFEST_BYTES, "manifest")?;
     let mut value: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| Nvfp4SidecarError::invalid(format!("manifest JSON: {error}")))?;
@@ -217,9 +267,9 @@ pub fn verify_nvfp4_sidecar(
     let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|error| Nvfp4SidecarError::invalid(format!("manifest schema: {error}")))?;
     if manifest.schema_version != SCHEMA
-        || manifest.source.repo_id != source_lock.model.repo_id
-        || manifest.source.resolved_revision != source_lock.model.resolved_revision
-        || manifest.source.lock_fingerprint != source_lock.fingerprint
+        || manifest.source.repo_id != source_repo_id
+        || manifest.source.resolved_revision != source_revision
+        || manifest.source.lock_fingerprint != source_fingerprint
         || manifest.source.lock_sha256 != sha256_file(source_lock_path)?
     {
         return Err(Nvfp4SidecarError::invalid("source identity differs"));
@@ -365,9 +415,47 @@ fn validate_format_source(source: &FormatSource) -> Result<(), Nvfp4SidecarError
 }
 
 fn validate_tool(tool: &Tool) -> Result<(), Nvfp4SidecarError> {
+    let optimized_scale = match (
+        tool.arguments.tensor_scale_multipliers_sha256.as_deref(),
+        tool.arguments.scale_objective.as_deref(),
+    ) {
+        (None, None) => true,
+        (Some(hash), Some("sampled-weight-mse-independent-evaluation-set")) => valid_sha256(hash),
+        _ => false,
+    };
+    let converter = tool.path == "ci/tools/convert_nvfp4_sidecar.py"
+        && matches!(
+            tool.arguments.selection.as_deref(),
+            None | Some("gemma-mlp-144") | Some("gemma-mlp-subset")
+        )
+        && optimized_scale
+        && tool.arguments.source_repository.is_none()
+        && tool.arguments.source_revision.is_none()
+        && tool.arguments.source_artifact_sha256.is_none()
+        && tool.arguments.global_scale_convention.is_none()
+        && tool.arguments.input_global_scales_applied.is_none();
+    let importer = tool.path == "ci/tools/import_unsloth_nvfp4_sidecar.py"
+        && tool.numpy == "not-used"
+        && matches!(
+            (
+                tool.arguments.tensor.is_empty(),
+                tool.arguments.selection.as_deref()
+            ),
+            (true, None) | (false, Some("gemma-mlp-subset"))
+        )
+        && tool.arguments.tensor_scale_multipliers_sha256.is_none()
+        && tool.arguments.scale_objective.is_none()
+        && tool.arguments.source_repository.as_deref() == Some("unsloth/gemma-4-12b-it-NVFP4")
+        && tool.arguments.source_revision.as_deref()
+            == Some("b1f649734b34aa5575b03d186abd1b9be3d0d5c4")
+        && tool.arguments.source_artifact_sha256.as_deref()
+            == Some("sha256:7c2ee23298e7c3a9247e8947597dca5a38f8b791a0322487466d2bfad8ce704b")
+        && tool.arguments.global_scale_convention.as_deref()
+            == Some("multiplicative-reciprocal-of-compressed-tensors-weight-global-scale")
+        && tool.arguments.input_global_scales_applied == Some(false);
     if tool.repository.is_empty()
         || tool.commit.is_empty()
-        || tool.path != "ci/tools/convert_nvfp4_sidecar.py"
+        || (!converter && !importer)
         || !valid_sha256(&tool.sha256)
         || tool.numpy.is_empty()
         || !tool
