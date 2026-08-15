@@ -10,6 +10,9 @@ mod fake;
 mod final_output;
 mod fp8;
 mod fp8_sidecar;
+mod gemma4;
+mod gemma4_execution;
+mod gemma4_graph;
 mod handles;
 mod kv_state;
 mod linear_attention;
@@ -50,6 +53,29 @@ pub use fp8::{
     encode_e4m3fnuz, quantize_e4m3fn_k_blocks, quantize_e4m3fn_outer_rows, select_fp8_provider,
 };
 pub use fp8_sidecar::{Fp8SidecarError, Fp8SidecarTensor, VerifiedFp8Sidecar, verify_fp8_sidecar};
+pub use gemma4::{
+    GEMMA4_12B_ALIAS, GEMMA4_12B_CATALOG_SHA256, GEMMA4_12B_FINGERPRINT,
+    GEMMA4_12B_HEADER_LENGTH_BYTES, GEMMA4_12B_HEADER_SHA256, GEMMA4_12B_REPO_ID,
+    GEMMA4_12B_REVISION, GEMMA4_12B_TENSOR_COUNT, GEMMA4_12B_TEXT_TENSOR_COUNT,
+    Gemma4ArchitectureContract, Gemma4ComponentContract, Gemma4ExcludedFile, Gemma4LayerType,
+    Gemma4LicenseContract, Gemma4LockedModel, Gemma4ModelLock, Gemma4RopeContract,
+    Gemma4SliceContract, Gemma4TensorContract, Gemma4TextConfigContract, Gemma4TokenizerContract,
+    parse_gemma4_model_lock, reviewed_layer_schedule, validate_gemma4_config,
+};
+pub use gemma4_execution::{
+    Gemma4ExecutionAudit, Gemma4ExecutionLayout, Gemma4ExecutionLayoutError, Gemma4ExecutionNode,
+    Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
+    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
+    Gemma4TensorBacking, build_gemma4_execution_layout, provision_gemma4_execution_buffers,
+};
+pub use gemma4_graph::{
+    GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
+    GEMMA4_MAX_POSITION_EMBEDDINGS, GEMMA4_SLIDING_WINDOW, GEMMA4_VOCAB_SIZE,
+    Gemma4AttentionDescriptor, Gemma4Graph, Gemma4GraphBindingClass, Gemma4GraphError,
+    Gemma4GraphNode, Gemma4GraphNodeKind, Gemma4KvDescriptor, Gemma4NormRole, Gemma4RequestState,
+    Gemma4RequestStateSnapshot, Gemma4RequestTransition, Gemma4RopeDescriptor, Gemma4RopeType,
+    build_gemma4_graph,
+};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
@@ -70,17 +96,20 @@ pub use model::{
     NormalizationKind, PromptEvaluation, QWEN35_2B_FINGERPRINT, QWEN35_2B_REPO_ID,
     QWEN35_2B_REVISION, QWEN35_4B_FINGERPRINT, QWEN35_4B_REPO_ID, QWEN35_4B_REVISION,
     QWEN35_9B_FINGERPRINT, QWEN35_9B_REPO_ID, QWEN35_9B_REVISION, Qwen35ReviewedSpec,
-    RopeParameters, RopeType, ScaleMode, SliceContract, StopEvaluation, StopIdentity,
-    StopTokenHandling, TensorClassification, TensorContract, TensorDType, TensorDescriptor,
-    TextConfig, TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
-    parse_model_lock, qwen35_reviewed_spec, read_model_lock, reviewed_qwen35_spec,
-    validate_model_config, verify_model_cache,
+    ReviewedModelKind, ReviewedModelLock, ReviewedModelRegistry, RopeParameters, RopeType,
+    ScaleMode, SliceContract, StopEvaluation, StopIdentity, StopTokenHandling,
+    TensorClassification, TensorContract, TensorDType, TensorDescriptor, TextConfig,
+    TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
+    parse_model_lock, parse_reviewed_model_lock, qwen35_reviewed_spec, read_model_lock,
+    read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
+    verify_gemma4_model_cache, verify_model_cache,
 };
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
-    SemanticOp, SemanticOpDescriptor, SemanticOpKind,
+    RotaryTensor, SemanticOp, SemanticOpDescriptor, SemanticOpKind, SplitHalfRotaryContract,
+    WindowedCausalAttentionContract,
 };
 pub use prepared_execution::{
     ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
@@ -105,7 +134,8 @@ pub use tensor::{TensorError, TensorView};
 pub use weights::{
     WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer, WeightConsumerKey,
     WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError, WeightUploadError,
-    WeightUploadReceipt, WeightUploadRequest, build_verified_weight_load_plan,
+    WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
+    build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan,
     build_weight_load_plan, upload_verified_weight,
 };
 
@@ -397,11 +427,16 @@ mod tests {
         assert_eq!(valid_copy.arity(), (1, 1));
         assert_eq!(SemanticOpKind::Copy.arity(), (1, 1));
         assert_eq!(SemanticOpKind::Add.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::ScalarMul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::Embedding.arity(), (2, 1));
         assert_eq!(SemanticOpKind::Matmul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::SiluMul.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::GeluTanhMul.arity(), (2, 1));
         assert_eq!(SemanticOpKind::SigmoidMul.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::TanhSoftcap.arity(), (2, 1));
         assert_eq!(SemanticOpKind::RmsNorm.arity(), (2, 1));
+        assert_eq!(SemanticOpKind::Rotary.arity(), (3, 2));
+        assert_eq!(SemanticOpKind::CausalAttention.arity(), (3, 1));
         assert_eq!(SemanticOpKind::Argmax.arity(), (1, 1));
     }
 
@@ -533,14 +568,17 @@ mod tests {
         let semantic_kinds = [
             SemanticOpKind::Copy,
             SemanticOpKind::Add,
+            SemanticOpKind::ScalarMul,
             SemanticOpKind::Embedding,
             SemanticOpKind::Matmul,
             SemanticOpKind::SiluMul,
+            SemanticOpKind::GeluTanhMul,
             SemanticOpKind::SigmoidMul,
+            SemanticOpKind::TanhSoftcap,
             SemanticOpKind::RmsNorm,
             SemanticOpKind::AttentionPreprocess,
         ];
-        assert_eq!(semantic_kinds.len(), 8);
+        assert_eq!(semantic_kinds.len(), 11);
         assert!(
             semantic_kinds
                 .iter()
@@ -793,6 +831,54 @@ mod tests {
     }
 
     #[test]
+    fn gemma_elementwise_contracts_distinguish_scalar_broadcast_and_gelu_tanh() {
+        for shape in [vec![1], vec![3, 17], vec![3, 3839], vec![1, 262_144]] {
+            let value = TensorView::contiguous(DType::Bf16, &shape).unwrap();
+            let scalar = TensorView::contiguous(DType::Bf16, &[1]).unwrap();
+            for kind in [SemanticOpKind::ScalarMul, SemanticOpKind::TanhSoftcap] {
+                let descriptor = SemanticOpDescriptor::new(
+                    kind,
+                    vec![value.clone(), scalar.clone()],
+                    vec![value.clone()],
+                )
+                .unwrap();
+                assert_eq!(descriptor.kind(), kind);
+            }
+            let gelu = SemanticOpDescriptor::new(
+                SemanticOpKind::GeluTanhMul,
+                vec![value.clone(), value.clone()],
+                vec![value],
+            )
+            .unwrap();
+            assert_eq!(gelu.kind(), SemanticOpKind::GeluTanhMul);
+        }
+
+        let value = TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap();
+        let wrong_scalar = TensorView::contiguous(DType::Bf16, &[2]).unwrap();
+        for kind in [SemanticOpKind::ScalarMul, SemanticOpKind::TanhSoftcap] {
+            assert_eq!(
+                SemanticOpDescriptor::new(
+                    kind,
+                    vec![value.clone(), wrong_scalar.clone()],
+                    vec![value.clone()],
+                ),
+                Err(OpError::ScalarElementwiseShapeMismatch { kind })
+            );
+        }
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::GeluTanhMul,
+                vec![
+                    value.clone(),
+                    TensorView::contiguous(DType::Bf16, &[3, 16]).unwrap(),
+                ],
+                vec![value],
+            ),
+            Err(OpError::ElementwiseMetadataMismatch)
+        );
+    }
+
+    #[test]
     fn rms_norm_requires_explicit_contract_and_exposes_fixed_baseline() {
         let activation = TensorView::contiguous(DType::Bf16, &[2, 3]).expect("valid activation");
         let scale = TensorView::contiguous(DType::Bf16, &[3]).expect("valid scale");
@@ -821,6 +907,9 @@ mod tests {
         assert_eq!(contract.output_dtype(), DType::Bf16);
         assert_eq!(contract.alias_policy(), RmsNormAliasPolicy::Unsupported);
         assert_eq!(contract.effective_scale(0.25), 1.25);
+        let direct = RmsNormContract::new(1.0e-6, RmsNormScaleMode::Direct).unwrap();
+        assert_eq!(direct.scale_mode(), RmsNormScaleMode::Direct);
+        assert_eq!(direct.effective_scale(0.25), 0.25);
         assert_eq!(
             RmsNormContract::new(1.0e-6, RmsNormScaleMode::OffsetOne),
             Ok(contract)
@@ -1019,6 +1108,147 @@ mod tests {
                 TensorView::contiguous(DType::Bf16, &[m, 4, 256]).unwrap(),
             ],
         )
+    }
+
+    fn rotary_views(
+        m: usize,
+        q_heads: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> (Vec<TensorView>, Vec<TensorView>) {
+        (
+            vec![
+                TensorView::contiguous(DType::Bf16, &[m, q_heads, head_dim]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[m, kv_heads, head_dim]).unwrap(),
+                TensorView::contiguous(DType::I32, &[m]).unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[m, q_heads, head_dim]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[m, kv_heads, head_dim]).unwrap(),
+            ],
+        )
+    }
+
+    #[test]
+    fn split_half_rotary_distinguishes_gemma_sliding_and_proportional_full() {
+        for (kv_heads, head_dim, rotary_dim, theta) in [
+            (8_usize, 256_usize, 256_u32, 10_000.0_f32),
+            (1, 512, 128, 1_000_000.0),
+        ] {
+            let (inputs, outputs) = rotary_views(3, 16, kv_heads, head_dim);
+            let contract = SplitHalfRotaryContract::new(
+                16,
+                kv_heads as u32,
+                head_dim as u32,
+                rotary_dim,
+                theta,
+                17,
+                3,
+                262_144,
+            )
+            .unwrap();
+            let descriptor = SemanticOpDescriptor::new_rotary(inputs, outputs, contract).unwrap();
+            assert_eq!(descriptor.kind(), SemanticOpKind::Rotary);
+            assert_eq!(descriptor.arity(), (3, 2));
+            assert_eq!(descriptor.rotary_contract(), Some(contract));
+            assert_eq!(contract.accumulation_dtype(), DType::F32);
+            assert_eq!(contract.output_dtype(), DType::Bf16);
+            assert_eq!(contract.start_position(), 17);
+            assert_eq!(contract.token_count(), 3);
+            assert_eq!(contract.rotary_dim(), rotary_dim);
+            assert_eq!(contract.theta(), theta);
+        }
+    }
+
+    #[test]
+    fn split_half_rotary_rejects_invalid_ranges_and_tensor_contracts() {
+        assert!(matches!(
+            SplitHalfRotaryContract::new(16, 8, 256, 255, 10_000.0, 0, 1, 262_144),
+            Err(OpError::RotaryInvalidConfig {
+                field: "rotary dimension"
+            })
+        ));
+        assert!(matches!(
+            SplitHalfRotaryContract::new(16, 8, 256, 256, 10_000.0, 262_143, 2, 262_144),
+            Err(OpError::RotaryPositionOutOfRange { .. })
+        ));
+
+        let contract =
+            SplitHalfRotaryContract::new(16, 8, 256, 256, 10_000.0, 0, 3, 262_144).unwrap();
+        let (mut inputs, outputs) = rotary_views(3, 16, 8, 256);
+        inputs[2] = TensorView::contiguous(DType::I32, &[3, 1]).unwrap();
+        assert_eq!(
+            SemanticOpDescriptor::new_rotary(inputs, outputs, contract),
+            Err(OpError::RotaryShapeMismatch)
+        );
+
+        let (inputs, outputs) = rotary_views(3, 16, 8, 256);
+        assert_eq!(
+            SemanticOpDescriptor::new(SemanticOpKind::Rotary, inputs, outputs),
+            Err(OpError::RotaryContractRequired)
+        );
+    }
+
+    fn causal_attention_views(
+        m: usize,
+        length: usize,
+        kv_heads: usize,
+        head_dim: usize,
+    ) -> (Vec<TensorView>, Vec<TensorView>) {
+        (
+            vec![
+                TensorView::contiguous(DType::Bf16, &[m, 16, head_dim]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[length, kv_heads, head_dim]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[length, kv_heads, head_dim]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[m, 16, head_dim]).unwrap()],
+        )
+    }
+
+    #[test]
+    fn windowed_causal_attention_distinguishes_gemma_sliding_and_full() {
+        for (kv_heads, head_dim, window) in [(8_usize, 256_usize, Some(1_024_u64)), (1, 512, None)]
+        {
+            let contract = WindowedCausalAttentionContract::new(
+                16,
+                kv_heads as u32,
+                head_dim as u32,
+                17,
+                3,
+                20,
+                window,
+                1.0,
+            )
+            .unwrap();
+            let (inputs, outputs) = causal_attention_views(3, 20, kv_heads, head_dim);
+            let descriptor =
+                SemanticOpDescriptor::new_causal_attention(inputs, outputs, contract).unwrap();
+            assert_eq!(descriptor.kind(), SemanticOpKind::CausalAttention);
+            assert_eq!(descriptor.causal_attention_contract(), Some(contract));
+            assert_eq!(contract.sliding_window(), window);
+            assert_eq!(contract.scaling(), 1.0);
+            assert_eq!(contract.accumulation_dtype(), DType::F32);
+            assert_eq!(contract.output_dtype(), DType::Bf16);
+        }
+    }
+
+    #[test]
+    fn windowed_causal_attention_rejects_length_and_shape_drift() {
+        assert!(matches!(
+            WindowedCausalAttentionContract::new(16, 8, 256, 17, 3, 21, Some(1_024), 1.0),
+            Err(OpError::CausalAttentionLengthMismatch {
+                expected: 20,
+                actual: 21
+            })
+        ));
+        let contract =
+            WindowedCausalAttentionContract::new(16, 8, 256, 17, 3, 20, Some(1_024), 1.0).unwrap();
+        let (mut inputs, outputs) = causal_attention_views(3, 20, 8, 256);
+        inputs[1] = TensorView::contiguous(DType::Bf16, &[19, 8, 256]).unwrap();
+        assert_eq!(
+            SemanticOpDescriptor::new_causal_attention(inputs, outputs, contract),
+            Err(OpError::CausalAttentionShapeMismatch)
+        );
     }
 
     fn attention_preprocess_descriptor(

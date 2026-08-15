@@ -1,7 +1,7 @@
 use core::fmt;
 use std::collections::HashMap;
 
-use sllm_core::{ModelLock, StopIdentity, TokenizerContract, VerifiedCache};
+use sllm_core::{Gemma4ModelLock, ModelLock, StopIdentity, TokenizerContract, VerifiedCache};
 use tokenizers::{AddedToken, Tokenizer};
 
 use crate::{StopPolicyError, validate_generation_stop_policy};
@@ -185,6 +185,10 @@ pub enum TokenizerError {
         role: String,
         id: u32,
     },
+    SpecialTokenContentMismatch {
+        role: String,
+        id: u32,
+    },
     DuplicateSpecialId {
         first_role: String,
         second_role: String,
@@ -257,6 +261,9 @@ impl fmt::Display for TokenizerError {
             Self::SpecialTokenNotMarkedSpecial { .. } => {
                 formatter.write_str("typed special token is not marked special")
             }
+            Self::SpecialTokenContentMismatch { .. } => {
+                formatter.write_str("typed special token content differs")
+            }
             Self::DuplicateSpecialId { .. } => {
                 formatter.write_str("typed special token IDs are duplicated")
             }
@@ -306,6 +313,7 @@ impl From<StopPolicyError> for TokenizerError {
 pub struct TokenizerFrontendV1 {
     tokenizer: Tokenizer,
     snapshot: TokenizerSnapshotV1,
+    encode_add_special_tokens: bool,
 }
 
 impl TokenizerFrontendV1 {
@@ -408,6 +416,115 @@ impl TokenizerFrontendV1 {
         Ok(Self {
             tokenizer,
             snapshot,
+            encode_add_special_tokens: false,
+        })
+    }
+
+    /// Construct the raw-text-only Gemma 4 frontend. The base model has no
+    /// chat template; this entry point validates only the exact tokenizer and
+    /// prepends the tokenizer's reviewed BOS post-processor on encode.
+    pub fn from_gemma4_verified_cache(
+        lock: &Gemma4ModelLock,
+        cache: &VerifiedCache,
+    ) -> Result<Self, TokenizerError> {
+        if cache.lock_fingerprint != lock.fingerprint() {
+            return Err(TokenizerError::LockFingerprintMismatch {
+                lock: lock.fingerprint().to_owned(),
+                cache: cache.lock_fingerprint.clone(),
+            });
+        }
+        if lock.supports_chat_messages()
+            || lock.model.tokenizer_contract.prompt_mode != "raw-text-only"
+        {
+            return Err(TokenizerError::InvalidTokenizer);
+        }
+        let bytes = cache
+            .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
+            .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        let tokenizer =
+            Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
+        let contract = &lock.model.tokenizer_contract;
+        let tokenizer_vocab = tokenizer.get_vocab(true);
+        let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
+        let expected_vocab_size =
+            usize::try_from(contract.vocab_size).map_err(|_| TokenizerError::InvalidTokenizer)?;
+        let tokenizer_vocab_span = tokenizer_vocab
+            .values()
+            .copied()
+            .max()
+            .map_or(0_u64, |id| u64::from(id) + 1);
+        if tokenizer_vocab.len() != tokenizer_vocab_size
+            || tokenizer_vocab_size != expected_vocab_size
+            || tokenizer_vocab_span != contract.vocab_size
+        {
+            return Err(TokenizerError::VocabSizeMismatch {
+                lock: contract.vocab_size,
+                tokenizer: tokenizer_vocab_span,
+            });
+        }
+
+        let special_ids = contract
+            .special_token_ids
+            .iter()
+            .map(|(role, id)| {
+                checked_token_id(*id, TokenIdContextV1::SpecialRole).map(|id| (role.clone(), id))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let added_tokens = tokenizer.get_added_tokens_decoder();
+        let special_roles =
+            validate_special_roles(&tokenizer, |id| added_tokens.get(&id), &special_ids)?;
+        let expected_contents = gemma4_special_token_contents();
+        for token in &special_roles {
+            if expected_contents.get(token.role.as_str()).copied() != Some(token.content.as_str()) {
+                return Err(TokenizerError::SpecialTokenContentMismatch {
+                    role: token.role.clone(),
+                    id: token.token_id,
+                });
+            }
+        }
+        if special_roles.len() != expected_contents.len() {
+            return Err(TokenizerError::InvalidTokenizer);
+        }
+        let eos_id = checked_token_id(
+            *contract
+                .special_token_ids
+                .get("eos")
+                .ok_or(TokenizerError::InvalidTokenizer)?,
+            TokenIdContextV1::TokenizerEos,
+        )?;
+        let stop_token_ids = contract
+            .stop_token_ids
+            .iter()
+            .map(|id| checked_token_id(*id, TokenIdContextV1::ContractEos))
+            .collect::<Result<Vec<_>, _>>()?;
+        if stop_token_ids != [eos_id] {
+            return Err(TokenizerError::StopPolicyMismatch {
+                expected: vec![eos_id],
+                actual: stop_token_ids,
+            });
+        }
+        let eos = EosIdentitySnapshotV1 {
+            token: "<eos>".to_owned(),
+            token_id: eos_id,
+            observed_content: tokenizer.id_to_token(eos_id).ok_or(
+                TokenizerError::EosIdToTokenMismatch {
+                    identity: EosIdentityV1::Tokenizer,
+                    id: eos_id,
+                },
+            )?,
+        };
+        let snapshot = TokenizerSnapshotV1 {
+            fingerprint: lock.fingerprint().to_owned(),
+            vocab_size: contract.vocab_size,
+            special_roles,
+            config_eos: eos.clone(),
+            tokenizer_eos: eos,
+            stop_token_ids: vec![eos_id],
+        };
+        Ok(Self {
+            tokenizer,
+            snapshot,
+            encode_add_special_tokens: true,
         })
     }
 
@@ -418,7 +535,7 @@ impl TokenizerFrontendV1 {
     pub fn encode(&self, text: &str) -> Result<TokenIdsV1, TokenizerError> {
         let encoding = self
             .tokenizer
-            .encode(text, false)
+            .encode(text, self.encode_add_special_tokens)
             .map_err(|_| TokenizerError::Encode)?;
         Ok(TokenIdsV1::from_slice(encoding.get_ids()))
     }
@@ -440,6 +557,24 @@ impl TokenizerFrontendV1 {
             .decode(token_ids.as_slice(), mode.skip_special_tokens())
             .map_err(|_| TokenizerError::Decode)
     }
+}
+
+fn gemma4_special_token_contents() -> HashMap<&'static str, &'static str> {
+    HashMap::from([
+        ("pad", "<pad>"),
+        ("eos", "<eos>"),
+        ("bos", "<bos>"),
+        ("unk", "<unk>"),
+        ("mask", "<mask>"),
+        ("think", "<|think|>"),
+        ("image_begin", "<|image>"),
+        ("audio_begin", "<|audio>"),
+        ("image", "<|image|>"),
+        ("audio", "<|audio|>"),
+        ("image_end", "<image|>"),
+        ("audio_end", "<audio|>"),
+        ("video", "<|video|>"),
+    ])
 }
 
 #[derive(Debug)]

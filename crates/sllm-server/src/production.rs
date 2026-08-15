@@ -1,4 +1,4 @@
-//! Production Qwen3.5-4B backend for the profile-v1 transport.
+//! Production model backends for the profile-v1 transport.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -6,14 +6,16 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sllm_core::{
-    AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, ModelLock,
-    OsSamplingRandom, QwenResidentModel, VerifiedFp8Sidecar, WeightLoadPlan,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
-    build_verified_weight_load_plan, read_model_lock, verify_fp8_sidecar,
+    AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
+    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QwenResidentModel, ReviewedModelLock,
+    VerifiedFp8Sidecar, WeightLoadPlan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_graph, build_verified_gemma4_weight_load_plan, build_verified_weight_load_plan,
+    read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError,
-    GenerationServiceV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenizerFrontendV1,
+    GenerationServiceV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
+    Qwen35RenderOptionsV1, TokenizerFrontendV1, gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -23,6 +25,8 @@ use crate::{
 };
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
+const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const GEMMA4_KV_BYTES_PER_TOKEN: u64 = 344_064;
 
 #[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
@@ -76,6 +80,31 @@ impl QwenBackendConfigV1 {
                     "FP8 server provider is incompatible with the exact target",
                 ));
             }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Gemma4BackendConfigV1 {
+    pub lock_path: PathBuf,
+    pub cache_path: PathBuf,
+    pub device_index: u32,
+    pub target: String,
+    pub completion_timeout: Duration,
+    pub shutdown_timeout: Duration,
+}
+
+impl Gemma4BackendConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        if self.target.is_empty()
+            || !self.target.is_ascii()
+            || self.completion_timeout.is_zero()
+            || self.shutdown_timeout.is_zero()
+        {
+            return Err(BackendErrorV1::new(
+                "Gemma backend target and timeouts must be valid and nonzero",
+            ));
         }
         Ok(())
     }
@@ -144,6 +173,24 @@ struct QwenBackendStateV1 {
     model_ready_current_bytes: u64,
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
     fp8_provider: Option<String>,
+}
+
+pub struct Gemma4ChatBackendV1 {
+    state: Mutex<Option<Gemma4BackendStateV1>>,
+    audits: Mutex<Vec<ProductionRequestAuditV1>>,
+    shutdown_timeout: Duration,
+    identity: BackendIdentityV1,
+}
+
+struct Gemma4BackendStateV1 {
+    _lock: Gemma4ModelLock,
+    tokenizer: TokenizerFrontendV1,
+    stop_policy: GenerationStopPolicyV1,
+    _plan: WeightLoadPlan,
+    resident: Gemma4ResidentModel,
+    session: Arc<ExecutionSession>,
+    target: String,
+    model_ready_current_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -315,6 +362,154 @@ impl QwenChatBackendV1 {
         if before_shutdown.current_bytes() != 0 {
             return Err(BackendErrorV1::new(format!(
                 "resident drop left {} tracked device bytes",
+                before_shutdown.current_bytes()
+            )));
+        }
+        let report = session.shutdown(self.shutdown_timeout).map_err(|error| {
+            BackendErrorV1::new(format!("HIP session shutdown failed: {error}"))
+        })?;
+        let final_memory = session.memory_snapshot();
+        if final_memory.current_bytes() != 0
+            || report.retryable_cleanup != 0
+            || report.durable_quarantine != 0
+        {
+            return Err(BackendErrorV1::new(
+                "HIP session shutdown did not reach a zero-cleanup terminal state",
+            ));
+        }
+        Ok(ProductionShutdownAuditV1 {
+            schema_version: "openai-chat-production-shutdown-v1".to_owned(),
+            target: self.identity.target.clone(),
+            model_fingerprint: self.identity.model_fingerprint.clone(),
+            plan_digest: self.identity.plan_digest.clone(),
+            model_ready_current_bytes: self.identity.model_ready_current_bytes,
+            final_current_bytes: final_memory.current_bytes(),
+            final_request_state_bytes: final_memory.request_state().current_bytes(),
+            final_workspace_bytes: final_memory.workspace().current_bytes(),
+            retryable_cleanup: report.retryable_cleanup,
+            durable_quarantine: report.durable_quarantine,
+            requests: self.request_audits(),
+        })
+    }
+
+    fn record_audit(&self, audit: ProductionRequestAuditV1) {
+        let mut audits = self
+            .audits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if audits.len() == MAX_RETAINED_REQUEST_AUDITS {
+            audits.remove(0);
+        }
+        audits.push(audit);
+    }
+}
+
+impl Gemma4ChatBackendV1 {
+    pub fn open(config: Gemma4BackendConfigV1) -> Result<Self, BackendErrorV1> {
+        config.validate()?;
+        let lock = match read_reviewed_model_lock(&config.lock_path).map_err(|error| {
+            BackendErrorV1::new(format!("model lock validation failed: {error}"))
+        })? {
+            ReviewedModelLock::Gemma4(lock) => lock,
+            ReviewedModelLock::Qwen35(_) => {
+                return Err(BackendErrorV1::new(
+                    "Gemma backend requires a reviewed Gemma 4 lock",
+                ));
+            }
+        };
+        let cache = lock.verify_cache(&config.cache_path).map_err(|error| {
+            BackendErrorV1::new(format!("model cache verification failed: {error}"))
+        })?;
+        let tokenizer =
+            TokenizerFrontendV1::from_gemma4_verified_cache(&lock, &cache).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "verified Gemma tokenizer construction failed: {error}"
+                ))
+            })?;
+        let stop_policy = gemma4_generation_stop_policy(&lock).map_err(|error| {
+            BackendErrorV1::new(format!("Gemma stop policy construction failed: {error}"))
+        })?;
+        let plan = build_verified_gemma4_weight_load_plan(&lock, &cache).map_err(|error| {
+            BackendErrorV1::new(format!("verified Gemma load plan failed: {error}"))
+        })?;
+        let backend = HipBackend::connect()
+            .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
+        let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
+            .map_err(|error| BackendErrorV1::new(format!("HIP session request failed: {error}")))?;
+        let session = backend
+            .open_execution_session(session_request)
+            .map_err(|error| {
+                BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
+            })?;
+        let resident = Gemma4ResidentModel::new(
+            Arc::clone(&session),
+            lock.clone(),
+            plan.clone(),
+            &cache,
+            config.completion_timeout,
+        )
+        .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
+        let ready = session.memory_snapshot();
+        require_clean_request_memory(ready, "model-ready")?;
+        let model_ready_current_bytes = ready.model_resident().current_bytes();
+        if model_ready_current_bytes == 0 || ready.current_bytes() != model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "Gemma model-ready allocation accounting is not resident-only",
+            ));
+        }
+        let identity = BackendIdentityV1 {
+            target: config.target.clone(),
+            model_fingerprint: lock.fingerprint().to_owned(),
+            plan_digest: plan.digest_hex(),
+            model_ready_current_bytes,
+        };
+        Ok(Self {
+            state: Mutex::new(Some(Gemma4BackendStateV1 {
+                _lock: lock,
+                tokenizer,
+                stop_policy,
+                _plan: plan,
+                resident,
+                session,
+                target: config.target,
+                model_ready_current_bytes,
+            })),
+            audits: Mutex::new(Vec::new()),
+            shutdown_timeout: config.shutdown_timeout,
+            identity,
+        })
+    }
+
+    pub fn request_audits(&self) -> Vec<ProductionRequestAuditV1> {
+        self.audits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.identity.model_fingerprint
+    }
+
+    pub fn target(&self) -> &str {
+        &self.identity.target
+    }
+
+    pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?
+            .take()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is already shut down"))?;
+        let Gemma4BackendStateV1 {
+            resident, session, ..
+        } = state;
+        drop(resident);
+        let before_shutdown = session.memory_snapshot();
+        if before_shutdown.current_bytes() != 0 {
+            return Err(BackendErrorV1::new(format!(
+                "Gemma resident drop left {} tracked device bytes",
                 before_shutdown.current_bytes()
             )));
         }
@@ -553,6 +748,185 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
     }
 }
 
+impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
+    fn generate(
+        &self,
+        request: &ChatCompletionRequestV1,
+        cancellation: &GenerationCancellationV1,
+        sink: &mut dyn GenerationDeltaSinkV1,
+    ) -> Result<BackendCompletionV1, BackendErrorV1> {
+        let started = Instant::now();
+        if request.reasoning().enabled() || request.reasoning().separate_reasoning() {
+            return Err(BackendErrorV1::new(
+                "Gemma 4 base raw-text profile does not support reasoning mode",
+            ));
+        }
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        let ready = state.session.memory_snapshot();
+        require_clean_request_memory(ready, "Gemma request admission")?;
+        if ready.model_resident().current_bytes() != state.model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "Gemma model-resident accounting changed before request admission",
+            ));
+        }
+
+        let service = GenerationServiceV1::new(&state.tokenizer, None, &state.stop_policy)
+            .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
+        let rendered = render_gemma4_raw_messages(request.messages())?;
+        let prompt = service
+            .prepare_input(&GenerationInputV1::Prompt(rendered))
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            })?;
+        let prompt_tokens = u64::try_from(prompt.len())
+            .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
+        let state_capacity = prompt_tokens
+            .checked_add(u64::from(request.generation().max_new_tokens()))
+            .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
+        let mut owner = state
+            .resident
+            .new_request_for_session(Arc::clone(&state.session), prompt_tokens, state_capacity)
+            .map_err(|error| {
+                BackendErrorV1::new(format!("request provisioning failed: {error}"))
+            })?;
+        let allocated = state.session.memory_snapshot();
+        let mut random = OsSamplingRandom::for_parameters(request.generation().sampling())
+            .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut output_sink = OutputSinkAdapterV1 { inner: sink };
+        let outcome = service.generate_tokens_with_sink(
+            &mut owner,
+            &prompt,
+            request.generation(),
+            cancellation,
+            &mut random,
+            &mut output_sink,
+        );
+        let dispatch = owner.audit_snapshot().ok();
+        let observed_length = owner.committed_length();
+        drop(owner);
+        let cleanup = state.session.memory_snapshot();
+        let cleanup_result = require_clean_request_memory(cleanup, "Gemma request cleanup")
+            .and_then(|()| {
+                if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
+                    Ok(())
+                } else {
+                    Err(BackendErrorV1::new(
+                        "Gemma model-resident accounting changed after request cleanup",
+                    ))
+                }
+            });
+        let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let generation_result = outcome
+            .map_err(|error| BackendErrorV1::new(format!("generation failed: {error}")))
+            .and_then(|result| {
+                let dispatch = dispatch.as_ref().ok_or_else(|| {
+                    BackendErrorV1::new("completed Gemma generation has no dispatch audit")
+                })?;
+                if dispatch.target() != state.target || dispatch.fallback_used() {
+                    return Err(BackendErrorV1::new(
+                        "completed Gemma generation is not exact HIP/no-fallback",
+                    ));
+                }
+                let finish_reason = match result.finish_reason() {
+                    sllm_frontend::FinishReasonV1::Stop => FinishReasonV1::Stop,
+                    sllm_frontend::FinishReasonV1::Length => FinishReasonV1::Length,
+                };
+                let usage = result.usage();
+                Ok(BackendCompletionV1 {
+                    finish_reason,
+                    usage: TokenUsageV1::new(usage.prompt_tokens(), usage.completion_tokens())
+                        .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                })
+            });
+        let result = match (generation_result, cleanup_result) {
+            (_, Err(error)) => Err(error),
+            (result, Ok(())) => result,
+        };
+        let completion_tokens = result
+            .as_ref()
+            .ok()
+            .map(|value| value.usage.completion_tokens);
+        self.record_audit(ProductionRequestAuditV1 {
+            outcome: if cancellation.is_cancelled() {
+                "cancelled".to_owned()
+            } else if result.is_ok() {
+                "completed".to_owned()
+            } else {
+                "failed".to_owned()
+            },
+            target: state.target.clone(),
+            weight_encoding: "bf16".to_owned(),
+            fp8_provider: None,
+            prompt_tokens,
+            requested_max_completion_tokens: request.generation().max_new_tokens(),
+            completion_tokens,
+            elapsed_ns,
+            selected_backend: dispatch.as_ref().map(|_| "hip".to_owned()),
+            fallback_used: dispatch.as_ref().map(|audit| audit.fallback_used()),
+            all_dispatches_hip: dispatch.as_ref().map(|audit| !audit.fallback_used()),
+            submission_count: dispatch.as_ref().map(|audit| audit.submission_count()),
+            kernel_dispatch_count: dispatch.as_ref().map(|audit| audit.kernel_dispatch_count()),
+            full_attention_layers: 8,
+            linear_attention_layers: 0,
+            logical_kv_capacity_tokens: Some(state_capacity),
+            observed_kv_length_tokens: Some(observed_length),
+            physical_page_bytes: None,
+            kv_memory_kind: Some("contiguous-resident".to_owned()),
+            tokens_per_page: None,
+            mapped_kv_capacity_tokens: Some(state_capacity),
+            committed_kv_bytes: observed_length.checked_mul(GEMMA4_KV_BYTES_PER_TOKEN),
+            allocated_request_state_bytes: allocated.request_state().current_bytes(),
+            allocated_workspace_bytes: allocated.workspace().current_bytes(),
+            cleanup_request_state_bytes: cleanup.request_state().current_bytes(),
+            cleanup_workspace_bytes: cleanup.workspace().current_bytes(),
+        });
+        result
+    }
+}
+
+fn render_gemma4_raw_messages(messages: &[crate::ChatMessageV1]) -> Result<String, BackendErrorV1> {
+    let mut rendered = String::new();
+    for message in messages {
+        let (role, content) = match message.inner() {
+            Qwen35ChatMessageV1::System { content } => ("System", content),
+            Qwen35ChatMessageV1::User { content } => ("User", content),
+            Qwen35ChatMessageV1::Assistant {
+                content,
+                reasoning_content,
+            } => {
+                if reasoning_content.is_some() {
+                    return Err(BackendErrorV1::new(
+                        "Gemma 4 base raw-text profile rejects reasoning history",
+                    ));
+                }
+                ("Assistant", content)
+            }
+        };
+        rendered.push_str(role);
+        rendered.push_str(": ");
+        rendered.push_str(content);
+        rendered.push('\n');
+        if rendered.len() > GEMMA4_RAW_CHAT_MAX_BYTES {
+            return Err(BackendErrorV1::new(
+                "Gemma raw chat transcript exceeds the host byte limit",
+            ));
+        }
+    }
+    rendered.push_str("Assistant:");
+    if rendered.len() > GEMMA4_RAW_CHAT_MAX_BYTES {
+        return Err(BackendErrorV1::new(
+            "Gemma raw chat transcript exceeds the host byte limit",
+        ));
+    }
+    Ok(rendered)
+}
+
 struct OutputSinkAdapterV1<'a> {
     inner: &'a mut dyn GenerationDeltaSinkV1,
 }
@@ -578,4 +952,52 @@ fn require_clean_request_memory(
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ChatMessageV1;
+
+    fn message(inner: Qwen35ChatMessageV1) -> ChatMessageV1 {
+        ChatMessageV1 { inner }
+    }
+
+    #[test]
+    fn gemma_raw_transcript_is_versioned_by_exact_roles_and_unicode() {
+        let rendered = render_gemma4_raw_messages(&[
+            message(Qwen35ChatMessageV1::system("方針")),
+            message(Qwen35ChatMessageV1::user("こんにちは🌙")),
+            message(Qwen35ChatMessageV1::assistant("了解", None)),
+            message(Qwen35ChatMessageV1::user("続けて")),
+        ])
+        .unwrap();
+        assert_eq!(
+            rendered,
+            "System: 方針\nUser: こんにちは🌙\nAssistant: 了解\nUser: 続けて\nAssistant:"
+        );
+        assert!(
+            render_gemma4_raw_messages(&[message(Qwen35ChatMessageV1::assistant(
+                "visible",
+                Some("hidden".to_owned()),
+            ))])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn gemma_raw_transcript_checks_both_sides_of_the_byte_cap() {
+        let overhead = "User: \nAssistant:".len();
+        let accepted = "x".repeat(GEMMA4_RAW_CHAT_MAX_BYTES - overhead);
+        assert_eq!(
+            render_gemma4_raw_messages(&[message(Qwen35ChatMessageV1::user(accepted))])
+                .unwrap()
+                .len(),
+            GEMMA4_RAW_CHAT_MAX_BYTES
+        );
+        let rejected = "x".repeat(GEMMA4_RAW_CHAT_MAX_BYTES - overhead + 1);
+        assert!(
+            render_gemma4_raw_messages(&[message(Qwen35ChatMessageV1::user(rejected))]).is_err()
+        );
+    }
 }

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sllm_core::{
-    ProfileSamplerV1, QwenExecutionRequest, SamplingError, SamplingParametersV1,
-    SamplingRandomSource,
+    Gemma4ExecutionRequest, Gemma4ModelLock, ProfileSamplerV1, QwenExecutionRequest, SamplingError,
+    SamplingParametersV1, SamplingRandomSource,
 };
 
 use crate::{
@@ -16,6 +16,34 @@ use crate::{
 
 pub const MAX_STOP_STRINGS_V1: usize = 4;
 pub const MAX_STOP_STRING_BYTES_V1: usize = 1_048_576;
+
+pub fn gemma4_generation_stop_policy(
+    lock: &Gemma4ModelLock,
+) -> Result<GenerationStopPolicyV1, GenerationServiceError> {
+    let stop_token_ids = lock
+        .model
+        .tokenizer_contract
+        .stop_token_ids
+        .iter()
+        .map(|&token| u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = GenerationStopPolicyV1 {
+        version: 1,
+        stop_token_ids,
+        evaluation: crate::StopEvaluation::NewlyGeneratedAfterArgmax,
+        prompt_evaluation: crate::PromptEvaluation::NeverStop,
+        stop_token: crate::StopTokenHandling {
+            visible_output: false,
+            subsequent_decode_input: false,
+        },
+        budget_boundary: crate::BudgetBoundary::StopTokenWins,
+        max_new_tokens_zero: crate::MaxNewTokensZero::MaxNewTokensBeforeDecode,
+        reason_version: 1,
+    };
+    validate_generation_stop_policy(&policy)
+        .map_err(|_| GenerationServiceError::InvalidStopPolicy)?;
+    Ok(policy)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GenerationInputV1 {
@@ -319,6 +347,60 @@ impl GenerationExecutorV1 for QwenExecutionRequest {
 
     fn cancel(&mut self) {
         QwenExecutionRequest::cancel(self);
+    }
+}
+
+impl GenerationExecutorV1 for Gemma4ExecutionRequest {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = if include_last_logits {
+            Gemma4ExecutionRequest::prefill_with_last_logits(self, &input)
+        } else {
+            Gemma4ExecutionRequest::prefill(self, &input)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let argmax = output
+            .token_ids()
+            .last()
+            .copied()
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+        Ok(GenerationStepV1::new(
+            u32::try_from(argmax).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            output.last_logits().map(<[f32]>::to_vec),
+        ))
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = if include_last_logits {
+            Gemma4ExecutionRequest::decode_with_last_logits(self, token)
+        } else {
+            Gemma4ExecutionRequest::decode(self, token)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if output.token_ids().len() != 1 {
+            return Err(GenerationServiceError::MissingDeviceArgmax);
+        }
+        Ok(GenerationStepV1::new(
+            u32::try_from(output.token_ids()[0])
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            output.last_logits().map(<[f32]>::to_vec),
+        ))
+    }
+
+    fn cancel(&mut self) {
+        Gemma4ExecutionRequest::cancel(self);
     }
 }
 
@@ -740,6 +822,22 @@ mod tests {
         BudgetBoundary, MaxNewTokensZero, PromptEvaluation, StopEvaluation, StopTokenHandling,
     };
     use std::collections::VecDeque;
+
+    #[test]
+    fn gemma_stop_policy_is_derived_from_the_reviewed_lock() {
+        let lock = sllm_core::parse_gemma4_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-bf16.json"
+        ))
+        .unwrap();
+        let policy = gemma4_generation_stop_policy(&lock).unwrap();
+        assert_eq!(policy.stop_token_ids, [1]);
+        assert_eq!(
+            policy.evaluation,
+            sllm_core::StopEvaluation::NewlyGeneratedAfterArgmax
+        );
+        assert!(!policy.stop_token.visible_output);
+        assert!(!policy.stop_token.subsequent_decode_input);
+    }
 
     struct FixedRandom(f64);
 

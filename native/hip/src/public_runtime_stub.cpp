@@ -9,6 +9,8 @@
 #include "matmul_api.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
+#include "rotary_api.hpp"
+#include "windowed_attention_api.hpp"
 
 #include <cstring>
 
@@ -219,6 +221,69 @@ validate_dispatch_info(const sllm_embedding_dispatch_info_t *const info,
       return write_error(
           sink, SLLM_STATUS_RESERVED_NONZERO,
           "embedding dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+validate_dispatch_info(const sllm_rotary_dispatch_info_t *const info,
+                       sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "rotary dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_rotary_dispatch_info_t)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "rotary dispatch info struct size is unsupported");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "rotary dispatch info ABI is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "rotary dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "rotary dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_dispatch_info(
+    const sllm_windowed_attention_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "windowed attention dispatch info output is null");
+  }
+  uint32_t prefix[2]{};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(*info)) {
+    return write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "windowed attention dispatch info struct size is unsupported");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "windowed attention dispatch info ABI is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION) {
+    return write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "windowed attention dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "windowed attention dispatch info reserved fields must be zero");
     }
   }
   return SLLM_STATUS_OK;
@@ -1158,6 +1223,166 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     return write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
         "unexpected exception in attention preprocess execute stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_rotary_prepare(const sllm_context_t *const context,
+                    const sllm_rotary_desc_t *const descriptor,
+                    sllm_rotary_plan_t **const plan,
+                    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr) {
+      *plan = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || context == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "rotary context or plan output is null");
+    }
+    sllm_rotary::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_rotary::validate_and_copy_descriptor(descriptor, &metadata,
+                                                  error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in rotary prepare stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_rotary_plan_release(sllm_rotary_plan_t **const plan,
+                         sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || *plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "rotary plan handle is null");
+    }
+    return write_error(error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                       "rotary plan is not owned by the unavailable stub");
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in rotary plan release stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_rotary_execute(const sllm_rotary_plan_t *const plan,
+                    const sllm_queue_t *const queue,
+                    sllm_completion_t **const completion,
+                    sllm_rotary_dispatch_info_t *const dispatch_info,
+                    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || queue == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "rotary execute input or completion output is null");
+    }
+    const sllm_status_t info_status =
+        validate_dispatch_info(dispatch_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in rotary execute stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_windowed_attention_prepare(
+    const sllm_context_t *const context,
+    const sllm_windowed_attention_desc_t *const descriptor,
+    sllm_windowed_attention_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr) {
+      *plan = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || context == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "windowed attention context or plan output is null");
+    }
+    sllm_windowed_attention::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_windowed_attention::validate_and_copy_descriptor(
+            descriptor, &metadata, error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in windowed attention prepare stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_windowed_attention_plan_release(
+    sllm_windowed_attention_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || *plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "windowed attention plan handle is null");
+    }
+    return write_error(
+        error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+        "windowed attention plan is not owned by the unavailable stub");
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in windowed attention plan release stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_windowed_attention_execute(
+    const sllm_windowed_attention_plan_t *const plan,
+    const sllm_queue_t *const queue, sllm_completion_t **const completion,
+    sllm_windowed_attention_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || queue == nullptr || completion == nullptr) {
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "windowed attention execute input or completion output is null");
+    }
+    const sllm_status_t info_status =
+        validate_dispatch_info(dispatch_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in windowed attention execute stub");
   }
 }
 

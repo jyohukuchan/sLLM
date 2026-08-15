@@ -1,0 +1,202 @@
+{
+  "schema_version": "model-lock-v2",
+  "model": {
+    "repo_id": "google/gemma-4-12B",
+    "repo_type": "model",
+    "requested_revision": "main",
+    "resolved_revision": "023679ed352de9bb66cc873c9009ce3482585c08",
+    "license": {
+      "id": "Apache-2.0",
+      "statement": "Apache 2.0",
+      "evidence_paths": ["README.md"]
+    },
+    "evidence_files": ["README.md"],
+    "files": [
+      {
+        "path": "README.md",
+        "size_bytes": 28340,
+        "sha256": "131e26f7f1fa69445dc4b0ab98a2251811f8c3128426bf09fcef6ac5ee16e7e4",
+        "git_blob": "221970dc42ea6e97090b16ef09790b46777c1d91",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/README.md",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/README.md",
+        "lfs_oid": null
+      },
+      {
+        "path": "config.json",
+        "size_bytes": 4383,
+        "sha256": "14f38c5492ffc9cbcdf808647ca0c025bb5b9b4eb737526347134d500ace6098",
+        "git_blob": "6d3994fd0b98fd5eaaaadbf918bd826d778ce5ea",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/config.json",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "generation_config.json",
+        "size_bytes": 233,
+        "sha256": "02b56bd11e1cd1e363e701a85a2fd7fbaa2992ec3358c1cd7cc44ead7208f505",
+        "git_blob": "6e4ef65e8cf563a9177fd933423f89eed2f74d74",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/generation_config.json",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/generation_config.json",
+        "lfs_oid": null
+      },
+      {
+        "path": "model.safetensors",
+        "size_bytes": 23919549408,
+        "sha256": "fe054ae05ff7f44318fd8ae90d58992531455c7ed31356704088f0f2d8c8009a",
+        "git_blob": "b486eba79038fd235f4fa3b1aa502d3df9a4c23c",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/model.safetensors",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/model.safetensors",
+        "lfs_oid": "sha256:fe054ae05ff7f44318fd8ae90d58992531455c7ed31356704088f0f2d8c8009a"
+      },
+      {
+        "path": "tokenizer.json",
+        "size_bytes": 32170070,
+        "sha256": "12bac982b793c44b03d52a250a9f0d0b666813da566b910c24a6da0695fd11e6",
+        "git_blob": "890ddaefca8201dd023c4f013db5ce492d12e7e0",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/tokenizer.json",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/tokenizer.json",
+        "lfs_oid": "sha256:12bac982b793c44b03d52a250a9f0d0b666813da566b910c24a6da0695fd11e6"
+      },
+      {
+        "path": "tokenizer_config.json",
+        "size_bytes": 888,
+        "sha256": "522a38334973725dba8f7c645195b19dda0c284f403f43273f77837679ba2eab",
+        "git_blob": "0a3fe0009f6816c5c615c6102eea6599680c1523",
+        "source_page_url": "https://huggingface.co/google/gemma-4-12B/blob/023679ed352de9bb66cc873c9009ce3482585c08/tokenizer_config.json",
+        "download_url": "https://huggingface.co/google/gemma-4-12B/resolve/023679ed352de9bb66cc873c9009ce3482585c08/tokenizer_config.json",
+        "lfs_oid": null
+      }
+    ],
+    "excluded_files": [
+      {
+        "path": ".gitattributes",
+        "git_blob": "602d20f6eefed4b62821062891a7a495e25435f9",
+        "reason": "repository metadata is not a runtime or evidence input"
+      },
+      {
+        "path": "processor_config.json",
+        "git_blob": "b889adcd78015bf5a0139438c5fb0b7067529a61",
+        "reason": "vision/audio processing is outside the Phase 14 text-only scope"
+      }
+    ],
+    "architecture": {
+      "architectures": ["Gemma4UnifiedForConditionalGeneration"],
+      "top_level_architecture": "Gemma4UnifiedForConditionalGeneration",
+      "model_type": "gemma4_unified",
+      "phase_scope": "text-only",
+      "custom_code": false,
+      "converted": false,
+      "moe": false,
+      "text": {
+        "model_type": "gemma4_unified_text",
+        "hidden_size": 3840,
+        "intermediate_size": 15360,
+        "num_hidden_layers": 48,
+        "num_attention_heads": 16,
+        "num_key_value_heads": 8,
+        "num_global_key_value_heads": 1,
+        "head_dim": 256,
+        "global_head_dim": 512,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "max_position_embeddings": 262144,
+        "sliding_window": 1024,
+        "rms_norm_eps": "1e-6",
+        "attention_bias": false,
+        "attention_dropout": "0",
+        "attention_k_eq_v": true,
+        "final_logit_softcapping": "30",
+        "tie_word_embeddings": true,
+        "use_cache": true,
+        "vocab_size": 262144,
+        "layer_types": [
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention",
+          "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "sliding_attention", "full_attention"
+        ],
+        "rope": {
+          "sliding_attention": {
+            "rope_type": "default",
+            "rope_theta": 10000,
+            "partial_rotary_factor": "1",
+            "head_dim": 256
+          },
+          "full_attention": {
+            "rope_type": "proportional",
+            "rope_theta": 1000000,
+            "partial_rotary_factor": "0.25",
+            "head_dim": 512
+          }
+        }
+      },
+      "vision": {
+        "present": true,
+        "tensor_prefixes": ["model.embed_vision.", "model.vision_embedder."],
+        "tensor_count": 10,
+        "phase_scope": "known-unconsumed"
+      },
+      "audio": {
+        "present": true,
+        "tensor_prefixes": ["model.embed_audio."],
+        "tensor_count": 1,
+        "phase_scope": "known-unconsumed"
+      }
+    },
+    "tensor_contract": {
+      "container": "direct-safetensors",
+      "source_path": "model.safetensors",
+      "header_length_field_bytes": 8,
+      "header_length_bytes": 88952,
+      "data_buffer_start": 88960,
+      "header_sha256": "e432b3ee11ff7f7d179ccbf3827af9669c03a0a28e603000d89c6e1b6c9d4bb7",
+      "catalog_sha256": "24e705586f0bba5e1018951a9ee09aa02b1bfccd73f5c0a82e31e29fb7c2931f",
+      "tensor_count": 677,
+      "text_tensor_count": 666,
+      "dtype": "BF16",
+      "unknown_policy": "reject",
+      "duplicate_policy": "reject",
+      "catalog_policy": "exact-derived-name-shape-dtype-and-range"
+    },
+    "slice_contract": {
+      "tensor_name": "model.language_model.norm.weight",
+      "source_file": "model.safetensors",
+      "dtype": "BF16",
+      "shape": [3840],
+      "data_offsets": [23849099360, 23849107040],
+      "absolute_byte_range": [23849188320, 23849196000],
+      "byte_size": 7680
+    },
+    "tokenizer_contract": {
+      "files": ["tokenizer.json", "tokenizer_config.json"],
+      "tokenizer_class": "GemmaTokenizer",
+      "vocab_size": 262144,
+      "chat_template_path": null,
+      "prompt_mode": "raw-text-only",
+      "special_token_ids": {
+        "pad": 0,
+        "eos": 1,
+        "bos": 2,
+        "unk": 3,
+        "mask": 4,
+        "think": 98,
+        "image_begin": 255999,
+        "audio_begin": 256000,
+        "image": 258880,
+        "audio": 258881,
+        "image_end": 258882,
+        "audio_end": 258883,
+        "video": 258884
+      },
+      "stop_token_ids": [1]
+    },
+    "generation_config_path": "generation_config.json",
+    "derivation": null
+  },
+  "fingerprint": "sha256:086ede4017206d33533c70d5d00cb492f2f1064a21c995477207ebada668ccff",
+  "aliases": ["gemma4-12b-bf16"],
+  "generated_at": "2026-08-15T00:00:00Z"
+}

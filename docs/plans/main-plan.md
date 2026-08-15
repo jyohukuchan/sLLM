@@ -505,13 +505,18 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
   増加せず、fallback/cleanupも維持した。
 - 詳細は[Phase 13 archive](archive/2026/08/11-20/phase13-model-neutral-execution-control.md)を正とする。
 
-### Phase 14: google/gemma-4-12B Dense text-only（計画済み）
+### Phase 14: google/gemma-4-12B Dense text-only（完了）
 
 - Phase 13のmodel-neutral executorへ二つ目のproduction model adapterとして接続し、Qwen固有のwait/cache制御を
   複製しない。
 - immutable model lock、architecture inventory、weight/graph、固有semantic op、R9700 full model、V620 bounded
   evidence、CLI/OpenAI serviceを順に実装する。
-- 詳細は[Phase 14 active plan](active/2026/08/11-20/phase14-gemma4-dense.md)を正とする。
+- 2026-08-15にsource lock/frontend/weight graph、Gemma semantic provider、両RDNA exact targetのoperator/real-weight
+  slice、R9700 exact `gfx1201`の48-layer full modelを完了した。CLIとOpenAI non-stream/SSE、stop、disconnect recovery、
+  既定sampling、同一resident連続requestをshared generation pathへ接続し、fallbackなしとcleanup 0を確認した。
+- R9700 direct-engine profileでは`3/17`と`32/32`を同一resident uploadで計測した。最終host evidenceはH0 `513/513`、
+  H1 `421/421`、H2 `36/36` PASSであり、1回のintegration reviewとfindingだけのfocused re-reviewを完了した。
+- 詳細は[Phase 14 archive](archive/2026/08/11-20/phase14-gemma4-dense.md)を正とする。
 
 ### Phase 15: Weight NVFP4（計画済み）
 
@@ -522,12 +527,12 @@ Phase 12は`ready`のまま残し、再開時にlatest mainからexact `gfx942` 
 
 ## 現在の状態と次の作業
 
-- Phase 13まで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Gemma 4はPhase 14、Weight NVFP4は
-  Phase 15とする。MI300Xを管理できない現在のlocal forward実行対象はPhase 14のGemma 4とする。
+- Phase 14まで完了した。hardware検証順の次はPhase 12のMI300X実機確認であり、Weight NVFP4はPhase 15とする。
+  MI300Xを管理できない現在のlocal forward実行対象はQwen/Gemma共通RDNA性能bridgeである。
 - MI300Xを管理できない期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
-  verification境界を修復し、Phase 13で共通execution制御を抽出した。Gemma 4完了をgoal終端にせず、進捗が早い場合はPhase 16〜18の詳細計画と
-  local-only実装へ続ける。
+  verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。
+  次は共通RDNA性能bridge、Phase 15の順に進め、Phase 16〜18の詳細計画とlocal-only実装へ続ける。
 - Phase 9のdtype非依存completion/segment骨格とtarget別BF16 providerを再利用し、Phase 10でFP8 encoding、
   sidecar/loader、native/emulation/conversion providerを追加した。Phase 13でモデル非依存層へ抽出し、
   Phase 15開始前にもfresh profileで

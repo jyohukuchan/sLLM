@@ -200,10 +200,11 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *const descriptor,
         sink, SLLM_STATUS_INVALID_RMSNORM_DESCRIPTOR,
         "RMSNorm descriptor has an unsupported operation contract");
   }
-  if (descriptor->scale_mode != SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE) {
+  if (descriptor->scale_mode != SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE &&
+      descriptor->scale_mode != SLLM_RMSNORM_SCALE_MODE_DIRECT) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_UNSUPPORTED_SCALE_MODE,
-        "RMSNorm requires offset-one raw scale semantics");
+        "RMSNorm scale mode is unsupported");
   }
   float epsilon = 0.0F;
   std::memcpy(&epsilon, &descriptor->epsilon_bits, sizeof(epsilon));
@@ -255,6 +256,7 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *const descriptor,
         "RMSNorm tensor intervals overlap within one binding identity");
   }
   metadata->epsilon_bits = descriptor->epsilon_bits;
+  metadata->scale_mode = descriptor->scale_mode;
   return SLLM_STATUS_OK;
 }
 

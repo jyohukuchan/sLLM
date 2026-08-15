@@ -61,6 +61,8 @@ PUBLIC_RUNTIME_API_SOURCE_PATHS = (
     "native/hip/src/linear_attention_api.cpp",
     "native/hip/src/matmul_api.cpp",
     "native/hip/src/rmsnorm_api.cpp",
+    "native/hip/src/rotary_api.cpp",
+    "native/hip/src/windowed_attention_api.cpp",
 )
 PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/argmax_kernel.hip.cpp",
@@ -68,10 +70,12 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/causal_attention_kernel.hip.cpp",
     "native/hip/src/elementwise_kernel.hip.cpp",
     "native/hip/src/embedding_kernel.hip.cpp",
+    "native/hip/src/gemma_attention_kernel.hip.cpp",
     "native/hip/src/kv_state_kernel.hip.cpp",
     "native/hip/src/linear_attention_kernel.hip.cpp",
     "native/hip/src/matmul_kernel.hip.cpp",
     "native/hip/src/rmsnorm_kernel.hip.cpp",
+    "native/hip/src/rotary_kernel.hip.cpp",
 )
 PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/argmax_api.hpp",
@@ -89,6 +93,7 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/embedding_kernel_internal.hpp",
     "native/hip/src/embedding_runtime.inc",
     "native/hip/src/evidence_abi.h",
+    "native/hip/src/gemma_attention_kernel_internal.hpp",
     "native/hip/src/kv_state_api.hpp",
     "native/hip/src/kv_state_kernel_internal.hpp",
     "native/hip/src/linear_attention_api.hpp",
@@ -99,6 +104,11 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/matmul_runtime.inc",
     "native/hip/src/rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
+    "native/hip/src/rotary_api.hpp",
+    "native/hip/src/rotary_kernel_internal.hpp",
+    "native/hip/src/rotary_runtime.inc",
+    "native/hip/src/windowed_attention_api.hpp",
+    "native/hip/src/windowed_attention_runtime.inc",
 )
 EXPECTED_DIRECT_COMPILE_SOURCE_PATHS = tuple(sorted(set(
     EXPECTED_SOURCE_PATHS
@@ -137,6 +147,8 @@ PUBLIC_SYMBOLS = tuple(sorted({
     "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release",
     "sllm_matmul_prepare", "sllm_query_version", "sllm_queue_create", "sllm_queue_release",
     "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
+    "sllm_rotary_execute", "sllm_rotary_plan_release", "sllm_rotary_prepare",
+    "sllm_windowed_attention_execute", "sllm_windowed_attention_plan_release", "sllm_windowed_attention_prepare",
 }))
 KERNEL_SYMBOLS = (
     "sllm_argmax_bf16_f32_v1",
@@ -145,7 +157,11 @@ KERNEL_SYMBOLS = (
     "sllm_elementwise_copy_bf16_v1",
     "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
     "sllm_elementwise_silu_mul_bf16_fp32_v1",
+    "sllm_elementwise_scalar_mul_bf16_fp32_v1",
+    "sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1",
+    "sllm_elementwise_tanh_softcap_bf16_fp32_v1",
     "sllm_embedding_gather_bf16_i32_v1",
+    "sllm_gemma_causal_attention_online_softmax_gqa_bf16_v1",
     "sllm_kv_state_bf16_to_f16_token_major_v2",
     "sllm_linear_attention_causal_conv_silu_v1",
     "sllm_linear_attention_recurrent_gated_norm_v1",
@@ -157,6 +173,7 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_fp8_outer_emulation_v1",
     "sllm_rmsnorm_baseline_wave32_v1",
     "sllm_rmsnorm_baseline_wave64_v1",
+    "sllm_rotary_split_half_bf16_fp32_v1",
 )
 INTERNAL_RUNTIME_SYMBOLS = ("sllm_hip_kv_view_readback",)
 CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL = (
@@ -768,7 +785,7 @@ def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[st
     toolchain = read_json(repo / "ci/toolchains/rocm-7.14.0.json")
     if set(matrix) != {"$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"}:
         raise RuntimeContractError("public-runtime matrix has missing or unknown top-level fields")
-    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 4:
+    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 6:
         raise RuntimeContractError("public-runtime matrix identity is invalid")
     if matrix.get("toolchain_id") != "rocm-7.14.0" or matrix.get("targets") != list(TARGETS):
         raise RuntimeContractError("public-runtime matrix is not bound to ROCm 7.14.0 and the exact two targets")

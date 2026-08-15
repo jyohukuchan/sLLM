@@ -21,6 +21,7 @@ struct DescriptorMetadata final {
   TensorMetadata raw_scale;
   TensorMetadata output;
   uint32_t epsilon_bits;
+  uint32_t scale_mode;
 };
 
 /* The first eight bytes are the fixed ABI prefix.  Callers may provide only

@@ -37,8 +37,10 @@ use crate::{
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
     EmbeddingDispatchInfo, EmbeddingSubmission, HipBackend, MatmulDescriptor, MatmulDispatchInfo,
     MatmulSubmission, PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding,
-    PreparedMatmul, PreparedRmsNorm, Queue, RmsNormDescriptor, RmsNormDispatchInfo,
-    RmsNormSubmission, RuntimeError, RuntimeStatus,
+    PreparedMatmul, PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue,
+    RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor,
+    RotaryDispatchInfo, RotarySubmission, RuntimeError, RuntimeStatus, WindowedAttentionDescriptor,
+    WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -277,16 +279,21 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             descriptor.kind(),
             sllm_core::SemanticOpKind::Copy
                 | sllm_core::SemanticOpKind::Add
+                | sllm_core::SemanticOpKind::ScalarMul
                 | sllm_core::SemanticOpKind::SiluMul
+                | sllm_core::SemanticOpKind::GeluTanhMul
                 | sllm_core::SemanticOpKind::SigmoidMul
+                | sllm_core::SemanticOpKind::TanhSoftcap
                 | sllm_core::SemanticOpKind::Embedding
                 | sllm_core::SemanticOpKind::Matmul
                 | sllm_core::SemanticOpKind::RmsNorm
                 | sllm_core::SemanticOpKind::Argmax
                 | sllm_core::SemanticOpKind::AttentionPreprocess
+                | sllm_core::SemanticOpKind::Rotary
+                | sllm_core::SemanticOpKind::CausalAttention
         ) {
             return PrepareSupport::Unsupported {
-                reason: "the HIP owned execution bridge currently prepares copy, add, silu_mul, sigmoid_mul, embedding, matmul, RMSNorm, argmax, and attention_preprocess"
+                reason: "the HIP owned execution bridge currently prepares copy, add, scalar_mul, silu_mul, gelu_tanh_mul, sigmoid_mul, tanh_softcap, embedding, matmul, RMSNorm, argmax, attention_preprocess, split-half rotary, and windowed causal attention"
                     .to_owned(),
             };
         }
@@ -551,8 +558,11 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             }
             sllm_core::SemanticOpKind::Copy
             | sllm_core::SemanticOpKind::Add
+            | sllm_core::SemanticOpKind::ScalarMul
             | sllm_core::SemanticOpKind::SiluMul
-            | sllm_core::SemanticOpKind::SigmoidMul => {
+            | sllm_core::SemanticOpKind::GeluTanhMul
+            | sllm_core::SemanticOpKind::SigmoidMul
+            | sllm_core::SemanticOpKind::TanhSoftcap => {
                 let mut inputs = Vec::with_capacity(operation.inputs().len());
                 for input in operation.inputs() {
                     let buffer = access
@@ -693,6 +703,66 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         .map_err(map_backend_error)?,
                 )
             }
+            sllm_core::SemanticOpKind::Rotary => {
+                let query = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let key = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let positions = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let query_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let key_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[1].buffer())?
+                    .clone();
+                let descriptor = RotaryDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    query.binding(operation.inputs()[0].view().clone()),
+                    key.binding(operation.inputs()[1].view().clone()),
+                    positions.binding(operation.inputs()[2].view().clone()),
+                    query_output.binding(operation.outputs()[0].view().clone()),
+                    key_output.binding(operation.outputs()[1].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::Rotary(
+                    self.backend
+                        .prepare_rotary(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::CausalAttention => {
+                let query = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let key = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let value = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let descriptor = WindowedAttentionDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    query.binding(operation.inputs()[0].view().clone()),
+                    key.binding(operation.inputs()[1].view().clone()),
+                    value.binding(operation.inputs()[2].view().clone()),
+                    output.binding(operation.outputs()[0].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::WindowedAttention(
+                    self.backend
+                        .prepare_windowed_attention(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
         };
         Ok(AdapterResource::new(prepared))
     }
@@ -750,6 +820,20 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 (
                     HipSemanticSubmission::AttentionPreprocess(submission),
                     dispatch_from_attention_preprocess(dispatch),
+                )
+            }
+            HipPreparedPlan::Rotary(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::Rotary(submission),
+                    dispatch_from_rotary(dispatch),
+                )
+            }
+            HipPreparedPlan::WindowedAttention(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::WindowedAttention(submission),
+                    dispatch_from_windowed_attention(dispatch),
                 )
             }
         };
@@ -838,6 +922,8 @@ enum HipPreparedPlan {
     Matmul(PreparedMatmul),
     Argmax(PreparedArgmax),
     AttentionPreprocess(PreparedAttentionPreprocess),
+    Rotary(PreparedRotary),
+    WindowedAttention(PreparedWindowedAttention),
 }
 
 enum HipSemanticSubmission {
@@ -847,6 +933,8 @@ enum HipSemanticSubmission {
     Matmul(MatmulSubmission),
     Argmax(ArgmaxSubmission),
     AttentionPreprocess(AttentionPreprocessSubmission),
+    Rotary(RotarySubmission),
+    WindowedAttention(WindowedAttentionSubmission),
 }
 
 impl HipSemanticSubmission {
@@ -858,6 +946,8 @@ impl HipSemanticSubmission {
             Self::Matmul(submission) => submission.query(),
             Self::Argmax(submission) => submission.query(),
             Self::AttentionPreprocess(submission) => submission.query(),
+            Self::Rotary(submission) => submission.query(),
+            Self::WindowedAttention(submission) => submission.query(),
         }
     }
 
@@ -869,6 +959,8 @@ impl HipSemanticSubmission {
             Self::Matmul(submission) => submission.wait(timeout),
             Self::Argmax(submission) => submission.wait(timeout),
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
+            Self::Rotary(submission) => submission.wait(timeout),
+            Self::WindowedAttention(submission) => submission.wait(timeout),
         }
     }
 
@@ -880,6 +972,8 @@ impl HipSemanticSubmission {
             Self::Matmul(submission) => submission.kernel_elapsed_ns(),
             Self::Argmax(submission) => submission.kernel_elapsed_ns(),
             Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
+            Self::Rotary(submission) => submission.kernel_elapsed_ns(),
+            Self::WindowedAttention(submission) => submission.kernel_elapsed_ns(),
         }
     }
 }
@@ -1207,6 +1301,46 @@ fn dispatch_from_attention_preprocess(
     }
 }
 
+fn dispatch_from_rotary(dispatch: RotaryDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: u64::from(dispatch.head_dim),
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
+fn dispatch_from_windowed_attention(dispatch: WindowedAttentionDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.query_count,
+        normalized_size: u64::from(dispatch.head_dim),
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: dispatch.gcn_arch_name,
+    }
+}
+
 fn dispatch_from_kv_append(dispatch: KvAppendEvidence) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: sys::SLLM_HIP_ABI_VERSION,
@@ -1272,7 +1406,8 @@ mod tests {
     use super::*;
     use sllm_core::{
         AttentionPreprocessContract, AttentionPreprocessPositionMode, Backend, DType,
-        ExecutionSessionRequest, SemanticOpDescriptor, TensorView,
+        ExecutionSessionRequest, SemanticOpDescriptor, SplitHalfRotaryContract, TensorView,
+        WindowedCausalAttentionContract,
     };
     use std::sync::Barrier;
     use std::thread;
@@ -1400,6 +1535,118 @@ mod tests {
             adapter.supports(&attention_descriptor()),
             PrepareSupport::Supported
         );
+    }
+
+    #[test]
+    fn supports_split_half_rotary_after_owned_path_is_registered() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+            available_memory_bytes: u64::MAX,
+        };
+        let contract = SplitHalfRotaryContract::new(3, 1, 6, 4, 10_000.0, 255, 3, 262_144)
+            .expect("valid rotary contract");
+        let descriptor = SemanticOpDescriptor::new_rotary(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 3, 6]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[3, 1, 6]).unwrap(),
+                TensorView::contiguous(DType::I32, &[3]).unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 3, 6]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[3, 1, 6]).unwrap(),
+            ],
+            contract,
+        )
+        .expect("valid rotary descriptor");
+        assert_eq!(adapter.supports(&descriptor), PrepareSupport::Supported);
+    }
+
+    #[test]
+    fn supports_windowed_attention_after_owned_path_is_registered() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+            available_memory_bytes: u64::MAX,
+        };
+        let contract = WindowedCausalAttentionContract::new(3, 1, 6, 2, 3, 5, Some(4), 1.0)
+            .expect("valid windowed attention contract");
+        let descriptor = SemanticOpDescriptor::new_causal_attention(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 3, 6]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[5, 1, 6]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[5, 1, 6]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[3, 3, 6]).unwrap()],
+            contract,
+        )
+        .expect("valid windowed attention descriptor");
+        assert_eq!(adapter.supports(&descriptor), PrepareSupport::Supported);
+    }
+
+    #[test]
+    fn rotary_dispatch_mapping_preserves_non_aligned_shape_and_target() {
+        let dispatch = dispatch_from_rotary(RotaryDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 12,
+            dispatch_count: 1,
+            kernel_id: 1,
+            workgroup_size_x: 256,
+            grid_size_x: 1,
+            token_count: 3,
+            q_heads: 3,
+            kv_heads: 1,
+            head_dim: 6,
+            rotary_dim: 4,
+            start_position: 255,
+            max_position: 262_144,
+            backend: crate::sys::SLLM_BACKEND_HIP,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "rotary.split_half.bf16_fp32.v1".to_owned(),
+            device_symbol: "sllm_rotary_split_half_bf16_fp32_v1".to_owned(),
+            gcn_arch_name: "gfx1030".to_owned(),
+        });
+        assert_eq!(dispatch.row_count, 3);
+        assert_eq!(dispatch.normalized_size, 6);
+        assert_eq!(dispatch.target, "gfx1030");
+        assert!(!dispatch.fallback_allowed);
+        assert!(!dispatch.fallback_used);
+    }
+
+    #[test]
+    fn windowed_attention_dispatch_mapping_preserves_shape_window_and_target() {
+        let dispatch = dispatch_from_windowed_attention(WindowedAttentionDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 13,
+            dispatch_count: 1,
+            kernel_id: 1,
+            workgroup_size_x: 256,
+            grid_size_x: 1,
+            query_count: 3,
+            start_position: 2,
+            committed_kv_length: 5,
+            sliding_window: 4,
+            q_heads: 3,
+            kv_heads: 1,
+            head_dim: 6,
+            scaling_bits: 1.0_f32.to_bits(),
+            backend: crate::sys::SLLM_BACKEND_HIP,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "attention.windowed.bf16_fp32.v1".to_owned(),
+            device_symbol: "sllm_gemma_attention_bf16_fp32_v1".to_owned(),
+            gcn_arch_name: "gfx1201".to_owned(),
+        });
+        assert_eq!(dispatch.row_count, 3);
+        assert_eq!(dispatch.normalized_size, 6);
+        assert_eq!(dispatch.target, "gfx1201");
+        assert!(!dispatch.fallback_allowed);
+        assert!(!dispatch.fallback_used);
     }
 
     #[test]

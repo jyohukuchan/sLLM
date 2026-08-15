@@ -83,6 +83,8 @@ pub enum RuntimeStatus {
     LinearAttentionLengthMismatch,
     LinearAttentionStateBusy,
     InvalidArgmaxDescriptor,
+    InvalidRotaryDescriptor,
+    InvalidWindowedAttentionDescriptor,
     Unknown(u32),
 }
 
@@ -148,6 +150,10 @@ impl RuntimeStatus {
             }
             sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY => Self::LinearAttentionStateBusy,
             sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR => Self::InvalidArgmaxDescriptor,
+            sys::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR => Self::InvalidRotaryDescriptor,
+            sys::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR => {
+                Self::InvalidWindowedAttentionDescriptor
+            }
             other => Self::Unknown(other),
         }
     }
@@ -213,6 +219,10 @@ impl RuntimeStatus {
             }
             Self::LinearAttentionStateBusy => sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY,
             Self::InvalidArgmaxDescriptor => sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR,
+            Self::InvalidRotaryDescriptor => sys::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR,
+            Self::InvalidWindowedAttentionDescriptor => {
+                sys::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR
+            }
             Self::Unknown(raw) => raw,
         }
     }
@@ -303,6 +313,10 @@ fn status_name(status: RuntimeStatus) -> &'static str {
         RuntimeStatus::LinearAttentionLengthMismatch => "linear-attention length mismatch",
         RuntimeStatus::LinearAttentionStateBusy => "linear-attention state is busy",
         RuntimeStatus::InvalidArgmaxDescriptor => "invalid argmax descriptor",
+        RuntimeStatus::InvalidRotaryDescriptor => "invalid split-half rotary descriptor",
+        RuntimeStatus::InvalidWindowedAttentionDescriptor => {
+            "invalid windowed causal-attention descriptor"
+        }
         RuntimeStatus::Unknown(_) => "unknown public runtime status",
     }
 }
@@ -532,6 +546,18 @@ enum PendingCleanup {
         raw: Option<NonNull<sys::sllm_attention_preprocess_plan_t>>,
         context: Arc<ContextInner>,
         descriptor: Box<crate::attention_preprocess::AttentionPreprocessDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    RotaryPlan {
+        raw: Option<NonNull<sys::sllm_rotary_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::rotary::RotaryDescriptor>,
+        disposition: CleanupDisposition,
+    },
+    WindowedAttentionPlan {
+        raw: Option<NonNull<sys::sllm_windowed_attention_plan_t>>,
+        context: Arc<ContextInner>,
+        descriptor: Box<crate::windowed_attention::WindowedAttentionDescriptor>,
         disposition: CleanupDisposition,
     },
 }
@@ -1537,7 +1563,9 @@ impl PendingCleanup {
             | Self::EmbeddingPlan { disposition, .. }
             | Self::MatmulPlan { disposition, .. }
             | Self::ArgmaxPlan { disposition, .. }
-            | Self::AttentionPreprocessPlan { disposition, .. } => {
+            | Self::AttentionPreprocessPlan { disposition, .. }
+            | Self::RotaryPlan { disposition, .. }
+            | Self::WindowedAttentionPlan { disposition, .. } => {
                 *disposition == CleanupDisposition::Poisoned
             }
         }
@@ -1948,6 +1976,59 @@ pub(crate) fn enqueue_attention_preprocess_cleanup(
 ) {
     let (_, disposition, _) = classify_release(status, Some(raw));
     enqueue_cleanup(PendingCleanup::AttentionPreprocessPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_rotary_plan_once(
+    raw: NonNull<sys::sllm_rotary_plan_t>,
+) -> (RuntimeStatus, Option<NonNull<sys::sllm_rotary_plan_t>>) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_rotary_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_rotary_cleanup(
+    raw: NonNull<sys::sllm_rotary_plan_t>,
+    context: Context,
+    descriptor: crate::rotary::RotaryDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::RotaryPlan {
+        raw: Some(raw),
+        context: Arc::clone(&context.inner),
+        descriptor: Box::new(descriptor),
+        disposition,
+    });
+}
+
+pub(crate) fn release_windowed_attention_plan_once(
+    raw: NonNull<sys::sllm_windowed_attention_plan_t>,
+) -> (
+    RuntimeStatus,
+    Option<NonNull<sys::sllm_windowed_attention_plan_t>>,
+) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_windowed_attention_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn enqueue_windowed_attention_cleanup(
+    raw: NonNull<sys::sllm_windowed_attention_plan_t>,
+    context: Context,
+    descriptor: crate::windowed_attention::WindowedAttentionDescriptor,
+    status: RuntimeStatus,
+) {
+    let (_, disposition, _) = classify_release(status, Some(raw));
+    enqueue_cleanup(PendingCleanup::WindowedAttentionPlan {
         raw: Some(raw),
         context: Arc::clone(&context.inner),
         descriptor: Box::new(descriptor),
@@ -2845,6 +2926,86 @@ impl PendingCleanup {
                     None
                 } else {
                     Some(Self::AttentionPreprocessPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::RotaryPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::RotaryPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::RotaryPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_rotary_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::RotaryPlan {
+                        raw: remaining,
+                        context,
+                        descriptor,
+                        disposition,
+                    })
+                }
+            }
+            Self::WindowedAttentionPlan {
+                raw,
+                context,
+                descriptor,
+                disposition,
+            } => {
+                let Some(raw_handle) = raw else {
+                    return if disposition == CleanupDisposition::Poisoned {
+                        Some(Self::WindowedAttentionPlan {
+                            raw,
+                            context,
+                            descriptor,
+                            disposition,
+                        })
+                    } else {
+                        None
+                    };
+                };
+                if disposition == CleanupDisposition::Poisoned {
+                    return Some(Self::WindowedAttentionPlan {
+                        raw: Some(raw_handle),
+                        context,
+                        descriptor,
+                        disposition,
+                    });
+                }
+                let (status, remaining) = release_windowed_attention_plan_once(raw_handle);
+                let remaining = remaining?;
+                let (remaining, disposition, done) = classify_release(status, Some(remaining));
+                if done {
+                    None
+                } else {
+                    Some(Self::WindowedAttentionPlan {
                         raw: remaining,
                         context,
                         descriptor,

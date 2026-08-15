@@ -103,6 +103,13 @@ slice hash or cache path never substitutes for the source model lock.
 Qwen3.5-2B/9BのPhase 4で固定したraw非保存のrange recipeとhashは
 [Qwen3.5 Phase 4 real-weight slice identities](qwen3.5-phase4-slices.md)を正とする。
 
+Phase 14の`model-lock-v2`はreviewed `google/gemma-4-12B` direct-safetensors sourceだけに限定する。単一
+`model.safetensors`の8-byte header length、完全header hash、derived tensor catalog hash、全tensorの
+name/shape/dtype/absolute rangeを固定し、index fileが存在するかのように補わない。base sourceにはchat templateがないため
+`chat_template_path: null`と`prompt_mode: raw-text-only`を固定し、instruction-tuned siblingのtemplateを混在させない。
+text 666 tensorだけをloadableとし、locked audio/vision 11 tensorはknown-unconsumedとして明示する。runtimeは全locked fileを
+full hash検証した後でのみweight planを作り、23.8 GBをrepository、slice、生成artifactへ追加しない。
+
 ## Derived artifacts
 
 For each converted, quantized, merged, or otherwise generated artifact, record:

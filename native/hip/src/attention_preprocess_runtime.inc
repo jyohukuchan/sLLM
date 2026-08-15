@@ -301,7 +301,7 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
 
     std::unique_ptr<Completion> candidate;
     NativeEventGuard event_guard;
-    AttentionPreprocessExecuteScopeGuard execute_guard(
+    ArrayOperationExecuteScopeGuard execute_guard(
         plan, queue, &candidate, &event_guard, error_sink);
 
     const sllm_status_t device_status =

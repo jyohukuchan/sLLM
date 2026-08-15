@@ -188,7 +188,10 @@ impl RmsNormDescriptor {
             abi_version: sys::SLLM_HIP_ABI_VERSION,
             op_version: sys::SLLM_HIP_RMSNORM_VERSION,
             accumulation_dtype: sys::SLLM_RMSNORM_ACCUMULATION_F32,
-            scale_mode: sys::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE,
+            scale_mode: match contract.scale_mode() {
+                RmsNormScaleMode::OffsetOne => sys::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE,
+                RmsNormScaleMode::Direct => sys::SLLM_RMSNORM_SCALE_MODE_DIRECT,
+            },
             alias_policy: sys::SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP,
             epsilon_bits: contract.epsilon().bits(),
             reserved: [0; 3],

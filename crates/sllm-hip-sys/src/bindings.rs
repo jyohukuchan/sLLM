@@ -59,6 +59,8 @@ pub const SLLM_STATUS_INVALID_LINEAR_ATTENTION_DESCRIPTOR: sllm_status_t = 0x123
 pub const SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH: sllm_status_t = 0x124;
 pub const SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY: sllm_status_t = 0x125;
 pub const SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR: sllm_status_t = 0x126;
+pub const SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR: sllm_status_t = 0x127;
+pub const SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR: sllm_status_t = 0x128;
 
 pub const SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1: u32 = 1;
@@ -74,6 +76,9 @@ pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1: u32 = 1;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1: u32 = 2;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1: u32 = 3;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1: u32 = 4;
+pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1: u32 = 5;
+pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1: u32 = 6;
+pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1: u32 = 7;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE: u32 = 256;
@@ -127,6 +132,23 @@ pub const SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM: u32 = 64;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION: u32 = 262_144;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_M: u64 = 262_144;
+pub const SLLM_HIP_ROTARY_VERSION: u32 = 1;
+pub const SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1: u32 = 1;
+pub const SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_ROTARY_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_ROTARY_MAX_M: u64 = 262_144;
+pub const SLLM_HIP_ROTARY_MAX_POSITION: u32 = 262_144;
+pub const SLLM_HIP_WINDOWED_ATTENTION_VERSION: u32 = 1;
+pub const SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1: u32 = 1;
+pub const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_M: u64 = 262_144;
+pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_KV: u64 = 262_144;
+pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_KV_STATE_VERSION: u32 = 2;
 pub const SLLM_HIP_KV_VIEW_INFO_VERSION: u32 = 2;
 pub const SLLM_HIP_KV_APPEND_INFO_VERSION: u32 = 1;
@@ -201,6 +223,7 @@ pub type sllm_rmsnorm_accumulation_dtype_t = u32;
 pub const SLLM_RMSNORM_ACCUMULATION_F32: sllm_rmsnorm_accumulation_dtype_t = 2;
 pub type sllm_rmsnorm_scale_mode_t = u32;
 pub const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE: sllm_rmsnorm_scale_mode_t = 1;
+pub const SLLM_RMSNORM_SCALE_MODE_DIRECT: sllm_rmsnorm_scale_mode_t = 2;
 pub type sllm_rmsnorm_alias_policy_t = u32;
 pub const SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP: sllm_rmsnorm_alias_policy_t = 1;
 pub type sllm_elementwise_operation_t = u32;
@@ -208,6 +231,9 @@ pub const SLLM_ELEMENTWISE_OPERATION_COPY: sllm_elementwise_operation_t = 1;
 pub const SLLM_ELEMENTWISE_OPERATION_ADD: sllm_elementwise_operation_t = 2;
 pub const SLLM_ELEMENTWISE_OPERATION_SILU_MUL: sllm_elementwise_operation_t = 3;
 pub const SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL: sllm_elementwise_operation_t = 4;
+pub const SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL: sllm_elementwise_operation_t = 5;
+pub const SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL: sllm_elementwise_operation_t = 6;
+pub const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP: sllm_elementwise_operation_t = 7;
 
 pub const SLLM_COMPLETION_STATE_PENDING: u32 = 0;
 pub const SLLM_COMPLETION_STATE_SUCCESS: u32 = 1;
@@ -265,6 +291,16 @@ pub struct sllm_argmax_plan_t {
 
 #[repr(C)]
 pub struct sllm_attention_preprocess_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_rotary_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_windowed_attention_plan_t {
     _private: [u8; 0],
 }
 
@@ -637,6 +673,104 @@ pub struct sllm_attention_preprocess_dispatch_info_t {
     pub k_head_dim: u32,
     pub rotary_dim: u32,
     pub start_position: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_rotary_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub reserved0: u32,
+    pub start_position: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub rotary_dim: u32,
+    pub theta_bits: u32,
+    pub max_position: u32,
+    pub reserved: [u32; 2],
+    pub query: sllm_tensor_binding_t,
+    pub key: sllm_tensor_binding_t,
+    pub positions: sllm_tensor_binding_t,
+    pub query_output: sllm_tensor_binding_t,
+    pub key_output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_rotary_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub rotary_dim: u32,
+    pub start_position: u32,
+    pub max_position: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_windowed_attention_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub reserved0: u32,
+    pub start_position: u64,
+    pub expected_kv_length: u64,
+    pub sliding_window: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub scaling_bits: u32,
+    pub reserved: [u32; 4],
+    pub query: sllm_tensor_binding_t,
+    pub key: sllm_tensor_binding_t,
+    pub value: sllm_tensor_binding_t,
+    pub output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_windowed_attention_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub query_count: u64,
+    pub start_position: u64,
+    pub committed_kv_length: u64,
+    pub sliding_window: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub scaling_bits: u32,
     pub fallback_allowed: u32,
     pub fallback_used: u32,
     pub kernel_symbol: [c_char; 64],
@@ -1069,6 +1203,40 @@ unsafe extern "C" {
         queue: *const sllm_queue_t,
         completion: *mut *mut sllm_completion_t,
         dispatch_info: *mut sllm_attention_preprocess_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rotary_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_rotary_desc_t,
+        plan: *mut *mut sllm_rotary_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rotary_plan_release(
+        plan: *mut *mut sllm_rotary_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_rotary_execute(
+        plan: *const sllm_rotary_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_rotary_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_windowed_attention_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_windowed_attention_desc_t,
+        plan: *mut *mut sllm_windowed_attention_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_windowed_attention_plan_release(
+        plan: *mut *mut sllm_windowed_attention_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_windowed_attention_execute(
+        plan: *const sllm_windowed_attention_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_windowed_attention_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_kv_state_create(

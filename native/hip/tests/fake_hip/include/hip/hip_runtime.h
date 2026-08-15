@@ -117,7 +117,7 @@ void set_vmm_supported(bool supported) noexcept;
 hipError_t rmsnorm_launch(const uint16_t *activation, const uint16_t *raw_scale,
                           uint16_t *output, uint32_t normalized_size,
                           uint32_t row_count, float epsilon,
-                          hipStream_t stream) noexcept;
+                          uint32_t scale_mode, hipStream_t stream) noexcept;
 hipError_t elementwise_copy_launch(const uint16_t *input, uint16_t *output,
                                    uint64_t element_count,
                                    hipStream_t stream) noexcept;
@@ -133,6 +133,21 @@ hipError_t elementwise_sigmoid_mul_launch(const uint16_t *gate,
                                           uint16_t *output,
                                           uint64_t element_count,
                                           hipStream_t stream) noexcept;
+hipError_t elementwise_scalar_mul_launch(const uint16_t *input,
+                                         const uint16_t *scalar,
+                                         uint16_t *output,
+                                         uint64_t element_count,
+                                         hipStream_t stream) noexcept;
+hipError_t elementwise_gelu_tanh_mul_launch(const uint16_t *gate,
+                                            const uint16_t *up,
+                                            uint16_t *output,
+                                            uint64_t element_count,
+                                            hipStream_t stream) noexcept;
+hipError_t elementwise_tanh_softcap_launch(const uint16_t *input,
+                                           const uint16_t *cap,
+                                           uint16_t *output,
+                                           uint64_t element_count,
+                                           hipStream_t stream) noexcept;
 hipError_t embedding_gather_launch(const uint16_t *weight,
                                    const int32_t *token_ids, uint16_t *output,
                                    uint64_t token_count, uint64_t hidden_size,
@@ -147,6 +162,17 @@ hipError_t attention_preprocess_launch(
     const uint16_t *q_raw_scale, const uint16_t *k_raw_scale,
     const int32_t *positions, uint16_t *q_output, uint16_t *gate_output,
     uint16_t *k_output, uint32_t m, hipStream_t stream) noexcept;
+hipError_t rotary_launch(const uint16_t *query, const uint16_t *key,
+                         const int32_t *positions, uint16_t *query_output,
+                         uint16_t *key_output, uint32_t token_count,
+                         uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
+                         uint32_t rotary_dim, float theta,
+                         hipStream_t stream) noexcept;
+hipError_t windowed_attention_launch(
+    const uint16_t *query, const uint16_t *key, const uint16_t *value,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint64_t sliding_window, hipStream_t stream) noexcept;
 hipError_t
 kv_state_append_launch(const uint16_t *key_input, const uint16_t *value_input,
                        uint16_t *key_output, uint16_t *value_output,
@@ -162,6 +188,9 @@ hipError_t causal_attention_launch(const uint16_t *query, const uint16_t *key,
 std::size_t embedding_gather_launch_calls() noexcept;
 std::size_t matmul_launch_calls() noexcept;
 std::size_t attention_preprocess_launch_calls() noexcept;
+std::size_t rotary_launch_calls() noexcept;
+std::size_t windowed_attention_launch_calls() noexcept;
+uint32_t rotary_last_token_count() noexcept;
 uint32_t attention_preprocess_last_m() noexcept;
 std::size_t kv_state_append_launch_calls() noexcept;
 std::size_t causal_attention_launch_calls() noexcept;
@@ -182,11 +211,16 @@ std::size_t elementwise_copy_launch_calls() noexcept;
 std::size_t elementwise_add_launch_calls() noexcept;
 std::size_t elementwise_silu_mul_launch_calls() noexcept;
 std::size_t elementwise_sigmoid_mul_launch_calls() noexcept;
+std::size_t elementwise_scalar_mul_launch_calls() noexcept;
+std::size_t elementwise_gelu_tanh_mul_launch_calls() noexcept;
+std::size_t elementwise_tanh_softcap_launch_calls() noexcept;
 uint64_t elementwise_last_element_count() noexcept;
 void set_rmsnorm_launch_status(hipError_t status) noexcept;
+void set_rmsnorm_numerical_execution(bool enabled) noexcept;
 std::size_t rmsnorm_launch_calls() noexcept;
 uint32_t rmsnorm_last_normalized_size() noexcept;
 uint32_t rmsnorm_last_row_count() noexcept;
+uint32_t rmsnorm_last_scale_mode() noexcept;
 void set_matmul_launch_status(hipError_t status) noexcept;
 std::size_t argmax_launch_calls() noexcept;
 uint64_t argmax_last_m() noexcept;

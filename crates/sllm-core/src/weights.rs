@@ -103,6 +103,10 @@ pub enum WeightConsumer {
     AttentionO,
     AttentionQNorm,
     AttentionKNorm,
+    PreFeedforwardNorm,
+    PostFeedforwardNorm,
+    LayerScalar,
+    AttentionKAndV,
 }
 
 impl WeightConsumer {
@@ -132,6 +136,10 @@ impl WeightConsumer {
             Self::AttentionKNorm => 22,
             Self::Embedding => 23,
             Self::OutputProjection => 24,
+            Self::PreFeedforwardNorm => 25,
+            Self::PostFeedforwardNorm => 26,
+            Self::LayerScalar => 27,
+            Self::AttentionKAndV => 28,
         }
     }
 }
@@ -630,6 +638,155 @@ pub fn build_verified_weight_load_plan(
     build_weight_load_plan(lock, cache.tensors())
 }
 
+/// Build the exact Gemma 4 text-only load plan from verified direct-file
+/// descriptors. Audio and vision tensors remain represented as
+/// known-unconsumed entries and consume no device destination space.
+pub fn build_gemma4_weight_load_plan<'a>(
+    lock: &crate::gemma4::Gemma4ModelLock,
+    descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if lock.schema_version != "model-lock-v2"
+        || lock.model.repo_id != crate::gemma4::GEMMA4_12B_REPO_ID
+        || lock.model.resolved_revision != crate::gemma4::GEMMA4_12B_REVISION
+        || lock.fingerprint() != crate::gemma4::GEMMA4_12B_FINGERPRINT
+        || !lock.model.architecture.text.tie_word_embeddings
+        || lock.model.architecture.text.layer_types != crate::gemma4::reviewed_layer_schedule()
+    {
+        return Err(WeightPlanError::invalid(
+            "model identity is not the reviewed Gemma 4 dense contract",
+        ));
+    }
+    let locked_files = locked_file_map_from_files(&lock.model.files)?;
+    let mut by_name = BTreeMap::new();
+    for descriptor in descriptors {
+        if by_name
+            .insert(descriptor.tensor_name.as_str(), descriptor)
+            .is_some()
+        {
+            return Err(WeightPlanError::invalid(format!(
+                "duplicate tensor descriptor: {}",
+                descriptor.tensor_name
+            )));
+        }
+    }
+
+    let expected_consumers = expected_gemma4_consumers();
+    let mut observed_consumers = BTreeSet::new();
+    let mut audio_count = 0_u64;
+    let mut vision_count = 0_u64;
+    let mut entries = Vec::with_capacity(by_name.len());
+    let mut destination_cursor = 0_u64;
+    for descriptor in by_name.values() {
+        validate_descriptor(descriptor, &locked_files)?;
+        let (classification, consumer) = classify_gemma4_descriptor(descriptor)?;
+        if let Some(key) = consumer {
+            if !observed_consumers.insert(key) {
+                return Err(WeightPlanError::invalid(format!(
+                    "duplicate weight consumer: {key:?}"
+                )));
+            }
+        }
+        if classification == WeightClassification::KnownUnconsumed {
+            if descriptor.tensor_name.starts_with("model.embed_audio.") {
+                audio_count = audio_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("audio tensor count overflow"))?;
+            } else {
+                vision_count = vision_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
+            }
+        }
+        let locked = locked_files
+            .get(descriptor.source_file.as_str())
+            .expect("descriptor source was validated");
+        let (destination_start, chunks) = if classification == WeightClassification::KnownUnconsumed
+        {
+            (None, Vec::new())
+        } else {
+            let destination_start = destination_cursor;
+            let chunks = split_chunks(descriptor, destination_start)?;
+            destination_cursor = destination_cursor
+                .checked_add(descriptor.byte_size)
+                .ok_or_else(|| WeightPlanError::invalid("destination size overflow"))?;
+            (Some(destination_start), chunks)
+        };
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.tensor_name.clone(),
+            classification,
+            consumer,
+            dtype: descriptor.dtype,
+            shape: descriptor.shape.clone(),
+            source_file: descriptor.source_file.clone(),
+            locked_file_size: locked.size_bytes,
+            locked_file_sha256: locked.sha256.clone(),
+            source_range: descriptor.absolute_byte_range,
+            destination_start,
+            chunks,
+        });
+    }
+    if observed_consumers != expected_consumers {
+        let missing: Vec<_> = expected_consumers
+            .difference(&observed_consumers)
+            .copied()
+            .collect();
+        let unexpected: Vec<_> = observed_consumers
+            .difference(&expected_consumers)
+            .copied()
+            .collect();
+        return Err(WeightPlanError::invalid(format!(
+            "Gemma 4 weight consumer set differs: missing={missing:?}, unexpected={unexpected:?}"
+        )));
+    }
+    if audio_count != lock.model.architecture.audio.tensor_count
+        || vision_count != lock.model.architecture.vision.tensor_count
+        || entries.len() as u64 != lock.model.tensor_contract.tensor_count
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "Gemma 4 known-unconsumed/count contract differs: audio={audio_count}/{}, vision={vision_count}/{}, all={}/{}",
+            lock.model.architecture.audio.tensor_count,
+            lock.model.architecture.vision.tensor_count,
+            entries.len(),
+            lock.model.tensor_contract.tensor_count
+        )));
+    }
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version: &lock.schema_version,
+            repo_id: &lock.model.repo_id,
+            resolved_revision: &lock.model.resolved_revision,
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: true,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: lock.schema_version.clone(),
+        repo_id: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: true,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
+}
+
+pub fn build_verified_gemma4_weight_load_plan(
+    lock: &crate::gemma4::Gemma4ModelLock,
+    cache: &VerifiedCache,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if cache.lock_fingerprint != lock.fingerprint() {
+        return Err(WeightPlanError::invalid(
+            "verified cache fingerprint differs from the model lock",
+        ));
+    }
+    build_gemma4_weight_load_plan(lock, cache.tensors())
+}
+
 fn validate_fixed_lock(lock: &ModelLock) -> Result<(), WeightPlanError> {
     let config = &lock.model.architecture.text_config;
     if lock.schema_version != QWEN_SCHEMA_VERSION || reviewed_qwen35_spec(lock).is_none() {
@@ -649,8 +806,14 @@ fn validate_fixed_lock(lock: &ModelLock) -> Result<(), WeightPlanError> {
 }
 
 fn locked_file_map(lock: &ModelLock) -> Result<BTreeMap<&str, &LockedFile>, WeightPlanError> {
+    locked_file_map_from_files(&lock.model.files)
+}
+
+fn locked_file_map_from_files(
+    locked_files: &[LockedFile],
+) -> Result<BTreeMap<&str, &LockedFile>, WeightPlanError> {
     let mut files = BTreeMap::new();
-    for file in &lock.model.files {
+    for file in locked_files {
         if file.sha256.len() != 64
             || !file
                 .sha256
@@ -670,6 +833,142 @@ fn locked_file_map(lock: &ModelLock) -> Result<BTreeMap<&str, &LockedFile>, Weig
         }
     }
     Ok(files)
+}
+
+fn classify_gemma4_descriptor(
+    descriptor: &TensorDescriptor,
+) -> Result<(WeightClassification, Option<WeightConsumerKey>), WeightPlanError> {
+    let name = descriptor.tensor_name.as_str();
+    let top_level = match name {
+        "model.language_model.embed_tokens.weight" => Some(WeightConsumer::EmbeddingAndTiedOutput),
+        "model.language_model.norm.weight" => Some(WeightConsumer::FinalNorm),
+        _ => None,
+    };
+    if let Some(role) = top_level {
+        return Ok((
+            WeightClassification::Required,
+            Some(WeightConsumerKey { layer: None, role }),
+        ));
+    }
+    if name.starts_with("model.embed_audio.")
+        || name.starts_with("model.embed_vision.")
+        || name.starts_with("model.vision_embedder.")
+    {
+        return Ok((WeightClassification::KnownUnconsumed, None));
+    }
+    const LAYER_PREFIX: &str = "model.language_model.layers.";
+    let remainder = name
+        .strip_prefix(LAYER_PREFIX)
+        .ok_or_else(|| WeightPlanError::invalid(format!("unknown Gemma 4 tensor name: {name}")))?;
+    let (layer_text, suffix) = remainder.split_once('.').ok_or_else(|| {
+        WeightPlanError::invalid(format!("malformed Gemma 4 layer tensor: {name}"))
+    })?;
+    let layer = layer_text
+        .parse::<u64>()
+        .map_err(|_| WeightPlanError::invalid(format!("invalid layer index: {name}")))?;
+    if layer.to_string() != layer_text {
+        return Err(WeightPlanError::invalid(format!(
+            "layer index is not canonical decimal: {name}"
+        )));
+    }
+    let layer_type = crate::gemma4::reviewed_layer_schedule()
+        .get(
+            usize::try_from(layer)
+                .map_err(|_| WeightPlanError::invalid("layer index does not fit usize"))?,
+        )
+        .copied()
+        .ok_or_else(|| WeightPlanError::invalid(format!("layer index is out of range: {layer}")))?;
+    let common = match suffix {
+        "input_layernorm.weight" => Some(WeightConsumer::InputNorm),
+        "post_attention_layernorm.weight" => Some(WeightConsumer::PostAttentionNorm),
+        "pre_feedforward_layernorm.weight" => Some(WeightConsumer::PreFeedforwardNorm),
+        "post_feedforward_layernorm.weight" => Some(WeightConsumer::PostFeedforwardNorm),
+        "layer_scalar" => Some(WeightConsumer::LayerScalar),
+        "mlp.gate_proj.weight" => Some(WeightConsumer::MlpGate),
+        "mlp.up_proj.weight" => Some(WeightConsumer::MlpUp),
+        "mlp.down_proj.weight" => Some(WeightConsumer::MlpDown),
+        "self_attn.q_proj.weight" => Some(WeightConsumer::AttentionQ),
+        "self_attn.o_proj.weight" => Some(WeightConsumer::AttentionO),
+        "self_attn.q_norm.weight" => Some(WeightConsumer::AttentionQNorm),
+        "self_attn.k_norm.weight" => Some(WeightConsumer::AttentionKNorm),
+        "self_attn.k_proj.weight" => Some(match layer_type {
+            crate::gemma4::Gemma4LayerType::SlidingAttention => WeightConsumer::AttentionK,
+            crate::gemma4::Gemma4LayerType::FullAttention => WeightConsumer::AttentionKAndV,
+        }),
+        "self_attn.v_proj.weight"
+            if layer_type == crate::gemma4::Gemma4LayerType::SlidingAttention =>
+        {
+            Some(WeightConsumer::AttentionV)
+        }
+        _ => None,
+    };
+    let role = common.ok_or_else(|| {
+        WeightPlanError::invalid(format!(
+            "tensor suffix is invalid for its Gemma 4 layer class: {name}"
+        ))
+    })?;
+    Ok((
+        WeightClassification::Required,
+        Some(WeightConsumerKey {
+            layer: Some(layer),
+            role,
+        }),
+    ))
+}
+
+fn expected_gemma4_consumers() -> BTreeSet<WeightConsumerKey> {
+    let mut expected = BTreeSet::from([
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::EmbeddingAndTiedOutput,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::FinalNorm,
+        },
+    ]);
+    for (layer, layer_type) in crate::gemma4::reviewed_layer_schedule()
+        .into_iter()
+        .enumerate()
+    {
+        let layer = u64::try_from(layer).expect("Gemma 4 layer index fits u64");
+        for role in [
+            WeightConsumer::InputNorm,
+            WeightConsumer::PostAttentionNorm,
+            WeightConsumer::PreFeedforwardNorm,
+            WeightConsumer::PostFeedforwardNorm,
+            WeightConsumer::LayerScalar,
+            WeightConsumer::MlpGate,
+            WeightConsumer::MlpUp,
+            WeightConsumer::MlpDown,
+            WeightConsumer::AttentionQ,
+            WeightConsumer::AttentionO,
+            WeightConsumer::AttentionQNorm,
+            WeightConsumer::AttentionKNorm,
+        ] {
+            expected.insert(WeightConsumerKey {
+                layer: Some(layer),
+                role,
+            });
+        }
+        match layer_type {
+            crate::gemma4::Gemma4LayerType::SlidingAttention => {
+                for role in [WeightConsumer::AttentionK, WeightConsumer::AttentionV] {
+                    expected.insert(WeightConsumerKey {
+                        layer: Some(layer),
+                        role,
+                    });
+                }
+            }
+            crate::gemma4::Gemma4LayerType::FullAttention => {
+                expected.insert(WeightConsumerKey {
+                    layer: Some(layer),
+                    role: WeightConsumer::AttentionKAndV,
+                });
+            }
+        }
+    }
+    expected
 }
 
 fn validate_descriptor(
@@ -1019,6 +1318,76 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn gemma4_plan_classifies_exact_text_and_unconsumed_catalog() {
+        let lock = crate::gemma4::parse_gemma4_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-bf16.json"
+        ))
+        .expect("reviewed Gemma 4 lock parses");
+        let catalog = crate::gemma4::expected_gemma4_tensor_catalog()
+            .expect("reviewed Gemma 4 catalog derives");
+        let plan = build_gemma4_weight_load_plan(&lock, catalog.values())
+            .expect("reviewed Gemma 4 load plan builds");
+        assert_eq!(plan.entries.len(), 677);
+        assert_eq!(
+            plan.entries
+                .iter()
+                .filter(|entry| entry.classification == WeightClassification::KnownUnconsumed)
+                .count(),
+            11
+        );
+        assert_eq!(
+            plan.entries
+                .iter()
+                .filter(|entry| entry.destination_start.is_some())
+                .count(),
+            666
+        );
+        assert_eq!(plan.total_destination_bytes, 23_814_700_640);
+        let consumer = |name: &str| {
+            plan.entries
+                .iter()
+                .find(|entry| entry.tensor_name == name)
+                .and_then(|entry| entry.consumer)
+                .map(|consumer| consumer.role)
+        };
+        assert_eq!(
+            consumer("model.language_model.layers.5.self_attn.k_proj.weight"),
+            Some(WeightConsumer::AttentionKAndV)
+        );
+        assert_eq!(
+            consumer("model.language_model.layers.6.self_attn.k_proj.weight"),
+            Some(WeightConsumer::AttentionK)
+        );
+        assert_eq!(
+            consumer("model.language_model.layers.6.self_attn.v_proj.weight"),
+            Some(WeightConsumer::AttentionV)
+        );
+        assert_eq!(
+            consumer("model.language_model.layers.47.post_feedforward_layernorm.weight"),
+            Some(WeightConsumer::PostFeedforwardNorm)
+        );
+    }
+
+    #[test]
+    fn gemma4_plan_rejects_missing_extra_and_full_layer_v_weight() {
+        let lock = crate::gemma4::parse_gemma4_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-bf16.json"
+        ))
+        .expect("reviewed Gemma 4 lock parses");
+        let mut catalog = crate::gemma4::expected_gemma4_tensor_catalog()
+            .expect("reviewed Gemma 4 catalog derives");
+        let missing = catalog
+            .remove("model.language_model.layers.0.layer_scalar")
+            .expect("boundary tensor exists");
+        assert!(build_gemma4_weight_load_plan(&lock, catalog.values()).is_err());
+        catalog.insert(missing.tensor_name.clone(), missing.clone());
+        let mut invalid = missing;
+        invalid.tensor_name = "model.language_model.layers.5.self_attn.v_proj.weight".to_owned();
+        catalog.insert(invalid.tensor_name.clone(), invalid);
+        assert!(build_gemma4_weight_load_plan(&lock, catalog.values()).is_err());
+    }
 
     struct FakeWeightSource {
         fingerprint: String,

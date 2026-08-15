@@ -771,7 +771,11 @@ elementwise_descriptor(const sllm_elementwise_operation_t operation,
   };
   descriptor.input0 = binding(input0, size);
   if (operation != SLLM_ELEMENTWISE_OPERATION_COPY) {
-    descriptor.input1 = binding(input1, size);
+    descriptor.input1 =
+        operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||
+                operation == SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP
+            ? rmsnorm_binding(input1, 0U, 1U, 1U)
+            : binding(input1, size);
   }
   descriptor.output = binding(output, size);
   return descriptor;
@@ -864,6 +868,15 @@ bool elementwise_prepare_execute_and_negative_contract() {
       !run(SLLM_ELEMENTWISE_OPERATION_SILU_MUL, 255U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1,
            "elementwise.silu_mul.bf16_fp32.v1") ||
+      !run(SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL, 257U,
+           SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1,
+           "elementwise.scalar_mul.bf16_fp32.v1") ||
+      !run(SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL, 17U,
+           SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1,
+           "elementwise.gelu_tanh_mul.bf16_fp32.v1") ||
+      !run(SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP, 255U,
+           SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1,
+           "elementwise.tanh_softcap.bf16_fp32.v1") ||
       !run(SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL, 3U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1,
            "elementwise.sigmoid_mul.bf16_fp32.v1") ||
@@ -871,6 +884,9 @@ bool elementwise_prepare_execute_and_negative_contract() {
       fake_hip::elementwise_add_launch_calls() != 1U ||
       fake_hip::elementwise_silu_mul_launch_calls() != 1U ||
       fake_hip::elementwise_sigmoid_mul_launch_calls() != 1U ||
+      fake_hip::elementwise_scalar_mul_launch_calls() != 1U ||
+      fake_hip::elementwise_gelu_tanh_mul_launch_calls() != 1U ||
+      fake_hip::elementwise_tanh_softcap_launch_calls() != 1U ||
       fake_hip::elementwise_last_element_count() != 3U * 16U * 256U) {
     return false;
   }
@@ -906,6 +922,16 @@ bool elementwise_prepare_execute_and_negative_contract() {
   if (!expect_status(
           sllm_elementwise_prepare(context, &descriptor, &plan, &error.sink),
           SLLM_STATUS_UNSUPPORTED_DTYPE, "elementwise dtype rejection",
+          error) ||
+      plan != nullptr) {
+    return false;
+  }
+  descriptor = elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL,
+                                      input0, input1, output, 3U);
+  descriptor.input1 = rmsnorm_binding(input1, 0U, 1U, 3U);
+  if (!expect_status(
+          sllm_elementwise_prepare(context, &descriptor, &plan, &error.sink),
+          SLLM_STATUS_SHAPE_MISMATCH, "scalar multiplier shape rejection",
           error) ||
       plan != nullptr) {
     return false;
@@ -1355,6 +1381,15 @@ bool rmsnorm_table_driven_negative_contract() {
       plan != nullptr) {
     return false;
   }
+  auto direct = valid;
+  direct.scale_mode = SLLM_RMSNORM_SCALE_MODE_DIRECT;
+  if (!expect_status(sllm_rmsnorm_prepare(context, &direct, &plan, &error.sink),
+                     SLLM_STATUS_OK, "direct-scale RMSNorm prepare", error) ||
+      plan == nullptr ||
+      !expect_status(sllm_rmsnorm_plan_release(&plan, &error.sink),
+                     SLLM_STATUS_OK, "direct-scale RMSNorm release", error)) {
+    return false;
+  }
   auto descriptor = valid;
   descriptor.activation.dtype = SLLM_TENSOR_DTYPE_F32;
   if (!expect(descriptor, SLLM_STATUS_UNSUPPORTED_DTYPE, "negative dtype")) {
@@ -1737,6 +1772,124 @@ bool rmsnorm_execute_metadata_and_reuse() {
     return false;
   }
   return true;
+}
+
+bool rmsnorm_direct_scale_numerical_contract() {
+  fake_hip::reset();
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *scale = nullptr;
+  sllm_buffer_t *output = nullptr;
+  constexpr uint64_t rows = 2U;
+  constexpr uint64_t columns = 3U;
+  constexpr uint64_t activation_bytes = rows * columns * sizeof(uint16_t);
+  constexpr uint64_t scale_bytes = columns * sizeof(uint16_t);
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_buffer_sized(context, activation_bytes, &activation) ||
+      !create_buffer_sized(context, scale_bytes, &scale) ||
+      !create_buffer_sized(context, activation_bytes, &output)) {
+    return false;
+  }
+
+  const std::array<float, rows * columns> activation_values = {
+      1.0F, 2.0F, 3.0F, -1.0F, -2.0F, -3.0F};
+  const std::array<float, columns> scale_values = {1.0F, 2.0F, 0.5F};
+  std::array<uint16_t, rows * columns> activation_words{};
+  std::array<uint16_t, columns> scale_words{};
+  for (std::size_t index = 0U; index != activation_words.size(); ++index) {
+    activation_words[index] =
+        sllm_rmsnorm_kernel::float_to_bf16_rne_bits(activation_values[index]);
+  }
+  for (std::size_t index = 0U; index != scale_words.size(); ++index) {
+    scale_words[index] =
+        sllm_rmsnorm_kernel::float_to_bf16_rne_bits(scale_values[index]);
+  }
+
+  Error error;
+  const auto upload = [&](const sllm_buffer_t *const buffer,
+                          const void *const source, const uint64_t bytes) {
+    sllm_transfer_desc_t transfer{};
+    transfer.struct_size = sizeof(transfer);
+    transfer.abi_version = SLLM_HIP_ABI_VERSION;
+    transfer.host_pointer = const_cast<void *>(source);
+    transfer.size_bytes = bytes;
+    sllm_completion_t *completion = nullptr;
+    return expect_status(sllm_buffer_copy_h2d(queue, buffer, &transfer,
+                                              &completion, &error.sink),
+                         SLLM_STATUS_OK, "direct RMSNorm upload", error) &&
+           query_completion(completion, SLLM_STATUS_OK) &&
+           release_completion(&completion);
+  };
+  if (!upload(activation, activation_words.data(), activation_bytes) ||
+      !upload(scale, scale_words.data(), scale_bytes)) {
+    return false;
+  }
+  fake_hip::set_rmsnorm_numerical_execution(true);
+
+  auto descriptor =
+      rmsnorm_descriptor(activation, 0U, scale, 0U, output, 0U, rows, columns);
+  descriptor.scale_mode = SLLM_RMSNORM_SCALE_MODE_DIRECT;
+  sllm_rmsnorm_plan_t *plan = nullptr;
+  if (!expect_status(
+          sllm_rmsnorm_prepare(context, &descriptor, &plan, &error.sink),
+          SLLM_STATUS_OK, "direct RMSNorm numerical prepare", error)) {
+    return false;
+  }
+  sllm_completion_t *completion = nullptr;
+  auto info = rmsnorm_dispatch_info();
+  if (!expect_status(
+          sllm_rmsnorm_execute(plan, queue, &completion, &info, &error.sink),
+          SLLM_STATUS_OK, "direct RMSNorm numerical execute", error) ||
+      !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion) ||
+      fake_hip::rmsnorm_last_scale_mode() != SLLM_RMSNORM_SCALE_MODE_DIRECT) {
+    return false;
+  }
+
+  sllm_completion_t *readback = nullptr;
+  std::array<uint16_t, rows * columns> observed{};
+  uint64_t bytes_written = 0U;
+  if (!submit_d2h(queue, output, activation_bytes, &readback) ||
+      !query_completion(readback, SLLM_STATUS_OK) ||
+      !expect_status(sllm_completion_read(readback, observed.data(),
+                                          activation_bytes, &bytes_written,
+                                          &error.sink),
+                     SLLM_STATUS_OK, "direct RMSNorm readback", error) ||
+      bytes_written != activation_bytes || !release_completion(&readback)) {
+    return false;
+  }
+
+  std::array<uint16_t, rows * columns> expected{};
+  for (uint64_t row = 0U; row != rows; ++row) {
+    float sum = 0.0F;
+    for (uint64_t column = 0U; column != columns; ++column) {
+      const float value = activation_values[row * columns + column];
+      sum += value * value;
+    }
+    const float inverse_rms =
+        1.0F / std::sqrt(sum / static_cast<float>(columns) + 1.0e-6F);
+    for (uint64_t column = 0U; column != columns; ++column) {
+      expected[row * columns + column] =
+          sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+              activation_values[row * columns + column] * inverse_rms *
+              scale_values[column]);
+    }
+  }
+  const uint16_t forbidden_offset_one =
+      sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+          activation_values[0] /
+          std::sqrt((1.0F + 4.0F + 9.0F) / 3.0F + 1.0e-6F) *
+          (1.0F + scale_values[0]));
+  const bool numerical_match =
+      observed == expected && observed.front() != forbidden_offset_one;
+  return numerical_match &&
+         expect_status(sllm_rmsnorm_plan_release(&plan, &error.sink),
+                       SLLM_STATUS_OK, "direct RMSNorm numerical release",
+                       error) &&
+         !plan && release_queue(&queue) && release_buffer(&activation) &&
+         release_buffer(&scale) && release_buffer(&output) &&
+         release_context(&context);
 }
 
 bool rmsnorm_execute_boundaries_and_failures() {
@@ -2750,6 +2903,324 @@ bool attention_preprocess_success_metadata_and_dispatch() {
                     SLLM_STATUS_OK, "attention success plan release", error);
   release_attention_buffers(&buffers);
   return valid && release_queue(&queue) && release_context(&context);
+}
+
+using RotaryTestBuffers = std::array<sllm_buffer_t *, 5>;
+
+void release_rotary_buffers(RotaryTestBuffers *const buffers) {
+  if (buffers == nullptr) {
+    return;
+  }
+  for (sllm_buffer_t *&buffer : *buffers) {
+    if (buffer != nullptr) {
+      release_buffer(&buffer);
+    }
+  }
+}
+
+bool create_rotary_resources(sllm_context_t **const context,
+                             sllm_queue_t **const queue,
+                             RotaryTestBuffers *const buffers,
+                             const uint64_t token_count, const uint32_t q_heads,
+                             const uint32_t kv_heads, const uint32_t head_dim) {
+  if (!create_context(context) || !create_queue(*context, queue)) {
+    return false;
+  }
+  const uint64_t query_bytes = token_count * q_heads * head_dim * 2U;
+  const uint64_t key_bytes = token_count * kv_heads * head_dim * 2U;
+  const uint64_t sizes[] = {query_bytes, key_bytes,
+                            token_count * sizeof(int32_t), query_bytes,
+                            key_bytes};
+  for (std::size_t index = 0U; index != buffers->size(); ++index) {
+    if (!create_buffer_sized(*context, sizes[index], &(*buffers)[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+sllm_rotary_desc_t
+rotary_descriptor(const RotaryTestBuffers &buffers, const uint64_t token_count,
+                  const uint64_t start_position, const uint32_t q_heads,
+                  const uint32_t kv_heads, const uint32_t head_dim,
+                  const uint32_t rotary_dim, const float theta) {
+  const uint64_t query_shape[] = {token_count, q_heads, head_dim};
+  const uint64_t key_shape[] = {token_count, kv_heads, head_dim};
+  const uint64_t positions_shape[] = {token_count};
+  sllm_rotary_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_ROTARY_VERSION;
+  descriptor.start_position = start_position;
+  descriptor.q_heads = q_heads;
+  descriptor.kv_heads = kv_heads;
+  descriptor.head_dim = head_dim;
+  descriptor.rotary_dim = rotary_dim;
+  std::memcpy(&descriptor.theta_bits, &theta, sizeof(theta));
+  descriptor.max_position = SLLM_HIP_ROTARY_MAX_POSITION;
+  descriptor.query =
+      attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 3U, query_shape);
+  descriptor.key =
+      attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 3U, key_shape);
+  descriptor.positions =
+      attention_binding(buffers[2], SLLM_TENSOR_DTYPE_I32, 1U, positions_shape);
+  descriptor.query_output =
+      attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 3U, query_shape);
+  descriptor.key_output =
+      attention_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, key_shape);
+  return descriptor;
+}
+
+sllm_rotary_dispatch_info_t rotary_dispatch_info() {
+  sllm_rotary_dispatch_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION;
+  return info;
+}
+
+bool rotary_prepare_execute_lifetime_and_negative_contract() {
+  fake_hip::reset();
+  constexpr uint64_t token_count = 3U;
+  constexpr uint64_t start_position = 17U;
+  constexpr uint32_t q_heads = 3U;
+  constexpr uint32_t kv_heads = 1U;
+  constexpr uint32_t head_dim = 6U;
+  constexpr uint32_t rotary_dim = 4U;
+  constexpr float theta = 10'000.0F;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  RotaryTestBuffers buffers{};
+  if (!create_rotary_resources(&context, &queue, &buffers, token_count, q_heads,
+                               kv_heads, head_dim)) {
+    release_rotary_buffers(&buffers);
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  Error error;
+  auto descriptor =
+      rotary_descriptor(buffers, token_count, start_position, q_heads, kv_heads,
+                        head_dim, rotary_dim, theta);
+  sllm_rotary_plan_t *plan = nullptr;
+  auto alias = descriptor;
+  alias.query_output.buffer = alias.query.buffer;
+  if (!expect_status(sllm_rotary_prepare(context, &alias, &plan, &error.sink),
+                     SLLM_STATUS_ALIAS_OVERLAP, "rotary alias rejection",
+                     error) ||
+      plan != nullptr) {
+    return false;
+  }
+  auto odd_head_dim = descriptor;
+  odd_head_dim.head_dim = 5U;
+  if (!expect_status(
+          sllm_rotary_prepare(context, &odd_head_dim, &plan, &error.sink),
+          SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR,
+          "rotary odd head dimension rejection", error) ||
+      plan != nullptr) {
+    return false;
+  }
+  std::vector<int32_t> positions = {static_cast<int32_t>(start_position),
+                                    static_cast<int32_t>(start_position + 2U),
+                                    static_cast<int32_t>(start_position + 2U)};
+  if (!upload_attention_positions(queue, buffers[2], positions) ||
+      !expect_status(
+          sllm_rotary_prepare(context, &descriptor, &plan, &error.sink),
+          SLLM_STATUS_OK, "rotary prepare", error) ||
+      plan == nullptr ||
+      !release_buffer(&buffers[0], SLLM_STATUS_PUBLIC_BUSY)) {
+    return false;
+  }
+  sllm_completion_t *completion = nullptr;
+  auto info = rotary_dispatch_info();
+  if (!expect_status(
+          sllm_rotary_execute(plan, queue, &completion, &info, &error.sink),
+          SLLM_STATUS_POSITION_PAYLOAD_MISMATCH, "rotary position mismatch",
+          error) ||
+      completion != nullptr || fake_hip::rotary_launch_calls() != 0U) {
+    return false;
+  }
+  positions[1] = static_cast<int32_t>(start_position + 1U);
+  if (!upload_attention_positions(queue, buffers[2], positions)) {
+    return false;
+  }
+  info = rotary_dispatch_info();
+  const bool valid =
+      expect_status(
+          sllm_rotary_execute(plan, queue, &completion, &info, &error.sink),
+          SLLM_STATUS_OK, "rotary execute", error) &&
+      completion != nullptr &&
+      expect_status(sllm_rotary_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_PUBLIC_BUSY, "rotary active plan release",
+                    error) &&
+      plan != nullptr && info.dispatch_id != 0U && info.dispatch_count == 1U &&
+      info.kernel_id == SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1 &&
+      info.workgroup_size_x == SLLM_HIP_ROTARY_WORKGROUP_SIZE &&
+      info.grid_size_x == token_count * (q_heads + kv_heads) &&
+      info.token_count == token_count && info.q_heads == q_heads &&
+      info.kv_heads == kv_heads && info.head_dim == head_dim &&
+      info.rotary_dim == rotary_dim && info.start_position == start_position &&
+      info.max_position == SLLM_HIP_ROTARY_MAX_POSITION &&
+      info.fallback_allowed == 0U && info.fallback_used == 0U &&
+      std::strcmp(info.kernel_symbol, "rotary.split_half.bf16_fp32.v1") == 0 &&
+      std::strcmp(info.device_symbol, "sllm_rotary_split_half_bf16_fp32_v1") ==
+          0 &&
+      std::strcmp(info.gcn_arch_name, "gfx1201") == 0 &&
+      fake_hip::rotary_launch_calls() == 1U &&
+      fake_hip::rotary_last_token_count() == token_count &&
+      query_completion(completion, SLLM_STATUS_OK) &&
+      release_completion(&completion) &&
+      expect_status(sllm_rotary_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_OK, "rotary plan release", error);
+  release_rotary_buffers(&buffers);
+  return valid && release_queue(&queue) && release_context(&context) &&
+         fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
+         fake_hip::live_allocations() == 0U;
+}
+
+bool windowed_attention_prepare_execute_lifetime_and_negative_contract() {
+  fake_hip::reset();
+  constexpr uint64_t query_count = 3U;
+  constexpr uint64_t start_position = 2U;
+  constexpr uint64_t kv_length = start_position + query_count;
+  constexpr uint64_t sliding_window = 4U;
+  constexpr uint32_t q_heads = 3U;
+  constexpr uint32_t kv_heads = 1U;
+  constexpr uint32_t head_dim = 6U;
+  const uint64_t query_bytes = query_count * q_heads * head_dim * 2U;
+  const uint64_t kv_bytes = kv_length * kv_heads * head_dim * 2U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  std::array<sllm_buffer_t *, 4> buffers{};
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_buffer_sized(context, query_bytes, &buffers[0]) ||
+      !create_buffer_sized(context, kv_bytes, &buffers[1]) ||
+      !create_buffer_sized(context, kv_bytes, &buffers[2]) ||
+      !create_buffer_sized(context, query_bytes, &buffers[3])) {
+    return false;
+  }
+  std::vector<uint16_t> query(query_bytes / 2U);
+  std::vector<uint16_t> key(kv_bytes / 2U);
+  std::vector<uint16_t> value(kv_bytes / 2U);
+  for (std::size_t index = 0U; index != query.size(); ++index) {
+    query[index] = sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+        static_cast<float>(static_cast<int32_t>(index % 11U) - 5) / 16.0F);
+  }
+  for (std::size_t index = 0U; index != key.size(); ++index) {
+    key[index] = sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+        static_cast<float>(static_cast<int32_t>(index % 13U) - 6) / 16.0F);
+    value[index] = sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+        static_cast<float>(static_cast<int32_t>(index % 7U) - 3) / 8.0F);
+  }
+  const auto upload = [&](const sllm_buffer_t *const buffer,
+                          const std::vector<uint16_t> &words) {
+    sllm_transfer_desc_t transfer{};
+    transfer.struct_size = sizeof(transfer);
+    transfer.abi_version = SLLM_HIP_ABI_VERSION;
+    transfer.host_pointer = const_cast<uint16_t *>(words.data());
+    transfer.size_bytes = words.size() * sizeof(uint16_t);
+    sllm_completion_t *completion = nullptr;
+    Error upload_error;
+    return expect_status(sllm_buffer_copy_h2d(queue, buffer, &transfer,
+                                              &completion, &upload_error.sink),
+                         SLLM_STATUS_OK, "windowed attention upload",
+                         upload_error) &&
+           query_completion(completion, SLLM_STATUS_OK) &&
+           release_completion(&completion);
+  };
+  if (!upload(buffers[0], query) || !upload(buffers[1], key) ||
+      !upload(buffers[2], value)) {
+    return false;
+  }
+
+  const uint64_t query_shape[] = {query_count, q_heads, head_dim};
+  const uint64_t kv_shape[] = {kv_length, kv_heads, head_dim};
+  sllm_windowed_attention_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_WINDOWED_ATTENTION_VERSION;
+  descriptor.start_position = start_position;
+  descriptor.expected_kv_length = kv_length;
+  descriptor.sliding_window = sliding_window;
+  descriptor.q_heads = q_heads;
+  descriptor.kv_heads = kv_heads;
+  descriptor.head_dim = head_dim;
+  descriptor.scaling_bits = UINT32_C(0x3f800000);
+  descriptor.query =
+      attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 3U, query_shape);
+  descriptor.key =
+      attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 3U, kv_shape);
+  descriptor.value =
+      attention_binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 3U, kv_shape);
+  descriptor.output =
+      attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 3U, query_shape);
+  Error error;
+  sllm_windowed_attention_plan_t *plan = nullptr;
+  auto alias = descriptor;
+  alias.output.buffer = alias.query.buffer;
+  if (!expect_status(
+          sllm_windowed_attention_prepare(context, &alias, &plan, &error.sink),
+          SLLM_STATUS_ALIAS_OVERLAP, "windowed attention alias rejection",
+          error) ||
+      plan != nullptr) {
+    return false;
+  }
+  auto unsupported_scale = descriptor;
+  unsupported_scale.scaling_bits = UINT32_C(0x3f000000);
+  if (!expect_status(sllm_windowed_attention_prepare(
+                         context, &unsupported_scale, &plan, &error.sink),
+                     SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR,
+                     "windowed attention scale rejection", error) ||
+      plan != nullptr ||
+      !expect_status(sllm_windowed_attention_prepare(context, &descriptor,
+                                                     &plan, &error.sink),
+                     SLLM_STATUS_OK, "windowed attention prepare", error) ||
+      plan == nullptr ||
+      !release_buffer(&buffers[0], SLLM_STATUS_PUBLIC_BUSY)) {
+    return false;
+  }
+  sllm_windowed_attention_dispatch_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION;
+  sllm_completion_t *completion = nullptr;
+  const bool valid =
+      expect_status(sllm_windowed_attention_execute(plan, queue, &completion,
+                                                    &info, &error.sink),
+                    SLLM_STATUS_OK, "windowed attention execute", error) &&
+      completion != nullptr &&
+      expect_status(sllm_windowed_attention_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_PUBLIC_BUSY,
+                    "windowed attention active plan release", error) &&
+      plan != nullptr && info.dispatch_id != 0U && info.dispatch_count == 1U &&
+      info.kernel_id ==
+          SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1 &&
+      info.workgroup_size_x == SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE &&
+      info.grid_size_x == query_count * q_heads &&
+      info.query_count == query_count &&
+      info.start_position == start_position &&
+      info.committed_kv_length == kv_length &&
+      info.sliding_window == sliding_window && info.q_heads == q_heads &&
+      info.kv_heads == kv_heads && info.head_dim == head_dim &&
+      info.scaling_bits == UINT32_C(0x3f800000) &&
+      info.fallback_allowed == 0U && info.fallback_used == 0U &&
+      std::strcmp(info.kernel_symbol,
+                  "gemma_causal_attention.online_softmax_gqa_bf16.v1") == 0 &&
+      std::strcmp(info.device_symbol,
+                  "sllm_gemma_causal_attention_online_softmax_gqa_bf16_v1") ==
+          0 &&
+      std::strcmp(info.gcn_arch_name, "gfx1201") == 0 &&
+      fake_hip::windowed_attention_launch_calls() == 1U &&
+      query_completion(completion, SLLM_STATUS_OK) &&
+      release_completion(&completion) &&
+      expect_status(sllm_windowed_attention_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_OK, "windowed attention plan release", error);
+  for (sllm_buffer_t *&buffer : buffers) {
+    release_buffer(&buffer);
+  }
+  return valid && release_queue(&queue) && release_context(&context) &&
+         fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
+         fake_hip::live_allocations() == 0U;
 }
 
 bool create_kv_state(const sllm_context_t *const context,
@@ -4216,6 +4687,14 @@ int main() {
     std::cerr << "attention preprocess public ABI contract test failed\n";
     return 1;
   }
+  if (!rotary_prepare_execute_lifetime_and_negative_contract()) {
+    std::cerr << "rotary public ABI contract test failed\n";
+    return 1;
+  }
+  if (!windowed_attention_prepare_execute_lifetime_and_negative_contract()) {
+    std::cerr << "windowed attention public ABI contract test failed\n";
+    return 1;
+  }
   if (!bounded_counter_cas_contention_is_fail_closed() ||
       !completion_safety_quarantine_is_bounded_and_fail_closed() ||
       !successful_completion_lifecycle() ||
@@ -4236,6 +4715,10 @@ int main() {
   }
   if (!rmsnorm_execute_metadata_and_reuse()) {
     std::cerr << "RMSNorm execute metadata/reuse test failed\n";
+    return 1;
+  }
+  if (!rmsnorm_direct_scale_numerical_contract()) {
+    std::cerr << "RMSNorm direct-scale numerical contract test failed\n";
     return 1;
   }
   if (!rmsnorm_execute_boundaries_and_failures()) {

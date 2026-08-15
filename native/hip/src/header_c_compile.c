@@ -13,6 +13,8 @@ int sllm_header_c_compile(void) {
   sllm_embedding_plan_t *embedding_plan = 0;
   sllm_matmul_plan_t *matmul_plan = 0;
   sllm_attention_preprocess_plan_t *attention_preprocess_plan = 0;
+  sllm_rotary_plan_t *rotary_plan = 0;
+  sllm_windowed_attention_plan_t *windowed_attention_plan = 0;
   sllm_kv_state_t *kv_state = 0;
   sllm_kv_view_t *kv_view = 0;
   sllm_device_info_t device = {0};
@@ -29,6 +31,10 @@ int sllm_header_c_compile(void) {
   sllm_matmul_dispatch_info_t matmul_dispatch = {0};
   sllm_attention_preprocess_desc_t attention_preprocess = {0};
   sllm_attention_preprocess_dispatch_info_t attention_preprocess_dispatch = {0};
+  sllm_rotary_desc_t rotary = {0};
+  sllm_rotary_dispatch_info_t rotary_dispatch = {0};
+  sllm_windowed_attention_desc_t windowed_attention = {0};
+  sllm_windowed_attention_dispatch_info_t windowed_attention_dispatch = {0};
   sllm_kv_state_create_info_t kv_create = {0};
   sllm_kv_view_info_t kv_view_info = {0};
   sllm_kv_append_desc_t kv_append = {0};
@@ -63,6 +69,26 @@ int sllm_header_c_compile(void) {
       const sllm_attention_preprocess_plan_t *, const sllm_queue_t *,
       sllm_completion_t **, sllm_attention_preprocess_dispatch_info_t *,
       sllm_error_sink_t *) = &sllm_attention_preprocess_execute;
+  sllm_status_t (*rotary_prepare)(
+      const sllm_context_t *, const sllm_rotary_desc_t *, sllm_rotary_plan_t **,
+      sllm_error_sink_t *) = &sllm_rotary_prepare;
+  sllm_status_t (*rotary_release)(sllm_rotary_plan_t **, sllm_error_sink_t *) =
+      &sllm_rotary_plan_release;
+  sllm_status_t (*rotary_execute)(const sllm_rotary_plan_t *,
+                                  const sllm_queue_t *, sllm_completion_t **,
+                                  sllm_rotary_dispatch_info_t *,
+                                  sllm_error_sink_t *) = &sllm_rotary_execute;
+  sllm_status_t (*windowed_attention_prepare)(
+      const sllm_context_t *, const sllm_windowed_attention_desc_t *,
+      sllm_windowed_attention_plan_t **, sllm_error_sink_t *) =
+      &sllm_windowed_attention_prepare;
+  sllm_status_t (*windowed_attention_release)(sllm_windowed_attention_plan_t **,
+                                              sllm_error_sink_t *) =
+      &sllm_windowed_attention_plan_release;
+  sllm_status_t (*windowed_attention_execute)(
+      const sllm_windowed_attention_plan_t *, const sllm_queue_t *,
+      sllm_completion_t **, sllm_windowed_attention_dispatch_info_t *,
+      sllm_error_sink_t *) = &sllm_windowed_attention_execute;
   sllm_status_t (*kv_state_create)(
       const sllm_context_t *, const sllm_kv_state_create_info_t *,
       sllm_kv_state_t **, sllm_error_sink_t *) = &sllm_kv_state_create;
@@ -86,13 +112,17 @@ int sllm_header_c_compile(void) {
                  transfer.size_bytes == 0U && completion_result.state == 0U &&
                  rmsnorm_plan == 0 && elementwise_plan == 0 &&
                  embedding_plan == 0 && matmul_plan == 0 &&
-                 attention_preprocess_plan == 0 && kv_state == 0 &&
+                 attention_preprocess_plan == 0 && rotary_plan == 0 &&
+                 windowed_attention_plan == 0 && kv_state == 0 &&
                  kv_view == 0 && binding.rank == 0U &&
                  rmsnorm.op_version == 0U && elementwise.op_version == 0U &&
                  embedding.op_version == 0U && matmul.op_version == 0U &&
                  matmul_dispatch.m == 0U &&
                  attention_preprocess.op_version == 0U &&
                  attention_preprocess_dispatch.m == 0U &&
+                 rotary.op_version == 0U && rotary_dispatch.token_count == 0U &&
+                 windowed_attention.op_version == 0U &&
+                 windowed_attention_dispatch.query_count == 0U &&
                  kv_create.capacity_tokens == 0U &&
                  kv_view_info.observed_length == 0U &&
                  kv_append.expected_length == 0U &&
@@ -104,7 +134,11 @@ int sllm_header_c_compile(void) {
                  matmul_release != 0 && matmul_execute != 0 &&
                  attention_preprocess_prepare != 0 &&
                  attention_preprocess_release != 0 &&
-                 attention_preprocess_execute != 0 && kv_state_create != 0 &&
+                 attention_preprocess_execute != 0 && rotary_prepare != 0 &&
+                 rotary_release != 0 && rotary_execute != 0 &&
+                 windowed_attention_prepare != 0 &&
+                 windowed_attention_release != 0 &&
+                 windowed_attention_execute != 0 && kv_state_create != 0 &&
                  kv_state_append != 0 && kv_state_cancel != 0 &&
                  causal_attention_execute != 0
              ? 0

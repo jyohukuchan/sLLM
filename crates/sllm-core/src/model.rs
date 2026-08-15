@@ -26,7 +26,7 @@ const JCS_SAFE_INTEGER_MAX: u128 = 9_007_199_254_740_991;
 const MAX_LOCK_JSON_BYTES: usize = 1024 * 1024;
 const MAX_CONFIG_JSON_BYTES: usize = 1024 * 1024;
 const MAX_INDEX_JSON_BYTES: usize = 1024 * 1024;
-const MAX_TOKENIZER_JSON_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TOKENIZER_JSON_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOKENIZER_CONFIG_JSON_BYTES: usize = 256 * 1024;
 const MAX_CHAT_TEMPLATE_JINJA_BYTES: usize = 64 * 1024;
 const MAX_SAFE_TENSOR_HEADER: u64 = 4 * 1024 * 1024;
@@ -599,6 +599,138 @@ impl ModelLock {
     pub fn verify_cache(&self, cache_root: impl AsRef<Path>) -> Result<VerifiedCache, ModelError> {
         verify_model_cache(self, cache_root)
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ReviewedModelKind {
+    Qwen35Dense,
+    Gemma4Dense,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReviewedModelLock {
+    Qwen35(ModelLock),
+    Gemma4(crate::gemma4::Gemma4ModelLock),
+}
+
+impl ReviewedModelLock {
+    pub const fn kind(&self) -> ReviewedModelKind {
+        match self {
+            Self::Qwen35(_) => ReviewedModelKind::Qwen35Dense,
+            Self::Gemma4(_) => ReviewedModelKind::Gemma4Dense,
+        }
+    }
+
+    pub fn fingerprint(&self) -> &str {
+        match self {
+            Self::Qwen35(lock) => lock.fingerprint(),
+            Self::Gemma4(lock) => lock.fingerprint(),
+        }
+    }
+
+    pub fn aliases(&self) -> &[String] {
+        match self {
+            Self::Qwen35(lock) => lock.aliases(),
+            Self::Gemma4(lock) => &lock.aliases,
+        }
+    }
+
+    pub fn repo_id(&self) -> &str {
+        match self {
+            Self::Qwen35(lock) => &lock.model.repo_id,
+            Self::Gemma4(lock) => &lock.model.repo_id,
+        }
+    }
+
+    pub fn resolved_revision(&self) -> &str {
+        match self {
+            Self::Qwen35(lock) => &lock.model.resolved_revision,
+            Self::Gemma4(lock) => &lock.model.resolved_revision,
+        }
+    }
+
+    pub fn supports_chat_messages(&self) -> bool {
+        match self {
+            Self::Qwen35(_) => true,
+            Self::Gemma4(lock) => lock.supports_chat_messages(),
+        }
+    }
+
+    pub fn verify_cache(&self, cache_root: impl AsRef<Path>) -> Result<VerifiedCache, ModelError> {
+        match self {
+            Self::Qwen35(lock) => lock.verify_cache(cache_root),
+            Self::Gemma4(lock) => lock.verify_cache(cache_root),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewedModelRegistry {
+    locks: Vec<ReviewedModelLock>,
+    aliases: BTreeMap<String, usize>,
+}
+
+impl ReviewedModelRegistry {
+    pub fn new(locks: Vec<ReviewedModelLock>) -> Result<Self, ModelError> {
+        if locks.is_empty() {
+            return Err(invalid("reviewed model registry must not be empty"));
+        }
+        let mut aliases = BTreeMap::new();
+        for (index, lock) in locks.iter().enumerate() {
+            if lock.aliases().is_empty() {
+                return Err(invalid("reviewed model registry lock has no alias"));
+            }
+            for alias in lock.aliases() {
+                if aliases.insert(alias.clone(), index).is_some() {
+                    return Err(invalid(format!(
+                        "duplicate reviewed model registry alias: {alias}"
+                    )));
+                }
+            }
+        }
+        Ok(Self { locks, aliases })
+    }
+
+    pub fn resolve(
+        &self,
+        alias: &str,
+        expected_fingerprint: &str,
+    ) -> Result<&ReviewedModelLock, ModelError> {
+        let index = self
+            .aliases
+            .get(alias)
+            .copied()
+            .ok_or_else(|| invalid(format!("unknown reviewed model alias: {alias}")))?;
+        let lock = &self.locks[index];
+        if lock.fingerprint() != expected_fingerprint {
+            return Err(invalid("reviewed model registry fingerprint differs"));
+        }
+        Ok(lock)
+    }
+
+    pub fn locks(&self) -> &[ReviewedModelLock] {
+        &self.locks
+    }
+}
+
+/// Parse either reviewed lock schema without treating a future schema as a
+/// compatible model. The selected parser still performs its full immutable
+/// fingerprint and reviewed-source checks.
+pub fn parse_reviewed_model_lock(bytes: &[u8]) -> Result<ReviewedModelLock, ModelError> {
+    let value = parse_json(bytes, true, MAX_LOCK_JSON_BYTES, "reviewed model lock")?;
+    match value.get("schema_version").and_then(Value::as_str) {
+        Some("model-lock-v1") => parse_model_lock(bytes).map(ReviewedModelLock::Qwen35),
+        Some("model-lock-v2") => {
+            crate::gemma4::parse_gemma4_model_lock(bytes).map(ReviewedModelLock::Gemma4)
+        }
+        _ => Err(invalid("unsupported reviewed model-lock schema")),
+    }
+}
+
+pub fn read_reviewed_model_lock(path: impl AsRef<Path>) -> Result<ReviewedModelLock, ModelError> {
+    let path = path.as_ref();
+    let bytes = read_bound_regular_file(path, MAX_LOCK_JSON_BYTES, "reviewed model lock")?;
+    parse_reviewed_model_lock(&bytes)
 }
 
 /// Parse a model-lock-v1 document with duplicate-key and unknown-field rejection.
@@ -2432,6 +2564,14 @@ fn parse_json(
     Ok(value)
 }
 
+/// Parse one bounded upstream model JSON document with duplicate-key,
+/// control-character, collection, and nesting checks while allowing finite
+/// source decimals. Model-specific adapters perform the closed field and
+/// semantic validation after this common safety boundary.
+pub(crate) fn parse_model_source_json(bytes: &[u8], purpose: &str) -> Result<Value, ModelError> {
+    parse_json(bytes, false, MAX_CONFIG_JSON_BYTES, purpose)
+}
+
 struct StrictValueSeed {
     reject_floats: bool,
     depth: usize,
@@ -2894,6 +3034,74 @@ pub fn verify_model_cache(
     validate_stop_identity(lock, &owned_files)?;
     assert_cache_root_stable(cache_root, &root_before, "semantic validation")?;
     assert_cache_path_bindings(cache_root, &owned_files, "semantic validation")?;
+    let mut actual_after = BTreeMap::new();
+    collect_cache_files(cache_root, cache_root, &mut actual_after)?;
+    if actual_after.len() != expected.len()
+        || actual_after
+            .keys()
+            .any(|path| !expected.contains_key(path.as_str()))
+    {
+        return Err(invalid("cache file set changed during validation"));
+    }
+    Ok(VerifiedCache {
+        lock_fingerprint: lock.fingerprint.clone(),
+        files: verified,
+        tensors,
+        owned_files,
+        cache_root: cache_root.to_path_buf(),
+        root_identity: root_before,
+    })
+}
+
+/// Verify the reviewed Gemma 4 cache whose payload is one direct safetensors
+/// file rather than an indexed shard set.
+pub fn verify_gemma4_model_cache(
+    lock: &crate::gemma4::Gemma4ModelLock,
+    cache_root: impl AsRef<Path>,
+) -> Result<VerifiedCache, ModelError> {
+    let cache_root = cache_root.as_ref();
+    let root_before = validate_cache_root(cache_root)?;
+    let mut actual = BTreeMap::new();
+    collect_cache_files(cache_root, cache_root, &mut actual)?;
+    let expected: BTreeMap<&str, &LockedFile> = lock
+        .model
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    if actual.len() != expected.len()
+        || actual
+            .keys()
+            .any(|path| !expected.contains_key(path.as_str()))
+    {
+        return Err(invalid("cache file set differs from locked files"));
+    }
+
+    let mut verified = Vec::with_capacity(expected.len());
+    let mut owned_files = BTreeMap::new();
+    for (path, entry) in &expected {
+        let owned = hash_open_cache_file(cache_root, path, entry)?;
+        verified.push(VerifiedFile {
+            path: (*path).to_owned(),
+            size_bytes: owned.size_bytes,
+            sha256: entry.sha256.clone(),
+        });
+        owned_files.insert((*path).to_owned(), owned);
+    }
+    assert_cache_root_stable(cache_root, &root_before, "hash verification")?;
+    assert_cache_path_bindings(cache_root, &owned_files, "hash verification")?;
+
+    let config = read_verified_bytes(
+        &owned_files,
+        "config.json",
+        MAX_CONFIG_JSON_BYTES,
+        "Gemma 4 model config",
+    )?;
+    crate::gemma4::validate_gemma4_config(&config)?;
+    let tensors = validate_gemma4_direct_safetensors(lock, &owned_files)?;
+    assert_cache_root_stable(cache_root, &root_before, "semantic validation")?;
+    assert_cache_path_bindings(cache_root, &owned_files, "semantic validation")?;
+
     let mut actual_after = BTreeMap::new();
     collect_cache_files(cache_root, cache_root, &mut actual_after)?;
     if actual_after.len() != expected.len()
@@ -3562,6 +3770,210 @@ struct SafetensorsIndex {
     weight_map: BTreeMap<String, String>,
 }
 
+fn validate_gemma4_direct_safetensors(
+    lock: &crate::gemma4::Gemma4ModelLock,
+    files: &BTreeMap<String, OwnedVerifiedFile>,
+) -> Result<BTreeMap<String, TensorDescriptor>, ModelError> {
+    let contract = &lock.model.tensor_contract;
+    let source = contract.source_path.as_str();
+    let (header_length, file_size, header_value) = read_safetensors_header(files, source)?;
+    if header_length != contract.header_length_bytes
+        || contract.header_length_field_bytes != 8
+        || contract.data_buffer_start != header_length + 8
+    {
+        return Err(invalid("Gemma 4 safetensors header geometry differs"));
+    }
+    let file = verified_file(files, source)?;
+    let complete_header_length = usize::try_from(contract.data_buffer_start)
+        .map_err(|_| invalid("Gemma 4 complete header length does not fit usize"))?;
+    let complete_header = read_owned_range(
+        file,
+        0,
+        complete_header_length,
+        usize::try_from(MAX_SAFE_TENSOR_HEADER + 8)
+            .map_err(|_| invalid("safetensors header limit does not fit usize"))?,
+        "Gemma 4 complete safetensors header",
+    )?;
+    let header_sha256 = format!("{:x}", Sha256::digest(&complete_header));
+    if header_sha256 != contract.header_sha256 {
+        return Err(invalid("Gemma 4 safetensors header digest differs"));
+    }
+
+    let header = header_value
+        .as_object()
+        .ok_or_else(|| invalid("Gemma 4 safetensors header is not an object"))?;
+    let metadata = header
+        .get("__metadata__")
+        .and_then(Value::as_object)
+        .ok_or_else(|| invalid("Gemma 4 safetensors metadata is absent"))?;
+    if metadata.len() != 1 || metadata.get("format").and_then(Value::as_str) != Some("pt") {
+        return Err(invalid("Gemma 4 safetensors metadata differs"));
+    }
+
+    let mut tensors = BTreeMap::new();
+    let mut spans = Vec::new();
+    for (name, value) in header {
+        if name == "__metadata__" {
+            continue;
+        }
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid(format!("tensor metadata is not an object: {source}:{name}")))?;
+        if object.len() != 3
+            || !object.contains_key("dtype")
+            || !object.contains_key("shape")
+            || !object.contains_key("data_offsets")
+        {
+            return Err(invalid(format!(
+                "tensor metadata keys are not exact: {source}:{name}"
+            )));
+        }
+        let dtype: TensorDType = from_value(object["dtype"].clone())?;
+        let shape = object["shape"]
+            .as_array()
+            .ok_or_else(|| invalid(format!("tensor shape is not an array: {source}:{name}")))?;
+        let shape: Vec<u64> = shape
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| invalid(format!("invalid tensor shape: {source}:{name}")))
+            })
+            .collect::<Result<_, _>>()?;
+        if shape.is_empty() || shape.contains(&0) {
+            return Err(invalid(format!(
+                "tensor shape is empty/zero: {source}:{name}"
+            )));
+        }
+        let offsets = object["data_offsets"]
+            .as_array()
+            .ok_or_else(|| invalid(format!("tensor offsets are not an array: {source}:{name}")))?;
+        if offsets.len() != 2 {
+            return Err(invalid(format!(
+                "tensor offsets do not have length two: {source}:{name}"
+            )));
+        }
+        let offsets = [
+            offsets[0]
+                .as_u64()
+                .ok_or_else(|| invalid("invalid tensor offset"))?,
+            offsets[1]
+                .as_u64()
+                .ok_or_else(|| invalid("invalid tensor offset"))?,
+        ];
+        if offsets[0] >= offsets[1] {
+            return Err(invalid(format!(
+                "tensor offsets are empty/reversed: {source}:{name}"
+            )));
+        }
+        let expected_bytes = product(shape.iter().copied())
+            .and_then(|elements| elements.checked_mul(dtype.byte_width()))
+            .ok_or_else(|| invalid(format!("tensor size overflow: {source}:{name}")))?;
+        if offsets[1] - offsets[0] != expected_bytes {
+            return Err(invalid(format!(
+                "tensor dtype/shape size mismatch: {source}:{name}"
+            )));
+        }
+        let absolute_start = contract
+            .data_buffer_start
+            .checked_add(offsets[0])
+            .ok_or_else(|| invalid("tensor start overflow"))?;
+        let absolute_end = contract
+            .data_buffer_start
+            .checked_add(offsets[1])
+            .ok_or_else(|| invalid("tensor end overflow"))?;
+        if absolute_end > file_size {
+            return Err(invalid(format!(
+                "tensor range exceeds source file: {source}:{name}"
+            )));
+        }
+        let descriptor = TensorDescriptor {
+            tensor_name: name.clone(),
+            source_file: source.to_owned(),
+            dtype,
+            shape,
+            header_length_field_bytes: 8,
+            header_length_bytes: header_length,
+            data_buffer_start: contract.data_buffer_start,
+            data_offset_basis: "data-buffer-relative".to_owned(),
+            data_offsets: offsets,
+            absolute_byte_range: [absolute_start, absolute_end],
+            byte_size: expected_bytes,
+        };
+        if tensors.insert(name.clone(), descriptor).is_some() {
+            return Err(invalid(format!("duplicate tensor: {name}")));
+        }
+        spans.push((offsets[0], offsets[1], name.clone()));
+    }
+    if tensors.len() as u64 != contract.tensor_count {
+        return Err(invalid("Gemma 4 safetensors tensor count differs"));
+    }
+    spans.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let mut cursor = 0u64;
+    for (start, end, name) in spans {
+        if start != cursor {
+            return Err(invalid(format!(
+                "Gemma 4 safetensors payload has gap/overlap: {name}"
+            )));
+        }
+        cursor = end;
+    }
+    if contract
+        .data_buffer_start
+        .checked_add(cursor)
+        .ok_or_else(|| invalid("Gemma 4 safetensors payload end overflows"))?
+        != file_size
+    {
+        return Err(invalid("Gemma 4 safetensors payload is not fully covered"));
+    }
+
+    let expected = crate::gemma4::expected_gemma4_tensor_catalog()?;
+    if tensors != expected {
+        let mismatch = expected
+            .iter()
+            .find(|(name, descriptor)| tensors.get(*name) != Some(*descriptor))
+            .map(|(name, _)| name.as_str())
+            .or_else(|| {
+                tensors
+                    .keys()
+                    .find(|name| !expected.contains_key(*name))
+                    .map(String::as_str)
+            })
+            .unwrap_or("unknown");
+        return Err(invalid(format!(
+            "Gemma 4 exact tensor catalog differs: {mismatch}"
+        )));
+    }
+    if crate::gemma4::gemma4_catalog_sha256(&tensors) != contract.catalog_sha256 {
+        return Err(invalid("Gemma 4 tensor catalog digest differs"));
+    }
+    let text_count = tensors
+        .keys()
+        .filter(|name| name.starts_with("model.language_model."))
+        .count() as u64;
+    if text_count != contract.text_tensor_count {
+        return Err(invalid("Gemma 4 text tensor count differs"));
+    }
+
+    let slice = &lock.model.slice_contract;
+    let descriptor = tensors
+        .get(&slice.tensor_name)
+        .ok_or_else(|| invalid("locked Gemma 4 slice tensor is absent"))?;
+    if descriptor.source_file != slice.source_file
+        || descriptor.dtype != slice.dtype
+        || descriptor.shape != slice.shape
+        || descriptor.data_offsets != slice.data_offsets
+        || descriptor.absolute_byte_range != slice.absolute_byte_range
+        || descriptor.byte_size != slice.byte_size
+    {
+        return Err(invalid(
+            "locked Gemma 4 slice does not match safetensors metadata",
+        ));
+    }
+    assert_owned_file_stable(file, "Gemma 4 safetensors validation")?;
+    Ok(tensors)
+}
+
 fn validate_safetensors(
     lock: &ModelLock,
     files: &BTreeMap<String, OwnedVerifiedFile>,
@@ -4188,7 +4600,7 @@ mod tests {
             (
                 FrontendAssetKind::TokenizerJson,
                 "tokenizer.json",
-                16 * 1024 * 1024,
+                64 * 1024 * 1024,
             ),
             (
                 FrontendAssetKind::TokenizerConfigJson,

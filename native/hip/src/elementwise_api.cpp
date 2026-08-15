@@ -182,7 +182,10 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
       (descriptor->operation != SLLM_ELEMENTWISE_OPERATION_COPY &&
        descriptor->operation != SLLM_ELEMENTWISE_OPERATION_ADD &&
        descriptor->operation != SLLM_ELEMENTWISE_OPERATION_SILU_MUL &&
-       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL)) {
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL &&
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL &&
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL &&
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR,
         "elementwise descriptor has an unsupported operation contract");
@@ -216,12 +219,22 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
   if (status != SLLM_STATUS_OK) {
     return status;
   }
+  const bool scalar_input =
+      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||
+      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP;
+  const bool input1_layout_valid =
+      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_COPY ||
+      (scalar_input
+           ? metadata->input1.rank == 1U && metadata->input1.shape[0] == 1U
+           : equal_layout(metadata->input0, metadata->input1));
   if (!equal_layout(metadata->input0, metadata->output) ||
-      (descriptor->operation != SLLM_ELEMENTWISE_OPERATION_COPY &&
-       !equal_layout(metadata->input0, metadata->input1))) {
+      !input1_layout_valid) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "elementwise operands must have exactly equal layouts");
+        scalar_input
+            ? "scalar elementwise operation requires equal input/output "
+              "layouts and one BF16 scalar"
+            : "elementwise operands must have exactly equal layouts");
   }
   if (descriptor->operation == SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL &&
       (metadata->input0.rank != 3U ||

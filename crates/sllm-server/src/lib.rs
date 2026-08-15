@@ -14,7 +14,8 @@ pub use api::{
     FinishReasonV1, ReasoningOptionsV1, TokenUsageV1,
 };
 pub use production::{
-    ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
+    Gemma4BackendConfigV1, Gemma4ChatBackendV1, ProductionRequestAuditV1,
+    ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
 };
 pub use runtime::{
     BackendCompletionV1, BackendErrorV1, ChatGenerationBackendV1, GenerationDeltaSinkV1,

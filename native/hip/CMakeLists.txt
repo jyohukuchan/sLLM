@@ -30,6 +30,31 @@ option(SLLM_ENABLE_ARGMAX_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST
+    "Build the focused real-GPU Gemma direct-scale RMSNorm runner"
+    OFF
+)
+
+option(SLLM_ENABLE_ROTARY_GPU_TEST
+    "Build the focused real-GPU split-half rotary runner"
+    OFF
+)
+
+option(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST
+    "Build the focused real-GPU public-ABI split-half rotary runner"
+    OFF
+)
+
+option(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST
+    "Build the focused real-GPU Gemma sliding/full attention runner"
+    OFF
+)
+
+option(SLLM_ENABLE_GEMMA_ATTENTION_PUBLIC_GPU_TEST
+    "Build the focused real-GPU public-ABI Gemma sliding/full attention runner"
+    OFF
+)
+
 option(SLLM_SEMANTIC_G1_AUTHORITY
     "Require controller-held sealed compiler authority for semantic G1 only"
     OFF
@@ -270,6 +295,8 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/argmax_api.cpp
     src/rmsnorm_api.cpp
     src/attention_preprocess_api.cpp
+    src/rotary_api.cpp
+    src/windowed_attention_api.cpp
     src/causal_attention_api.cpp
     src/kv_state_api.cpp
     src/linear_attention_api.cpp
@@ -318,6 +345,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${CMAKE_BINARY_DIR}/causal_attention_kernel.hip.o")
         set(SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/linear_attention_kernel.hip.o")
+        set(SLLM_ROTARY_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/rotary_kernel.hip.o")
+        set(SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/gemma_attention_kernel.hip.o")
         add_custom_command(
             OUTPUT "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
@@ -326,6 +357,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/argmax_runtime.inc
                 src/attention_preprocess_runtime.inc
+                src/rotary_runtime.inc
+                src/windowed_attention_runtime.inc
                 src/causal_attention_runtime.inc
                 src/linear_attention_runtime.inc
                 src/public_runtime_internal.hpp src/embedding_api.hpp
@@ -335,6 +368,9 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
                 src/attention_preprocess_api.hpp
                 src/attention_preprocess_kernel_internal.hpp
+                src/rotary_api.hpp src/rotary_kernel_internal.hpp
+                src/windowed_attention_api.hpp
+                src/gemma_attention_kernel_internal.hpp
                 src/causal_attention_api.hpp
                 src/causal_attention_kernel_internal.hpp
                 src/kv_state_api.hpp src/kv_state_kernel_internal.hpp
@@ -439,6 +475,25 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
         )
+        add_custom_command(
+            OUTPUT "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/rotary_kernel.hip.cpp"
+                -o "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            DEPENDS src/rotary_kernel.hip.cpp src/rotary_kernel_internal.hpp
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/gemma_attention_kernel.hip.cpp"
+                -o "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
+            DEPENDS src/gemma_attention_kernel.hip.cpp
+                src/gemma_attention_kernel_internal.hpp
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
         set_source_files_properties(
             "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}" "${SLLM_SEMANTIC_G1_KERNEL_OBJECT}"
             "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
@@ -449,6 +504,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
+            "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
             PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE
         )
         list(APPEND SLLM_HIP_NATIVE_SOURCES
@@ -461,6 +518,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
+            "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
         )
     else()
         set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -477,6 +536,9 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                                     LANGUAGE HIP)
         set_source_files_properties(src/linear_attention_kernel.hip.cpp PROPERTIES
                                     LANGUAGE HIP)
+        set_source_files_properties(src/rotary_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/gemma_attention_kernel.hip.cpp PROPERTIES
+                                    LANGUAGE HIP)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/public_runtime.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/rmsnorm_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/elementwise_kernel.hip.cpp)
@@ -488,6 +550,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/kv_state_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/causal_attention_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/linear_attention_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/rotary_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/gemma_attention_kernel.hip.cpp)
     endif()
 endif()
 
@@ -609,6 +673,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
+        src/rotary_api.cpp
+        src/windowed_attention_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
         src/linear_attention_api.cpp
@@ -649,6 +715,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/argmax_api.cpp
         src/rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
+        src/rotary_api.cpp
+        src/windowed_attention_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
         src/linear_attention_api.cpp
@@ -736,4 +804,122 @@ if(SLLM_ENABLE_ARGMAX_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_argmax_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "direct-scale RMSNorm GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_rmsnorm_direct_gpu_test
+        tests/rmsnorm_direct_gpu_test.cpp
+    )
+    target_compile_features(sllm_rmsnorm_direct_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_rmsnorm_direct_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_rmsnorm_direct_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_rmsnorm_direct_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_ROTARY_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "split-half rotary GPU test requires the normal public HIP runtime build")
+    endif()
+    set_source_files_properties(src/rotary_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_rotary_gpu_test
+        tests/rotary_gpu_test.cpp
+        src/rotary_kernel.hip.cpp
+    )
+    target_compile_features(sllm_rotary_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_rotary_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_rotary_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
+    )
+    target_include_directories(sllm_rotary_gpu_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_rotary_gpu_test PRIVATE
+        sllm_hip_stub
+        "${ROCM_PATH}/lib/libamdhip64.so"
+    )
+endif()
+
+if(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "public split-half rotary GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_rotary_public_gpu_test
+        tests/rotary_public_gpu_test.cpp
+    )
+    target_compile_features(sllm_rotary_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_rotary_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_rotary_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_rotary_public_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Gemma attention GPU test requires the normal public HIP runtime build")
+    endif()
+    set_source_files_properties(src/gemma_attention_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+    add_executable(sllm_gemma_attention_gpu_test
+        tests/gemma_attention_gpu_test.cpp
+        src/gemma_attention_kernel.hip.cpp
+    )
+    target_compile_features(sllm_gemma_attention_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_gemma_attention_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_gemma_attention_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+        -ffp-contract=off
+        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+    )
+    target_include_directories(sllm_gemma_attention_gpu_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_gemma_attention_gpu_test PRIVATE
+        sllm_hip_stub
+        "${ROCM_PATH}/lib/libamdhip64.so"
+    )
+endif()
+
+if(SLLM_ENABLE_GEMMA_ATTENTION_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "public Gemma attention GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_gemma_attention_public_gpu_test
+        tests/gemma_attention_public_gpu_test.cpp
+    )
+    target_compile_features(sllm_gemma_attention_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_gemma_attention_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_gemma_attention_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_gemma_attention_public_gpu_test PRIVATE
+        sllm_hip_stub
+    )
 endif()

@@ -9,6 +9,7 @@
 #include "embedding_api.hpp"
 #include "embedding_kernel_internal.hpp"
 #include "evidence_abi.h"
+#include "gemma_attention_kernel_internal.hpp"
 #include "kv_state_api.hpp"
 #include "kv_state_kernel_internal.hpp"
 #include "linear_attention_api.hpp"
@@ -18,6 +19,9 @@
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
 #include "rmsnorm_kernel_internal.hpp"
+#include "rotary_api.hpp"
+#include "rotary_kernel_internal.hpp"
+#include "windowed_attention_api.hpp"
 
 #include <hip/hip_runtime.h>
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -45,9 +49,11 @@ namespace sllm_rmsnorm_kernel {
 hipError_t launch(const uint16_t *const activation,
                   const uint16_t *const raw_scale, uint16_t *const output,
                   const uint32_t normalized_size, const uint32_t row_count,
-                  const float epsilon, const hipStream_t stream) noexcept {
+                  const float epsilon, const uint32_t scale_mode,
+                  const hipStream_t stream) noexcept {
   return fake_hip::rmsnorm_launch(activation, raw_scale, output,
-                                  normalized_size, row_count, epsilon, stream);
+                                  normalized_size, row_count, epsilon,
+                                  scale_mode, stream);
 }
 } // namespace sllm_rmsnorm_kernel
 
@@ -81,6 +87,33 @@ hipError_t launch_sigmoid_mul(const uint16_t *const gate,
                               const hipStream_t stream) noexcept {
   return fake_hip::elementwise_sigmoid_mul_launch(gate, attention_value, output,
                                                   element_count, stream);
+}
+
+hipError_t launch_scalar_mul(const uint16_t *const input,
+                             const uint16_t *const scalar,
+                             uint16_t *const output,
+                             const uint64_t element_count,
+                             const hipStream_t stream) noexcept {
+  return fake_hip::elementwise_scalar_mul_launch(input, scalar, output,
+                                                 element_count, stream);
+}
+
+hipError_t launch_gelu_tanh_mul(const uint16_t *const gate,
+                                const uint16_t *const up,
+                                uint16_t *const output,
+                                const uint64_t element_count,
+                                const hipStream_t stream) noexcept {
+  return fake_hip::elementwise_gelu_tanh_mul_launch(gate, up, output,
+                                                    element_count, stream);
+}
+
+hipError_t launch_tanh_softcap(const uint16_t *const input,
+                               const uint16_t *const cap,
+                               uint16_t *const output,
+                               const uint64_t element_count,
+                               const hipStream_t stream) noexcept {
+  return fake_hip::elementwise_tanh_softcap_launch(input, cap, output,
+                                                   element_count, stream);
 }
 } // namespace sllm_elementwise_kernel
 
@@ -140,6 +173,33 @@ hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
       gate_output, k_output, m, stream);
 }
 } // namespace sllm_attention_preprocess_kernel
+
+namespace sllm_rotary_kernel {
+hipError_t launch(const uint16_t *const query, const uint16_t *const key,
+                  const int32_t *const positions, uint16_t *const query_output,
+                  uint16_t *const key_output, const uint32_t token_count,
+                  const uint32_t q_heads, const uint32_t kv_heads,
+                  const uint32_t head_dim, const uint32_t rotary_dim,
+                  const float theta, const hipStream_t stream) noexcept {
+  return fake_hip::rotary_launch(query, key, positions, query_output,
+                                 key_output, token_count, q_heads, kv_heads,
+                                 head_dim, rotary_dim, theta, stream);
+}
+} // namespace sllm_rotary_kernel
+
+namespace sllm_gemma_attention_kernel {
+hipError_t launch(const uint16_t *const query, const uint16_t *const key,
+                  const uint16_t *const value, uint16_t *const output,
+                  const uint32_t query_count, const uint64_t start_position,
+                  const uint64_t committed_kv_length, const uint32_t q_heads,
+                  const uint32_t kv_heads, const uint32_t head_dim,
+                  const uint64_t sliding_window,
+                  const hipStream_t stream) noexcept {
+  return fake_hip::windowed_attention_launch(
+      query, key, value, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, sliding_window, stream);
+}
+} // namespace sllm_gemma_attention_kernel
 
 namespace sllm_kv_state_kernel {
 hipError_t launch(const uint16_t *const key_input,
@@ -220,6 +280,8 @@ enum class HandleKind : uint32_t {
   MatmulPlan,
   ArgmaxPlan,
   AttentionPreprocessPlan,
+  RotaryPlan,
+  WindowedAttentionPlan,
   KvState,
   KvView,
   LinearAttentionState,
@@ -608,8 +670,11 @@ struct Event final : QuarantineNode {
 
 struct RmsNormPlan;
 struct ElementwisePlan;
+struct ArrayOperationPlan;
 struct AttentionPreprocessPlan;
 using AttentionBuffers = std::array<struct Buffer *, 8>;
+using RotaryBuffers = AttentionBuffers;
+using WindowedAttentionBuffers = AttentionBuffers;
 using CausalAttentionBuffers = std::array<struct Buffer *, 2>;
 using LinearAttentionBuffers = std::array<struct Buffer *, 9>;
 struct ArgmaxCompletionTag final {};
@@ -660,9 +725,9 @@ struct Completion final : QuarantineNode {
   ElementwisePlan *argmax_plan;
   Buffer *argmax_logits;
   Buffer *argmax_output;
-  bool attention_preprocess;
-  AttentionPreprocessPlan *attention_preprocess_plan;
-  AttentionBuffers attention_buffers;
+  bool array_operation;
+  ArrayOperationPlan *array_operation_plan;
+  AttentionBuffers array_operation_buffers;
   bool kv_state_append;
   KvState *kv_state;
   Buffer *kv_key_input;
@@ -699,8 +764,8 @@ struct Completion final : QuarantineNode {
              Buffer *const matmul_activation_value = nullptr,
              Buffer *const matmul_weight_value = nullptr,
              Buffer *const matmul_output_value = nullptr,
-             AttentionPreprocessPlan *const attention_plan_value = nullptr,
-             const AttentionBuffers attention_buffers_value = {},
+             ArrayOperationPlan *const array_plan_value = nullptr,
+             const AttentionBuffers array_buffers_value = {},
              KvState *const kv_state_value = nullptr,
              Buffer *const kv_key_input_value = nullptr,
              Buffer *const kv_value_input_value = nullptr,
@@ -740,9 +805,9 @@ struct Completion final : QuarantineNode {
         matmul_weight(matmul_weight_value), matmul_output(matmul_output_value),
         argmax(argmax_plan_value != nullptr), argmax_plan(argmax_plan_value),
         argmax_logits(argmax_logits_value), argmax_output(argmax_output_value),
-        attention_preprocess(attention_plan_value != nullptr),
-        attention_preprocess_plan(attention_plan_value),
-        attention_buffers(attention_buffers_value),
+        array_operation(array_plan_value != nullptr),
+        array_operation_plan(array_plan_value),
+        array_operation_buffers(array_buffers_value),
         kv_state_append(kv_state_value != nullptr), kv_state(kv_state_value),
         kv_key_input(kv_key_input_value), kv_value_input(kv_value_input_value),
         kv_key_buffer(kv_key_buffer_value),
@@ -859,19 +924,49 @@ struct ElementwisePlan final : QuarantineNode {
   }
 };
 
-struct AttentionPreprocessPlan final : QuarantineNode {
+struct ArrayOperationPlan : QuarantineNode {
   Context *context;
   AttentionBuffers buffers;
-  sllm_attention_preprocess::DescriptorMetadata metadata;
   bool release_active;
   bool in_flight;
+
+  ArrayOperationPlan(const HandleKind kind_value, Context *const context_value,
+                     const AttentionBuffers buffers_value)
+      : QuarantineNode(kind_value), context(context_value),
+        buffers(buffers_value), release_active(false), in_flight(false) {}
+};
+
+struct AttentionPreprocessPlan final : ArrayOperationPlan {
+  sllm_attention_preprocess::DescriptorMetadata metadata;
 
   AttentionPreprocessPlan(
       Context *const context_value, const AttentionBuffers buffers_value,
       const sllm_attention_preprocess::DescriptorMetadata &metadata_value)
-      : QuarantineNode(HandleKind::AttentionPreprocessPlan),
-        context(context_value), buffers(buffers_value),
-        metadata(metadata_value), release_active(false), in_flight(false) {}
+      : ArrayOperationPlan(HandleKind::AttentionPreprocessPlan, context_value,
+                           buffers_value),
+        metadata(metadata_value) {}
+};
+
+struct RotaryPlan final : ArrayOperationPlan {
+  sllm_rotary::DescriptorMetadata metadata;
+
+  RotaryPlan(Context *const context_value, const RotaryBuffers buffers_value,
+             const sllm_rotary::DescriptorMetadata &metadata_value)
+      : ArrayOperationPlan(HandleKind::RotaryPlan, context_value,
+                           buffers_value),
+        metadata(metadata_value) {}
+};
+
+struct WindowedAttentionPlan final : ArrayOperationPlan {
+  sllm_windowed_attention::DescriptorMetadata metadata;
+
+  WindowedAttentionPlan(
+      Context *const context_value,
+      const WindowedAttentionBuffers buffers_value,
+      const sllm_windowed_attention::DescriptorMetadata &metadata_value)
+      : ArrayOperationPlan(HandleKind::WindowedAttentionPlan, context_value,
+                           buffers_value),
+        metadata(metadata_value) {}
 };
 
 struct RegistryEntry {
@@ -1739,6 +1834,76 @@ sllm_status_t validate_attention_preprocess_dispatch_info(
 }
 
 sllm_status_t
+validate_rotary_dispatch_info(const sllm_rotary_dispatch_info_t *const info,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "rotary dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_rotary_dispatch_info_t)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "rotary dispatch info has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "rotary dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "rotary dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "rotary dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_windowed_attention_dispatch_info(
+    const sllm_windowed_attention_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "windowed attention dispatch info output is null");
+  }
+  uint32_t prefix[2]{};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(*info)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "windowed attention dispatch info has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "windowed attention dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "windowed attention dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "windowed attention dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
 validate_completion_timing(const sllm_completion_timing_t *const timing,
                            sllm_error_sink_t *const sink) noexcept {
   if (timing == nullptr) {
@@ -1817,13 +1982,50 @@ void initialize_elementwise_dispatch_info(
   info->dispatch_id = dispatch_id;
   info->operation = operation;
   info->dispatch_count = 1U;
-  info->kernel_id = operation == SLLM_ELEMENTWISE_OPERATION_COPY
-                        ? SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1
-                    : operation == SLLM_ELEMENTWISE_OPERATION_ADD
-                        ? SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1
-                    : operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL
-                        ? SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1
-                        : SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1;
+  const char *logical_symbol = nullptr;
+  const char *device_symbol = nullptr;
+  switch (operation) {
+  case SLLM_ELEMENTWISE_OPERATION_COPY:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kCopyLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kCopyDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_ADD:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kAddLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kAddDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_SILU_MUL:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kSiluMulLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kSiluMulDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kSigmoidMulLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kSigmoidMulDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kScalarMulLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kScalarMulDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kGeluTanhMulLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kGeluTanhMulDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kTanhSoftcapLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kTanhSoftcapDeviceSymbol;
+    break;
+  default:
+    info->kernel_id = 0U;
+    logical_symbol = "invalid.elementwise";
+    device_symbol = "invalid_elementwise";
+    break;
+  }
   info->workgroup_size_x = SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(
       (element_count + SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE - 1U) /
@@ -1831,21 +2033,12 @@ void initialize_elementwise_dispatch_info(
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   info->element_count = element_count;
-  const bool copy = operation == SLLM_ELEMENTWISE_OPERATION_COPY;
-  const bool add = operation == SLLM_ELEMENTWISE_OPERATION_ADD;
-  const bool silu_mul = operation == SLLM_ELEMENTWISE_OPERATION_SILU_MUL;
-  sllm_public_runtime::copy_fixed_string(
-      info->kernel_symbol, SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX,
-      copy       ? ::sllm_elementwise_kernel::kCopyLogicalKernelId
-      : add      ? ::sllm_elementwise_kernel::kAddLogicalKernelId
-      : silu_mul ? ::sllm_elementwise_kernel::kSiluMulLogicalKernelId
-                 : ::sllm_elementwise_kernel::kSigmoidMulLogicalKernelId);
-  sllm_public_runtime::copy_fixed_string(
-      info->device_symbol, SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX,
-      copy       ? ::sllm_elementwise_kernel::kCopyDeviceSymbol
-      : add      ? ::sllm_elementwise_kernel::kAddDeviceSymbol
-      : silu_mul ? ::sllm_elementwise_kernel::kSiluMulDeviceSymbol
-                 : ::sllm_elementwise_kernel::kSigmoidMulDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->kernel_symbol,
+                                         SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX,
+                                         logical_symbol);
+  sllm_public_runtime::copy_fixed_string(info->device_symbol,
+                                         SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX,
+                                         device_symbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -2154,6 +2347,81 @@ void initialize_attention_preprocess_dispatch_info(
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
+void initialize_rotary_dispatch_info(
+    sllm_rotary_dispatch_info_t *const info, const uint64_t dispatch_id,
+    const sllm_rotary::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 1U;
+  info->kernel_id = SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1;
+  info->workgroup_size_x = SLLM_HIP_ROTARY_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(
+      metadata.token_count * (metadata.q_heads + metadata.kv_heads));
+  info->token_count = metadata.token_count;
+  info->q_heads = metadata.q_heads;
+  info->kv_heads = metadata.kv_heads;
+  info->head_dim = metadata.head_dim;
+  info->rotary_dim = metadata.rotary_dim;
+  info->start_position = static_cast<uint32_t>(metadata.start_position);
+  info->max_position = metadata.max_position;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX,
+      ::sllm_rotary_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(info->device_symbol,
+                                         SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX,
+                                         ::sllm_rotary_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+void initialize_windowed_attention_dispatch_info(
+    sllm_windowed_attention_dispatch_info_t *const info,
+    const uint64_t dispatch_id,
+    const sllm_windowed_attention::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 1U;
+  info->kernel_id =
+      SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1;
+  info->workgroup_size_x = SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE;
+  info->grid_size_x =
+      static_cast<uint32_t>(metadata.query_count * metadata.q_heads);
+  info->query_count = metadata.query_count;
+  info->start_position = metadata.start_position;
+  info->committed_kv_length = metadata.expected_kv_length;
+  info->sliding_window = metadata.sliding_window;
+  info->q_heads = metadata.q_heads;
+  info->kv_heads = metadata.kv_heads;
+  info->head_dim = metadata.head_dim;
+  info->scaling_bits = metadata.scaling_bits;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX,
+      ::sllm_gemma_attention_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX,
+      ::sllm_gemma_attention_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
 bool copy_property(char *const destination,
                    const std::size_t destination_capacity,
                    const char *const source,
@@ -2359,8 +2627,8 @@ bool rollback_reserved_argmax_submission(
   return false;
 }
 
-bool rollback_reserved_attention_submission(
-    AttentionPreprocessPlan *const plan, Queue *const queue,
+bool rollback_reserved_array_submission(
+    ArrayOperationPlan *const plan, Queue *const queue,
     sllm_error_sink_t *const sink) noexcept {
   Context *const context = plan->context;
   std::lock_guard<std::mutex> lock(context->accounting_mutex);
@@ -2372,7 +2640,7 @@ bool rollback_reserved_attention_submission(
   poison_context_locked(context);
   (void)sllm_public_runtime::write_error(
       sink, SLLM_STATUS_INTERNAL_ERROR,
-      "attention preprocess submission accounting rollback failed; context "
+      "array operation submission accounting rollback failed; context "
       "poisoned");
   return false;
 }
@@ -2584,9 +2852,9 @@ bool release_submission_references(Completion *const completion) noexcept {
               completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
-    } else if (completion->attention_preprocess) {
+    } else if (completion->array_operation) {
       released = release_attention_active(completion->queue->accounting,
-                                          completion->attention_buffers);
+                                          completion->array_operation_buffers);
     } else if (completion->kv_state_append) {
       released = sllm_public_runtime::AccountingState::release_kv_active(
           completion->queue->accounting, completion->kv_state->accounting,
@@ -2625,9 +2893,9 @@ bool release_submission_references(Completion *const completion) noexcept {
   if (completion->argmax && completion->argmax_plan != nullptr) {
     completion->argmax_plan->in_flight = false;
   }
-  if (completion->attention_preprocess &&
-      completion->attention_preprocess_plan != nullptr) {
-    completion->attention_preprocess_plan->in_flight = false;
+  if (completion->array_operation &&
+      completion->array_operation_plan != nullptr) {
+    completion->array_operation_plan->in_flight = false;
   }
   return true;
 }
@@ -2668,10 +2936,10 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->context->accounting, completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
-    } else if (completion->attention_preprocess) {
-      released = rollback_attention_submission(completion->context->accounting,
-                                               completion->queue->accounting,
-                                               completion->attention_buffers);
+    } else if (completion->array_operation) {
+      released = rollback_attention_submission(
+          completion->context->accounting, completion->queue->accounting,
+          completion->array_operation_buffers);
     } else if (completion->kv_state_append) {
       released = sllm_public_runtime::AccountingState::rollback_kv_append(
           completion->context->accounting, completion->queue->accounting,
@@ -2718,9 +2986,9 @@ bool rollback_submission_references(Completion *const completion) noexcept {
     if (completion->argmax && completion->argmax_plan != nullptr) {
       completion->argmax_plan->in_flight = false;
     }
-    if (completion->attention_preprocess &&
-        completion->attention_preprocess_plan != nullptr) {
-      completion->attention_preprocess_plan->in_flight = false;
+    if (completion->array_operation &&
+        completion->array_operation_plan != nullptr) {
+      completion->array_operation_plan->in_flight = false;
     }
   } else {
     poison_context_locked(completion->context);
@@ -2763,10 +3031,10 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->context->accounting, completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
-    } else if (completion->attention_preprocess) {
-      released = release_attention_completion(completion->context->accounting,
-                                              completion->queue->accounting,
-                                              completion->attention_buffers);
+    } else if (completion->array_operation) {
+      released = release_attention_completion(
+          completion->context->accounting, completion->queue->accounting,
+          completion->array_operation_buffers);
     } else if (completion->kv_state_append) {
       released = sllm_public_runtime::AccountingState::release_kv_completion(
           completion->context->accounting, completion->queue->accounting,
@@ -2823,7 +3091,7 @@ sllm_status_t poll_completion(Completion *const completion,
   }
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
-        completion->argmax || completion->attention_preprocess ||
+        completion->argmax || completion->array_operation ||
         completion->kv_state_append || completion->causal_attention ||
         completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
@@ -3380,23 +3648,23 @@ private:
   Phase phase_;
 };
 
-class AttentionPreprocessExecuteScopeGuard final {
+class ArrayOperationExecuteScopeGuard final {
 public:
-  AttentionPreprocessExecuteScopeGuard(
-      AttentionPreprocessPlan *const plan, Queue *const queue,
-      std::unique_ptr<Completion> *const candidate,
-      NativeEventGuard *const event_guard,
-      sllm_error_sink_t *const sink) noexcept
+  ArrayOperationExecuteScopeGuard(ArrayOperationPlan *const plan,
+                                  Queue *const queue,
+                                  std::unique_ptr<Completion> *const candidate,
+                                  NativeEventGuard *const event_guard,
+                                  sllm_error_sink_t *const sink) noexcept
       : plan_(plan), queue_(queue), candidate_(candidate),
         event_guard_(event_guard), sink_(sink), token_(0U),
         phase_(Phase::Reserved) {}
 
-  AttentionPreprocessExecuteScopeGuard(
-      const AttentionPreprocessExecuteScopeGuard &) = delete;
-  AttentionPreprocessExecuteScopeGuard &
-  operator=(const AttentionPreprocessExecuteScopeGuard &) = delete;
+  ArrayOperationExecuteScopeGuard(const ArrayOperationExecuteScopeGuard &) =
+      delete;
+  ArrayOperationExecuteScopeGuard &
+  operator=(const ArrayOperationExecuteScopeGuard &) = delete;
 
-  ~AttentionPreprocessExecuteScopeGuard() { cleanup(); }
+  ~ArrayOperationExecuteScopeGuard() { cleanup(); }
 
   void candidate_allocated() noexcept { phase_ = Phase::Candidate; }
 
@@ -3413,24 +3681,23 @@ private:
   void cleanup() noexcept {
     switch (phase_) {
     case Phase::Reserved:
-      (void)rollback_reserved_attention_submission(plan_, queue_, sink_);
+      (void)rollback_reserved_array_submission(plan_, queue_, sink_);
       break;
     case Phase::Candidate:
       if (candidate_ != nullptr && candidate_->get() != nullptr) {
         (void)rollback_unpublished_submission(
             *candidate_, *event_guard_,
-            "attention preprocess execute unwound before completion "
-            "registration",
+            "array operation execute unwound before completion registration",
             sink_);
       } else {
-        (void)rollback_reserved_attention_submission(plan_, queue_, sink_);
+        (void)rollback_reserved_array_submission(plan_, queue_, sink_);
       }
       break;
     case Phase::Registered:
       if (candidate_ != nullptr && candidate_->get() != nullptr) {
         (void)cleanup_failed_submission(*candidate_, token_, hipErrorUnknown,
-                                        "attention preprocess execute unwound "
-                                        "after completion registration",
+                                        "array operation execute unwound after "
+                                        "completion registration",
                                         queue_, sink_);
       } else {
         poison_context(plan_->context);
@@ -3442,7 +3709,7 @@ private:
     phase_ = Phase::Disarmed;
   }
 
-  AttentionPreprocessPlan *const plan_;
+  ArrayOperationPlan *const plan_;
   Queue *const queue_;
   std::unique_ptr<Completion> *const candidate_;
   NativeEventGuard *const event_guard_;
@@ -5092,7 +5359,7 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
     }
     if (!completion->rmsnorm && !completion->elementwise &&
         !completion->matmul && !completion->argmax &&
-        !completion->attention_preprocess && !completion->kv_state_append &&
+        !completion->array_operation && !completion->kv_state_append &&
         !completion->causal_attention && !completion->linear_attention) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_UNSUPPORTED,
@@ -5807,7 +6074,8 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
         static_cast<uint16_t *>(
             byte_pointer(plan->output, plan->metadata.output.byte_offset)),
         static_cast<uint32_t>(normalized_size),
-        static_cast<uint32_t>(row_count), epsilon, queue->stream);
+        static_cast<uint32_t>(row_count), epsilon, plan->metadata.scale_mode,
+        queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -6282,10 +6550,28 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
       launch_status = ::sllm_elementwise_kernel::launch_silu_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
-    } else {
+    } else if (plan->metadata.operation ==
+               SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL) {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
       launch_status = ::sllm_elementwise_kernel::launch_sigmoid_mul(
+          input0, input1, output, plan->metadata.element_count, queue->stream);
+    } else if (plan->metadata.operation ==
+               SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL) {
+      const uint16_t *const input1 = static_cast<const uint16_t *>(
+          byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      launch_status = ::sllm_elementwise_kernel::launch_scalar_mul(
+          input0, input1, output, plan->metadata.element_count, queue->stream);
+    } else if (plan->metadata.operation ==
+               SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL) {
+      const uint16_t *const input1 = static_cast<const uint16_t *>(
+          byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      launch_status = ::sllm_elementwise_kernel::launch_gelu_tanh_mul(
+          input0, input1, output, plan->metadata.element_count, queue->stream);
+    } else {
+      const uint16_t *const input1 = static_cast<const uint16_t *>(
+          byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      launch_status = ::sllm_elementwise_kernel::launch_tanh_softcap(
           input0, input1, output, plan->metadata.element_count, queue->stream);
     }
     if (launch_status != hipSuccess) {
@@ -6320,6 +6606,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
 #include "matmul_runtime.inc"
+#include "rotary_runtime.inc"
+#include "windowed_attention_runtime.inc"
 
 namespace {
 

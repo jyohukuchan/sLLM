@@ -2294,8 +2294,11 @@ impl BoundSemanticOp {
             descriptor.kind(),
             SemanticOpKind::Copy
                 | SemanticOpKind::Add
+                | SemanticOpKind::ScalarMul
                 | SemanticOpKind::SiluMul
+                | SemanticOpKind::GeluTanhMul
                 | SemanticOpKind::SigmoidMul
+                | SemanticOpKind::TanhSoftcap
         ) {
             validate_elementwise_nonoverlap(descriptor.kind(), &inputs, &outputs)?;
         } else if descriptor.kind() == SemanticOpKind::Embedding {
@@ -2312,6 +2315,21 @@ impl BoundSemanticOp {
             ])?;
         } else if descriptor.kind() == SemanticOpKind::RmsNorm {
             validate_rmsnorm_nonoverlap(&inputs, &outputs)?;
+        } else if descriptor.kind() == SemanticOpKind::Rotary {
+            validate_nonoverlap(&[
+                ("rotary query", &inputs[0]),
+                ("rotary key", &inputs[1]),
+                ("rotary positions", &inputs[2]),
+                ("rotary query output", &outputs[0]),
+                ("rotary key output", &outputs[1]),
+            ])?;
+        } else if descriptor.kind() == SemanticOpKind::CausalAttention {
+            validate_nonoverlap(&[
+                ("causal_attention query", &inputs[0]),
+                ("causal_attention key", &inputs[1]),
+                ("causal_attention value", &inputs[2]),
+                ("causal_attention output", &outputs[0]),
+            ])?;
         } else if descriptor.kind() == SemanticOpKind::AttentionPreprocess {
             validate_nonoverlap(&[
                 ("attention_preprocess packed Q/gate", &inputs[0]),
@@ -2365,14 +2383,28 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Copy, 0) => "copy input",
         (SemanticOpKind::Add, 0) => "add input 0",
         (SemanticOpKind::Add, 1) => "add input 1",
+        (SemanticOpKind::ScalarMul, 0) => "scalar_mul input",
+        (SemanticOpKind::ScalarMul, 1) => "scalar_mul scalar",
         (SemanticOpKind::Embedding, 0) => "embedding weight",
         (SemanticOpKind::Embedding, 1) => "embedding token IDs",
         (SemanticOpKind::Matmul, 0) => "matmul activation",
         (SemanticOpKind::Matmul, 1) => "matmul weight",
         (SemanticOpKind::SiluMul, 0) => "silu_mul gate",
         (SemanticOpKind::SiluMul, 1) => "silu_mul up",
+        (SemanticOpKind::GeluTanhMul, 0) => "gelu_tanh_mul gate",
+        (SemanticOpKind::GeluTanhMul, 1) => "gelu_tanh_mul up",
+        (SemanticOpKind::SigmoidMul, 0) => "sigmoid_mul gate",
+        (SemanticOpKind::SigmoidMul, 1) => "sigmoid_mul attention value",
+        (SemanticOpKind::TanhSoftcap, 0) => "tanh_softcap logits",
+        (SemanticOpKind::TanhSoftcap, 1) => "tanh_softcap cap",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm activation",
         (SemanticOpKind::RmsNorm, 1) => "RMSNorm raw scale",
+        (SemanticOpKind::Rotary, 0) => "rotary query",
+        (SemanticOpKind::Rotary, 1) => "rotary key",
+        (SemanticOpKind::Rotary, 2) => "rotary positions",
+        (SemanticOpKind::CausalAttention, 0) => "causal_attention query",
+        (SemanticOpKind::CausalAttention, 1) => "causal_attention key",
+        (SemanticOpKind::CausalAttention, 2) => "causal_attention value",
         (SemanticOpKind::Argmax, 0) => "argmax logits",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess packed Q/gate",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess K",
@@ -2387,10 +2419,17 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
     match (kind, index) {
         (SemanticOpKind::Copy, 0) => "copy output",
         (SemanticOpKind::Add, 0) => "add output",
+        (SemanticOpKind::ScalarMul, 0) => "scalar_mul output",
         (SemanticOpKind::Embedding, 0) => "embedding output",
         (SemanticOpKind::Matmul, 0) => "matmul output",
         (SemanticOpKind::SiluMul, 0) => "silu_mul output",
+        (SemanticOpKind::GeluTanhMul, 0) => "gelu_tanh_mul output",
+        (SemanticOpKind::SigmoidMul, 0) => "sigmoid_mul output",
+        (SemanticOpKind::TanhSoftcap, 0) => "tanh_softcap output",
         (SemanticOpKind::RmsNorm, 0) => "RMSNorm output",
+        (SemanticOpKind::Rotary, 0) => "rotary query output",
+        (SemanticOpKind::Rotary, 1) => "rotary key output",
+        (SemanticOpKind::CausalAttention, 0) => "causal_attention output",
         (SemanticOpKind::Argmax, 0) => "argmax output",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess Q output",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess gate output",
@@ -2469,15 +2508,30 @@ fn validate_elementwise_nonoverlap(
             ("add input 1", &inputs[1]),
             ("add output", &outputs[0]),
         ],
+        SemanticOpKind::ScalarMul => vec![
+            ("scalar_mul input", &inputs[0]),
+            ("scalar_mul scalar", &inputs[1]),
+            ("scalar_mul output", &outputs[0]),
+        ],
         SemanticOpKind::SiluMul => vec![
             ("silu_mul gate", &inputs[0]),
             ("silu_mul up", &inputs[1]),
             ("silu_mul output", &outputs[0]),
         ],
+        SemanticOpKind::GeluTanhMul => vec![
+            ("gelu_tanh_mul gate", &inputs[0]),
+            ("gelu_tanh_mul up", &inputs[1]),
+            ("gelu_tanh_mul output", &outputs[0]),
+        ],
         SemanticOpKind::SigmoidMul => vec![
             ("sigmoid_mul gate", &inputs[0]),
             ("sigmoid_mul attention value", &inputs[1]),
             ("sigmoid_mul output", &outputs[0]),
+        ],
+        SemanticOpKind::TanhSoftcap => vec![
+            ("tanh_softcap logits", &inputs[0]),
+            ("tanh_softcap cap", &inputs[1]),
+            ("tanh_softcap output", &outputs[0]),
         ],
         _ => unreachable!("elementwise overlap is only used by copy/add"),
     };

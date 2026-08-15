@@ -155,6 +155,8 @@ G1_SCHEMA_FILES = {
 }
 MODEL_LOCK_SCHEMA = "ci/schema/model-lock-v1.schema.json"
 MODEL_LOCK_PATH = "docs/models/locks/qwen3.5-4b-bf16.json"
+MODEL_LOCK_V2_SCHEMA = "ci/schema/model-lock-v2.schema.json"
+MODEL_LOCK_V2_PATH = "docs/models/locks/gemma4-12b-bf16.json"
 RUST_DEPENDENCY_SCHEMA = "ci/schema/rust-dependency-policy-v1.schema.json"
 RUST_DEPENDENCY_MANIFEST = "ci/dependencies/rust-workspace-v1.json"
 PHASE6_A2_SCHEMA = "ci/schema/phase6-a2-v1.schema.json"
@@ -1521,6 +1523,8 @@ def main() -> int:
             )
         if MODEL_LOCK_SCHEMA not in schema_names:
             raise ContractError("model-lock-v1 schema is not registered for manifest validation")
+        if MODEL_LOCK_V2_SCHEMA not in schema_names:
+            raise ContractError("model-lock-v2 schema is not registered for manifest validation")
         if RUST_DEPENDENCY_SCHEMA not in schema_names:
             raise ContractError("Rust dependency policy schema is not registered for manifest validation")
         if PHASE6_A2_SCHEMA not in schema_names or not (ROOT / PHASE6_A2_CONTRACT).is_file():
@@ -1551,6 +1555,14 @@ def main() -> int:
                 errors.extend(
                     f"{path.relative_to(ROOT)}: {error.message}"
                     for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(phase6_a2_contract)
+                )
+            if path.relative_to(ROOT).as_posix() == MODEL_LOCK_V2_SCHEMA:
+                model_lock_v2 = read_json(ROOT / MODEL_LOCK_V2_PATH)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(
+                        schema, format_checker=FormatChecker()
+                    ).iter_errors(model_lock_v2)
                 )
         load_manifests(ROOT)
         from validate_rmsnorm_h3_contracts import validate_static as validate_rmsnorm_h3_static

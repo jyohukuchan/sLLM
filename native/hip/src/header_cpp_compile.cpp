@@ -13,6 +13,8 @@ int sllm_header_cpp_compile() {
   sllm_embedding_plan_t *embedding_plan = nullptr;
   sllm_matmul_plan_t *matmul_plan = nullptr;
   sllm_attention_preprocess_plan_t *attention_preprocess_plan = nullptr;
+  sllm_rotary_plan_t *rotary_plan = nullptr;
+  sllm_windowed_attention_plan_t *windowed_attention_plan = nullptr;
   sllm_kv_state_t *kv_state = nullptr;
   sllm_kv_view_t *kv_view = nullptr;
   sllm_device_info_t device{};
@@ -29,6 +31,10 @@ int sllm_header_cpp_compile() {
   sllm_matmul_dispatch_info_t matmul_dispatch{};
   sllm_attention_preprocess_desc_t attention_preprocess{};
   sllm_attention_preprocess_dispatch_info_t attention_preprocess_dispatch{};
+  sllm_rotary_desc_t rotary{};
+  sllm_rotary_dispatch_info_t rotary_dispatch{};
+  sllm_windowed_attention_desc_t windowed_attention{};
+  sllm_windowed_attention_dispatch_info_t windowed_attention_dispatch{};
   sllm_kv_state_create_info_t kv_create{};
   sllm_kv_view_info_t kv_view_info{};
   sllm_kv_append_desc_t kv_append{};
@@ -87,6 +93,32 @@ int sllm_header_cpp_compile() {
       sllm_error_sink_t *) noexcept;
   const AttentionPreprocessExecuteFn attention_preprocess_execute =
       &sllm_attention_preprocess_execute;
+  using RotaryPrepareFn =
+      sllm_status_t (*)(const sllm_context_t *, const sllm_rotary_desc_t *,
+                        sllm_rotary_plan_t **, sllm_error_sink_t *) noexcept;
+  const RotaryPrepareFn rotary_prepare = &sllm_rotary_prepare;
+  using RotaryReleaseFn =
+      sllm_status_t (*)(sllm_rotary_plan_t **, sllm_error_sink_t *) noexcept;
+  const RotaryReleaseFn rotary_release = &sllm_rotary_plan_release;
+  using RotaryExecuteFn = sllm_status_t (*)(
+      const sllm_rotary_plan_t *, const sllm_queue_t *, sllm_completion_t **,
+      sllm_rotary_dispatch_info_t *, sllm_error_sink_t *) noexcept;
+  const RotaryExecuteFn rotary_execute = &sllm_rotary_execute;
+  using WindowedAttentionPrepareFn = sllm_status_t (*)(
+      const sllm_context_t *, const sllm_windowed_attention_desc_t *,
+      sllm_windowed_attention_plan_t **, sllm_error_sink_t *) noexcept;
+  const WindowedAttentionPrepareFn windowed_attention_prepare =
+      &sllm_windowed_attention_prepare;
+  using WindowedAttentionReleaseFn = sllm_status_t (*)(
+      sllm_windowed_attention_plan_t **, sllm_error_sink_t *) noexcept;
+  const WindowedAttentionReleaseFn windowed_attention_release =
+      &sllm_windowed_attention_plan_release;
+  using WindowedAttentionExecuteFn = sllm_status_t (*)(
+      const sllm_windowed_attention_plan_t *, const sllm_queue_t *,
+      sllm_completion_t **, sllm_windowed_attention_dispatch_info_t *,
+      sllm_error_sink_t *) noexcept;
+  const WindowedAttentionExecuteFn windowed_attention_execute =
+      &sllm_windowed_attention_execute;
   using KvStateCreateFn = sllm_status_t (*)(
       const sllm_context_t *, const sllm_kv_state_create_info_t *,
       sllm_kv_state_t **, sllm_error_sink_t *) noexcept;
@@ -119,6 +151,12 @@ int sllm_header_cpp_compile() {
   (void)attention_preprocess_prepare;
   (void)attention_preprocess_release;
   (void)attention_preprocess_execute;
+  (void)rotary_prepare;
+  (void)rotary_release;
+  (void)rotary_execute;
+  (void)windowed_attention_prepare;
+  (void)windowed_attention_release;
+  (void)windowed_attention_execute;
   (void)kv_state_create;
   (void)kv_state_append;
   (void)kv_state_cancel;
@@ -132,13 +170,18 @@ int sllm_header_cpp_compile() {
                  completion_result.state == 0U && rmsnorm_plan == nullptr &&
                  elementwise_plan == nullptr && embedding_plan == nullptr &&
                  matmul_plan == nullptr &&
-                 attention_preprocess_plan == nullptr && kv_state == nullptr &&
-                 kv_view == nullptr && binding.rank == 0U &&
-                 rmsnorm.op_version == 0U && elementwise.op_version == 0U &&
-                 embedding.op_version == 0U && matmul.op_version == 0U &&
+                 attention_preprocess_plan == nullptr &&
+                 rotary_plan == nullptr && kv_state == nullptr &&
+                 windowed_attention_plan == nullptr && kv_view == nullptr &&
+                 binding.rank == 0U && rmsnorm.op_version == 0U &&
+                 elementwise.op_version == 0U && embedding.op_version == 0U &&
+                 matmul.op_version == 0U &&
                  attention_preprocess.op_version == 0U &&
                  matmul_dispatch.m == 0U &&
                  attention_preprocess_dispatch.m == 0U &&
+                 rotary.op_version == 0U && rotary_dispatch.token_count == 0U &&
+                 windowed_attention.op_version == 0U &&
+                 windowed_attention_dispatch.query_count == 0U &&
                  kv_create.capacity_tokens == 0U &&
                  kv_view_info.observed_length == 0U &&
                  kv_append.expected_length == 0U &&

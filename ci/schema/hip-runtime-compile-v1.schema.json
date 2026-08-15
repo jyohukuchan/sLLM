@@ -126,7 +126,7 @@
     "$schema": {"const": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json"},
     "schema_version": {"const": "hip-runtime-compile-v1"},
     "matrix_id": {"const": "hip-runtime-compile-v1"},
-    "revision": {"const": 4},
+    "revision": {"const": 6},
     "toolchain_id": {"const": "rocm-7.14.0"},
     "container": {
       "type": "object",
@@ -156,8 +156,8 @@
       "additionalProperties": false,
       "required": ["canonical_order", "files", "source_set_sha256"],
       "properties": {
-        "canonical_order": {"type": "array", "minItems": 47, "maxItems": 47, "items": {"type": "string"}},
-        "files": {"type": "array", "minItems": 47, "maxItems": 47, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "canonical_order": {"type": "array", "minItems": 57, "maxItems": 57, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 57, "maxItems": 57, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
         "source_set_sha256": {"$ref": "#/$defs/sha256"}
       }
     },
@@ -176,7 +176,9 @@
       "sllm_linear_attention_execute", "sllm_linear_attention_state_create", "sllm_linear_attention_state_query",
       "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release", "sllm_matmul_prepare",
       "sllm_query_version", "sllm_queue_create", "sllm_queue_release", "sllm_rmsnorm_execute",
-      "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare"
+      "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare", "sllm_rotary_execute",
+      "sllm_rotary_plan_release", "sllm_rotary_prepare", "sllm_windowed_attention_execute",
+      "sllm_windowed_attention_plan_release", "sllm_windowed_attention_prepare"
     ]},
     "targets": {"const": ["gfx1030", "gfx1201"]},
     "rows": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/row"}}

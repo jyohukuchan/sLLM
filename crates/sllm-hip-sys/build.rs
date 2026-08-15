@@ -266,6 +266,9 @@ fn main() {
     let elementwise_api = source_dir.join("src/elementwise_api.cpp");
     let elementwise_kernel_internal = source_dir.join("src/elementwise_kernel_internal.hpp");
     let elementwise_kernel = source_dir.join("src/elementwise_kernel.hip.cpp");
+    let gemma_attention_kernel_internal =
+        source_dir.join("src/gemma_attention_kernel_internal.hpp");
+    let gemma_attention_kernel = source_dir.join("src/gemma_attention_kernel.hip.cpp");
     let matmul_api_header = source_dir.join("src/matmul_api.hpp");
     let matmul_api = source_dir.join("src/matmul_api.cpp");
     let matmul_kernel_internal = source_dir.join("src/matmul_kernel_internal.hpp");
@@ -280,6 +283,14 @@ fn main() {
     let rmsnorm_api = source_dir.join("src/rmsnorm_api.cpp");
     let rmsnorm_kernel_internal = source_dir.join("src/rmsnorm_kernel_internal.hpp");
     let rmsnorm_kernel = source_dir.join("src/rmsnorm_kernel.hip.cpp");
+    let rotary_api_header = source_dir.join("src/rotary_api.hpp");
+    let rotary_api = source_dir.join("src/rotary_api.cpp");
+    let rotary_kernel_internal = source_dir.join("src/rotary_kernel_internal.hpp");
+    let rotary_kernel = source_dir.join("src/rotary_kernel.hip.cpp");
+    let rotary_runtime = source_dir.join("src/rotary_runtime.inc");
+    let windowed_attention_api_header = source_dir.join("src/windowed_attention_api.hpp");
+    let windowed_attention_api = source_dir.join("src/windowed_attention_api.cpp");
+    let windowed_attention_runtime = source_dir.join("src/windowed_attention_runtime.inc");
     let attention_preprocess_api_header = source_dir.join("src/attention_preprocess_api.hpp");
     let attention_preprocess_api = source_dir.join("src/attention_preprocess_api.cpp");
     let attention_preprocess_kernel_internal =
@@ -359,6 +370,14 @@ fn main() {
         elementwise_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", elementwise_kernel.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        gemma_attention_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        gemma_attention_kernel.display()
+    );
     println!("cargo:rerun-if-changed={}", matmul_api_header.display());
     println!("cargo:rerun-if-changed={}", matmul_api.display());
     println!(
@@ -382,6 +401,26 @@ fn main() {
         rmsnorm_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", rmsnorm_kernel.display());
+    println!("cargo:rerun-if-changed={}", rotary_api_header.display());
+    println!("cargo:rerun-if-changed={}", rotary_api.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        rotary_kernel_internal.display()
+    );
+    println!("cargo:rerun-if-changed={}", rotary_kernel.display());
+    println!("cargo:rerun-if-changed={}", rotary_runtime.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        windowed_attention_api_header.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        windowed_attention_api.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        windowed_attention_runtime.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         attention_preprocess_api_header.display()
@@ -1016,6 +1055,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE={{}}\", bindings::SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE);\n\
              println!(\"const SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR);\n\
+             println!(\"const SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR);\n\
+             println!(\"const SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_POSITION_PAYLOAD_MISMATCH={{}}\", bindings::SLLM_STATUS_POSITION_PAYLOAD_MISMATCH);\n\
              println!(\"const SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR);\n\
@@ -1045,6 +1086,9 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1);\n\
+             println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1);\n\
+             println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1);\n\
+             println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);\n\
@@ -1096,6 +1140,23 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_MAX_M={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_MAX_M);\n\
+             println!(\"const SLLM_HIP_ROTARY_VERSION={{}}\", bindings::SLLM_HIP_ROTARY_VERSION);\n\
+             println!(\"const SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1);\n\
+             println!(\"const SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_ROTARY_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ROTARY_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_ROTARY_MAX_M={{}}\", bindings::SLLM_HIP_ROTARY_MAX_M);\n\
+             println!(\"const SLLM_HIP_ROTARY_MAX_POSITION={{}}\", bindings::SLLM_HIP_ROTARY_MAX_POSITION);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_VERSION={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_VERSION);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_MAX_M={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_MAX_M);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_MAX_KV={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_MAX_KV);\n\
+             println!(\"const SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM);\n\
              println!(\"const SLLM_HIP_TENSOR_MAX_RANK={{}}\", bindings::SLLM_HIP_TENSOR_MAX_RANK);\n\
              println!(\"const SLLM_TENSOR_DTYPE_BF16={{}}\", bindings::SLLM_TENSOR_DTYPE_BF16);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F32={{}}\", bindings::SLLM_TENSOR_DTYPE_F32);\n\
@@ -1106,11 +1167,15 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_ENCODING_FP8_OUTER_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_FP8_OUTER_F32);\n\
              println!(\"const SLLM_RMSNORM_ACCUMULATION_F32={{}}\", bindings::SLLM_RMSNORM_ACCUMULATION_F32);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);\n\
+             println!(\"const SLLM_RMSNORM_SCALE_MODE_DIRECT={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_DIRECT);\n\
              println!(\"const SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP={{}}\", bindings::SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_COPY={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_COPY);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_ADD={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_ADD);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_SILU_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_SILU_MUL);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL);\n\
+             println!(\"const SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL);\n\
+             println!(\"const SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL);\n\
+             println!(\"const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP);\n\
              println!(\"const SLLM_COMPLETION_STATE_PENDING={{}}\", bindings::SLLM_COMPLETION_STATE_PENDING);\n\
              println!(\"const SLLM_COMPLETION_STATE_SUCCESS={{}}\", bindings::SLLM_COMPLETION_STATE_SUCCESS);\n\
              println!(\"const SLLM_COMPLETION_STATE_FAILURE={{}}\", bindings::SLLM_COMPLETION_STATE_FAILURE);\n\
@@ -1137,6 +1202,10 @@ fn verify_checked_in_bindings(
              println!(\"layout sllm_argmax_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} row_count={{}} vocab_size={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_argmax_dispatch_info_t>(), align_of::<bindings::sllm_argmax_dispatch_info_t>(), offset_of!(bindings::sllm_argmax_dispatch_info_t, struct_size), offset_of!(bindings::sllm_argmax_dispatch_info_t, abi_version), offset_of!(bindings::sllm_argmax_dispatch_info_t, info_version), offset_of!(bindings::sllm_argmax_dispatch_info_t, backend), offset_of!(bindings::sllm_argmax_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_argmax_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_argmax_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_argmax_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_argmax_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_argmax_dispatch_info_t, row_count), offset_of!(bindings::sllm_argmax_dispatch_info_t, vocab_size), offset_of!(bindings::sllm_argmax_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_argmax_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_argmax_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_argmax_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_argmax_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_argmax_dispatch_info_t, reserved));\n\
              println!(\"layout sllm_attention_preprocess_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} start_position={{}} reserved={{}} packed_q_gate={{}} k={{}} q_raw_scale={{}} k_raw_scale={{}} positions={{}} q_output={{}} gate_output={{}} k_output={{}}\", size_of::<bindings::sllm_attention_preprocess_desc_t>(), align_of::<bindings::sllm_attention_preprocess_desc_t>(), offset_of!(bindings::sllm_attention_preprocess_desc_t, struct_size), offset_of!(bindings::sllm_attention_preprocess_desc_t, abi_version), offset_of!(bindings::sllm_attention_preprocess_desc_t, op_version), offset_of!(bindings::sllm_attention_preprocess_desc_t, start_position), offset_of!(bindings::sllm_attention_preprocess_desc_t, reserved), offset_of!(bindings::sllm_attention_preprocess_desc_t, packed_q_gate), offset_of!(bindings::sllm_attention_preprocess_desc_t, k), offset_of!(bindings::sllm_attention_preprocess_desc_t, q_raw_scale), offset_of!(bindings::sllm_attention_preprocess_desc_t, k_raw_scale), offset_of!(bindings::sllm_attention_preprocess_desc_t, positions), offset_of!(bindings::sllm_attention_preprocess_desc_t, q_output), offset_of!(bindings::sllm_attention_preprocess_desc_t, gate_output), offset_of!(bindings::sllm_attention_preprocess_desc_t, k_output));\n\
              println!(\"layout sllm_attention_preprocess_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} m={{}} q_heads={{}} k_heads={{}} q_head_dim={{}} k_head_dim={{}} rotary_dim={{}} start_position={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_attention_preprocess_dispatch_info_t>(), align_of::<bindings::sllm_attention_preprocess_dispatch_info_t>(), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, struct_size), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, abi_version), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, info_version), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, backend), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, m), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, q_heads), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, k_heads), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, q_head_dim), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, k_head_dim), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, rotary_dim), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, start_position), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_attention_preprocess_dispatch_info_t, reserved));\n\
+             println!(\"layout sllm_rotary_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} reserved0={{}} start_position={{}} q_heads={{}} kv_heads={{}} head_dim={{}} rotary_dim={{}} theta_bits={{}} max_position={{}} reserved={{}} query={{}} key={{}} positions={{}} query_output={{}} key_output={{}}\", size_of::<bindings::sllm_rotary_desc_t>(), align_of::<bindings::sllm_rotary_desc_t>(), offset_of!(bindings::sllm_rotary_desc_t, struct_size), offset_of!(bindings::sllm_rotary_desc_t, abi_version), offset_of!(bindings::sllm_rotary_desc_t, op_version), offset_of!(bindings::sllm_rotary_desc_t, reserved0), offset_of!(bindings::sllm_rotary_desc_t, start_position), offset_of!(bindings::sllm_rotary_desc_t, q_heads), offset_of!(bindings::sllm_rotary_desc_t, kv_heads), offset_of!(bindings::sllm_rotary_desc_t, head_dim), offset_of!(bindings::sllm_rotary_desc_t, rotary_dim), offset_of!(bindings::sllm_rotary_desc_t, theta_bits), offset_of!(bindings::sllm_rotary_desc_t, max_position), offset_of!(bindings::sllm_rotary_desc_t, reserved), offset_of!(bindings::sllm_rotary_desc_t, query), offset_of!(bindings::sllm_rotary_desc_t, key), offset_of!(bindings::sllm_rotary_desc_t, positions), offset_of!(bindings::sllm_rotary_desc_t, query_output), offset_of!(bindings::sllm_rotary_desc_t, key_output));\n\
+             println!(\"layout sllm_rotary_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} token_count={{}} q_heads={{}} kv_heads={{}} head_dim={{}} rotary_dim={{}} start_position={{}} max_position={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_rotary_dispatch_info_t>(), align_of::<bindings::sllm_rotary_dispatch_info_t>(), offset_of!(bindings::sllm_rotary_dispatch_info_t, struct_size), offset_of!(bindings::sllm_rotary_dispatch_info_t, abi_version), offset_of!(bindings::sllm_rotary_dispatch_info_t, info_version), offset_of!(bindings::sllm_rotary_dispatch_info_t, backend), offset_of!(bindings::sllm_rotary_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_rotary_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_rotary_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_rotary_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_rotary_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_rotary_dispatch_info_t, token_count), offset_of!(bindings::sllm_rotary_dispatch_info_t, q_heads), offset_of!(bindings::sllm_rotary_dispatch_info_t, kv_heads), offset_of!(bindings::sllm_rotary_dispatch_info_t, head_dim), offset_of!(bindings::sllm_rotary_dispatch_info_t, rotary_dim), offset_of!(bindings::sllm_rotary_dispatch_info_t, start_position), offset_of!(bindings::sllm_rotary_dispatch_info_t, max_position), offset_of!(bindings::sllm_rotary_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_rotary_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_rotary_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_rotary_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_rotary_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_rotary_dispatch_info_t, reserved));\n\
+             println!(\"layout sllm_windowed_attention_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} reserved0={{}} start_position={{}} expected_kv_length={{}} sliding_window={{}} q_heads={{}} kv_heads={{}} head_dim={{}} scaling_bits={{}} reserved={{}} query={{}} key={{}} value={{}} output={{}}\", size_of::<bindings::sllm_windowed_attention_desc_t>(), align_of::<bindings::sllm_windowed_attention_desc_t>(), offset_of!(bindings::sllm_windowed_attention_desc_t, struct_size), offset_of!(bindings::sllm_windowed_attention_desc_t, abi_version), offset_of!(bindings::sllm_windowed_attention_desc_t, op_version), offset_of!(bindings::sllm_windowed_attention_desc_t, reserved0), offset_of!(bindings::sllm_windowed_attention_desc_t, start_position), offset_of!(bindings::sllm_windowed_attention_desc_t, expected_kv_length), offset_of!(bindings::sllm_windowed_attention_desc_t, sliding_window), offset_of!(bindings::sllm_windowed_attention_desc_t, q_heads), offset_of!(bindings::sllm_windowed_attention_desc_t, kv_heads), offset_of!(bindings::sllm_windowed_attention_desc_t, head_dim), offset_of!(bindings::sllm_windowed_attention_desc_t, scaling_bits), offset_of!(bindings::sllm_windowed_attention_desc_t, reserved), offset_of!(bindings::sllm_windowed_attention_desc_t, query), offset_of!(bindings::sllm_windowed_attention_desc_t, key), offset_of!(bindings::sllm_windowed_attention_desc_t, value), offset_of!(bindings::sllm_windowed_attention_desc_t, output));\n\
+             println!(\"layout sllm_windowed_attention_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} query_count={{}} start_position={{}} committed_kv_length={{}} sliding_window={{}} q_heads={{}} kv_heads={{}} head_dim={{}} scaling_bits={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_windowed_attention_dispatch_info_t>(), align_of::<bindings::sllm_windowed_attention_dispatch_info_t>(), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, struct_size), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, abi_version), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, info_version), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, backend), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, query_count), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, start_position), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, committed_kv_length), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, sliding_window), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, q_heads), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, kv_heads), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, head_dim), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, scaling_bits), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_windowed_attention_dispatch_info_t, reserved));\n\
              println!(\"layout sllm_kv_state_create_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} session_id={{}} layer_id={{}} flags={{}} capacity_tokens={{}} head_count={{}} head_dim={{}} memory_kind={{}} layout={{}}\", size_of::<bindings::sllm_kv_state_create_info_t>(), align_of::<bindings::sllm_kv_state_create_info_t>(), offset_of!(bindings::sllm_kv_state_create_info_t, struct_size), offset_of!(bindings::sllm_kv_state_create_info_t, abi_version), offset_of!(bindings::sllm_kv_state_create_info_t, session_id), offset_of!(bindings::sllm_kv_state_create_info_t, layer_id), offset_of!(bindings::sllm_kv_state_create_info_t, flags), offset_of!(bindings::sllm_kv_state_create_info_t, capacity_tokens), offset_of!(bindings::sllm_kv_state_create_info_t, head_count), offset_of!(bindings::sllm_kv_state_create_info_t, head_dim), offset_of!(bindings::sllm_kv_state_create_info_t, memory_kind), offset_of!(bindings::sllm_kv_state_create_info_t, layout));\n\
              println!(\"layout sllm_kv_view_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} session_id={{}} layer_id={{}} dtype={{}} memory_kind={{}} layout={{}} capacity_tokens={{}} observed_length={{}} generation={{}} physical_page_bytes={{}} tokens_per_page={{}} mapped_token_capacity={{}} committed_bytes_per_plane={{}} context_identity={{}} state_identity={{}} k_stride_elements={{}} v_stride_elements={{}} reserved={{}}\", size_of::<bindings::sllm_kv_view_info_t>(), align_of::<bindings::sllm_kv_view_info_t>(), offset_of!(bindings::sllm_kv_view_info_t, struct_size), offset_of!(bindings::sllm_kv_view_info_t, abi_version), offset_of!(bindings::sllm_kv_view_info_t, info_version), offset_of!(bindings::sllm_kv_view_info_t, session_id), offset_of!(bindings::sllm_kv_view_info_t, layer_id), offset_of!(bindings::sllm_kv_view_info_t, dtype), offset_of!(bindings::sllm_kv_view_info_t, memory_kind), offset_of!(bindings::sllm_kv_view_info_t, layout), offset_of!(bindings::sllm_kv_view_info_t, capacity_tokens), offset_of!(bindings::sllm_kv_view_info_t, observed_length), offset_of!(bindings::sllm_kv_view_info_t, generation), offset_of!(bindings::sllm_kv_view_info_t, physical_page_bytes), offset_of!(bindings::sllm_kv_view_info_t, tokens_per_page), offset_of!(bindings::sllm_kv_view_info_t, mapped_token_capacity), offset_of!(bindings::sllm_kv_view_info_t, committed_bytes_per_plane), offset_of!(bindings::sllm_kv_view_info_t, context_identity), offset_of!(bindings::sllm_kv_view_info_t, state_identity), offset_of!(bindings::sllm_kv_view_info_t, k_stride_elements), offset_of!(bindings::sllm_kv_view_info_t, v_stride_elements), offset_of!(bindings::sllm_kv_view_info_t, reserved));\n\
              println!(\"layout sllm_kv_append_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} append_version={{}} expected_length={{}} start_position={{}} key_input={{}} value_input={{}} reserved={{}}\", size_of::<bindings::sllm_kv_append_desc_t>(), align_of::<bindings::sllm_kv_append_desc_t>(), offset_of!(bindings::sllm_kv_append_desc_t, struct_size), offset_of!(bindings::sllm_kv_append_desc_t, abi_version), offset_of!(bindings::sllm_kv_append_desc_t, append_version), offset_of!(bindings::sllm_kv_append_desc_t, expected_length), offset_of!(bindings::sllm_kv_append_desc_t, start_position), offset_of!(bindings::sllm_kv_append_desc_t, key_input), offset_of!(bindings::sllm_kv_append_desc_t, value_input), offset_of!(bindings::sllm_kv_append_desc_t, reserved));\n\

@@ -66,7 +66,7 @@ float_to_bf16_rne_bits(const float value) noexcept {
 
 hipError_t launch(const uint16_t *activation, const uint16_t *raw_scale,
                   uint16_t *output, uint32_t normalized_size,
-                  uint32_t row_count, float epsilon,
+                  uint32_t row_count, float epsilon, uint32_t scale_mode,
                   hipStream_t stream) noexcept;
 
 } // namespace sllm_rmsnorm_kernel

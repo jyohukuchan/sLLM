@@ -1,4 +1,4 @@
-//! Safe BF16 copy, residual-add, SiLU-multiply, and sigmoid-multiply wrappers.
+//! Safe BF16 elementwise wrappers shared by reviewed model adapters.
 
 use std::mem::size_of;
 use std::ptr::NonNull;
@@ -17,8 +17,11 @@ use crate::{HipBackend, TensorBinding};
 pub enum ElementwiseOperation {
     Copy,
     Add,
+    ScalarMul,
     SiluMul,
+    GeluTanhMul,
     SigmoidMul,
+    TanhSoftcap,
 }
 
 impl ElementwiseOperation {
@@ -26,8 +29,11 @@ impl ElementwiseOperation {
         match self {
             Self::Copy => sys::SLLM_ELEMENTWISE_OPERATION_COPY,
             Self::Add => sys::SLLM_ELEMENTWISE_OPERATION_ADD,
+            Self::ScalarMul => sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL,
             Self::SiluMul => sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL,
+            Self::GeluTanhMul => sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL,
             Self::SigmoidMul => sys::SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL,
+            Self::TanhSoftcap => sys::SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP,
         }
     }
 
@@ -35,11 +41,14 @@ impl ElementwiseOperation {
         match kind {
             SemanticOpKind::Copy => Ok(Self::Copy),
             SemanticOpKind::Add => Ok(Self::Add),
+            SemanticOpKind::ScalarMul => Ok(Self::ScalarMul),
             SemanticOpKind::SiluMul => Ok(Self::SiluMul),
+            SemanticOpKind::GeluTanhMul => Ok(Self::GeluTanhMul),
             SemanticOpKind::SigmoidMul => Ok(Self::SigmoidMul),
+            SemanticOpKind::TanhSoftcap => Ok(Self::TanhSoftcap),
             _ => Err(RuntimeError::local(
                 RuntimeStatus::InvalidElementwiseDescriptor,
-                "semantic descriptor is not copy, add, silu_mul, or sigmoid_mul",
+                "semantic descriptor is not a supported elementwise operation",
             )),
         }
     }
@@ -108,6 +117,63 @@ impl ElementwiseDescriptor {
         })
     }
 
+    pub fn scalar_mul(
+        input: TensorBinding,
+        scalar: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, sllm_core::OpError> {
+        let semantic = Arc::new(SemanticOpDescriptor::new(
+            SemanticOpKind::ScalarMul,
+            vec![input.view().clone(), scalar.view().clone()],
+            vec![output.view().clone()],
+        )?);
+        Ok(Self {
+            operation: ElementwiseOperation::ScalarMul,
+            input0: input,
+            input1: Some(scalar),
+            output,
+            semantic,
+        })
+    }
+
+    pub fn gelu_tanh_mul(
+        gate: TensorBinding,
+        up: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, sllm_core::OpError> {
+        let semantic = Arc::new(SemanticOpDescriptor::new(
+            SemanticOpKind::GeluTanhMul,
+            vec![gate.view().clone(), up.view().clone()],
+            vec![output.view().clone()],
+        )?);
+        Ok(Self {
+            operation: ElementwiseOperation::GeluTanhMul,
+            input0: gate,
+            input1: Some(up),
+            output,
+            semantic,
+        })
+    }
+
+    pub fn tanh_softcap(
+        input: TensorBinding,
+        cap: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, sllm_core::OpError> {
+        let semantic = Arc::new(SemanticOpDescriptor::new(
+            SemanticOpKind::TanhSoftcap,
+            vec![input.view().clone(), cap.view().clone()],
+            vec![output.view().clone()],
+        )?);
+        Ok(Self {
+            operation: ElementwiseOperation::TanhSoftcap,
+            input0: input,
+            input1: Some(cap),
+            output,
+            semantic,
+        })
+    }
+
     pub fn sigmoid_mul(
         gate: TensorBinding,
         attention_value: TensorBinding,
@@ -155,8 +221,11 @@ impl ElementwiseDescriptor {
         let expected_inputs = match operation {
             ElementwiseOperation::Copy => 1,
             ElementwiseOperation::Add => 2,
+            ElementwiseOperation::ScalarMul => 2,
             ElementwiseOperation::SiluMul => 2,
+            ElementwiseOperation::GeluTanhMul => 2,
             ElementwiseOperation::SigmoidMul => 2,
+            ElementwiseOperation::TanhSoftcap => 2,
         };
         if inputs.len() != expected_inputs || semantic.outputs().len() != 1 {
             return Err(RuntimeError::local(
@@ -307,8 +376,11 @@ fn dispatch_info_from_raw(
     let operation = match info.operation {
         sys::SLLM_ELEMENTWISE_OPERATION_COPY => ElementwiseOperation::Copy,
         sys::SLLM_ELEMENTWISE_OPERATION_ADD => ElementwiseOperation::Add,
+        sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL => ElementwiseOperation::ScalarMul,
         sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL => ElementwiseOperation::SiluMul,
+        sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL => ElementwiseOperation::GeluTanhMul,
         sys::SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL => ElementwiseOperation::SigmoidMul,
+        sys::SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP => ElementwiseOperation::TanhSoftcap,
         _ => {
             return Err(RuntimeError::local(
                 RuntimeStatus::InternalError,
@@ -508,6 +580,34 @@ mod tests {
         .unwrap();
         assert_eq!(silu_mul.operation, ElementwiseOperation::SiluMul);
         assert_eq!(silu_mul.semantic().kind(), SemanticOpKind::SiluMul);
+
+        let scalar_view = TensorView::contiguous(DType::Bf16, &[1]).unwrap();
+        let scalar_mul = ElementwiseDescriptor::scalar_mul(
+            input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            input1.binding(scalar_view.clone()),
+            output.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(scalar_mul.operation, ElementwiseOperation::ScalarMul);
+        assert_eq!(scalar_mul.semantic().kind(), SemanticOpKind::ScalarMul);
+
+        let gelu_tanh_mul = ElementwiseDescriptor::gelu_tanh_mul(
+            input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            input1.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            output.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(gelu_tanh_mul.operation, ElementwiseOperation::GeluTanhMul);
+        assert_eq!(gelu_tanh_mul.semantic().kind(), SemanticOpKind::GeluTanhMul);
+
+        let tanh_softcap = ElementwiseDescriptor::tanh_softcap(
+            input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            input1.binding(scalar_view),
+            output.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(tanh_softcap.operation, ElementwiseOperation::TanhSoftcap);
+        assert_eq!(tanh_softcap.semantic().kind(), SemanticOpKind::TanhSoftcap);
 
         let gate_view = TensorView::contiguous(DType::Bf16, &[3, 16, 256]).unwrap();
         let sigmoid_mul = ElementwiseDescriptor::sigmoid_mul(

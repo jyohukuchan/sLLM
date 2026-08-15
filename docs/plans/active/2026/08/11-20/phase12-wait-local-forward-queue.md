@@ -62,7 +62,7 @@ Phase 13が未完了のままGemma executor、NVFP4 graph、MoE executorを独�
 
 ### Q2: Phase 14 Gemma 4 12B Dense text-only
 
-正本は[Phase 14 plan](phase14-gemma4-dense.md)とする。
+正本は[Phase 14 archive](../../../../archive/2026/08/11-20/phase14-gemma4-dense.md)とする。
 
 1. P14-A0/A1で公式source、immutable model lock、architecture差分、adapter契約を固定する。
 2. P14-A2/A3でweight mapping、graph lowering、必要な固有semantic op/providerを実装する。

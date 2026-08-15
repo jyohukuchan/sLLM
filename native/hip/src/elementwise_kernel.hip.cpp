@@ -89,6 +89,50 @@ __launch_bounds__(256, 1) void sllm_elementwise_sigmoid_mul_bf16_fp32_v1(
   }
 }
 
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_elementwise_scalar_mul_bf16_fp32_v1(
+    const uint16_t *const input, const uint16_t *const scalar,
+    uint16_t *const output, const uint64_t element_count) {
+  const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+                         static_cast<uint64_t>(threadIdx.x);
+  if (index < element_count) {
+    output[index] = float_to_bf16_rne_bits(bf16_to_float(input[index]) *
+                                           bf16_to_float(scalar[0]));
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1(
+    const uint16_t *const gate, const uint16_t *const up,
+    uint16_t *const output, const uint64_t element_count) {
+  const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+                         static_cast<uint64_t>(threadIdx.x);
+  if (index < element_count) {
+    constexpr float sqrt_two_over_pi = 0.7978845608028654F;
+    constexpr float cubic_coefficient = 0.044715F;
+    const float value = bf16_to_float(gate[index]);
+    const float inner =
+        sqrt_two_over_pi * (value + cubic_coefficient * value * value * value);
+    const float gelu = 0.5F * value * (1.0F + ::tanhf(inner));
+    const uint16_t gelu_bf16 = float_to_bf16_rne_bits(gelu);
+    output[index] = float_to_bf16_rne_bits(bf16_to_float(gelu_bf16) *
+                                           bf16_to_float(up[index]));
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_elementwise_tanh_softcap_bf16_fp32_v1(
+    const uint16_t *const input, const uint16_t *const cap,
+    uint16_t *const output, const uint64_t element_count) {
+  const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+                         static_cast<uint64_t>(threadIdx.x);
+  if (index < element_count) {
+    const float cap_value = bf16_to_float(cap[0]);
+    output[index] = float_to_bf16_rne_bits(
+        ::tanhf(bf16_to_float(input[index]) / cap_value) * cap_value);
+  }
+}
+
 namespace sllm_elementwise_kernel {
 namespace {
 
@@ -160,6 +204,51 @@ hipError_t launch_sigmoid_mul(const uint16_t *const gate,
   hipLaunchKernelGGL(sllm_elementwise_sigmoid_mul_bf16_fp32_v1, grid,
                      dim3(kWorkgroupSize), 0U, stream, gate, attention_value,
                      output, element_count);
+  return hipGetLastError();
+}
+
+hipError_t launch_scalar_mul(const uint16_t *const input,
+                             const uint16_t *const scalar,
+                             uint16_t *const output,
+                             const uint64_t element_count,
+                             const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_scalar_mul_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, input, scalar, output,
+                     element_count);
+  return hipGetLastError();
+}
+
+hipError_t launch_gelu_tanh_mul(const uint16_t *const gate,
+                                const uint16_t *const up,
+                                uint16_t *const output,
+                                const uint64_t element_count,
+                                const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, gate, up, output,
+                     element_count);
+  return hipGetLastError();
+}
+
+hipError_t launch_tanh_softcap(const uint16_t *const input,
+                               const uint16_t *const cap,
+                               uint16_t *const output,
+                               const uint64_t element_count,
+                               const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid)) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_tanh_softcap_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, input, cap, output,
+                     element_count);
   return hipGetLastError();
 }
 

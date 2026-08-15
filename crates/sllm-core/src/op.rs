@@ -6,11 +6,16 @@ use crate::{DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity, Ten
 pub enum SemanticOpKind {
     Copy,
     Add,
+    ScalarMul,
     Embedding,
     Matmul,
     SiluMul,
+    GeluTanhMul,
     SigmoidMul,
+    TanhSoftcap,
     RmsNorm,
+    Rotary,
+    CausalAttention,
     AttentionPreprocess,
     Argmax,
 }
@@ -70,6 +75,27 @@ pub enum ArgmaxTensor {
     Output,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RotaryTensor {
+    Query,
+    Key,
+    Positions,
+    QueryOutput,
+    KeyOutput,
+}
+
+impl fmt::Display for RotaryTensor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Query => "query",
+            Self::Key => "key",
+            Self::Positions => "positions",
+            Self::QueryOutput => "query output",
+            Self::KeyOutput => "key output",
+        })
+    }
+}
+
 impl fmt::Display for ArgmaxTensor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -94,11 +120,16 @@ impl SemanticOpKind {
         match self {
             Self::Copy => "copy",
             Self::Add => "add",
+            Self::ScalarMul => "scalar_mul",
             Self::Embedding => "embedding",
             Self::Matmul => "matmul",
             Self::SiluMul => "silu_mul",
+            Self::GeluTanhMul => "gelu_tanh_mul",
             Self::SigmoidMul => "sigmoid_mul",
+            Self::TanhSoftcap => "tanh_softcap",
             Self::RmsNorm => "rms_norm",
+            Self::Rotary => "rotary",
+            Self::CausalAttention => "causal_attention",
             Self::AttentionPreprocess => "attention_preprocess",
             Self::Argmax => "argmax",
         }
@@ -108,24 +139,27 @@ impl SemanticOpKind {
         match self {
             Self::Copy => (1, 1),
             Self::Add => (2, 1),
+            Self::ScalarMul => (2, 1),
             Self::Embedding => (2, 1),
             Self::Matmul => (2, 1),
             Self::SiluMul => (2, 1),
+            Self::GeluTanhMul => (2, 1),
             Self::SigmoidMul => (2, 1),
+            Self::TanhSoftcap => (2, 1),
             Self::RmsNorm => (2, 1),
+            Self::Rotary => (3, 2),
+            Self::CausalAttention => (3, 1),
             Self::AttentionPreprocess => (5, 3),
             Self::Argmax => (1, 1),
         }
     }
 }
 
-/// The scale interpretation used by the Qwen3.5 RMSNorm contract.
-///
-/// This is intentionally an explicit enum rather than an implicit default:
-/// the raw checkpoint scale is not a conventional RMSNorm scale.
+/// The explicit checkpoint scale interpretation used by RMSNorm.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum RmsNormScaleMode {
     OffsetOne,
+    Direct,
 }
 
 /// Tensor roles used in RMSNorm validation errors.
@@ -221,6 +255,7 @@ impl RmsNormContract {
     pub fn effective_scale(self, raw_scale: f32) -> f32 {
         match self.scale_mode {
             RmsNormScaleMode::OffsetOne => 1.0_f32 + raw_scale,
+            RmsNormScaleMode::Direct => raw_scale,
         }
     }
 }
@@ -505,6 +540,274 @@ impl AttentionPreprocessContract {
     }
 }
 
+/// A backend-neutral split-half RoPE contract.
+///
+/// Frequencies are `theta^(-2*i/head_dim)`. The first `rotary_dim / 2`
+/// dimensions are paired with the dimensions beginning at `head_dim / 2`;
+/// dimensions outside those two active ranges are copied unchanged. This
+/// represents both Gemma 4 sliding RoPE (`256/256`) and proportional full
+/// RoPE (`512/128`) without treating either as Qwen mRoPE.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SplitHalfRotaryContract {
+    q_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    rotary_dim: u32,
+    theta_bits: u32,
+    start_position: u32,
+    token_count: u32,
+    max_position_embeddings: u32,
+    accumulation_dtype: DType,
+    output_dtype: DType,
+}
+
+impl SplitHalfRotaryContract {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+        rotary_dim: u32,
+        theta: f32,
+        start_position: u64,
+        token_count: u64,
+        max_position_embeddings: u32,
+    ) -> Result<Self, OpError> {
+        if q_heads == 0 || kv_heads == 0 || q_heads % kv_heads != 0 {
+            return Err(OpError::RotaryInvalidConfig {
+                field: "head count",
+            });
+        }
+        if head_dim == 0 || head_dim % 2 != 0 {
+            return Err(OpError::RotaryInvalidConfig {
+                field: "head dimension",
+            });
+        }
+        if rotary_dim == 0 || rotary_dim % 2 != 0 || rotary_dim > head_dim {
+            return Err(OpError::RotaryInvalidConfig {
+                field: "rotary dimension",
+            });
+        }
+        if !theta.is_finite() || theta <= 0.0 {
+            return Err(OpError::RotaryInvalidConfig { field: "theta" });
+        }
+        if token_count == 0 {
+            return Err(OpError::RotaryInvalidConfig {
+                field: "token count",
+            });
+        }
+        if max_position_embeddings == 0 {
+            return Err(OpError::RotaryInvalidConfig {
+                field: "max position embeddings",
+            });
+        }
+        let end_position = start_position
+            .checked_add(token_count)
+            .ok_or(OpError::RotaryPositionOverflow)?;
+        if end_position > u64::from(max_position_embeddings) {
+            return Err(OpError::RotaryPositionOutOfRange {
+                last_position: end_position - 1,
+                max_position_embeddings,
+            });
+        }
+        let start_position =
+            u32::try_from(start_position).map_err(|_| OpError::RotaryPositionOutOfRange {
+                last_position: start_position,
+                max_position_embeddings,
+            })?;
+        let token_count = u32::try_from(token_count).map_err(|_| OpError::RotaryInvalidConfig {
+            field: "token count",
+        })?;
+        Ok(Self {
+            q_heads,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            theta_bits: theta.to_bits(),
+            start_position,
+            token_count,
+            max_position_embeddings,
+            accumulation_dtype: DType::F32,
+            output_dtype: DType::Bf16,
+        })
+    }
+
+    pub const fn q_heads(self) -> u32 {
+        self.q_heads
+    }
+
+    pub const fn kv_heads(self) -> u32 {
+        self.kv_heads
+    }
+
+    pub const fn head_dim(self) -> u32 {
+        self.head_dim
+    }
+
+    pub const fn rotary_dim(self) -> u32 {
+        self.rotary_dim
+    }
+
+    pub const fn theta(self) -> f32 {
+        f32::from_bits(self.theta_bits)
+    }
+
+    pub const fn theta_bits(self) -> u32 {
+        self.theta_bits
+    }
+
+    pub const fn start_position(self) -> u32 {
+        self.start_position
+    }
+
+    pub const fn token_count(self) -> u32 {
+        self.token_count
+    }
+
+    pub const fn max_position_embeddings(self) -> u32 {
+        self.max_position_embeddings
+    }
+
+    pub const fn accumulation_dtype(self) -> DType {
+        self.accumulation_dtype
+    }
+
+    pub const fn output_dtype(self) -> DType {
+        self.output_dtype
+    }
+}
+
+/// Model-neutral BF16 GQA causal-attention semantics used by Gemma 4.
+///
+/// A zero `sliding_window()` means full causal attention. A non-zero value is
+/// the inclusive token count ending at the current query, so the first key is
+/// `max(0, query_position + 1 - sliding_window)`. Scores use the explicit
+/// multiplicative scale before FP32 softmax.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct WindowedCausalAttentionContract {
+    q_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    start_position: u64,
+    query_count: u32,
+    expected_kv_length: u64,
+    sliding_window: u64,
+    scaling_bits: u32,
+    accumulation_dtype: DType,
+    output_dtype: DType,
+}
+
+impl WindowedCausalAttentionContract {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+        start_position: u64,
+        query_count: u64,
+        expected_kv_length: u64,
+        sliding_window: Option<u64>,
+        scaling: f32,
+    ) -> Result<Self, OpError> {
+        if q_heads == 0 || kv_heads == 0 || q_heads % kv_heads != 0 {
+            return Err(OpError::CausalAttentionInvalidConfig {
+                field: "head count",
+            });
+        }
+        if head_dim == 0 {
+            return Err(OpError::CausalAttentionInvalidConfig {
+                field: "head dimension",
+            });
+        }
+        if query_count == 0 {
+            return Err(OpError::CausalAttentionInvalidConfig {
+                field: "query count",
+            });
+        }
+        if matches!(sliding_window, Some(0)) {
+            return Err(OpError::CausalAttentionInvalidConfig {
+                field: "sliding window",
+            });
+        }
+        if !scaling.is_finite() || scaling <= 0.0 {
+            return Err(OpError::CausalAttentionInvalidConfig { field: "scaling" });
+        }
+        let end = start_position
+            .checked_add(query_count)
+            .ok_or(OpError::CausalAttentionLengthOverflow)?;
+        if end != expected_kv_length {
+            return Err(OpError::CausalAttentionLengthMismatch {
+                expected: end,
+                actual: expected_kv_length,
+            });
+        }
+        let query_count =
+            u32::try_from(query_count).map_err(|_| OpError::CausalAttentionInvalidConfig {
+                field: "query count",
+            })?;
+        Ok(Self {
+            q_heads,
+            kv_heads,
+            head_dim,
+            start_position,
+            query_count,
+            expected_kv_length,
+            sliding_window: sliding_window.unwrap_or(0),
+            scaling_bits: scaling.to_bits(),
+            accumulation_dtype: DType::F32,
+            output_dtype: DType::Bf16,
+        })
+    }
+
+    pub const fn q_heads(self) -> u32 {
+        self.q_heads
+    }
+
+    pub const fn kv_heads(self) -> u32 {
+        self.kv_heads
+    }
+
+    pub const fn head_dim(self) -> u32 {
+        self.head_dim
+    }
+
+    pub const fn start_position(self) -> u64 {
+        self.start_position
+    }
+
+    pub const fn query_count(self) -> u32 {
+        self.query_count
+    }
+
+    pub const fn expected_kv_length(self) -> u64 {
+        self.expected_kv_length
+    }
+
+    pub const fn sliding_window(self) -> Option<u64> {
+        if self.sliding_window == 0 {
+            None
+        } else {
+            Some(self.sliding_window)
+        }
+    }
+
+    pub const fn scaling(self) -> f32 {
+        f32::from_bits(self.scaling_bits)
+    }
+
+    pub const fn scaling_bits(self) -> u32 {
+        self.scaling_bits
+    }
+
+    pub const fn accumulation_dtype(self) -> DType {
+        self.accumulation_dtype
+    }
+
+    pub const fn output_dtype(self) -> DType {
+        self.output_dtype
+    }
+}
+
 /// A backend-independent operation contract containing only tensor metadata.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SemanticOpDescriptor {
@@ -512,6 +815,8 @@ pub struct SemanticOpDescriptor {
     inputs: Vec<TensorView>,
     outputs: Vec<TensorView>,
     rms_norm_contract: Option<RmsNormContract>,
+    rotary_contract: Option<SplitHalfRotaryContract>,
+    causal_attention_contract: Option<WindowedCausalAttentionContract>,
     attention_preprocess_contract: Option<AttentionPreprocessContract>,
 }
 
@@ -529,6 +834,8 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
             attention_preprocess_contract: None,
         };
         descriptor.validate()?;
@@ -557,6 +864,8 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: Some(contract),
+            rotary_contract: None,
+            causal_attention_contract: None,
             attention_preprocess_contract: None,
         };
         descriptor.validate()?;
@@ -573,7 +882,45 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
             attention_preprocess_contract: Some(contract),
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_rotary(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: SplitHalfRotaryContract,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::Rotary,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            rotary_contract: Some(contract),
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_causal_attention(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: WindowedCausalAttentionContract,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::CausalAttention,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: Some(contract),
+            attention_preprocess_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -597,6 +944,14 @@ impl SemanticOpDescriptor {
 
     pub const fn rms_norm_contract(&self) -> Option<RmsNormContract> {
         self.rms_norm_contract
+    }
+
+    pub const fn rotary_contract(&self) -> Option<SplitHalfRotaryContract> {
+        self.rotary_contract
+    }
+
+    pub const fn causal_attention_contract(&self) -> Option<WindowedCausalAttentionContract> {
+        self.causal_attention_contract
     }
 
     pub const fn attention_preprocess_contract(&self) -> Option<AttentionPreprocessContract> {
@@ -644,6 +999,9 @@ impl SemanticOpDescriptor {
             SemanticOpKind::Add => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
+            SemanticOpKind::ScalarMul => {
+                validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
+            }
             SemanticOpKind::Embedding => {
                 validate_embedding(&self.inputs, &self.outputs)?;
             }
@@ -653,7 +1011,13 @@ impl SemanticOpDescriptor {
             SemanticOpKind::SiluMul => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
+            SemanticOpKind::GeluTanhMul => {
+                validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
+            }
             SemanticOpKind::SigmoidMul => {
+                validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::TanhSoftcap => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
             SemanticOpKind::RmsNorm => {
@@ -661,6 +1025,18 @@ impl SemanticOpDescriptor {
                     .rms_norm_contract
                     .ok_or(OpError::RmsNormContractRequired)?;
                 validate_rms_norm(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::Rotary => {
+                let contract = self
+                    .rotary_contract
+                    .ok_or(OpError::RotaryContractRequired)?;
+                validate_rotary(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::CausalAttention => {
+                let contract = self
+                    .causal_attention_contract
+                    .ok_or(OpError::CausalAttentionContractRequired)?;
+                validate_causal_attention(&self.inputs, &self.outputs, contract)?;
             }
             SemanticOpKind::AttentionPreprocess => {
                 let contract = self
@@ -674,6 +1050,97 @@ impl SemanticOpDescriptor {
         }
         Ok(())
     }
+}
+
+fn validate_causal_attention(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: WindowedCausalAttentionContract,
+) -> Result<(), OpError> {
+    for tensor in inputs.iter().chain(outputs) {
+        if tensor.shape().contains(&0) {
+            return Err(OpError::CausalAttentionZeroExtent);
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::CausalAttentionNonContiguous);
+        }
+        if tensor.dtype() != DType::Bf16 || tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::CausalAttentionTensorContractMismatch);
+        }
+    }
+    let m = contract.query_count() as usize;
+    let length = usize::try_from(contract.expected_kv_length())
+        .map_err(|_| OpError::CausalAttentionShapeMismatch)?;
+    let q_shape = [m, contract.q_heads() as usize, contract.head_dim() as usize];
+    let kv_shape = [
+        length,
+        contract.kv_heads() as usize,
+        contract.head_dim() as usize,
+    ];
+    if inputs[0].shape() != q_shape
+        || inputs[1].shape() != kv_shape
+        || inputs[2].shape() != kv_shape
+        || outputs[0].shape() != q_shape
+    {
+        return Err(OpError::CausalAttentionShapeMismatch);
+    }
+    Ok(())
+}
+
+fn validate_rotary(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: SplitHalfRotaryContract,
+) -> Result<(), OpError> {
+    let tensors = [
+        (&inputs[0], RotaryTensor::Query),
+        (&inputs[1], RotaryTensor::Key),
+        (&inputs[2], RotaryTensor::Positions),
+        (&outputs[0], RotaryTensor::QueryOutput),
+        (&outputs[1], RotaryTensor::KeyOutput),
+    ];
+    for (tensor, role) in tensors {
+        if tensor.shape().contains(&0) {
+            return Err(OpError::RotaryZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::RotaryNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::RotaryUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+        let expected_dtype = if role == RotaryTensor::Positions {
+            DType::I32
+        } else {
+            DType::Bf16
+        };
+        if tensor.dtype() != expected_dtype {
+            return Err(OpError::RotaryUnsupportedDType {
+                tensor: role,
+                expected: expected_dtype,
+                actual: tensor.dtype(),
+            });
+        }
+    }
+    let m = contract.token_count() as usize;
+    let q_shape = [m, contract.q_heads() as usize, contract.head_dim() as usize];
+    let k_shape = [
+        m,
+        contract.kv_heads() as usize,
+        contract.head_dim() as usize,
+    ];
+    if inputs[0].shape() != q_shape
+        || outputs[0].shape() != q_shape
+        || inputs[1].shape() != k_shape
+        || outputs[1].shape() != k_shape
+        || inputs[2].shape() != [m]
+    {
+        return Err(OpError::RotaryShapeMismatch);
+    }
+    Ok(())
 }
 
 fn validate_argmax(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
@@ -812,16 +1279,29 @@ fn validate_baseline_elementwise(
 ) -> Result<(), OpError> {
     let metadata_matches = match kind {
         SemanticOpKind::Copy => same_metadata(&inputs[0], &outputs[0]),
-        SemanticOpKind::Add | SemanticOpKind::SiluMul | SemanticOpKind::SigmoidMul => {
+        SemanticOpKind::Add
+        | SemanticOpKind::SiluMul
+        | SemanticOpKind::GeluTanhMul
+        | SemanticOpKind::SigmoidMul => {
             same_metadata(&inputs[0], &inputs[1]) && same_metadata(&inputs[0], &outputs[0])
+        }
+        SemanticOpKind::ScalarMul | SemanticOpKind::TanhSoftcap => {
+            same_metadata(&inputs[0], &outputs[0])
+                && inputs[1].shape() == [1]
+                && inputs[1].dtype() == inputs[0].dtype()
+                && inputs[1].encoding() == inputs[0].encoding()
         }
         _ => unreachable!("elementwise validation is only used by copy/add"),
     };
     if !metadata_matches {
         return Err(match kind {
             SemanticOpKind::Copy => OpError::CopyMetadataMismatch,
-            SemanticOpKind::Add | SemanticOpKind::SiluMul | SemanticOpKind::SigmoidMul => {
-                OpError::ElementwiseMetadataMismatch
+            SemanticOpKind::Add
+            | SemanticOpKind::SiluMul
+            | SemanticOpKind::GeluTanhMul
+            | SemanticOpKind::SigmoidMul => OpError::ElementwiseMetadataMismatch,
+            SemanticOpKind::ScalarMul | SemanticOpKind::TanhSoftcap => {
+                OpError::ScalarElementwiseShapeMismatch { kind }
             }
             _ => unreachable!("elementwise validation is only used by copy/add"),
         });
@@ -831,7 +1311,12 @@ fn validate_baseline_elementwise(
     tensors.push((&inputs[0], ElementwiseTensor::Input0));
     if matches!(
         kind,
-        SemanticOpKind::Add | SemanticOpKind::SiluMul | SemanticOpKind::SigmoidMul
+        SemanticOpKind::Add
+            | SemanticOpKind::ScalarMul
+            | SemanticOpKind::SiluMul
+            | SemanticOpKind::GeluTanhMul
+            | SemanticOpKind::SigmoidMul
+            | SemanticOpKind::TanhSoftcap
     ) {
         tensors.push((&inputs[1], ElementwiseTensor::Input1));
     }
@@ -1030,6 +1515,9 @@ pub enum OpError {
     },
     CopyMetadataMismatch,
     ElementwiseMetadataMismatch,
+    ScalarElementwiseShapeMismatch {
+        kind: SemanticOpKind,
+    },
     ElementwiseRankZero {
         kind: SemanticOpKind,
         tensor: ElementwiseTensor,
@@ -1091,6 +1579,44 @@ pub enum OpError {
     RmsNormInvalidEpsilon {
         bits: u32,
     },
+    RotaryContractRequired,
+    RotaryInvalidConfig {
+        field: &'static str,
+    },
+    RotaryPositionOverflow,
+    RotaryPositionOutOfRange {
+        last_position: u64,
+        max_position_embeddings: u32,
+    },
+    RotaryZeroExtent {
+        tensor: RotaryTensor,
+    },
+    RotaryNonContiguous {
+        tensor: RotaryTensor,
+    },
+    RotaryUnsupportedDType {
+        tensor: RotaryTensor,
+        expected: DType,
+        actual: DType,
+    },
+    RotaryUnsupportedEncoding {
+        tensor: RotaryTensor,
+        actual: Encoding,
+    },
+    RotaryShapeMismatch,
+    CausalAttentionContractRequired,
+    CausalAttentionInvalidConfig {
+        field: &'static str,
+    },
+    CausalAttentionLengthOverflow,
+    CausalAttentionLengthMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    CausalAttentionZeroExtent,
+    CausalAttentionNonContiguous,
+    CausalAttentionTensorContractMismatch,
+    CausalAttentionShapeMismatch,
     AttentionPreprocessContractRequired,
     AttentionPreprocessInvalidConfig {
         field: &'static str,
@@ -1173,6 +1699,11 @@ impl fmt::Display for OpError {
             Self::ElementwiseMetadataMismatch => {
                 formatter.write_str("elementwise operand metadata differ")
             }
+            Self::ScalarElementwiseShapeMismatch { kind } => write!(
+                formatter,
+                "{} requires matching input/output metadata and one BF16 scalar input",
+                kind.name()
+            ),
             Self::ElementwiseRankZero { kind, tensor } => {
                 write!(
                     formatter,
@@ -1286,6 +1817,65 @@ impl fmt::Display for OpError {
                     "rms_norm epsilon is not finite and positive (bits 0x{bits:08x})"
                 )
             }
+            Self::RotaryContractRequired => {
+                formatter.write_str("rotary requires an explicit split-half contract")
+            }
+            Self::RotaryInvalidConfig { field } => {
+                write!(formatter, "rotary has an invalid {field} configuration")
+            }
+            Self::RotaryPositionOverflow => {
+                formatter.write_str("rotary position range overflowed")
+            }
+            Self::RotaryPositionOutOfRange {
+                last_position,
+                max_position_embeddings,
+            } => write!(
+                formatter,
+                "rotary position {last_position} is not below max position {max_position_embeddings}"
+            ),
+            Self::RotaryZeroExtent { tensor } => {
+                write!(formatter, "rotary {tensor} must not have a zero extent")
+            }
+            Self::RotaryNonContiguous { tensor } => {
+                write!(formatter, "rotary {tensor} must be row-major contiguous")
+            }
+            Self::RotaryUnsupportedDType {
+                tensor,
+                expected,
+                actual,
+            } => write!(formatter, "rotary {tensor} must use {expected}, got {actual}"),
+            Self::RotaryUnsupportedEncoding { tensor, actual } => write!(
+                formatter,
+                "rotary {tensor} must use unquantized encoding, got {actual:?}"
+            ),
+            Self::RotaryShapeMismatch => formatter.write_str(
+                "rotary requires Q/K and output [M,H,D] tensors plus I32 positions [M] matching its contract",
+            ),
+            Self::CausalAttentionContractRequired => {
+                formatter.write_str("causal_attention requires an explicit window contract")
+            }
+            Self::CausalAttentionInvalidConfig { field } => {
+                write!(formatter, "causal_attention has an invalid {field} configuration")
+            }
+            Self::CausalAttentionLengthOverflow => {
+                formatter.write_str("causal_attention length overflowed")
+            }
+            Self::CausalAttentionLengthMismatch { expected, actual } => write!(
+                formatter,
+                "causal_attention expected KV length {expected}, got {actual}"
+            ),
+            Self::CausalAttentionZeroExtent => {
+                formatter.write_str("causal_attention tensors must not have zero extents")
+            }
+            Self::CausalAttentionNonContiguous => {
+                formatter.write_str("causal_attention tensors must be row-major contiguous")
+            }
+            Self::CausalAttentionTensorContractMismatch => formatter.write_str(
+                "causal_attention tensors must be unquantized BF16",
+            ),
+            Self::CausalAttentionShapeMismatch => formatter.write_str(
+                "causal_attention requires Q/output [M,Hq,D] and K/V [L,Hkv,D] matching its contract",
+            ),
             Self::AttentionPreprocessContractRequired => {
                 formatter.write_str("attention_preprocess requires an explicit contract")
             }

@@ -31,18 +31,18 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "c390879b807f8a0af6cceb5454e3096150ba7d76139178bdf524442a34cbb5ae"
+          "sha256": "017d16e5fea2d0f0c87e84bee5b44caa3fa853aea5382c5c824e20e43930a94d"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "sha256": "29d39747fdce2d643c190cb5d8acde37a2dfcfe4bbe85dbff6b5fb06603feaf6"
+          "sha256": "f305bc8814551b48d6fa11fe01e99ec388b482c91568d23d351eb855b4503dba"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
-          "sha256": "4d5a1899942f00886059f89aaa9391da16e38249a443f164c98377b85a7be4df"
+          "sha256": "7957b1c2e25b78a2083de2492d1712ddacc560bf23d73585141fa6b3e339cfbf"
         }
       ],
-      "source_set_sha256": "f4c310ba08ef6cb69b5b6dc9b09fa3791883d101f323207b52a829e340a234da"
+      "source_set_sha256": "bf75184f15c5328125ad001df9508102f7cea09ddd2c99d61441317002ecb06c"
     },
     "host_abi": {
       "canonical_order": [
@@ -54,7 +54,7 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "660831575635834511f11e8f95a9ca28e818502145ba38a7cf64eabb36a0db60"
+        "sha256": "94905111ced129215a9455e98fc6b84936885281167eba880eed9235f6550cca"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -62,14 +62,14 @@
         },
         {
           "path": "native/hip/src/rmsnorm_api.cpp",
-          "sha256": "08f899273e1e7b064f717571b271ae2b4609f394bd1e32644919c42187c75d7f"
+          "sha256": "ae55d6ae9e16f5b09ddb12ff04cba0cd4b87714f5699d2afc639bba42093bae8"
         },
         {
           "path": "native/hip/src/rmsnorm_api.hpp",
-          "sha256": "64aabff65bb99435e783e7af6b72e3c31d2f03da7dc7d3480cda59e883f9d43e"
+          "sha256": "f7a061cf121a47f248dc7ae539f2b3a7d53e706c0976b27bad9a3e8b346cb152"
         }
       ],
-      "source_set_sha256": "84230c9fbd84515bca58d4ae28709277ae59bccb69404729254d9c3bbd29a0a9"
+      "source_set_sha256": "23fa3f7b0abdde748edd129d761ca5025bb55a09a9209dd896ffe857d8faf94a"
     },
     "binding_build": {
       "canonical_order": [
@@ -82,26 +82,26 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "aa432bd174d7ee7901692bc2b3a4ee281f175253defb889e4630c7b8142d9c9e"
+          "sha256": "02d7eed28fabf2d8641e248e46def08012b270fcf0244ed975120e2f3c184d6b"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "84b8ffcfd414db225ac2ab5f56b562c73334dba11e9c71ff52beb270596c1322"
+          "sha256": "772817640c3208629776bd97f6d4070ebf0aca7b62dc9cf9c692e48843b15cc8"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
-          "sha256": "668b369cf255fbda4214138db736ecfcead813aa61f63c30c9099b7d0a6da9fc"
+          "sha256": "d7b80d2a66a7b4c9ab5b714e3e45c4fa52f168b720807d23c094ed3ef2a7ff30"
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "464e56bb6afd7651968be505c492268b1013b80b0773c87fbfa067a7edb6e01d"
+          "sha256": "afc998ea0f2b24c9552eeb8fcab5b4b5d22e9b432f89ba72c1807a16920ecf45"
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "d8f2098219ca906bd6351095cfb38669517e555815440a351e81d8e92889524c"
+          "sha256": "c801bc144f8e64fc6fc3b3d832e822153f0fb0fe023e3bb2508a5fe69fa632c0"
         }
       ],
-      "source_set_sha256": "be8959ba99b976e00e3c5cb97ac18a9657224deeaf31f758b69a87b7b42e8f83"
+      "source_set_sha256": "821bb33c5efe88c2ecb753c8fe8c5c131fbf0253694377651b79cbd921527ed0"
     },
     "ci_contract": {
       "canonical_order": [
@@ -147,11 +147,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "5b2c8dfb60a5c365f57e9a0eabeb95961cda1e4e5872d72dc8467f7d49a42c95"
+          "sha256": "36debcc312d9a1163481eaf1b27329c81415ca3ab0743c4e18ca021c0d140219"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "1f6d1d0942997fb179612e8c4031a1f439124e36ebb8a6699d40de8f8a659d88"
+          "sha256": "0002793fc258147ebeec993052f296e82c73ba82c274a8ebe207f082bfc16c96"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -178,7 +178,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "ffbc766fdd7b40b9a07620ec1932d5a1f9011b77ba5d3b5544b25535bbcf6faa"
+      "source_set_sha256": "c1d8975806f01953c79c93404db9e07f26f7b538a06db02e4b002d7b1e9ef1f0"
     }
   },
   "source_symbol_map": [
@@ -262,7 +262,13 @@
     "sllm_queue_release",
     "sllm_rmsnorm_execute",
     "sllm_rmsnorm_plan_release",
-    "sllm_rmsnorm_prepare"
+    "sllm_rmsnorm_prepare",
+    "sllm_rotary_execute",
+    "sllm_rotary_plan_release",
+    "sllm_rotary_prepare",
+    "sllm_windowed_attention_execute",
+    "sllm_windowed_attention_plan_release",
+    "sllm_windowed_attention_prepare"
   ],
   "logical_kernel": "rmsnorm.baseline.wave32.v1",
   "device_symbol": "sllm_rmsnorm_baseline_wave32_v1",
@@ -399,6 +405,8 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/rotary_api.cpp",
+            "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
             "hip",
             "{repo}/native/hip/src/argmax_kernel.hip.cpp",
@@ -406,9 +414,11 @@
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/gemma_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/rotary_kernel.hip.cpp",
             "-x",
             "none",
             "-o",
@@ -567,6 +577,8 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/rotary_api.cpp",
+            "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
             "hip",
             "{repo}/native/hip/src/argmax_kernel.hip.cpp",
@@ -574,9 +586,11 @@
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/gemma_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/rotary_kernel.hip.cpp",
             "-x",
             "none",
             "-o",

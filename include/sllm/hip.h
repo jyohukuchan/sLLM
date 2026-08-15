@@ -77,6 +77,8 @@ typedef uint32_t sllm_status_t;
 #define SLLM_STATUS_LINEAR_ATTENTION_LENGTH_MISMATCH UINT32_C(0x124)
 #define SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY UINT32_C(0x125)
 #define SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR UINT32_C(0x126)
+#define SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR UINT32_C(0x127)
+#define SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR UINT32_C(0x128)
 
 #define SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1 UINT32_C(1)
@@ -93,6 +95,9 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1 UINT32_C(2)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1 UINT32_C(3)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_SIGMOID_MUL_V1 UINT32_C(4)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1 UINT32_C(5)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1 UINT32_C(6)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1 UINT32_C(7)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE UINT32_C(256)
@@ -150,6 +155,26 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM UINT32_C(64)
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION UINT32_C(262144)
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_M UINT64_C(262144)
+
+#define SLLM_HIP_ROTARY_VERSION UINT32_C(1)
+#define SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1 UINT32_C(1)
+#define SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_ROTARY_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_ROTARY_MAX_M UINT64_C(262144)
+#define SLLM_HIP_ROTARY_MAX_POSITION UINT32_C(262144)
+
+#define SLLM_HIP_WINDOWED_ATTENTION_VERSION UINT32_C(1)
+#define SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1       \
+  UINT32_C(1)
+#define SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_WINDOWED_ATTENTION_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_WINDOWED_ATTENTION_MAX_M UINT64_C(262144)
+#define SLLM_HIP_WINDOWED_ATTENTION_MAX_KV UINT64_C(262144)
+#define SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM UINT32_C(512)
 
 #define SLLM_HIP_KV_STATE_VERSION UINT32_C(2)
 #define SLLM_HIP_KV_VIEW_INFO_VERSION UINT32_C(2)
@@ -231,6 +256,7 @@ typedef uint32_t sllm_rmsnorm_accumulation_dtype_t;
 
 typedef uint32_t sllm_rmsnorm_scale_mode_t;
 #define SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE UINT32_C(1)
+#define SLLM_RMSNORM_SCALE_MODE_DIRECT UINT32_C(2)
 
 typedef uint32_t sllm_rmsnorm_alias_policy_t;
 #define SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP UINT32_C(1)
@@ -240,6 +266,9 @@ typedef uint32_t sllm_elementwise_operation_t;
 #define SLLM_ELEMENTWISE_OPERATION_ADD UINT32_C(2)
 #define SLLM_ELEMENTWISE_OPERATION_SILU_MUL UINT32_C(3)
 #define SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL UINT32_C(4)
+#define SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL UINT32_C(5)
+#define SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL UINT32_C(6)
+#define SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP UINT32_C(7)
 
 #define SLLM_COMPLETION_STATE_PENDING UINT32_C(0)
 #define SLLM_COMPLETION_STATE_SUCCESS UINT32_C(1)
@@ -259,6 +288,8 @@ typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
 typedef struct sllm_argmax_plan_t sllm_argmax_plan_t;
 typedef struct sllm_attention_preprocess_plan_t
     sllm_attention_preprocess_plan_t;
+typedef struct sllm_rotary_plan_t sllm_rotary_plan_t;
+typedef struct sllm_windowed_attention_plan_t sllm_windowed_attention_plan_t;
 typedef struct sllm_kv_state_t sllm_kv_state_t;
 typedef struct sllm_kv_view_t sllm_kv_view_t;
 typedef struct sllm_linear_attention_state_t sllm_linear_attention_state_t;
@@ -614,6 +645,105 @@ typedef struct sllm_attention_preprocess_dispatch_info_t {
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
   uint32_t reserved[8];
 } sllm_attention_preprocess_dispatch_info_t;
+
+/* Gemma split-half rotary position encoding. Query and key are contiguous
+ * BF16 [M,heads,head_dim], positions is contiguous I32 [M], and outputs match
+ * their respective inputs. The active rotary dimensions are paired across
+ * the two halves of head_dim. All five byte ranges must be disjoint when they
+ * share a backing buffer. */
+typedef struct sllm_rotary_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved0;
+  uint64_t start_position;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t rotary_dim;
+  uint32_t theta_bits;
+  uint32_t max_position;
+  uint32_t reserved[2];
+  sllm_tensor_binding_t query;
+  sllm_tensor_binding_t key;
+  sllm_tensor_binding_t positions;
+  sllm_tensor_binding_t query_output;
+  sllm_tensor_binding_t key_output;
+} sllm_rotary_desc_t;
+
+typedef struct sllm_rotary_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t rotary_dim;
+  uint32_t start_position;
+  uint32_t max_position;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_ROTARY_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_rotary_dispatch_info_t;
+
+/* Model-neutral BF16 GQA causal attention. K/V are complete token-major
+ * histories [expected_kv_length,kv_heads,head_dim]. A zero sliding window
+ * selects full attention; otherwise the window is inclusive of the current
+ * token. The baseline provider supports the explicit scale 1.0 only. */
+typedef struct sllm_windowed_attention_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved0;
+  uint64_t start_position;
+  uint64_t expected_kv_length;
+  uint64_t sliding_window;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t scaling_bits;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t query;
+  sllm_tensor_binding_t key;
+  sllm_tensor_binding_t value;
+  sllm_tensor_binding_t output;
+} sllm_windowed_attention_desc_t;
+
+typedef struct sllm_windowed_attention_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t query_count;
+  uint64_t start_position;
+  uint64_t committed_kv_length;
+  uint64_t sliding_window;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t scaling_bits;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_WINDOWED_ATTENTION_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_WINDOWED_ATTENTION_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_windowed_attention_dispatch_info_t;
 
 /* A request-local full-attention KV state owns separate K and V virtual
  * address reservations. Physical pages grow on demand. The allocations are
@@ -1012,6 +1142,34 @@ SLLM_HIP_API sllm_status_t sllm_attention_preprocess_execute(
     const sllm_attention_preprocess_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion,
     sllm_attention_preprocess_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_rotary_prepare(
+    const sllm_context_t *context, const sllm_rotary_desc_t *descriptor,
+    sllm_rotary_plan_t **plan, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_rotary_plan_release(
+    sllm_rotary_plan_t **plan, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_rotary_execute(
+    const sllm_rotary_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion, sllm_rotary_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_windowed_attention_prepare(
+    const sllm_context_t *context,
+    const sllm_windowed_attention_desc_t *descriptor,
+    sllm_windowed_attention_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_windowed_attention_plan_release(
+    sllm_windowed_attention_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_windowed_attention_execute(
+    const sllm_windowed_attention_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_windowed_attention_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_kv_state_create(

@@ -27,7 +27,9 @@ mod kv_state;
 mod linear_attention;
 mod matmul;
 mod rmsnorm;
+mod rotary;
 mod runtime;
+mod windowed_attention;
 
 pub use argmax::{ArgmaxDescriptor, ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 pub use attention_preprocess::{
@@ -48,9 +50,14 @@ pub use matmul::{MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission, Prepare
 pub use rmsnorm::{
     PreparedRmsNorm, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, TensorBinding,
 };
+pub use rotary::{PreparedRotary, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission};
 pub use runtime::{
     Buffer, Completion, CompletionState, Context, DeviceInfo, Event, Queue, RuntimeError,
     RuntimeStatus,
+};
+pub use windowed_attention::{
+    PreparedWindowedAttention, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
+    WindowedAttentionSubmission,
 };
 
 const ERROR_CAPACITY: usize = 256;

@@ -129,6 +129,12 @@ pending、timeout、query failure、partial mutation、guard dropではoutput/st
 Qwen3.5 adapterはgraph lowering、attention preprocess、GDN/KV descriptor、Argmax/logits解釈だけを所有し、独自のprepared
 cache、pending submission enum、flush loop、completion wait policyを持たない。
 
+Gemma 4 adapterも同じplan/transition/segment/transactionを使い、48 layer・958 nodeのtensor/buffer layoutだけを所有する。
+immutable weight/constant/ordered queueは`Gemma4ResidentModel`が保持し、request ownerはtoken/position、workspace、連続BF16
+K/Vだけを持つ。decode tailはpublished attention prefixと同じbufferのchecked offsetへappendし、state-publicationと
+terminal-readbackの両boundary完了後だけ長さを公開する。greedyではArgmaxだけを返し、sampling時だけ最終BF16 logits rowを
+bounded chunkでreadbackしてからtransactionをcommitする。
+
 ## DType と量子化 encoding
 
 `DType` は BF16、FP16、FP8 など、要素の物理 scalar format を表す。量子化の scale、grouping、packing、codebook、tensor ごとの付加 metadata は `DType` に詰め込まず、独立した quantization encoding descriptor として表す。これにより、同じ低精度 storage dtype に複数の量子化方式を対応づけたり、weight、activation、KV cache で異なる encoding 制約を表現できる。
@@ -183,8 +189,9 @@ standard error envelopeを一つのSSE data eventとして送り、finish chunk�
 request cancellationを発火し、scheduler timeoutとgraceful shutdownも同じflagへ伝播する。backendはbounded sink
 へのpublish前後とlong-running operationの境界でcancellationを観測し、request-local stateを解放する。
 
-A6のproduction backendはverified model lock、tokenizer/template、weight plan、exact HIP sessionを一度loadし、
-既存`QwenResidentModel`をこのworkerへ接続する。token loopは複製せず`GenerationServiceV1`を呼ぶ。各requestの
+A6以降のproduction backendはreviewed model lock kindからQwen/Gemmaを選び、verified tokenizer/templateまたは明示的な
+Gemma raw-text transcript、weight plan、exact HIP sessionを一度loadする。`QwenResidentModel`または
+`Gemma4ResidentModel`をworkerへ接続し、token loopは複製せず`GenerationServiceV1`を呼ぶ。各requestの
 監査値はlogical KV capacity、mapped token capacity、physical page bytes、K/V committed bytes、full/linear
 layer数、HIP submission、fallback、request/workspace allocationとcleanupを含む。成功responseはexact targetの
 HIP dispatchのみ、fallbackなし、整合したphysical metadataを満たさなければfail-closedにする。

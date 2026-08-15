@@ -4,16 +4,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sllm_core::{
-    Backend, ExecutionSessionRequest, ModelLock, OsSamplingRandom, QwenExecutionRequest,
-    QwenResidentModel, SamplingParametersV1, VerifiedCache, WeightClassification,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
-    build_verified_weight_load_plan, read_model_lock, verify_fp8_sidecar,
+    Backend, ExecutionSessionRequest, Gemma4ExecutionRequest, Gemma4ModelLock, ModelLock,
+    OsSamplingRandom, QwenExecutionRequest, QwenResidentModel, ReviewedModelLock,
+    SamplingParametersV1, VerifiedCache, WeightClassification, build_qwen35_fp8_fnuz_graph,
+    build_qwen35_fp8_graph, build_qwen35_graph, build_verified_gemma4_weight_load_plan,
+    build_verified_weight_load_plan, read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
 };
 use sllm_frontend::{
     DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
     GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1, GenerationServiceV1,
     GenerationStopControllerV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
     Qwen35RenderOptionsV1, ThinkingModeV1, TokenIdsV1, TokenizerFrontendV1,
+    gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -305,6 +307,247 @@ struct ProductionBackend {
     lock: ModelLock,
     lock_path: PathBuf,
     cache: Arc<VerifiedCache>,
+}
+
+struct GemmaProductionBackend {
+    lock: Gemma4ModelLock,
+    cache: Arc<VerifiedCache>,
+}
+
+impl GemmaProductionBackend {
+    fn open(lock: Gemma4ModelLock, request: &Request) -> Result<Self, String> {
+        let cache = lock
+            .verify_cache(&request.cache)
+            .map_err(|_| "model cache does not match the Gemma 4 lock".to_owned())?;
+        Ok(Self {
+            lock,
+            cache: Arc::new(cache),
+        })
+    }
+}
+
+impl ModelFrontendBackend for GemmaProductionBackend {
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            repo_id: self.lock.model.repo_id.clone(),
+            resolved_revision: self.lock.model.resolved_revision.clone(),
+            lock_fingerprint: self.lock.fingerprint().to_owned(),
+        }
+    }
+
+    fn verify(&self) -> Result<Value, String> {
+        let plan = build_verified_gemma4_weight_load_plan(&self.lock, &self.cache)
+            .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?;
+        let loadable = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.classification != WeightClassification::KnownUnconsumed)
+            .count();
+        Ok(json!({
+            "kind": "verify-model",
+            "model_kind": "gemma4-dense",
+            "prompt_mode": "raw-text-only",
+            "chat_template": null,
+            "locked_files": self.lock.model.files.len(),
+            "verified_files": self.cache.files.len(),
+            "tensor_count": self.cache.tensors().count(),
+            "weight_entries": plan.entries.len(),
+            "loadable_entries": loadable,
+            "known_unconsumed_entries": plan.entries.len() - loadable,
+            "total_destination_bytes": plan.total_destination_bytes,
+            "plan_digest": plan.digest_hex(),
+        }))
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Value, String> {
+        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
+            .map_err(|error| {
+                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
+            })?;
+        let ids = tokenizer
+            .encode(text)
+            .map_err(|_| "text could not be tokenized".to_owned())?;
+        Ok(json!({
+            "kind": "tokenize",
+            "prompt_mode": "raw-text-only",
+            "count": ids.len(),
+            "token_ids": ids.as_slice(),
+        }))
+    }
+
+    fn render(&self, _: &[Qwen35ChatMessageV1], _: Qwen35RenderOptionsV1) -> Result<Value, String> {
+        Err("google/gemma-4-12B has no locked chat template; use a raw prompt".to_owned())
+    }
+
+    fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
+            .map_err(|error| {
+                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
+            })?;
+        let text = tokenizer
+            .decode(ids, mode)
+            .map_err(|_| "token IDs could not be decoded".to_owned())?;
+        Ok(json!({"kind": "decode", "text": text}))
+    }
+
+    fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
+        let started = Instant::now();
+        if request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err(
+                "Gemma 4 generation currently supports locked BF16 weights only".to_owned(),
+            );
+        }
+        let prompt = match &request.input {
+            GenerationInput::Prompt(prompt) => prompt,
+            GenerationInput::Messages { .. } => {
+                return Err(
+                    "google/gemma-4-12B has no locked chat template; use a raw prompt".to_owned(),
+                );
+            }
+        };
+        let tokenizer = TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, &self.cache)
+            .map_err(|error| {
+                format!("verified Gemma 4 tokenizer could not be constructed: {error}")
+            })?;
+        let stop_policy = gemma4_generation_stop_policy(&self.lock)
+            .map_err(|error| format!("Gemma stop policy is invalid: {error}"))?;
+        let service = GenerationServiceV1::new(&tokenizer, None, &stop_policy)
+            .map_err(|error| format!("generation service could not be constructed: {error}"))?;
+        let input = service
+            .prepare_input(&ServiceGenerationInputV1::Prompt(prompt.clone()))
+            .map_err(|error| format!("generation input preparation failed: {error}"))?;
+        let input_len = u64::try_from(input.len())
+            .map_err(|_| "generation input token count overflowed".to_owned())?;
+        let state_capacity = input_len
+            .checked_add(u64::from(request.max_new_tokens))
+            .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
+        let plan = build_verified_gemma4_weight_load_plan(&self.lock, &self.cache)
+            .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?;
+        let plan_digest = plan.digest_hex();
+        let model_fingerprint = self.lock.fingerprint().to_owned();
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session_request =
+            ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                .map_err(|_| "invalid exact HIP session request".to_owned())?;
+        let session = backend
+            .open_execution_session(session_request)
+            .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
+
+        let execution = (|| -> Result<Value, String> {
+            let mut owner = Gemma4ExecutionRequest::new(
+                Arc::clone(&session),
+                self.lock.clone(),
+                plan,
+                self.cache.as_ref(),
+                input_len,
+                state_capacity,
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("Gemma request provisioning failed: {error}"))?;
+            let config = GenerationConfigV1::new(
+                request.max_new_tokens,
+                request.sampling,
+                request.stop_strings.clone(),
+            )
+            .map_err(|error| format!("generation configuration is invalid: {error}"))?;
+            let cancellation = GenerationCancellationV1::new();
+            let mut random = OsSamplingRandom::for_parameters(request.sampling)
+                .map_err(|error| format!("sampling random source failed: {error}"))?;
+            let report = service
+                .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
+                .map_err(|error| format!("generation service failed: {error}"))?;
+            let audit = owner
+                .audit_snapshot()
+                .map_err(|_| "Gemma dispatch audit was empty or invalid".to_owned())?;
+            if audit.target() != request.target || audit.fallback_used() {
+                return Err("Gemma dispatch audit differs from the exact target".to_owned());
+            }
+            Ok(json!({
+                "kind": "generate",
+                "input_kind": "prompt",
+                "input_token_ids": report.input_token_ids(),
+                "generated_token_ids": report.generated_token_ids(),
+                "visible_token_ids": report.visible_token_ids(),
+                "decode_input_token_ids": report.decode_input_token_ids(),
+                "output_text": report.output_text(),
+                "finish_reason": report.finish_reason().as_str(),
+                "stop_reason": {
+                    "version": 1,
+                    "reason_version": 1,
+                    "kind": report.finish_reason().as_str(),
+                    "token_id": report.stop_token_id(),
+                    "matched_string": report.matched_stop(),
+                },
+                "usage": {
+                    "prompt_tokens": report.usage().prompt_tokens(),
+                    "completion_tokens": report.usage().completion_tokens(),
+                    "total_tokens": report.usage().total_tokens(),
+                },
+                "sampling": {
+                    "temperature": request.sampling.temperature(),
+                    "top_p": request.sampling.top_p(),
+                    "presence_penalty": request.sampling.presence_penalty(),
+                    "frequency_penalty": request.sampling.frequency_penalty(),
+                },
+                "execution": {
+                    "selected_backend": "hip",
+                    "target": audit.target(),
+                    "device_index": request.device_index,
+                    "model_fingerprint": model_fingerprint,
+                    "plan_digest": plan_digest,
+                    "prefill_tokens": input.len(),
+                    "decode_steps": report.decode_steps(),
+                    "fallback_used": audit.fallback_used(),
+                    "submission_count": audit.submission_count(),
+                    "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                    "segment_count": audit.segment_count(),
+                    "boundary_count": audit.boundary_count(),
+                    "all_dispatches_hip": true,
+                    "weight_encoding": "bf16",
+                    "fp8_provider": null,
+                },
+            }))
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "HIP session cleanup failed".to_owned())?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        let mut result = execution?;
+        let object = result
+            .as_object_mut()
+            .ok_or_else(|| "generation result was not an object".to_owned())?;
+        object.insert(
+            "timing_ns".to_owned(),
+            Value::from(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+        );
+        object.insert(
+            "cleanup".to_owned(),
+            json!({"retryable_cleanup": 0, "durable_quarantine": 0}),
+        );
+        Ok(result)
+    }
+
+    fn benchmark(&self, _: &BenchmarkRequest, _: BenchmarkTiming) -> Result<Value, String> {
+        Err("Gemma 4 benchmark is unavailable until its exact executor is active".to_owned())
+    }
+}
+
+fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBackend>, String> {
+    match read_reviewed_model_lock(&request.lock)
+        .map_err(|_| "model lock could not be read or validated".to_owned())?
+    {
+        ReviewedModelLock::Qwen35(_) => {
+            ProductionBackend::open(request).map(|backend| Box::new(backend) as Box<_>)
+        }
+        ReviewedModelLock::Gemma4(lock) => {
+            GemmaProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
+        }
+    }
 }
 
 impl ProductionBackend {
@@ -1217,17 +1460,19 @@ pub(crate) fn run(
 ) -> Result<String, String> {
     let request = parse(command, arguments)?;
     let benchmark_timing = (command == "benchmark").then(BenchmarkTiming::start);
-    let backend = ProductionBackend::open(&request)?;
+    let backend = open_production_backend(&request)?;
     match benchmark_timing {
-        Some(timing) => execute_with_timing(command, request.operation, &backend, Some(timing)),
-        None => execute(command, request.operation, &backend),
+        Some(timing) => {
+            execute_with_timing(command, request.operation, backend.as_ref(), Some(timing))
+        }
+        None => execute(command, request.operation, backend.as_ref()),
     }
 }
 
 fn execute(
     command: &str,
     operation: Operation,
-    backend: &impl ModelFrontendBackend,
+    backend: &dyn ModelFrontendBackend,
 ) -> Result<String, String> {
     execute_with_timing(command, operation, backend, None)
 }
@@ -1235,7 +1480,7 @@ fn execute(
 fn execute_with_timing(
     command: &str,
     operation: Operation,
-    backend: &impl ModelFrontendBackend,
+    backend: &dyn ModelFrontendBackend,
     benchmark_timing: Option<BenchmarkTiming>,
 ) -> Result<String, String> {
     let result = match operation {

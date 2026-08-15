@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-only contract tests for the immutable Qwen model lock."""
+"""Host-only contracts for immutable Qwen v1 and Gemma 4 v2 model locks."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ import unittest
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
+
+from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
@@ -37,6 +39,8 @@ LOCK_PATH = ROOT / "docs/models/locks/qwen3.5-4b-bf16.json"
 SCHEMA_PATH = ROOT / "ci/schema/model-lock-v1.schema.json"
 FIXTURE_LOCK = ROOT / "ci/fixtures/model-lock-v1/lock.json"
 FIXTURE_CACHE = ROOT / "ci/fixtures/model-lock-v1/cache"
+GEMMA_LOCK_PATH = ROOT / "docs/models/locks/gemma4-12b-bf16.json"
+GEMMA_SCHEMA_PATH = ROOT / "ci/schema/model-lock-v2.schema.json"
 
 
 class ModelLockContractTests(unittest.TestCase):
@@ -1167,6 +1171,92 @@ class ModelLockContractTests(unittest.TestCase):
     def test_lock_and_fixture_json_have_no_duplicate_keys(self) -> None:
         self.assertEqual(read_json(LOCK_PATH)["fingerprint"], self.lock["fingerprint"])
         self.assertEqual(read_json(FIXTURE_LOCK)["schema_version"], "model-lock-v1")
+
+
+class Gemma4ModelLockV2ContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.schema = read_json(GEMMA_SCHEMA_PATH)
+        cls.lock = read_json(GEMMA_LOCK_PATH)
+        Draft202012Validator.check_schema(cls.schema)
+        errors = list(
+            Draft202012Validator(
+                cls.schema, format_checker=FormatChecker()
+            ).iter_errors(cls.lock)
+        )
+        if errors:
+            raise AssertionError(errors)
+
+    def assert_schema_rejected(self, mutate) -> None:
+        changed = copy.deepcopy(self.lock)
+        mutate(changed)
+        errors = list(Draft202012Validator(self.schema).iter_errors(changed))
+        self.assertTrue(errors)
+
+    def test_exact_source_fingerprint_and_direct_header_contract(self) -> None:
+        model = self.lock["model"]
+        self.assertEqual(self.lock["schema_version"], "model-lock-v2")
+        self.assertEqual(model["repo_id"], "google/gemma-4-12B")
+        self.assertEqual(
+            model["resolved_revision"],
+            "023679ed352de9bb66cc873c9009ce3482585c08",
+        )
+        self.assertEqual(
+            self.lock["fingerprint"],
+            "sha256:086ede4017206d33533c70d5d00cb492f2f1064a21c995477207ebada668ccff",
+        )
+        self.assertEqual(self.lock["fingerprint"], fingerprint_for_document(self.lock))
+        tensor = model["tensor_contract"]
+        self.assertEqual(tensor["container"], "direct-safetensors")
+        self.assertEqual(tensor["tensor_count"], 677)
+        self.assertEqual(tensor["text_tensor_count"], 666)
+        self.assertEqual(tensor["data_buffer_start"], tensor["header_length_bytes"] + 8)
+        self.assertEqual(
+            tensor["header_sha256"],
+            "e432b3ee11ff7f7d179ccbf3827af9669c03a0a28e603000d89c6e1b6c9d4bb7",
+        )
+
+    def test_base_model_is_raw_text_only_and_does_not_invent_template(self) -> None:
+        tokenizer = self.lock["model"]["tokenizer_contract"]
+        self.assertIsNone(tokenizer["chat_template_path"])
+        self.assertEqual(tokenizer["prompt_mode"], "raw-text-only")
+        self.assertEqual(tokenizer["stop_token_ids"], [1])
+        self.assertEqual(tokenizer["special_token_ids"]["bos"], 2)
+        self.assertEqual(tokenizer["special_token_ids"]["eos"], 1)
+
+    def test_locked_file_set_and_lfs_content_identities_are_exact(self) -> None:
+        files = {entry["path"]: entry for entry in self.lock["model"]["files"]}
+        self.assertEqual(
+            set(files),
+            {
+                "README.md",
+                "config.json",
+                "generation_config.json",
+                "model.safetensors",
+                "tokenizer.json",
+                "tokenizer_config.json",
+            },
+        )
+        for path in ("model.safetensors", "tokenizer.json"):
+            self.assertEqual(files[path]["lfs_oid"], "sha256:" + files[path]["sha256"])
+        self.assertEqual(files["model.safetensors"]["size_bytes"], 23919549408)
+
+    def test_schema_rejects_unknown_zero_and_fabricated_template(self) -> None:
+        self.assert_schema_rejected(
+            lambda value: value["model"]["architecture"]["text"].__setitem__(
+                "future_attention", True
+            )
+        )
+        self.assert_schema_rejected(
+            lambda value: value["model"]["architecture"]["text"].__setitem__(
+                "head_dim", 0
+            )
+        )
+        self.assert_schema_rejected(
+            lambda value: value["model"]["tokenizer_contract"].__setitem__(
+                "chat_template_path", "../outside.jinja"
+            )
+        )
 
 
 def main() -> int:

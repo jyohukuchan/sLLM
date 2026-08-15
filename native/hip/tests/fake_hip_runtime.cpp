@@ -1,5 +1,7 @@
 #include <hip/hip_runtime.h>
 
+#include "sllm/hip.h"
+
 #include <cmath>
 #include <condition_variable>
 #include <cstdlib>
@@ -25,6 +27,7 @@ struct State final {
   bool completion_pending = false;
   bool vmm_supported = true;
   hipError_t rmsnorm_launch_status = hipSuccess;
+  bool rmsnorm_numerical_execution = false;
   hipError_t elementwise_launch_status = hipSuccess;
   hipError_t matmul_launch_status = hipSuccess;
   hipError_t argmax_launch_status = hipSuccess;
@@ -36,10 +39,15 @@ struct State final {
   std::size_t elementwise_add_launch_calls = 0U;
   std::size_t elementwise_silu_mul_launch_calls = 0U;
   std::size_t elementwise_sigmoid_mul_launch_calls = 0U;
+  std::size_t elementwise_scalar_mul_launch_calls = 0U;
+  std::size_t elementwise_gelu_tanh_mul_launch_calls = 0U;
+  std::size_t elementwise_tanh_softcap_launch_calls = 0U;
   std::size_t embedding_gather_launch_calls = 0U;
   std::size_t matmul_launch_calls = 0U;
   std::size_t argmax_launch_calls = 0U;
   std::size_t attention_preprocess_launch_calls = 0U;
+  std::size_t rotary_launch_calls = 0U;
+  std::size_t windowed_attention_launch_calls = 0U;
   uint64_t elementwise_last_element_count = 0U;
   uint64_t matmul_last_m = 0U;
   uint64_t matmul_last_k = 0U;
@@ -48,6 +56,7 @@ struct State final {
   uint64_t argmax_last_m = 0U;
   uint64_t argmax_last_v = 0U;
   uint32_t attention_preprocess_last_m = 0U;
+  uint32_t rotary_last_token_count = 0U;
   std::size_t kv_state_append_launch_calls = 0U;
   std::size_t causal_attention_launch_calls = 0U;
   uint32_t kv_state_last_token_count = 0U;
@@ -57,6 +66,7 @@ struct State final {
   const uint16_t *kv_value_output = nullptr;
   uint32_t rmsnorm_last_normalized_size = 0U;
   uint32_t rmsnorm_last_row_count = 0U;
+  uint32_t rmsnorm_last_scale_mode = 0U;
   std::size_t event_destroy_calls = 0U;
   std::size_t stream_destroy_calls = 0U;
   std::size_t allocation_free_calls = 0U;
@@ -178,6 +188,7 @@ void reset() noexcept {
   state.completion_pending = false;
   state.vmm_supported = true;
   state.rmsnorm_launch_status = hipSuccess;
+  state.rmsnorm_numerical_execution = false;
   state.elementwise_launch_status = hipSuccess;
   state.matmul_launch_status = hipSuccess;
   state.argmax_launch_status = hipSuccess;
@@ -189,10 +200,15 @@ void reset() noexcept {
   state.elementwise_add_launch_calls = 0U;
   state.elementwise_silu_mul_launch_calls = 0U;
   state.elementwise_sigmoid_mul_launch_calls = 0U;
+  state.elementwise_scalar_mul_launch_calls = 0U;
+  state.elementwise_gelu_tanh_mul_launch_calls = 0U;
+  state.elementwise_tanh_softcap_launch_calls = 0U;
   state.embedding_gather_launch_calls = 0U;
   state.matmul_launch_calls = 0U;
   state.argmax_launch_calls = 0U;
   state.attention_preprocess_launch_calls = 0U;
+  state.rotary_launch_calls = 0U;
+  state.windowed_attention_launch_calls = 0U;
   state.kv_state_append_launch_calls = 0U;
   state.causal_attention_launch_calls = 0U;
   state.elementwise_last_element_count = 0U;
@@ -203,6 +219,7 @@ void reset() noexcept {
   state.argmax_last_m = 0U;
   state.argmax_last_v = 0U;
   state.attention_preprocess_last_m = 0U;
+  state.rotary_last_token_count = 0U;
   state.kv_state_last_token_count = 0U;
   state.kv_state_last_capacity_tokens = 0U;
   state.kv_state_last_start_position = 0U;
@@ -210,6 +227,7 @@ void reset() noexcept {
   state.kv_value_output = nullptr;
   state.rmsnorm_last_normalized_size = 0U;
   state.rmsnorm_last_row_count = 0U;
+  state.rmsnorm_last_scale_mode = 0U;
   state.event_destroy_calls = 0U;
   state.stream_destroy_calls = 0U;
   state.allocation_free_calls = 0U;
@@ -220,16 +238,38 @@ void set_vmm_supported(const bool supported) noexcept {
   state.vmm_supported = supported;
 }
 
-hipError_t rmsnorm_launch(const uint16_t *const /*activation*/,
-                          const uint16_t *const /*raw_scale*/,
-                          uint16_t *const /*output*/,
+hipError_t rmsnorm_launch(const uint16_t *const activation,
+                          const uint16_t *const raw_scale,
+                          uint16_t *const output,
                           const uint32_t normalized_size,
-                          const uint32_t row_count, const float /*epsilon*/,
+                          const uint32_t row_count, const float epsilon,
+                          const uint32_t scale_mode,
                           const hipStream_t /*stream*/) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   ++state.rmsnorm_launch_calls;
   state.rmsnorm_last_normalized_size = normalized_size;
   state.rmsnorm_last_row_count = row_count;
+  state.rmsnorm_last_scale_mode = scale_mode;
+  if (state.rmsnorm_launch_status == hipSuccess &&
+      state.rmsnorm_numerical_execution) {
+    for (uint32_t row = 0U; row != row_count; ++row) {
+      const uint64_t row_offset = static_cast<uint64_t>(row) * normalized_size;
+      float sum = 0.0F;
+      for (uint32_t column = 0U; column != normalized_size; ++column) {
+        const float value = bf16_to_f32(activation[row_offset + column]);
+        sum += value * value;
+      }
+      const float inverse_rms =
+          1.0F / std::sqrt(sum / static_cast<float>(normalized_size) + epsilon);
+      for (uint32_t column = 0U; column != normalized_size; ++column) {
+        const float raw = bf16_to_f32(raw_scale[column]);
+        const float scale =
+            scale_mode == SLLM_RMSNORM_SCALE_MODE_DIRECT ? raw : 1.0F + raw;
+        output[row_offset + column] = f32_to_bf16_rne(
+            bf16_to_f32(activation[row_offset + column]) * inverse_rms * scale);
+      }
+    }
+  }
   return state.rmsnorm_launch_status;
 }
 
@@ -282,6 +322,62 @@ hipError_t elementwise_sigmoid_mul_launch(
       const float sigmoid = 1.0F / (1.0F + std::exp(-gate_value));
       output[index] =
           f32_to_bf16_rne(sigmoid * bf16_to_f32(attention_value[index]));
+    }
+  }
+  return state.elementwise_launch_status;
+}
+
+hipError_t elementwise_scalar_mul_launch(
+    const uint16_t *const input, const uint16_t *const scalar,
+    uint16_t *const output, const uint64_t element_count,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.elementwise_scalar_mul_launch_calls;
+  state.elementwise_last_element_count = element_count;
+  if (state.elementwise_launch_status == hipSuccess) {
+    const float scalar_value = bf16_to_f32(scalar[0]);
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      output[index] = f32_to_bf16_rne(bf16_to_f32(input[index]) * scalar_value);
+    }
+  }
+  return state.elementwise_launch_status;
+}
+
+hipError_t elementwise_gelu_tanh_mul_launch(
+    const uint16_t *const gate, const uint16_t *const up,
+    uint16_t *const output, const uint64_t element_count,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.elementwise_gelu_tanh_mul_launch_calls;
+  state.elementwise_last_element_count = element_count;
+  if (state.elementwise_launch_status == hipSuccess) {
+    constexpr float sqrt_two_over_pi = 0.7978845608028654F;
+    constexpr float cubic_coefficient = 0.044715F;
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      const float value = bf16_to_f32(gate[index]);
+      const float inner = sqrt_two_over_pi *
+                          (value + cubic_coefficient * value * value * value);
+      const float gelu = 0.5F * value * (1.0F + std::tanh(inner));
+      const uint16_t gelu_bf16 = f32_to_bf16_rne(gelu);
+      output[index] =
+          f32_to_bf16_rne(bf16_to_f32(gelu_bf16) * bf16_to_f32(up[index]));
+    }
+  }
+  return state.elementwise_launch_status;
+}
+
+hipError_t elementwise_tanh_softcap_launch(
+    const uint16_t *const input, const uint16_t *const cap,
+    uint16_t *const output, const uint64_t element_count,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.elementwise_tanh_softcap_launch_calls;
+  state.elementwise_last_element_count = element_count;
+  if (state.elementwise_launch_status == hipSuccess) {
+    const float cap_value = bf16_to_f32(cap[0]);
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      output[index] = f32_to_bf16_rne(
+          std::tanh(bf16_to_f32(input[index]) / cap_value) * cap_value);
     }
   }
   return state.elementwise_launch_status;
@@ -358,6 +454,121 @@ hipError_t attention_preprocess_launch(
   std::lock_guard<std::mutex> lock(state.mutex);
   ++state.attention_preprocess_launch_calls;
   state.attention_preprocess_last_m = m;
+  return hipSuccess;
+}
+
+hipError_t rotary_launch(const uint16_t *const query, const uint16_t *const key,
+                         const int32_t *const positions,
+                         uint16_t *const query_output,
+                         uint16_t *const key_output, const uint32_t token_count,
+                         const uint32_t q_heads, const uint32_t kv_heads,
+                         const uint32_t head_dim, const uint32_t rotary_dim,
+                         const float theta,
+                         const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.rotary_launch_calls;
+  state.rotary_last_token_count = token_count;
+  const uint32_t half = head_dim / 2U;
+  const uint32_t active_pairs = rotary_dim / 2U;
+  const auto rotate = [&](const uint16_t *const input, uint16_t *const output,
+                          const uint32_t heads) {
+    for (uint32_t token = 0U; token != token_count; ++token) {
+      for (uint32_t head = 0U; head != heads; ++head) {
+        const uint64_t base =
+            (static_cast<uint64_t>(token) * heads + head) * head_dim;
+        for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+          output[base + dimension] = input[base + dimension];
+        }
+        for (uint32_t pair = 0U; pair != active_pairs; ++pair) {
+          const float exponent =
+              -2.0F * static_cast<float>(pair) / static_cast<float>(head_dim);
+          const float angle =
+              static_cast<float>(positions[token]) * std::pow(theta, exponent);
+          const float cosine = std::cos(angle);
+          const float sine = std::sin(angle);
+          const float left = bf16_to_f32(input[base + pair]);
+          const float right = bf16_to_f32(input[base + half + pair]);
+          output[base + pair] = f32_to_bf16_rne(left * cosine - right * sine);
+          output[base + half + pair] =
+              f32_to_bf16_rne(right * cosine + left * sine);
+        }
+      }
+    }
+  };
+  rotate(query, query_output, q_heads);
+  rotate(key, key_output, kv_heads);
+  return hipSuccess;
+}
+
+hipError_t windowed_attention_launch(
+    const uint16_t *const query, const uint16_t *const key,
+    const uint16_t *const value, uint16_t *const output,
+    const uint32_t query_count, const uint64_t start_position,
+    const uint64_t committed_kv_length, const uint32_t q_heads,
+    const uint32_t kv_heads, const uint32_t head_dim,
+    const uint64_t sliding_window, const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.windowed_attention_launch_calls;
+  if (query == nullptr || key == nullptr || value == nullptr ||
+      output == nullptr || kv_heads == 0U || q_heads % kv_heads != 0U) {
+    return hipErrorInvalidValue;
+  }
+  for (uint32_t row = 0U; row != query_count; ++row) {
+    const uint64_t position = start_position + row;
+    if (position >= committed_kv_length) {
+      return hipErrorInvalidValue;
+    }
+    uint64_t first_key = 0U;
+    if (sliding_window != 0U && position + 1U > sliding_window) {
+      first_key = position + 1U - sliding_window;
+    }
+    for (uint32_t q_head = 0U; q_head != q_heads; ++q_head) {
+      const uint32_t kv_head = q_head / (q_heads / kv_heads);
+      const uint64_t query_base =
+          (static_cast<uint64_t>(row) * q_heads + q_head) * head_dim;
+      float maximum = -INFINITY;
+      for (uint64_t key_position = first_key; key_position <= position;
+           ++key_position) {
+        const uint64_t key_base =
+            (key_position * kv_heads + kv_head) * head_dim;
+        float score = 0.0F;
+        for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+          score += bf16_to_f32(query[query_base + dimension]) *
+                   bf16_to_f32(key[key_base + dimension]);
+        }
+        maximum = std::fmax(maximum, score);
+      }
+      float denominator = 0.0F;
+      for (uint64_t key_position = first_key; key_position <= position;
+           ++key_position) {
+        const uint64_t key_base =
+            (key_position * kv_heads + kv_head) * head_dim;
+        float score = 0.0F;
+        for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+          score += bf16_to_f32(query[query_base + dimension]) *
+                   bf16_to_f32(key[key_base + dimension]);
+        }
+        denominator += std::exp(score - maximum);
+      }
+      for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+        float accumulation = 0.0F;
+        for (uint64_t key_position = first_key; key_position <= position;
+             ++key_position) {
+          const uint64_t key_base =
+              (key_position * kv_heads + kv_head) * head_dim;
+          float score = 0.0F;
+          for (uint32_t dot = 0U; dot != head_dim; ++dot) {
+            score += bf16_to_f32(query[query_base + dot]) *
+                     bf16_to_f32(key[key_base + dot]);
+          }
+          const float probability = std::exp(score - maximum) / denominator;
+          const uint64_t value_index = key_base + dimension;
+          accumulation += probability * bf16_to_f32(value[value_index]);
+        }
+        output[query_base + dimension] = f32_to_bf16_rne(accumulation);
+      }
+    }
+  }
   return hipSuccess;
 }
 
@@ -475,6 +686,21 @@ std::size_t attention_preprocess_launch_calls() noexcept {
   return state.attention_preprocess_launch_calls;
 }
 
+std::size_t rotary_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.rotary_launch_calls;
+}
+
+std::size_t windowed_attention_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.windowed_attention_launch_calls;
+}
+
+uint32_t rotary_last_token_count() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.rotary_last_token_count;
+}
+
 uint32_t attention_preprocess_last_m() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.attention_preprocess_last_m;
@@ -582,6 +808,21 @@ std::size_t elementwise_sigmoid_mul_launch_calls() noexcept {
   return state.elementwise_sigmoid_mul_launch_calls;
 }
 
+std::size_t elementwise_scalar_mul_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.elementwise_scalar_mul_launch_calls;
+}
+
+std::size_t elementwise_gelu_tanh_mul_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.elementwise_gelu_tanh_mul_launch_calls;
+}
+
+std::size_t elementwise_tanh_softcap_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.elementwise_tanh_softcap_launch_calls;
+}
+
 uint64_t elementwise_last_element_count() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.elementwise_last_element_count;
@@ -590,6 +831,11 @@ uint64_t elementwise_last_element_count() noexcept {
 void set_rmsnorm_launch_status(const hipError_t status) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   state.rmsnorm_launch_status = status;
+}
+
+void set_rmsnorm_numerical_execution(const bool enabled) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.rmsnorm_numerical_execution = enabled;
 }
 
 std::size_t rmsnorm_launch_calls() noexcept {
@@ -605,6 +851,11 @@ uint32_t rmsnorm_last_normalized_size() noexcept {
 uint32_t rmsnorm_last_row_count() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.rmsnorm_last_row_count;
+}
+
+uint32_t rmsnorm_last_scale_mode() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.rmsnorm_last_scale_mode;
 }
 
 void set_matmul_launch_status(const hipError_t status) noexcept {

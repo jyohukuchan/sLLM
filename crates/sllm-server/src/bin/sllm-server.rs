@@ -6,9 +6,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sllm_core::{ReviewedModelLock, read_reviewed_model_lock};
 use sllm_server::{
-    ChatGenerationBackendV1, ModelRegistryEntryV1, ModelRegistryV1, QwenBackendConfigV1,
-    QwenChatBackendV1, SchedulerConfigV1, SchedulerV1, ServerConfigV1, build_router_v1,
+    ChatGenerationBackendV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1, ModelRegistryEntryV1,
+    ModelRegistryV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
+    SchedulerConfigV1, SchedulerV1, ServerConfigV1, build_router_v1,
 };
 
 fn main() -> ExitCode {
@@ -134,21 +136,44 @@ fn run(config: Config) -> Result<(), String> {
         .build()
         .map_err(|error| format!("Tokio runtime construction failed: {error}"))?;
     runtime.block_on(async move {
-        let backend = Arc::new(
-            QwenChatBackendV1::open(QwenBackendConfigV1 {
-                lock_path: config.lock,
-                cache_path: config.cache,
-                device_index: config.device_index,
-                target: config.target,
-                completion_timeout: config.completion_timeout,
-                shutdown_timeout: config.shutdown_timeout,
-                fp8_manifest_path: config.fp8_manifest,
-                fp8_artifact_path: config.fp8_artifact,
-                fp8_provider: config.fp8_provider,
-            })
-            .map_err(|error| error.to_string())?,
-        );
-        let backend_trait: Arc<dyn ChatGenerationBackendV1> = backend.clone();
+        let reviewed = read_reviewed_model_lock(&config.lock)
+            .map_err(|error| format!("model lock validation failed: {error}"))?;
+        let backend = match reviewed {
+            ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
+                QwenChatBackendV1::open(QwenBackendConfigV1 {
+                    lock_path: config.lock,
+                    cache_path: config.cache,
+                    device_index: config.device_index,
+                    target: config.target,
+                    completion_timeout: config.completion_timeout,
+                    shutdown_timeout: config.shutdown_timeout,
+                    fp8_manifest_path: config.fp8_manifest,
+                    fp8_artifact_path: config.fp8_artifact,
+                    fp8_provider: config.fp8_provider,
+                })
+                .map_err(|error| error.to_string())?,
+            )),
+            ReviewedModelLock::Gemma4(_) => {
+                if config.fp8_manifest.is_some()
+                    || config.fp8_artifact.is_some()
+                    || config.fp8_provider.is_some()
+                {
+                    return Err("Gemma 4 server profile supports locked BF16 weights only".to_owned());
+                }
+                ActiveBackend::Gemma(Arc::new(
+                    Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
+                        lock_path: config.lock,
+                        cache_path: config.cache,
+                        device_index: config.device_index,
+                        target: config.target,
+                        completion_timeout: config.completion_timeout,
+                        shutdown_timeout: config.shutdown_timeout,
+                    })
+                    .map_err(|error| error.to_string())?,
+                ))
+            }
+        };
+        let backend_trait = backend.as_trait();
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "system clock is before UNIX epoch".to_owned())?
@@ -218,6 +243,41 @@ fn run(config: Config) -> Result<(), String> {
         );
         Ok(())
     })
+}
+
+enum ActiveBackend {
+    Qwen(Arc<QwenChatBackendV1>),
+    Gemma(Arc<Gemma4ChatBackendV1>),
+}
+
+impl ActiveBackend {
+    fn as_trait(&self) -> Arc<dyn ChatGenerationBackendV1> {
+        match self {
+            Self::Qwen(backend) => backend.clone(),
+            Self::Gemma(backend) => backend.clone(),
+        }
+    }
+
+    fn model_fingerprint(&self) -> &str {
+        match self {
+            Self::Qwen(backend) => backend.model_fingerprint(),
+            Self::Gemma(backend) => backend.model_fingerprint(),
+        }
+    }
+
+    fn target(&self) -> &str {
+        match self {
+            Self::Qwen(backend) => backend.target(),
+            Self::Gemma(backend) => backend.target(),
+        }
+    }
+
+    fn shutdown(&self) -> Result<ProductionShutdownAuditV1, sllm_server::BackendErrorV1> {
+        match self {
+            Self::Qwen(backend) => backend.shutdown(),
+            Self::Gemma(backend) => backend.shutdown(),
+        }
+    }
 }
 
 fn take_required(values: &mut BTreeMap<String, String>, flag: &str) -> Result<String, String> {

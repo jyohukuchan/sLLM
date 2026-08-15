@@ -13,6 +13,7 @@ use sllm_core::{
 use sllm_hip::HipBackend;
 
 const CASE_SIZES: [usize; 7] = [1, 3, 17, 255, 256, 257, 2560];
+const GEMMA_CASE_SIZES: [usize; 10] = [1, 3, 17, 255, 256, 257, 3839, 3840, 3841, 262_144];
 const SILU_BOUNDARY_INDEX: usize = 3;
 const SILU_BOUNDARY_GATE: u16 = 0xc100;
 const SILU_BOUNDARY_UP: u16 = 0xc0fe;
@@ -23,6 +24,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 struct Config {
     device_index: u32,
     target: String,
+    gemma_ops: bool,
 }
 
 #[derive(Serialize)]
@@ -57,6 +59,7 @@ struct Report {
 fn parse_config() -> Result<Config, String> {
     let mut device_index = None;
     let mut target = None;
+    let mut gemma_ops = false;
     let mut arguments = env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -84,12 +87,19 @@ fn parse_config() -> Result<Config, String> {
                 }
                 target = Some(value);
             }
+            "--gemma-ops" => {
+                if gemma_ops {
+                    return Err("duplicate --gemma-ops".to_owned());
+                }
+                gemma_ops = true;
+            }
             other => return Err(format!("unexpected argument `{other}`")),
         }
     }
     Ok(Config {
         device_index: device_index.ok_or_else(|| "missing --device-index".to_owned())?,
         target: target.ok_or_else(|| "missing --target".to_owned())?,
+        gemma_ops,
     })
 }
 
@@ -120,6 +130,22 @@ fn silu_mul_f32_fused(gate_bits: u16, up_bits: u16) -> u16 {
     let gate = bf16_to_float(gate_bits);
     let silu = gate / (1.0 + (-gate).exp());
     float_to_bf16_rne(silu * bf16_to_float(up_bits))
+}
+
+fn scalar_mul(input_bits: u16, scalar_bits: u16) -> u16 {
+    float_to_bf16_rne(bf16_to_float(input_bits) * bf16_to_float(scalar_bits))
+}
+
+fn gelu_tanh_mul_bf16_intermediate(gate_bits: u16, up_bits: u16) -> u16 {
+    let gate = bf16_to_float(gate_bits);
+    let inner = 0.797_884_6_f32 * (gate + 0.044_715_f32 * gate * gate * gate);
+    let gelu_bf16 = float_to_bf16_rne(0.5_f32 * gate * (1.0_f32 + inner.tanh()));
+    float_to_bf16_rne(bf16_to_float(gelu_bf16) * bf16_to_float(up_bits))
+}
+
+fn tanh_softcap(input_bits: u16, cap_bits: u16) -> u16 {
+    let cap = bf16_to_float(cap_bits);
+    float_to_bf16_rne((bf16_to_float(input_bits) / cap).tanh() * cap)
 }
 
 fn words_to_bytes(words: &[u16]) -> Vec<u8> {
@@ -179,6 +205,21 @@ fn validate_dispatch(
             "elementwise.silu_mul.bf16_fp32.v1",
             "sllm_elementwise_silu_mul_bf16_fp32_v1",
         ),
+        SemanticOpKind::ScalarMul => (
+            5,
+            "elementwise.scalar_mul.bf16_fp32.v1",
+            "sllm_elementwise_scalar_mul_bf16_fp32_v1",
+        ),
+        SemanticOpKind::GeluTanhMul => (
+            6,
+            "elementwise.gelu_tanh_mul.bf16_fp32.v1",
+            "sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1",
+        ),
+        SemanticOpKind::TanhSoftcap => (
+            7,
+            "elementwise.tanh_softcap.bf16_fp32.v1",
+            "sllm_elementwise_tanh_softcap_bf16_fp32_v1",
+        ),
         _ => return Err("evidence received a non-elementwise operation".to_owned()),
     };
     let expected_grid = dispatch_grid_size(element_count)?;
@@ -220,6 +261,15 @@ fn run_case(
     target: &str,
 ) -> Result<CaseEvidence, String> {
     let (mut input0_words, mut input1_words) = make_inputs(element_count);
+    let scalar_input = matches!(
+        kind,
+        SemanticOpKind::ScalarMul | SemanticOpKind::TanhSoftcap
+    );
+    if kind == SemanticOpKind::ScalarMul {
+        input1_words = vec![float_to_bf16_rne((3840.0_f32).sqrt())];
+    } else if kind == SemanticOpKind::TanhSoftcap {
+        input1_words = vec![float_to_bf16_rne(30.0)];
+    }
     if kind == SemanticOpKind::SiluMul && element_count > SILU_BOUNDARY_INDEX {
         input0_words[SILU_BOUNDARY_INDEX] = SILU_BOUNDARY_GATE;
         input1_words[SILU_BOUNDARY_INDEX] = SILU_BOUNDARY_UP;
@@ -241,7 +291,7 @@ fn run_case(
     let input1_buffer = if kind != SemanticOpKind::Copy {
         Some(
             session
-                .allocate(output_bytes)
+                .allocate(input1_bytes.len() as u64)
                 .map_err(|error| format!("input1 allocation failed: {error}"))?,
         )
     } else {
@@ -265,7 +315,7 @@ fn run_case(
             .upload(
                 queue,
                 buffer
-                    .range(0, output_bytes)
+                    .range(0, input1_bytes.len() as u64)
                     .map_err(|error| error.to_string())?,
                 Arc::<[u8]>::from(input1_bytes.clone()),
             )
@@ -281,19 +331,25 @@ fn run_case(
             .map_err(|error| format!("input0 binding failed: {error}"))?,
     ];
     if let Some(buffer) = &input1_buffer {
+        let input1_view = if scalar_input {
+            TensorView::contiguous(DType::Bf16, &[1])
+                .map_err(|error| format!("scalar tensor view failed: {error}"))?
+        } else {
+            view.clone()
+        };
         input_bindings.push(
             session
-                .bind(buffer, view.clone(), AccessMode::Read)
+                .bind(buffer, input1_view, AccessMode::Read)
                 .map_err(|error| format!("input1 binding failed: {error}"))?,
         );
     }
+    let descriptor_inputs = input_bindings
+        .iter()
+        .map(|binding| binding.view().clone())
+        .collect();
     let descriptor = Arc::new(
-        SemanticOpDescriptor::new(
-            kind,
-            vec![view.clone(); input_bindings.len()],
-            vec![view.clone()],
-        )
-        .map_err(|error| format!("semantic descriptor failed: {error}"))?,
+        SemanticOpDescriptor::new(kind, descriptor_inputs, vec![view.clone()])
+            .map_err(|error| format!("semantic descriptor failed: {error}"))?,
     );
     let operation = Arc::new(
         BoundSemanticOp::new(
@@ -338,6 +394,19 @@ fn run_case(
             .iter()
             .zip(&input1_words)
             .map(|(&gate, &up)| silu_mul_bf16_intermediate(gate, up))
+            .collect::<Vec<_>>(),
+        SemanticOpKind::ScalarMul => input0_words
+            .iter()
+            .map(|&input| scalar_mul(input, input1_words[0]))
+            .collect::<Vec<_>>(),
+        SemanticOpKind::GeluTanhMul => input0_words
+            .iter()
+            .zip(&input1_words)
+            .map(|(&gate, &up)| gelu_tanh_mul_bf16_intermediate(gate, up))
+            .collect::<Vec<_>>(),
+        SemanticOpKind::TanhSoftcap => input0_words
+            .iter()
+            .map(|&input| tanh_softcap(input, input1_words[0]))
             .collect::<Vec<_>>(),
         _ => unreachable!(),
     };
@@ -385,29 +454,36 @@ fn run(config: &Config) -> Result<Report, String> {
         let queue = session
             .create_queue()
             .map_err(|error| format!("queue creation failed: {error}"))?;
-        let mut cases = Vec::with_capacity(CASE_SIZES.len() * 3);
-        for element_count in CASE_SIZES {
-            cases.push(run_case(
-                &session,
-                &queue,
-                SemanticOpKind::Copy,
-                element_count,
-                &config.target,
-            )?);
-            cases.push(run_case(
-                &session,
-                &queue,
-                SemanticOpKind::Add,
-                element_count,
-                &config.target,
-            )?);
-            cases.push(run_case(
-                &session,
-                &queue,
-                SemanticOpKind::SiluMul,
-                element_count,
-                &config.target,
-            )?);
+        let (sizes, kinds): (&[usize], &[SemanticOpKind]) = if config.gemma_ops {
+            (
+                &GEMMA_CASE_SIZES,
+                &[
+                    SemanticOpKind::ScalarMul,
+                    SemanticOpKind::GeluTanhMul,
+                    SemanticOpKind::TanhSoftcap,
+                ],
+            )
+        } else {
+            (
+                &CASE_SIZES,
+                &[
+                    SemanticOpKind::Copy,
+                    SemanticOpKind::Add,
+                    SemanticOpKind::SiluMul,
+                ],
+            )
+        };
+        let mut cases = Vec::with_capacity(sizes.len() * kinds.len());
+        for &element_count in sizes {
+            for &kind in kinds {
+                cases.push(run_case(
+                    &session,
+                    &queue,
+                    kind,
+                    element_count,
+                    &config.target,
+                )?);
+            }
         }
         Ok(cases)
     })();
@@ -419,7 +495,11 @@ fn run(config: &Config) -> Result<Report, String> {
         return Err("execution cleanup did not return to zero owned work".to_owned());
     }
     Ok(Report {
-        schema_version: "elementwise-g1-report-v1",
+        schema_version: if config.gemma_ops {
+            "gemma-elementwise-a3-report-v1"
+        } else {
+            "elementwise-g1-report-v1"
+        },
         state: "PASS",
         target: config.target.clone(),
         device_index: config.device_index,
