@@ -6,7 +6,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sllm_core::{ReviewedModelLock, read_reviewed_model_lock};
+use sllm_core::{
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
+    read_reviewed_model_lock,
+};
 use sllm_server::{
     ChatGenerationBackendV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1, ModelRegistryEntryV1,
     ModelRegistryV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
@@ -38,6 +41,7 @@ struct Config {
     request_timeout: Duration,
     completion_timeout: Duration,
     shutdown_timeout: Duration,
+    context_length: Option<u32>,
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<String>,
@@ -125,6 +129,13 @@ fn parse_args() -> Result<Config, String> {
         "--shutdown-timeout-seconds",
         30_u64,
     )?);
+    let context_length = values
+        .remove("--context-length")
+        .map(|value| parse_value::<u32>(&value, "context length"))
+        .transpose()?;
+    if context_length == Some(0) {
+        return Err("context length must be nonzero".to_owned());
+    }
     if let Some(flag) = values.keys().next() {
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
@@ -142,6 +153,7 @@ fn parse_args() -> Result<Config, String> {
         request_timeout,
         completion_timeout,
         shutdown_timeout,
+        context_length,
         fp8_manifest,
         fp8_artifact,
         fp8_provider,
@@ -163,6 +175,9 @@ fn run(config: Config) -> Result<(), String> {
                     target: config.target,
                     completion_timeout: config.completion_timeout,
                     shutdown_timeout: config.shutdown_timeout,
+                    context_length: config
+                        .context_length
+                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                     fp8_manifest_path: config.fp8_manifest,
                     fp8_artifact_path: config.fp8_artifact,
                     fp8_provider: config.fp8_provider,
@@ -181,6 +196,9 @@ fn run(config: Config) -> Result<(), String> {
                     target: config.target,
                     completion_timeout: config.completion_timeout,
                     shutdown_timeout: config.shutdown_timeout,
+                    context_length: config
+                        .context_length
+                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                     fp8_manifest_path: config.fp8_manifest,
                     fp8_artifact_path: config.fp8_artifact,
                     fp8_provider: config.fp8_provider,
@@ -205,12 +223,21 @@ fn run(config: Config) -> Result<(), String> {
                         target: config.target,
                         completion_timeout: config.completion_timeout,
                         shutdown_timeout: config.shutdown_timeout,
+                        context_length: config
+                            .context_length
+                            .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
                     })
                     .map_err(|error| error.to_string())?,
                 ))
             }
             }
         };
+        if let Some(warning) = context_length_warning(
+            backend.context_length(),
+            backend.recommended_context_tokens(),
+        ) {
+            eprintln!("{warning}");
+        }
         let backend_trait = backend.as_trait();
         let created = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -265,6 +292,8 @@ fn run(config: Config) -> Result<(), String> {
                 "target": backend.target(),
                 "model_fingerprint": backend.model_fingerprint(),
                 "compatibility_profile": if config.openwebui_compatibility { "openwebui" } else { "strict" },
+                "context_length": backend.context_length(),
+                "official_recommended_context_tokens": backend.recommended_context_tokens(),
             })
         );
         axum::serve(listener, router)
@@ -280,6 +309,23 @@ fn run(config: Config) -> Result<(), String> {
             serde_json::json!({"event": "shutdown_audit", "report": report})
         );
         Ok(())
+    })
+}
+
+fn context_length_warning(
+    context_length: u32,
+    recommended_context_tokens: u32,
+) -> Option<serde_json::Value> {
+    (context_length > recommended_context_tokens).then(|| {
+        serde_json::json!({
+            "event": "warning",
+            "kind": "context_length_exceeds_recommended",
+            "context_length": context_length,
+            "official_recommended_context_tokens": recommended_context_tokens,
+            "message": format!(
+                "the model's official recommended context is {recommended_context_tokens} tokens; {context_length} was requested and output quality beyond the recommendation is not guaranteed",
+            ),
+        })
     })
 }
 
@@ -307,6 +353,20 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.target(),
             Self::Gemma(backend) => backend.target(),
+        }
+    }
+
+    fn context_length(&self) -> u32 {
+        match self {
+            Self::Qwen(backend) => backend.context_length(),
+            Self::Gemma(backend) => backend.context_length(),
+        }
+    }
+
+    fn recommended_context_tokens(&self) -> u32 {
+        match self {
+            Self::Qwen(backend) => backend.recommended_context_tokens(),
+            Self::Gemma(backend) => backend.recommended_context_tokens(),
         }
     }
 
@@ -342,5 +402,21 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --device-index N --target GFX [--cache PATH] [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --device-index N --target GFX [--cache PATH] [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context_length_warning;
+
+    #[test]
+    fn context_warning_is_advisory_only_above_the_model_recommendation() {
+        assert!(context_length_warning(262_143, 262_144).is_none());
+        assert!(context_length_warning(262_144, 262_144).is_none());
+        let warning = context_length_warning(1_000_000, 262_144).unwrap();
+        assert_eq!(warning["event"], "warning");
+        assert_eq!(warning["kind"], "context_length_exceeds_recommended");
+        assert_eq!(warning["context_length"], 1_000_000);
+        assert_eq!(warning["official_recommended_context_tokens"], 262_144);
+    }
 }

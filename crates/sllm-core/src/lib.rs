@@ -83,7 +83,8 @@ pub use gemma4_execution::{
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
-    GEMMA4_MAX_POSITION_EMBEDDINGS, GEMMA4_SLIDING_WINDOW, GEMMA4_VOCAB_SIZE,
+    GEMMA4_MAX_POSITION_EMBEDDINGS, GEMMA4_RECOMMENDED_CONTEXT_TOKENS,
+    GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS, GEMMA4_SLIDING_WINDOW, GEMMA4_VOCAB_SIZE,
     Gemma4AttentionDescriptor, Gemma4Graph, Gemma4GraphBindingClass, Gemma4GraphError,
     Gemma4GraphNode, Gemma4GraphNodeKind, Gemma4KvDescriptor, Gemma4NormRole, Gemma4RequestState,
     Gemma4RequestStateSnapshot, Gemma4RequestTransition, Gemma4RopeDescriptor, Gemma4RopeType,
@@ -154,12 +155,12 @@ pub use qwen_execution::{
     QwenKvLayerMemoryAudit, QwenKvPayloadEvidence, QwenRequestMemoryAudit, QwenResidentModel,
 };
 pub use qwen_graph::{
-    QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QWEN35_MAX_POSITION_EMBEDDINGS,
-    QWEN35_PLAN_ENTRY_COUNT, QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError,
-    QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
-    QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph,
+    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
+    QWEN35_MAX_POSITION_EMBEDDINGS, QWEN35_PLAN_ENTRY_COUNT, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
+    QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError, QwenGraphError, QwenGraphNode,
+    QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor, QwenGraphStateKind,
+    QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
+    build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph,
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
@@ -1552,6 +1553,18 @@ mod tests {
             ),
             Err(OpError::AttentionPreprocessPositionOutOfRange { .. })
         ));
+        assert!(
+            AttentionPreprocessContract::new_qwen3_5_with_layout_and_context(
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                262_144,
+                1,
+                AttentionPreprocessContract::Q_HEADS as u32,
+                AttentionPreprocessContract::KV_HEADS as u32,
+                AttentionPreprocessContract::HEAD_DIM as u32,
+                1_000_000,
+            )
+            .is_ok()
+        );
         assert!(matches!(
             AttentionPreprocessContract::new_qwen3_5(
                 AttentionPreprocessPositionMode::DecodeContinuation,
@@ -1686,6 +1699,19 @@ mod tests {
                 true,
                 [11, 11, 10],
                 262_143
+            )
+            .is_ok()
+        );
+        assert!(
+            make(
+                1.0e-6,
+                DType::F32,
+                DType::Bf16,
+                64,
+                10_000_000.0,
+                true,
+                [11, 11, 10],
+                0
             )
             .is_err()
         );

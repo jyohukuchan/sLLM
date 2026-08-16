@@ -29,7 +29,12 @@ pub const GEMMA4_INTERMEDIATE_SIZE: u64 = 15_360;
 pub const GEMMA4_VOCAB_SIZE: u64 = 262_144;
 pub const GEMMA4_LAYER_COUNT: usize = 48;
 pub const GEMMA4_SLIDING_WINDOW: u64 = 1_024;
-pub const GEMMA4_MAX_POSITION_EMBEDDINGS: u64 = 262_144;
+/// Native context length declared by the reviewed Gemma artifact.
+pub const GEMMA4_RECOMMENDED_CONTEXT_TOKENS: u64 = 262_144;
+/// Compatibility alias for the exact model-config field. This is advisory at
+/// runtime and remains part of artifact identity validation.
+pub const GEMMA4_MAX_POSITION_EMBEDDINGS: u64 = GEMMA4_RECOMMENDED_CONTEXT_TOKENS;
+pub const GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS: u64 = u32::MAX as u64;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Gemma4GraphBindingClass {
@@ -81,7 +86,7 @@ impl Gemma4RopeDescriptor {
             self.theta as f32,
             start_position,
             token_count,
-            GEMMA4_MAX_POSITION_EMBEDDINGS as u32,
+            GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS as u32,
         )
     }
 }
@@ -345,9 +350,9 @@ pub struct Gemma4RequestState {
 
 impl Gemma4RequestState {
     pub fn new(capacity: u64) -> Result<Self, PreparedExecutionError> {
-        if capacity == 0 || capacity > GEMMA4_MAX_POSITION_EMBEDDINGS {
+        if capacity == 0 || capacity > GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS {
             return Err(PreparedExecutionError::InvalidTransition(
-                "Gemma request-state capacity is outside the reviewed model range".to_owned(),
+                "Gemma request-state capacity is outside the u32 execution ABI".to_owned(),
             ));
         }
         Ok(Self {
@@ -544,7 +549,7 @@ pub fn build_gemma4_graph(
     let expected_length = start_position
         .checked_add(token_count)
         .ok_or(Gemma4GraphError::PositionOverflow)?;
-    if expected_length > state_capacity || state_capacity > GEMMA4_MAX_POSITION_EMBEDDINGS {
+    if expected_length > state_capacity || state_capacity > GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(Gemma4GraphError::LengthOutOfBounds);
     }
     let expected_catalog = crate::gemma4::expected_gemma4_tensor_catalog()
@@ -1056,6 +1061,18 @@ mod tests {
             graph.lock_fingerprint(),
             crate::gemma4::GEMMA4_12B_IT_FINGERPRINT
         );
+    }
+
+    #[test]
+    fn graph_treats_the_model_context_as_advisory() {
+        let (lock, plan) = fixture();
+        assert!(
+            build_gemma4_graph(&lock, &plan, 1, 0, GEMMA4_RECOMMENDED_CONTEXT_TOKENS + 1,).is_ok()
+        );
+        assert!(matches!(
+            build_gemma4_graph(&lock, &plan, 1, 0, GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS + 1,),
+            Err(Gemma4GraphError::LengthOutOfBounds)
+        ));
     }
 
     #[test]

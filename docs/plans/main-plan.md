@@ -34,6 +34,12 @@
   - 初期仕様は `sLLM OpenAI-compatible Chat Completions profile v1` とする。
   - llama.cpp serverは実装参考・差分比較対象であり、仕様の正本にはしない。
   - [Responses APIに対応する。]
+- model artifactの`max_position_embeddings`等はnative/公式推奨contextとして扱い、runtimeの品質hard gateにはしない。
+  serverの実行上限はユーザーが`--context-length`で自由に指定でき、省略時だけmodel推奨値を既定値にする。
+  推奨値を超える場合は起動時に一度だけ、設定値と公式推奨token数を警告する。追加opt-inやoverride flagは要求しない。
+  requestのprompt tokenと要求output tokenの合計は設定した実行上限以内とし、32-bit位置表現、kernel dispatch、VRAM等の
+  実装・資源制約によるfail-closed errorはmodel品質gateと分離する。推奨外の品質は保証せず、RoPE scaling等を明示指定する
+  将来拡張とは別に管理する。
 - 最適化済みの単一リクエストでは、同一条件のllama.cppより高速であることを一つの基準とする。
   - 比較条件はモデルrevision、GPU target、入力長、出力長、数値型、llama.cpp commitを記録する。
   - 一律の必達倍率は設けず、TTFT、TPOT、token/s、peak VRAMを記録する。

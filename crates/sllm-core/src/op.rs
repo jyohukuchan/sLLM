@@ -413,7 +413,7 @@ impl AttentionPreprocessContract {
                 field: "mRoPE sections",
             });
         }
-        if max_position_embeddings != Self::MAX_POSITION_EMBEDDINGS {
+        if max_position_embeddings == 0 {
             return Err(OpError::AttentionPreprocessInvalidConfig {
                 field: "max position embeddings",
             });
@@ -511,6 +511,27 @@ impl AttentionPreprocessContract {
         kv_heads: u32,
         head_dim: u32,
     ) -> Result<Self, OpError> {
+        Self::new_qwen3_5_with_layout_and_context(
+            position_mode,
+            start_position,
+            token_count,
+            q_heads,
+            kv_heads,
+            head_dim,
+            Self::MAX_POSITION_EMBEDDINGS,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_qwen3_5_with_layout_and_context(
+        position_mode: AttentionPreprocessPositionMode,
+        start_position: i64,
+        token_count: u64,
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+        runtime_context_tokens: u32,
+    ) -> Result<Self, OpError> {
         if q_heads == 0 || kv_heads == 0 || q_heads % kv_heads != 0 || head_dim != 256 {
             return Err(OpError::AttentionPreprocessInvalidConfig {
                 field: "head layout",
@@ -529,7 +550,7 @@ impl AttentionPreprocessContract {
             10_000_000.0,
             true,
             Self::MROPE_SECTIONS,
-            Self::MAX_POSITION_EMBEDDINGS,
+            runtime_context_tokens,
         )?;
         contract.q_heads = q_heads;
         contract.kv_heads = kv_heads;

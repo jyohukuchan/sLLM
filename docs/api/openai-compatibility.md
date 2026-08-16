@@ -182,6 +182,16 @@ the CLI, keeps the model resident between requests, and creates and releases
 request-local KV/linear state for each request. An omitted extension continues to
 use the locked Qwen chat template with thinking disabled.
 
+The server context capacity is selected with `--context-length TOKENS`. When the
+option is omitted, the exact model artifact's declared native/recommended context
+is used. A larger value is accepted without an opt-in or override flag; startup
+emits one `context_length_exceeds_recommended` warning on stderr containing both
+values, and the ready event reports them. This warning is advisory about model
+quality, not a request rejection. Each request still requires prompt tokens plus
+`max_completion_tokens` to fit the configured server context, and allocation,
+position-representation, and kernel resource failures remain ordinary runtime
+errors.
+
 ## sLLM extensions
 
 sLLM-specific request or response fields must be isolated under a clearly named

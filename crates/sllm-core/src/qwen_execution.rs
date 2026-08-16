@@ -2286,11 +2286,6 @@ impl QwenExecutionCore {
                 self.graph.state_capacity()
             )));
         }
-        if expected_length > u64::from(AttentionPreprocessContract::MAX_POSITION_EMBEDDINGS) {
-            return Err(QwenExecutionError::InvalidRequest(
-                "transition exceeds the attention position contract".to_owned(),
-            ));
-        }
         validate_input_token_ids(token_ids)?;
         let expects_multimodal = self.graph.is_multimodal();
         if (start_position == 0 && expects_multimodal) != multimodal.is_some()
@@ -2874,7 +2869,7 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout(
+        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout_and_context(
             execution.position_mode,
             i64::try_from(execution.start_position).map_err(|_| {
                 QwenExecutionError::InvalidRequest("position does not fit i64".to_owned())
@@ -2883,6 +2878,11 @@ impl QwenExecutionCore {
             execution.q_heads,
             execution.kv_heads,
             execution.head_dim,
+            u32::try_from(self.graph.state_capacity()).map_err(|_| {
+                QwenExecutionError::InvalidRequest(
+                    "request context exceeds the u32 execution ABI".to_owned(),
+                )
+            })?,
         )?;
         let descriptor = SemanticOpDescriptor::new_attention_preprocess(
             self.views(node.inputs(), execution.token_count)?,
@@ -3129,11 +3129,8 @@ impl QwenExecutionCore {
                 if positions.len() != token_ids.len()
                     || positions.iter().flatten().any(|position| {
                         *position < 0
-                            || *position
-                                >= i32::try_from(
-                                    AttentionPreprocessContract::MAX_POSITION_EMBEDDINGS,
-                                )
-                                .expect("position contract fits i32")
+                            || u64::try_from(*position)
+                                .map_or(true, |position| position >= self.graph.state_capacity())
                     })
                 {
                     return Err(QwenExecutionError::InvalidRequest(

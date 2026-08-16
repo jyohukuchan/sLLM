@@ -28,7 +28,15 @@ use crate::{Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-pub const QWEN35_MAX_POSITION_EMBEDDINGS: u64 = 262_144;
+/// Native context length declared by the reviewed Qwen3.5 model artifacts.
+/// Runtime context may exceed this advisory boundary when the caller accepts
+/// the model-quality tradeoff.
+pub const QWEN35_RECOMMENDED_CONTEXT_TOKENS: u64 = 262_144;
+/// Compatibility alias for the exact model-config field. This is not a
+/// runtime admission ceiling.
+pub const QWEN35_MAX_POSITION_EMBEDDINGS: u64 = QWEN35_RECOMMENDED_CONTEXT_TOKENS;
+/// Position and token-count fields in the execution ABI are unsigned 32-bit.
+pub const QWEN_RUNTIME_MAX_CONTEXT_TOKENS: u64 = u32::MAX as u64;
 pub const QWEN35_LAYER_COUNT: usize = 32;
 pub const QWEN35_REQUIRED_WEIGHT_COUNT: usize = 426;
 pub const QWEN35_PLAN_ENTRY_COUNT: usize = 738;
@@ -549,11 +557,10 @@ pub fn build_qwen35_graph(
             capacity: state_capacity,
         });
     }
-    let max_position = lock.model.architecture.text_config.max_position_embeddings;
-    if state_capacity > max_position {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
 
@@ -599,10 +606,10 @@ pub fn build_qwen35_moe_execution_graph(
             capacity: state_capacity,
         });
     }
-    if state_capacity > QWEN35_MAX_POSITION_EMBEDDINGS {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position: QWEN35_MAX_POSITION_EMBEDDINGS,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
     if artifact.config().hidden_size != 2_048
@@ -751,10 +758,10 @@ pub fn build_qwen35_multimodal_graph(
             capacity: state_capacity,
         });
     }
-    if state_capacity > lock.model.architecture.text_config.max_position_embeddings {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position: lock.model.architecture.text_config.max_position_embeddings,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
     let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
@@ -792,10 +799,10 @@ pub fn build_qwen35_mtp_graph(
     if state_capacity == 0 {
         return Err(QwenGraphError::ZeroStateCapacity);
     }
-    if state_capacity > lock.model.architecture.text_config.max_position_embeddings {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position: lock.model.architecture.text_config.max_position_embeddings,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
     let (bindings, known_unconsumed) = validate_mtp_plan(lock, plan)?;
@@ -931,11 +938,10 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
             capacity: state_capacity,
         });
     }
-    let max_position = lock.model.architecture.text_config.max_position_embeddings;
-    if state_capacity > max_position {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
     let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
@@ -1019,11 +1025,10 @@ fn build_qwen35_fp8_graph_with_dtype(
             capacity: state_capacity,
         });
     }
-    let max_position = lock.model.architecture.text_config.max_position_embeddings;
-    if state_capacity > max_position {
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
         return Err(QwenGraphError::CapacityExceedsMax {
             capacity: state_capacity,
-            max_position,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
         });
     }
     let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
@@ -4365,8 +4370,9 @@ mod tests {
             build_qwen35_graph(&lock, &plan, 2, 1),
             Err(QwenGraphError::TokenCountExceedsCapacity { .. })
         ));
+        assert!(build_qwen35_graph(&lock, &plan, 1, QWEN35_RECOMMENDED_CONTEXT_TOKENS + 1).is_ok());
         assert!(matches!(
-            build_qwen35_graph(&lock, &plan, 1, QWEN35_MAX_POSITION_EMBEDDINGS + 1),
+            build_qwen35_graph(&lock, &plan, 1, QWEN_RUNTIME_MAX_CONTEXT_TOKENS + 1),
             Err(QwenGraphError::CapacityExceedsMax { .. })
         ));
         assert!(matches!(

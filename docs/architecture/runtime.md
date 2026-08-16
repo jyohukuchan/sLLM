@@ -30,6 +30,11 @@ Cargo workspace
 | `sllm-server` | strict OpenAI profile DTO、model registry、bounded FIFO、HTTP/non-stream/SSE adapter、transport cancellation |
 | `native/hip` | HIP context、allocator、queues、events、operator dispatch、backend 内 kernel registry、HIP kernels |
 
+server contextはmodel artifactが宣言するnative/推奨値と、operator/stateが実際に使用する実行容量を分離する。
+前者は省略時の既定値と起動時advisory warningにだけ使い、graph、KV、RoPE、attentionのhard gateには使わない。
+後者は`--context-length`で指定し、requestのprompt+最大outputをadmissionする上限となる。ABIの固定幅位置表現、
+1 dispatchのshape上限、memory確保失敗は独立した実装制約であり、model品質上の推奨値へ偽装しない。
+
 Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `sllm-core` に漏らさない。
 
 ## Backend 境界

@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sllm_core::{
-    AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
-    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QWEN35_4B_FINGERPRINT,
+    AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
+    OsSamplingRandom, QWEN35_4B_FINGERPRINT, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
     QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
     QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest,
     QwenVisionResidentModel, ReviewedModelLock, VerifiedCache, VerifiedFp8Sidecar,
@@ -48,6 +49,7 @@ pub struct QwenBackendConfigV1 {
     pub target: String,
     pub completion_timeout: Duration,
     pub shutdown_timeout: Duration,
+    pub context_length: u32,
     pub fp8_manifest_path: Option<PathBuf>,
     pub fp8_artifact_path: Option<PathBuf>,
     pub fp8_provider: Option<String>,
@@ -59,9 +61,10 @@ impl QwenBackendConfigV1 {
             || !self.target.is_ascii()
             || self.completion_timeout.is_zero()
             || self.shutdown_timeout.is_zero()
+            || self.context_length == 0
         {
             return Err(BackendErrorV1::new(
-                "Qwen backend target and timeouts must be valid and nonzero",
+                "Qwen backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
         let sidecar = self.fp8_manifest_path.is_some() && self.fp8_artifact_path.is_some();
@@ -106,6 +109,7 @@ pub struct Gemma4BackendConfigV1 {
     pub target: String,
     pub completion_timeout: Duration,
     pub shutdown_timeout: Duration,
+    pub context_length: u32,
 }
 
 impl Gemma4BackendConfigV1 {
@@ -114,9 +118,10 @@ impl Gemma4BackendConfigV1 {
             || !self.target.is_ascii()
             || self.completion_timeout.is_zero()
             || self.shutdown_timeout.is_zero()
+            || self.context_length == 0
         {
             return Err(BackendErrorV1::new(
-                "Gemma backend target and timeouts must be valid and nonzero",
+                "Gemma backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
         Ok(())
@@ -228,6 +233,8 @@ struct BackendIdentityV1 {
     model_fingerprint: String,
     plan_digest: String,
     model_ready_current_bytes: u64,
+    context_length: u32,
+    recommended_context_tokens: u32,
 }
 
 impl QwenChatBackendV1 {
@@ -422,6 +429,8 @@ impl QwenChatBackendV1 {
             model_fingerprint: lock.fingerprint().to_owned(),
             plan_digest: plan.digest_hex(),
             model_ready_current_bytes,
+            context_length: config.context_length,
+            recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
@@ -504,6 +513,8 @@ impl QwenChatBackendV1 {
             model_fingerprint: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
             plan_digest: plan.digest_hex(),
             model_ready_current_bytes,
+            context_length: config.context_length,
+            recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
@@ -542,6 +553,14 @@ impl QwenChatBackendV1 {
 
     pub fn model_fingerprint(&self) -> &str {
         &self.identity.model_fingerprint
+    }
+
+    pub const fn context_length(&self) -> u32 {
+        self.identity.context_length
+    }
+
+    pub const fn recommended_context_tokens(&self) -> u32 {
+        self.identity.recommended_context_tokens
     }
 
     pub fn target(&self) -> &str {
@@ -700,6 +719,8 @@ impl Gemma4ChatBackendV1 {
             model_fingerprint: lock.fingerprint().to_owned(),
             plan_digest: plan.digest_hex(),
             model_ready_current_bytes,
+            context_length: config.context_length,
+            recommended_context_tokens: GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
         Ok(Self {
             state: Mutex::new(Some(Gemma4BackendStateV1 {
@@ -737,6 +758,14 @@ impl Gemma4ChatBackendV1 {
 
     pub fn model_fingerprint(&self) -> &str {
         &self.identity.model_fingerprint
+    }
+
+    pub const fn context_length(&self) -> u32 {
+        self.identity.context_length
+    }
+
+    pub const fn recommended_context_tokens(&self) -> u32 {
+        self.identity.recommended_context_tokens
     }
 
     pub fn target(&self) -> &str {
@@ -926,6 +955,12 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let state_capacity = prompt_tokens
             .checked_add(u64::from(request.generation().max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
+        if state_capacity > u64::from(self.identity.context_length) {
+            return Err(BackendErrorV1::new(format!(
+                "request requires {state_capacity} context tokens but the server was started with --context-length {}",
+                self.identity.context_length
+            )));
+        }
         let target_graph_rows = if state.mtp_resident.is_some()
             && !request.generation().sampling().requires_logits()
             && multimodal_prompt.is_none()
@@ -1204,6 +1239,12 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         let state_capacity = prompt_tokens
             .checked_add(u64::from(request.generation().max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
+        if state_capacity > u64::from(self.identity.context_length) {
+            return Err(BackendErrorV1::new(format!(
+                "request requires {state_capacity} context tokens but the server was started with --context-length {}",
+                self.identity.context_length
+            )));
+        }
         let mut owner = state
             .resident
             .new_request_for_session(Arc::clone(&state.session), prompt_tokens, state_capacity)
