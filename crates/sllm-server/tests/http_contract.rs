@@ -403,7 +403,7 @@ async fn strict_http_error_matrix_uses_profile_envelopes() {
             request_bytes(
                 "POST",
                 "/v1/chat/completions",
-                br#"{"model":"qwen-test","messages":[{"role":"user","content":"x"}],"seed":1}"#,
+                br#"{"model":"qwen-test","messages":[{"role":"user","content":"x"}],"tools":null}"#,
                 &[
                     "Authorization: Bearer secret",
                     "Content-Type: application/json",

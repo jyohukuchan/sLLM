@@ -5,14 +5,17 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
-    OsSamplingRandom, QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
-    QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock,
-    SamplingParametersV1, VerifiedCache, VerifiedUnslothGemma4Nvfp4, WeightClassification,
-    assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    OsSamplingRandom, QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
+    QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
+    ReviewedModelLock, SamplingParametersV1, VerifiedCache, VerifiedQwen35Moe,
+    VerifiedUnslothGemma4Nvfp4, WeightClassification, assemble_qwen35_multimodal_prompt,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
+    build_qwen35_moe_execution_graph, build_qwen35_moe_weight_load_plan, build_qwen35_mtp_graph,
+    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
-    build_verified_qwen35_vision_manifest, build_verified_weight_load_plan, read_model_lock,
-    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar,
+    build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
+    build_verified_weight_load_plan, qwen35_moe_generation_stop_policy, read_model_lock,
+    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar, verify_qwen35_moe_artifact,
     verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
@@ -20,8 +23,9 @@ use sllm_frontend::{
     GenerationExecutorV1, GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopControllerV1,
     GenerationStopPolicyV1, ProcessedVisionInputV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, Qwen35VisionProcessorV1, ThinkingModeV1, TokenIdsV1,
-    TokenizerFrontendV1, gemma4_generation_stop_policy,
+    Qwen35RenderOptionsV1, Qwen35VisionProcessorV1, QwenMtpGenerationExecutorV1,
+    SpeculativeGenerationAdapterV1, ThinkingModeV1, TokenIdsV1, TokenizerFrontendV1,
+    gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -172,6 +176,7 @@ struct GenerateRequest {
     image_paths: Vec<PathBuf>,
     max_new_tokens: u32,
     sampling: SamplingParametersV1,
+    seed: Option<u64>,
     stop_strings: Vec<String>,
     device_index: u32,
     target: String,
@@ -445,6 +450,10 @@ struct ProductionBackend {
     cache: Arc<VerifiedCache>,
 }
 
+struct MoeProductionBackend {
+    artifact: Arc<VerifiedQwen35Moe>,
+}
+
 struct GemmaProductionBackend {
     lock: Gemma4ModelLock,
     source: GemmaModelSource,
@@ -652,8 +661,9 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             )
             .map_err(|error| format!("generation configuration is invalid: {error}"))?;
             let cancellation = GenerationCancellationV1::new();
-            let mut random = OsSamplingRandom::for_parameters(request.sampling)
-                .map_err(|error| format!("sampling random source failed: {error}"))?;
+            let mut random =
+                OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
+                    .map_err(|error| format!("sampling random source failed: {error}"))?;
             let report = service
                 .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
                 .map_err(|error| format!("generation service failed: {error}"))?;
@@ -739,6 +749,13 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 }
 
 fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBackend>, String> {
+    if request.lock.is_dir() {
+        let artifact = Arc::new(
+            verify_qwen35_moe_artifact(&request.lock)
+                .map_err(|error| format!("MoE model directory is invalid: {error}"))?,
+        );
+        return Ok(Box::new(MoeProductionBackend { artifact }));
+    }
     match read_reviewed_model_lock(&request.lock)
         .map_err(|_| "model lock could not be read or validated".to_owned())?
     {
@@ -748,6 +765,192 @@ fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBac
         ReviewedModelLock::Gemma4(lock) => {
             GemmaProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
         }
+    }
+}
+
+impl ModelFrontendBackend for MoeProductionBackend {
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            repo_id: sllm_core::QWEN35_MOE_REPOSITORY.to_owned(),
+            resolved_revision: sllm_core::QWEN35_MOE_REVISION.to_owned(),
+            lock_fingerprint: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+        }
+    }
+
+    fn verify(&self) -> Result<Value, String> {
+        let plan =
+            build_qwen35_moe_weight_load_plan(&self.artifact).map_err(|error| error.to_string())?;
+        Ok(json!({
+            "kind": "verify-model",
+            "architecture": "Qwen3_5MoeForConditionalGeneration",
+            "tensor_count": self.artifact.text_planes().len(),
+            "weight_entries": plan.entries.len(),
+            "total_destination_bytes": plan.total_destination_bytes,
+            "plan_digest": plan.digest_hex(),
+            "weight_encoding": "ocp-mxfp4-e2m1-block32-e8m0-mixed",
+        }))
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Value, String> {
+        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
+            .map_err(|error| error.to_string())?;
+        let ids = tokenizer.encode(text).map_err(|error| error.to_string())?;
+        Ok(json!({"kind":"tokenize","count":ids.len(),"token_ids":ids.as_slice()}))
+    }
+
+    fn render(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&self.artifact)
+            .map_err(|error| error.to_string())?;
+        let text = renderer
+            .render(messages, options)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({"kind":"render","text":text}))
+    }
+
+    fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
+            .map_err(|error| error.to_string())?;
+        let text = tokenizer
+            .decode(ids, mode)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({"kind":"decode","text":text}))
+    }
+
+    fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
+        let started = Instant::now();
+        if !request.image_paths.is_empty() {
+            return Err("Qwen3.5 MoE production path is text-only".to_owned());
+        }
+        if request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err("Qwen3.5 MoE selects its mixed MXFP4 recipe internally".to_owned());
+        }
+        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
+            .map_err(|error| error.to_string())?;
+        let renderer = match &request.input {
+            GenerationInput::Prompt(_) => None,
+            GenerationInput::Messages { .. } => Some(
+                Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&self.artifact)
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        let stop_policy = qwen35_moe_generation_stop_policy();
+        let service = GenerationServiceV1::new(&tokenizer, renderer.as_ref(), &stop_policy)
+            .map_err(|error| error.to_string())?;
+        let (input_kind, service_input) = match &request.input {
+            GenerationInput::Prompt(prompt) => {
+                ("prompt", ServiceGenerationInputV1::Prompt(prompt.clone()))
+            }
+            GenerationInput::Messages { messages, options } => (
+                "messages",
+                ServiceGenerationInputV1::Messages {
+                    messages: messages.clone(),
+                    options: *options,
+                },
+            ),
+        };
+        let input = service
+            .prepare_input(&service_input)
+            .map_err(|error| error.to_string())?;
+        let input_len = u64::try_from(input.len()).map_err(|_| "input is too long")?;
+        let state_capacity = input_len
+            .checked_add(u64::from(request.max_new_tokens))
+            .ok_or("state capacity overflow")?;
+        let plan =
+            build_qwen35_moe_weight_load_plan(&self.artifact).map_err(|error| error.to_string())?;
+        let graph =
+            build_qwen35_moe_execution_graph(&self.artifact, &plan, input_len, state_capacity)
+                .map_err(|error| error.to_string())?;
+        let backend = HipBackend::connect().map_err(|error| error.to_string())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        let result = (|| -> Result<Value, String> {
+            let resident = QwenResidentModel::new_moe(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                Arc::clone(&self.artifact),
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| error.to_string())?;
+            let mut owner = resident
+                .new_request(graph)
+                .map_err(|error| error.to_string())?;
+            let config = GenerationConfigV1::new(
+                request.max_new_tokens,
+                request.sampling,
+                request.stop_strings.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+            let cancellation = GenerationCancellationV1::new();
+            let mut random =
+                OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
+                    .map_err(|error| error.to_string())?;
+            let report = service
+                .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
+                .map_err(|error| error.to_string())?;
+            let audit = owner.audit_snapshot().map_err(|error| error.to_string())?;
+            if audit.target() != request.target
+                || audit.fallback_used()
+                || !audit.all_dispatches_hip()
+            {
+                return Err("MoE dispatch audit is not exact HIP/no-fallback".to_owned());
+            }
+            Ok(json!({
+                "kind":"generate",
+                "input_kind":input_kind,
+                "input_token_ids":report.input_token_ids(),
+                "generated_token_ids":report.generated_token_ids(),
+                "visible_token_ids":report.visible_token_ids(),
+                "decode_input_token_ids":report.decode_input_token_ids(),
+                "output_text":report.output_text(),
+                "finish_reason":report.finish_reason().as_str(),
+                "usage":{
+                    "prompt_tokens":report.usage().prompt_tokens(),
+                    "completion_tokens":report.usage().completion_tokens(),
+                    "total_tokens":report.usage().total_tokens(),
+                },
+                "execution":{
+                    "selected_backend":audit.selected_backend(),
+                    "target":audit.target(),
+                    "device_index":request.device_index,
+                    "model_fingerprint":sllm_core::QWEN35_MOE_MODEL_FINGERPRINT,
+                    "plan_digest":plan.digest_hex(),
+                    "fallback_used":audit.fallback_used(),
+                    "submission_count":audit.submission_count(),
+                    "kernel_dispatch_count":audit.kernel_dispatch_count(),
+                    "all_dispatches_hip":audit.all_dispatches_hip(),
+                    "weight_encoding":"ocp-mxfp4-e2m1-block32-e8m0-mixed",
+                    "fp8_provider":null,
+                },
+            }))
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|error| error.to_string())?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        let mut result = result?;
+        result.as_object_mut().unwrap().insert(
+            "timing_ns".to_owned(),
+            Value::from(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+        );
+        Ok(result)
+    }
+
+    fn benchmark(&self, _: &BenchmarkRequest, _: BenchmarkTiming) -> Result<Value, String> {
+        Err("Qwen3.5 MoE benchmark uses the Phase 19 evidence runner".to_owned())
     }
 }
 
@@ -909,6 +1112,16 @@ impl ModelFrontendBackend for ProductionBackend {
         }
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
+        let mtp_candidate = processed_images.is_empty()
+            && !has_sidecar
+            && request.target == "gfx1201"
+            && !request.sampling.requires_logits()
+            && self.lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT;
+        let text_graph_rows = if mtp_candidate {
+            input_len.max(2)
+        } else {
+            input_len
+        };
         let graph = if !processed_images.is_empty() {
             build_qwen35_multimodal_graph(&self.lock, &plan, input_len, state_capacity)
         } else if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
@@ -928,7 +1141,9 @@ impl ModelFrontendBackend for ProductionBackend {
                 (Some(sidecar), Some(_)) => {
                     build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
                 }
-                (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+                (None, None) => {
+                    build_qwen35_graph(&self.lock, &plan, text_graph_rows, state_capacity)
+                }
                 _ => unreachable!("quantized provider selection validated sidecar state"),
             }
         }
@@ -1088,22 +1303,72 @@ impl ModelFrontendBackend for ProductionBackend {
             )
             .map_err(|error| format!("generation configuration is invalid: {error}"))?;
             let cancellation = GenerationCancellationV1::new();
-            let mut random = OsSamplingRandom::for_parameters(request.sampling)
-                .map_err(|error| format!("sampling random source failed: {error}"))?;
-            let report = if let Some((_, prompt)) = vision_bundle.as_ref() {
+            let mut random =
+                OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
+                    .map_err(|error| format!("sampling random source failed: {error}"))?;
+            let (report, audit) = if let Some((_, prompt)) = vision_bundle.as_ref() {
                 let mut executor = CliQwenMultimodalExecutor {
                     inner: &mut owner,
                     prompt,
                     prefilled: false,
                 };
-                service.generate_tokens(&mut executor, &input, &config, &cancellation, &mut random)
+                let report = service.generate_tokens(
+                    &mut executor,
+                    &input,
+                    &config,
+                    &cancellation,
+                    &mut random,
+                );
+                let audit = owner.audit_snapshot();
+                (report, audit)
+            } else if mtp_candidate {
+                let mtp_plan = build_verified_qwen_component_weight_load_plan(
+                    &self.lock,
+                    &self.cache,
+                    QwenComponentSelection::MTP_ONLY,
+                )
+                .map_err(|error| format!("MTP load plan validation failed: {error}"))?;
+                let mtp_graph = build_qwen35_mtp_graph(&self.lock, &mtp_plan, state_capacity)
+                    .map_err(|error| format!("MTP request graph failed: {error}"))?;
+                let mtp_resident = QwenResidentModel::new(
+                    Arc::clone(&session),
+                    mtp_graph.clone(),
+                    mtp_plan,
+                    Arc::clone(&self.cache),
+                    COMPLETION_TIMEOUT,
+                )
+                .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
+                let mtp_owner = mtp_resident
+                    .new_request(mtp_graph)
+                    .map_err(|error| format!("MTP request provisioning failed: {error}"))?;
+                let mut executor = SpeculativeGenerationAdapterV1::new(
+                    QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
+                        .map_err(|error| error.to_string())?,
+                );
+                let report = service.generate_tokens(
+                    &mut executor,
+                    &input,
+                    &config,
+                    &cancellation,
+                    &mut random,
+                );
+                let audit = executor.inner().target().audit_snapshot();
+                drop(executor);
+                drop(mtp_resident);
+                (report, audit)
             } else {
-                service.generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
-            }
-            .map_err(|error| format!("generation service failed: {error}"))?;
-            let audit = owner
-                .audit_snapshot()
-                .map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
+                let report = service.generate_tokens(
+                    &mut owner,
+                    &input,
+                    &config,
+                    &cancellation,
+                    &mut random,
+                );
+                let audit = owner.audit_snapshot();
+                (report, audit)
+            };
+            let report = report.map_err(|error| format!("generation service failed: {error}"))?;
+            let audit = audit.map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
             if audit.target() != request.target {
                 return Err(
                     "Qwen dispatch audit target differs from the requested target".to_owned(),
@@ -1927,6 +2192,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut top_p = None;
     let mut presence_penalty = None;
     let mut frequency_penalty = None;
+    let mut seed = None;
     let mut stop_strings = Vec::new();
     let mut benchmark_lane = None;
     let mut benchmark_row_id = None;
@@ -2101,6 +2367,19 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "--frequency-penalty",
                 )?;
             }
+            "--seed" if command == "generate" => {
+                let value = take_value(&mut arguments, "--seed")?;
+                if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
+                    return Err("--seed must be an unsigned decimal U64".to_owned());
+                }
+                set_once(
+                    &mut seed,
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| "--seed must be an unsigned decimal U64".to_owned())?,
+                    "--seed",
+                )?;
+            }
             "--stop" if command == "generate" => {
                 let value = take_value(&mut arguments, "--stop")?;
                 if value.is_empty() {
@@ -2184,7 +2463,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     }
 
     let lock = PathBuf::from(lock.ok_or_else(|| "missing required --lock PATH".to_owned())?);
-    let cache = PathBuf::from(cache.ok_or_else(|| "missing required --cache PATH".to_owned())?);
+    let cache = cache.map(PathBuf::from).unwrap_or_else(|| lock.clone());
     let operation = match command {
         "verify-model" => Operation::Verify,
         "tokenize" => Operation::Tokenize {
@@ -2251,6 +2530,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     frequency_penalty.unwrap_or(0.0),
                 )
                 .map_err(|error| format!("invalid generation sampling parameters: {error}"))?,
+                seed,
                 stop_strings,
                 device_index: device_index
                     .ok_or_else(|| "generate requires --device-index".to_owned())?,
@@ -2707,6 +2987,8 @@ mod tests {
                     "0",
                     "--target",
                     "gfx1030",
+                    "--seed",
+                    "18446744073709551615",
                     "--greedy"
                 ]
             )
@@ -2715,6 +2997,7 @@ mod tests {
             Operation::Generate(GenerateRequest {
                 input: GenerationInput::Prompt(_),
                 max_new_tokens: 3,
+                seed: Some(u64::MAX),
                 device_index: 0,
                 ..
             })

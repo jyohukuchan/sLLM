@@ -96,6 +96,7 @@ pub const SLLM_HIP_MATMUL_VERSION: u32 = 1;
 pub const SLLM_HIP_MATMUL_FP8_VERSION: u32 = 2;
 pub const SLLM_HIP_MATMUL_NVFP4_VERSION: u32 = 3;
 pub const SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION: u32 = 4;
+pub const SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION: u32 = 5;
 pub const SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1: u32 = 1;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2: u32 = 2;
@@ -107,6 +108,8 @@ pub const SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1: u32 = 6;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_DECODE_WAVE64_BF16_FP32_V1: u32 = 7;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_PACKED_DEQUANT_V1: u32 = 8;
 pub const SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_W4A4_PACKED_V1: u32 = 11;
+pub const SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_DECODE_V1: u32 = 14;
+pub const SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_PREFILL_V1: u32 = 15;
 pub const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_MATMUL_WORKGROUP_SIZE: u32 = 256;
@@ -122,6 +125,28 @@ pub const SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ARGMAX_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_ARGMAX_MAX_V: u64 = 1_048_576;
 pub const SLLM_HIP_ARGMAX_MAX_M: u64 = 4_294_967_295;
+pub const SLLM_HIP_MOE_ROUTE_VERSION: u32 = 1;
+pub const SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1: u32 = 1;
+pub const SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MOE_ROUTE_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_MOE_ROUTE_MAX_TOKENS: u64 = 65_536;
+pub const SLLM_HIP_MOE_ROUTE_MAX_EXPERTS: u64 = 256;
+pub const SLLM_HIP_MOE_ROUTE_MAX_SELECTED: u32 = 16;
+pub const SLLM_HIP_MOE_EXPERT_VERSION: u32 = 1;
+pub const SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1: u32 = 1;
+pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1: u32 = 2;
+pub const SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE: u32 = 2048;
+pub const SLLM_HIP_MOE_EXPERT_INTERMEDIATE_SIZE: u32 = 512;
+pub const SLLM_HIP_MOE_EXPERT_COUNT: u32 = 256;
+pub const SLLM_HIP_MOE_EXPERT_TOPK: u32 = 8;
+pub const SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES: u64 = 434_114_560;
+pub const SLLM_HIP_MOE_EXPERT_MAX_TOKENS: u64 = 65_536;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_VERSION: u32 = 1;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1: u32 = 1;
@@ -237,6 +262,7 @@ pub const SLLM_TENSOR_ENCODING_UNQUANTIZED: sllm_tensor_encoding_t = 0;
 pub const SLLM_TENSOR_ENCODING_FP8_OUTER_F32: sllm_tensor_encoding_t = 1;
 pub const SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32: sllm_tensor_encoding_t = 2;
 pub const SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32: sllm_tensor_encoding_t = 3;
+pub const SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0: sllm_tensor_encoding_t = 4;
 pub type sllm_rmsnorm_accumulation_dtype_t = u32;
 pub const SLLM_RMSNORM_ACCUMULATION_F32: sllm_rmsnorm_accumulation_dtype_t = 2;
 pub type sllm_rmsnorm_scale_mode_t = u32;
@@ -304,6 +330,16 @@ pub struct sllm_matmul_plan_t {
 
 #[repr(C)]
 pub struct sllm_argmax_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_moe_route_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_moe_expert_plan_t {
     _private: [u8; 0],
 }
 
@@ -646,6 +682,83 @@ pub struct sllm_argmax_dispatch_info_t {
     pub grid_size_x: u32,
     pub row_count: u64,
     pub vocab_size: u64,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_moe_route_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub selected_expert_count: u32,
+    pub reserved: [u32; 4],
+    pub logits: sllm_tensor_binding_t,
+    pub metadata: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_moe_route_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub expert_count: u64,
+    pub pair_count: u64,
+    pub selected_expert_count: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub reserved0: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_moe_expert_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub reserved0: u32,
+    pub reserved: [u32; 4],
+    pub hidden: sllm_tensor_binding_t,
+    pub routing_metadata: sllm_tensor_binding_t,
+    pub layer_blob: sllm_tensor_binding_t,
+    pub workspace: sllm_tensor_binding_t,
+    pub output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_moe_expert_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub active_pair_count: u64,
+    pub workspace_bytes: u64,
+    pub selected_expert_count: u32,
+    pub shared_expert_count: u32,
     pub fallback_allowed: u32,
     pub fallback_used: u32,
     pub kernel_symbol: [c_char; 64],
@@ -1228,6 +1341,40 @@ unsafe extern "C" {
         dispatch_info: *mut sllm_argmax_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_moe_route_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_moe_route_desc_t,
+        plan: *mut *mut sllm_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_moe_route_plan_release(
+        plan: *mut *mut sllm_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_moe_route_execute(
+        plan: *const sllm_moe_route_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_moe_route_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_moe_expert_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_moe_expert_desc_t,
+        plan: *mut *mut sllm_moe_expert_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_moe_expert_plan_release(
+        plan: *mut *mut sllm_moe_expert_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_moe_expert_execute(
+        plan: *const sllm_moe_expert_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_moe_expert_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_attention_preprocess_prepare(
         context: *const sllm_context_t,
         descriptor: *const sllm_attention_preprocess_desc_t,
@@ -1300,6 +1447,12 @@ unsafe extern "C" {
         info: *mut sllm_kv_view_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_kv_state_rewind_last(
+        state: *const sllm_kv_state_t,
+        expected_length: u64,
+        rewind_length: u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_kv_state_snapshot(
         state: *const sllm_kv_state_t,
         view: *mut *mut sllm_kv_view_t,
@@ -1348,6 +1501,12 @@ unsafe extern "C" {
     pub fn sllm_linear_attention_state_query(
         state: *const sllm_linear_attention_state_t,
         info: *mut sllm_linear_attention_view_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_rewind_last(
+        state: *const sllm_linear_attention_state_t,
+        expected_length: u64,
+        rewind_length: u64,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_linear_attention_execute(

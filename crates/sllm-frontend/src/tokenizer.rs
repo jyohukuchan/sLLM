@@ -6,6 +6,23 @@ use tokenizers::{AddedToken, Tokenizer};
 
 use crate::{StopPolicyError, validate_generation_stop_policy};
 
+const QWEN35_MOE_TOKENIZER_CONTRACT: &str = r#"{
+  "files":["chat_template.jinja","merges.txt","tokenizer.json","tokenizer_config.json","vocab.json"],
+  "chat_template_path":"chat_template.jinja",
+  "vocab_size":248320,
+  "eos_token_id":248044,
+  "special_token_ids":{"vision_start":248053,"vision_end":248054,"vision_pad":248055,"image_pad":248056,"video_pad":248057},
+  "stop_identity":{
+    "config_eos":{"token":"<|endoftext|>","token_id":248044,"source_file":"config.json"},
+    "tokenizer_eos":{"token":"<|im_end|>","token_id":248046,"source_files":["tokenizer_config.json","tokenizer.json"]}
+  },
+  "generation_stop_policy":{
+    "version":1,"stop_token_ids":[248046,248044],"evaluation":"newly_generated_after_argmax",
+    "prompt_evaluation":"never_stop","stop_token":{"visible_output":false,"subsequent_decode_input":false},
+    "budget_boundary":"stop_token_wins","max_new_tokens_zero":"max_new_tokens_before_decode","reason_version":1
+  }
+}"#;
+
 /// Immutable token IDs returned by the versioned tokenizer frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TokenIdsV1 {
@@ -331,11 +348,31 @@ impl TokenizerFrontendV1 {
         let bytes = cache
             .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        Self::from_qwen35_bytes(bytes, &lock.model().tokenizer_contract, lock.fingerprint())
+    }
+
+    /// Constructs the same Qwen3.5 tokenizer contract from the exact reviewed
+    /// MoE artifact, without requiring a Dense-model lock or cache facade.
+    pub fn from_qwen35_moe_artifact(
+        artifact: &sllm_core::VerifiedQwen35Moe,
+    ) -> Result<Self, TokenizerError> {
+        let bytes = artifact
+            .read_support_file("tokenizer.json")
+            .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        let contract: TokenizerContract = serde_json::from_str(QWEN35_MOE_TOKENIZER_CONTRACT)
+            .map_err(|_| TokenizerError::InvalidTokenizer)?;
+        Self::from_qwen35_bytes(bytes, &contract, sllm_core::QWEN35_MOE_MODEL_FINGERPRINT)
+    }
+
+    fn from_qwen35_bytes(
+        bytes: Vec<u8>,
+        contract: &TokenizerContract,
+        fingerprint: &str,
+    ) -> Result<Self, TokenizerError> {
         let tokenizer =
             Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
 
-        let contract = &lock.model().tokenizer_contract;
-        validate_generation_stop_policy(lock.generation_stop_policy())?;
+        validate_generation_stop_policy(contract.generation_stop_policy())?;
         let checked = CheckedContract::new(contract)?;
 
         // `get_vocab_size(false)` excludes added special tokens and therefore
@@ -394,7 +431,7 @@ impl TokenizerFrontendV1 {
         if identities_equal {
             expected_stop_ids.dedup();
         }
-        let actual_stop_ids = lock.generation_stop_policy().stop_token_ids.clone();
+        let actual_stop_ids = contract.generation_stop_policy().stop_token_ids.clone();
         if actual_stop_ids != expected_stop_ids {
             return Err(TokenizerError::StopPolicyMismatch {
                 expected: expected_stop_ids,
@@ -405,7 +442,7 @@ impl TokenizerFrontendV1 {
         let snapshot = TokenizerSnapshotV1 {
             // This is retained as a consistency label only. It does not make
             // the mutable core label a cryptographic lock binding.
-            fingerprint: lock.fingerprint().to_owned(),
+            fingerprint: fingerprint.to_owned(),
             vocab_size: contract.vocab_size,
             special_roles,
             config_eos,

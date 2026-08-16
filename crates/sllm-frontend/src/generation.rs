@@ -1,6 +1,7 @@
 //! Transport-independent render/tokenize/prefill/decode/sampling service.
 
 use core::fmt;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -240,6 +241,14 @@ impl GenerationStepV1 {
             last_logits,
         }
     }
+
+    pub const fn device_argmax(&self) -> u32 {
+        self.device_argmax
+    }
+
+    pub fn last_logits(&self) -> Option<&[f32]> {
+        self.last_logits.as_deref()
+    }
 }
 
 pub trait GenerationExecutorV1 {
@@ -256,6 +265,364 @@ pub trait GenerationExecutorV1 {
     ) -> Result<GenerationStepV1, GenerationServiceError>;
 
     fn cancel(&mut self);
+}
+
+/// Internal exact-speculation seam. It returns only canonical target steps in
+/// visible order; proposals and rejected rows never cross this boundary.
+pub trait SpeculativeGenerationExecutorV1: GenerationExecutorV1 {
+    fn speculative_decode_greedy(
+        &mut self,
+        pending_token: u32,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError>;
+}
+
+/// Adapts an exact speculative executor to the unchanged one-token generation
+/// loop. Sampled requests request logits and therefore use the canonical
+/// target-only decode path without consuming proposal RNG or changing public
+/// sampling state.
+pub struct SpeculativeGenerationAdapterV1<E> {
+    inner: E,
+    queued: VecDeque<(u32, GenerationStepV1)>,
+}
+
+impl<E> SpeculativeGenerationAdapterV1<E> {
+    pub fn new(inner: E) -> Self {
+        Self {
+            inner,
+            queued: VecDeque::new(),
+        }
+    }
+
+    pub fn inner(&self) -> &E {
+        &self.inner
+    }
+
+    pub fn inner_mut(&mut self) -> &mut E {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> E {
+        self.inner
+    }
+}
+
+impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
+    for SpeculativeGenerationAdapterV1<E>
+{
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        self.queued.clear();
+        self.inner.prefill(input_token_ids, include_last_logits)
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if include_last_logits {
+            if !self.queued.is_empty() {
+                return Err(GenerationServiceError::Execution(
+                    "sampling mode changed while speculative rows were queued".to_owned(),
+                ));
+            }
+            return self.inner.decode(token_id, true);
+        }
+        if let Some((expected_input, step)) = self.queued.pop_front() {
+            if token_id != expected_input {
+                return Err(GenerationServiceError::Execution(
+                    "generation loop input differs from the accepted speculative token".to_owned(),
+                ));
+            }
+            return Ok(step);
+        }
+        let steps = self.inner.speculative_decode_greedy(token_id)?;
+        let mut steps = steps.into_iter();
+        let first = steps.next().ok_or_else(|| {
+            GenerationServiceError::Execution(
+                "speculative executor returned no canonical target step".to_owned(),
+            )
+        })?;
+        let mut expected_input = first.device_argmax();
+        for step in steps {
+            let next_expected = step.device_argmax();
+            self.queued.push_back((expected_input, step));
+            expected_input = next_expected;
+        }
+        Ok(first)
+    }
+
+    fn cancel(&mut self) {
+        self.queued.clear();
+        self.inner.cancel();
+    }
+}
+
+/// Qwen3.5 target+MTP owner for exact greedy speculation.
+/// The target graph must have row capacity `draft_width + 1`.
+pub struct QwenMtpGenerationExecutorV1 {
+    target: QwenExecutionRequest,
+    mtp: QwenExecutionRequest,
+    last_target_hidden_bf16: Vec<u16>,
+    draft_width: usize,
+    proposal_blocks: u64,
+    proposed_draft_tokens: u64,
+    accepted_draft_tokens: u64,
+    committed_target_rows: u64,
+}
+
+impl QwenMtpGenerationExecutorV1 {
+    const HIDDEN_WIDTH: usize = 2_560;
+
+    pub fn new(target: QwenExecutionRequest, mtp: QwenExecutionRequest) -> Self {
+        Self {
+            target,
+            mtp,
+            last_target_hidden_bf16: Vec::new(),
+            draft_width: 2,
+            proposal_blocks: 0,
+            proposed_draft_tokens: 0,
+            accepted_draft_tokens: 0,
+            committed_target_rows: 0,
+        }
+    }
+
+    pub fn new_with_draft_width(
+        target: QwenExecutionRequest,
+        mtp: QwenExecutionRequest,
+        draft_width: usize,
+    ) -> Result<Self, GenerationServiceError> {
+        // The recurrent linear-attention state keeps exactly one prior slot,
+        // so one speculative call may discard at most one proposal row. A
+        // wider target block remains available to the numerical evidence
+        // seam, but is not a safe generation transaction yet.
+        if !(1..=2).contains(&draft_width) {
+            return Err(GenerationServiceError::Execution(
+                "MTP generation draft width must be in 1..=2".to_owned(),
+            ));
+        }
+        Ok(Self {
+            target,
+            mtp,
+            last_target_hidden_bf16: Vec::new(),
+            draft_width,
+            proposal_blocks: 0,
+            proposed_draft_tokens: 0,
+            accepted_draft_tokens: 0,
+            committed_target_rows: 0,
+        })
+    }
+
+    pub const fn draft_width(&self) -> usize {
+        self.draft_width
+    }
+
+    pub fn target(&self) -> &QwenExecutionRequest {
+        &self.target
+    }
+
+    pub fn mtp(&self) -> &QwenExecutionRequest {
+        &self.mtp
+    }
+
+    pub const fn proposal_blocks(&self) -> u64 {
+        self.proposal_blocks
+    }
+
+    pub const fn proposed_draft_tokens(&self) -> u64 {
+        self.proposed_draft_tokens
+    }
+
+    pub const fn accepted_draft_tokens(&self) -> u64 {
+        self.accepted_draft_tokens
+    }
+
+    pub const fn committed_target_rows(&self) -> u64 {
+        self.committed_target_rows
+    }
+
+    fn step_from_output(
+        output: &sllm_core::QwenExecutionOutput,
+        row: usize,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = *output
+            .token_ids()
+            .get(row)
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+        Ok(GenerationStepV1::new(
+            u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            None,
+        ))
+    }
+}
+
+impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        _: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .target
+            .prefill_with_mtp_state(&input)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let hidden = output.hidden_states_bf16().ok_or_else(|| {
+            GenerationServiceError::Execution("target prefill omitted MTP hidden rows".to_owned())
+        })?;
+        if hidden.len() != input.len() * Self::HIDDEN_WIDTH {
+            return Err(GenerationServiceError::Execution(
+                "target prefill MTP hidden row count differs".to_owned(),
+            ));
+        }
+        let zero = vec![0_u16; Self::HIDDEN_WIDTH];
+        self.mtp
+            .prefill_mtp(input[0], &zero)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        for index in 1..input.len() {
+            self.mtp
+                .decode_mtp(
+                    input[index],
+                    &hidden[(index - 1) * Self::HIDDEN_WIDTH..index * Self::HIDDEN_WIDTH],
+                )
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        self.last_target_hidden_bf16 = hidden[(input.len() - 1) * Self::HIDDEN_WIDTH..].to_vec();
+        Self::step_from_output(&output, input.len() - 1)
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = if include_last_logits {
+            self.target.decode_with_last_logits(token)
+        } else {
+            self.target.decode(token)
+        }
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let argmax = Self::step_from_output(&output, 0)?;
+        Ok(GenerationStepV1::new(
+            argmax.device_argmax(),
+            output.last_logits().map(<[f32]>::to_vec),
+        ))
+    }
+
+    fn cancel(&mut self) {
+        self.target.cancel();
+        self.mtp.cancel();
+    }
+}
+
+impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
+    fn speculative_decode_greedy(
+        &mut self,
+        pending_token: u32,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        if self.last_target_hidden_bf16.len() != Self::HIDDEN_WIDTH {
+            return Err(GenerationServiceError::Execution(
+                "MTP executor was not initialized by prefill".to_owned(),
+            ));
+        }
+        let pending =
+            i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let mut drafts = Vec::with_capacity(self.draft_width);
+        let mut proposal_token = pending;
+        let mut proposal_hidden = self.last_target_hidden_bf16.clone();
+        for _ in 0..self.draft_width {
+            let proposal = self
+                .mtp
+                .decode_mtp(proposal_token, &proposal_hidden)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            proposal_token = *proposal
+                .token_ids()
+                .first()
+                .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+            proposal_hidden = proposal
+                .hidden_states_bf16()
+                .ok_or_else(|| {
+                    GenerationServiceError::Execution(
+                        "MTP proposal omitted hidden state".to_owned(),
+                    )
+                })?
+                .to_vec();
+            drafts.push(proposal_token);
+        }
+        let mut block_inputs = Vec::with_capacity(self.draft_width + 1);
+        block_inputs.push(pending);
+        block_inputs.extend_from_slice(&drafts);
+        let block = self
+            .target
+            .decode_block_with_mtp_state(&block_inputs)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let hidden = block.hidden_states_bf16().ok_or_else(|| {
+            GenerationServiceError::Execution("target verify omitted hidden rows".to_owned())
+        })?;
+        if block.token_ids().len() != self.draft_width + 1
+            || hidden.len() != (self.draft_width + 1) * Self::HIDDEN_WIDTH
+        {
+            return Err(GenerationServiceError::Execution(
+                "target verify row count differs from draft width".to_owned(),
+            ));
+        }
+        let mut accepted = 0_usize;
+        while accepted < self.draft_width {
+            let draft = u32::try_from(drafts[accepted])
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+            let target = u32::try_from(block.token_ids()[accepted])
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+            if draft != target {
+                break;
+            }
+            accepted += 1;
+        }
+        let committed_rows = if accepted == self.draft_width {
+            self.draft_width + 1
+        } else {
+            accepted + 1
+        };
+        let steps = (0..committed_rows)
+            .map(|row| Self::step_from_output(&block, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.last_target_hidden_bf16 = hidden
+            [(committed_rows - 1) * Self::HIDDEN_WIDTH..committed_rows * Self::HIDDEN_WIDTH]
+            .to_vec();
+        if accepted != self.draft_width {
+            for _ in 0..self.draft_width.saturating_sub(committed_rows) {
+                self.mtp
+                    .rewind_last_decode_transition()
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            }
+        } else {
+            let previous_hidden_start = (self.draft_width - 1) * Self::HIDDEN_WIDTH;
+            self.mtp
+                .decode_mtp(
+                    drafts[self.draft_width - 1],
+                    &hidden[previous_hidden_start..previous_hidden_start + Self::HIDDEN_WIDTH],
+                )
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        self.target
+            .resolve_decode_block(committed_rows)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.proposal_blocks = self.proposal_blocks.saturating_add(1);
+        self.proposed_draft_tokens = self
+            .proposed_draft_tokens
+            .saturating_add(self.draft_width as u64);
+        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted as u64);
+        self.committed_target_rows = self
+            .committed_target_rows
+            .saturating_add(committed_rows as u64);
+        Ok(steps)
+    }
 }
 
 /// Minimal text frontend seam used by the transport-independent service.
@@ -900,6 +1267,54 @@ mod tests {
         }
     }
 
+    struct TinySpeculativeExecutor {
+        prefill_step: Option<GenerationStepV1>,
+        target_only_steps: VecDeque<GenerationStepV1>,
+        batches: VecDeque<Vec<GenerationStepV1>>,
+        speculative_inputs: Vec<u32>,
+        target_only_inputs: Vec<u32>,
+        cancelled: bool,
+    }
+
+    impl GenerationExecutorV1 for TinySpeculativeExecutor {
+        fn prefill(
+            &mut self,
+            _: &[u32],
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.prefill_step.take().ok_or_else(|| {
+                GenerationServiceError::Execution("missing speculative prefill".to_owned())
+            })
+        }
+
+        fn decode(
+            &mut self,
+            token_id: u32,
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.target_only_inputs.push(token_id);
+            self.target_only_steps.pop_front().ok_or_else(|| {
+                GenerationServiceError::Execution("missing target-only step".to_owned())
+            })
+        }
+
+        fn cancel(&mut self) {
+            self.cancelled = true;
+        }
+    }
+
+    impl SpeculativeGenerationExecutorV1 for TinySpeculativeExecutor {
+        fn speculative_decode_greedy(
+            &mut self,
+            pending_token: u32,
+        ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+            self.speculative_inputs.push(pending_token);
+            self.batches.pop_front().ok_or_else(|| {
+                GenerationServiceError::Execution("missing speculative batch".to_owned())
+            })
+        }
+    }
+
     struct PieceFrontend;
 
     impl GenerationTextFrontendV1 for PieceFrontend {
@@ -991,6 +1406,44 @@ mod tests {
         assert_eq!(result.usage().total_tokens(), 6);
         assert_eq!(executor.include_logits, [false, false, false]);
         assert_eq!(executor.cancel_count, 0);
+    }
+
+    #[test]
+    fn speculative_adapter_feeds_only_accepted_target_steps_to_the_normal_loop() {
+        let inner = TinySpeculativeExecutor {
+            prefill_step: Some(GenerationStepV1::new(5, None)),
+            target_only_steps: VecDeque::new(),
+            batches: VecDeque::from([vec![
+                GenerationStepV1::new(6, None),
+                GenerationStepV1::new(7, None),
+            ]]),
+            speculative_inputs: Vec::new(),
+            target_only_inputs: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
+        assert_eq!(adapter.prefill(&[1], false).unwrap().device_argmax(), 5);
+        assert_eq!(adapter.decode(5, false).unwrap().device_argmax(), 6);
+        assert_eq!(adapter.decode(6, false).unwrap().device_argmax(), 7);
+        assert_eq!(adapter.inner().speculative_inputs, [5]);
+        assert!(adapter.inner().target_only_inputs.is_empty());
+    }
+
+    #[test]
+    fn speculative_adapter_uses_target_only_path_when_logits_are_requested() {
+        let inner = TinySpeculativeExecutor {
+            prefill_step: Some(GenerationStepV1::new(5, Some(vec![0.0, 1.0]))),
+            target_only_steps: VecDeque::from([GenerationStepV1::new(6, Some(vec![1.0, 0.0]))]),
+            batches: VecDeque::new(),
+            speculative_inputs: Vec::new(),
+            target_only_inputs: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
+        adapter.prefill(&[1], true).unwrap();
+        adapter.decode(1, true).unwrap();
+        assert!(adapter.inner().speculative_inputs.is_empty());
+        assert_eq!(adapter.inner().target_only_inputs, [1]);
     }
 
     #[test]

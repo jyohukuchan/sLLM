@@ -92,6 +92,11 @@ impl TensorBinding {
                     scale_dtype: DType::F8E4M3Fn,
                 } => sys::SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32,
                 Encoding::Nvfp4W4A4 { .. } => u32::MAX,
+                Encoding::Mxfp4W4A4 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                } => sys::SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0,
+                Encoding::Mxfp4W4A4 { .. } => u32::MAX,
                 Encoding::Fp8Scaled {
                     granularity: Fp8ScaleGranularity::OuterDimension,
                     scale_dtype: DType::F32,

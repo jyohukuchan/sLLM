@@ -154,7 +154,7 @@ versioned API拡張として文書化する。
 - stochastic MTPをproduction採用したtargetではseeded image promptも1 case通す。未採用targetへmatrixを無条件に増やさない。
 - Phase 16Fのquantized modelはtext-only smokeだけを回帰し、vision weight quantizationまで本Phaseへ広げない。
 - model lock、runtime、OpenAI compatibility、GPU/software compatibility、main plan、historyを同期する。1回のintegration reviewと
-  findingだけのfocused re-review後にarchiveし、Phase 18 MoEへ進む。
+  findingだけのfocused re-review後にarchiveする。後続順序は2026-08-16訂正によりPhase 18 MTP性能統合、Phase 19 MoEとする。
 
 ## 計測matrix
 
@@ -194,5 +194,11 @@ versioned API拡張として文書化する。
 - V620/R9700でMTPとvision/multimodal textをHIP-only、fallbackなし、deterministic、cleanup 0でPASSした。MTPを性能採用したtargetが
   ないためimage+MTP production matrixは非選択providerの追加gateにせず、imageはtarget-only text providerでcloseoutした。
 - low-bit modelのtext-only挙動を維持し、visionはBF16 text artifactに限定した。remote fetch、Files API、video、low-bit visionは非対象のまま。
+
+## 2026-08-16訂正
+
+- MTPの完了範囲はcomponent graph/verifier/real-weight evidenceまでであり、generation serviceのMTP off/on倍率、
+  batched target verify、target forward削減は未確認だった。通常逐次decodeとの数値同一性と最低限の高速化は
+  [Phase 18 archive](phase18-mtp-exact-sequential-speedup.md)へ移管し、MoEはPhase 19へ繰り下げる。
 
 [対応する履歴](../../../../../history/2026/08/11-20/phase17-qwen35-mtp-vision.md)

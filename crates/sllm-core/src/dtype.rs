@@ -78,6 +78,15 @@ pub enum Encoding {
         block_size: usize,
         scale_dtype: DType,
     },
+    /// OCP MXFP4 weights consumed through a dynamic-activation W4A4 matmul.
+    ///
+    /// Values use packed E2M1 nibbles and each consecutive K-axis block of 32
+    /// owns one E8M0 scale byte. E8M0 is represented physically as [`DType::U8`]
+    /// because it is a scale encoding rather than an arithmetic scalar dtype.
+    Mxfp4W4A4 {
+        block_size: usize,
+        scale_dtype: DType,
+    },
     /// One byte per FP8 value with scales stored in a distinct resident region.
     ///
     /// Keeping scales out of the value payload makes the safetensors layout,
@@ -121,7 +130,7 @@ impl Encoding {
             Self::Unquantized => dtype.size_bytes(),
             // NVFP4 values are packed into bytes.  Scale alignment is an
             // internal encoding detail and does not change the view offset.
-            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } => 1,
+            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } | Self::Mxfp4W4A4 { .. } => 1,
             Self::Fp8Scaled { resident, .. } => match resident {
                 Fp8ResidentRepresentation::PackedBytes => 1,
                 Fp8ResidentRepresentation::ConvertedBf16 => DType::Bf16.size_bytes(),
@@ -148,6 +157,21 @@ impl Encoding {
                 }
                 if scale_dtype != DType::F8E4M3Fn {
                     return Err(EncodingError::Nvfp4BlockScaleMustBeE4M3Fn { dtype: scale_dtype });
+                }
+                Ok(())
+            }
+            Self::Mxfp4W4A4 {
+                block_size,
+                scale_dtype,
+            } => {
+                if block_size != 32 {
+                    return Err(EncodingError::InvalidMxfp4BlockSize { block_size });
+                }
+                if dtype != DType::U8 {
+                    return Err(EncodingError::PackedStorageMustBeU8 { dtype });
+                }
+                if scale_dtype != DType::U8 {
+                    return Err(EncodingError::Mxfp4BlockScaleMustBeE8M0 { dtype: scale_dtype });
                 }
                 Ok(())
             }
@@ -183,7 +207,7 @@ impl Encoding {
             Self::Unquantized => elements
                 .checked_mul(dtype.size_bytes())
                 .ok_or(EncodingError::SizeOverflow),
-            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } => {
+            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } | Self::Mxfp4W4A4 { .. } => {
                 Ok(elements / 2 + u64::from(elements % 2 != 0))
             }
             Self::Fp8Scaled { resident, .. } => elements
@@ -200,8 +224,10 @@ impl Encoding {
 pub enum EncodingError {
     ZeroBlockSize,
     InvalidNvfp4BlockSize { block_size: usize },
+    InvalidMxfp4BlockSize { block_size: usize },
     PackedStorageMustBeU8 { dtype: DType },
     Nvfp4BlockScaleMustBeE4M3Fn { dtype: DType },
+    Mxfp4BlockScaleMustBeE8M0 { dtype: DType },
     Fp8StorageRequired { dtype: DType },
     InvalidScaleDType { dtype: DType },
     ConvertedBf16MustUseTensorScale,
@@ -214,6 +240,9 @@ impl fmt::Display for EncodingError {
             Self::ZeroBlockSize => formatter.write_str("encoding block size must be non-zero"),
             Self::InvalidNvfp4BlockSize { block_size } => {
                 write!(formatter, "NVFP4 block size must be 16, got {block_size}")
+            }
+            Self::InvalidMxfp4BlockSize { block_size } => {
+                write!(formatter, "MXFP4 block size must be 32, got {block_size}")
             }
             Self::PackedStorageMustBeU8 { dtype } => {
                 write!(formatter, "packed NVFP4 storage must use u8, got {dtype}")
@@ -228,6 +257,12 @@ impl fmt::Display for EncodingError {
                 write!(
                     formatter,
                     "NVFP4 block scale must use OCP E4M3FN, got {dtype}"
+                )
+            }
+            Self::Mxfp4BlockScaleMustBeE8M0 { dtype } => {
+                write!(
+                    formatter,
+                    "MXFP4 block scale must use E8M0 u8 storage, got {dtype}"
                 )
             }
             Self::InvalidScaleDType { dtype } => {

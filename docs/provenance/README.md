@@ -174,6 +174,24 @@ model-neutral contractと独立oracleから実装した。llama.cppはMTP tensor
 新しいsource expressionのcopy/adapt/importはない。vLLM/SGLang sourceは参照・移植していない。このPhaseによる
 `THIRD_PARTY_NOTICES.md`へのcode import追加はない。model/image payloadはrepositoryへ含めない。
 
+## Phase 18 exact MTP implementation record
+
+Phase 18のserial-equivalent small-M Matmul、target block transaction、KV/linear-state rewind、generation adapter、performance runnerは
+sLLM既存のM=1 kernel、owned execution contract、Phase 17 MTP graphから独立実装した。llama.cpp issue #25618は量子化targetの
+出力分岐というdefect classにだけ使用し、llama.cppのMTP source/control flowをcopy、adapt、portしていない。vLLM/SGLang sourceも
+参照・移植していない。このPhaseによる新規第三者code importと`THIRD_PARTY_NOTICES.md`追加はない。model、raw logits、KV dump、
+profile traceはrepositoryへ含めない。
+
+## Phase 19 Qwen3.5 MoE implementation record
+
+Phase 19は`amd/Qwen3.5-35B-A3B-MXFP4`の公開artifactをtensor schema、mixed-precision recipe、OCP MXFP4 dataの
+sourceとして、`Qwen/Qwen3.5-35B-A3B-FP8`をarchitecture/lineage controlとして使用した。router/top-8/shared-expert semantics、
+artifact loader、HIP route/expert kernel、full-model integrationはsLLM既存execution contract、OCP Microscaling Formats v1.0、
+独立NumPy actual-weight oracleから実装した。llama.cppからの新規直接reuseはなく、vLLM/SGLang sourceを参照・移植していない。
+vLLM containerによる同一artifactのblack-box起動はhealth到達前に停止しておりcorrectness evidenceには使用せず、source expressionの
+入力にもしていない。このPhaseによる新規第三者code importと`THIRD_PARTY_NOTICES.md`追加はない。model shard、生成token trace、
+profile artifactはrepositoryへ含めず、model artifactのlicense/noticeはsLLM runtimeのMIT licenseと別に扱う。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

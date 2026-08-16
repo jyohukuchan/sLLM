@@ -7,6 +7,8 @@
 #include "kv_state_api.hpp"
 #include "linear_attention_api.hpp"
 #include "matmul_api.hpp"
+#include "moe_expert_api.hpp"
+#include "moe_route_api.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
 #include "rotary_api.hpp"
@@ -1144,6 +1146,154 @@ sllm_argmax_execute(const sllm_argmax_plan_t *const plan,
   }
 }
 
+extern "C" sllm_status_t
+sllm_moe_route_prepare(const sllm_context_t *const context,
+                       const sllm_moe_route_desc_t *const descriptor,
+                       sllm_moe_route_plan_t **const plan,
+                       sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr) {
+      *plan = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "MoE route context or plan output is null");
+    }
+    sllm_moe_route::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_moe_route::validate_and_copy_descriptor(descriptor, &metadata,
+                                                     error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in MoE route prepare stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_moe_route_plan_release(sllm_moe_route_plan_t **const plan,
+                            sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || *plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "MoE route plan handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in MoE route release stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_moe_route_execute(const sllm_moe_route_plan_t *const plan,
+                       const sllm_queue_t *const queue,
+                       sllm_completion_t **const completion,
+                       sllm_moe_route_dispatch_info_t *const dispatch_info,
+                       sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || queue == nullptr || completion == nullptr ||
+        dispatch_info == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "MoE route execute input or output is null");
+    }
+    if (dispatch_info->struct_size != sizeof(*dispatch_info) ||
+        dispatch_info->abi_version != SLLM_HIP_ABI_VERSION ||
+        dispatch_info->info_version !=
+            SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION ||
+        dispatch_info->reserved0 != 0U ||
+        !std::all_of(std::begin(dispatch_info->reserved),
+                     std::end(dispatch_info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "MoE route dispatch info is unsupported");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in MoE route execute stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_moe_expert_prepare(const sllm_context_t *const context,
+                        const sllm_moe_expert_desc_t *const descriptor,
+                        sllm_moe_expert_plan_t **const plan,
+                        sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr)
+      *plan = nullptr;
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (context == nullptr || plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "MoE expert context or plan output is null");
+    }
+    sllm_moe_expert::DescriptorMetadata metadata{};
+    const sllm_status_t status = sllm_moe_expert::validate_and_copy_descriptor(
+        descriptor, &metadata, error_sink);
+    return status == SLLM_STATUS_OK ? unavailable(error_sink) : status;
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in MoE expert prepare stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_moe_expert_plan_release(sllm_moe_expert_plan_t **const plan,
+                             sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (plan == nullptr || *plan == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "MoE expert plan handle is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t
+sllm_moe_expert_execute(const sllm_moe_expert_plan_t *const plan,
+                        const sllm_queue_t *const queue,
+                        sllm_completion_t **const completion,
+                        sllm_moe_expert_dispatch_info_t *const dispatch_info,
+                        sllm_error_sink_t *const error_sink) noexcept {
+  if (completion != nullptr)
+    *completion = nullptr;
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (plan == nullptr || queue == nullptr || completion == nullptr ||
+      dispatch_info == nullptr ||
+      dispatch_info->struct_size != sizeof(*dispatch_info) ||
+      dispatch_info->abi_version != SLLM_HIP_ABI_VERSION ||
+      dispatch_info->info_version !=
+          SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "MoE expert execute contract differs");
+  }
+  return unavailable(error_sink);
+}
+
 extern "C" sllm_status_t sllm_attention_preprocess_prepare(
     const sllm_context_t *const context,
     const sllm_attention_preprocess_desc_t *const descriptor,
@@ -1490,6 +1640,21 @@ sllm_kv_state_query(const sllm_kv_state_t *const state,
 }
 
 extern "C" sllm_status_t
+sllm_kv_state_rewind_last(const sllm_kv_state_t *const state, const uint64_t,
+                          const uint64_t,
+                          sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "KV rewind state handle is null");
+  }
+  return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t
 sllm_kv_state_snapshot(const sllm_kv_state_t *const state,
                        sllm_kv_view_t **const view,
                        sllm_error_sink_t *const error_sink) noexcept {
@@ -1751,6 +1916,20 @@ extern "C" sllm_status_t sllm_linear_attention_state_query(
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in linear attention query stub");
   }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_rewind_last(
+    const sllm_linear_attention_state_t *const state, const uint64_t,
+    const uint64_t, sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK) {
+    return sink_status;
+  }
+  if (state == nullptr) {
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "linear attention rewind state handle is null");
+  }
+  return unavailable(error_sink);
 }
 
 extern "C" sllm_status_t sllm_linear_attention_execute(

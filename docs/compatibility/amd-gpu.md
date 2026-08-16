@@ -295,6 +295,27 @@ PASSしたが、逐次target verifyのため性能採用せず通常providerはt
 3-axis mRoPE text prefill、1 decodeを両targetでPASSした。targetごとのprojected digestはtarget内で再現し、異なるHIP数学provider間の
 bit一致は要求しない。別SKU、別画像geometry、video、low-bit visionへ一般化しない。
 
+### 2026-08-16 Phase 18 exact MTP evidence
+
+同じlocal tupleのcanonical V620 `gfx1030`とR9700 `gfx1201`で、fixed Qwen3.5-4Bのtarget block M=`2/3/4/7/8`を
+BF16+FP16 KVおよびFP8 W8A8+static FP8 KVで実行した。全幅のtoken/hidden、M=8のraw target logitsとaccepted-prefix K/V
+payloadは逐次M=1とbit/byte exactで、全dispatch HIP、fallbackなし、cleanup 0だった。R9700 BF16 width 1の3 warmup + 10 measuredは
+speedup中央値`1.0355x`、MAD`0.0028`、p10/p90 `1.0242/1.0448`だった。V620 screening中央値`0.9990x`はnoise内なので
+正確なprovider実装だけを保持し通常auto-selectionは行わない。別tuple、model、sampling、vision、長時間運転へ一般化しない。
+
+### 2026-08-16 Phase 19 Qwen3.5 MoE evidence
+
+同じlocal tupleのcanonical R9700 `gfx1201`（UUID `GPU-a8e9ddefa2d60f55`）とV620 `gfx1030`
+（UUID `GPU-08b2ddcbd6e6b36c`）で、fixed `amd/Qwen3.5-35B-A3B-MXFP4` text-only artifactを実行した。
+router境界matrixとactual-weight expert oracle（layer 0/19/39、M=1/3/7、expert 0–7/124–131/248–255）は
+最大誤差`1.86265e-9`、active pair 8/24/56、fallback 0をPASSした。full modelはprefill/decodeのSparseMoeを
+40/40回、active pairを960/320とexactに監査し、両targetで同じprefill/decode tokenとreplayを得た。
+
+resident currentは22,009,574,016 byte、request stateは129,474,560 byte、workspaceは17,982,024 byte、
+high-waterは22,230,758,892 byteだった。2 warmup + 11 measuredのprefill/decode中央値はR9700が
+216.258/204.198 ms、V620が537.832/370.711 msである。通常CLI/API、SSE、cancel/recovery、seeded sampling、shutdownを
+HIP-only、fallbackなし、cleanup 0でPASSした。別SKU/tuple、MoE vision/MTP、multi-GPU、batchingへ一般化しない。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

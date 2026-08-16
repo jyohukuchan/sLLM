@@ -28,6 +28,7 @@ const SUPPORTED_FIELDS: &[&str] = &[
     "stop",
     "presence_penalty",
     "frequency_penalty",
+    "seed",
     "stream",
     "n",
     "sllm",
@@ -46,7 +47,6 @@ const KNOWN_UNSUPPORTED_FIELDS: &[&str] = &[
     "prediction",
     "reasoning_effort",
     "response_format",
-    "seed",
     "service_tier",
     "store",
     "stream_options",
@@ -298,6 +298,7 @@ pub struct ChatCompletionRequestV1 {
     model: String,
     messages: Vec<ChatMessageV1>,
     generation: GenerationConfigV1,
+    seed: Option<i64>,
     stream: bool,
     reasoning: ReasoningOptionsV1,
 }
@@ -313,6 +314,17 @@ impl ChatCompletionRequestV1 {
 
     pub const fn generation(&self) -> &GenerationConfigV1 {
         &self.generation
+    }
+
+    pub const fn seed(&self) -> Option<i64> {
+        self.seed
+    }
+
+    pub const fn sampling_seed(&self) -> Option<u64> {
+        match self.seed {
+            Some(seed) => Some(u64::from_ne_bytes(seed.to_ne_bytes())),
+            None => None,
+        }
     }
 
     pub const fn stream(&self) -> bool {
@@ -363,6 +375,7 @@ struct WireChatCompletionRequest {
     stop: Option<WireStop>,
     presence_penalty: Option<f32>,
     frequency_penalty: Option<f32>,
+    seed: Option<i64>,
     stream: Option<bool>,
     n: Option<u32>,
     sllm: Option<WireSllmOptions>,
@@ -748,6 +761,7 @@ pub(crate) fn parse_chat_completion_request_for_profile(
         model: wire.model,
         messages,
         generation,
+        seed: wire.seed,
         stream: wire.stream.unwrap_or(false),
         reasoning,
     })
@@ -873,13 +887,27 @@ mod tests {
     #[test]
     fn supported_request_defaults_and_boundaries_are_typed() {
         let request = parse_chat_completion_request(&valid(
-            r#", "temperature":0, "top_p":0, "presence_penalty":-2, "frequency_penalty":2, "max_completion_tokens":4096, "stop":["x","終"], "stream":true, "n":1"#,
+            r#", "temperature":0, "top_p":0, "presence_penalty":-2, "frequency_penalty":2, "max_completion_tokens":4096, "stop":["x","終"], "seed":-9223372036854775808, "stream":true, "n":1"#,
         ))
         .unwrap();
         assert_eq!(request.model(), "qwen");
         assert_eq!(request.messages().len(), 1);
         assert!(request.stream());
         assert_eq!(request.generation().max_new_tokens(), 4096);
+        assert_eq!(request.seed(), Some(i64::MIN));
+        assert_eq!(request.sampling_seed(), Some(1_u64 << 63));
+        let maximum =
+            parse_chat_completion_request(&valid(r#", "seed":9223372036854775807"#)).unwrap();
+        assert_eq!(maximum.seed(), Some(i64::MAX));
+        assert_eq!(maximum.sampling_seed(), Some(i64::MAX as u64));
+        for value in ["-9223372036854775809", "9223372036854775808"] {
+            assert_eq!(
+                parse_chat_completion_request(&valid(&format!(r#", "seed":{value}"#)))
+                    .unwrap_err()
+                    .code(),
+                ErrorCodeV1::InvalidJson
+            );
+        }
     }
 
     #[test]
@@ -898,11 +926,6 @@ mod tests {
             (
                 valid(r#", "logprobs":false"#),
                 "logprobs",
-                ErrorCodeV1::UnsupportedParameter,
-            ),
-            (
-                valid(r#", "seed":0"#),
-                "seed",
                 ErrorCodeV1::UnsupportedParameter,
             ),
             (

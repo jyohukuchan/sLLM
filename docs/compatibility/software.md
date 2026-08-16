@@ -267,6 +267,22 @@ multimodal text prefill/decodeを実行した。vision projected digestはtarget
 全dispatch HIP、fallbackなし、cleanup 0だった。R9700ではCLI local PNGから1 token生成もPASSした。MTP逐次verifyは性能採用せず、
 通常serviceはtarget-onlyを維持する。software lifecycleは`experimental`のままで、別tupleやlow-bit visionへ一般化しない。
 
+### 2026-08-16 Phase 18 exact MTP tuple
+
+Phase 17と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、LLVM 23 tupleで、
+exact `gfx1030`/`gfx1201`のserial-equivalent target block、BF16/FP8 target、FP16/static-FP8 KVを実行した。raw target logitsと
+accepted-prefix KVを逐次M=1へ照合し、CLI、OpenAI non-stream/SSE/cancel/recovery/shutdownをR9700でPASSした。R9700だけ
+検証済みBF16 greedy rowを通常内部MTP providerへ採用し、V620と未計測tupleはtarget-onlyを維持する。software lifecycleは
+`experimental`のままで、別runtime/driver/kernelへ一般化しない。
+
+### 2026-08-16 Phase 19 Qwen3.5 MoE tuple
+
+Phase 18と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、LLVM 23、
+Code Object V6、wave32 tupleで、exact V620 `gfx1030`とR9700 `gfx1201`のQwen3.5-35B-A3B MXFP4 sparse MoEを
+target別release buildで実行した。actual-weight oracle、40層full-model prefill/decode、CLI/OpenAI service、cancel/recovery、
+seeded sampling、shutdownは全dispatch HIP、fallbackなし、cleanup 0をPASSした。software lifecycleは`experimental`のままで、
+別runtime/driver/kernel、別artifact、multi-GPU、長時間運転へ一般化しない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

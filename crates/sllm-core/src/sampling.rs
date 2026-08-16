@@ -132,7 +132,7 @@ impl fmt::Display for SamplingError {
 
 impl std::error::Error for SamplingError {}
 
-/// Internal randomness seam. HTTP request schemas never expose a seed.
+/// Internal randomness seam shared by OS-seeded and explicitly seeded requests.
 pub trait SamplingRandomSource {
     fn next_unit_f64(&mut self) -> Result<f64, SamplingError>;
 }
@@ -156,16 +156,27 @@ impl OsSamplingRandom {
     /// Avoids touching the OS random source for the strict greedy path, where
     /// [`ProfileSamplerV1`] guarantees that randomness is never observed.
     pub fn for_parameters(parameters: SamplingParametersV1) -> Result<Self, SamplingError> {
+        Self::for_parameters_and_seed(parameters, None)
+    }
+
+    pub fn for_parameters_and_seed(
+        parameters: SamplingParametersV1,
+        seed: Option<u64>,
+    ) -> Result<Self, SamplingError> {
         if parameters.requires_logits() {
-            Self::new()
+            match seed {
+                Some(state) => Ok(Self { state }),
+                None => Self::new(),
+            }
         } else {
             Ok(Self { state: 0 })
         }
     }
 
     fn next_u64(&mut self) -> u64 {
-        // SplitMix64 is used only after the state is seeded by the OS. It is
-        // adequate for categorical sampling and keeps the RNG seam tiny.
+        // SplitMix64 is used after the state is seeded by the OS or supplied
+        // explicitly by the request. It is adequate for categorical sampling
+        // and keeps the reproducible RNG seam tiny.
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut value = self.state;
         value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -359,6 +370,21 @@ mod tests {
     fn greedy_keeps_device_argmax_and_needs_no_logits_or_rng() {
         let sampler = ProfileSamplerV1::new(SamplingParametersV1::greedy(), &[]).unwrap();
         assert_eq!(sampler.select(17, None, &mut Fixed(f64::NAN)).unwrap(), 17);
+    }
+
+    #[test]
+    fn explicit_seed_replays_the_same_sampling_stream() {
+        let parameters = params(0.7, 0.9, 0.0, 0.0);
+        let mut first =
+            OsSamplingRandom::for_parameters_and_seed(parameters, Some(u64::MAX)).unwrap();
+        let mut replay =
+            OsSamplingRandom::for_parameters_and_seed(parameters, Some(u64::MAX)).unwrap();
+        for _ in 0..17 {
+            assert_eq!(
+                first.next_unit_f64().unwrap(),
+                replay.next_unit_f64().unwrap()
+            );
+        }
     }
 
     #[test]

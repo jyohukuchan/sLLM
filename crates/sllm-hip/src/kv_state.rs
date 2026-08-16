@@ -277,6 +277,24 @@ impl KvStateResource {
         })
     }
 
+    pub(crate) fn rewind_last(
+        &self,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sys::sllm_kv_state_rewind_last(
+                self.raw_handle()?.as_ptr(),
+                expected_length,
+                rewind_length,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
     pub(crate) fn readback(
         &self,
         plane: u32,
@@ -1028,7 +1046,7 @@ fn validate_causal_attention_binding(
         || view.shape().len() != 3
         || q_heads == 0
         || q_heads % layout.heads() != 0
-        || !matches!(q_heads / layout.heads(), 2 | 4 | 16)
+        || !matches!(q_heads / layout.heads(), 2 | 4 | 8 | 16)
         || view.shape()[2] != layout.head_dim()
         || view.strides() != [q_heads * layout.head_dim(), layout.head_dim(), 1]
         || view.shape()[0] == 0

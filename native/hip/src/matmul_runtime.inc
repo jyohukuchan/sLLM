@@ -97,7 +97,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
       try {
         candidate = std::make_unique<ElementwisePlan>(context, activation,
                                                       weight, output, metadata);
-        if (metadata.fp8_outer || metadata.nvfp4_w4a4) {
+        if (metadata.fp8_outer || metadata.nvfp4_w4a4 ||
+            metadata.mxfp4_w4a4) {
           const sllm_status_t device_status =
               select_context_device(context, error_sink);
           if (device_status != SLLM_STATUS_OK) {
@@ -107,18 +108,23 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
             return device_status;
           }
           const uint64_t value_bytes =
-              metadata.nvfp4_w4a4
+              metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
                   ? metadata.m * ((metadata.k + UINT64_C(1)) / UINT64_C(2))
                   : metadata.m * metadata.k;
-          const uint64_t scale_offset = metadata.nvfp4_w4a4
+          const uint64_t scale_offset =
+              metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
                                             ? value_bytes
                                             : (value_bytes + UINT64_C(3)) &
                                                   ~UINT64_C(3);
           candidate->matmul_workspace_bytes =
               scale_offset +
-              (metadata.nvfp4_w4a4
+              (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
                    ? metadata.m *
-                         ((metadata.k + UINT64_C(15)) / UINT64_C(16))
+                         ((metadata.k +
+                           (metadata.mxfp4_w4a4 ? UINT64_C(31)
+                                               : UINT64_C(15))) /
+                          (metadata.mxfp4_w4a4 ? UINT64_C(32)
+                                              : UINT64_C(16)))
                    : metadata.m * UINT64_C(4));
           const hipError_t workspace_status = hipMalloc(
               &candidate->matmul_workspace,
@@ -499,7 +505,48 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         plan->matmul_metadata.m, plan->matmul_metadata.k,
         plan->matmul_metadata.n, arch_name);
     hipError_t launch_status = hipSuccess;
-    if (plan->matmul_metadata.nvfp4_w4a4) {
+    if (plan->matmul_metadata.mxfp4_w4a4) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      launch_status = hipErrorInvalidValue;
+#else
+      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
+        launch_status = hipErrorNotSupported;
+      } else {
+        const uint64_t packed_activation_bytes =
+            plan->matmul_metadata.m *
+            ((plan->matmul_metadata.k + UINT64_C(1)) / UINT64_C(2));
+        const uint64_t activation_scale_bytes =
+            plan->matmul_metadata.m *
+            ((plan->matmul_metadata.k + UINT64_C(31)) / UINT64_C(32));
+        if (plan->matmul_workspace == nullptr ||
+            plan->matmul_workspace_bytes <
+                packed_activation_bytes + activation_scale_bytes) {
+          launch_status = hipErrorOutOfMemory;
+        } else {
+          auto *const packed_activation =
+              static_cast<uint8_t *>(plan->matmul_workspace);
+          auto *const activation_block_scales = packed_activation +
+                                                packed_activation_bytes;
+          const auto *const packed_weight =
+              static_cast<const uint8_t *>(weight_storage);
+          const auto *const weight_block_scales =
+              packed_weight + plan->matmul_metadata.weight_value_bytes;
+          launch_status = ::sllm_matmul_kernel::launch_mxfp4_quantize(
+              activation, packed_activation, activation_block_scales,
+              plan->matmul_metadata.m, plan->matmul_metadata.k,
+              queue->stream);
+          if (launch_status == hipSuccess) {
+            launch_status = ::sllm_matmul_kernel::launch_mxfp4_w4a4(
+                packed_activation, activation_block_scales, packed_weight,
+                weight_block_scales, output, plan->matmul_metadata.m,
+                plan->matmul_metadata.k, plan->matmul_metadata.n,
+                queue->stream);
+          }
+        }
+      }
+#endif
+    } else if (plan->matmul_metadata.nvfp4_w4a4) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       launch_status = hipErrorInvalidValue;
 #else

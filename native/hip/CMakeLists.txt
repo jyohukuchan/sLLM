@@ -30,6 +30,16 @@ option(SLLM_ENABLE_ARGMAX_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_MOE_ROUTE_GPU_TEST
+    "Build the focused real-GPU deterministic MoE routing runner"
+    OFF
+)
+
+option(SLLM_ENABLE_MOE_EXPERT_GPU_TEST
+    "Build the focused real-weight Qwen3.5 MoE expert runner"
+    OFF
+)
+
 option(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST
     "Build the focused real-GPU Gemma direct-scale RMSNorm runner"
     OFF
@@ -293,6 +303,8 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/elementwise_api.cpp
     src/matmul_api.cpp
     src/argmax_api.cpp
+    src/moe_route_api.cpp
+    src/moe_expert_api.cpp
     src/rmsnorm_api.cpp
     src/attention_preprocess_api.cpp
     src/rotary_api.cpp
@@ -337,6 +349,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_EMBEDDING_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/embedding_kernel.hip.o")
         set(SLLM_MATMUL_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/matmul_kernel.hip.o")
         set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
+        set(SLLM_MOE_ROUTE_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/moe_route_kernel.hip.o")
+        set(SLLM_MOE_EXPERT_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/moe_expert_kernel.hip.o")
         set(SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/attention_preprocess_kernel.hip.o")
         set(SLLM_KV_STATE_G1_KERNEL_OBJECT
@@ -356,6 +372,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/argmax_runtime.inc
+                src/moe_route_runtime.inc
+                src/moe_expert_runtime.inc
                 src/attention_preprocess_runtime.inc
                 src/rotary_runtime.inc
                 src/windowed_attention_runtime.inc
@@ -366,6 +384,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/elementwise_kernel_internal.hpp src/matmul_api.hpp
                 src/matmul_kernel_internal.hpp src/argmax_api.hpp
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
+                src/moe_route_api.hpp src/moe_route_kernel_internal.hpp
+                src/moe_expert_api.hpp src/moe_expert_kernel_internal.hpp
                 src/attention_preprocess_api.hpp
                 src/attention_preprocess_kernel_internal.hpp
                 src/rotary_api.hpp src/rotary_kernel_internal.hpp
@@ -427,6 +447,29 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/argmax_kernel.hip.cpp"
                 -o "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             DEPENDS src/argmax_kernel.hip.cpp src/argmax_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/moe_route_kernel.hip.cpp"
+                -o "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            DEPENDS src/moe_route_kernel.hip.cpp
+                src/moe_route_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/moe_expert_kernel.hip.cpp"
+                -o "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
+            DEPENDS src/moe_expert_kernel.hip.cpp
+                src/moe_expert_kernel_internal.hpp
+                src/matmul_kernel_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -500,6 +543,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
@@ -514,6 +559,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
@@ -528,6 +575,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/matmul_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/moe_expert_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/attention_preprocess_kernel.hip.cpp
                                     PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/kv_state_kernel.hip.cpp PROPERTIES
@@ -545,6 +594,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/matmul_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_expert_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES
             src/attention_preprocess_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/kv_state_kernel.hip.cpp)
@@ -671,6 +722,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/elementwise_api.cpp
         src/matmul_api.cpp
         src/argmax_api.cpp
+        src/moe_route_api.cpp
+        src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
@@ -713,6 +766,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/elementwise_api.cpp
         src/matmul_api.cpp
         src/argmax_api.cpp
+        src/moe_route_api.cpp
+        src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
@@ -804,6 +859,38 @@ if(SLLM_ENABLE_ARGMAX_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_argmax_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_MOE_ROUTE_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "MoE route GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_moe_route_gpu_test
+        tests/moe_route_gpu_test.cpp
+    )
+    target_compile_features(sllm_moe_route_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_moe_route_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+    )
+    target_compile_options(sllm_moe_route_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_moe_route_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_MOE_EXPERT_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "MoE expert GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_moe_expert_gpu_test tests/moe_expert_gpu_test.cpp)
+    target_compile_features(sllm_moe_expert_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_moe_expert_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}")
+    target_compile_options(sllm_moe_expert_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
+    target_link_libraries(sllm_moe_expert_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
 if(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST)

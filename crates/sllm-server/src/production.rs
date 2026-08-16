@@ -7,22 +7,25 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest, Gemma4ModelLock,
-    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QWEN35_4B_FINGERPRINT, QwenExecutionRequest,
-    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
-    QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
-    VerifiedCache, VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4,
-    WeightLoadPlan, assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph,
-    build_qwen35_fp8_graph, build_qwen35_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_unsloth_gemma4_nvfp4_weight_load_plan,
-    build_verified_gemma4_weight_load_plan, build_verified_qwen35_vision_manifest,
-    build_verified_weight_load_plan, read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
-    verify_nvfp4_sidecar, verify_unsloth_gemma4_nvfp4,
+    Gemma4ResidentModel, ModelLock, OsSamplingRandom, QWEN35_4B_FINGERPRINT,
+    QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
+    QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest,
+    QwenVisionResidentModel, ReviewedModelLock, VerifiedCache, VerifiedFp8Sidecar,
+    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedUnslothGemma4Nvfp4, WeightLoadPlan,
+    assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_graph, build_qwen35_moe_execution_graph, build_qwen35_moe_weight_load_plan,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
+    build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
+    build_verified_weight_load_plan, qwen35_moe_generation_stop_policy, read_model_lock,
+    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar, verify_qwen35_moe_artifact,
+    verify_unsloth_gemma4_nvfp4,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1,
-    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenizerFrontendV1,
-    gemma4_generation_stop_policy,
+    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1,
+    SpeculativeGenerationAdapterV1, TokenizerFrontendV1, gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -173,18 +176,22 @@ pub struct QwenChatBackendV1 {
 }
 
 struct QwenBackendStateV1 {
-    lock: ModelLock,
+    lock: Option<ModelLock>,
+    moe_artifact: Option<Arc<VerifiedQwen35Moe>>,
+    stop_policy: GenerationStopPolicyV1,
     tokenizer: TokenizerFrontendV1,
     renderer: Qwen35ChatTemplateV1,
     plan: WeightLoadPlan,
     resident: QwenResidentModel,
+    mtp_resident: Option<QwenResidentModel>,
+    mtp_plan: Option<WeightLoadPlan>,
     session: Arc<ExecutionSession>,
     target: String,
     model_ready_current_bytes: u64,
     sidecar: Option<Arc<VerifiedFp8Sidecar>>,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     fp8_provider: Option<String>,
-    cache: Arc<VerifiedCache>,
+    cache: Option<Arc<VerifiedCache>>,
     vision_manifest: Option<QwenVisionManifest>,
     vision_resident: Option<QwenVisionResidentModel>,
     completion_timeout: Duration,
@@ -226,6 +233,9 @@ struct BackendIdentityV1 {
 impl QwenChatBackendV1 {
     pub fn open(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
+        if config.lock_path.is_dir() {
+            return Self::open_moe(config);
+        }
         let lock = read_model_lock(&config.lock_path).map_err(|error| {
             BackendErrorV1::new(format!("model lock validation failed: {error}"))
         })?;
@@ -371,6 +381,34 @@ impl QwenChatBackendV1 {
             }
         }
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
+        let (mtp_resident, mtp_plan) = if sidecar.is_none()
+            && nvfp4_sidecar.is_none()
+            && config.target == "gfx1201"
+            && lock.fingerprint() == QWEN35_4B_FINGERPRINT
+        {
+            let mtp_plan = build_verified_qwen_component_weight_load_plan(
+                &lock,
+                &cache,
+                QwenComponentSelection::MTP_ONLY,
+            )
+            .map_err(|error| {
+                BackendErrorV1::new(format!("MTP load plan validation failed: {error}"))
+            })?;
+            let mtp_graph = build_qwen35_mtp_graph(&lock, &mtp_plan, 1).map_err(|error| {
+                BackendErrorV1::new(format!("MTP resident graph failed: {error}"))
+            })?;
+            let mtp_resident = QwenResidentModel::new(
+                Arc::clone(&session),
+                mtp_graph,
+                mtp_plan.clone(),
+                Arc::clone(&cache),
+                config.completion_timeout,
+            )
+            .map_err(|error| BackendErrorV1::new(format!("MTP resident load failed: {error}")))?;
+            (Some(mtp_resident), Some(mtp_plan))
+        } else {
+            (None, None)
+        };
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "model-ready")?;
         let model_ready_current_bytes = ready.model_resident().current_bytes();
@@ -387,19 +425,105 @@ impl QwenChatBackendV1 {
         };
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
-                lock,
+                stop_policy: lock.generation_stop_policy().clone(),
+                lock: Some(lock),
+                moe_artifact: None,
                 tokenizer,
                 renderer,
                 plan,
                 resident,
+                mtp_resident,
+                mtp_plan,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
                 sidecar,
                 nvfp4_sidecar,
                 fp8_provider,
-                cache,
+                cache: Some(cache),
                 vision_manifest,
+                vision_resident: None,
+                completion_timeout: config.completion_timeout,
+            })),
+            audits: Mutex::new(Vec::new()),
+            shutdown_timeout: config.shutdown_timeout,
+            identity,
+        })
+    }
+
+    fn open_moe(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
+        if config.fp8_manifest_path.is_some()
+            || config.fp8_artifact_path.is_some()
+            || config.fp8_provider.is_some()
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen3.5 MoE artifact selects its mixed MXFP4 recipe internally",
+            ));
+        }
+        let artifact = Arc::new(verify_qwen35_moe_artifact(&config.lock_path).map_err(
+            |error| BackendErrorV1::new(format!("MoE artifact validation failed: {error}")),
+        )?);
+        let tokenizer =
+            TokenizerFrontendV1::from_qwen35_moe_artifact(&artifact).map_err(|error| {
+                BackendErrorV1::new(format!("MoE tokenizer construction failed: {error}"))
+            })?;
+        let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&artifact)
+            .map_err(|error| BackendErrorV1::new(format!("MoE chat renderer failed: {error}")))?;
+        let plan = build_qwen35_moe_weight_load_plan(&artifact).map_err(|error| {
+            BackendErrorV1::new(format!("MoE load plan validation failed: {error}"))
+        })?;
+        let seed_graph = build_qwen35_moe_execution_graph(&artifact, &plan, 1, 1)
+            .map_err(|error| BackendErrorV1::new(format!("MoE resident graph failed: {error}")))?;
+        let backend = HipBackend::connect()
+            .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(config.device_index, &config.target).map_err(
+                    |error| BackendErrorV1::new(format!("HIP session request failed: {error}")),
+                )?,
+            )
+            .map_err(|error| BackendErrorV1::new(format!("HIP session failed: {error}")))?;
+        let resident = QwenResidentModel::new_moe(
+            Arc::clone(&session),
+            seed_graph,
+            plan.clone(),
+            Arc::clone(&artifact),
+            config.completion_timeout,
+        )
+        .map_err(|error| BackendErrorV1::new(format!("MoE resident load failed: {error}")))?;
+        let ready = session.memory_snapshot();
+        require_clean_request_memory(ready, "MoE model-ready")?;
+        let model_ready_current_bytes = ready.model_resident().current_bytes();
+        if model_ready_current_bytes == 0 || ready.current_bytes() != model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "MoE model-ready accounting is not resident-only",
+            ));
+        }
+        let identity = BackendIdentityV1 {
+            target: config.target.clone(),
+            model_fingerprint: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+            plan_digest: plan.digest_hex(),
+            model_ready_current_bytes,
+        };
+        Ok(Self {
+            state: Mutex::new(Some(QwenBackendStateV1 {
+                lock: None,
+                moe_artifact: Some(artifact),
+                stop_policy: qwen35_moe_generation_stop_policy(),
+                tokenizer,
+                renderer,
+                plan,
+                resident,
+                mtp_resident: None,
+                mtp_plan: None,
+                session,
+                target: config.target,
+                model_ready_current_bytes,
+                sidecar: None,
+                nvfp4_sidecar: None,
+                fp8_provider: Some("ocp-mxfp4-w4a4-mixed".to_owned()),
+                cache: None,
+                vision_manifest: None,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
             })),
@@ -433,12 +557,14 @@ impl QwenChatBackendV1 {
             .ok_or_else(|| BackendErrorV1::new("Qwen backend is already shut down"))?;
         let QwenBackendStateV1 {
             resident,
+            mtp_resident,
             vision_resident,
             session,
             model_ready_current_bytes,
             ..
         } = state;
         drop(resident);
+        drop(mtp_resident);
         drop(vision_resident);
         let before_shutdown = session.memory_snapshot();
         if before_shutdown.current_bytes() != 0 {
@@ -700,7 +826,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let service = GenerationServiceV1::new(
             &state.tokenizer,
             Some(&state.renderer),
-            state.lock.generation_stop_policy(),
+            &state.stop_policy,
         )
         .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
         let input = GenerationInputV1::Messages {
@@ -729,6 +855,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let multimodal_prompt = if processed_images.is_empty() {
             None
         } else {
+            if state.moe_artifact.is_some() {
+                return Err(BackendErrorV1::new(
+                    "Qwen3.5 MoE production path is text-only",
+                ));
+            }
             if state.sidecar.is_some() || state.nvfp4_sidecar.is_some() {
                 return Err(BackendErrorV1::new(
                     "vision requests currently require the BF16 text artifact",
@@ -741,7 +872,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 state.vision_resident = Some(
                     QwenVisionResidentModel::new(
                         Arc::clone(&state.session),
-                        Arc::clone(&state.cache),
+                        Arc::clone(state.cache.as_ref().expect("vision requires dense cache")),
                         vision_manifest.clone(),
                         state.completion_timeout,
                     )
@@ -777,7 +908,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 .collect::<Result<Vec<_>, BackendErrorV1>>()?;
             Some(
                 assemble_qwen35_multimodal_prompt(
-                    state.cache.as_ref(),
+                    state
+                        .cache
+                        .as_deref()
+                        .ok_or_else(|| BackendErrorV1::new("dense Qwen cache is absent"))?,
                     &prompt,
                     vision_manifest.image_pad_token,
                     &images,
@@ -792,11 +926,26 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let state_capacity = prompt_tokens
             .checked_add(u64::from(request.generation().max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
-        let graph = if multimodal_prompt.is_some() {
-            build_qwen35_multimodal_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
+        let target_graph_rows = if state.mtp_resident.is_some()
+            && !request.generation().sampling().requires_logits()
+            && multimodal_prompt.is_none()
+        {
+            prompt_tokens.max(2)
+        } else {
+            prompt_tokens
+        };
+        let graph = if let Some(artifact) = &state.moe_artifact {
+            build_qwen35_moe_execution_graph(artifact, &state.plan, prompt_tokens, state_capacity)
+        } else if multimodal_prompt.is_some() {
+            build_qwen35_multimodal_graph(
+                state.lock.as_ref().expect("dense Qwen lock"),
+                &state.plan,
+                prompt_tokens,
+                state_capacity,
+            )
         } else if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
             build_qwen35_nvfp4_graph(
-                &state.lock,
+                state.lock.as_ref().expect("dense Qwen lock"),
                 &state.plan,
                 nvfp4_sidecar,
                 prompt_tokens,
@@ -804,18 +953,21 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             )
         } else {
             match (&state.sidecar, state.fp8_provider.as_deref()) {
-                (Some(_), Some("converted-bf16")) | (None, None) => {
-                    build_qwen35_graph(&state.lock, &state.plan, prompt_tokens, state_capacity)
-                }
+                (Some(_), Some("converted-bf16")) | (None, None) => build_qwen35_graph(
+                    state.lock.as_ref().expect("dense Qwen lock"),
+                    &state.plan,
+                    target_graph_rows,
+                    state_capacity,
+                ),
                 (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
-                    &state.lock,
+                    state.lock.as_ref().expect("dense Qwen lock"),
                     &state.plan,
                     sidecar,
                     prompt_tokens,
                     state_capacity,
                 ),
                 (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                    &state.lock,
+                    state.lock.as_ref().expect("dense Qwen lock"),
                     &state.plan,
                     sidecar,
                     prompt_tokens,
@@ -831,37 +983,78 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("request provisioning failed: {error}"))
             })?;
-        let allocated = state.session.memory_snapshot();
-        let mut random = OsSamplingRandom::for_parameters(request.generation().sampling())
-            .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut allocated = state.session.memory_snapshot();
+        let mut random = OsSamplingRandom::for_parameters_and_seed(
+            request.generation().sampling(),
+            request.sampling_seed(),
+        )
+        .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
-        let outcome = if let Some(multimodal_prompt) = multimodal_prompt.as_ref() {
+        let (outcome, dispatch, memory) = if let Some(multimodal_prompt) =
+            multimodal_prompt.as_ref()
+        {
             let mut executor = QwenMultimodalExecutorV1 {
                 inner: &mut owner,
                 prompt: multimodal_prompt,
                 prefilled: false,
             };
-            service.generate_tokens_with_sink(
+            let outcome = service.generate_tokens_with_sink(
                 &mut executor,
                 &prompt,
                 request.generation(),
                 cancellation,
                 &mut random,
                 &mut output_sink,
+            );
+            let dispatch = owner.audit_snapshot().ok();
+            let memory = owner.memory_audit_snapshot().ok();
+            drop(owner);
+            (outcome, dispatch, memory)
+        } else if !request.generation().sampling().requires_logits()
+            && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
+        {
+            let mtp_graph = build_qwen35_mtp_graph(
+                state.lock.as_ref().expect("MTP requires dense Qwen lock"),
+                mtp_plan,
+                state_capacity,
             )
+            .map_err(|error| BackendErrorV1::new(format!("MTP request graph failed: {error}")))?;
+            let mtp_owner = mtp_resident
+                .new_request_for_session(Arc::clone(&state.session), mtp_graph)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
+                })?;
+            allocated = state.session.memory_snapshot();
+            let mut executor = SpeculativeGenerationAdapterV1::new(
+                QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            );
+            let outcome = service.generate_tokens_with_sink(
+                &mut executor,
+                &prompt,
+                request.generation(),
+                cancellation,
+                &mut random,
+                &mut output_sink,
+            );
+            let dispatch = executor.inner().target().audit_snapshot().ok();
+            let memory = executor.inner().target().memory_audit_snapshot().ok();
+            drop(executor);
+            (outcome, dispatch, memory)
         } else {
-            service.generate_tokens_with_sink(
+            let outcome = service.generate_tokens_with_sink(
                 &mut owner,
                 &prompt,
                 request.generation(),
                 cancellation,
                 &mut random,
                 &mut output_sink,
-            )
+            );
+            let dispatch = owner.audit_snapshot().ok();
+            let memory = owner.memory_audit_snapshot().ok();
+            drop(owner);
+            (outcome, dispatch, memory)
         };
-        let dispatch = owner.audit_snapshot().ok();
-        let memory = owner.memory_audit_snapshot().ok();
-        drop(owner);
         let cleanup = state.session.memory_snapshot();
         let cleanup_result =
             require_clean_request_memory(cleanup, "request cleanup").and_then(|()| {
@@ -931,6 +1124,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("converted-bf16") => "bf16-converted-from-ocp-e4m3fn".to_owned(),
                 Some("native-fnuz") => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32".to_owned(),
                 Some("nvfp4-packed-dequant") => "nvfp4-e2m1-block16-e4m3fn-tensor-f32".to_owned(),
+                Some("ocp-mxfp4-w4a4-mixed") => "ocp-mxfp4-e2m1-block32-e8m0-mixed".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
             fp8_provider: state.fp8_provider.clone(),
@@ -1017,8 +1211,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 BackendErrorV1::new(format!("request provisioning failed: {error}"))
             })?;
         let allocated = state.session.memory_snapshot();
-        let mut random = OsSamplingRandom::for_parameters(request.generation().sampling())
-            .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut random = OsSamplingRandom::for_parameters_and_seed(
+            request.generation().sampling(),
+            request.sampling_seed(),
+        )
+        .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
         let outcome = service.generate_tokens_with_sink(
             &mut owner,

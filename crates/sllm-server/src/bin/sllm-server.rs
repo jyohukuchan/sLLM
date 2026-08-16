@@ -59,7 +59,10 @@ fn parse_args() -> Result<Config, String> {
         values.insert(flag, value);
     }
     let lock = PathBuf::from(take_required(&mut values, "--lock")?);
-    let cache = PathBuf::from(take_required(&mut values, "--cache")?);
+    let cache = values
+        .remove("--cache")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| lock.clone());
     let device_index = parse_value(
         &take_required(&mut values, "--device-index")?,
         "device index",
@@ -151,9 +154,25 @@ fn run(config: Config) -> Result<(), String> {
         .build()
         .map_err(|error| format!("Tokio runtime construction failed: {error}"))?;
     runtime.block_on(async move {
-        let reviewed = read_reviewed_model_lock(&config.lock)
-            .map_err(|error| format!("model lock validation failed: {error}"))?;
-        let backend = match reviewed {
+        let backend = if config.lock.is_dir() {
+            ActiveBackend::Qwen(Arc::new(
+                QwenChatBackendV1::open(QwenBackendConfigV1 {
+                    lock_path: config.lock,
+                    cache_path: config.cache,
+                    device_index: config.device_index,
+                    target: config.target,
+                    completion_timeout: config.completion_timeout,
+                    shutdown_timeout: config.shutdown_timeout,
+                    fp8_manifest_path: config.fp8_manifest,
+                    fp8_artifact_path: config.fp8_artifact,
+                    fp8_provider: config.fp8_provider,
+                })
+                .map_err(|error| error.to_string())?,
+            ))
+        } else {
+            let reviewed = read_reviewed_model_lock(&config.lock)
+                .map_err(|error| format!("model lock validation failed: {error}"))?;
+            match reviewed {
             ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
                 QwenChatBackendV1::open(QwenBackendConfigV1 {
                     lock_path: config.lock,
@@ -189,6 +208,7 @@ fn run(config: Config) -> Result<(), String> {
                     })
                     .map_err(|error| error.to_string())?,
                 ))
+            }
             }
         };
         let backend_trait = backend.as_trait();
@@ -322,5 +342,5 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --cache PATH --device-index N --target GFX [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --lock PATH --device-index N --target GFX [--cache PATH] [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }

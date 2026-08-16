@@ -208,8 +208,10 @@ request間で共有する。
 
 temperature 0はQwen executionが返すdevice argmaxをそのまま使い、full-vocabulary logitsをhostへ読まない。
 samplingが必要な場合だけterminal BF16 logits rowをbackendのbounded transfer単位へ分割してreadbackし、
-temperature、top-p、presence/frequency penaltyを適用する。public requestにseedは持たせず、deterministic testは
-明示的なrandom-source seamを内部serviceへ注入する。
+temperature、top-p、presence/frequency penaltyを適用する。OpenAI requestの任意`seed`とCLIの`--seed`は同じ
+sampling RNGを初期化し、同一model artifact、runtime、target、prompt、generation parameterの反復を再現可能にする。
+異なるsoftware/GPU tuple間のbitwise再現性や`system_fingerprint`互換は主張しない。temperature 0のgreedy pathは
+seedの有無にかかわらずrandom sourceを読まない。deterministic testは引き続き明示的random-source seamも利用できる。
 
 stop文字列matcherはdecoded UTF-8の末尾がstop prefixである間はpublicationを保留し、token境界またはUTF-8
 byte-fallback境界を跨いだ完全一致でもstop自身をvisible outputへ含めない。共通resultはprompt/completion/total
@@ -252,12 +254,36 @@ CLI/serverはBF16とprovider low-bit artifactを同じmodel-directory引数か�
 通常警告を設けない。runtime/model evidenceの`experimental`分類は内部audit/documentationに留める。artifact source identity、
 recipe digest、topology plan、exact targetをresident identityに含め、異なるrecipe間でresident cacheを共有しない。
 
+### Qwen3.5 sparse MoE
+
+Phase 19はQwen3.5-35B-A3Bのcontainer inputをstrict artifact inventory、config、tensor index、support-file lockから
+container-neutralな40個のimmutable layer blobへlowerする。各layerはBF16 routerでstable top-8を選び、選択された
+OCP MXFP4 routed expertだけをdecodeでは8 pair、prefillではexpert別にgroup化したactive pairとしてHIP実行する。
+shared expertとsigmoid gate、weighted combineも同じordered queueへ接続し、host routing、256 expert全件実行、
+requestごとのexpert upload、CPU fallbackを正常経路にしない。
+
+artifact検証は使用時のidentityまで拘束する。全weight shardはhash確認に使ったopen descriptorをverified ownerが保持し、
+execution uploadはそのdescriptorからpositional readする。config/index/support fileもopen後にbounded readし、descriptorとpathの
+device/inode/size/mtime/ctimeを読み込み前後で照合するため、検証後のpath置換や同一inode mutationを有効なmodel inputとして扱わない。
+
+`SparseMoe`はmodel-neutral semantic opであり、Qwen adapterは40層の3 GDN + 1 full-attention schedule、GQA 16/2、
+hidden 2048とmodel固有weight mappingだけを所有する。resident ownerが22,009,574,016 byteのmodel allocationを一度構築し、
+request ownerはroute metadata、state、workspaceだけを持つ。auditはlayerごとのSparseMoe submissionとactive pairを数え、
+3-token prefillの40/960、1-token decodeの40/320からの逸脱をfail closedにする。CLI/serverはmodel directoryから自動検出し、
+MoE用flag、low-bit opt-in、通常警告を追加しない。vision/MTP、batching、expert/tensor parallel、CPU offloadはこの経路の範囲外である。
+
 ### Qwen3.5 MTPとvision
 
 Phase 17のMTPはQwen固有の15 tensor manifest/graphをmodel-neutralなspeculative decisionとopaque transactionへ接続する。
-draftは公開stateを直接更新せず、greedy/stochastic verifierが返すaccepted prefixだけをcommit対象にする。canonical V620/R9700の
-現実装はdraft後のtarget verifyを逐次実行するためtarget-onlyより遅く、通常serviceは内部的にtarget-onlyを選ぶ。これはwire modeではなく、
-将来batched verifyが利益を示したtargetだけで切り替えるprovider判断である。
+Phase 18ではtarget candidate列をM=2..8のserial-equivalent blockへlowerし、各rowのlinear reduction/roundingを通常M=1と同じにした。
+draftは公開stateを直接更新せず、最初のrejectまでのaccepted prefixとreplacement tokenだけを既存one-token generation loopへ渡す。
+KVとlinear-attention stateはblock単位のopaque rewind後にaccepted input prefixだけをtarget pathでreplayし、上位層はencoding別rollbackを持たない。
+数値target blockはM=8まで保持するが、generation transactionのdraft widthはrecurrent stateが保持する一世代のrewind範囲に合わせて1/2、
+通常auto-selectionは性能確認済みのwidth 1だけとする。
+
+通常runtimeのprovider選択はwire modeではない。fixed Qwen3.5-4B BF16 text-only greedyのexact `gfx1201`だけ、反復性能tableに基づき
+draft width 1を内部選択する。`gfx1030`、量子化target、vision、sampled request、未計測tupleは同じCLI/API操作のままtarget-onlyを選ぶ。
+sampled requestはpublic target sampler/RNGを唯一の選択経路として保持し、draft用RNGやresidual samplerを導入しない。
 
 visionはtext residentと別のlazy `QwenVisionResidentModel`を持つ。text-only requestはvision 297 tensorをdeviceへloadしない。
 画像requestはbounded decoder/processorを一度実行し、patch projectionと24 vision block、merger/projectorのdense演算を既存HIP

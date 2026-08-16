@@ -615,6 +615,34 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
+    /// Evidence-only readback of one backend-owned semantic KV plane.
+    fn readback_kv_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _plane: u32,
+        _byte_offset: u64,
+        _destination: &mut [u8],
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV state readback".to_owned(),
+        })
+    }
+
+    /// Rewinds exactly the last completed KV publication. Backends must reject
+    /// stale lengths and any non-quiescent state.
+    fn rewind_last_kv_state_transition(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _expected_length: u64,
+        _rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV state rewind".to_owned(),
+        })
+    }
+
     /// Enqueues a transactional append.  The backend owns the authoritative
     /// length transition; core supplies already-admitted bindings and request
     /// metadata, but never performs numerical or state updates itself.
@@ -678,6 +706,20 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support linear-attention state snapshots".to_owned(),
+        })
+    }
+
+    /// Restores the prior double-buffer slot for exactly the last completed
+    /// linear-attention transition.
+    fn rewind_last_linear_attention_transition(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _expected_length: u64,
+        _rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention state rewind".to_owned(),
         })
     }
 
@@ -951,6 +993,85 @@ impl ExecutionSession {
         validate_kv_state_snapshot(self, state, snapshot)
     }
 
+    /// Reads one semantic K or V plane for exactness evidence. Production
+    /// inference never depends on this D2H path.
+    pub fn readback_kv_state(
+        &self,
+        state: &KvState,
+        plane: u32,
+        byte_offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        if plane > 1 || destination.is_empty() {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "KV readback requires plane 0 or 1 and a non-empty destination".to_owned(),
+            });
+        }
+        let resident = state
+            .descriptor()
+            .resident_bytes_per_plane()
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "KV resident byte count overflowed".to_owned(),
+            })?;
+        let end = byte_offset
+            .checked_add(u64::try_from(destination.len()).map_err(|_| {
+                ExecutionError::InvalidRequest {
+                    reason: "KV readback length does not fit u64".to_owned(),
+                }
+            })?)
+            .ok_or_else(|| ExecutionError::InvalidRequest {
+                reason: "KV readback range overflowed".to_owned(),
+            })?;
+        if end > resident {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "KV readback range exceeds the resident plane".to_owned(),
+            });
+        }
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        self.state.adapter.readback_kv_state(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            plane,
+            byte_offset,
+            destination,
+        )
+    }
+
+    pub fn rewind_last_kv_state_transition(
+        &self,
+        state: &KvState,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        self.state.adapter.rewind_last_kv_state_transition(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            expected_length,
+            rewind_length,
+        )
+    }
+
     /// Creates a backend-owned request-local linear-attention state.
     pub fn create_linear_attention_state(
         &self,
@@ -997,6 +1118,25 @@ impl ExecutionSession {
             .adapter
             .linear_attention_state_snapshot(&ExecutionAdapterAccess { session: self }, state)?;
         validate_linear_attention_state_snapshot(self, state, snapshot)
+    }
+
+    pub fn rewind_last_linear_attention_transition(
+        &self,
+        state: &LinearAttentionState,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        self.state.adapter.rewind_last_linear_attention_transition(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            expected_length,
+            rewind_length,
+        )
     }
 
     /// Admits one ordered convolution/recurrent state transition. The output
@@ -2646,7 +2786,7 @@ fn validate_causal_attention_bindings(
     }
     let query_heads = query_shape[1];
     let group_size = query_heads / layout.heads();
-    if !matches!(group_size, 2 | 4 | 16) {
+    if !matches!(group_size, 2 | 4 | 8 | 16) {
         return Err(ExecutionError::InvalidRequest {
             reason: "causal attention GQA group size is not reviewed".to_owned(),
         });

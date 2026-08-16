@@ -18,6 +18,7 @@ pub enum SemanticOpKind {
     CausalAttention,
     AttentionPreprocess,
     Argmax,
+    SparseMoe,
 }
 
 /// The only accepted C3a1 Q/gate storage layout. The packed tensor is
@@ -132,6 +133,7 @@ impl SemanticOpKind {
             Self::CausalAttention => "causal_attention",
             Self::AttentionPreprocess => "attention_preprocess",
             Self::Argmax => "argmax",
+            Self::SparseMoe => "sparse_moe",
         }
     }
 
@@ -151,7 +153,71 @@ impl SemanticOpKind {
             Self::CausalAttention => (3, 1),
             Self::AttentionPreprocess => (5, 3),
             Self::Argmax => (1, 1),
+            Self::SparseMoe => (3, 1),
         }
+    }
+}
+
+/// Model-neutral sparse-MoE semantic boundary. Resident router/expert weights
+/// are bound by the graph adapter; this contract fixes only numerical shape
+/// and routing semantics shared by all backends.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct SparseMoeContract {
+    hidden_size: u32,
+    expert_count: u32,
+    selected_expert_count: u32,
+    expert_intermediate_size: u32,
+    shared_expert_intermediate_size: u32,
+    renormalize_selected_weights: bool,
+}
+
+impl SparseMoeContract {
+    pub fn new(
+        hidden_size: u32,
+        expert_count: u32,
+        selected_expert_count: u32,
+        expert_intermediate_size: u32,
+        shared_expert_intermediate_size: u32,
+        renormalize_selected_weights: bool,
+    ) -> Result<Self, OpError> {
+        if hidden_size == 0
+            || expert_count == 0
+            || expert_count > 256
+            || selected_expert_count == 0
+            || selected_expert_count > expert_count
+            || selected_expert_count > 16
+            || expert_intermediate_size == 0
+            || shared_expert_intermediate_size == 0
+        {
+            return Err(OpError::SparseMoeInvalidContract);
+        }
+        Ok(Self {
+            hidden_size,
+            expert_count,
+            selected_expert_count,
+            expert_intermediate_size,
+            shared_expert_intermediate_size,
+            renormalize_selected_weights,
+        })
+    }
+
+    pub const fn hidden_size(self) -> u32 {
+        self.hidden_size
+    }
+    pub const fn expert_count(self) -> u32 {
+        self.expert_count
+    }
+    pub const fn selected_expert_count(self) -> u32 {
+        self.selected_expert_count
+    }
+    pub const fn expert_intermediate_size(self) -> u32 {
+        self.expert_intermediate_size
+    }
+    pub const fn shared_expert_intermediate_size(self) -> u32 {
+        self.shared_expert_intermediate_size
+    }
+    pub const fn renormalize_selected_weights(self) -> bool {
+        self.renormalize_selected_weights
     }
 }
 
@@ -818,6 +884,7 @@ pub struct SemanticOpDescriptor {
     rotary_contract: Option<SplitHalfRotaryContract>,
     causal_attention_contract: Option<WindowedCausalAttentionContract>,
     attention_preprocess_contract: Option<AttentionPreprocessContract>,
+    sparse_moe_contract: Option<SparseMoeContract>,
 }
 
 /// Short name for the semantic operation descriptor used by backend traits.
@@ -837,6 +904,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            sparse_moe_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -867,6 +935,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            sparse_moe_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -885,6 +954,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: Some(contract),
+            sparse_moe_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -903,6 +973,7 @@ impl SemanticOpDescriptor {
             rotary_contract: Some(contract),
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            sparse_moe_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -921,6 +992,26 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: Some(contract),
             attention_preprocess_contract: None,
+            sparse_moe_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_sparse_moe(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: SparseMoeContract,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::SparseMoe,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            sparse_moe_contract: Some(contract),
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -956,6 +1047,10 @@ impl SemanticOpDescriptor {
 
     pub const fn attention_preprocess_contract(&self) -> Option<AttentionPreprocessContract> {
         self.attention_preprocess_contract
+    }
+
+    pub const fn sparse_moe_contract(&self) -> Option<SparseMoeContract> {
+        self.sparse_moe_contract
     }
 
     /// Returns the zero-copy rank-2 view consumed by the existing `o_proj`
@@ -1047,9 +1142,52 @@ impl SemanticOpDescriptor {
             SemanticOpKind::Argmax => {
                 validate_argmax(&self.inputs, &self.outputs)?;
             }
+            SemanticOpKind::SparseMoe => {
+                let contract = self
+                    .sparse_moe_contract
+                    .ok_or(OpError::SparseMoeContractRequired)?;
+                validate_sparse_moe(&self.inputs, &self.outputs, contract)?;
+            }
         }
         Ok(())
     }
+}
+
+fn validate_sparse_moe(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: SparseMoeContract,
+) -> Result<(), OpError> {
+    let input = &inputs[0];
+    let router = &inputs[1];
+    let layer_blob = &inputs[2];
+    let output = &outputs[0];
+    if input.shape().len() != 2
+        || input.shape() != output.shape()
+        || input.shape()[1] != contract.hidden_size as usize
+        || input.shape().contains(&0)
+        || !input.is_contiguous()
+        || !output.is_contiguous()
+        || input.dtype() != DType::Bf16
+        || output.dtype() != DType::Bf16
+        || input.encoding() != Encoding::Unquantized
+        || output.encoding() != Encoding::Unquantized
+        || router.shape()
+            != [
+                contract.expert_count as usize,
+                contract.hidden_size as usize,
+            ]
+        || router.dtype() != DType::Bf16
+        || router.encoding() != Encoding::Unquantized
+        || !router.is_contiguous()
+        || layer_blob.shape() != [434_114_560]
+        || layer_blob.dtype() != DType::U8
+        || layer_blob.encoding() != Encoding::Unquantized
+        || !layer_blob.is_contiguous()
+    {
+        return Err(OpError::SparseMoeTensorContractMismatch);
+    }
+    Ok(())
 }
 
 fn validate_causal_attention(
@@ -1266,7 +1404,7 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
                 scale_dtype: DType::F32,
                 resident: Fp8ResidentRepresentation::PackedBytes,
             };
-    let nvfp4_weight = weight.dtype() == DType::U8
+    let low_bit_weight = weight.dtype() == DType::U8
         && matches!(
             weight.encoding(),
             Encoding::Nvfp4 {
@@ -1275,9 +1413,12 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
             } | Encoding::Nvfp4W4A4 {
                 block_size: 16,
                 scale_dtype: DType::F8E4M3Fn,
+            } | Encoding::Mxfp4W4A4 {
+                block_size: 32,
+                scale_dtype: DType::U8,
             }
         );
-    if !bf16_weight && !fp8_weight && !nvfp4_weight {
+    if !bf16_weight && !fp8_weight && !low_bit_weight {
         return Err(OpError::MatmulWeightContract);
     }
     Ok(())
@@ -1697,6 +1838,9 @@ pub enum OpError {
     ArgmaxVocabTooLarge {
         vocab: usize,
     },
+    SparseMoeContractRequired,
+    SparseMoeInvalidContract,
+    SparseMoeTensorContractMismatch,
 }
 
 impl fmt::Display for OpError {
@@ -1987,6 +2131,15 @@ impl fmt::Display for OpError {
             Self::ArgmaxVocabTooLarge { vocab } => {
                 write!(formatter, "argmax vocabulary size {vocab} exceeds 1048576")
             }
+            Self::SparseMoeContractRequired => {
+                formatter.write_str("sparse_moe requires an explicit routing/expert contract")
+            }
+            Self::SparseMoeInvalidContract => {
+                formatter.write_str("sparse_moe contract dimensions are invalid")
+            }
+            Self::SparseMoeTensorContractMismatch => formatter.write_str(
+                "sparse_moe input/output must be matching contiguous unquantized BF16 [M,H] tensors",
+            ),
         }
     }
 }

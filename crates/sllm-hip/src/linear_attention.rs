@@ -146,6 +146,24 @@ impl LinearAttentionStateResource {
         })
     }
 
+    pub(crate) fn rewind_last(
+        &self,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sys::sllm_linear_attention_state_rewind_last(
+                self.raw_handle()?.as_ptr(),
+                expected_length,
+                rewind_length,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
     fn validate_view(
         &self,
         info: &sys::sllm_linear_attention_view_info_t,

@@ -26,6 +26,8 @@ mod embedding;
 mod kv_state;
 mod linear_attention;
 mod matmul;
+mod moe_expert;
+mod moe_route;
 mod rmsnorm;
 mod rotary;
 mod runtime;
@@ -47,6 +49,13 @@ pub use kv_state::{
     CausalAttentionEvidence, KvAppendEvidence, bf16_to_f16_bits, expected_storage_offset,
 };
 pub use matmul::{MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission, PreparedMatmul};
+pub use moe_expert::{
+    MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission, PreparedMoeExpert,
+    moe_expert_workspace_bytes,
+};
+pub use moe_route::{
+    MoeRouteDescriptor, MoeRouteDispatchInfo, MoeRouteLayout, MoeRouteSubmission, PreparedMoeRoute,
+};
 pub use rmsnorm::{
     PreparedRmsNorm, RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, TensorBinding,
 };

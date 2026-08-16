@@ -332,6 +332,22 @@ impl Qwen35ChatTemplateV1 {
         Self::from_verified_cache_impl(lock, cache, expected_sha256)
     }
 
+    pub fn from_qwen35_moe_artifact(
+        artifact: &sllm_core::VerifiedQwen35Moe,
+    ) -> Result<Self, ChatRenderError> {
+        let bytes = artifact
+            .read_support_file(QWEN35_CHAT_TEMPLATE_FILENAME)
+            .map_err(|_| ChatRenderError::TemplateAssetUnavailable)?;
+        if bytes.len() != QWEN35_CHAT_TEMPLATE_SIZE_BYTES as usize {
+            return Err(ChatRenderError::UnsupportedTemplateIdentity);
+        }
+        validate_template_bytes(&bytes, QWEN35_CHAT_TEMPLATE_SHA256)?;
+        Ok(Self {
+            consistency_label: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+            default_thinking: true,
+        })
+    }
+
     /// Test-only construction still performs the production metadata, bounded
     /// read, UTF-8, and success-path checks.  It supplies an explicit digest
     /// for a synthetic same-size asset because the real locked template is

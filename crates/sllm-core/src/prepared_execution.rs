@@ -401,7 +401,7 @@ impl ExecutionSegment {
         let had_work = !self.pending.is_empty();
         for mut retained in self.pending.drain(..) {
             require_terminal_success(&retained.label, retained.owner.query()?)?;
-            audit.record(retained.owner.dispatch())?;
+            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
         }
         audit.record_boundary(boundary, had_work)?;
         Ok(())
@@ -427,6 +427,8 @@ pub struct PreparedExecutionAudit {
     fallback_used: bool,
     segment_count: u64,
     boundary_count: u64,
+    sparse_moe_submission_count: u64,
+    sparse_moe_active_pair_count: u64,
 }
 
 impl PreparedExecutionAudit {
@@ -457,6 +459,14 @@ impl PreparedExecutionAudit {
     pub const fn boundary_count(&self) -> u64 {
         self.boundary_count
     }
+
+    pub const fn sparse_moe_submission_count(&self) -> u64 {
+        self.sparse_moe_submission_count
+    }
+
+    pub const fn sparse_moe_active_pair_count(&self) -> u64 {
+        self.sparse_moe_active_pair_count
+    }
 }
 
 pub(crate) struct ExecutionAuditAccumulator {
@@ -467,6 +477,8 @@ pub(crate) struct ExecutionAuditAccumulator {
     fallback_used: bool,
     segment_count: u64,
     boundary_count: u64,
+    sparse_moe_submission_count: u64,
+    sparse_moe_active_pair_count: u64,
 }
 
 impl ExecutionAuditAccumulator {
@@ -479,7 +491,36 @@ impl ExecutionAuditAccumulator {
             fallback_used: false,
             segment_count: 0,
             boundary_count: 0,
+            sparse_moe_submission_count: 0,
+            sparse_moe_active_pair_count: 0,
         }
+    }
+
+    fn record_labeled(
+        &mut self,
+        label: &str,
+        evidence: &DispatchEvidence,
+    ) -> Result<(), PreparedExecutionError> {
+        self.record(evidence)?;
+        if label.ends_with(".sparse_moe") {
+            self.sparse_moe_submission_count = self
+                .sparse_moe_submission_count
+                .checked_add(1)
+                .ok_or_else(|| {
+                    PreparedExecutionError::InvalidAudit(
+                        "SparseMoe submission count overflowed u64".to_owned(),
+                    )
+                })?;
+            self.sparse_moe_active_pair_count = self
+                .sparse_moe_active_pair_count
+                .checked_add(evidence.normalized_size)
+                .ok_or_else(|| {
+                    PreparedExecutionError::InvalidAudit(
+                        "SparseMoe active pair count overflowed u64".to_owned(),
+                    )
+                })?;
+        }
+        Ok(())
     }
 
     pub(crate) fn record(
@@ -561,6 +602,8 @@ impl ExecutionAuditAccumulator {
             fallback_used: self.fallback_used,
             segment_count: self.segment_count,
             boundary_count: self.boundary_count,
+            sparse_moe_submission_count: self.sparse_moe_submission_count,
+            sparse_moe_active_pair_count: self.sparse_moe_active_pair_count,
         })
     }
 }

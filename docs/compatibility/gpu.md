@@ -133,6 +133,20 @@ visionは256 patch token/64 visual token、multimodal text prefill+decode、dete
 逐次verifyはtarget forward数を減らさないため通常providerはtarget-onlyを維持する。このevidenceは固定model/image geometry、
 single request、BF16 visionに限り、別SKU、video、low-bit vision、性能優位性へ一般化しない。
 
+Phase 18では同じcanonical 2 targetでQwen3.5-4Bのserial-equivalent M=2/3/4/7/8 target verifyを実行した。BF16+FP16 KVと
+FP8 W8A8+static FP8 KVでtoken/hidden、M=8 raw logits、accepted-prefix K/V payloadを逐次M=1へbit/byte exact照合した。
+R9700 `gfx1201`のBF16 fixed 32-token caseはMTP off/on中央値`1.0355x`でnoiseを越えたため通常内部providerへ採用し、V620
+`gfx1030`はwidth 1中央値`0.9990x`でnoise内のためtarget-onlyを維持する。このevidenceはfixed model、single request、text-only greedy、
+実行済みtuple/lengthへ限定し、別model/SKU、sampling高速化、一般的なMTP倍率へ一般化しない。
+
+Phase 19では同じcanonical 2 targetで`amd/Qwen3.5-35B-A3B-MXFP4` revision `2e19c657...`のsingle-GPU
+text-only sparse MoEを実行した。actual-weight oracleはlayer 0/19/39、M=1/3/7、連続8 expertで最大絶対・相対誤差
+`1.86265e-9`、fallback 0をPASSし、full modelは40 SparseMoe submissionとprefill/decode 960/320 active pairを
+exactに記録した。resident/peakは22,009,574,016/22,230,758,892 byteである。R9700 `gfx1201`のprefill/decode中央値は
+216.258/204.198 ms、V620 `gfx1030`は537.832/370.711 ms（各2 warmup + 11 measured）だった。
+CLI/OpenAI non-stream/SSE/cancel/recovery/seed/shutdownも通常経路でHIP-only、fallbackなし、cleanup 0をPASSした。
+このevidenceはfixed artifact、batch 1、text-only、実行済みtupleへ限定し、vision/MTP、multi-GPU、別model/SKUへ一般化しない。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

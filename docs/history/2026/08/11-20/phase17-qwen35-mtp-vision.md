@@ -47,6 +47,14 @@
 - R9700の実serverでも同じPNGをOpenAI non-stream/SSEへ送り、両方`The`、usage 79+1、SSE terminal chunkと`[DONE]`を
   PASSした。lazy vision residentを含む最終shutdownはmodel-ready 9,078,620,672 byteからfinal current/request/workspace 0、
   retryable/durable cleanup 0へ到達した。
-- vision weight量子化、remote fetch、cross-request image cache、videoは非対象のまま。次はPhase 18 MoEとする。
+- vision weight量子化、remote fetch、cross-request image cache、videoは非対象のまま。当時は次をPhase 18 MoEとしたが、
+  下記訂正でPhase 18をMTP性能統合へ変更した。
+
+## 2026-08-16: MTP性能closeoutの訂正とPhase 18への移管
+
+- Phase 17のMTP evidenceはcomponent correctnessであり、generation serviceのMTP off/on倍率、batched target verify、
+  target forward削減を確認していなかった。MTP production性能をPhase 17完了証拠として扱わない。
+- ユーザー指示により、通常逐次decodeと同じ計算結果、draftの逐次承認、量子化target回帰、最低限の実速度改善を
+  [Phase 18](../../../../plans/archive/2026/08/11-20/phase18-mtp-exact-sequential-speedup.md)へ割り当て、MoEをPhase 19へ繰り下げた。
 
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase17-qwen35-mtp-vision.md)

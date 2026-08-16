@@ -211,6 +211,11 @@
 - 2026-08-02の追加調査対象からはLMDeployとKTransformersだけを正式なlocal参照sourceとして採用する。MLC LLM、Candle、CTranslate2、OpenVINO GenAI、ONNX Runtime GenAI、TGIは今回未採用とし、採用予定に置かない。
 - vLLM等からコードを直接流用しない。参照sourceの表現を実装へ持ち込まないようreader記録とimplementation phaseを分離するが、別subagentの使用は必須にしない。
 - llama.cppからの直接流用は許可するが、トップレベルLICENSEへの曖昧な追記だけで済ませない。
+- MTPのspeculative decode/verify制御はllama.cpp実装を一括移植しない。llama.cpp issue
+  [#25618](https://github.com/ggml-org/llama.cpp/issues/25618)で、量子化targetに対するdraft-model型speculationが
+  greedy target-only生成から分岐する問題が報告されているため、同issueは回帰caseのsourceとしてのみ扱う。
+  sLLMでは通常の逐次target decodeを数値oracleとし、draft tokenを順番に承認し、target-onlyと同じ計算結果を得る
+  独自contractをPhase 18で実装・検証した。
 - 直接流用する場合は、copyright/license noticeを保持し、upstream URL、完全commit SHA、upstream/local path、hash、exact/adapted/ported区分、変更内容、import commitを記録する。
 - 実際にimportした時点で`THIRD_PARTY_NOTICES.md`を作成・更新し、コピー先から参照できるようにする。
 - 詳細は `docs/provenance/README.md` を正とする。
@@ -335,13 +340,25 @@
      accepted prefixだけのKV publicationをgeneration serviceへ統合する。
    - MTP単独closeout後に同じmodelのprocessor、vision encoder/projector、multimodal prompt、Chat Completions image inputを実装する。
    - 詳細は[Phase 17 archive](archive/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
-18. Gemma4またはQwen3.5のMoEへ対応する。
-19. 残りの初期バージョン機能を実装し、ユーザー向けモデル入力と配布artifactをGGUFへ統一する。
+18. MTPを通常生成と数値的に同一な内部高速化経路として完成させる。
+   - fixed Qwen3.5-4Bの通常逐次decodeをoracleにし、draftを逐次承認する。量子化targetを含め、MTP on/offで
+     target logits、visible token、commit済みKV、sampling/stop/usageの結果を一致させる。
+   - 数値順序を変える一般的なmulti-token verifyを無条件採用せず、single-token decodeと同じrow arithmeticを保つ
+     serial-equivalent batch、device-side orchestration、staged KVによってtarget launch/synchronizationを減らす。
+   - target別の反復MTP off/on計測でnoise envelopeを越える改善を確認し、倍率を記録する。詳細は
+     [Phase 18 archive](archive/2026/08/11-20/phase18-mtp-exact-sequential-speedup.md)を正とする。
+19. Qwen3.5のMoEへ対応する。
+   - `Qwen3.5-35B-A3B`の単一GPU text-only pathをprimaryに、router、top-8 routed expert、shared expert、
+     decode/prefill別expert provider、CLI/OpenAI APIを実装する。
+   - 詳細は[Phase 19 archive](archive/2026/08/11-20/phase19-qwen35-moe.md)を正とする。
+20. ユーザー向けモデル入力と配布artifactをGGUFへ統一する。
    - safetensorsと量子化sidecarから、推論に必要な情報を収容した単一GGUFへの変換経路を用意する。
    - 公開runtimeはGGUFを正本として読み込み、変換元と出力をmodel lockで再現可能に固定する。
-   - Phase 19内ではGGUF統一を先に行い、その共通model input上でrequest batching/chunked prefill、簡易永続化、
-     残るmodel/KV形式を順に計画する。詳細な分割と受入条件はPhase 17 closeout時の実装状況から別途固定する。
-20. 人間がREADMEを整備し、発表する。
+   - Phase 20はGGUF converter、loader/runtime、metadata/tensor type、model lock、移行・互換性のcloseoutだけを扱う。
+     request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20の範囲に含めない。
+
+Phase番号を割り当てない将来タスクとして、READMEの整備と人間による発表がある。発表時期は未定であり、
+Phase 19/20の完了条件、直後の作業、または番号付きPhaseとして割り当てない。
 
 Phase 12のMI300Xを管理できない期間は、Phase番号と依存関係を維持したままPhase 13以降のlocal-only workを
 先行できる。現在のGitHub CI不整合は製品Phaseを繰り下げず、Phase 12待機中のremediation subphase
@@ -655,13 +672,50 @@ candidateを再確認した。
 ### Phase 17: Qwen3.5 MTP、vision（完了）
 
 - fixed Qwen3.5-4BのMTP 15 tensorをcomponent manifest/graphへ昇格し、greedy/stochastic verify、opaque
-  transaction、real-weight deterministic GPU evidenceを実装した。canonical 2 targetでは逐次verifyがtarget-onlyより遅いため、
-  通常CLI/APIは内部的にtarget-only providerを選ぶ。MTP用の許可flagや品質警告は追加しない。
+  transaction、real-weight deterministic GPU component evidenceを実装した。canonical 2 targetのrunnerはdraftごとに
+  target forwardを逐次実行してtarget-onlyより遅く、通常generation serviceへの正確な高速化統合とMTP off/on倍率は
+  未確認である。この残差をPhase 18へ移し、MTP用の許可flagや品質警告は追加しない。
 - vision 297 tensor、bounded PNG/JPEG/WebP/non-animated GIF decode、locked processor、multimodal embedding/mRoPE、
   lazy vision resident、CLI local image、Chat Completions Base64 data URLを実装した。HTTP(S) fetch/Files APIは行わない。
 - V620/R9700でvision→64 projected token→text prefill/decodeをHIP-only、fallbackなし、deterministic、cleanup 0でPASSし、
   R9700の実CLI画像生成もPASSした。量子化text artifactのvision weight量子化は本Phaseへ広げていない。
 - 詳細は[Phase 17 archive](archive/2026/08/11-20/phase17-qwen35-mtp-vision.md)を正とする。
+
+### Phase 18: MTP逐次承認・target-only数値同一・最低限の高速化（完了）
+
+- M=2..8のserial-equivalent target block、最初のrejectまでの逐次承認、KV/linear-state rewindとaccepted-prefix replay、
+  既存one-token generation loop用adapterを実装した。sampled requestは同じpublic target sampler/RNGを保つ内部target-only選択とした。
+- V620/R9700でBF16+FP16 KVとFP8 W8A8+static FP8 KVのM=`2/3/4/7/8`を実行し、token/hidden、M=8 raw logits、
+  accepted-prefix K/V payloadを逐次M=1へbit/byte exact照合した。HIP-only、fallbackなし、cleanup 0だった。
+- R9700 BF16 width 1は3 warmup + 10 measuredで中央値`1.0355x`、MAD`0.0028`、p10/p90 `1.0242/1.0448`となり、
+  fixed Qwen3.5-4B text-only greedyで内部auto-selectする。V620 width 1は`0.9990x`でnoise内のため同じUXのtarget-onlyを維持する。
+- 通常CLIとOpenAI non-stream/SSE/cancel/recovery/shutdownをR9700で実機PASSした。MTP用flag、opt-in、品質警告は追加していない。
+- 詳細は[Phase 18 archive](archive/2026/08/11-20/phase18-mtp-exact-sequential-speedup.md)を正とする。
+
+### Phase 19: Qwen3.5 MoE text-only production path（完了）
+
+- `Qwen3.5-35B-A3B`をprimaryに、256 routed expertからtokenごとのtop-8と1 shared expertを実行するsparse MoEを
+  単一AMD GPUのtext-only generationへ統合する。Qwen3.5 Denseのfull attention/GDNとPhase 16Fの
+  low-bit recipe descriptorを再利用する。
+- primary artifactは`amd/Qwen3.5-35B-A3B-MXFP4` revision
+  `2e19c6576db91e5d5a93455415619262218bf8a1`、architecture/lineage controlは
+  `Qwen/Qwen3.5-35B-A3B-FP8` revision `9d1823d2dee688a6b25e77009dc727688c44936e`に固定した。
+- router/stable top-8、OCP MXFP4 routed expert、shared-expert gate、weighted combineをNumPy oracleとHIPで照合し、
+  decodeはselected 8 + shared、prefillはactive pairのexpert別grouped executionとする。
+- exact R9700/V620で22,009,574,016 byte resident、22,230,758,892 byte peak、40層full-model
+  prefill/decode、CLI/OpenAI non-stream/SSE/cancel/recovery/seeded sampling/shutdownをHIP-only、fallbackなしでPASSした。
+  full-model active pairはprefill 960、decode 320であり、256 expert全件実行ではない。
+- integration reviewで検証後のshard path再openを除去し、verified descriptorからのpositional readへ固定した。
+  additive MoE C ABI layoutをC/Rust probeへ追加し、actual 24.6 GB artifactとR9700 full-modelをfocused再検証した。
+- Phase 19はMoE vision/MTP、batching、expert/tensor parallel、CPU offload、GGUF writer/readerを含まない。
+- 詳細は[Phase 19 archive](archive/2026/08/11-20/phase19-qwen35-moe.md)を正とする。
+
+### Phase 20: GGUF統一（未着手）
+
+- safetensorsと量子化sidecarを変換・開発入力へ移し、ユーザー向けのモデル入力と配布artifactを
+  BF16、FP8、NVFP4、MXFP4で共通の単一GGUFへ統一する。
+- Phase 20の範囲はGGUF converter、loader/runtime、standard/extension metadataとtensor type、model lock、
+  移行・互換性の検証とcloseoutだけとする。その他の残機能をPhase 20へ混ぜない。
 
 ## 残タスクと改訂した実行順序
 
@@ -669,26 +723,27 @@ candidateを再確認した。
 | ---: | --- | --- | --- |
 | 完了 | Phase 16 | FP8/NVFP4 KV append・attention・capacity・quality | first-class Unsloth mixed recipeのFP8 KV依存を満たした |
 | 完了 | Phase 16F | NVFP4 full mixed artifact、MXFP4/MXFP8 encoding/import | faithful provider artifact経路とGGUF handoffを固定した |
-| 完了 | Phase 17 | Qwen3.5 MTP component、vision、multimodal CLI/API | canonical targetではMTP target-only選択、vision実機PASS |
-| 1 | Phase 18 | Gemma4またはQwen3.5 MoE | 共通executorとlow-bit encodingをrouter/expertへ再利用する |
-| 2 | Phase 19 | GGUF統一を先に、残る初期機能を後に分割 | hobby user向けmodel UXを固定してからbatch/persistence等を積む |
-| 3 | Phase 20 | 人間によるREADME整備・発表 | 実装と公開artifact contractのcloseout後 |
+| 完了 | Phase 17 | Qwen3.5 MTP component、vision、multimodal CLI/API | MTP性能統合は未完、vision実機PASS |
+| 完了 | Phase 18 | MTP逐次承認、target-only数値同一、最低限の高速化 | R9700でexact MTPを内部採用、V620はtarget-only維持 |
+| 完了 | Phase 19 | Qwen3.5-35B-A3B MoE text-only production path | R9700/V620の通常CLI/APIへ統合済み |
+| 1 | Phase 20 | GGUF統一のみ | hobby user向けmodel inputと配布artifactを単一containerに固定する |
 
-Phase 18以降で残る具体項目はMoE、GGUF converter/runtime、request batching、chunked prefill、KV/会話/model lockの
-簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMAである。Responses API、
-LMCache、RadixAttention、将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。Phase 18/19の詳細分割は、
-Phase 16〜17の実装で確定する共通descriptorと実測残差を見て固定し、現在の3計画へ先行実装を混ぜない。
+Phase 19/20の後または別の依存関係で残る将来項目はrequest batching、chunked prefill、KV/会話/model lockの
+簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、
+人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
+将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。
 
 ## 現在の状態と次の作業
 
-- Phase 17まで完了した。次はPhase 18でGemma4またはQwen3.5のMoE architecture、router/expert graph、
-  low-bit expert encodingの詳細計画を固定する。Phase 17のMTPはcanonical targetで性能採用せずtarget-onlyを維持し、
-  visionはfixed Qwen3.5-4B BF16のCLI/OpenAI経路まで実機closeoutした。
+- Phase 19のQwen3.5-35B-A3B MoE text-only production統合は完了した。次はPhase 20としてGGUF統一だけを行う。
+  MTPの別model、request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20へ混ぜない。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
   起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
-- 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 19へ割り当てた。現在のsafetensors direct loadと
+- 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 20へ割り当てた。現在のsafetensors direct loadと
   量子化sidecarは移行完了まで維持する。Phase 16Fのcontainer-neutral encoding/recipe descriptorをGGUFへ引き渡すが、
-  最終GGUF writer/runtimeをPhase 16Fへ前倒ししない。
+  最終GGUF writer/runtimeをPhase 16Fへ前倒ししない。Phase 20にrequest batching、chunked prefill、簡易永続化、
+  残るmodel/KV形式を含めない。
+- README整備と人間による発表は時期未定の将来タスクであり、番号付きPhaseやPhase 19/20の完了条件に割り当てない。
 - MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。

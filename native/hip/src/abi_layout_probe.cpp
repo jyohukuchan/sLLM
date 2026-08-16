@@ -315,6 +315,7 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_FP8_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_NVFP4_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2);
@@ -324,6 +325,8 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_FP8_BYTE_EMULATION_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_PACKED_DEQUANT_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_W4A4_PACKED_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_DECODE_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_PREFILL_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MATMUL_WORKGROUP_SIZE);
@@ -339,6 +342,28 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_WORKGROUP_SIZE);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_MAX_V);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ARGMAX_MAX_M);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_TOKENS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_EXPERTS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_SELECTED);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_INTERMEDIATE_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_TOPK);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_MAX_TOKENS);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);
@@ -382,6 +407,7 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_ENCODING_FP8_OUTER_F32);
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
   SLLM_PRINT_CONSTANT(SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32);
+  SLLM_PRINT_CONSTANT(SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_ACCUMULATION_F32);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);
   SLLM_PRINT_CONSTANT(SLLM_RMSNORM_SCALE_MODE_DIRECT);
@@ -748,6 +774,113 @@ int main() {
       << offsetof(sllm_argmax_dispatch_info_t, gcn_arch_name)
       << " reserved=" << offsetof(sllm_argmax_dispatch_info_t, reserved)
       << '\n';
+  std::cout << "layout sllm_moe_route_desc_t size="
+            << sizeof(sllm_moe_route_desc_t)
+            << " align=" << alignof(sllm_moe_route_desc_t)
+            << " struct_size=" << offsetof(sllm_moe_route_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_moe_route_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_moe_route_desc_t, op_version)
+            << " selected_expert_count="
+            << offsetof(sllm_moe_route_desc_t, selected_expert_count)
+            << " reserved=" << offsetof(sllm_moe_route_desc_t, reserved)
+            << " logits=" << offsetof(sllm_moe_route_desc_t, logits)
+            << " metadata=" << offsetof(sllm_moe_route_desc_t, metadata)
+            << '\n';
+  std::cout
+      << "layout sllm_moe_route_dispatch_info_t size="
+      << sizeof(sllm_moe_route_dispatch_info_t)
+      << " align=" << alignof(sllm_moe_route_dispatch_info_t) << " struct_size="
+      << offsetof(sllm_moe_route_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_moe_route_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_moe_route_dispatch_info_t, info_version)
+      << " backend=" << offsetof(sllm_moe_route_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_moe_route_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_moe_route_dispatch_info_t, dispatch_count)
+      << " kernel_id=" << offsetof(sllm_moe_route_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_moe_route_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_moe_route_dispatch_info_t, grid_size_x)
+      << " token_count="
+      << offsetof(sllm_moe_route_dispatch_info_t, token_count)
+      << " expert_count="
+      << offsetof(sllm_moe_route_dispatch_info_t, expert_count)
+      << " pair_count=" << offsetof(sllm_moe_route_dispatch_info_t, pair_count)
+      << " selected_expert_count="
+      << offsetof(sllm_moe_route_dispatch_info_t, selected_expert_count)
+      << " fallback_allowed="
+      << offsetof(sllm_moe_route_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_moe_route_dispatch_info_t, fallback_used)
+      << " reserved0=" << offsetof(sllm_moe_route_dispatch_info_t, reserved0)
+      << " kernel_symbol="
+      << offsetof(sllm_moe_route_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_moe_route_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_moe_route_dispatch_info_t, gcn_arch_name)
+      << " reserved=" << offsetof(sllm_moe_route_dispatch_info_t, reserved)
+      << '\n';
+  std::cout << "layout sllm_moe_expert_desc_t size="
+            << sizeof(sllm_moe_expert_desc_t)
+            << " align=" << alignof(sllm_moe_expert_desc_t)
+            << " struct_size=" << offsetof(sllm_moe_expert_desc_t, struct_size)
+            << " abi_version=" << offsetof(sllm_moe_expert_desc_t, abi_version)
+            << " op_version=" << offsetof(sllm_moe_expert_desc_t, op_version)
+            << " reserved0=" << offsetof(sllm_moe_expert_desc_t, reserved0)
+            << " reserved=" << offsetof(sllm_moe_expert_desc_t, reserved)
+            << " hidden=" << offsetof(sllm_moe_expert_desc_t, hidden)
+            << " routing_metadata="
+            << offsetof(sllm_moe_expert_desc_t, routing_metadata)
+            << " layer_blob=" << offsetof(sllm_moe_expert_desc_t, layer_blob)
+            << " workspace=" << offsetof(sllm_moe_expert_desc_t, workspace)
+            << " output=" << offsetof(sllm_moe_expert_desc_t, output) << '\n';
+  std::cout << "layout sllm_moe_expert_dispatch_info_t size="
+            << sizeof(sllm_moe_expert_dispatch_info_t)
+            << " align=" << alignof(sllm_moe_expert_dispatch_info_t)
+            << " struct_size="
+            << offsetof(sllm_moe_expert_dispatch_info_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_moe_expert_dispatch_info_t, abi_version)
+            << " info_version="
+            << offsetof(sllm_moe_expert_dispatch_info_t, info_version)
+            << " backend=" << offsetof(sllm_moe_expert_dispatch_info_t, backend)
+            << " dispatch_id="
+            << offsetof(sllm_moe_expert_dispatch_info_t, dispatch_id)
+            << " dispatch_count="
+            << offsetof(sllm_moe_expert_dispatch_info_t, dispatch_count)
+            << " kernel_id="
+            << offsetof(sllm_moe_expert_dispatch_info_t, kernel_id)
+            << " workgroup_size_x="
+            << offsetof(sllm_moe_expert_dispatch_info_t, workgroup_size_x)
+            << " grid_size_x="
+            << offsetof(sllm_moe_expert_dispatch_info_t, grid_size_x)
+            << " token_count="
+            << offsetof(sllm_moe_expert_dispatch_info_t, token_count)
+            << " active_pair_count="
+            << offsetof(sllm_moe_expert_dispatch_info_t, active_pair_count)
+            << " workspace_bytes="
+            << offsetof(sllm_moe_expert_dispatch_info_t, workspace_bytes)
+            << " selected_expert_count="
+            << offsetof(sllm_moe_expert_dispatch_info_t, selected_expert_count)
+            << " shared_expert_count="
+            << offsetof(sllm_moe_expert_dispatch_info_t, shared_expert_count)
+            << " fallback_allowed="
+            << offsetof(sllm_moe_expert_dispatch_info_t, fallback_allowed)
+            << " fallback_used="
+            << offsetof(sllm_moe_expert_dispatch_info_t, fallback_used)
+            << " kernel_symbol="
+            << offsetof(sllm_moe_expert_dispatch_info_t, kernel_symbol)
+            << " device_symbol="
+            << offsetof(sllm_moe_expert_dispatch_info_t, device_symbol)
+            << " gcn_arch_name="
+            << offsetof(sllm_moe_expert_dispatch_info_t, gcn_arch_name)
+            << " reserved="
+            << offsetof(sllm_moe_expert_dispatch_info_t, reserved) << '\n';
   std::cout
       << "layout sllm_attention_preprocess_desc_t size="
       << sizeof(sllm_attention_preprocess_desc_t)

@@ -60,7 +60,9 @@ fn print_help() {
     println!("  both lanes require exactly 3 warmup and 10 measured requests");
     println!();
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
-    println!("  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32]");
+    println!(
+        "  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32] [--seed U64]"
+    );
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");

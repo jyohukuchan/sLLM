@@ -16,6 +16,10 @@
 #include "linear_attention_kernel_internal.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
+#include "moe_expert_api.hpp"
+#include "moe_expert_kernel_internal.hpp"
+#include "moe_route_api.hpp"
+#include "moe_route_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
 #include "rmsnorm_kernel_internal.hpp"
@@ -159,7 +163,36 @@ hipError_t launch_nvfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
                              hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
+
+hipError_t launch_mxfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
+                                 uint64_t, uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_mxfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
+                             const uint8_t *, uint16_t *, uint64_t, uint64_t,
+                             uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
 } // namespace sllm_matmul_kernel
+
+namespace sllm_moe_route_kernel {
+hipError_t launch(const uint16_t *, int32_t *, float *, int32_t *, int32_t *,
+                  int32_t *, int32_t *, int32_t *, uint64_t, uint64_t, uint32_t,
+                  hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+} // namespace sllm_moe_route_kernel
+
+namespace sllm_moe_expert_kernel {
+uint64_t workspace_bytes(const uint64_t token_count) noexcept {
+  return token_count * UINT64_C(12484);
+}
+hipError_t launch(const uint16_t *, const uint8_t *, const uint8_t *, uint8_t *,
+                  uint16_t *, uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+} // namespace sllm_moe_expert_kernel
 
 namespace sllm_argmax_kernel {
 hipError_t launch(const uint16_t *const logits, int32_t *const output,
@@ -321,6 +354,8 @@ enum class HandleKind : uint32_t {
   EmbeddingPlan,
   MatmulPlan,
   ArgmaxPlan,
+  MoeRoutePlan,
+  MoeExpertPlan,
   AttentionPreprocessPlan,
   RotaryPlan,
   WindowedAttentionPlan,
@@ -595,6 +630,9 @@ struct KvState final : QuarantineNode {
   sllm_public_runtime::AccountingState accounting;
   uint64_t published_length;
   uint64_t generation;
+  uint64_t last_published_start;
+  uint64_t last_published_end;
+  uint64_t last_published_generation;
   uint64_t transition_token;
   uint64_t transition_start;
   uint64_t transition_count;
@@ -649,9 +687,10 @@ struct KvState final : QuarantineNode {
                         ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
                         : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS),
         accounting(), published_length(0U), generation(0U),
-        transition_token(0U), transition_start(0U), transition_count(0U),
-        transition_end(0U), commit_allowed(false), view_count(0U),
-        release_active(false) {
+        last_published_start(0U), last_published_end(0U),
+        last_published_generation(0U), transition_token(0U),
+        transition_start(0U), transition_count(0U), transition_end(0U),
+        commit_allowed(false), view_count(0U), release_active(false) {
     const auto include_plane = [this](const KvVmmPlane &key,
                                       const KvVmmPlane &value,
                                       const uint64_t bytes_per_token) {
@@ -726,6 +765,9 @@ struct LinearAttentionState final : QuarantineNode {
   uint64_t published_length;
   uint64_t generation;
   uint32_t active_slot;
+  uint64_t last_published_start;
+  uint64_t last_published_end;
+  uint64_t last_published_generation;
   uint64_t transition_token;
   uint64_t transition_start;
   uint64_t transition_count;
@@ -750,9 +792,10 @@ struct LinearAttentionState final : QuarantineNode {
         output_width(value_heads_value * head_dim_value),
         conv_state(conv_value), recurrent_state(recurrent_value),
         scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
-        generation(0U), active_slot(0U), transition_token(0U),
-        transition_start(0U), transition_count(0U), transition_end(0U),
-        commit_allowed(false), release_active(false) {}
+        generation(0U), active_slot(0U), last_published_start(0U),
+        last_published_end(0U), last_published_generation(0U),
+        transition_token(0U), transition_start(0U), transition_count(0U),
+        transition_end(0U), commit_allowed(false), release_active(false) {}
 };
 
 struct Event final : QuarantineNode {
@@ -962,6 +1005,7 @@ struct ElementwisePlan final : QuarantineNode {
   sllm_embedding::DescriptorMetadata embedding_metadata;
   sllm_matmul::DescriptorMetadata matmul_metadata;
   sllm_argmax::DescriptorMetadata argmax_metadata;
+  sllm_moe_route::DescriptorMetadata moe_route_metadata;
   bool embedding;
   bool matmul;
   bool argmax;
@@ -977,9 +1021,10 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::ElementwisePlan), context(context_value),
         input0(input0_value), input1(input1_value), output(output_value),
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
-        argmax_metadata(), embedding(false), matmul(false), argmax(false),
-        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        argmax_metadata(), moe_route_metadata(), embedding(false),
+        matmul(false), argmax(false), matmul_workspace(nullptr),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -987,8 +1032,8 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::EmbeddingPlan), context(context_value),
         input0(weight_value), input1(token_ids_value), output(output_value),
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
-        argmax_metadata(), embedding(true), matmul(false), argmax(false),
-        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        argmax_metadata(), moe_route_metadata(), embedding(true), matmul(false),
+        argmax(false), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
@@ -997,8 +1042,8 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::MatmulPlan), context(context_value),
         input0(activation_value), input1(weight_value), output(output_value),
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
-        argmax_metadata(), embedding(false), matmul(true), argmax(false),
-        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        argmax_metadata(), moe_route_metadata(), embedding(false), matmul(true),
+        argmax(false), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
@@ -1007,7 +1052,18 @@ struct ElementwisePlan final : QuarantineNode {
       : QuarantineNode(HandleKind::ArgmaxPlan), context(context_value),
         input0(logits_value), input1(nullptr), output(output_value), metadata(),
         embedding_metadata(), matmul_metadata(),
-        argmax_metadata(metadata_value), embedding(false), matmul(false),
+        argmax_metadata(metadata_value), moe_route_metadata(), embedding(false),
+        matmul(false), argmax(true), matmul_workspace(nullptr),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        in_flight(false) {}
+
+  ElementwisePlan(Context *const context_value, Buffer *const logits_value,
+                  Buffer *const output_value,
+                  const sllm_moe_route::DescriptorMetadata &metadata_value)
+      : QuarantineNode(HandleKind::MoeRoutePlan), context(context_value),
+        input0(logits_value), input1(nullptr), output(output_value), metadata(),
+        embedding_metadata(), matmul_metadata(), argmax_metadata(),
+        moe_route_metadata(metadata_value), embedding(false), matmul(false),
         argmax(true), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
@@ -1062,6 +1118,17 @@ struct WindowedAttentionPlan final : ArrayOperationPlan {
       const WindowedAttentionBuffers buffers_value,
       const sllm_windowed_attention::DescriptorMetadata &metadata_value)
       : ArrayOperationPlan(HandleKind::WindowedAttentionPlan, context_value,
+                           buffers_value),
+        metadata(metadata_value) {}
+};
+
+struct MoeExpertPlan final : ArrayOperationPlan {
+  sllm_moe_expert::DescriptorMetadata metadata;
+
+  MoeExpertPlan(Context *const context_value,
+                const AttentionBuffers buffers_value,
+                const sllm_moe_expert::DescriptorMetadata &metadata_value)
+      : ArrayOperationPlan(HandleKind::MoeExpertPlan, context_value,
                            buffers_value),
         metadata(metadata_value) {}
 };
@@ -1894,6 +1961,54 @@ validate_argmax_dispatch_info(const sllm_argmax_dispatch_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t validate_moe_route_dispatch_info(
+    const sllm_moe_route_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "MoE route dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_moe_route_dispatch_info_t) ||
+      prefix[1] != SLLM_HIP_ABI_VERSION ||
+      info->info_version != SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION ||
+      info->reserved0 != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "MoE route dispatch info prefix or version differs");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "MoE route dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_moe_expert_dispatch_info(
+    const sllm_moe_expert_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr || info->struct_size != sizeof(*info) ||
+      info->abi_version != SLLM_HIP_ABI_VERSION ||
+      info->info_version != SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "MoE expert dispatch info prefix differs");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "MoE expert dispatch reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t validate_attention_preprocess_dispatch_info(
     const sllm_attention_preprocess_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -2349,7 +2464,9 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant =
-      metadata.nvfp4_w4a4
+      metadata.mxfp4_w4a4
+          ? ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m)
+      : metadata.nvfp4_w4a4
           ? ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed
       : metadata.nvfp4 ? ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m)
       : metadata.fp8_outer
@@ -2360,7 +2477,8 @@ void initialize_matmul_dispatch_info(
           : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
                                                  metadata.n, arch_name);
   info->dispatch_count =
-      metadata.fp8_outer || metadata.nvfp4_w4a4 ? 2U : 1U;
+      metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ? 2U
+                                                                       : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -2407,6 +2525,77 @@ void initialize_argmax_dispatch_info(
   sllm_public_runtime::copy_fixed_string(info->device_symbol,
                                          SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX,
                                          ::sllm_argmax_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+void initialize_moe_route_dispatch_info(
+    sllm_moe_route_dispatch_info_t *const info, const uint64_t dispatch_id,
+    const sllm_moe_route::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 2U;
+  info->kernel_id = SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1;
+  info->workgroup_size_x = SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(metadata.token_count);
+  info->token_count = metadata.token_count;
+  info->expert_count = metadata.expert_count;
+  info->pair_count = metadata.pair_count;
+  info->selected_expert_count = metadata.selected_expert_count;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX,
+      ::sllm_moe_route_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_MOE_ROUTE_DEVICE_SYMBOL_MAX,
+      ::sllm_moe_route_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+void initialize_moe_expert_dispatch_info(
+    sllm_moe_expert_dispatch_info_t *const info, const uint64_t dispatch_id,
+    const sllm_moe_expert::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  /* Two MXFP4 quantizers plus routed gate/up, shared gate/up, and down/combine.
+   */
+  info->dispatch_count = 5U;
+  info->kernel_id = metadata.token_count == 1U
+                        ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1
+                        : SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1;
+  info->workgroup_size_x = SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(metadata.active_pair_count);
+  info->token_count = metadata.token_count;
+  info->active_pair_count = metadata.active_pair_count;
+  info->workspace_bytes = metadata.workspace_bytes;
+  info->selected_expert_count = SLLM_HIP_MOE_EXPERT_TOPK;
+  info->shared_expert_count = 1U;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX,
+      metadata.token_count == 1U
+          ? ::sllm_moe_expert_kernel::kDecodeLogicalKernelId
+          : ::sllm_moe_expert_kernel::kPrefillLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX,
+      "sllm_moe_expert_active_pairs_shared_v1");
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -2774,8 +2963,11 @@ bool clear_kv_transition_locked(KvState *const state, const uint64_t token,
         state->generation == std::numeric_limits<uint64_t>::max()) {
       return false;
     }
+    state->last_published_start = state->transition_start;
+    state->last_published_end = state->transition_end;
     state->published_length = state->transition_end;
     ++state->generation;
+    state->last_published_generation = state->generation;
   }
   state->transition_token = 0U;
   state->transition_start = 0U;
@@ -2858,9 +3050,12 @@ bool clear_linear_attention_transition_locked(LinearAttentionState *const state,
         state->generation == std::numeric_limits<uint64_t>::max()) {
       return false;
     }
+    state->last_published_start = state->transition_start;
+    state->last_published_end = state->transition_end;
     state->active_slot = 1U - state->active_slot;
     state->published_length = state->transition_end;
     ++state->generation;
+    state->last_published_generation = state->generation;
   }
   state->transition_token = 0U;
   state->transition_start = 0U;
@@ -6722,6 +6917,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
 #include "matmul_runtime.inc"
+#include "moe_expert_runtime.inc"
+#include "moe_route_runtime.inc"
 #include "rotary_runtime.inc"
 #include "windowed_attention_runtime.inc"
 
@@ -6801,12 +6998,13 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->session_id = state->session_id;
   info->layer_id = state->layer_id;
   info->dtype = state->dtype;
-  info->encoding = state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-                       ? SLLM_TENSOR_ENCODING_UNQUANTIZED
-                       : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-                                  state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                              ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
-                              : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
+  info->encoding =
+      state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+          ? SLLM_TENSOR_ENCODING_UNQUANTIZED
+          : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+                     state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                 ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+                 : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
   info->head_count = state->head_count;
   info->head_dim = state->head_dim;
   info->memory_kind = state->memory_kind;
@@ -7460,6 +7658,52 @@ sllm_kv_state_query(const sllm_kv_state_t *const raw_state,
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
         "unexpected exception in KV state query");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_rewind_last(const sllm_kv_state_t *const raw_state,
+                          const uint64_t expected_length,
+                          const uint64_t rewind_length,
+                          sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    KvState *const state = lookup<KvState>(raw_state, HandleKind::KvState);
+    if (state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "KV rewind state handle is stale or has the wrong kind");
+    }
+    std::lock_guard<std::mutex> accounting_lock(
+        state->context->accounting_mutex);
+    if (state->context->poisoned.load() || state->release_active ||
+        state->transition_token != 0U || state->view_count != 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "KV rewind requires a quiescent state without live views");
+    }
+    if (rewind_length >= expected_length ||
+        state->published_length != expected_length ||
+        state->generation == std::numeric_limits<uint64_t>::max()) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "KV rewind length is stale or outside the committed tail");
+    }
+    state->published_length = rewind_length;
+    ++state->generation;
+    state->last_published_start = 0U;
+    state->last_published_end = 0U;
+    state->last_published_generation = 0U;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in KV state rewind");
   }
 }
 

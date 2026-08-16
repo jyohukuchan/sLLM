@@ -40,7 +40,9 @@ use crate::weights::{
 };
 use crate::{
     AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
-    VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, decode_e4m3fn,
+    QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_LAYER_BLOB_PREFIX, Qwen35MoeExpertProjection,
+    Qwen35MoeTensorPlane, VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
+    decode_e4m3fn,
 };
 
 /// Output published by a fully completed Qwen request transition.
@@ -48,9 +50,13 @@ use crate::{
 pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
+    logits_bf16: Option<Vec<u16>>,
     hidden_states_bf16: Option<Vec<u16>>,
     committed_length: u64,
 }
+
+/// Evidence-only `(layer, key bytes, value bytes)` semantic KV payload.
+pub type QwenKvPayloadEvidence = (u32, Vec<u8>, Vec<u8>);
 
 struct AttentionPreprocessExecution {
     layer: u32,
@@ -82,6 +88,8 @@ pub struct QwenExecutionAudit {
     all_dispatches_hip: bool,
     segment_count: u64,
     boundary_count: u64,
+    sparse_moe_submission_count: u64,
+    sparse_moe_active_pair_count: u64,
 }
 
 impl QwenExecutionAudit {
@@ -115,6 +123,14 @@ impl QwenExecutionAudit {
 
     pub const fn boundary_count(&self) -> u64 {
         self.boundary_count
+    }
+
+    pub const fn sparse_moe_submission_count(&self) -> u64 {
+        self.sparse_moe_submission_count
+    }
+
+    pub const fn sparse_moe_active_pair_count(&self) -> u64 {
+        self.sparse_moe_active_pair_count
     }
 }
 
@@ -200,6 +216,12 @@ impl QwenExecutionOutput {
     /// one BF16 row and convert it to finite-width F32 host values.
     pub fn last_logits(&self) -> Option<&[f32]> {
         self.last_logits.as_deref()
+    }
+
+    /// All target-logit rows in row-major BF16, published only by the
+    /// explicit Phase 18 exactness hooks.
+    pub fn logits_bf16(&self) -> Option<&[u16]> {
+        self.logits_bf16.as_deref()
     }
 
     /// Target hidden rows before the final output RMSNorm, in row-major BF16.
@@ -381,6 +403,36 @@ impl QwenResidentModel {
         let source = VerifiedProvisionSource {
             cache: Arc::clone(&cache),
         };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Provisions the exact reviewed Qwen3.5-35B-A3B MXFP4 artifact. Each
+    /// layer's expert planes are packed once into the native immutable blob;
+    /// routing and activation quantization remain request-time GPU work.
+    pub fn new_moe(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        artifact: Arc<VerifiedQwen35Moe>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "completion timeout must be non-zero".to_owned(),
+            ));
+        }
+        if plan.lock_fingerprint != crate::QWEN35_MOE_MODEL_FINGERPRINT
+            || graph.model_fingerprint() != crate::QWEN35_MOE_MODEL_FINGERPRINT
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MoE artifact, graph, and load-plan identities differ".to_owned(),
+            ));
+        }
+        let source = Qwen35MoeProvisionSource { artifact };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
         Ok(Self {
@@ -667,6 +719,62 @@ impl QwenExecutionRequest {
         self.core.decode_with_mtp_state(token_id)
     }
 
+    /// Evidence-only exactness hook: returns the raw BF16 target-logit row in
+    /// addition to the MTP hidden row.
+    pub fn decode_with_mtp_state_and_logits(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_with_mtp_state_and_logits(token_id)
+    }
+
+    /// Verifies one speculative target block in a single causal transition.
+    ///
+    /// The first input is the pending token already selected by the preceding
+    /// target step; subsequent inputs are draft tokens. The returned Argmax
+    /// and hidden-state rows preserve input order. Publication/rollback is
+    /// deliberately handled by the Phase 18 speculative transaction owner,
+    /// not by this numerical primitive.
+    pub fn decode_block_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_block_with_mtp_state(token_ids)
+    }
+
+    /// Evidence-only exactness hook: returns every raw BF16 target-logit row
+    /// for the speculative block.
+    pub fn decode_block_with_mtp_state_and_logits(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_block_with_mtp_state_and_logits(token_ids)
+    }
+
+    /// Resolves the immediately preceding speculative block. Keeping the full
+    /// block is metadata-only; a partial prefix restores the pre-block state
+    /// and deterministically replays only the committed input rows.
+    pub fn resolve_decode_block(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.resolve_decode_block(committed_input_rows)
+    }
+
+    /// Rewinds the immediately preceding single-row decode transition. This
+    /// is used by the MTP owner when a later draft is discarded; stale or
+    /// repeated rewinds fail closed in the backend.
+    pub fn rewind_last_decode_transition(&mut self) -> Result<(), QwenExecutionError> {
+        self.core.rewind_last_decode_transition()
+    }
+
+    /// Evidence-only semantic KV readback as `(layer, key_bytes, value_bytes)`.
+    pub fn kv_payload_bytes_for_evidence(
+        &self,
+    ) -> Result<Vec<QwenKvPayloadEvidence>, QwenExecutionError> {
+        self.core.kv_payload_bytes_for_evidence()
+    }
+
     /// Runs one MTP row. `target_hidden_bf16` must contain exactly 2560 BF16
     /// values and the graph must expose the typed MTP hidden input.
     pub fn prefill_mtp(
@@ -818,6 +926,12 @@ struct QwenExecutionCore {
     committed_length: u64,
     rope_position_delta: i64,
     last_output: Option<QwenExecutionOutput>,
+    pending_speculative: Option<PendingSpeculativeBlock>,
+}
+
+struct PendingSpeculativeBlock {
+    start_length: u64,
+    token_ids: Vec<i32>,
 }
 
 #[derive(Clone)]
@@ -913,6 +1027,240 @@ struct Fp8ConvertedProvisionSource {
 struct Nvfp4ProvisionSource {
     cache: Arc<VerifiedCache>,
     sidecar: Arc<VerifiedNvfp4Sidecar>,
+}
+
+struct Qwen35MoeProvisionSource {
+    artifact: Arc<VerifiedQwen35Moe>,
+}
+
+impl QwenProvisionSource for Qwen35MoeProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        if plan.lock_fingerprint != crate::QWEN35_MOE_MODEL_FINGERPRINT {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MoE load plan identity differs".to_owned(),
+            ));
+        }
+        if let Some(layer_text) = binding
+            .tensor_name()
+            .strip_prefix(QWEN35_MOE_LAYER_BLOB_PREFIX)
+        {
+            let layer = layer_text.parse::<u16>().map_err(|_| {
+                QwenExecutionError::InvalidRequest("MoE layer blob name is malformed".to_owned())
+            })?;
+            let bytes = self.pack_layer_blob(layer)?;
+            return upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &bytes,
+                completion_timeout,
+                "Qwen3.5 MoE layer blob upload",
+            );
+        }
+        let plane = self.artifact.plane(binding.tensor_name()).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!(
+                "MoE execution plane is absent: {}",
+                binding.tensor_name()
+            ))
+        })?;
+        upload_moe_plane(
+            self.artifact.as_ref(),
+            plane,
+            session,
+            queue,
+            &destination,
+            completion_timeout,
+        )
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        let plane = self.artifact.plane(tensor_name).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(format!(
+                "MoE attention scale plane is absent: {tensor_name}"
+            ))
+        })?;
+        let bytes = read_moe_plane(self.artifact.as_ref(), plane)?;
+        if bytes.len() != expected_length {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "MoE attention scale length differs: {tensor_name}"
+            )));
+        }
+        Ok(Arc::from(bytes))
+    }
+}
+
+impl Qwen35MoeProvisionSource {
+    fn pack_layer_blob(&self, layer: u16) -> Result<Vec<u8>, QwenExecutionError> {
+        const GATE_VALUES: usize = 0;
+        const GATE_SCALES: usize = 134_217_728;
+        const UP_VALUES: usize = 142_606_336;
+        const UP_SCALES: usize = 276_824_064;
+        const DOWN_VALUES: usize = 285_212_672;
+        const DOWN_SCALES: usize = 419_430_400;
+        const SHARED_GATE: usize = 427_819_008;
+        const SHARED_UP: usize = 429_916_160;
+        const SHARED_DOWN: usize = 432_013_312;
+        const SHARED_EXPERT_GATE: usize = 434_110_464;
+        let mut blob = vec![0_u8; QWEN35_MOE_LAYER_BLOB_BYTES as usize];
+        for expert in 0..256_u16 {
+            for (projection, value_base, scale_base, value_stride, scale_stride) in [
+                (
+                    Qwen35MoeExpertProjection::Gate,
+                    GATE_VALUES,
+                    GATE_SCALES,
+                    524_288,
+                    32_768,
+                ),
+                (
+                    Qwen35MoeExpertProjection::Up,
+                    UP_VALUES,
+                    UP_SCALES,
+                    524_288,
+                    32_768,
+                ),
+                (
+                    Qwen35MoeExpertProjection::Down,
+                    DOWN_VALUES,
+                    DOWN_SCALES,
+                    524_288,
+                    32_768,
+                ),
+            ] {
+                let descriptor =
+                    self.artifact
+                        .expert(layer, expert, projection)
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidRequest(
+                                "MoE expert descriptor is absent".to_owned(),
+                            )
+                        })?;
+                copy_plane_into(
+                    self.artifact.as_ref(),
+                    &descriptor.value,
+                    &mut blob,
+                    value_base + usize::from(expert) * value_stride,
+                )?;
+                copy_plane_into(
+                    self.artifact.as_ref(),
+                    &descriptor.scale,
+                    &mut blob,
+                    scale_base + usize::from(expert) * scale_stride,
+                )?;
+            }
+        }
+        let prefix = format!("model.language_model.layers.{layer}.mlp");
+        for (name, offset) in [
+            (
+                format!("{prefix}.shared_expert.gate_proj.weight"),
+                SHARED_GATE,
+            ),
+            (format!("{prefix}.shared_expert.up_proj.weight"), SHARED_UP),
+            (
+                format!("{prefix}.shared_expert.down_proj.weight"),
+                SHARED_DOWN,
+            ),
+            (
+                format!("{prefix}.shared_expert_gate.weight"),
+                SHARED_EXPERT_GATE,
+            ),
+        ] {
+            let plane = self.artifact.plane(&name).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!("MoE shared plane is absent: {name}"))
+            })?;
+            copy_plane_into(self.artifact.as_ref(), plane, &mut blob, offset)?;
+        }
+        Ok(blob)
+    }
+}
+
+fn copy_plane_into(
+    artifact: &VerifiedQwen35Moe,
+    plane: &Qwen35MoeTensorPlane,
+    output: &mut [u8],
+    offset: usize,
+) -> Result<(), QwenExecutionError> {
+    let bytes = read_moe_plane(artifact, plane)?;
+    let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("MoE blob offset overflowed".to_owned())
+    })?;
+    let destination = output.get_mut(offset..end).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("MoE blob plane exceeds layout".to_owned())
+    })?;
+    destination.copy_from_slice(&bytes);
+    Ok(())
+}
+
+fn read_moe_plane(
+    artifact: &VerifiedQwen35Moe,
+    plane: &Qwen35MoeTensorPlane,
+) -> Result<Vec<u8>, QwenExecutionError> {
+    let length = usize::try_from(plane.absolute_byte_range[1] - plane.absolute_byte_range[0])
+        .map_err(|_| QwenExecutionError::InvalidRequest("MoE plane is too large".to_owned()))?;
+    artifact
+        .read_plane_range(plane, 0, length)
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))
+}
+
+fn upload_moe_plane(
+    artifact: &VerifiedQwen35Moe,
+    plane: &Qwen35MoeTensorPlane,
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    completion_timeout: Duration,
+) -> Result<(), QwenExecutionError> {
+    let total = plane.absolute_byte_range[1]
+        .checked_sub(plane.absolute_byte_range[0])
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("MoE plane range underflow".to_owned())
+        })?;
+    if total != destination.size_bytes() || total == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "MoE plane does not exactly match its destination".to_owned(),
+        ));
+    }
+    let maximum = session
+        .max_transfer_bytes()?
+        .min(crate::WEIGHT_LOAD_CHUNK_BYTES);
+    if maximum == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "MoE backend transfer limit is zero".to_owned(),
+        ));
+    }
+    let mut relative = 0_u64;
+    while relative < total {
+        let length = (total - relative).min(maximum);
+        let length_usize = usize::try_from(length).map_err(|_| {
+            QwenExecutionError::InvalidRequest("MoE transfer length is too large".to_owned())
+        })?;
+        let bytes = artifact
+            .read_plane_range(plane, relative, length_usize)
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let absolute = destination
+            .offset_bytes()
+            .checked_add(relative)
+            .ok_or_else(|| QwenExecutionError::InvalidRequest("MoE upload overflow".to_owned()))?;
+        let range = destination.buffer().range(absolute, length)?;
+        let mut transfer = session.upload(queue, range, Arc::from(bytes))?;
+        require_terminal_success(
+            "Qwen3.5 MoE tensor upload",
+            transfer.wait(completion_timeout)?,
+        )?;
+        relative += length;
+    }
+    Ok(())
 }
 
 impl QwenProvisionSource for VerifiedProvisionSource {
@@ -1344,6 +1692,7 @@ impl QwenResidentInner {
         source: &S,
     ) -> Result<Self, QwenExecutionError> {
         let layout = validate_graph_plan(&graph, &plan)?;
+        preflight_semantic_support(session.as_ref(), &graph)?;
         preflight_device_memory(session.as_ref(), &graph, &plan)?;
         let queue = session.create_queue()?;
         let static_tensors = allocate_resident_tensors(&session, &graph, &layout)?;
@@ -1479,6 +1828,7 @@ impl QwenExecutionCore {
             committed_length: 0,
             rope_position_delta: 0,
             last_output: None,
+            pending_speculative: None,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -1567,6 +1917,7 @@ impl QwenExecutionCore {
             committed_length: 0,
             rope_position_delta: 0,
             last_output: None,
+            pending_speculative: None,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -1632,9 +1983,9 @@ impl QwenExecutionCore {
         let expected = usize::try_from(self.graph.token_count()).map_err(|_| {
             QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
         })?;
-        if token_ids.len() != expected {
+        if token_ids.len() > expected {
             return Err(QwenExecutionError::InvalidRequest(format!(
-                "prefill token count is {}, expected {expected}",
+                "prefill token count is {}, graph capacity is {expected}",
                 token_ids.len()
             )));
         }
@@ -1642,6 +1993,7 @@ impl QwenExecutionCore {
             token_ids,
             AttentionPreprocessPositionMode::Prefill,
             include_last_logits,
+            false,
             include_hidden_states,
             target_hidden_bf16,
             multimodal,
@@ -1649,21 +2001,209 @@ impl QwenExecutionCore {
     }
 
     fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, false, false, None)
+        self.decode_impl(token_id, false, false, false, None)
     }
 
     fn decode_with_last_logits(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, false, None)
+        self.decode_impl(token_id, true, false, false, None)
     }
 
     fn decode_with_mtp_state(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, true, None)
+        self.decode_impl(token_id, true, false, true, None)
+    }
+
+    fn decode_with_mtp_state_and_logits(
+        &mut self,
+        token_id: i32,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_impl(token_id, false, true, true, None)
+    }
+
+    fn decode_block_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "decode block requires a committed prefill".to_owned(),
+            ));
+        }
+        let maximum = usize::try_from(self.graph.token_count()).map_err(|_| {
+            QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
+        })?;
+        if token_ids.is_empty() || token_ids.len() > maximum {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "decode block token count is {}, graph capacity is {maximum}",
+                token_ids.len()
+            )));
+        }
+        let start_length = self.committed_length;
+        let output = self.run_transition(
+            token_ids,
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            false,
+            false,
+            true,
+            None,
+            None,
+        )?;
+        self.pending_speculative = Some(PendingSpeculativeBlock {
+            start_length,
+            token_ids: token_ids.to_vec(),
+        });
+        Ok(output)
+    }
+
+    fn decode_block_with_mtp_state_and_logits(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "decode block requires a committed prefill".to_owned(),
+            ));
+        }
+        let maximum = usize::try_from(self.graph.token_count()).map_err(|_| {
+            QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
+        })?;
+        if token_ids.is_empty() || token_ids.len() > maximum {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "decode block token count is {}, graph capacity is {maximum}",
+                token_ids.len()
+            )));
+        }
+        let start_length = self.committed_length;
+        let output = self.run_transition(
+            token_ids,
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            false,
+            true,
+            true,
+            None,
+            None,
+        )?;
+        self.pending_speculative = Some(PendingSpeculativeBlock {
+            start_length,
+            token_ids: token_ids.to_vec(),
+        });
+        Ok(output)
+    }
+
+    fn resolve_decode_block(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        let pending = self.pending_speculative.take().ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "no speculative decode block is pending resolution".to_owned(),
+            )
+        })?;
+        if committed_input_rows == 0 || committed_input_rows > pending.token_ids.len() {
+            self.pending_speculative = Some(pending);
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "committed speculative input rows {committed_input_rows} are outside 1..={}",
+                self.pending_speculative
+                    .as_ref()
+                    .map_or(0, |block| block.token_ids.len())
+            )));
+        }
+        if committed_input_rows == pending.token_ids.len() {
+            return self.last_output.clone().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "resolved speculative block has no completed output".to_owned(),
+                )
+            });
+        }
+        let expected_length = self.committed_length;
+        if let Err(error) = self.rewind_last_transition(expected_length, pending.start_length) {
+            self.lifecycle.cancel();
+            return Err(error);
+        }
+        self.committed_length = pending.start_length;
+        self.last_output = None;
+        self.run_transition(
+            &pending.token_ids[..committed_input_rows],
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            false,
+            false,
+            true,
+            None,
+            None,
+        )
+    }
+
+    fn rewind_last_decode_transition(&mut self) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        let rewind_length = self.committed_length.checked_sub(1).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("cannot rewind an empty request".to_owned())
+        })?;
+        if let Err(error) = self.rewind_last_transition(self.committed_length, rewind_length) {
+            self.lifecycle.cancel();
+            return Err(error);
+        }
+        self.committed_length = rewind_length;
+        self.last_output = None;
+        Ok(())
+    }
+
+    fn kv_payload_bytes_for_evidence(
+        &self,
+    ) -> Result<Vec<QwenKvPayloadEvidence>, QwenExecutionError> {
+        let mut payloads = Vec::with_capacity(self.kv_states.len());
+        for (&layer, state) in &self.kv_states {
+            let snapshot = self.session.kv_state_snapshot(state)?;
+            if snapshot.length() != self.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "kv",
+                    expected: self.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            let resident = state
+                .descriptor()
+                .resident_bytes_per_plane()
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph("KV resident byte count overflowed".to_owned())
+                })?;
+            let bytes_per_token = resident / state.capacity();
+            let semantic_bytes =
+                bytes_per_token
+                    .checked_mul(snapshot.length())
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(
+                            "KV semantic byte count overflowed".to_owned(),
+                        )
+                    })?;
+            let length = usize::try_from(semantic_bytes).map_err(|_| {
+                QwenExecutionError::InvalidGraph(
+                    "KV semantic byte count does not fit usize".to_owned(),
+                )
+            })?;
+            let mut key = vec![0_u8; length];
+            let mut value = vec![0_u8; length];
+            self.session.readback_kv_state(state, 0, 0, &mut key)?;
+            self.session.readback_kv_state(state, 1, 0, &mut value)?;
+            payloads.push((layer, key, value));
+        }
+        Ok(payloads)
     }
 
     fn decode_mtp(
@@ -1671,13 +2211,14 @@ impl QwenExecutionCore {
         token_id: i32,
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, true, Some(target_hidden_bf16))
+        self.decode_impl(token_id, true, false, true, Some(target_hidden_bf16))
     }
 
     fn decode_impl(
         &mut self,
         token_id: i32,
         include_last_logits: bool,
+        include_all_logits_bf16: bool,
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
@@ -1693,21 +2234,27 @@ impl QwenExecutionCore {
             &[token_id],
             AttentionPreprocessPositionMode::DecodeContinuation,
             include_last_logits,
+            include_all_logits_bf16,
             include_hidden_states,
             target_hidden_bf16,
             None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn run_transition(
         &mut self,
         token_ids: &[i32],
         position_mode: AttentionPreprocessPositionMode,
         include_last_logits: bool,
+        include_all_logits_bf16: bool,
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
         let token_count = u64::try_from(token_ids.len()).map_err(|_| {
             QwenExecutionError::InvalidRequest("token count does not fit u64".to_owned())
         })?;
@@ -1818,6 +2365,9 @@ impl QwenExecutionCore {
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count))
             .transpose()?;
+        let logits_bf16 = include_all_logits_bf16
+            .then(|| self.read_logits_bf16(token_count))
+            .transpose()?;
         let hidden_states_bf16 = include_hidden_states
             .then(|| self.read_hidden_states(token_count))
             .transpose()?;
@@ -1826,6 +2376,7 @@ impl QwenExecutionCore {
         let output = QwenExecutionOutput {
             token_ids: output,
             last_logits,
+            logits_bf16,
             hidden_states_bf16,
             committed_length: expected_length,
         };
@@ -1836,6 +2387,25 @@ impl QwenExecutionCore {
         }
         self.last_output = Some(output.clone());
         Ok(output)
+    }
+
+    fn rewind_last_transition(
+        &self,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), QwenExecutionError> {
+        for state in self.linear_states.values() {
+            self.session.rewind_last_linear_attention_transition(
+                state,
+                expected_length,
+                rewind_length,
+            )?;
+        }
+        for state in self.kv_states.values() {
+            self.session
+                .rewind_last_kv_state_transition(state, expected_length, rewind_length)?;
+        }
+        self.ensure_state_lengths(rewind_length)
     }
 
     fn lower_graph(
@@ -2035,6 +2605,83 @@ impl QwenExecutionCore {
         decode_bf16_logits(&bytes)
     }
 
+    fn read_logits_bf16(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
+        let argmax = self.graph.nodes().last().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("graph has no terminal Argmax node".to_owned())
+        })?;
+        if !matches!(
+            argmax.kind(),
+            QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
+        ) || argmax.inputs().len() != 1
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal Argmax does not have one logits input".to_owned(),
+            ));
+        }
+        let logits_id = argmax.inputs()[0];
+        let view = self.view(logits_id, token_count)?;
+        let rows = usize::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest("token count does not fit usize".to_owned())
+        })?;
+        if view.dtype() != DType::Bf16 || view.shape() != [rows, QWEN35_VOCAB_SIZE] {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal logits do not have the fixed BF16 [tokens,vocab] shape".to_owned(),
+            ));
+        }
+        let word_count = rows.checked_mul(QWEN35_VOCAB_SIZE).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("logits word count overflowed".to_owned())
+        })?;
+        let total_bytes = u64::try_from(word_count)
+            .map_err(|_| {
+                QwenExecutionError::InvalidGraph("logits word count does not fit u64".to_owned())
+            })?
+            .checked_mul(2)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits byte count overflowed".to_owned())
+            })?;
+        let allocation = self.tensors.get(logits_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("terminal logits allocation is absent".to_owned())
+        })?;
+        let maximum = self.session.max_transfer_bytes()?;
+        if maximum == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "backend transfer limit must be non-zero".to_owned(),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(word_count * 2);
+        let mut relative = 0_u64;
+        while relative < total_bytes {
+            let length = (total_bytes - relative).min(maximum);
+            let offset = view.byte_offset().checked_add(relative).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits chunk offset overflowed".to_owned())
+            })?;
+            let range = allocation.buffer.range(offset, length)?;
+            let mut readback = self.session.readback(&self.queue, range)?;
+            require_terminal_success(
+                "all-logits-readback",
+                readback.wait(self.completion_timeout)?,
+            )?;
+            let start = bytes.len();
+            bytes.resize(
+                start + usize::try_from(length).expect("transfer length fits usize"),
+                0,
+            );
+            readback.read_into(&mut bytes[start..])?;
+            relative = relative.checked_add(length).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("logits chunk progress overflowed".to_owned())
+            })?;
+        }
+        if bytes.len() != word_count * 2 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "all-logits readback byte count differs".to_owned(),
+            ));
+        }
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect())
+    }
+
     fn read_hidden_states(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
         let final_norm = self
             .graph
@@ -2113,6 +2760,16 @@ impl QwenExecutionCore {
                 operation.rms_norm_contract().ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(format!(
                         "RMSNorm node {} has no contract",
+                        node.label()
+                    ))
+                })?,
+            )?,
+            SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
+                inputs,
+                outputs,
+                operation.sparse_moe_contract().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "SparseMoe node {} has no contract",
                         node.label()
                     ))
                 })?,
@@ -2394,6 +3051,8 @@ impl QwenExecutionCore {
             all_dispatches_hip: true,
             segment_count: audit.segment_count(),
             boundary_count: audit.boundary_count(),
+            sparse_moe_submission_count: audit.sparse_moe_submission_count(),
+            sparse_moe_active_pair_count: audit.sparse_moe_active_pair_count(),
         })
     }
 
@@ -2775,6 +3434,27 @@ fn preflight_device_memory(
             owned_tensor_bytes,
             graph.total_state_bytes()
         )));
+    }
+    Ok(())
+}
+
+fn preflight_semantic_support(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+) -> Result<(), QwenExecutionError> {
+    for node in graph.nodes() {
+        let Some(operation) = node.operation() else {
+            continue;
+        };
+        match session.supports(operation) {
+            PrepareSupport::Supported => {}
+            PrepareSupport::Unsupported { reason } => {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "semantic node {} is unsupported before model upload: {reason}",
+                    node.label()
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -4963,7 +5643,7 @@ mod tests {
             Err(QwenExecutionError::InvalidRequest(_))
         ));
         assert!(matches!(
-            core.prefill(&[1]),
+            core.prefill(&[1, 2, 3, 4]),
             Err(QwenExecutionError::InvalidRequest(_))
         ));
         assert!(matches!(
@@ -4978,6 +5658,9 @@ mod tests {
         assert_eq!(position_bytes(0, 3).unwrap(), i32_bytes(&[0, 1, 2]));
         assert_eq!(position_bytes(3, 1).unwrap(), i32_bytes(&[3]));
         assert!(position_bytes(i32::MAX as u64, 2).is_err());
+
+        let (mut short, _) = provisioned_core(Arc::new(ExecutionRecorder::default()));
+        assert_eq!(short.prefill(&[1]).unwrap().committed_length(), 1);
     }
 
     #[test]

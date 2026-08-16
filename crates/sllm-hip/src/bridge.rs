@@ -37,11 +37,13 @@ use crate::{
     AttentionPreprocessSubmission, Buffer, Completion, CompletionState, Context,
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
     EmbeddingDispatchInfo, EmbeddingSubmission, HipBackend, MatmulDescriptor, MatmulDispatchInfo,
-    MatmulSubmission, PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding,
-    PreparedMatmul, PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue,
-    RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor,
-    RotaryDispatchInfo, RotarySubmission, RuntimeError, RuntimeStatus, WindowedAttentionDescriptor,
-    WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
+    MatmulSubmission, MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission,
+    MoeRouteDescriptor, MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess,
+    PreparedElementwise, PreparedEmbedding, PreparedMatmul, PreparedMoeExpert, PreparedMoeRoute,
+    PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue, RmsNormDescriptor,
+    RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission,
+    RuntimeError, RuntimeStatus, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
+    WindowedAttentionSubmission, moe_expert_workspace_bytes,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -292,9 +294,10 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::AttentionPreprocess
                 | sllm_core::SemanticOpKind::Rotary
                 | sllm_core::SemanticOpKind::CausalAttention
+                | sllm_core::SemanticOpKind::SparseMoe
         ) {
             return PrepareSupport::Unsupported {
-                reason: "the HIP owned execution bridge currently prepares copy, add, scalar_mul, silu_mul, gelu_tanh_mul, sigmoid_mul, tanh_softcap, embedding, matmul, RMSNorm, argmax, attention_preprocess, split-half rotary, and windowed causal attention"
+                reason: "the HIP owned execution bridge does not support this semantic operation"
                     .to_owned(),
             };
         }
@@ -343,6 +346,35 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         access
             .downcast_kv_state_payload::<KvStateResource>(state)?
             .snapshot()
+            .map_err(map_backend_error)
+    }
+
+    fn readback_kv_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        plane: u32,
+        byte_offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .readback(plane, byte_offset, destination)
+            .map_err(map_backend_error)
+    }
+
+    fn rewind_last_kv_state_transition(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .rewind_last(expected_length, rewind_length)
             .map_err(map_backend_error)
     }
 
@@ -464,6 +496,20 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         access
             .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
             .snapshot()
+            .map_err(map_backend_error)
+    }
+
+    fn rewind_last_linear_attention_transition(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        expected_length: u64,
+        rewind_length: u64,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
+            .rewind_last(expected_length, rewind_length)
             .map_err(map_backend_error)
     }
 
@@ -764,6 +810,100 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         .map_err(map_backend_error)?,
                 )
             }
+            sllm_core::SemanticOpKind::SparseMoe => {
+                let hidden_owned = &operation.inputs()[0];
+                let router_owned = &operation.inputs()[1];
+                let blob_owned = &operation.inputs()[2];
+                let output_owned = &operation.outputs()[0];
+                let hidden = access
+                    .downcast_buffer_payload::<Buffer>(hidden_owned.buffer())?
+                    .clone();
+                let router_weight = access
+                    .downcast_buffer_payload::<Buffer>(router_owned.buffer())?
+                    .clone();
+                let layer_blob = access
+                    .downcast_buffer_payload::<Buffer>(blob_owned.buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(output_owned.buffer())?
+                    .clone();
+                let token_count = hidden_owned.view().shape()[0] as u64;
+                let logits_view = sllm_core::TensorView::contiguous(
+                    sllm_core::DType::Bf16,
+                    &[token_count as usize, 256],
+                )
+                .map_err(|error| ExecutionError::ExecutionUnavailable {
+                    backend: HIP_BACKEND_NAME,
+                    reason: format!("SparseMoe logits layout: {error}"),
+                })?;
+                let route_layout =
+                    MoeRouteLayout::new(token_count, 256, 8).map_err(map_backend_error)?;
+                let route_view = sllm_core::TensorView::contiguous(
+                    sllm_core::DType::U8,
+                    &[route_layout.metadata_bytes as usize],
+                )
+                .map_err(|error| ExecutionError::ExecutionUnavailable {
+                    backend: HIP_BACKEND_NAME,
+                    reason: format!("SparseMoe route layout: {error}"),
+                })?;
+                let workspace_bytes = moe_expert_workspace_bytes(token_count).ok_or_else(|| {
+                    ExecutionError::ExecutionUnavailable {
+                        backend: HIP_BACKEND_NAME,
+                        reason: "SparseMoe workspace size overflow".to_owned(),
+                    }
+                })?;
+                let workspace_view = sllm_core::TensorView::contiguous(
+                    sllm_core::DType::U8,
+                    &[workspace_bytes as usize],
+                )
+                .map_err(|error| ExecutionError::ExecutionUnavailable {
+                    backend: HIP_BACKEND_NAME,
+                    reason: format!("SparseMoe workspace layout: {error}"),
+                })?;
+                let logits = Buffer::allocate(&self.context, logits_view.payload_bytes())
+                    .map_err(map_backend_error)?;
+                let route_metadata = Buffer::allocate(&self.context, route_view.payload_bytes())
+                    .map_err(map_backend_error)?;
+                let workspace = Buffer::allocate(&self.context, workspace_view.payload_bytes())
+                    .map_err(map_backend_error)?;
+                let matmul = MatmulDescriptor::new(
+                    hidden.binding(hidden_owned.view().clone()),
+                    router_weight.binding(router_owned.view().clone()),
+                    logits.binding(logits_view.clone()),
+                )
+                .map_err(|error| ExecutionError::ExecutionUnavailable {
+                    backend: HIP_BACKEND_NAME,
+                    reason: format!("SparseMoe router matmul: {error}"),
+                })?;
+                let route = MoeRouteDescriptor::new(
+                    logits.binding(logits_view),
+                    route_metadata.binding(route_view.clone()),
+                    8,
+                )
+                .map_err(map_backend_error)?;
+                let expert = MoeExpertDescriptor::new(
+                    hidden.binding(hidden_owned.view().clone()),
+                    route_metadata.binding(route_view),
+                    layer_blob.binding(blob_owned.view().clone()),
+                    workspace.binding(workspace_view),
+                    output.binding(output_owned.view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                HipPreparedPlan::SparseMoe(PreparedSparseMoe {
+                    router: self
+                        .backend
+                        .prepare_matmul(&self.context, matmul)
+                        .map_err(map_backend_error)?,
+                    route: self
+                        .backend
+                        .prepare_moe_route(&self.context, route)
+                        .map_err(map_backend_error)?,
+                    expert: self
+                        .backend
+                        .prepare_moe_expert(&self.context, expert)
+                        .map_err(map_backend_error)?,
+                })
+            }
         };
         Ok(AdapterResource::new(prepared))
     }
@@ -835,6 +975,19 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 (
                     HipSemanticSubmission::WindowedAttention(submission),
                     dispatch_from_windowed_attention(dispatch),
+                )
+            }
+            HipPreparedPlan::SparseMoe(plan) => {
+                let (router, _) = plan.router.execute(&queue).map_err(map_backend_error)?;
+                let (route, _) = plan.route.execute(&queue).map_err(map_backend_error)?;
+                let (expert, dispatch) = plan.expert.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::SparseMoe(SparseMoeSubmission {
+                        router,
+                        route,
+                        expert,
+                    }),
+                    dispatch_from_moe_expert(dispatch),
                 )
             }
         };
@@ -925,6 +1078,14 @@ enum HipPreparedPlan {
     AttentionPreprocess(PreparedAttentionPreprocess),
     Rotary(PreparedRotary),
     WindowedAttention(PreparedWindowedAttention),
+    SparseMoe(PreparedSparseMoe),
+}
+
+#[derive(Clone)]
+struct PreparedSparseMoe {
+    router: PreparedMatmul,
+    route: PreparedMoeRoute,
+    expert: PreparedMoeExpert,
 }
 
 enum HipSemanticSubmission {
@@ -936,6 +1097,13 @@ enum HipSemanticSubmission {
     AttentionPreprocess(AttentionPreprocessSubmission),
     Rotary(RotarySubmission),
     WindowedAttention(WindowedAttentionSubmission),
+    SparseMoe(SparseMoeSubmission),
+}
+
+struct SparseMoeSubmission {
+    router: MatmulSubmission,
+    route: MoeRouteSubmission,
+    expert: MoeExpertSubmission,
 }
 
 impl HipSemanticSubmission {
@@ -949,6 +1117,7 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.query(),
             Self::Rotary(submission) => submission.query(),
             Self::WindowedAttention(submission) => submission.query(),
+            Self::SparseMoe(submission) => submission.expert.query(),
         }
     }
 
@@ -962,6 +1131,7 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
             Self::Rotary(submission) => submission.wait(timeout),
             Self::WindowedAttention(submission) => submission.wait(timeout),
+            Self::SparseMoe(submission) => submission.expert.wait(timeout),
         }
     }
 
@@ -975,6 +1145,12 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
             Self::Rotary(submission) => submission.kernel_elapsed_ns(),
             Self::WindowedAttention(submission) => submission.kernel_elapsed_ns(),
+            Self::SparseMoe(submission) => {
+                let expert = submission.expert.kernel_elapsed_ns()?;
+                let route = submission.route.kernel_elapsed_ns()?;
+                let router = submission.router.kernel_elapsed_ns()?;
+                Ok(router + route + expert)
+            }
         }
     }
 }
@@ -1337,6 +1513,26 @@ fn dispatch_from_windowed_attention(dispatch: WindowedAttentionDispatchInfo) -> 
         grid_size_x: dispatch.grid_size_x,
         row_count: dispatch.query_count,
         normalized_size: u64::from(dispatch.head_dim),
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_moe_expert(dispatch: MoeExpertDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count + 3,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: dispatch.active_pair_count,
         backend: dispatch.backend,
         fallback_allowed: dispatch.fallback_allowed,
         fallback_used: dispatch.fallback_used,

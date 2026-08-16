@@ -60,6 +60,7 @@ Supported generation fields are:
 - `stop` as a string or array of strings;
 - `presence_penalty`;
 - `frequency_penalty`;
+- `seed` as an optional signed 64-bit integer, matching the pinned OpenAPI `int64` schema;
 - `stream`;
 - `n`, only when its value is `1`.
 
@@ -128,7 +129,8 @@ particular, profile v1 rejects:
 - image content outside the Phase 17 subset below, and all video or audio content;
 - `logprobs` and `top_logprobs`;
 - structured output and `response_format`;
-- `seed` and reproducibility claims involving `system_fingerprint`;
+- reproducibility claims involving `system_fingerprint`（同一model artifact、runtime、target、
+  request parameter内では`seed`をsampling RNGへ固定するが、異なるtuple間のbitwise再現性は保証しない）;
 - `n` with any value other than `1`;
 - multipart message content and non-text output; and
 - other pinned-schema fields not explicitly listed as supported above.

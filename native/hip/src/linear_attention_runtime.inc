@@ -539,6 +539,55 @@ extern "C" sllm_status_t sllm_linear_attention_state_query(
   }
 }
 
+extern "C" sllm_status_t sllm_linear_attention_state_rewind_last(
+    const sllm_linear_attention_state_t *const raw_state,
+    const uint64_t expected_length, const uint64_t rewind_length,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    LinearAttentionState *const state = lookup<LinearAttentionState>(
+        raw_state, HandleKind::LinearAttentionState);
+    if (state == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "linear attention rewind state handle is stale or wrong kind");
+    }
+    std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+    if (state->context->poisoned.load() || state->release_active ||
+        state->transition_token != 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "linear attention rewind requires a quiescent state");
+    }
+    if (rewind_length >= expected_length ||
+        state->published_length != expected_length ||
+        state->last_published_start != rewind_length ||
+        state->last_published_end != expected_length ||
+        state->last_published_generation != state->generation ||
+        state->generation == std::numeric_limits<uint64_t>::max()) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "linear attention rewind does not identify the most recent published transition");
+    }
+    state->active_slot = 1U - state->active_slot;
+    state->published_length = rewind_length;
+    ++state->generation;
+    state->last_published_start = 0U;
+    state->last_published_end = 0U;
+    state->last_published_generation = 0U;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in linear attention state rewind");
+  }
+}
+
 extern "C" sllm_status_t sllm_linear_attention_execute(
     const sllm_context_t *const raw_context,
     const sllm_queue_t *const raw_queue,

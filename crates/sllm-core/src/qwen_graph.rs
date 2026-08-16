@@ -12,7 +12,12 @@ use crate::model::{
     ClassificationStatus, LayerType, ModelLock, Qwen35ReviewedSpec, RopeType, TensorDType,
     TensorDescriptor, reviewed_qwen35_spec,
 };
-use crate::op::{OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind};
+use crate::op::{
+    OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
+};
+use crate::qwen35_moe::{
+    QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedQwen35Moe,
+};
 use crate::weights::{
     QWEN35_MTP_CONSUMER_LAYER, QwenComponentSelection, WeightClassification, WeightConsumer,
     WeightConsumerKey, WeightLoadPlan, build_qwen_component_weight_load_plan,
@@ -568,8 +573,159 @@ pub fn build_qwen35_graph(
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
         multimodal: false,
+        moe: false,
     })?;
     builder.build()
+}
+
+/// Builds the executable text graph for the exact reviewed 35B-A3B MXFP4
+/// artifact. Attention and GDN nodes use the common Qwen implementation;
+/// every dense MLP subgraph is replaced by one native sparse-MoE boundary.
+pub fn build_qwen35_moe_execution_graph(
+    artifact: &VerifiedQwen35Moe,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN35_MAX_POSITION_EMBEDDINGS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN35_MAX_POSITION_EMBEDDINGS,
+        });
+    }
+    if artifact.config().hidden_size != 2_048
+        || artifact.config().layer_count != 40
+        || artifact.config().attention_heads != 16
+        || artifact.config().kv_heads != 2
+        || artifact.config().head_dim != 256
+        || plan.repo_id != crate::qwen35_moe::QWEN35_MOE_REPOSITORY
+        || plan.resolved_revision != crate::qwen35_moe::QWEN35_MOE_REVISION
+        || plan.lock_fingerprint != QWEN35_MOE_MODEL_FINGERPRINT
+        || plan.tied_embeddings
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "Qwen3.5 MoE artifact and load plan identity differ".to_owned(),
+        ));
+    }
+    let dimensions = QwenGraphDimensions {
+        hidden: 2_048,
+        intermediate: 512,
+        vocab: QWEN35_VOCAB_SIZE as u64,
+        q_heads: 16,
+        kv_heads: 2,
+        head_dim: 256,
+        full_q_width: 8_192,
+        full_kv_width: 512,
+        full_output_width: 4_096,
+        linear_qk_heads: 16,
+        linear_value_heads: 32,
+        linear_head_dim: 128,
+        linear_qkv_width: 8_192,
+        linear_output_width: 4_096,
+        linear_conv_kernel: 4,
+        tied_embeddings: false,
+    };
+    let layer_types = artifact.config().layer_types.clone();
+    let expected = expected_moe_consumers(&layer_types, false);
+    let mut bindings = Vec::with_capacity(expected.len());
+    let mut seen = BTreeSet::new();
+    for entry in &plan.entries {
+        if entry.classification != WeightClassification::Required {
+            continue;
+        }
+        let consumer = entry.consumer.ok_or_else(|| {
+            QwenGraphError::InvalidPlan("required MoE entry has no consumer".to_owned())
+        })?;
+        if !expected.contains(&consumer) || !seen.insert(consumer) {
+            return Err(QwenGraphError::InvalidPlan(
+                "MoE load-plan consumer coverage is not one-to-one".to_owned(),
+            ));
+        }
+        validate_moe_binding(entry, consumer, &layer_types, dimensions)?;
+        bindings.push(QwenGraphWeightBinding {
+            consumer,
+            tensor_name: entry.tensor_name.clone(),
+            classification: entry.classification,
+            dtype: entry.dtype,
+            shape: entry.shape.clone(),
+            source_range: entry.source_range,
+            destination_start: entry.destination_start.ok_or_else(|| {
+                QwenGraphError::InvalidPlan("required MoE entry has no destination".to_owned())
+            })?,
+        });
+    }
+    if seen != expected || bindings.len() != expected.len() {
+        return Err(QwenGraphError::InvalidPlan(
+            "MoE load plan does not cover the exact execution weight set".to_owned(),
+        ));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types,
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed: BTreeSet::new(),
+        model_fingerprint: QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: BTreeSet::new(),
+        fp8_dtype: None,
+        fp8_sidecar_fingerprint: None,
+        kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+        mtp: false,
+        multimodal: false,
+        moe: true,
+    })?
+    .build()
+}
+
+fn validate_moe_binding(
+    entry: &crate::WeightLoadEntry,
+    consumer: WeightConsumerKey,
+    layer_types: &[LayerType],
+    dimensions: QwenGraphDimensions,
+) -> Result<(), QwenGraphError> {
+    let (name, dtype, shape) = match consumer.role {
+        WeightConsumer::MoeRouter => {
+            let layer = consumer
+                .layer
+                .ok_or_else(|| QwenGraphError::InvalidPlan("MoE router has no layer".to_owned()))?;
+            (
+                format!("model.language_model.layers.{layer}.mlp.gate.weight"),
+                TensorDType::Bf16,
+                vec![256, 2_048],
+            )
+        }
+        WeightConsumer::MoeLayerBlob => {
+            let layer = consumer
+                .layer
+                .ok_or_else(|| QwenGraphError::InvalidPlan("MoE blob has no layer".to_owned()))?;
+            (
+                crate::qwen35_moe::qwen35_moe_layer_blob_name(layer as u32),
+                TensorDType::U8,
+                vec![QWEN35_MOE_LAYER_BLOB_BYTES],
+            )
+        }
+        _ => expected_weight(consumer, layer_types, dimensions)?,
+    };
+    if entry.tensor_name != name || entry.dtype != dtype || entry.shape != shape {
+        return Err(QwenGraphError::InvalidPlan(format!(
+            "MoE binding metadata differs for {consumer:?}"
+        )));
+    }
+    Ok(())
 }
 
 /// Build the text decoder graph whose prefill embedding rows and three-axis
@@ -617,6 +773,7 @@ pub fn build_qwen35_multimodal_graph(
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
         multimodal: true,
+        moe: false,
     })?
     .build()
 }
@@ -657,6 +814,7 @@ pub fn build_qwen35_mtp_graph(
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: true,
         multimodal: false,
+        moe: false,
     })?
     .build()
 }
@@ -828,6 +986,7 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
         kv_cache_encoding,
         mtp: false,
         multimodal: false,
+        moe: false,
     })?
     .build()
 }
@@ -915,6 +1074,7 @@ fn build_qwen35_fp8_graph_with_dtype(
         kv_cache_encoding,
         mtp: false,
         multimodal: false,
+        moe: false,
     })?
     .build()
 }
@@ -1449,6 +1609,34 @@ fn expected_consumers(
     result
 }
 
+fn expected_moe_consumers(
+    layer_types: &[LayerType],
+    tied_embeddings: bool,
+) -> BTreeSet<WeightConsumerKey> {
+    let mut result = expected_consumers(layer_types, tied_embeddings);
+    for layer in 0..layer_types.len() as u64 {
+        for role in [
+            WeightConsumer::MlpGate,
+            WeightConsumer::MlpUp,
+            WeightConsumer::MlpDown,
+        ] {
+            result.remove(&WeightConsumerKey {
+                layer: Some(layer),
+                role,
+            });
+        }
+        result.insert(WeightConsumerKey {
+            layer: Some(layer),
+            role: WeightConsumer::MoeRouter,
+        });
+        result.insert(WeightConsumerKey {
+            layer: Some(layer),
+            role: WeightConsumer::MoeLayerBlob,
+        });
+    }
+    result
+}
+
 fn expected_weight(
     consumer: WeightConsumerKey,
     layer_types: &[LayerType],
@@ -1655,6 +1843,7 @@ struct GraphBuilderConfig {
     kv_cache_encoding: crate::KvCacheEncoding,
     mtp: bool,
     multimodal: bool,
+    moe: bool,
 }
 
 struct GraphBuilder {
@@ -1672,6 +1861,7 @@ struct GraphBuilder {
     kv_cache_encoding: crate::KvCacheEncoding,
     mtp: bool,
     multimodal: bool,
+    moe: bool,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
     nodes: Vec<QwenGraphNode>,
@@ -1697,6 +1887,7 @@ impl GraphBuilder {
             kv_cache_encoding,
             mtp,
             multimodal,
+            moe,
         } = config;
         let bindings = bindings
             .into_iter()
@@ -1704,6 +1895,8 @@ impl GraphBuilder {
             .collect::<BTreeMap<_, _>>();
         let expected_binding_count = if mtp {
             16
+        } else if moe {
+            expected_moe_consumers(&layer_types, dimensions.tied_embeddings).len()
         } else {
             expected_consumers(&layer_types, dimensions.tied_embeddings).len()
         };
@@ -1727,6 +1920,7 @@ impl GraphBuilder {
             kv_cache_encoding,
             mtp,
             multimodal,
+            moe,
             tensors: Vec::new(),
             producers: Vec::new(),
             nodes: Vec::new(),
@@ -2344,6 +2538,65 @@ impl GraphBuilder {
                     role: WeightConsumer::PostAttentionNorm,
                 }],
             )?;
+
+            if self.moe {
+                let router_key = WeightConsumerKey {
+                    layer: Some(layer_index as u64),
+                    role: WeightConsumer::MoeRouter,
+                };
+                let blob_key = WeightConsumerKey {
+                    layer: Some(layer_index as u64),
+                    role: WeightConsumer::MoeLayerBlob,
+                };
+                let router = self.weight_tensor(router_key)?;
+                let blob = self.weight_tensor(blob_key)?;
+                let moe_output = self.activation(
+                    layer,
+                    "moe.output",
+                    &[self.token_count, self.dimensions.hidden],
+                )?;
+                let contract = SparseMoeContract::new(2_048, 256, 8, 512, 512, true)?;
+                let moe_op = SemanticOpDescriptor::new_sparse_moe(
+                    vec![
+                        self.tensors[post_normed].view.clone(),
+                        self.tensors[router].view.clone(),
+                        self.tensors[blob].view.clone(),
+                    ],
+                    vec![self.tensors[moe_output].view.clone()],
+                    contract,
+                )?;
+                self.add_semantic(
+                    &format!("layer.{layer}.sparse_moe"),
+                    moe_op,
+                    vec![post_normed, router, blob],
+                    vec![moe_output],
+                    vec![],
+                    vec![router_key, blob_key],
+                )?;
+                let mlp_residual = self.activation(
+                    layer,
+                    "mlp.residual.output",
+                    &[self.token_count, self.dimensions.hidden],
+                )?;
+                let add_op = SemanticOpDescriptor::new(
+                    SemanticOpKind::Add,
+                    vec![
+                        self.tensors[attention_residual].view.clone(),
+                        self.tensors[moe_output].view.clone(),
+                    ],
+                    vec![self.tensors[mlp_residual].view.clone()],
+                )?;
+                self.add_semantic(
+                    &format!("layer.{layer}.mlp_residual_add"),
+                    add_op,
+                    vec![attention_residual, moe_output],
+                    vec![mlp_residual],
+                    vec![],
+                    vec![],
+                )?;
+                hidden = mlp_residual;
+                continue;
+            }
 
             let gate_weight = self.weight_tensor(WeightConsumerKey {
                 layer: Some(layer_index as u64),
@@ -3635,6 +3888,7 @@ mod tests {
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
             multimodal: false,
+            moe: false,
         })
         .expect("fixture bindings")
         .build()
@@ -4186,6 +4440,7 @@ mod tests {
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
             multimodal: false,
+            moe: false,
         })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());

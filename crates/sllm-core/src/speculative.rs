@@ -206,6 +206,17 @@ pub fn verify_greedy(
     })
 }
 
+/// Sequentially accepts proposals against tokens already selected by the
+/// canonical target sampler. This is the production exact path for both
+/// greedy and stochastic generation: it consumes no RNG and never applies a
+/// residual/rejection distribution.
+pub fn verify_target_selected(
+    draft_tokens: &[u32],
+    target_selected: &[u32],
+) -> Result<SpeculativeDecision, SpeculativeError> {
+    verify_greedy(draft_tokens, target_selected)
+}
+
 pub fn verify_stochastic(
     drafts: &[DraftToken],
     target: &[TokenDistribution],
@@ -406,6 +417,14 @@ mod tests {
         assert_eq!(mid.accepted_draft_tokens(), 1);
         assert_eq!(mid.emitted_tokens(), [1, 8]);
         assert_eq!(mid.rejected_at(), Some(1));
+    }
+
+    #[test]
+    fn target_selected_verification_is_rng_free_for_sampled_tokens() {
+        let decision = verify_target_selected(&[4, 5, 6], &[4, 9, 6, 7]).unwrap();
+        assert_eq!(decision.accepted_draft_tokens(), 1);
+        assert_eq!(decision.emitted_tokens(), [4, 9]);
+        assert_eq!(decision.random_draws(), 0);
     }
 
     #[test]

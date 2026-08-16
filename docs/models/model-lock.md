@@ -161,6 +161,22 @@ special token、processor geometryを検査する。text-only weight planは従�
 required componentとして消費する。画像bytes、decoded raster、patch列、projected embeddingはderived model artifactではなく
 request-local dataであり、lockやrepositoryへ保存しない。
 
+Phase 19のprimary lockは`amd/Qwen3.5-35B-A3B-MXFP4` revision
+`2e19c6576db91e5d5a93455415619262218bf8a1`であり、architecture/lineage controlは
+`Qwen/Qwen3.5-35B-A3B-FP8` revision `9d1823d2dee688a6b25e77009dc727688c44936e`である。
+text-only inventoryは62,053 tensor、22,009,481,856 source byte、model fingerprintは
+`sha256:5bca203f6ec8ab9cab4e340a6c337fff7387f9ca2fa12526c48ce999748e83b0`とする。loaderはconfig、index、全shard、
+9個のsupport file、license、tensor name/shape/dtype/source range、expert ID 0..255、projection/value/scale planeをexactに検査し、
+missing/extra/duplicate/range/hash不一致をload前に拒否する。lowered execution planは493 entry、digest
+`sha256:f96a3389cfaca4ab947fe060ccd6f048d078946e704464277d87019a13fb7ae4`である。
+検証済みshardはhash確認後も同じopen file descriptorへ固定し、upload時のpositional readでpathを再openしない。
+config、index、support fileも同じdescriptorから上限付きで読み、読み込み前後のdevice/inode/size/mtime/ctimeとpath bindingが
+変化した場合は拒否する。
+
+このlockはsource container固有の検査結果と、container-neutralなMoE config、expert-axis inventory、mixed recipe、verified load plan、
+tokenizer/chat metadataを分離する。Phase 20のGGUFは後者と同じsemantic identityを保持し、GGUF化を理由に別modelとして扱ったり、
+source safetensorsと量子化sidecarを最終ユーザー形式として残したりしない。model shardや生成GGUF自体はrepositoryへ含めない。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

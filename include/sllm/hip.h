@@ -117,6 +117,7 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MATMUL_FP8_VERSION UINT32_C(2)
 #define SLLM_HIP_MATMUL_NVFP4_VERSION UINT32_C(3)
 #define SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION UINT32_C(4)
+#define SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION UINT32_C(5)
 #define SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1 UINT32_C(1)
 #define SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2 UINT32_C(2)
@@ -128,6 +129,8 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MATMUL_KERNEL_ID_DECODE_WAVE64_BF16_FP32_V1 UINT32_C(7)
 #define SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_PACKED_DEQUANT_V1 UINT32_C(8)
 #define SLLM_HIP_MATMUL_KERNEL_ID_NVFP4_W4A4_PACKED_V1 UINT32_C(11)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_DECODE_V1 UINT32_C(14)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_PREFILL_V1 UINT32_C(15)
 #define SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MATMUL_WORKGROUP_SIZE UINT32_C(256)
@@ -144,6 +147,30 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ARGMAX_WORKGROUP_SIZE UINT32_C(256)
 #define SLLM_HIP_ARGMAX_MAX_V UINT64_C(1048576)
 #define SLLM_HIP_ARGMAX_MAX_M UINT64_C(4294967295)
+
+#define SLLM_HIP_MOE_ROUTE_VERSION UINT32_C(1)
+#define SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1 UINT32_C(1)
+#define SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MOE_ROUTE_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_MOE_ROUTE_MAX_TOKENS UINT64_C(65536)
+#define SLLM_HIP_MOE_ROUTE_MAX_EXPERTS UINT64_C(256)
+#define SLLM_HIP_MOE_ROUTE_MAX_SELECTED UINT32_C(16)
+
+#define SLLM_HIP_MOE_EXPERT_VERSION UINT32_C(1)
+#define SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1 UINT32_C(1)
+#define SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1 UINT32_C(2)
+#define SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE UINT32_C(2048)
+#define SLLM_HIP_MOE_EXPERT_INTERMEDIATE_SIZE UINT32_C(512)
+#define SLLM_HIP_MOE_EXPERT_COUNT UINT32_C(256)
+#define SLLM_HIP_MOE_EXPERT_TOPK UINT32_C(8)
+#define SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES UINT64_C(434114560)
+#define SLLM_HIP_MOE_EXPERT_MAX_TOKENS UINT64_C(65536)
 
 #define SLLM_HIP_ATTENTION_PREPROCESS_VERSION UINT32_C(1)
 #define SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -268,6 +295,7 @@ typedef uint32_t sllm_tensor_encoding_t;
 #define SLLM_TENSOR_ENCODING_FP8_OUTER_F32 UINT32_C(1)
 #define SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32 UINT32_C(2)
 #define SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32 UINT32_C(3)
+#define SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0 UINT32_C(4)
 
 typedef uint32_t sllm_rmsnorm_accumulation_dtype_t;
 #define SLLM_RMSNORM_ACCUMULATION_F32 UINT32_C(2)
@@ -304,6 +332,8 @@ typedef struct sllm_elementwise_plan_t sllm_elementwise_plan_t;
 typedef struct sllm_embedding_plan_t sllm_embedding_plan_t;
 typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
 typedef struct sllm_argmax_plan_t sllm_argmax_plan_t;
+typedef struct sllm_moe_route_plan_t sllm_moe_route_plan_t;
+typedef struct sllm_moe_expert_plan_t sllm_moe_expert_plan_t;
 typedef struct sllm_attention_preprocess_plan_t
     sllm_attention_preprocess_plan_t;
 typedef struct sllm_rotary_plan_t sllm_rotary_plan_t;
@@ -617,6 +647,87 @@ typedef struct sllm_argmax_dispatch_info_t {
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
   uint32_t reserved[8];
 } sllm_argmax_dispatch_info_t;
+
+/* Sparse-MoE routing consumes contiguous BF16 logits [M,E]. `metadata` is a
+ * contiguous unquantized U8 byte buffer whose reviewed layout is:
+ *   i32 expert_ids[M,K], f32 expert_weights[M,K], i32 counts[E],
+ *   i32 offsets[E+1], i32 grouped_token_ids[M,K],
+ *   i32 grouped_topk_slots[M,K], i32 status.
+ * Status is zero on success and nonzero when any input row is nonfinite.
+ * Ties select the smaller expert ID. Grouping is expert-major, then token,
+ * then selected slot, without a host-side decision or sort. */
+typedef struct sllm_moe_route_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t selected_expert_count;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t logits;
+  sllm_tensor_binding_t metadata;
+} sllm_moe_route_desc_t;
+
+typedef struct sllm_moe_route_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint64_t expert_count;
+  uint64_t pair_count;
+  uint32_t selected_expert_count;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MOE_ROUTE_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_moe_route_dispatch_info_t;
+
+/* One Qwen3.5 MoE layer. `routing_metadata` is the exact output byte layout of
+ * sllm_moe_route_execute. `layer_blob` is the container-neutral packed layer
+ * layout documented by the Rust loader: routed gate/up/down MXFP4 planes,
+ * followed by BF16 shared gate/up/down and shared-expert gate. */
+typedef struct sllm_moe_expert_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved0;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t hidden;
+  sllm_tensor_binding_t routing_metadata;
+  sllm_tensor_binding_t layer_blob;
+  sllm_tensor_binding_t workspace;
+  sllm_tensor_binding_t output;
+} sllm_moe_expert_desc_t;
+
+typedef struct sllm_moe_expert_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint64_t active_pair_count;
+  uint64_t workspace_bytes;
+  uint32_t selected_expert_count;
+  uint32_t shared_expert_count;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_moe_expert_dispatch_info_t;
 
 /* C3a1 text-only attention preprocessing. The packed Q/gate input is exactly
  * [M, 16, 512], with each head's final axis [Q 256, gate 256]. K is [M, 4,
@@ -1170,6 +1281,36 @@ SLLM_HIP_API sllm_status_t sllm_argmax_execute(
     sllm_completion_t **completion, sllm_argmax_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t sllm_moe_route_prepare(
+    const sllm_context_t *context, const sllm_moe_route_desc_t *descriptor,
+    sllm_moe_route_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_moe_route_plan_release(sllm_moe_route_plan_t **plan,
+                            sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_moe_route_execute(
+    const sllm_moe_route_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_moe_route_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_moe_expert_prepare(
+    const sllm_context_t *context, const sllm_moe_expert_desc_t *descriptor,
+    sllm_moe_expert_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t
+sllm_moe_expert_plan_release(sllm_moe_expert_plan_t **plan,
+                             sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_moe_expert_execute(
+    const sllm_moe_expert_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_moe_expert_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t sllm_attention_preprocess_prepare(
     const sllm_context_t *context,
     const sllm_attention_preprocess_desc_t *descriptor,
@@ -1229,6 +1370,13 @@ SLLM_HIP_API sllm_status_t
 sllm_kv_state_query(const sllm_kv_state_t *state, sllm_kv_view_info_t *info,
                     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+/* Rewinds a quiescent committed KV tail to an earlier length. The expected
+ * current length makes stale rollback fail closed. Tail bytes are left
+ * inaccessible and may be overwritten by later appends. */
+SLLM_HIP_API sllm_status_t sllm_kv_state_rewind_last(
+    const sllm_kv_state_t *state, uint64_t expected_length,
+    uint64_t rewind_length, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t
 sllm_kv_state_snapshot(const sllm_kv_state_t *state, sllm_kv_view_t **view,
                        sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
@@ -1274,6 +1422,12 @@ SLLM_HIP_API sllm_status_t sllm_linear_attention_state_query(
     const sllm_linear_attention_state_t *state,
     sllm_linear_attention_view_info_t *info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Rewinds exactly the most recently published transition by restoring the
+ * prior double-buffer slot. */
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_rewind_last(
+    const sllm_linear_attention_state_t *state, uint64_t expected_length,
+    uint64_t rewind_length, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_linear_attention_execute(
     const sllm_context_t *context, const sllm_queue_t *queue,

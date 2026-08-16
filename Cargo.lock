@@ -1026,6 +1026,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "image",
+ "serde_json",
  "sha2",
  "sllm-core",
  "tokenizers",
@@ -1039,6 +1040,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sllm-core",
+ "sllm-frontend",
  "sllm-hip-sys",
  "static_assertions",
 ]

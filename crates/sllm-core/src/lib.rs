@@ -17,12 +17,14 @@ mod handles;
 mod kv_state;
 mod linear_attention;
 mod model;
+mod moe;
 mod mxfp;
 mod nvfp4;
 mod nvfp4_sidecar;
 mod op;
 mod prepared_execution;
 mod quantized_model;
+mod qwen35_moe;
 mod qwen_execution;
 mod qwen_graph;
 mod qwen_mtp;
@@ -115,6 +117,10 @@ pub use model::{
     read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
     verify_gemma4_model_cache, verify_model_cache,
 };
+pub use moe::{
+    QWEN35_MOE_EXPERT_COUNT, QWEN35_MOE_SELECTED_EXPERT_COUNT, SparseMoeRouting,
+    SparseMoeRoutingContract, SparseMoeRoutingError, reference_sparse_moe_route,
+};
 pub use mxfp::{MX_BLOCK_SIZE, MxElementFormat, MxError, decode_e8m0, decode_mxfp4, decode_mxfp8};
 pub use nvfp4::{
     E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,
@@ -128,8 +134,8 @@ pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
-    RotaryTensor, SemanticOp, SemanticOpDescriptor, SemanticOpKind, SplitHalfRotaryContract,
-    WindowedCausalAttentionContract,
+    RotaryTensor, SemanticOp, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
+    SplitHalfRotaryContract, WindowedCausalAttentionContract,
 };
 pub use prepared_execution::{
     ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
@@ -145,7 +151,7 @@ pub use quantized_model::{
 };
 pub use qwen_execution::{
     QwenExecutionAudit, QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest,
-    QwenKvLayerMemoryAudit, QwenRequestMemoryAudit, QwenResidentModel,
+    QwenKvLayerMemoryAudit, QwenKvPayloadEvidence, QwenRequestMemoryAudit, QwenResidentModel,
 };
 pub use qwen_graph::{
     QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QWEN35_MAX_POSITION_EMBEDDINGS,
@@ -153,9 +159,9 @@ pub use qwen_graph::{
     QwenGraphError, QwenGraphNode, QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor,
     QwenGraphStateKind, QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph, build_qwen35_mtp_graph,
-    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_qwen35_nvfp4_graph_with_kv_cache_encoding,
+    build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,
@@ -173,6 +179,17 @@ pub use qwen_vision_execution::{
     QwenVisionExecutionInput, QwenVisionExecutionOutput, QwenVisionResidentModel,
     assemble_qwen35_multimodal_prompt,
 };
+pub use qwen35_moe::{
+    QWEN35_MOE_EXPERT_PROJECTION_COUNT, QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_LAYER_BLOB_PREFIX,
+    QWEN35_MOE_LICENSE, QWEN35_MOE_MODEL_FINGERPRINT, QWEN35_MOE_MTP_TENSOR_COUNT,
+    QWEN35_MOE_REPOSITORY, QWEN35_MOE_REVISION, QWEN35_MOE_SEMANTIC_REPOSITORY,
+    QWEN35_MOE_SEMANTIC_REVISION, QWEN35_MOE_TENSOR_COUNT, QWEN35_MOE_TEXT_RESIDENT_BYTES,
+    QWEN35_MOE_TEXT_TENSOR_COUNT, QWEN35_MOE_VISION_TENSOR_COUNT, Qwen35MoeConfig,
+    Qwen35MoeExpertProjection, Qwen35MoeExpertTensor, Qwen35MoeGraph, Qwen35MoeLayerGraph,
+    Qwen35MoeModelError, Qwen35MoeRecipe, Qwen35MoeTensorPlane, VerifiedQwen35Moe,
+    build_qwen35_moe_graph, build_qwen35_moe_weight_load_plan, qwen35_moe_generation_stop_policy,
+    qwen35_moe_layer_blob_name, validate_qwen35_moe_config, verify_qwen35_moe_artifact,
+};
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
     OsSamplingRandom, ProfileSamplerV1, SamplingError, SamplingParametersV1, SamplingRandomSource,
@@ -180,6 +197,7 @@ pub use sampling::{
 pub use speculative::{
     DraftToken, OpaqueStateCheckpoint, SpeculativeDecision, SpeculativeError,
     SpeculativeTransaction, TokenDistribution, verify_greedy, verify_stochastic,
+    verify_target_selected,
 };
 pub use tensor::{TensorError, TensorView};
 pub use weights::{

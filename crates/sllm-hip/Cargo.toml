@@ -62,12 +62,21 @@ path = "src/bin/sllm-output-gate-g1-evidence.rs"
 name = "sllm-qwen-d2-evidence"
 path = "src/bin/sllm-qwen-d2-evidence.rs"
 
+[[bin]]
+name = "sllm-qwen35-moe-admission"
+path = "src/bin/sllm-qwen35-moe-admission.rs"
+
+[[bin]]
+name = "sllm-mxfp4-w4a4-evidence"
+path = "src/bin/sllm-mxfp4-w4a4-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sllm-core.workspace = true
 sllm-hip-sys.workspace = true
+sllm-frontend.workspace = true
 
 [dev-dependencies]
 static_assertions = "1.1.0"

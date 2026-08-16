@@ -115,6 +115,8 @@ pub enum WeightConsumer {
     MtpEmbeddingNorm,
     MtpHiddenNorm,
     MtpFinalNorm,
+    MoeRouter,
+    MoeLayerBlob,
 }
 
 impl WeightConsumer {
@@ -152,6 +154,8 @@ impl WeightConsumer {
             Self::MtpEmbeddingNorm => 30,
             Self::MtpHiddenNorm => 31,
             Self::MtpFinalNorm => 32,
+            Self::MoeRouter => 33,
+            Self::MoeLayerBlob => 34,
         }
     }
 }
@@ -197,6 +201,16 @@ pub struct WeightLoadPlan {
     digest: [u8; 32],
 }
 
+pub(crate) struct VerifiedWeightPlanMetadata {
+    pub schema_version: String,
+    pub repo_id: String,
+    pub resolved_revision: String,
+    pub lock_fingerprint: String,
+    pub tied_embeddings: bool,
+    pub chunk_size: u64,
+    pub total_destination_bytes: u64,
+}
+
 impl WeightLoadPlan {
     pub fn digest(&self) -> &[u8; 32] {
         &self.digest
@@ -225,6 +239,25 @@ impl WeightLoadPlan {
             },
             &self.entries,
         )
+    }
+
+    pub(crate) fn from_verified_entries(
+        metadata: VerifiedWeightPlanMetadata,
+        entries: Vec<WeightLoadEntry>,
+    ) -> Result<Self, WeightPlanError> {
+        let mut plan = Self {
+            schema_version: metadata.schema_version,
+            repo_id: metadata.repo_id,
+            resolved_revision: metadata.resolved_revision,
+            lock_fingerprint: metadata.lock_fingerprint,
+            tied_embeddings: metadata.tied_embeddings,
+            chunk_size: metadata.chunk_size,
+            total_destination_bytes: metadata.total_destination_bytes,
+            entries,
+            digest: [0; 32],
+        };
+        plan.digest = plan.recompute_digest()?;
+        Ok(plan)
     }
 }
 
