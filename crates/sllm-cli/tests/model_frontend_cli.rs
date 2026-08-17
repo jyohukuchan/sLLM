@@ -15,6 +15,12 @@ fn help_lists_offline_model_frontend_commands() {
     for command in ["verify-model", "tokenize", "render", "decode", "generate"] {
         assert!(stdout.contains(command), "help omitted {command}");
     }
+    for legacy_option in ["--model-lock", "--fp8-manifest", "--fp8-provider"] {
+        assert!(
+            !stdout.contains(legacy_option),
+            "help retained legacy option {legacy_option}"
+        );
+    }
     assert!(output.stderr.is_empty());
 }
 

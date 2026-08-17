@@ -2638,7 +2638,7 @@ bool create_attention_resources(sllm_context_t **const context,
       m * 4U * 256U * sizeof(uint16_t),
       16U * 256U * sizeof(uint16_t),
       4U * 256U * sizeof(uint16_t),
-      m * sizeof(int32_t),
+      m * 3U * sizeof(int32_t),
       m * 16U * 256U * sizeof(uint16_t),
       m * 16U * 256U * sizeof(uint16_t),
       m * 4U * 256U * sizeof(uint16_t),
@@ -2901,6 +2901,46 @@ bool attention_preprocess_success_metadata_and_dispatch() {
       release_completion(&completion) &&
       expect_status(sllm_attention_preprocess_plan_release(&plan, &error.sink),
                     SLLM_STATUS_OK, "attention success plan release", error);
+  release_attention_buffers(&buffers);
+  return valid && release_queue(&queue) && release_context(&context);
+}
+
+bool attention_preprocess_mrope_positions_dispatch() {
+  fake_hip::reset();
+  constexpr uint64_t m = 2U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  AttentionBuffers buffers{};
+  if (!create_attention_resources(&context, &queue, &buffers, m)) {
+    release_attention_buffers(&buffers);
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  std::vector<int32_t> positions = {0, 0, 0, 1, 7, 11};
+  Error error;
+  auto descriptor = attention_preprocess_descriptor(buffers, m, 0U);
+  const uint64_t positions_shape[] = {m, 3U};
+  descriptor.positions = attention_binding(
+      buffers[4], SLLM_TENSOR_DTYPE_I32, 2U, positions_shape);
+  sllm_attention_preprocess_plan_t *plan = nullptr;
+  sllm_completion_t *completion = nullptr;
+  auto info = attention_preprocess_dispatch_info();
+  const bool valid =
+      upload_attention_positions(queue, buffers[4], positions) &&
+      expect_status(sllm_attention_preprocess_prepare(
+                        context, &descriptor, &plan, &error.sink),
+                    SLLM_STATUS_OK, "attention mRoPE prepare", error) &&
+      plan != nullptr &&
+      expect_status(sllm_attention_preprocess_execute(
+                        plan, queue, &completion, &info, &error.sink),
+                    SLLM_STATUS_OK, "attention mRoPE execute", error) &&
+      completion != nullptr && info.dispatch_count == 1U &&
+      fake_hip::attention_preprocess_launch_calls() == 1U &&
+      query_completion(completion, SLLM_STATUS_OK) &&
+      release_completion(&completion) &&
+      expect_status(sllm_attention_preprocess_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_OK, "attention mRoPE plan release", error);
   release_attention_buffers(&buffers);
   return valid && release_queue(&queue) && release_context(&context);
 }
@@ -4798,7 +4838,8 @@ int main() {
   }
   if (!attention_preprocess_prepare_validation_and_old_abi() ||
       !attention_preprocess_position_payload_mismatch_is_pre_dispatch() ||
-      !attention_preprocess_success_metadata_and_dispatch()) {
+      !attention_preprocess_success_metadata_and_dispatch() ||
+      !attention_preprocess_mrope_positions_dispatch()) {
     std::cerr << "attention preprocess public ABI contract test failed\n";
     return 1;
   }

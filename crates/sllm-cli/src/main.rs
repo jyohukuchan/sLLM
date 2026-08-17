@@ -62,7 +62,6 @@ fn print_help() {
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");
-    println!("  [--fp8-provider native|native-fnuz|emulation|converted-bf16]");
 }
 
 fn print_version() -> Result<(), String> {

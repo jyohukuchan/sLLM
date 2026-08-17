@@ -1588,7 +1588,7 @@ fn validate_mtp_plan(
     lock: &ModelLock,
     plan: &WeightLoadPlan,
 ) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
-    if plan.schema_version != lock.schema_version
+    if (plan.schema_version != lock.schema_version && plan.schema_version != "gguf-model-plan-v1")
         || plan.repo_id != lock.model.repo_id
         || plan.resolved_revision != lock.model.resolved_revision
         || plan.lock_fingerprint != lock.fingerprint()
@@ -1619,15 +1619,24 @@ fn validate_mtp_plan(
             byte_size: entry.source_range[1].saturating_sub(entry.source_range[0]),
         })
         .collect::<Vec<_>>();
-    let canonical = build_qwen_component_weight_load_plan(
-        lock,
-        descriptors.iter(),
-        QwenComponentSelection::MTP_ONLY,
-    )
-    .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
-    if &canonical != plan {
+    if plan.schema_version == lock.schema_version {
+        let canonical = build_qwen_component_weight_load_plan(
+            lock,
+            descriptors.iter(),
+            QwenComponentSelection::MTP_ONLY,
+        )
+        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        if &canonical != plan {
+            return Err(QwenGraphError::InvalidPlan(
+                "MTP plan entries or digest are not canonical".to_owned(),
+            ));
+        }
+    } else if !plan
+        .has_valid_digest()
+        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?
+    {
         return Err(QwenGraphError::InvalidPlan(
-            "MTP plan entries or digest are not canonical".to_owned(),
+            "GGUF MTP plan digest is not canonical".to_owned(),
         ));
     }
     let mut required = Vec::new();
@@ -3831,6 +3840,7 @@ pub(crate) fn qwen35_mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::weights::VerifiedWeightPlanMetadata;
     use crate::{build_weight_load_plan, read_model_lock};
     use std::path::PathBuf;
 
@@ -4198,6 +4208,23 @@ mod tests {
                 .any(|node| node.label() == "layer.32.kv_append")
         );
         assert_eq!(graph.nodes().last().unwrap().label(), "argmax");
+
+        let mut gguf_plan = WeightLoadPlan::from_verified_entries(
+            VerifiedWeightPlanMetadata {
+                schema_version: "gguf-model-plan-v1".to_owned(),
+                repo_id: plan.repo_id.clone(),
+                resolved_revision: plan.resolved_revision.clone(),
+                lock_fingerprint: plan.lock_fingerprint.clone(),
+                tied_embeddings: plan.tied_embeddings,
+                chunk_size: plan.chunk_size,
+                total_destination_bytes: plan.total_destination_bytes,
+            },
+            plan.entries.clone(),
+        )
+        .expect("GGUF MTP plan digest builds");
+        build_qwen35_mtp_graph(&lock, &gguf_plan, 257).expect("GGUF MTP graph builds");
+        gguf_plan.entries[0].source_range[0] += 1;
+        assert!(build_qwen35_mtp_graph(&lock, &gguf_plan, 257).is_err());
     }
 
     #[test]

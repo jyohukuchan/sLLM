@@ -1342,9 +1342,22 @@ impl ModelFrontendBackend for ProductionBackend {
                         (owner, None)
                     }
                     QwenDenseSource::Gguf(source) => {
-                        let request_graph = self
-                            .build_plain_graph(&plan, input_len, state_capacity, &request.target)
-                            .map_err(|error| format!("Qwen GGUF request graph failed: {error}"))?;
+                        let request_graph = if processed_images.is_empty() {
+                            self.build_plain_graph(
+                                &plan,
+                                input_len,
+                                state_capacity,
+                                &request.target,
+                            )
+                        } else {
+                            build_qwen35_multimodal_graph(
+                                &self.lock,
+                                &plan,
+                                input_len,
+                                state_capacity,
+                            )
+                        }
+                        .map_err(|error| format!("Qwen GGUF request graph failed: {error}"))?;
                         let resident = QwenResidentModel::new_gguf(
                             Arc::clone(&session),
                             graph,

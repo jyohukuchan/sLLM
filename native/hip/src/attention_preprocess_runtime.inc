@@ -360,9 +360,10 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
           static_cast<int64_t>(index / plan->metadata.position_components);
       const bool valid = plan->metadata.position_components == 1U
           ? host_positions[index] == static_cast<int32_t>(expected)
-          : host_positions[index] >= 0 &&
-                host_positions[index] < static_cast<int32_t>(
-                    SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION);
+          // The mRoPE ABI carries signed I32 components while its public
+          // exclusive upper bound is UINT32_MAX. Every non-negative I32
+          // value is therefore representable and below that bound.
+          : host_positions[index] >= 0;
       if (!valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
