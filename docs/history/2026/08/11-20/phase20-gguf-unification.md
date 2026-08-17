@@ -79,8 +79,8 @@
   8,411,592,192 byte、peakは8,512,933,508 byteで、1 loadを13 sampleとuntimed correctness controlで再利用し、
   HIP-only、fallbackなし、全request cleanupとmodel drop後allocation 0を確認した。
 - `bc09604018da08434fc6e42f94d7397e21c22fc8`でGGUF MTP/vision、mRoPE境界、旧help表記を固定した。最終host回帰は
-  core 174、GGUF contract 11、CLI 24、server 27 testをPASSした。native host fault binaryでは新mRoPE testを先行実行して
-  PASSした。full suiteは本変更と独立したmatmul kernel-id expectation 4 / actual 12で後続停止したため、その結果を
-  Phase 20全体のPASSへ数えず、実GPUの両target visionでも数値経路を検証した。
+  core 174、GGUF contract 11、CLI 24、server 27 testをPASSした。push前監査でsmall-row matmulの公開dispatch ID
+  12/13に名称定数がなく、host testが旧hipBLAS ID 4を期待していたstale contractを検出した。ABI値を変えずC/Rust定数、
+  layout probe、serial-row symbol期待値を同期し、native public-runtime host suiteも新mRoPE caseを含めてPASSした。
 
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase20-gguf-unification.md)

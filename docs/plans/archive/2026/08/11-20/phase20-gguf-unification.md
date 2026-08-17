@@ -121,7 +121,8 @@ tokenizer、vocabulary、chat template、model metadata、tensor recipeととも
 - A5のQwen BF16固定laneは各targetで3 warmup + 10 measuredを完走した。R9700 / V620のloadは10.654 / 10.331 s、
   resident 8,411,592,192 byte、peak 8,512,933,508 byte、median TTFT 46.653 / 184.143 ms、median TPOT
   26.689 / 29.685 ms。modelは1回だけloadし、13 sampleとcorrectness controlで再利用した。
-- host回帰はcore 174、GGUF contract 11、CLI 24、server 27 testをfailed/skipped 0でPASSした。4 final GGUFの
+- host回帰はcore 174、GGUF contract 11、CLI 24、server 27、native public-runtime host testをfailed/skipped 0で
+  PASSした。4 final GGUFの
   `verify-model --gguf ... --derived-lock ...`もPASSし、旧公開引数はparserで拒否しhelpにも表示しない。
 - model、GGUF binary、raw trace、生成artifactはrepositoryへ追加していない。詳細値は対応履歴を正とする。
 
