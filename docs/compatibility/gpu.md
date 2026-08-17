@@ -147,6 +147,11 @@ exactに記録した。resident/peakは22,009,574,016/22,230,758,892 byteであ�
 CLI/OpenAI non-stream/SSE/cancel/recovery/seed/shutdownも通常経路でHIP-only、fallbackなし、cleanup 0をPASSした。
 このevidenceはfixed artifact、batch 1、text-only、実行済みtupleへ限定し、vision/MTP、multi-GPU、別model/SKUへ一般化しない。
 
+Phase 20では同じcanonical 2 targetで単一GGUFのQwen BF16、Gemma mixed NVFP4、Qwen MoE MXFP4をsource importerと
+同じtop-1へ照合し、R9700ではQwen FP8 GGUFも実行した。全caseはexact target、HIP-only、fallbackなし、cleanup 0をPASSした。
+R9700のMoE GGUF serverは`/v1/models`、1-token chat completion、graceful shutdownをPASSした。この証拠はcontainer/runtime
+統合の正しさに限定し、性能倍率、別artifact、別target、multi-GPUを主張しない。
+
 Phase Xでは同じV620 `gfx1030`とR9700 `gfx1201`を外部llama.cpp local-subagent runtimeの比較対象にし、
 Qwen3.8-27B Q5_K_XL、Q5_1 KV、context 262,144でHIP/Vulkanを実行した。HIP buildで
 `GGML_CUDA_FA_ALL_QUANTS=ON`にすると、Q5_1 Flash Attention exact Qwen shapeが両target各18/18でCPU oracleへ一致し、

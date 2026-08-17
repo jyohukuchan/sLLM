@@ -210,6 +210,10 @@ tensor block、converter mappingの技術参照として読んだ。8 fileのSHA
 test、generated artifactをsLLM sourceへcopy、adapt、portしていないため、import eventと`THIRD_PARTY_NOTICES.md` entryは
 追加しない。後続Phaseで直接reuseする場合は、実際のimport前に本書の通常手順で別recordを追加する。
 
+P20-A1〜A6もこの境界を維持し、reader、writer、converter、block repack、testsをsLLM内で実装した。
+llama.cppからのcode expression、control flow、test vectorのimport/adaptationはなく、Phase 20 closeout時点でも
+import eventと`THIRD_PARTY_NOTICES.md` entryは不要である。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

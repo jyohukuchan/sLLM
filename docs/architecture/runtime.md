@@ -170,10 +170,9 @@ encoding、mixed-precision recipe、providerをloaderが自動解決し、低bit
 量子化済みartifactの選択をユーザーの明示選択とみなす。provider名やscale layoutは`doctor`、明示的なdiagnostic、benchmark reportで
 確認可能にするが、通常のgenerate/server応答へ品質警告を注入しない。
 
-現行の`--fp8-manifest`、`--nvfp4-manifest`、artifact path、provider引数はsafetensors＋sidecar移行期間の開発interfaceであり、
-`default`、`opt-in production`、`correctness-only opt-in`というevidence記述を実装するユーザー向けmodeではない。明示provider指定を
-残す場合も、通常選択ではなく開発・benchmark用overrideとする。artifact hash/schema不一致、targetで実装されていないencoding、
-memory/shape contract不成立は自動変換や警告付き継続をせずerrorにする。
+Phase 20完了後の公開CLI/serverは`--gguf PATH --derived-lock PATH`だけをmodel入力として受け付ける。
+旧`--lock`/`--cache`、量子化sidecar、provider overrideは公開parserから削除した。safetensorsとsidecarのreaderはconverter・
+開発adapterに限定し、GGUFのhash/schema不一致、未対応encoding、memory/shape contract不成立はfallbackせずerrorにする。
 
 内部状態は一つの序列へ潰さず、少なくとも次を独立に記録する。
 

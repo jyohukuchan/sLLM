@@ -165,7 +165,8 @@ GPU visible by its stable UUID and pass logical device index `0` to the server:
 
 ```console
 ROCR_VISIBLE_DEVICES=GPU-76a08c022586fed6 sllm-server \
-  --device-index 0 --target gfx1030 [model and server options]
+  --gguf /models/model.gguf --derived-lock /models/model.lock.json \
+  --device-index 0 --target gfx1030 [server options]
 ```
 
 The corresponding canonical R9700 invocation uses UUID

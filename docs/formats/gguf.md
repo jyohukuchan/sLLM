@@ -2,9 +2,9 @@
 
 ## Status and scope
 
-This document is the Phase 20 format authority for the public model container.
-P20-A0 freezes the source baseline, standard-versus-extension boundary, and the
-handoff inventory. It does not claim that the converter or runtime reader exists.
+This document is the implemented Phase 20 format authority for the public model
+container. The bounded reader, deterministic writer, converters, derived lock,
+and GGUF-only public runtime were completed on 2026-08-17.
 
 The public artifact is one GGUF file containing the model metadata, tensor
 payloads, tokenizer, vocabulary, special-token data, and chat template needed by
@@ -43,12 +43,11 @@ packing, and outer-scale rules remain distinct. The converter may move bits into
 the standard block layout but must not run a new quantizer. Source and output
 logical values are checked by independent decode in a later work unit.
 
-The pinned enum has no FP8 tensor type. P20-A0 therefore allocates no private
-numeric tensor-type value. A1 must specify a versioned representation that keeps
-the exact FP8 payload and scale relation, remains structurally inspectable by a
-standard GGUF parser, and fails closed in an sLLM reader that does not recognize
-the extension. Converting FP8 to BF16, F16, Q8_0, or another encoding is not
-faithful Phase 20 FP8 support.
+The pinned enum has no FP8 tensor type. sLLM therefore stores FP8 value planes as
+standard I8 carrier tensors and binds them to scale tensors with versioned
+`sllm.fp8.*` metadata. Readers unaware of the extension can still inspect the
+GGUF structure; sLLM rejects missing, unknown, or ambiguous extension bindings.
+No dequantized BF16, F16, or Q8_0 substitute is produced.
 
 ## Container-neutral lowering
 
@@ -97,9 +96,10 @@ EOF, bad alignment, truncated string/array/table, and incomplete or ambiguous
 recipe bindings. A GGUF failure never falls back to an unverified safetensors or
 sidecar path.
 
-## Phase boundary
+## Implemented boundary
 
-P20-A0 proves only that the source and format decisions and existing handoffs are
-closed and machine checked. A1 owns the bounded reader and FP8 extension schema;
-A2/A3 own conversion; A4 owns runtime loading; A5 owns CPU/GPU/full-model
-fidelity; A6 owns migration and compatibility closeout.
+The public CLI and server accept exactly one GGUF plus its derived lock. Source
+safetensors and sidecars remain converter/development inputs only. Runtime
+verification hashes the GGUF, validates metadata and tensor ranges, and retains
+the verified open descriptor for payload reads; it never falls back to a source
+container.

@@ -349,6 +349,11 @@ single-process profileとなった。ただしR9700をsLLM開発から占有す�
 63.45/65.08秒で棄却した。この比較後に上記V620×2 tensorの縮小構成だけを通常運用へ昇格した。詳細は
 [multi-GPU selection summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)を参照する。
 
+Phase 20では同じcanonical V620 `gfx1030`とR9700 `gfx1201`で、単一GGUFからQwen3.5-4B BF16、
+Gemma 4-12B mixed NVFP4、Qwen3.5-35B-A3B MXFP4をfull-model実行し、source importerと同じtop-1、HIP-only、
+fallbackなし、cleanup 0を確認した。R9700ではQwen FP8 GGUFも同条件をPASSした。MoEのOpenAI serverはR9700で
+model list、chat completion、graceful shutdownをPASSした。この証拠は固定artifact、single request、実行済みtargetに限定する。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

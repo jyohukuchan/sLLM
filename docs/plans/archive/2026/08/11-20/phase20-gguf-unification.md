@@ -1,6 +1,6 @@
 # Phase 20: GGUF unification
 
-> 状態: active（P20-A0 completed、2026-08-17）
+> 状態: completed（P20-A0〜A6、2026-08-17）
 > 作成日: 2026-08-17
 
 ## 目的
@@ -95,6 +95,21 @@ tokenizer、vocabulary、chat template、model metadata、tensor recipeととも
 - `python3 ci/tools/validate_markdown_links.py`
 - `git diff --check`
 - A0はhost-only contractであり、model、GGUF binary、raw traceをrepositoryへ追加していない。
+
+## P20-A1〜A6完了証拠
+
+- `ded2264035b8138da581773e42f37d11e3693fe1`にbounded reader、deterministic writer、FP8 extension、4 converter、
+  derived lock、runtime lowering、GGUF-only CLI/serverを固定した。llama.cpp codeのimportはなく、A0で固定したsourceを参照した。
+- final BF16/FP8/NVFP4/MXFP4 GGUFは順に9,343,583,840 / 5,779,142,624 / 9,337,229,760 /
+  24,617,123,424 byte。SHA-256は`50582d6c...9ca3`、`1a9db28b...74b5`、`4e0410c6...2fb5`、
+  `44022302...1fce`で、全derived lockがconverter commit `ded22640...3fe1`を保持する。
+- Qwen BF16の独立2回変換はbyte-identical。standard NVFP4/MXFP4 repackは独立decoderとexact byte/valueで一致し、
+  FP8はI8 carrier + versioned bindingとして元payloadを保持した。
+- canonical R9700 `gfx1201`とV620 `gfx1030`でQwen BF16、Gemma NVFP4 mixed、Qwen MoE MXFP4のGGUF/source top-1が一致。
+  R9700ではQwen FP8もPASSした。全caseはHIP-only、fallbackなし、cleanup 0。R9700 MoE serverのmodels/chat/shutdownもPASSした。
+- host回帰はcore 173、GGUF contract 11、CLI 24、server 27 testをfailed/skipped 0でPASSした。4 final GGUFの
+  `verify-model --gguf ... --derived-lock ...`もPASSし、旧公開引数はparserで拒否する。
+- model、GGUF binary、raw trace、生成artifactはrepositoryへ追加していない。詳細値は対応履歴を正とする。
 
 ## 停止・再計画条件
 
