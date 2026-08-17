@@ -493,6 +493,19 @@ impl VerifiedGgufWeightSource {
         &self.lock_fingerprint
     }
 
+    pub fn file_sha256(&self) -> &str {
+        &self.file_sha256
+    }
+
+    pub fn read_tensor_range(
+        &self,
+        tensor_name: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, crate::GgufError> {
+        self.gguf.read_tensor_range(tensor_name, offset, length)
+    }
+
     pub fn tensor(&self, name: &str) -> Option<&TensorDescriptor> {
         self.descriptors.get(name)
     }
@@ -1291,6 +1304,18 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
                 .collect()
         })
         .unwrap_or_default();
+    let logical_shapes: BTreeMap<_, _> = verified
+        .gguf
+        .extension()
+        .map(|extension| {
+            extension
+                .recipe
+                .logical_shapes
+                .iter()
+                .map(|binding| (binding.tensor.as_str(), binding.logical_shape.as_slice()))
+                .collect()
+        })
+        .unwrap_or_default();
     if recipe_bindings.values().any(|binding| {
         !matches!(
             binding.encoding,
@@ -1345,6 +1370,8 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
         };
         let shape = if let Some(binding) = recipe_bindings.get(&tensor.name) {
             binding.logical_shape.clone()
+        } else if let Some(shape) = logical_shapes.get(tensor.name.as_str()) {
+            shape.to_vec()
         } else {
             let mut shape = tensor.dimensions.clone();
             shape.reverse();

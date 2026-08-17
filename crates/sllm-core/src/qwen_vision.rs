@@ -72,10 +72,44 @@ pub fn build_verified_qwen35_vision_manifest(
     build_qwen35_vision_manifest(lock, cache.tensors(), &processor_bytes)
 }
 
+pub fn build_verified_gguf_qwen35_vision_manifest(
+    lock: &ModelLock,
+    source: &crate::VerifiedGgufWeightSource,
+) -> Result<QwenVisionManifest, QwenVisionError> {
+    if source.lock_fingerprint() != lock.fingerprint() {
+        return Err(QwenVisionError::Invalid(
+            "verified GGUF fingerprint differs from model lock".to_owned(),
+        ));
+    }
+    let processor_bytes = source
+        .gguf()
+        .extension()
+        .and_then(|extension| extension.frontend_assets.get("preprocessor_config.json"))
+        .ok_or_else(|| {
+            QwenVisionError::Invalid("GGUF preprocessor configuration is absent".to_owned())
+        })?;
+    let source_path = source.gguf().path().to_string_lossy().into_owned();
+    build_qwen35_vision_manifest_with_source(
+        lock,
+        source.tensors(),
+        processor_bytes,
+        Some((source_path.as_str(), source.file_sha256())),
+    )
+}
+
 pub fn build_qwen35_vision_manifest<'a>(
     lock: &ModelLock,
     descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
     processor_bytes: &[u8],
+) -> Result<QwenVisionManifest, QwenVisionError> {
+    build_qwen35_vision_manifest_with_source(lock, descriptors, processor_bytes, None)
+}
+
+fn build_qwen35_vision_manifest_with_source<'a>(
+    lock: &ModelLock,
+    descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+    processor_bytes: &[u8],
+    source_override: Option<(&str, &str)>,
 ) -> Result<QwenVisionManifest, QwenVisionError> {
     validate_lock(lock)?;
     let processor = parse_processor(processor_bytes)?;
@@ -123,9 +157,10 @@ pub fn build_qwen35_vision_manifest<'a>(
                 descriptor.tensor_name
             )));
         }
-        let source_sha256 = locked_files
-            .get(descriptor.source_file.as_str())
-            .copied()
+        let source_sha256 = source_override
+            .filter(|(path, _)| *path == descriptor.source_file)
+            .map(|(_, digest)| digest)
+            .or_else(|| locked_files.get(descriptor.source_file.as_str()).copied())
             .ok_or_else(|| {
                 QwenVisionError::Invalid("vision source file is not locked".to_owned())
             })?;

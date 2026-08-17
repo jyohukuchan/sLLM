@@ -9,14 +9,15 @@ use sllm_core::{
     QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
     ReviewedModelLock, SamplingParametersV1, VerifiedCache, VerifiedGgufGemmaSource,
     VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, WeightClassification,
-    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph, build_qwen35_mtp_graph,
-    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
+    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
-    builtin_reviewed_model_lock, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
+    build_verified_gguf_qwen35_vision_manifest, build_verified_qwen_component_weight_load_plan,
+    build_verified_qwen35_vision_manifest, builtin_reviewed_model_lock,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -1117,9 +1118,6 @@ impl ModelFrontendBackend for ProductionBackend {
                         .to_owned(),
                 );
             }
-            if !processed_images.is_empty() {
-                return Err("GGUF vision execution is not yet available".to_owned());
-            }
         }
         let tokenizer = self.tokenizer()?;
         let renderer = match &effective_input {
@@ -1199,7 +1197,7 @@ impl ModelFrontendBackend for ProductionBackend {
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
         let mtp_candidate = processed_images.is_empty()
             && !has_sidecar
-            && matches!(self.source, QwenDenseSource::Cache(_))
+            && !embedded_fp8
             && request.target == "gfx1201"
             && !request.sampling.requires_logits()
             && self.lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT;
@@ -1367,16 +1365,39 @@ impl ModelFrontendBackend for ProductionBackend {
             let vision_bundle = if processed_images.is_empty() {
                 None
             } else {
-                let cache = self.cache()?;
-                let manifest = build_verified_qwen35_vision_manifest(&self.lock, cache)
-                    .map_err(|error| format!("vision manifest validation failed: {error}"))?;
-                let resident = QwenVisionResidentModel::new(
-                    Arc::clone(&session),
-                    Arc::clone(cache),
-                    manifest.clone(),
-                    COMPLETION_TIMEOUT,
-                )
-                .map_err(|error| format!("vision resident provisioning failed: {error}"))?;
+                let (manifest, resident) = match &self.source {
+                    QwenDenseSource::Cache(cache) => {
+                        let manifest = build_verified_qwen35_vision_manifest(&self.lock, cache)
+                            .map_err(|error| {
+                                format!("vision manifest validation failed: {error}")
+                            })?;
+                        let resident = QwenVisionResidentModel::new(
+                            Arc::clone(&session),
+                            Arc::clone(cache),
+                            manifest.clone(),
+                            COMPLETION_TIMEOUT,
+                        )
+                        .map_err(|error| format!("vision resident provisioning failed: {error}"))?;
+                        (manifest, resident)
+                    }
+                    QwenDenseSource::Gguf(source) => {
+                        let manifest =
+                            build_verified_gguf_qwen35_vision_manifest(&self.lock, source)
+                                .map_err(|error| {
+                                    format!("GGUF vision manifest validation failed: {error}")
+                                })?;
+                        let resident = QwenVisionResidentModel::new_gguf(
+                            Arc::clone(&session),
+                            Arc::clone(source),
+                            manifest.clone(),
+                            COMPLETION_TIMEOUT,
+                        )
+                        .map_err(|error| {
+                            format!("GGUF vision resident provisioning failed: {error}")
+                        })?;
+                        (manifest, resident)
+                    }
+                };
                 let images = processed_images
                     .iter()
                     .map(|image| {
@@ -1393,12 +1414,20 @@ impl ModelFrontendBackend for ProductionBackend {
                             .map_err(|error| format!("vision encode failed: {error}"))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                let prompt = assemble_qwen35_multimodal_prompt(
-                    cache.as_ref(),
-                    &input,
-                    manifest.image_pad_token,
-                    &images,
-                )
+                let prompt = match &self.source {
+                    QwenDenseSource::Cache(cache) => assemble_qwen35_multimodal_prompt(
+                        cache.as_ref(),
+                        &input,
+                        manifest.image_pad_token,
+                        &images,
+                    ),
+                    QwenDenseSource::Gguf(source) => assemble_gguf_qwen35_multimodal_prompt(
+                        source.as_ref(),
+                        &input,
+                        manifest.image_pad_token,
+                        &images,
+                    ),
+                }
                 .map_err(|error| format!("multimodal prompt assembly failed: {error}"))?;
                 Some((resident, prompt))
             };
@@ -1428,21 +1457,25 @@ impl ModelFrontendBackend for ProductionBackend {
                 let audit = owner.audit_snapshot();
                 (report, audit)
             } else if mtp_candidate {
-                let mtp_plan = build_verified_qwen_component_weight_load_plan(
-                    &self.lock,
-                    self.cache()?,
-                    QwenComponentSelection::MTP_ONLY,
-                )
-                .map_err(|error| format!("MTP load plan validation failed: {error}"))?;
+                let mtp_plan = self.load_plan(QwenComponentSelection::MTP_ONLY)?;
                 let mtp_graph = build_qwen35_mtp_graph(&self.lock, &mtp_plan, state_capacity)
                     .map_err(|error| format!("MTP request graph failed: {error}"))?;
-                let mtp_resident = QwenResidentModel::new(
-                    Arc::clone(&session),
-                    mtp_graph.clone(),
-                    mtp_plan,
-                    Arc::clone(self.cache()?),
-                    COMPLETION_TIMEOUT,
-                )
+                let mtp_resident = match &self.source {
+                    QwenDenseSource::Cache(cache) => QwenResidentModel::new(
+                        Arc::clone(&session),
+                        mtp_graph.clone(),
+                        mtp_plan,
+                        Arc::clone(cache),
+                        COMPLETION_TIMEOUT,
+                    ),
+                    QwenDenseSource::Gguf(source) => QwenResidentModel::new_gguf(
+                        Arc::clone(&session),
+                        mtp_graph.clone(),
+                        mtp_plan,
+                        Arc::clone(source),
+                        COMPLETION_TIMEOUT,
+                    ),
+                }
                 .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
                 let mtp_owner = mtp_resident
                     .new_request(mtp_graph)

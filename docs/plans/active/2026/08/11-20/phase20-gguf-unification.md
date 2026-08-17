@@ -1,6 +1,6 @@
 # Phase 20: GGUF unification
 
-> 状態: completed（P20-A0〜A6、2026-08-17）
+> 状態: active（P20-A6互換性監査で再開、2026-08-17）
 > 作成日: 2026-08-17
 
 ## 目的

@@ -8,7 +8,7 @@
 use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, DispatchEvidence, ExecutionBuffer,
     ExecutionError, ExecutionQueue, ExecutionSession, ExecutionState, QwenVisionManifest,
-    SemanticOpDescriptor, SemanticOpKind, TensorView, VerifiedCache,
+    SemanticOpDescriptor, SemanticOpKind, TensorView, VerifiedCache, VerifiedGgufWeightSource,
 };
 use std::collections::BTreeMap;
 use std::fmt;
@@ -44,6 +44,45 @@ pub fn assemble_qwen35_multimodal_prompt(
     image_pad_token: u32,
     images: &[QwenMultimodalImageEmbedding],
 ) -> Result<QwenMultimodalPrompt, QwenVisionExecutionError> {
+    assemble_qwen35_multimodal_prompt_with_reader(
+        token_ids,
+        image_pad_token,
+        images,
+        |name, offset, length| {
+            cache
+                .read_tensor_range(name, offset, length)
+                .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))
+        },
+    )
+}
+
+pub fn assemble_gguf_qwen35_multimodal_prompt(
+    source: &VerifiedGgufWeightSource,
+    token_ids: &[u32],
+    image_pad_token: u32,
+    images: &[QwenMultimodalImageEmbedding],
+) -> Result<QwenMultimodalPrompt, QwenVisionExecutionError> {
+    assemble_qwen35_multimodal_prompt_with_reader(
+        token_ids,
+        image_pad_token,
+        images,
+        |name, offset, length| {
+            source
+                .read_tensor_range(name, offset, length)
+                .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))
+        },
+    )
+}
+
+fn assemble_qwen35_multimodal_prompt_with_reader<F>(
+    token_ids: &[u32],
+    image_pad_token: u32,
+    images: &[QwenMultimodalImageEmbedding],
+    mut read_tensor_range: F,
+) -> Result<QwenMultimodalPrompt, QwenVisionExecutionError>
+where
+    F: FnMut(&str, u64, usize) -> Result<Vec<u8>, QwenVisionExecutionError>,
+{
     if token_ids.is_empty() || images.is_empty() || images.len() > 2 {
         return Err(QwenVisionExecutionError::Invalid(
             "multimodal prompt/image count differs".to_owned(),
@@ -82,9 +121,7 @@ pub fn assemble_qwen35_multimodal_prompt(
             .ok_or_else(|| {
                 QwenVisionExecutionError::Invalid("embedding offset overflowed".to_owned())
             })?;
-        let bytes = cache
-            .read_tensor_range(crate::QWEN35_EMBEDDING_TENSOR, offset, OUTPUT * 2)
-            .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))?;
+        let bytes = read_tensor_range(crate::QWEN35_EMBEDDING_TENSOR, offset, OUTPUT * 2)?;
         embeddings_bf16.extend(
             bytes
                 .chunks_exact(2)
@@ -282,9 +319,53 @@ impl QwenVisionResidentModel {
         manifest: QwenVisionManifest,
         completion_timeout: Duration,
     ) -> Result<Self, QwenVisionExecutionError> {
-        if completion_timeout.is_zero() || manifest.model_fingerprint != cache.lock_fingerprint {
+        let source_fingerprint = cache.lock_fingerprint.clone();
+        Self::new_with_reader(
+            session,
+            manifest,
+            completion_timeout,
+            &source_fingerprint,
+            move |name, offset, length| {
+                cache
+                    .read_tensor_range(name, offset, length)
+                    .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))
+            },
+        )
+    }
+
+    pub fn new_gguf(
+        session: Arc<ExecutionSession>,
+        source: Arc<VerifiedGgufWeightSource>,
+        manifest: QwenVisionManifest,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenVisionExecutionError> {
+        let source_fingerprint = source.lock_fingerprint().to_owned();
+        Self::new_with_reader(
+            session,
+            manifest,
+            completion_timeout,
+            &source_fingerprint,
+            move |name, offset, length| {
+                source
+                    .read_tensor_range(name, offset, length)
+                    .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))
+            },
+        )
+    }
+
+    fn new_with_reader<F>(
+        session: Arc<ExecutionSession>,
+        manifest: QwenVisionManifest,
+        completion_timeout: Duration,
+        source_fingerprint: &str,
+        mut read_tensor_range: F,
+    ) -> Result<Self, QwenVisionExecutionError>
+    where
+        F: FnMut(&str, u64, usize) -> Result<Vec<u8>, QwenVisionExecutionError>,
+    {
+        if completion_timeout.is_zero() || manifest.model_fingerprint != source_fingerprint {
             return Err(QwenVisionExecutionError::Invalid(
-                "timeout or verified cache identity differs".to_owned(),
+                "timeout or verified source identity differs".to_owned(),
             ));
         }
         let queue = session.create_queue()?;
@@ -297,10 +378,10 @@ impl QwenVisionResidentModel {
                 session.as_ref(),
                 &queue,
                 &buffer,
-                cache.as_ref(),
                 &tensor.name,
                 tensor.byte_size,
                 completion_timeout,
+                &mut read_tensor_range,
             )?;
             if needs_host_copy(&tensor.name) {
                 let length = usize::try_from(tensor.byte_size).map_err(|_| {
@@ -311,13 +392,11 @@ impl QwenVisionResidentModel {
                     .step_by(1_048_576)
                     .map(|offset| (offset, (length - offset).min(1_048_576)))
                 {
-                    bytes.extend_from_slice(
-                        &cache
-                            .read_tensor_range(&tensor.name, index as u64, chunk_length)
-                            .map_err(|error| {
-                                QwenVisionExecutionError::Invalid(error.to_string())
-                            })?,
-                    );
+                    bytes.extend_from_slice(&read_tensor_range(
+                        &tensor.name,
+                        index as u64,
+                        chunk_length,
+                    )?);
                 }
                 host_tensors.insert(tensor.name.clone(), Arc::from(decode_bf16(&bytes)?));
             }
@@ -674,15 +753,18 @@ fn needs_host_copy(name: &str) -> bool {
         || name == "model.visual.pos_embed.weight"
 }
 
-fn upload_tensor(
+fn upload_tensor<F>(
     session: &ExecutionSession,
     queue: &ExecutionQueue,
     buffer: &ExecutionBuffer,
-    cache: &VerifiedCache,
     name: &str,
     size: u64,
     timeout: Duration,
-) -> Result<(), QwenVisionExecutionError> {
+    read_tensor_range: &mut F,
+) -> Result<(), QwenVisionExecutionError>
+where
+    F: FnMut(&str, u64, usize) -> Result<Vec<u8>, QwenVisionExecutionError>,
+{
     let max = usize::try_from(session.max_transfer_bytes()?)
         .map_err(|_| QwenVisionExecutionError::Invalid("transfer bound is too large".to_owned()))?
         .min(16 * 1024 * 1024);
@@ -696,9 +778,7 @@ fn upload_tensor(
         let length = usize::try_from((size - offset).min(max as u64)).map_err(|_| {
             QwenVisionExecutionError::Invalid("transfer length does not fit usize".to_owned())
         })?;
-        let bytes = cache
-            .read_tensor_range(name, offset, length)
-            .map_err(|error| QwenVisionExecutionError::Invalid(error.to_string()))?;
+        let bytes = read_tensor_range(name, offset, length)?;
         let mut transfer = session.upload(
             queue,
             buffer.range(offset, length as u64)?,

@@ -12,14 +12,15 @@ use sllm_core::{
     QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
     QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
     VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
-    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan, assemble_qwen35_multimodal_prompt,
+    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
     build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
     build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
-    build_verified_gguf_qwen_weight_load_plan, builtin_reviewed_model_lock,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gguf_qwen35_moe,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
+    verify_derived_gguf, verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
@@ -277,6 +278,41 @@ impl QwenChatBackendV1 {
             config.completion_timeout,
         )
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
+        let vision_manifest = if lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT {
+            Some(
+                build_verified_gguf_qwen35_vision_manifest(&lock, &source).map_err(|error| {
+                    BackendErrorV1::new(format!("GGUF vision manifest validation failed: {error}"))
+                })?,
+            )
+        } else {
+            None
+        };
+        let (mtp_resident, mtp_plan) = if !source.has_fp8_recipe()
+            && config.target == "gfx1201"
+            && lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT
+        {
+            let mtp_plan = source
+                .build_qwen_weight_load_plan(&lock, QwenComponentSelection::MTP_ONLY)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("GGUF MTP load plan validation failed: {error}"))
+                })?;
+            let mtp_graph = build_qwen35_mtp_graph(&lock, &mtp_plan, 1).map_err(|error| {
+                BackendErrorV1::new(format!("GGUF MTP resident graph failed: {error}"))
+            })?;
+            let mtp_resident = QwenResidentModel::new_gguf(
+                Arc::clone(&session),
+                mtp_graph,
+                mtp_plan.clone(),
+                Arc::clone(&source),
+                config.completion_timeout,
+            )
+            .map_err(|error| {
+                BackendErrorV1::new(format!("GGUF MTP resident load failed: {error}"))
+            })?;
+            (Some(mtp_resident), Some(mtp_plan))
+        } else {
+            (None, None)
+        };
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "model-ready")?;
         let model_ready_current_bytes = ready.model_resident().current_bytes();
@@ -304,8 +340,8 @@ impl QwenChatBackendV1 {
                 renderer,
                 plan,
                 resident,
-                mtp_resident: None,
-                mtp_plan: None,
+                mtp_resident,
+                mtp_plan,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
@@ -314,7 +350,7 @@ impl QwenChatBackendV1 {
                 fp8_provider,
                 cache: None,
                 gguf_source: Some(source),
-                vision_manifest: None,
+                vision_manifest,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
             })),
@@ -729,12 +765,25 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             })?;
             if state.vision_resident.is_none() {
                 state.vision_resident = Some(
-                    QwenVisionResidentModel::new(
-                        Arc::clone(&state.session),
-                        Arc::clone(state.cache.as_ref().expect("vision requires dense cache")),
-                        vision_manifest.clone(),
-                        state.completion_timeout,
-                    )
+                    match (&state.cache, &state.gguf_source) {
+                        (Some(cache), None) => QwenVisionResidentModel::new(
+                            Arc::clone(&state.session),
+                            Arc::clone(cache),
+                            vision_manifest.clone(),
+                            state.completion_timeout,
+                        ),
+                        (None, Some(source)) => QwenVisionResidentModel::new_gguf(
+                            Arc::clone(&state.session),
+                            Arc::clone(source),
+                            vision_manifest.clone(),
+                            state.completion_timeout,
+                        ),
+                        _ => {
+                            return Err(BackendErrorV1::new(
+                                "vision requires exactly one verified dense weight source",
+                            ));
+                        }
+                    }
                     .map_err(|error| {
                         BackendErrorV1::new(format!("vision resident load failed: {error}"))
                     })?,
@@ -765,20 +814,29 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     })
                 })
                 .collect::<Result<Vec<_>, BackendErrorV1>>()?;
-            Some(
-                assemble_qwen35_multimodal_prompt(
-                    state
-                        .cache
-                        .as_deref()
-                        .ok_or_else(|| BackendErrorV1::new("dense Qwen cache is absent"))?,
+            let assembled = match (&state.cache, &state.gguf_source) {
+                (Some(cache), None) => assemble_qwen35_multimodal_prompt(
+                    cache,
                     &prompt,
                     vision_manifest.image_pad_token,
                     &images,
-                )
-                .map_err(|error| {
-                    BackendErrorV1::new(format!("multimodal prompt assembly failed: {error}"))
-                })?,
-            )
+                ),
+                (None, Some(source)) => assemble_gguf_qwen35_multimodal_prompt(
+                    source,
+                    &prompt,
+                    vision_manifest.image_pad_token,
+                    &images,
+                ),
+                _ => {
+                    return Err(BackendErrorV1::new(
+                        "multimodal assembly requires exactly one verified dense weight source",
+                    ));
+                }
+            }
+            .map_err(|error| {
+                BackendErrorV1::new(format!("multimodal prompt assembly failed: {error}"))
+            })?;
+            Some(assembled)
         };
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;

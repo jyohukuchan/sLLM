@@ -719,7 +719,7 @@ candidateを再確認した。
 - Phase 19はMoE vision/MTP、batching、expert/tensor parallel、CPU offload、GGUF writer/readerを含まない。
 - 詳細は[Phase 19 archive](archive/2026/08/11-20/phase19-qwen35-moe.md)を正とする。
 
-### Phase 20: GGUF統一（完了）
+### Phase 20: GGUF統一（互換性監査で再開）
 
 - safetensorsと量子化sidecarを変換・開発入力へ移し、ユーザー向けのモデル入力と配布artifactを
   BF16、FP8、NVFP4、MXFP4で共通の単一GGUFへ統一する。
@@ -729,8 +729,9 @@ candidateを再確認した。
   公開CLI/serverを`--gguf`と`--derived-lock`だけの単一経路へ移行した。旧cache/sidecar/provider引数とdirect benchmark laneは
   公開parserから削除し、source importerはconverter・開発用に限定した。
 - canonical V620 `gfx1030`とR9700 `gfx1201`でQwen BF16、Gemma mixed NVFP4、Qwen MoE MXFP4をsource経路と同じtop-1へ照合し、
-  R9700ではQwen FP8も実行した。全実行はHIP-only、fallbackなし、cleanup 0で、MoE OpenAI server lifecycleもPASSした。詳細は
-  [Phase 20 archive](archive/2026/08/11-20/phase20-gguf-unification.md)を正とする。
+  R9700ではQwen FP8も実行した。全実行はHIP-only、fallbackなし、cleanup 0で、MoE OpenAI server lifecycleもPASSした。
+- 完了監査でrank-5 tensorを出力していたstandard GGUF互換性、GGUF公開経路のQwen vision/MTP、A5 timing evidenceの不足を確認し、
+  closeoutを再開した。詳細は[Phase 20 active plan](active/2026/08/11-20/phase20-gguf-unification.md)を正とする。
 
 ### Phase X: Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元（完了）
 

@@ -34,7 +34,7 @@ impl GgufWriteTensor {
         if self.name.is_empty() || self.source_name.is_empty() {
             return Err(invalid("write tensor name is empty"));
         }
-        if self.dimensions.is_empty() || self.dimensions.len() > 8 {
+        if self.dimensions.is_empty() || self.dimensions.len() > 4 {
             return Err(invalid("write tensor dimension count is invalid"));
         }
         if self.dimensions.iter().any(|dimension| *dimension == 0) {

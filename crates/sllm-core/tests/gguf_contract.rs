@@ -268,6 +268,31 @@ fn rejects_unknown_type_misalignment_overlap_and_truncation() {
 
 #[test]
 fn rejects_dimension_overflow_and_unknown_extension_version() {
+    assert_invalid(
+        build(
+            base_metadata(),
+            vec![tensor(
+                "rank-five",
+                GgufTensorType::Bf16,
+                &[1, 1, 1, 1, 2],
+                0,
+            )],
+        ),
+        "dimension count",
+    );
+    assert!(
+        GgufWriteTensor {
+            name: "rank-five".to_owned(),
+            source_name: "rank-five".to_owned(),
+            dimensions: vec![1, 1, 1, 1, 2],
+            tensor_type: GgufTensorType::Bf16,
+        }
+        .byte_length()
+        .expect_err("writer must reject rank five")
+        .to_string()
+        .contains("dimension count")
+    );
+
     let overflowing = TestTensor {
         name: "overflow".to_owned(),
         dimensions: vec![u64::MAX, 2],
@@ -348,6 +373,7 @@ fn fp8_recipe() -> GgufTensorRecipeV1 {
                 role: GgufScaleRole::Channel,
             }],
         }],
+        logical_shapes: vec![],
         static_fp8_kv: vec![],
         known_unconsumed_tensors: vec![],
     }
@@ -443,6 +469,7 @@ fn deterministic_writer_round_trips_frontend_assets_and_derived_lock() {
         semantic_model_id: "qwen35-writer-test".to_owned(),
         source_lock_fingerprints: vec![format!("sha256:{}", "2".repeat(64))],
         bindings: vec![],
+        logical_shapes: vec![],
         static_fp8_kv: vec![],
         known_unconsumed_tensors: vec![],
     };

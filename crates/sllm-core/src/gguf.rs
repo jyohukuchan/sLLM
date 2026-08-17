@@ -30,7 +30,7 @@ const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const MAX_HEADER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_ENTRIES: u64 = 16_384;
 const MAX_TENSORS: u64 = 65_536;
-const MAX_DIMS: u32 = 8;
+const MAX_DIMS: u32 = 4;
 const MAX_KEY_BYTES: u64 = 1_024;
 const MAX_NAME_BYTES: u64 = 16 * 1024;
 const MAX_STRING_BYTES: u64 = 64 * 1024 * 1024;
@@ -216,6 +216,13 @@ pub struct GgufTensorBinding {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct GgufLogicalShapeBinding {
+    pub tensor: String,
+    pub logical_shape: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct GgufStaticFp8KvBinding {
     pub layer: u32,
     pub key_decode_scale_bf16: u16,
@@ -229,6 +236,8 @@ pub struct GgufTensorRecipeV1 {
     pub semantic_model_id: String,
     pub source_lock_fingerprints: Vec<String>,
     pub bindings: Vec<GgufTensorBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub logical_shapes: Vec<GgufLogicalShapeBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub static_fp8_kv: Vec<GgufStaticFp8KvBinding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -797,6 +806,38 @@ fn validate_recipe_bindings(
                     scale.tensor, scale.role
                 )));
             }
+        }
+    }
+    let mut shape_names = BTreeSet::new();
+    for binding in &recipe.logical_shapes {
+        if binding.tensor.is_empty()
+            || binding.logical_shape.len() <= MAX_DIMS as usize
+            || binding.logical_shape.iter().any(|value| *value == 0)
+            || !shape_names.insert(binding.tensor.as_str())
+            || logical_names.contains(binding.tensor.as_str())
+        {
+            return Err(invalid("logical-shape override is invalid or ambiguous"));
+        }
+        let tensor = tensor_map
+            .get(binding.tensor.as_str())
+            .ok_or_else(|| invalid("logical-shape override tensor is absent"))?;
+        let logical_elements = binding
+            .logical_shape
+            .iter()
+            .try_fold(1_u64, |product, value| {
+                product
+                    .checked_mul(*value)
+                    .ok_or_else(|| invalid("logical-shape override overflows"))
+            })?;
+        let physical_elements = tensor.dimensions.iter().try_fold(1_u64, |product, value| {
+            product
+                .checked_mul(*value)
+                .ok_or_else(|| invalid("physical tensor shape overflows"))
+        })?;
+        if logical_elements != physical_elements {
+            return Err(invalid(
+                "logical-shape override changes tensor element count",
+            ));
         }
     }
     let mut kv_layers = BTreeSet::new();

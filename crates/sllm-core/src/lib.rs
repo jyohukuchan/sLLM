@@ -94,10 +94,10 @@ pub use gemma4_graph::{
     build_gemma4_graph,
 };
 pub use gguf::{
-    GGUF_ALIGNMENT, GGUF_VERSION, GgufArray, GgufError, GgufExtensionV1, GgufRecipeEncoding,
-    GgufScaleBinding, GgufScaleRole, GgufStaticFp8KvBinding, GgufTensorBinding, GgufTensorInfo,
-    GgufTensorRecipeV1, GgufTensorScope, GgufTensorType, GgufValue, SLLM_EXTENSION_VERSION_KEY,
-    SLLM_FRONTEND_CONFIG_KEY, SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY,
+    GGUF_ALIGNMENT, GGUF_VERSION, GgufArray, GgufError, GgufExtensionV1, GgufLogicalShapeBinding,
+    GgufRecipeEncoding, GgufScaleBinding, GgufScaleRole, GgufStaticFp8KvBinding, GgufTensorBinding,
+    GgufTensorInfo, GgufTensorRecipeV1, GgufTensorScope, GgufTensorType, GgufValue,
+    SLLM_EXTENSION_VERSION_KEY, SLLM_FRONTEND_CONFIG_KEY, SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY,
     SLLM_FRONTEND_TOKENIZER_CONFIG_KEY, SLLM_FRONTEND_TOKENIZER_KEY, SLLM_GGUF_EXTENSION_VERSION,
     SLLM_TENSOR_RECIPE_KEY, SLLM_TENSOR_RECIPE_SHA256_KEY, VerifiedGguf,
 };
@@ -195,12 +195,12 @@ pub use qwen_vision::{
     QWEN35_VISION_DEPTH, QWEN35_VISION_HIDDEN_SIZE, QWEN35_VISION_INTERMEDIATE_SIZE,
     QWEN35_VISION_OUTPUT_SIZE, QWEN35_VISION_TENSOR_COUNT, QwenVisionError, QwenVisionManifest,
     QwenVisionProcessorContract, QwenVisionTensor, build_qwen35_vision_manifest,
-    build_verified_qwen35_vision_manifest,
+    build_verified_gguf_qwen35_vision_manifest, build_verified_qwen35_vision_manifest,
 };
 pub use qwen_vision_execution::{
     QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenVisionExecutionError,
     QwenVisionExecutionInput, QwenVisionExecutionOutput, QwenVisionResidentModel,
-    assemble_qwen35_multimodal_prompt,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
 };
 pub use qwen35_moe::{
     QWEN35_MOE_EXPERT_PROJECTION_COUNT, QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_LAYER_BLOB_PREFIX,

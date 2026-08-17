@@ -1,11 +1,12 @@
 //! Source-importer to GGUF conversion plans.
 
 use crate::gguf::{
-    GGUF_ALIGNMENT, GgufArray, GgufError, GgufRecipeEncoding, GgufScaleBinding, GgufScaleRole,
-    GgufStaticFp8KvBinding, GgufTensorBinding, GgufTensorRecipeV1, GgufTensorScope, GgufTensorType,
-    GgufValue, SLLM_EXTENSION_VERSION_KEY, SLLM_FRONTEND_CONFIG_KEY,
-    SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY, SLLM_FRONTEND_TOKENIZER_CONFIG_KEY,
-    SLLM_FRONTEND_TOKENIZER_KEY, SLLM_TENSOR_RECIPE_KEY, SLLM_TENSOR_RECIPE_SHA256_KEY,
+    GGUF_ALIGNMENT, GgufArray, GgufError, GgufLogicalShapeBinding, GgufRecipeEncoding,
+    GgufScaleBinding, GgufScaleRole, GgufStaticFp8KvBinding, GgufTensorBinding, GgufTensorRecipeV1,
+    GgufTensorScope, GgufTensorType, GgufValue, SLLM_EXTENSION_VERSION_KEY,
+    SLLM_FRONTEND_CONFIG_KEY, SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY,
+    SLLM_FRONTEND_TOKENIZER_CONFIG_KEY, SLLM_FRONTEND_TOKENIZER_KEY, SLLM_TENSOR_RECIPE_KEY,
+    SLLM_TENSOR_RECIPE_SHA256_KEY,
 };
 use crate::gguf_writer::{GgufWritePlan, GgufWriteReport, GgufWriteTensor, write_gguf};
 use crate::{
@@ -169,23 +170,15 @@ pub fn build_qwen35_bf16_gguf_plan(
         })
         .map(|descriptor| descriptor.tensor_name.clone())
         .collect();
-    let recipe = GgufTensorRecipeV1 {
+    let mut recipe = GgufTensorRecipeV1 {
         schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
         semantic_model_id: format!("qwen35:{}", lock.fingerprint()),
         source_lock_fingerprints: vec![lock.fingerprint().to_owned()],
         bindings: vec![],
+        logical_shapes: vec![],
         static_fp8_kv: vec![],
         known_unconsumed_tensors,
     };
-    metadata.insert(SLLM_EXTENSION_VERSION_KEY.to_owned(), GgufValue::U32(1));
-    metadata.insert(
-        SLLM_TENSOR_RECIPE_KEY.to_owned(),
-        GgufValue::String(recipe.canonical_json()?),
-    );
-    metadata.insert(
-        SLLM_TENSOR_RECIPE_SHA256_KEY.to_owned(),
-        GgufValue::String(recipe.digest()?),
-    );
     for (key, bytes) in [
         (SLLM_FRONTEND_CONFIG_KEY, config),
         (SLLM_FRONTEND_TOKENIZER_KEY, tokenizer),
@@ -214,8 +207,13 @@ pub fn build_qwen35_bf16_gguf_plan(
                 )));
             }
         };
-        let mut dimensions = descriptor.shape.clone();
-        dimensions.reverse();
+        let (dimensions, logical_shape) = standard_dimensions(&descriptor.shape)?;
+        if let Some(logical_shape) = logical_shape {
+            recipe.logical_shapes.push(GgufLogicalShapeBinding {
+                tensor: descriptor.tensor_name.clone(),
+                logical_shape,
+            });
+        }
         let tensor = GgufWriteTensor {
             name: descriptor.tensor_name.clone(),
             source_name: descriptor.tensor_name.clone(),
@@ -235,6 +233,7 @@ pub fn build_qwen35_bf16_gguf_plan(
             "Qwen GGUF tensor inventory differs from model lock",
         ));
     }
+    insert_recipe_metadata(&mut metadata, &recipe)?;
     Ok(GgufWritePlan { metadata, tensors })
 }
 
@@ -305,11 +304,13 @@ pub fn build_qwen35_fp8_gguf_plan(
         })
         .map(|tensor| tensor.name.clone())
         .collect();
+    let logical_shapes = recipe_from_metadata(&plan.metadata)?.logical_shapes;
     let recipe = GgufTensorRecipeV1 {
         schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
         semantic_model_id: format!("qwen35:{}", lock.fingerprint()),
         source_lock_fingerprints: vec![lock.fingerprint().to_owned()],
         bindings,
+        logical_shapes,
         static_fp8_kv: vec![],
         known_unconsumed_tensors,
     };
@@ -354,10 +355,16 @@ pub fn build_gemma4_nvfp4_gguf_plan(
     }
     let mut tensors = Vec::new();
     let mut bindings = Vec::new();
+    let mut logical_shapes = Vec::new();
     let mut known_unconsumed_tensors = Vec::new();
     for descriptor in artifact.tensors() {
-        let mut dimensions = descriptor.logical_shape.clone();
-        dimensions.reverse();
+        let (dimensions, logical_shape) = standard_dimensions(&descriptor.logical_shape)?;
+        if let Some(logical_shape) = logical_shape {
+            logical_shapes.push(GgufLogicalShapeBinding {
+                tensor: descriptor.logical_name.clone(),
+                logical_shape,
+            });
+        }
         match descriptor.encoding {
             QuantizedTensorEncoding::UnquantizedBf16 => {
                 tensors.push(GgufWriteTensor {
@@ -474,6 +481,7 @@ pub fn build_gemma4_nvfp4_gguf_plan(
             format!("sha256:{UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256}"),
         ],
         bindings,
+        logical_shapes,
         static_fp8_kv,
         known_unconsumed_tensors,
     };
@@ -560,13 +568,19 @@ pub fn build_qwen35_moe_mxfp4_gguf_plan(
     let mut tensors = Vec::new();
     let mut bindings = Vec::with_capacity(expert_values.len());
     let mut known_unconsumed_tensors = Vec::new();
+    let mut logical_shapes = Vec::new();
     for plane in artifact.all_planes() {
         if expert_scales.contains(plane.source_name.as_str()) {
             continue;
         }
         if let Some(expert) = expert_values.get(plane.source_name.as_str()) {
-            let mut dimensions = expert.logical_shape.to_vec();
-            dimensions.reverse();
+            let (dimensions, logical_shape) = standard_dimensions(&expert.logical_shape)?;
+            if let Some(logical_shape) = logical_shape {
+                logical_shapes.push(GgufLogicalShapeBinding {
+                    tensor: expert.value.source_name.clone(),
+                    logical_shape,
+                });
+            }
             tensors.push(GgufWriteTensor {
                 name: expert.value.source_name.clone(),
                 source_name: format!("moe-mxfp4::{}", expert.value.source_name),
@@ -595,8 +609,13 @@ pub fn build_qwen35_moe_mxfp4_gguf_plan(
                 )));
             }
         };
-        let mut dimensions = plane.shape.clone();
-        dimensions.reverse();
+        let (dimensions, logical_shape) = standard_dimensions(&plane.shape)?;
+        if let Some(logical_shape) = logical_shape {
+            logical_shapes.push(GgufLogicalShapeBinding {
+                tensor: plane.source_name.clone(),
+                logical_shape,
+            });
+        }
         tensors.push(GgufWriteTensor {
             name: plane.source_name.clone(),
             source_name: format!("moe-direct::{}", plane.source_name),
@@ -615,6 +634,7 @@ pub fn build_qwen35_moe_mxfp4_gguf_plan(
         semantic_model_id: format!("qwen35moe:{QWEN35_MOE_MODEL_FINGERPRINT}"),
         source_lock_fingerprints: vec![QWEN35_MOE_MODEL_FINGERPRINT.to_owned()],
         bindings,
+        logical_shapes,
         static_fp8_kv: vec![],
         known_unconsumed_tensors,
     };
@@ -1088,6 +1108,42 @@ fn insert_recipe_metadata(
     Ok(())
 }
 
+fn recipe_from_metadata(
+    metadata: &BTreeMap<String, GgufValue>,
+) -> Result<GgufTensorRecipeV1, GgufError> {
+    let json = match metadata.get(SLLM_TENSOR_RECIPE_KEY) {
+        Some(GgufValue::String(json)) => json,
+        _ => return Err(invalid("GGUF tensor recipe metadata is absent")),
+    };
+    serde_json::from_str(json).map_err(|error| invalid(format!("GGUF tensor recipe JSON: {error}")))
+}
+
+fn standard_dimensions(logical_shape: &[u64]) -> Result<(Vec<u64>, Option<Vec<u64>>), GgufError> {
+    if logical_shape.is_empty() || logical_shape.iter().any(|dimension| *dimension == 0) {
+        return Err(invalid("tensor logical shape is empty or contains zero"));
+    }
+    let mut dimensions = logical_shape.to_vec();
+    dimensions.reverse();
+    if dimensions.len() <= 4 {
+        return Ok((dimensions, None));
+    }
+    let middle =
+        dimensions[2..dimensions.len() - 1]
+            .iter()
+            .try_fold(1_u64, |product, dimension| {
+                product
+                    .checked_mul(*dimension)
+                    .ok_or_else(|| invalid("flattened GGUF dimension overflows"))
+            })?;
+    let standard = vec![
+        dimensions[0],
+        dimensions[1],
+        middle,
+        *dimensions.last().expect("non-empty dimensions"),
+    ];
+    Ok((standard, Some(logical_shape.to_vec())))
+}
+
 fn insert_frontend_asset(
     metadata: &mut BTreeMap<String, GgufValue>,
     key: &str,
@@ -1275,6 +1331,19 @@ fn invalid(message: impl Into<String>) -> GgufError {
 mod tests {
     use super::*;
     use crate::{decode_e2m1, decode_e4m3fn, decode_e8m0, decode_mxfp4};
+
+    #[test]
+    fn standard_dimensions_preserve_element_count_and_record_rank_five_shape() {
+        assert_eq!(
+            standard_dimensions(&[1_024, 3, 2, 16, 16]).expect("rank-five dimensions"),
+            (vec![16, 16, 6, 1_024], Some(vec![1_024, 3, 2, 16, 16]))
+        );
+        assert_eq!(
+            standard_dimensions(&[2_560, 1_024]).expect("rank-two dimensions"),
+            (vec![1_024, 2_560], None)
+        );
+        assert!(standard_dimensions(&[1, 0, 2, 3, 4]).is_err());
+    }
 
     #[test]
     fn tokenizer_padding_and_boundary_ids_are_deterministic() {
