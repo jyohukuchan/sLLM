@@ -3,7 +3,9 @@
 ## 位置付け
 
 - ここで扱うsourceは、sLLMのarchitecture、scheduler、KV cache、量子化、native kernel、CI/testを調査するための参照である。sLLMの対応実績、性能証拠、実装の正しさの証明ではない。
-- 固定された7件の取得事実と再現コマンドは [source-lock manifest](source-lock.md) を正とする。観測日は2026-08-02であり、ここで「release」と記すものは、その日に公式GitHubで `draft=false` かつ `prerelease=false` として観測した識別子である。将来のlatestを意味しない。
+- 固定された7件の取得事実と再現コマンドは [source-lock manifest](source-lock.md) を正とする。初回観測日は
+  2026-08-02、latest releaseと重大issueの更新監査日は2026-08-17である。将来のlatestを意味せず、重大な
+  release後問題があるvLLM/SGLangは前の固定revisionを維持する。
 - llama.cpp以外のengineはreader-onlyの参照とし、source codeのcopy・adapt・portを行わない。
 - llama.cppからの直接reuseだけは、`docs/provenance/README.md` のexact import recordとnotice processを完了した場合に限り許可する。対象ファイルのlicense/copyright、upstream URL、完全SHA、source/local path、blob ID、hash、`exact`/`adapted`/`ported`区分、変更内容、import commitを記録し、`THIRD_PARTY_NOTICES.md` とsource-file headerを整備する。
 
@@ -11,7 +13,7 @@
 
 | engine | official source | version / full commit SHA | 主な参照範囲 |
 | --- | --- | --- | --- |
-| llama.cpp | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | `b10227` / `f5919bf458ef190468b5c329bb293f8a54a1e69c` | tokenizer、GGUF/vocabulary、model parser、軽量baseline |
+| llama.cpp | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) | `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70` | tokenizer、GGUF/vocabulary、model parser、軽量baseline、Phase X GDN/HIP/Vulkan調査 |
 | vLLM | [vllm-project/vllm](https://github.com/vllm-project/vllm) | `v0.26.0` / `568afb3a13806beb53bb2e6bd518269357b237c0` | scheduler、paged/block KV、量子化、hardware別test構成 |
 | SGLang | [sgl-project/sglang](https://github.com/sgl-project/sglang) | `v0.5.16` / `fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1` | serving scheduler、KV/radix系設計、test分割。tag objectは `d21f3c3a10606ba3c7bf43f981496da0a7d620cd` |
 | TensorRT-LLM | [NVIDIA/TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM) | `v1.2.1` / `376f7e1bd8ed543f75014309e3fd4b237e9b0e73` | engine build、GPU matrix、量子化、backend/stage別CI |

@@ -719,12 +719,17 @@ candidateを再確認した。
 - Phase 19はMoE vision/MTP、batching、expert/tensor parallel、CPU offload、GGUF writer/readerを含まない。
 - 詳細は[Phase 19 archive](archive/2026/08/11-20/phase19-qwen35-moe.md)を正とする。
 
-### Phase 20: GGUF統一（未着手）
+### Phase 20: GGUF統一（進行中、A0完了）
 
 - safetensorsと量子化sidecarを変換・開発入力へ移し、ユーザー向けのモデル入力と配布artifactを
   BF16、FP8、NVFP4、MXFP4で共通の単一GGUFへ統一する。
 - Phase 20の範囲はGGUF converter、loader/runtime、standard/extension metadataとtensor type、model lock、
   移行・互換性の検証とcloseoutだけとする。その他の残機能をPhase 20へ混ぜない。
+- P20-A0でllama.cpp `b10453`のGGUF v3 source、single-file/little-endian/32-byte alignment、標準architecture
+  `qwen35`/`qwen35moe`/`gemma4`、BF16/NVFP4/MXFP4 standard type、FP8 extension境界、既存descriptor handoffを
+  host-only contractへ固定した。converter/reader/runtime実装はA1以降であり、A0はGPU/full-model PASSを主張しない。詳細は
+  [Phase 20 active plan](active/2026/08/11-20/phase20-gguf-unification.md)を正とする。
+
 ### Phase X: Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元（完了）
 
 - Qwen3.8-27B/Qwen3.5 architectureで観測したllama.cpp HIPの長prompt prefill崩れと低decode性能を、

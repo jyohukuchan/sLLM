@@ -1,0 +1,86 @@
+{
+  "schema_version": "phase20-gguf-a0-v1",
+  "phase": "P20-A0",
+  "state": "PASS",
+  "evidence_scope": "host-only-source-format-and-handoff-contract",
+  "source": {
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "release": "b10453",
+    "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+    "license": "MIT",
+    "reuse": "inspection-only-no-import",
+    "files": [
+      {"path": "reference/llama.cpp/ggml/include/gguf.h", "sha256": "e56714aab702e5ce62ee587a409643c08f7e93e8fbb77f48ef7cc85075f96fa4", "purpose": "public GGUF C contract"},
+      {"path": "reference/llama.cpp/ggml/src/gguf.cpp", "sha256": "615894b49182f94d711280d570a215860e1247ecc05d4289c9382295170b53bc", "purpose": "bounded parser and writer behavior reference"},
+      {"path": "reference/llama.cpp/gguf-py/gguf/constants.py", "sha256": "1db4fa8c0defa3910dae4e8f706519ec46cd65c2eb54ebbdca91086173f7aae2", "purpose": "version, metadata, architecture, tensor type, and block constants"},
+      {"path": "reference/llama.cpp/gguf-py/gguf/gguf_reader.py", "sha256": "f1784b59de0f6ef5454091acd0997214a0c3151c0f33ee1f6394eca8441a0002", "purpose": "metadata and tensor table reading reference"},
+      {"path": "reference/llama.cpp/gguf-py/gguf/gguf_writer.py", "sha256": "9216da38c4bc5d7d9f2693125708fbaf64868e5447d26f186dbd07e0d059e594", "purpose": "header, metadata, tensor, and alignment writing reference"},
+      {"path": "reference/llama.cpp/gguf-py/gguf/quants.py", "sha256": "2c927a1b3d9f0920dcf4007fb686e1b0999333e9f65ce43dcc689900c0beae8b", "purpose": "MXFP4 and NVFP4 standard block decode reference"},
+      {"path": "reference/llama.cpp/conversion/qwen.py", "sha256": "65c61155458078232dd3f9d23284710fa39c29cf7ecc341194c825cf5334f43f", "purpose": "Qwen3.5 architecture, tensor reorder, MTP, and NVFP4 conversion reference"},
+      {"path": "reference/llama.cpp/conversion/gemma.py", "sha256": "b43670f30a470a3099f6475cb639a7cdb327b37e98467c96d288c8db862bfa76", "purpose": "Gemma 4 architecture and frontend conversion reference"}
+    ]
+  },
+  "container": {
+    "magic": "GGUF",
+    "version": 3,
+    "endianness": "little",
+    "alignment": 32,
+    "distribution": "single-file",
+    "external_required_files": []
+  },
+  "architectures": ["qwen35", "qwen35moe", "gemma4"],
+  "tensor_encodings": [
+    {"semantic": "bf16", "status": "standard", "ggml_type": 30, "block_size": 1, "type_size": 2, "conversion": "bit-preserving", "a1_requirement": null},
+    {"semantic": "fp8-e4m3fn-channel-bf16-scale", "status": "extension-required", "ggml_type": null, "block_size": null, "type_size": null, "conversion": "not-defined-in-a0", "a1_requirement": "versioned structurally inspectable carrier preserving exact FP8 and scale planes"},
+    {"semantic": "nvfp4-e2m1-block16-e4m3fn-f32-outer", "status": "standard", "ggml_type": 40, "block_size": 64, "type_size": 36, "conversion": "lossless-repack", "a1_requirement": null},
+    {"semantic": "mxfp4-e2m1-block32-e8m0", "status": "standard", "ggml_type": 39, "block_size": 32, "type_size": 17, "conversion": "lossless-repack", "a1_requirement": null}
+  ],
+  "handoffs": [
+    {
+      "id": "qwen35-4b-bf16-dense",
+      "architecture": "qwen35",
+      "source_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "semantic_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+      "inventory": {"physical_tensors": 738, "mtp_tensors": 15, "vision_tensors": 297, "component_scope": "text+mtp+vision"},
+      "descriptor_sources": ["crates/sllm-core/src/model.rs", "crates/sllm-core/src/qwen_graph.rs", "crates/sllm-core/src/qwen_mtp.rs", "crates/sllm-core/src/qwen_vision.rs"]
+    },
+    {
+      "id": "gemma4-12b-bf16-dense",
+      "architecture": "gemma4",
+      "source_revision": "023679ed352de9bb66cc873c9009ce3482585c08",
+      "semantic_fingerprint": "sha256:086ede4017206d33533c70d5d00cb492f2f1064a21c995477207ebada668ccff",
+      "inventory": {"physical_tensors": 677, "loadable_text_tensors": 666, "catalog_sha256": "24e705586f0bba5e1018951a9ee09aa02b1bfccd73f5c0a82e31e29fb7c2931f", "component_scope": "text-only"},
+      "descriptor_sources": ["crates/sllm-core/src/gemma4.rs", "crates/sllm-core/src/gemma4_graph.rs", "crates/sllm-core/src/weights.rs"]
+    },
+    {
+      "id": "gemma4-12b-nvfp4-mixed",
+      "architecture": "gemma4",
+      "source_revision": "b1f649734b34aa5575b03d186abd1b9be3d0d5c4",
+      "semantic_fingerprint": "sha256:7c2ee23298e7c3a9247e8947597dca5a38f8b791a0322487466d2bfad8ce704b",
+      "inventory": {"physical_tensors": 1389, "logical_tensors": 677, "nvfp4_mlp_tensors": 144, "fp8_attention_tensors": 184, "static_fp8_kv_layers": 48, "recipe_digest": "sha256:e64f38576cffd36fac5f55d5e7c47846afdc59ef8ef5aec24b66f090aa8522e2", "component_scope": "text-mixed-recipe"},
+      "descriptor_sources": ["crates/sllm-core/src/quantized_model.rs", "crates/sllm-core/src/gemma4_execution.rs"]
+    },
+    {
+      "id": "qwen35-35b-a3b-mxfp4-moe",
+      "architecture": "qwen35moe",
+      "source_revision": "2e19c6576db91e5d5a93455415619262218bf8a1",
+      "semantic_fingerprint": "sha256:5bca203f6ec8ab9cab4e340a6c337fff7387f9ca2fa12526c48ce999748e83b0",
+      "inventory": {"physical_tensors": 63171, "text_tensors": 62053, "vision_known_unconsumed": 333, "mtp_known_unconsumed": 785, "load_plan_entries": 493, "load_plan_digest": "sha256:f96a3389cfaca4ab947fe060ccd6f048d078946e704464277d87019a13fb7ae4", "component_scope": "text-only"},
+      "descriptor_sources": ["crates/sllm-core/src/qwen35_moe.rs", "crates/sllm-core/src/quantized_model.rs"]
+    }
+  ],
+  "model_lock": {
+    "semantic_identity": "preserve-across-container-conversion",
+    "required_derivation_fields": ["source_lock_fingerprints", "tool_repository", "tool_commit", "arguments", "effective_config", "environment"],
+    "required_output_fields": ["path", "size_bytes", "sha256", "metadata_sha256", "tensor_catalog_sha256"],
+    "path_reopen_policy": "same-verified-open-descriptor"
+  },
+  "decisions": {
+    "standard_first": true,
+    "fp8": "versioned-extension-required-no-dequantized-substitution",
+    "quantized_repack": "lossless-only",
+    "fallback": "reject-no-source-container-fallback",
+    "custom_type_id": "not-allocated-in-a0"
+  },
+  "non_goals": ["converter-implementation", "runtime-reader-implementation", "gpu-evidence", "full-model-gguf", "split-gguf", "request-batching", "chunked-prefill", "persistent-kv", "multi-gpu"]
+}

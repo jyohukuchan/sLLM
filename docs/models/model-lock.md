@@ -177,6 +177,12 @@ config、index、support fileも同じdescriptorから上限付きで読み、�
 tokenizer/chat metadataを分離する。Phase 20のGGUFは後者と同じsemantic identityを保持し、GGUF化を理由に別modelとして扱ったり、
 source safetensorsと量子化sidecarを最終ユーザー形式として残したりしない。model shardや生成GGUF自体はrepositoryへ含めない。
 
+P20-A0ではderived GGUF lockの必須境界を固定した。各outputは全source lock fingerprint、converter repository/full commit、
+完全な引数とeffective config、environment、GGUFのsize/SHA-256、metadata digest、tensor catalog digestを含める。
+container digestは変わるがsemantic identityは維持し、runtimeは検証済みGGUFを同じopen file descriptorから読む。
+format、encoding、handoffの正本は[GGUF format contract](../formats/gguf.md)と
+[P20-A0 manifest](../../ci/matrix/phase20-gguf-a0-v1.json)とする。A0はschemaを固定した段階であり、derived lock実装は後続である。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in

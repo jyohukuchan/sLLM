@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase20-gguf-a0-v1.schema.json",
+  "title": "sLLM Phase 20 A0 GGUF source, format, and handoff contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "phase",
+    "state",
+    "evidence_scope",
+    "source",
+    "container",
+    "architectures",
+    "tensor_encodings",
+    "handoffs",
+    "model_lock",
+    "decisions",
+    "non_goals"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase20-gguf-a0-v1"},
+    "phase": {"const": "P20-A0"},
+    "state": {"const": "PASS"},
+    "evidence_scope": {"const": "host-only-source-format-and-handoff-contract"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "release", "commit", "license", "reuse", "files"],
+      "properties": {
+        "repository": {"const": "https://github.com/ggml-org/llama.cpp"},
+        "release": {"const": "b10453"},
+        "commit": {"const": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"},
+        "license": {"const": "MIT"},
+        "reuse": {"const": "inspection-only-no-import"},
+        "files": {
+          "type": "array",
+          "minItems": 8,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "sha256", "purpose"],
+            "properties": {
+              "path": {"type": "string", "pattern": "^reference/llama\\.cpp/"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "purpose": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "container": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["magic", "version", "endianness", "alignment", "distribution", "external_required_files"],
+      "properties": {
+        "magic": {"const": "GGUF"},
+        "version": {"const": 3},
+        "endianness": {"const": "little"},
+        "alignment": {"const": 32},
+        "distribution": {"const": "single-file"},
+        "external_required_files": {"const": []}
+      }
+    },
+    "architectures": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"enum": ["qwen35", "qwen35moe", "gemma4"]}
+    },
+    "tensor_encodings": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["semantic", "status", "ggml_type", "block_size", "type_size", "conversion", "a1_requirement"],
+        "properties": {
+          "semantic": {"enum": ["bf16", "fp8-e4m3fn-channel-bf16-scale", "nvfp4-e2m1-block16-e4m3fn-f32-outer", "mxfp4-e2m1-block32-e8m0"]},
+          "status": {"enum": ["standard", "extension-required"]},
+          "ggml_type": {"type": ["integer", "null"]},
+          "block_size": {"type": ["integer", "null"], "minimum": 1},
+          "type_size": {"type": ["integer", "null"], "minimum": 1},
+          "conversion": {"enum": ["bit-preserving", "lossless-repack", "not-defined-in-a0"]},
+          "a1_requirement": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "handoffs": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "architecture", "source_revision", "semantic_fingerprint", "inventory", "descriptor_sources"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "architecture": {"enum": ["qwen35", "qwen35moe", "gemma4"]},
+          "source_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+          "semantic_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+          "inventory": {"type": "object", "minProperties": 1, "additionalProperties": {"type": ["integer", "string"]}},
+          "descriptor_sources": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "model_lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["semantic_identity", "required_derivation_fields", "required_output_fields", "path_reopen_policy"],
+      "properties": {
+        "semantic_identity": {"const": "preserve-across-container-conversion"},
+        "required_derivation_fields": {"const": ["source_lock_fingerprints", "tool_repository", "tool_commit", "arguments", "effective_config", "environment"]},
+        "required_output_fields": {"const": ["path", "size_bytes", "sha256", "metadata_sha256", "tensor_catalog_sha256"]},
+        "path_reopen_policy": {"const": "same-verified-open-descriptor"}
+      }
+    },
+    "decisions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standard_first", "fp8", "quantized_repack", "fallback", "custom_type_id"],
+      "properties": {
+        "standard_first": {"const": true},
+        "fp8": {"const": "versioned-extension-required-no-dequantized-substitution"},
+        "quantized_repack": {"const": "lossless-only"},
+        "fallback": {"const": "reject-no-source-container-fallback"},
+        "custom_type_id": {"const": "not-allocated-in-a0"}
+      }
+    },
+    "non_goals": {
+      "const": ["converter-implementation", "runtime-reader-implementation", "gpu-evidence", "full-model-gguf", "split-gguf", "request-batching", "chunked-prefill", "persistent-kv", "multi-gpu"]
+    }
+  }
+}

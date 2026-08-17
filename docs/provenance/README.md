@@ -201,6 +201,15 @@ control flow、kernelをcopy、adapt、portしていない。sLLMの`linear_atte
 `llama-cpp-phase9-gdn-layout-001`を更新せず、新しいimport eventまたは`THIRD_PARTY_NOTICES.md` entryを追加しない。
 local llama.cpp exact-shape test patchはupstream未投稿でsLLM repositoryへ含めず、model、raw trace、生成全文、binaryも含めない。
 
+## Phase 20 A0 GGUF source inspection record
+
+P20-A0はsource-lock済みllama.cpp `b10453` commit `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`の
+`gguf.h`、`gguf.cpp`、Python reader/writer/constants/quants、Qwen3.5/Gemma 4 converterをGGUF v3 format、標準metadata、
+tensor block、converter mappingの技術参照として読んだ。8 fileのSHA-256と用途は
+[P20-A0 manifest](../../ci/matrix/phase20-gguf-a0-v1.json)へ固定した。本作業でllama.cppのcode expression、control flow、
+test、generated artifactをsLLM sourceへcopy、adapt、portしていないため、import eventと`THIRD_PARTY_NOTICES.md` entryは
+追加しない。後続Phaseで直接reuseする場合は、実際のimport前に本書の通常手順で別recordを追加する。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.
