@@ -1,9 +1,10 @@
 //! Exact Qwen3.5-35B-A3B MXFP4 source and tensor-inventory contract.
 
 use crate::{
-    BudgetBoundary, DType, GenerationStopPolicyV1, LayerType, MaxNewTokensZero, PromptEvaluation,
-    QuantizedTensorEncoding, SemanticOpDescriptor, SparseMoeContract, StopEvaluation,
-    StopTokenHandling, TensorDType, TensorView, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification,
+    BudgetBoundary, DType, GenerationStopPolicyV1, GgufTensorType, GgufValue, LayerType,
+    MaxNewTokensZero, PromptEvaluation, QuantizedTensorEncoding, SemanticOpDescriptor,
+    SparseMoeContract, StopEvaluation, StopTokenHandling, TensorDType, TensorView,
+    VerifiedDerivedGguf, VerifiedGguf, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification,
     WeightConsumer, WeightConsumerKey, WeightLoadChunk, WeightLoadEntry, WeightLoadPlan,
 };
 use serde::Deserialize;
@@ -251,10 +252,98 @@ pub struct VerifiedQwen35Moe {
     root: PathBuf,
     config: Qwen35MoeConfig,
     recipe: Qwen35MoeRecipe,
+    all_planes: Vec<Qwen35MoeTensorPlane>,
     text_planes: Vec<Qwen35MoeTensorPlane>,
     experts: BTreeMap<(u16, u16, Qwen35MoeExpertProjection), Qwen35MoeExpertTensor>,
     support_files: BTreeMap<String, Arc<[u8]>>,
     shards: BTreeMap<String, BoundShard>,
+}
+
+#[derive(Debug)]
+pub struct VerifiedGgufQwen35Moe {
+    gguf: VerifiedGguf,
+    file_sha256: String,
+    config: Qwen35MoeConfig,
+    direct_planes: Vec<Qwen35MoeTensorPlane>,
+    experts: BTreeMap<(u16, u16, Qwen35MoeExpertProjection), String>,
+}
+
+impl VerifiedGgufQwen35Moe {
+    pub fn gguf(&self) -> &VerifiedGguf {
+        &self.gguf
+    }
+
+    pub fn config(&self) -> &Qwen35MoeConfig {
+        &self.config
+    }
+
+    pub fn direct_planes(&self) -> &[Qwen35MoeTensorPlane] {
+        &self.direct_planes
+    }
+
+    pub fn expert_tensor_name(
+        &self,
+        layer: u16,
+        expert: u16,
+        projection: Qwen35MoeExpertProjection,
+    ) -> Option<&str> {
+        self.experts
+            .get(&(layer, expert, projection))
+            .map(String::as_str)
+    }
+
+    pub fn file_sha256(&self) -> &str {
+        &self.file_sha256
+    }
+
+    pub fn read_tensor(&self, name: &str) -> Result<Vec<u8>, Qwen35MoeModelError> {
+        let tensor = self
+            .gguf
+            .tensor(name)
+            .ok_or_else(|| invalid(format!("GGUF MoE tensor is absent: {name}")))?;
+        let length = usize::try_from(tensor.byte_length())
+            .map_err(|_| invalid("GGUF MoE tensor is too large"))?;
+        self.gguf
+            .read_tensor_range(name, 0, length)
+            .map_err(|error| invalid(error.to_string()))
+    }
+
+    pub fn read_expert_planes(
+        &self,
+        layer: u16,
+        expert: u16,
+        projection: Qwen35MoeExpertProjection,
+    ) -> Result<(Vec<u8>, Vec<u8>), Qwen35MoeModelError> {
+        let name = self
+            .expert_tensor_name(layer, expert, projection)
+            .ok_or_else(|| invalid("GGUF MoE expert tensor is absent"))?;
+        let standard = self.read_tensor(name)?;
+        if standard.len() % 17 != 0 {
+            return Err(invalid("GGUF MXFP4 standard block byte count differs"));
+        }
+        let blocks = standard.len() / 17;
+        let mut values = Vec::with_capacity(blocks * 16);
+        let mut scales = Vec::with_capacity(blocks);
+        for block in standard.chunks_exact(17) {
+            scales.push(block[0]);
+            append_adjacent_mxfp4(&block[1..], &mut values);
+        }
+        Ok((values, scales))
+    }
+}
+
+fn append_adjacent_mxfp4(standard: &[u8], output: &mut Vec<u8>) {
+    debug_assert_eq!(standard.len(), 16);
+    for adjacent in (0..32).step_by(2) {
+        let code = |index: usize| {
+            if index < 16 {
+                standard[index] & 0x0f
+            } else {
+                standard[index - 16] >> 4
+            }
+        };
+        output.push(code(adjacent) | code(adjacent + 1) << 4);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -345,6 +434,12 @@ impl VerifiedQwen35Moe {
     pub fn text_planes(&self) -> &[Qwen35MoeTensorPlane] {
         &self.text_planes
     }
+    /// Every source tensor across text, vision, and MTP in deterministic
+    /// lexical-name order. Quantized expert value and scale planes remain
+    /// separate at this importer boundary.
+    pub fn all_planes(&self) -> &[Qwen35MoeTensorPlane] {
+        &self.all_planes
+    }
     pub fn expert(
         &self,
         layer: u16,
@@ -364,6 +459,13 @@ impl VerifiedQwen35Moe {
             .and_then(|index| self.text_planes.get(index))
     }
 
+    pub fn any_plane(&self, name: &str) -> Option<&Qwen35MoeTensorPlane> {
+        self.all_planes
+            .binary_search_by(|plane| plane.source_name.as_str().cmp(name))
+            .ok()
+            .and_then(|index| self.all_planes.get(index))
+    }
+
     pub fn locked_shard(&self, name: &str) -> Option<(u64, &'static str)> {
         SHARDS
             .iter()
@@ -378,7 +480,7 @@ impl VerifiedQwen35Moe {
             .ok_or_else(|| invalid(format!("unsupported MoE support file: {name}")))
     }
 
-    pub(crate) fn read_plane_range(
+    pub fn read_plane_range(
         &self,
         plane: &Qwen35MoeTensorPlane,
         relative_offset: u64,
@@ -403,6 +505,158 @@ impl VerifiedQwen35Moe {
             .ok_or_else(|| invalid("MoE tensor plane shard is not bound"))?
             .read_range(offset, length)
     }
+}
+
+pub fn verify_gguf_qwen35_moe(
+    verified: VerifiedDerivedGguf,
+) -> Result<VerifiedGgufQwen35Moe, Qwen35MoeModelError> {
+    if verified.gguf.architecture() != "qwen35moe"
+        || !verified
+            .lock
+            .source_lock_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint == QWEN35_MOE_MODEL_FINGERPRINT)
+    {
+        return Err(invalid("GGUF is not the reviewed Qwen3.5 MoE identity"));
+    }
+    for (key, expected) in [
+        ("qwen35moe.block_count", 40),
+        ("qwen35moe.embedding_length", 2_048),
+        ("qwen35moe.expert_count", 256),
+        ("qwen35moe.expert_used_count", 8),
+    ] {
+        if verified.gguf.metadata_value(key) != Some(&GgufValue::U32(expected)) {
+            return Err(invalid(format!("GGUF MoE metadata differs: {key}")));
+        }
+    }
+    let extension = verified
+        .gguf
+        .extension()
+        .ok_or_else(|| invalid("GGUF MoE tensor recipe is absent"))?;
+    if extension.recipe.bindings.len() != QWEN35_MOE_EXPERT_PROJECTION_COUNT
+        || verified.gguf.tensors().len()
+            != QWEN35_MOE_TENSOR_COUNT - QWEN35_MOE_EXPERT_PROJECTION_COUNT
+    {
+        return Err(invalid("GGUF MoE physical tensor inventory differs"));
+    }
+    let known: BTreeSet<_> = extension
+        .recipe
+        .known_unconsumed_tensors
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut experts = BTreeMap::new();
+    let mut expert_names = BTreeSet::new();
+    for binding in &extension.recipe.bindings {
+        if binding.encoding != crate::GgufRecipeEncoding::Mxfp4E2m1Block32E8m0
+            || binding.value_tensor != binding.logical_tensor
+            || !binding.scales.is_empty()
+            || binding.role != "routed-expert-projection"
+        {
+            return Err(invalid("GGUF MoE expert recipe differs"));
+        }
+        let (layer, expert, projection) = parse_gguf_expert_name(&binding.logical_tensor)?;
+        let tensor = verified
+            .gguf
+            .tensor(&binding.value_tensor)
+            .ok_or_else(|| invalid("GGUF MoE expert value is absent"))?;
+        if tensor.tensor_type != GgufTensorType::Mxfp4
+            || binding.logical_shape.as_slice() != projection.logical_shape()
+            || experts
+                .insert((layer, expert, projection), binding.value_tensor.clone())
+                .is_some()
+            || !expert_names.insert(binding.value_tensor.as_str())
+        {
+            return Err(invalid("GGUF MoE expert binding is not one-to-one"));
+        }
+    }
+    if experts.len() != QWEN35_MOE_EXPERT_PROJECTION_COUNT {
+        return Err(invalid("GGUF MoE expert coverage differs"));
+    }
+    let source_file = verified.gguf.path().display().to_string();
+    let mut direct_planes = Vec::new();
+    for tensor in verified.gguf.tensors() {
+        if expert_names.contains(tensor.name.as_str()) || known.contains(tensor.name.as_str()) {
+            continue;
+        }
+        let dtype = match tensor.tensor_type {
+            GgufTensorType::Bf16 => "BF16",
+            GgufTensorType::F16 => "F16",
+            GgufTensorType::F32 => "F32",
+            _ => return Err(invalid("GGUF MoE direct tensor type differs")),
+        };
+        let mut shape = tensor.dimensions.clone();
+        shape.reverse();
+        direct_planes.push(Qwen35MoeTensorPlane {
+            source_file: source_file.clone(),
+            source_name: tensor.name.clone(),
+            dtype: dtype.to_owned(),
+            shape,
+            absolute_byte_range: tensor.absolute_range,
+        });
+    }
+    direct_planes.sort_by(|left, right| left.source_name.cmp(&right.source_name));
+    if direct_planes.len() + QWEN35_MOE_EXPERT_PROJECTION_COUNT * 2 != QWEN35_MOE_TEXT_TENSOR_COUNT
+    {
+        return Err(invalid("GGUF MoE logical text inventory differs"));
+    }
+    let layer_types = (0..40)
+        .map(|layer| {
+            if (layer + 1) % 4 == 0 {
+                LayerType::FullAttention
+            } else {
+                LayerType::LinearAttention
+            }
+        })
+        .collect();
+    let config = Qwen35MoeConfig {
+        hidden_size: 2_048,
+        layer_count: 40,
+        attention_heads: 16,
+        kv_heads: 2,
+        head_dim: 256,
+        expert_count: 256,
+        selected_expert_count: 8,
+        expert_intermediate_size: 512,
+        shared_expert_intermediate_size: 512,
+        layer_types,
+    };
+    Ok(VerifiedGgufQwen35Moe {
+        gguf: verified.gguf,
+        file_sha256: verified.lock.output.sha256,
+        config,
+        direct_planes,
+        experts,
+    })
+}
+
+fn parse_gguf_expert_name(
+    name: &str,
+) -> Result<(u16, u16, Qwen35MoeExpertProjection), Qwen35MoeModelError> {
+    const PREFIX: &str = "model.language_model.layers.";
+    let rest = name
+        .strip_prefix(PREFIX)
+        .ok_or_else(|| invalid("GGUF MoE expert name prefix differs"))?;
+    let parts: Vec<_> = rest.split('.').collect();
+    if parts.len() != 6 || parts[1] != "mlp" || parts[2] != "experts" || parts[5] != "weight" {
+        return Err(invalid("GGUF MoE expert name is malformed"));
+    }
+    let layer = parts[0]
+        .parse::<u16>()
+        .map_err(|_| invalid("GGUF MoE layer is invalid"))?;
+    let expert = parts[3]
+        .parse::<u16>()
+        .map_err(|_| invalid("GGUF MoE expert index is invalid"))?;
+    let projection = match parts[4] {
+        "gate_proj" => Qwen35MoeExpertProjection::Gate,
+        "up_proj" => Qwen35MoeExpertProjection::Up,
+        "down_proj" => Qwen35MoeExpertProjection::Down,
+        _ => return Err(invalid("GGUF MoE expert projection is invalid")),
+    };
+    if layer >= 40 || expert >= 256 {
+        return Err(invalid("GGUF MoE expert coordinate is out of range"));
+    }
+    Ok((layer, expert, projection))
 }
 
 pub fn qwen35_moe_layer_blob_name(layer: u32) -> String {
@@ -484,6 +738,79 @@ pub fn build_qwen35_moe_weight_load_plan(
     crate::weights::WeightLoadPlan::from_verified_entries(
         crate::weights::VerifiedWeightPlanMetadata {
             schema_version: "qwen35-moe-mxfp4-load-plan-v1".to_owned(),
+            repo_id: QWEN35_MOE_REPOSITORY.to_owned(),
+            resolved_revision: QWEN35_MOE_REVISION.to_owned(),
+            lock_fingerprint: QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+            tied_embeddings: false,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination,
+        },
+        entries,
+    )
+    .map_err(|error| invalid(error.to_string()))
+}
+
+pub fn build_gguf_qwen35_moe_weight_load_plan(
+    source: &VerifiedGgufQwen35Moe,
+) -> Result<WeightLoadPlan, Qwen35MoeModelError> {
+    let source_file = source.gguf.path().display().to_string();
+    let source_sha = source
+        .file_sha256
+        .strip_prefix("sha256:")
+        .ok_or_else(|| invalid("GGUF MoE SHA-256 prefix differs"))?;
+    let mut entries = Vec::new();
+    let mut destination = 0_u64;
+    for plane in source.direct_planes() {
+        let Some(consumer) = classify_execution_plane(plane, source.config())? else {
+            continue;
+        };
+        let dtype = parse_tensor_dtype(&plane.dtype)?;
+        let byte_length = plane.absolute_byte_range[1]
+            .checked_sub(plane.absolute_byte_range[0])
+            .ok_or_else(|| invalid("GGUF execution plane byte range underflow"))?;
+        entries.push(WeightLoadEntry {
+            tensor_name: plane.source_name.clone(),
+            classification: WeightClassification::Required,
+            consumer: Some(consumer),
+            dtype,
+            shape: plane.shape.clone(),
+            source_file: source_file.clone(),
+            locked_file_size: source.gguf.file_size(),
+            locked_file_sha256: source_sha.to_owned(),
+            source_range: plane.absolute_byte_range,
+            destination_start: Some(destination),
+            chunks: load_chunks(plane.absolute_byte_range[0], destination, byte_length)?,
+        });
+        destination = destination
+            .checked_add(byte_length)
+            .ok_or_else(|| invalid("GGUF execution plan destination overflow"))?;
+    }
+    for layer in 0..source.config().layer_count {
+        let name = qwen35_moe_layer_blob_name(layer);
+        entries.push(WeightLoadEntry {
+            tensor_name: name,
+            classification: WeightClassification::Required,
+            consumer: Some(WeightConsumerKey {
+                layer: Some(u64::from(layer)),
+                role: WeightConsumer::MoeLayerBlob,
+            }),
+            dtype: TensorDType::U8,
+            shape: vec![QWEN35_MOE_LAYER_BLOB_BYTES],
+            source_file: source_file.clone(),
+            locked_file_size: source.gguf.file_size(),
+            locked_file_sha256: source_sha.to_owned(),
+            source_range: [0, QWEN35_MOE_LAYER_BLOB_BYTES],
+            destination_start: Some(destination),
+            chunks: Vec::new(),
+        });
+        destination = destination
+            .checked_add(QWEN35_MOE_LAYER_BLOB_BYTES)
+            .ok_or_else(|| invalid("GGUF MoE blob destination overflow"))?;
+    }
+    entries.sort_by(|left, right| left.tensor_name.cmp(&right.tensor_name));
+    crate::weights::WeightLoadPlan::from_verified_entries(
+        crate::weights::VerifiedWeightPlanMetadata {
+            schema_version: "qwen35-moe-mxfp4-gguf-load-plan-v1".to_owned(),
             repo_id: QWEN35_MOE_REPOSITORY.to_owned(),
             resolved_revision: QWEN35_MOE_REVISION.to_owned(),
             lock_fingerprint: QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
@@ -1148,6 +1475,7 @@ pub fn verify_qwen35_moe_artifact(
     }
     let config_bytes = read_bounded(&root.join("config.json"), MAX_CONFIG_BYTES)?;
     let (config, recipe) = validate_qwen35_moe_config(&config_bytes)?;
+    support_files.insert("config.json".to_owned(), Arc::<[u8]>::from(config_bytes));
     let index_bytes = read_bounded(&root.join("model.safetensors.index.json"), MAX_INDEX_BYTES)?;
     if sha256(&index_bytes) != INDEX_SHA256 {
         return Err(invalid("safetensors index SHA-256 differs"));
@@ -1201,12 +1529,14 @@ pub fn verify_qwen35_moe_artifact(
     }
     let mut catalog = Sha256::new();
     let mut text_catalog = Sha256::new();
+    let mut all_planes = Vec::with_capacity(QWEN35_MOE_TENSOR_COUNT);
     let mut text_planes = Vec::with_capacity(QWEN35_MOE_TEXT_TENSOR_COUNT);
     let mut text_count = 0_usize;
     let mut vision_count = 0_usize;
     let mut mtp_count = 0_usize;
     let mut text_bytes = 0_u64;
     for (name, located) in &entries {
+        all_planes.push(plane(name.clone(), located));
         let row = serde_json::to_string(&(
             name,
             &located.file,
@@ -1301,6 +1631,7 @@ pub fn verify_qwen35_moe_artifact(
         root: root.to_path_buf(),
         config,
         recipe,
+        all_planes,
         text_planes,
         experts,
         support_files,
@@ -1359,6 +1690,15 @@ mod tests {
         assert_eq!(Qwen35MoeExpertProjection::Gate.scale_shape(), [512, 64]);
         assert_eq!(Qwen35MoeExpertProjection::Down.value_shape(), [2_048, 256]);
         assert_eq!(Qwen35MoeExpertProjection::Down.scale_shape(), [2_048, 16]);
+    }
+
+    #[test]
+    fn standard_mxfp4_blocks_restore_the_exact_adjacent_source_bytes() {
+        let source: Vec<u8> = (0..16).map(|index| (index * 23 + 5) as u8).collect();
+        let standard = crate::repack_mxfp4_standard(&source, &[0x7f], 1, 32).unwrap();
+        let mut restored = Vec::new();
+        append_adjacent_mxfp4(&standard[1..], &mut restored);
+        assert_eq!(restored, source);
     }
 
     #[cfg(feature = "reviewed-qwen35-external-cache")]

@@ -16,7 +16,8 @@ use crate::op::{
     OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
 };
 use crate::qwen35_moe::{
-    QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedQwen35Moe,
+    QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedGgufQwen35Moe,
+    VerifiedQwen35Moe,
 };
 use crate::weights::{
     QWEN35_MTP_CONSUMER_LAYER, QwenComponentSelection, WeightClassification, WeightConsumer,
@@ -24,7 +25,9 @@ use crate::weights::{
     build_weight_load_plan,
 };
 use crate::{DType, Encoding, TensorError, TensorView};
-use crate::{Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar};
+use crate::{
+    Fp8ResidentRepresentation, Fp8ScaleGranularity, VerifiedFp8Sidecar, VerifiedGgufWeightSource,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -626,6 +629,56 @@ pub fn build_qwen35_moe_execution_graph(
             "Qwen3.5 MoE artifact and load plan identity differ".to_owned(),
         ));
     }
+    build_qwen35_moe_execution_graph_config(artifact.config(), plan, token_count, state_capacity)
+}
+
+pub fn build_qwen35_gguf_moe_execution_graph(
+    source: &VerifiedGgufQwen35Moe,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        });
+    }
+    if source.config().hidden_size != 2_048
+        || source.config().layer_count != 40
+        || source.config().attention_heads != 16
+        || source.config().kv_heads != 2
+        || source.config().head_dim != 256
+        || plan.repo_id != crate::qwen35_moe::QWEN35_MOE_REPOSITORY
+        || plan.resolved_revision != crate::qwen35_moe::QWEN35_MOE_REVISION
+        || plan.lock_fingerprint != QWEN35_MOE_MODEL_FINGERPRINT
+        || plan.tied_embeddings
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "Qwen3.5 MoE GGUF and load plan identity differ".to_owned(),
+        ));
+    }
+    build_qwen35_moe_execution_graph_config(source.config(), plan, token_count, state_capacity)
+}
+
+fn build_qwen35_moe_execution_graph_config(
+    config: &crate::Qwen35MoeConfig,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, QwenGraphError> {
     let dimensions = QwenGraphDimensions {
         hidden: 2_048,
         intermediate: 512,
@@ -644,7 +697,7 @@ pub fn build_qwen35_moe_execution_graph(
         linear_conv_kernel: 4,
         tied_embeddings: false,
     };
-    let layer_types = artifact.config().layer_types.clone();
+    let layer_types = config.layer_types.clone();
     let expected = expected_moe_consumers(&layer_types, false);
     let mut bindings = Vec::with_capacity(expected.len());
     let mut seen = BTreeSet::new();
@@ -868,6 +921,103 @@ pub fn build_qwen35_fp8_graph_with_kv_cache_encoding(
         DType::F8E4M3Fn,
         kv_cache_encoding,
     )
+}
+
+/// Builds the existing FP8 execution graph from the versioned recipe embedded
+/// in a verified GGUF. The container changes; the graph identity and semantic
+/// consumer set do not.
+pub fn build_qwen35_gguf_fp8_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    source: &VerifiedGgufWeightSource,
+    token_count: u64,
+    state_capacity: u64,
+    fp8_dtype: DType,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
+    if source.lock_fingerprint() != lock.fingerprint() || !source.has_fp8_recipe() {
+        return Err(QwenGraphError::InvalidModel(
+            "GGUF FP8 recipe differs from the reviewed Qwen identity".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut fp8_tensor_names = BTreeSet::new();
+    for recipe in source
+        .gguf()
+        .extension()
+        .expect("has_fp8_recipe requires an extension")
+        .recipe
+        .bindings
+        .iter()
+    {
+        let binding = by_name.get(recipe.logical_tensor.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "GGUF FP8 tensor is not a required Qwen weight: {}",
+                recipe.logical_tensor
+            ))
+        })?;
+        if recipe.logical_shape.as_slice() != binding.shape.as_slice()
+            || !is_fp8_linear_consumer(binding.consumer.role)
+            || !fp8_tensor_names.insert(recipe.logical_tensor.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "GGUF FP8 recipe differs from its graph binding: {}",
+                recipe.logical_tensor
+            )));
+        }
+    }
+    let expected_fp8: BTreeSet<_> = bindings
+        .iter()
+        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
+        .map(|binding| binding.tensor_name.clone())
+        .collect();
+    if fp8_tensor_names != expected_fp8 {
+        return Err(QwenGraphError::InvalidPlan(
+            "GGUF FP8 recipe does not cover the exact text-linear weight set".to_owned(),
+        ));
+    }
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names,
+        fp8_dtype: Some(fp8_dtype),
+        fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
+        kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
+        moe: false,
+    })?
+    .build()
 }
 
 /// Build the CDNA3 resident form of the Phase 10 sidecar. Values are expected
@@ -1241,7 +1391,11 @@ fn validate_plan(
     plan: &WeightLoadPlan,
     dimensions: QwenGraphDimensions,
 ) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
-    if plan.schema_version != lock.schema_version
+    let gguf_plan = matches!(
+        plan.schema_version.as_str(),
+        "gguf-model-plan-v1" | "gguf-quantized-model-plan-v1"
+    );
+    if (!gguf_plan && plan.schema_version != lock.schema_version)
         || plan.repo_id != lock.model.repo_id
         || plan.resolved_revision != lock.model.resolved_revision
         || plan.lock_fingerprint != lock.fingerprint()
@@ -1270,32 +1424,59 @@ fn validate_plan(
     // catalog. The later owner, `upload_verified_weight`, rebinds every entry
     // to `VerifiedCache` and enforces verified-cache descriptor equality
     // before upload.
-    let descriptors: Vec<TensorDescriptor> = plan
-        .entries
-        .iter()
-        .map(|entry| {
-            let byte_size = entry.source_range[1].saturating_sub(entry.source_range[0]);
-            TensorDescriptor {
-                tensor_name: entry.tensor_name.clone(),
-                source_file: entry.source_file.clone(),
-                dtype: entry.dtype,
-                shape: entry.shape.clone(),
-                header_length_field_bytes: 8,
-                header_length_bytes: 0,
-                data_buffer_start: entry.source_range[0],
-                data_offset_basis: "safetensors-data-buffer".to_owned(),
-                data_offsets: [0, byte_size],
-                absolute_byte_range: entry.source_range,
-                byte_size,
-            }
-        })
-        .collect();
-    let canonical = build_weight_load_plan(lock, descriptors.iter())
-        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
-    if &canonical != plan {
-        return Err(QwenGraphError::InvalidPlan(
-            "plan entries or digest are not canonical for the supplied lock".to_owned(),
-        ));
+    if gguf_plan {
+        if !plan
+            .has_valid_digest()
+            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?
+        {
+            return Err(QwenGraphError::InvalidPlan(
+                "GGUF plan digest does not match its canonical entry metadata".to_owned(),
+            ));
+        }
+        let Some(first) = plan.entries.first() else {
+            return Err(QwenGraphError::InvalidPlan(
+                "GGUF plan has no entries".to_owned(),
+            ));
+        };
+        if plan.entries.iter().any(|entry| {
+            entry.source_file != first.source_file
+                || entry.locked_file_size != first.locked_file_size
+                || entry.locked_file_sha256 != first.locked_file_sha256
+                || entry.source_range[0] >= entry.source_range[1]
+                || entry.source_range[1] > entry.locked_file_size
+        }) {
+            return Err(QwenGraphError::InvalidPlan(
+                "GGUF plan entries do not share one bounded verified source".to_owned(),
+            ));
+        }
+    } else {
+        let descriptors: Vec<TensorDescriptor> = plan
+            .entries
+            .iter()
+            .map(|entry| {
+                let byte_size = entry.source_range[1].saturating_sub(entry.source_range[0]);
+                TensorDescriptor {
+                    tensor_name: entry.tensor_name.clone(),
+                    source_file: entry.source_file.clone(),
+                    dtype: entry.dtype,
+                    shape: entry.shape.clone(),
+                    header_length_field_bytes: 8,
+                    header_length_bytes: 0,
+                    data_buffer_start: entry.source_range[0],
+                    data_offset_basis: "safetensors-data-buffer".to_owned(),
+                    data_offsets: [0, byte_size],
+                    absolute_byte_range: entry.source_range,
+                    byte_size,
+                }
+            })
+            .collect();
+        let canonical = build_weight_load_plan(lock, descriptors.iter())
+            .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        if &canonical != plan {
+            return Err(QwenGraphError::InvalidPlan(
+                "plan entries or digest are not canonical for the supplied lock".to_owned(),
+            ));
+        }
     }
 
     let expected_consumers = expected_consumers(
@@ -1324,7 +1505,7 @@ fn validate_plan(
                     || entry.dtype != expected_dtype
                     || entry.shape != expected_shape
                     || entry.destination_start.is_none()
-                    || entry.chunks.is_empty()
+                    || (!gguf_plan && entry.chunks.is_empty())
                 {
                     return Err(QwenGraphError::InvalidPlan(format!(
                         "required tensor metadata differs from its consumer: {}",

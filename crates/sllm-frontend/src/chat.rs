@@ -1,7 +1,7 @@
 use core::fmt;
 
 use sha2::{Digest, Sha256};
-use sllm_core::{FrontendAssetKind, ModelLock, VerifiedCache};
+use sllm_core::{FrontendAssetKind, GgufValue, ModelLock, VerifiedCache, VerifiedGguf};
 
 pub const QWEN35_CHAT_RENDERER_VERSION: u8 = 1;
 pub const QWEN35_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
@@ -332,6 +332,37 @@ impl Qwen35ChatTemplateV1 {
         Self::from_verified_cache_impl(lock, cache, expected_sha256)
     }
 
+    pub fn from_qwen35_gguf(
+        lock: &ModelLock,
+        gguf: &VerifiedGguf,
+    ) -> Result<Self, ChatRenderError> {
+        let (expected_size, expected_sha256, default_thinking) = reviewed_template_identity(lock)?;
+        let extension = gguf
+            .extension()
+            .ok_or(ChatRenderError::TemplateAssetUnavailable)?;
+        if gguf.architecture() != "qwen35"
+            || !extension
+                .recipe
+                .source_lock_fingerprints
+                .iter()
+                .any(|fingerprint| fingerprint == lock.fingerprint())
+        {
+            return Err(ChatRenderError::UnsupportedTemplateIdentity);
+        }
+        let bytes = match gguf.metadata_value("tokenizer.chat_template") {
+            Some(GgufValue::String(value)) => value.as_bytes(),
+            _ => return Err(ChatRenderError::TemplateAssetUnavailable),
+        };
+        if bytes.len() as u64 != expected_size {
+            return Err(ChatRenderError::UnsupportedTemplateIdentity);
+        }
+        validate_template_bytes(bytes, expected_sha256)?;
+        Ok(Self {
+            consistency_label: lock.fingerprint().to_owned(),
+            default_thinking,
+        })
+    }
+
     pub fn from_qwen35_moe_artifact(
         artifact: &sllm_core::VerifiedQwen35Moe,
     ) -> Result<Self, ChatRenderError> {
@@ -342,6 +373,23 @@ impl Qwen35ChatTemplateV1 {
             return Err(ChatRenderError::UnsupportedTemplateIdentity);
         }
         validate_template_bytes(&bytes, QWEN35_CHAT_TEMPLATE_SHA256)?;
+        Ok(Self {
+            consistency_label: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
+            default_thinking: true,
+        })
+    }
+
+    pub fn from_qwen35_moe_gguf(
+        source: &sllm_core::VerifiedGgufQwen35Moe,
+    ) -> Result<Self, ChatRenderError> {
+        let bytes = match source.gguf().metadata_value("tokenizer.chat_template") {
+            Some(GgufValue::String(value)) => value.as_bytes(),
+            _ => return Err(ChatRenderError::TemplateAssetUnavailable),
+        };
+        if bytes.len() != QWEN35_CHAT_TEMPLATE_SIZE_BYTES as usize {
+            return Err(ChatRenderError::UnsupportedTemplateIdentity);
+        }
+        validate_template_bytes(bytes, QWEN35_CHAT_TEMPLATE_SHA256)?;
         Ok(Self {
             consistency_label: sllm_core::QWEN35_MOE_MODEL_FINGERPRINT.to_owned(),
             default_thinking: true,

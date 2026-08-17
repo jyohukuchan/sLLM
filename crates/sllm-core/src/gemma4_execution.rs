@@ -24,7 +24,8 @@ use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, Encoding, ExecutionBuffer,
     ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding, PrepareSupport,
     QuantizedTensorEncoding, ScalePlaneRole, TensorDType, TensorView, VerifiedCache,
-    VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest, upload_verified_weight,
+    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest,
+    upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -205,9 +206,80 @@ struct Gemma4ResidentInner {
     lock: crate::Gemma4ModelLock,
     plan: WeightLoadPlan,
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
-    quantized_model: Option<Arc<VerifiedUnslothGemma4Nvfp4>>,
+    quantized_model: Option<Arc<dyn GemmaQuantizedSource>>,
     immutable: BTreeMap<String, (Gemma4TensorBacking, ExecutionBuffer)>,
     completion_timeout: Duration,
+}
+
+trait GemmaQuantizedSource: Send + Sync {
+    fn repository(&self) -> &str;
+    fn resolved_revision(&self) -> &str;
+    fn recipe_digest(&self) -> &str;
+    fn tensor(&self, name: &str) -> Option<&crate::QuantizedTensorDescriptor>;
+    fn kv_scale(&self, layer: u32) -> Option<crate::StaticFp8KvScale>;
+    fn resident_bytes(
+        &self,
+        descriptor: &crate::QuantizedTensorDescriptor,
+    ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError>;
+}
+
+impl GemmaQuantizedSource for VerifiedUnslothGemma4Nvfp4 {
+    fn repository(&self) -> &str {
+        self.repository()
+    }
+
+    fn resolved_revision(&self) -> &str {
+        self.resolved_revision()
+    }
+
+    fn recipe_digest(&self) -> &str {
+        self.recipe_digest()
+    }
+
+    fn tensor(&self, name: &str) -> Option<&crate::QuantizedTensorDescriptor> {
+        self.tensor(name)
+    }
+
+    fn kv_scale(&self, layer: u32) -> Option<crate::StaticFp8KvScale> {
+        self.kv_scale(layer)
+    }
+
+    fn resident_bytes(
+        &self,
+        descriptor: &crate::QuantizedTensorDescriptor,
+    ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
+        build_unsloth_gemma_resident_bytes(self, descriptor)
+    }
+}
+
+impl GemmaQuantizedSource for VerifiedGgufGemmaSource {
+    fn repository(&self) -> &str {
+        self.repository()
+    }
+
+    fn resolved_revision(&self) -> &str {
+        self.resolved_revision()
+    }
+
+    fn recipe_digest(&self) -> &str {
+        self.recipe_digest()
+    }
+
+    fn tensor(&self, name: &str) -> Option<&crate::QuantizedTensorDescriptor> {
+        self.tensor(name)
+    }
+
+    fn kv_scale(&self, layer: u32) -> Option<crate::StaticFp8KvScale> {
+        self.kv_scale(layer)
+    }
+
+    fn resident_bytes(
+        &self,
+        descriptor: &crate::QuantizedTensorDescriptor,
+    ) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
+        self.resident_bytes(&descriptor.logical_name)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -331,10 +403,35 @@ impl Gemma4ResidentModel {
         artifact: Arc<VerifiedUnslothGemma4Nvfp4>,
         completion_timeout: Duration,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        Self::new_quantized_source(session, lock, plan, artifact, completion_timeout)
+    }
+
+    pub fn new_gguf_quantized(
+        session: Arc<ExecutionSession>,
+        lock: crate::Gemma4ModelLock,
+        plan: WeightLoadPlan,
+        source: Arc<VerifiedGgufGemmaSource>,
+        completion_timeout: Duration,
+    ) -> Result<Self, Gemma4ExecutionLayoutError> {
+        if source.lock_fingerprint() != lock.fingerprint() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "GGUF Gemma source and lock identities differ",
+            ));
+        }
+        Self::new_quantized_source(session, lock, plan, source, completion_timeout)
+    }
+
+    fn new_quantized_source(
+        session: Arc<ExecutionSession>,
+        lock: crate::Gemma4ModelLock,
+        plan: WeightLoadPlan,
+        source: Arc<dyn GemmaQuantizedSource>,
+        completion_timeout: Duration,
+    ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if completion_timeout.is_zero()
             || lock.fingerprint() != plan.lock_fingerprint
-            || plan.repo_id != artifact.repository()
-            || plan.resolved_revision != artifact.resolved_revision()
+            || plan.repo_id != source.repository()
+            || plan.resolved_revision != source.resolved_revision()
         {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "quantized Gemma resident identity or completion timeout differs",
@@ -342,7 +439,8 @@ impl Gemma4ResidentModel {
         }
         let graph = crate::build_gemma4_graph(&lock, &plan, 1, 0, 1)
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        let layout = build_gemma4_quantized_execution_layout(&graph, &plan, &artifact)?;
+        let layout =
+            build_gemma4_quantized_execution_layout_source(&graph, &plan, source.as_ref())?;
         let queue = session
             .create_queue()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -350,7 +448,7 @@ impl Gemma4ResidentModel {
         buffers.upload_immutable_quantized(
             &layout,
             &plan,
-            &artifact,
+            source.as_ref(),
             &queue,
             completion_timeout,
         )?;
@@ -363,7 +461,7 @@ impl Gemma4ResidentModel {
                 lock,
                 plan,
                 nvfp4_sidecar: None,
-                quantized_model: Some(artifact),
+                quantized_model: Some(source),
                 immutable,
                 completion_timeout,
             }),
@@ -444,7 +542,7 @@ impl Gemma4ResidentModel {
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self.inner.quantized_model.as_deref() {
-            build_gemma4_quantized_execution_layout(&graph, &self.inner.plan, artifact)?
+            build_gemma4_quantized_execution_layout_source(&graph, &self.inner.plan, artifact)?
         } else {
             match self.inner.nvfp4_sidecar.as_deref() {
                 Some(sidecar) => {
@@ -633,7 +731,7 @@ impl Gemma4ExecutionRequest {
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
-            build_gemma4_quantized_execution_layout(&graph, &self.plan, artifact)?
+            build_gemma4_quantized_execution_layout_source(&graph, &self.plan, artifact)?
         } else {
             match self._resident.nvfp4_sidecar.as_deref() {
                 Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
@@ -989,11 +1087,11 @@ impl Gemma4ProvisionedBuffers {
         )
     }
 
-    pub fn upload_immutable_quantized(
+    fn upload_immutable_quantized(
         &self,
         layout: &Gemma4ExecutionLayout,
         plan: &WeightLoadPlan,
-        artifact: &VerifiedUnslothGemma4Nvfp4,
+        artifact: &dyn GemmaQuantizedSource,
         queue: &ExecutionQueue,
         completion_timeout: Duration,
     ) -> Result<(), Gemma4ExecutionLayoutError> {
@@ -1843,14 +1941,10 @@ fn gemma_resident_weight_bytes(view: &TensorView) -> Result<u64, Gemma4Execution
         .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("NVFP4 resident bytes overflowed"))
 }
 
-fn upload_gemma_quantized_weight(
-    session: &ExecutionSession,
-    queue: &ExecutionQueue,
-    destination: &crate::BufferRange,
+fn build_unsloth_gemma_resident_bytes(
     artifact: &VerifiedUnslothGemma4Nvfp4,
     descriptor: &crate::QuantizedTensorDescriptor,
-    completion_timeout: Duration,
-) -> Result<(), Gemma4ExecutionLayoutError> {
+) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
     let mut bytes = artifact
         .read_source_range(descriptor.value_range)
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -1920,6 +2014,18 @@ fn upload_gemma_quantized_weight(
             ));
         }
     }
+    Ok(bytes)
+}
+
+fn upload_gemma_quantized_weight(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    artifact: &dyn GemmaQuantizedSource,
+    descriptor: &crate::QuantizedTensorDescriptor,
+    completion_timeout: Duration,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let bytes = artifact.resident_bytes(descriptor)?;
     if u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
         return Err(Gemma4ExecutionLayoutError::invalid(format!(
             "quantized resident bytes differ for {}: expected {}, got {}",
@@ -2026,14 +2132,22 @@ pub fn build_gemma4_quantized_execution_layout(
     plan: &WeightLoadPlan,
     artifact: &VerifiedUnslothGemma4Nvfp4,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
-    build_gemma4_execution_layout_source(graph, plan, None, Some(artifact))
+    build_gemma4_quantized_execution_layout_source(graph, plan, artifact)
+}
+
+fn build_gemma4_quantized_execution_layout_source(
+    graph: &Gemma4Graph,
+    plan: &WeightLoadPlan,
+    source: &dyn GemmaQuantizedSource,
+) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
+    build_gemma4_execution_layout_source(graph, plan, None, Some(source))
 }
 
 fn build_gemma4_execution_layout_source(
     graph: &Gemma4Graph,
     plan: &WeightLoadPlan,
     sidecar: Option<&VerifiedNvfp4Sidecar>,
-    artifact: Option<&VerifiedUnslothGemma4Nvfp4>,
+    artifact: Option<&dyn GemmaQuantizedSource>,
 ) -> Result<Gemma4ExecutionLayout, Gemma4ExecutionLayoutError> {
     if graph.lock_fingerprint() != plan.lock_fingerprint
         || graph.weight_plan_digest() != plan.digest()
@@ -2056,7 +2170,7 @@ struct LayoutBuilder<'a> {
     graph: &'a Gemma4Graph,
     plan: &'a WeightLoadPlan,
     nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
-    quantized_model: Option<&'a VerifiedUnslothGemma4Nvfp4>,
+    quantized_model: Option<&'a dyn GemmaQuantizedSource>,
     tensors: Vec<Gemma4ExecutionTensor>,
     nodes: Vec<Gemma4ExecutionNode>,
     weights: BTreeMap<String, usize>,
@@ -2073,7 +2187,7 @@ impl<'a> LayoutBuilder<'a> {
         graph: &'a Gemma4Graph,
         plan: &'a WeightLoadPlan,
         nvfp4_sidecar: Option<&'a VerifiedNvfp4Sidecar>,
-        quantized_model: Option<&'a VerifiedUnslothGemma4Nvfp4>,
+        quantized_model: Option<&'a dyn GemmaQuantizedSource>,
     ) -> Result<Self, Gemma4ExecutionLayoutError> {
         if let Some(sidecar) = nvfp4_sidecar {
             if sidecar.source_lock_fingerprint() != graph.lock_fingerprint()

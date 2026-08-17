@@ -556,10 +556,15 @@ pub fn build_gemma4_graph(
         .map_err(|_| Gemma4GraphError::InvalidModel)?;
     let expected_plan = build_gemma4_weight_load_plan(lock, expected_catalog.values())
         .map_err(|_| Gemma4GraphError::InvalidModel)?;
-    let first_class_quantized = plan.schema_version == "quantized-model-plan-v1"
+    let first_class_quantized_identity = (plan.schema_version == "quantized-model-plan-v1"
         && plan.repo_id == crate::UNSLOTH_GEMMA4_NVFP4_REPOSITORY
-        && plan.resolved_revision == crate::UNSLOTH_GEMMA4_NVFP4_REVISION
+        && plan.resolved_revision == crate::UNSLOTH_GEMMA4_NVFP4_REVISION)
+        || (plan.schema_version == "gguf-quantized-model-plan-v1"
+            && plan.repo_id == lock.model.repo_id
+            && plan.resolved_revision == lock.model.resolved_revision);
+    let first_class_quantized = first_class_quantized_identity
         && plan.lock_fingerprint == lock.fingerprint()
+        && plan.has_valid_digest().unwrap_or(false)
         && plan.entries.len() == expected_plan.entries.len()
         && plan
             .entries

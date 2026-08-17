@@ -8,7 +8,10 @@ use crate::model::{
     LayerType, LockedFile, ModelLock, TensorDType, TensorDescriptor, VerifiedCache,
     reviewed_qwen35_spec,
 };
-use crate::{BufferRange, ExecutionQueue, ExecutionSession, ExecutionState};
+use crate::{
+    BufferRange, ExecutionQueue, ExecutionSession, ExecutionState, GgufRecipeEncoding,
+    GgufTensorBinding, GgufTensorType, VerifiedDerivedGguf, VerifiedGguf,
+};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -241,6 +244,10 @@ impl WeightLoadPlan {
         )
     }
 
+    pub(crate) fn has_valid_digest(&self) -> Result<bool, WeightPlanError> {
+        Ok(self.recompute_digest()? == self.digest)
+    }
+
     pub(crate) fn from_verified_entries(
         metadata: VerifiedWeightPlanMetadata,
         entries: Vec<WeightLoadEntry>,
@@ -277,6 +284,282 @@ pub struct WeightUploadRequest<'a> {
     pub queue: &'a ExecutionQueue,
     pub destination: BufferRange,
     pub completion_timeout: Duration,
+}
+
+pub struct GgufWeightUploadRequest<'a> {
+    pub plan: &'a WeightLoadPlan,
+    pub expected_plan_digest: [u8; 32],
+    pub source: &'a VerifiedGgufWeightSource,
+    pub tensor_name: &'a str,
+    pub expected_dtype: TensorDType,
+    pub session: &'a ExecutionSession,
+    pub queue: &'a ExecutionQueue,
+    pub destination: BufferRange,
+    pub completion_timeout: Duration,
+}
+
+pub struct VerifiedGgufWeightSource {
+    lock_fingerprint: String,
+    file_sha256: String,
+    descriptors: BTreeMap<String, TensorDescriptor>,
+    recipe_bindings: BTreeMap<String, GgufTensorBinding>,
+    gguf: VerifiedGguf,
+}
+
+pub struct VerifiedGgufGemmaSource {
+    lock_fingerprint: String,
+    repository: String,
+    resolved_revision: String,
+    file_sha256: String,
+    tensors: BTreeMap<String, crate::QuantizedTensorDescriptor>,
+    kv_scales: BTreeMap<u32, crate::StaticFp8KvScale>,
+    gguf: VerifiedGguf,
+}
+
+impl VerifiedGgufGemmaSource {
+    pub fn gguf(&self) -> &VerifiedGguf {
+        &self.gguf
+    }
+
+    pub fn lock_fingerprint(&self) -> &str {
+        &self.lock_fingerprint
+    }
+
+    pub fn file_sha256(&self) -> &str {
+        &self.file_sha256
+    }
+
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    pub fn resolved_revision(&self) -> &str {
+        &self.resolved_revision
+    }
+
+    pub fn tensor(&self, name: &str) -> Option<&crate::QuantizedTensorDescriptor> {
+        self.tensors.get(name)
+    }
+
+    pub fn tensors(&self) -> impl ExactSizeIterator<Item = &crate::QuantizedTensorDescriptor> {
+        self.tensors.values()
+    }
+
+    pub fn recipe_digest(&self) -> &str {
+        &self
+            .gguf
+            .extension()
+            .expect("verified Gemma GGUF has an extension")
+            .recipe_sha256
+    }
+
+    pub fn kv_scale(&self, layer: u32) -> Option<crate::StaticFp8KvScale> {
+        self.kv_scales.get(&layer).copied()
+    }
+
+    pub fn resident_bytes(&self, logical_name: &str) -> Result<Vec<u8>, WeightPlanError> {
+        let descriptor = self
+            .tensor(logical_name)
+            .ok_or_else(|| WeightPlanError::invalid("GGUF Gemma tensor is absent"))?;
+        let value = self
+            .gguf
+            .tensor(&descriptor.source_name)
+            .ok_or_else(|| WeightPlanError::invalid("GGUF Gemma value tensor is absent"))?;
+        let length = usize::try_from(value.byte_length())
+            .map_err(|_| WeightPlanError::invalid("GGUF Gemma value is too large"))?;
+        let encoded = self
+            .gguf
+            .read_tensor_range(&descriptor.source_name, 0, length)
+            .map_err(|error| WeightPlanError::invalid(error.to_string()))?;
+        let mut output = Vec::new();
+        match descriptor.encoding {
+            crate::QuantizedTensorEncoding::UnquantizedBf16 => return Ok(encoded),
+            crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale => {
+                output = encoded;
+                let scale = descriptor
+                    .scale_planes
+                    .iter()
+                    .find(|plane| plane.role == crate::ScalePlaneRole::WeightChannel)
+                    .ok_or_else(|| WeightPlanError::invalid("GGUF Gemma FP8 scale is absent"))?;
+                let scale_info = self.gguf.tensor(&scale.source_name).ok_or_else(|| {
+                    WeightPlanError::invalid("GGUF Gemma FP8 scale tensor is absent")
+                })?;
+                let scale_length = usize::try_from(scale_info.byte_length())
+                    .map_err(|_| WeightPlanError::invalid("GGUF Gemma FP8 scale is too large"))?;
+                let bytes = self
+                    .gguf
+                    .read_tensor_range(&scale.source_name, 0, scale_length)
+                    .map_err(|error| WeightPlanError::invalid(error.to_string()))?;
+                if bytes.len() % 2 != 0 {
+                    return Err(WeightPlanError::invalid(
+                        "GGUF Gemma FP8 BF16 scale byte count is odd",
+                    ));
+                }
+                for chunk in bytes.chunks_exact(2) {
+                    let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    output.extend_from_slice(&f32::from_bits(u32::from(bits) << 16).to_le_bytes());
+                }
+            }
+            crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer => {
+                if encoded.len() % 36 != 0 {
+                    return Err(WeightPlanError::invalid(
+                        "GGUF NVFP4 standard block byte count differs",
+                    ));
+                }
+                output.reserve(encoded.len());
+                for block in encoded.chunks_exact(36) {
+                    for standard in block[4..].chunks_exact(8) {
+                        append_adjacent_nibbles(standard, 16, &mut output);
+                    }
+                }
+                for block in encoded.chunks_exact(36) {
+                    output.extend_from_slice(&block[..4]);
+                }
+                while output.len() & 3 != 0 {
+                    output.push(0);
+                }
+                for role in [
+                    crate::ScalePlaneRole::WeightOuter,
+                    crate::ScalePlaneRole::InputOuter,
+                ] {
+                    let scale = descriptor
+                        .scale_planes
+                        .iter()
+                        .find(|plane| plane.role == role)
+                        .ok_or_else(|| {
+                            WeightPlanError::invalid("GGUF Gemma outer scale is absent")
+                        })?;
+                    let scale_info = self.gguf.tensor(&scale.source_name).ok_or_else(|| {
+                        WeightPlanError::invalid("GGUF Gemma outer scale tensor is absent")
+                    })?;
+                    let scale_length = usize::try_from(scale_info.byte_length()).map_err(|_| {
+                        WeightPlanError::invalid("GGUF Gemma outer scale is too large")
+                    })?;
+                    let bytes = self
+                        .gguf
+                        .read_tensor_range(&scale.source_name, 0, scale_length)
+                        .map_err(|error| WeightPlanError::invalid(error.to_string()))?;
+                    if bytes.len() != 4 {
+                        return Err(WeightPlanError::invalid(
+                            "GGUF Gemma outer scale is not one F32",
+                        ));
+                    }
+                    output.extend_from_slice(&bytes);
+                }
+            }
+            _ => {
+                return Err(WeightPlanError::invalid(
+                    "GGUF Gemma tensor has an unsupported encoding",
+                ));
+            }
+        }
+        Ok(output)
+    }
+
+    pub fn build_weight_load_plan(
+        &self,
+        lock: &crate::Gemma4ModelLock,
+    ) -> Result<WeightLoadPlan, WeightPlanError> {
+        if self.lock_fingerprint != lock.fingerprint() {
+            return Err(WeightPlanError::invalid(
+                "GGUF Gemma source and lock fingerprints differ",
+            ));
+        }
+        build_gguf_gemma_plan(lock, self)
+    }
+}
+
+fn append_adjacent_nibbles(standard: &[u8], elements: usize, output: &mut Vec<u8>) {
+    let half = elements / 2;
+    debug_assert_eq!(standard.len(), half);
+    for adjacent in (0..elements).step_by(2) {
+        let code = |index: usize| {
+            if index < half {
+                standard[index] & 0x0f
+            } else {
+                standard[index - half] >> 4
+            }
+        };
+        output.push(code(adjacent) | code(adjacent + 1) << 4);
+    }
+}
+
+impl VerifiedGgufWeightSource {
+    pub fn gguf(&self) -> &VerifiedGguf {
+        &self.gguf
+    }
+
+    pub fn lock_fingerprint(&self) -> &str {
+        &self.lock_fingerprint
+    }
+
+    pub fn tensor(&self, name: &str) -> Option<&TensorDescriptor> {
+        self.descriptors.get(name)
+    }
+
+    pub fn tensors(&self) -> impl ExactSizeIterator<Item = &TensorDescriptor> {
+        self.descriptors.values()
+    }
+
+    pub fn recipe_binding(&self, logical_name: &str) -> Option<&GgufTensorBinding> {
+        self.recipe_bindings.get(logical_name)
+    }
+
+    pub fn has_fp8_recipe(&self) -> bool {
+        !self.recipe_bindings.is_empty()
+            && self.recipe_bindings.values().all(|binding| {
+                matches!(
+                    binding.encoding,
+                    GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
+                        | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
+                )
+            })
+    }
+
+    pub fn recipe_digest(&self) -> Option<&str> {
+        self.gguf
+            .extension()
+            .map(|extension| extension.recipe_sha256.as_str())
+    }
+
+    pub fn build_qwen_weight_load_plan(
+        &self,
+        lock: &ModelLock,
+        selection: QwenComponentSelection,
+    ) -> Result<WeightLoadPlan, WeightPlanError> {
+        if self.lock_fingerprint != lock.fingerprint() {
+            return Err(WeightPlanError::invalid(
+                "GGUF source and Qwen lock fingerprints differ",
+            ));
+        }
+        let locked_file = LockedFile {
+            path: self.gguf.path().display().to_string(),
+            size_bytes: self.gguf.file_size(),
+            sha256: self
+                .file_sha256
+                .strip_prefix("sha256:")
+                .ok_or_else(|| WeightPlanError::invalid("GGUF SHA-256 prefix differs"))?
+                .to_owned(),
+            git_blob: String::new(),
+            source_page_url: String::new(),
+            download_url: String::new(),
+            lfs_oid: None,
+        };
+        if self.recipe_bindings.is_empty() {
+            let locked_files = BTreeMap::from([(locked_file.path.as_str(), &locked_file)]);
+            let mut plan = build_qwen_component_weight_load_plan_inner(
+                lock,
+                self.descriptors.values(),
+                selection,
+                &locked_files,
+            )?;
+            plan.schema_version = "gguf-model-plan-v1".to_owned();
+            plan.digest = plan.recompute_digest()?;
+            Ok(plan)
+        } else {
+            build_qwen_gguf_quantized_plan(lock, &self.descriptors, selection, &locked_file)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -322,6 +605,27 @@ impl WeightRangeSource for VerifiedCache {
     }
 }
 
+impl WeightRangeSource for VerifiedGgufWeightSource {
+    fn lock_fingerprint(&self) -> &str {
+        &self.lock_fingerprint
+    }
+
+    fn tensor(&self, tensor_name: &str) -> Option<&TensorDescriptor> {
+        self.descriptors.get(tensor_name)
+    }
+
+    fn read_tensor_range(
+        &self,
+        tensor_name: &str,
+        offset: u64,
+        length: usize,
+    ) -> Result<Vec<u8>, WeightUploadError> {
+        self.gguf
+            .read_tensor_range(tensor_name, offset, length)
+            .map_err(|error| WeightUploadError::invalid(error.to_string()))
+    }
+}
+
 /// Upload one load-plan entry through the backend-neutral transfer API.
 ///
 /// Only one plan chunk is resident in host staging memory at a time. A failed
@@ -350,6 +654,69 @@ pub fn upload_verified_weight(
         request.plan,
         request.expected_plan_digest,
         request.cache,
+        request.tensor_name,
+        request.expected_dtype,
+        destination.offset_bytes(),
+        destination.size_bytes(),
+        max_transfer_bytes,
+        |relative_offset, bytes| {
+            let absolute_offset = destination
+                .offset_bytes()
+                .checked_add(relative_offset)
+                .ok_or_else(|| WeightUploadError::invalid("destination offset overflow"))?;
+            let range = destination
+                .buffer()
+                .range(
+                    absolute_offset,
+                    u64::try_from(bytes.len()).map_err(|_| {
+                        WeightUploadError::invalid("upload byte length does not fit u64")
+                    })?,
+                )
+                .map_err(|error| WeightUploadError::invalid(error.to_string()))?;
+            let mut transfer = request
+                .session
+                .upload(request.queue, range, bytes)
+                .map_err(|error| WeightUploadError::invalid(error.to_string()))?;
+            match transfer
+                .wait(request.completion_timeout)
+                .map_err(|error| WeightUploadError::invalid(error.to_string()))?
+            {
+                ExecutionState::Success => Ok(()),
+                ExecutionState::Pending => Err(WeightUploadError::invalid(
+                    "weight upload remained pending after wait",
+                )),
+                ExecutionState::Failure => {
+                    Err(WeightUploadError::invalid("weight upload reported failure"))
+                }
+            }
+        },
+    )
+}
+
+pub fn upload_verified_gguf_weight(
+    request: GgufWeightUploadRequest<'_>,
+) -> Result<WeightUploadReceipt, WeightUploadError> {
+    if request.completion_timeout.is_zero() {
+        return Err(WeightUploadError::invalid(
+            "completion timeout must be non-zero",
+        ));
+    }
+    if request.queue.session_id() != request.session.id()
+        || request.destination.buffer().session_id() != request.session.id()
+    {
+        return Err(WeightUploadError::invalid(
+            "queue and destination must belong to the upload session",
+        ));
+    }
+    let max_transfer_bytes = request
+        .session
+        .max_transfer_bytes()
+        .map_err(|error| WeightUploadError::invalid(error.to_string()))?;
+    let destination = request.destination.clone();
+    upload_weight_from_source(
+        request.plan,
+        request.expected_plan_digest,
+        request.source,
         request.tensor_name,
         request.expected_dtype,
         destination.offset_bytes(),
@@ -574,8 +941,17 @@ pub fn build_qwen_component_weight_load_plan<'a>(
     descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
     selection: QwenComponentSelection,
 ) -> Result<WeightLoadPlan, WeightPlanError> {
-    validate_fixed_lock(lock)?;
     let locked_files = locked_file_map(lock)?;
+    build_qwen_component_weight_load_plan_inner(lock, descriptors, selection, &locked_files)
+}
+
+fn build_qwen_component_weight_load_plan_inner<'a>(
+    lock: &ModelLock,
+    descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+    selection: QwenComponentSelection,
+    locked_files: &BTreeMap<&str, &LockedFile>,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    validate_fixed_lock(lock)?;
     let mut by_name = BTreeMap::new();
     for descriptor in descriptors {
         if by_name
@@ -884,6 +1260,591 @@ pub fn build_verified_qwen_component_weight_load_plan(
         ));
     }
     build_qwen_component_weight_load_plan(lock, cache.tensors(), selection)
+}
+
+pub fn build_verified_gguf_qwen_weight_load_plan(
+    lock: &ModelLock,
+    verified: VerifiedDerivedGguf,
+    selection: QwenComponentSelection,
+) -> Result<(VerifiedGgufWeightSource, WeightLoadPlan), WeightPlanError> {
+    if verified.gguf.architecture() != "qwen35"
+        || !verified
+            .lock
+            .source_lock_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint == lock.fingerprint())
+    {
+        return Err(WeightPlanError::invalid(
+            "GGUF is not the reviewed Qwen3.5 semantic identity",
+        ));
+    }
+    let recipe_bindings: BTreeMap<_, _> = verified
+        .gguf
+        .extension()
+        .map(|extension| {
+            extension
+                .recipe
+                .bindings
+                .iter()
+                .cloned()
+                .map(|binding| (binding.logical_tensor.clone(), binding))
+                .collect()
+        })
+        .unwrap_or_default();
+    if recipe_bindings.values().any(|binding| {
+        !matches!(
+            binding.encoding,
+            GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
+                | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
+        )
+    }) {
+        return Err(WeightPlanError::invalid(
+            "Qwen3.5 dense GGUF has an unsupported quantization recipe",
+        ));
+    }
+    let scale_names: BTreeSet<_> = recipe_bindings
+        .values()
+        .flat_map(|binding| binding.scales.iter().map(|scale| scale.tensor.as_str()))
+        .collect();
+    let source_file = verified.gguf.path().display().to_string();
+    let file_sha256 = verified
+        .lock
+        .output
+        .sha256
+        .strip_prefix("sha256:")
+        .ok_or_else(|| WeightPlanError::invalid("GGUF SHA-256 prefix differs"))?
+        .to_owned();
+    let locked_file = LockedFile {
+        path: source_file.clone(),
+        size_bytes: verified.gguf.file_size(),
+        sha256: file_sha256,
+        git_blob: String::new(),
+        source_page_url: String::new(),
+        download_url: String::new(),
+        lfs_oid: None,
+    };
+    let locked_files = BTreeMap::from([(locked_file.path.as_str(), &locked_file)]);
+    let mut descriptors = BTreeMap::new();
+    for tensor in verified.gguf.tensors() {
+        if scale_names.contains(tensor.name.as_str()) {
+            continue;
+        }
+        let dtype = match tensor.tensor_type {
+            GgufTensorType::Bf16 => TensorDType::Bf16,
+            GgufTensorType::F16 => TensorDType::F16,
+            GgufTensorType::F32 => TensorDType::F32,
+            GgufTensorType::I8Carrier if recipe_bindings.contains_key(&tensor.name) => {
+                TensorDType::U8
+            }
+            _ => {
+                return Err(WeightPlanError::invalid(format!(
+                    "Qwen GGUF tensor has no supported semantic binding: {}",
+                    tensor.name
+                )));
+            }
+        };
+        let shape = if let Some(binding) = recipe_bindings.get(&tensor.name) {
+            binding.logical_shape.clone()
+        } else {
+            let mut shape = tensor.dimensions.clone();
+            shape.reverse();
+            shape
+        };
+        let relative_end = tensor
+            .relative_offset
+            .checked_add(tensor.byte_length())
+            .ok_or_else(|| WeightPlanError::invalid("GGUF relative tensor range overflows"))?;
+        let descriptor = TensorDescriptor {
+            tensor_name: tensor.name.clone(),
+            source_file: source_file.clone(),
+            dtype,
+            shape,
+            header_length_field_bytes: 0,
+            header_length_bytes: verified.gguf.data_offset(),
+            data_buffer_start: verified.gguf.data_offset(),
+            data_offset_basis: "gguf-v3-tensor-data".to_owned(),
+            data_offsets: [tensor.relative_offset, relative_end],
+            absolute_byte_range: tensor.absolute_range,
+            byte_size: tensor.byte_length(),
+        };
+        if descriptors
+            .insert(descriptor.tensor_name.clone(), descriptor)
+            .is_some()
+        {
+            return Err(WeightPlanError::invalid("duplicate GGUF tensor descriptor"));
+        }
+    }
+    let plan = if recipe_bindings.is_empty() {
+        let mut plan = build_qwen_component_weight_load_plan_inner(
+            lock,
+            descriptors.values(),
+            selection,
+            &locked_files,
+        )?;
+        plan.schema_version = "gguf-model-plan-v1".to_owned();
+        plan.digest = plan.recompute_digest()?;
+        plan
+    } else {
+        build_qwen_gguf_quantized_plan(lock, &descriptors, selection, &locked_file)?
+    };
+    let source = VerifiedGgufWeightSource {
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        file_sha256: verified.lock.output.sha256,
+        descriptors,
+        recipe_bindings,
+        gguf: verified.gguf,
+    };
+    Ok((source, plan))
+}
+
+fn build_qwen_gguf_quantized_plan(
+    lock: &ModelLock,
+    descriptors: &BTreeMap<String, TensorDescriptor>,
+    selection: QwenComponentSelection,
+    locked_file: &LockedFile,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    validate_fixed_lock(lock)?;
+    let architecture = &lock.model.architecture;
+    let config = &architecture.text_config;
+    let mut selected_consumers = BTreeSet::new();
+    if selection.text {
+        selected_consumers.extend(expected_consumers(
+            &config.layer_types,
+            config.tie_word_embeddings,
+        ));
+    }
+    if selection.mtp {
+        selected_consumers.extend(expected_mtp_consumers());
+        selected_consumers.insert(WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::EmbeddingAndTiedOutput,
+        });
+    }
+    let mut observed_consumers = BTreeSet::new();
+    let mut vision_count = 0_u64;
+    let mut mtp_count = 0_u64;
+    let mut entries = Vec::with_capacity(descriptors.len());
+    let mut destination_cursor = 0_u64;
+    for descriptor in descriptors.values() {
+        let (mut classification, mut consumer) = classify_descriptor(
+            descriptor,
+            &config.layer_types,
+            &architecture.vision.tensor_prefix,
+            &architecture.mtp.tensor_prefix,
+            config.tie_word_embeddings,
+        )?;
+        let is_vision = descriptor
+            .tensor_name
+            .starts_with(&architecture.vision.tensor_prefix);
+        let is_mtp = descriptor
+            .tensor_name
+            .starts_with(&architecture.mtp.tensor_prefix);
+        let is_shared_embedding =
+            descriptor.tensor_name == "model.language_model.embed_tokens.weight";
+        if !selection.text && !is_vision && !is_mtp {
+            classification = WeightClassification::KnownUnconsumed;
+            consumer = None;
+        }
+        if selection.mtp && is_shared_embedding {
+            classification = WeightClassification::Required;
+            consumer = Some(WeightConsumerKey {
+                layer: None,
+                role: WeightConsumer::EmbeddingAndTiedOutput,
+            });
+        }
+        if is_vision {
+            vision_count = vision_count
+                .checked_add(1)
+                .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
+            if selection.vision {
+                classification = WeightClassification::Required;
+            }
+        } else if is_mtp {
+            mtp_count = mtp_count
+                .checked_add(1)
+                .ok_or_else(|| WeightPlanError::invalid("MTP tensor count overflow"))?;
+            if selection.mtp {
+                classification = WeightClassification::Required;
+                consumer = Some(classify_mtp_consumer(&descriptor.tensor_name)?);
+            }
+        }
+        if classification == WeightClassification::Required {
+            if let Some(key) = consumer {
+                if !observed_consumers.insert(key) {
+                    return Err(WeightPlanError::invalid(format!(
+                        "duplicate GGUF weight consumer: {key:?}"
+                    )));
+                }
+            }
+        }
+        let quantized = descriptor.dtype == TensorDType::U8;
+        let logical_bytes = if quantized {
+            descriptor
+                .shape
+                .iter()
+                .try_fold(2_u64, |bytes, dimension| bytes.checked_mul(*dimension))
+                .ok_or_else(|| WeightPlanError::invalid("GGUF logical tensor bytes overflow"))?
+        } else {
+            descriptor.byte_size
+        };
+        let destination_start = if classification == WeightClassification::KnownUnconsumed {
+            None
+        } else {
+            let start = destination_cursor;
+            destination_cursor = destination_cursor
+                .checked_add(logical_bytes)
+                .ok_or_else(|| WeightPlanError::invalid("GGUF destination size overflow"))?;
+            Some(start)
+        };
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.tensor_name.clone(),
+            classification,
+            consumer,
+            dtype: if quantized {
+                TensorDType::Bf16
+            } else {
+                descriptor.dtype
+            },
+            shape: descriptor.shape.clone(),
+            source_file: locked_file.path.clone(),
+            locked_file_size: locked_file.size_bytes,
+            locked_file_sha256: locked_file.sha256.clone(),
+            source_range: descriptor.absolute_byte_range,
+            destination_start,
+            chunks: Vec::new(),
+        });
+    }
+    if observed_consumers != selected_consumers
+        || vision_count != architecture.vision.tensor_count
+        || mtp_count != architecture.mtp.tensor_count
+        || entries.len() as u64 != lock.model.tensor_contract.indexed_tensor_count
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "quantized Qwen GGUF consumer/count contract differs: consumers={}/{}, vision={vision_count}/{}, mtp={mtp_count}/{}, all={}/{}",
+            observed_consumers.len(),
+            selected_consumers.len(),
+            architecture.vision.tensor_count,
+            architecture.mtp.tensor_count,
+            entries.len(),
+            lock.model.tensor_contract.indexed_tensor_count
+        )));
+    }
+    let schema_version = "gguf-quantized-model-plan-v1";
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version,
+            repo_id: &lock.model.repo_id,
+            resolved_revision: &lock.model.resolved_revision,
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: config.tie_word_embeddings,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: schema_version.to_owned(),
+        repo_id: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: config.tie_word_embeddings,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
+}
+
+pub fn build_verified_gguf_gemma_weight_load_plan(
+    lock: &crate::Gemma4ModelLock,
+    verified: VerifiedDerivedGguf,
+) -> Result<(VerifiedGgufGemmaSource, WeightLoadPlan), WeightPlanError> {
+    if verified.gguf.architecture() != "gemma4"
+        || !verified
+            .lock
+            .source_lock_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint == lock.fingerprint())
+    {
+        return Err(WeightPlanError::invalid(
+            "GGUF is not the reviewed Gemma 4 semantic identity",
+        ));
+    }
+    let extension = verified
+        .gguf
+        .extension()
+        .ok_or_else(|| WeightPlanError::invalid("Gemma mixed GGUF recipe is absent"))?;
+    let known_unconsumed: BTreeSet<_> = extension
+        .recipe
+        .known_unconsumed_tensors
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let scale_names: BTreeSet<_> = extension
+        .recipe
+        .bindings
+        .iter()
+        .flat_map(|binding| binding.scales.iter().map(|scale| scale.tensor.as_str()))
+        .collect();
+    let bindings: BTreeMap<_, _> = extension
+        .recipe
+        .bindings
+        .iter()
+        .map(|binding| (binding.logical_tensor.as_str(), binding))
+        .collect();
+    let mut tensors = BTreeMap::new();
+    for tensor in verified.gguf.tensors() {
+        if scale_names.contains(tensor.name.as_str()) {
+            continue;
+        }
+        let (role, encoding, logical_shape, source_name, scale_planes) =
+            if let Some(binding) = bindings.get(tensor.name.as_str()) {
+                let role = parse_quantized_role(&binding.role)?;
+                let encoding = match binding.encoding {
+                    GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale => {
+                        crate::QuantizedTensorEncoding::OcpFp8E4M3FnChannelBf16Scale
+                    }
+                    GgufRecipeEncoding::Nvfp4E2m1Block16E4m3fnF32Outer => {
+                        crate::QuantizedTensorEncoding::Nvfp4E2M1Block16E4M3FnF32Outer
+                    }
+                    _ => {
+                        return Err(WeightPlanError::invalid(
+                            "Gemma GGUF recipe contains an unsupported encoding",
+                        ));
+                    }
+                };
+                let mut planes = Vec::with_capacity(binding.scales.len());
+                for scale in &binding.scales {
+                    let info = verified.gguf.tensor(&scale.tensor).ok_or_else(|| {
+                        WeightPlanError::invalid("Gemma GGUF scale tensor is absent")
+                    })?;
+                    let role = match scale.role {
+                        crate::GgufScaleRole::Channel => crate::ScalePlaneRole::WeightChannel,
+                        crate::GgufScaleRole::Outer => crate::ScalePlaneRole::WeightOuter,
+                        crate::GgufScaleRole::Input => crate::ScalePlaneRole::InputOuter,
+                        crate::GgufScaleRole::Block => crate::ScalePlaneRole::WeightBlock,
+                    };
+                    let mut shape = info.dimensions.clone();
+                    shape.reverse();
+                    planes.push(crate::QuantizedScalePlane {
+                        role,
+                        source_name: scale.tensor.clone(),
+                        dtype: match info.tensor_type {
+                            GgufTensorType::Bf16 => "BF16",
+                            GgufTensorType::F32 => "F32",
+                            _ => "GGUF_BLOCK",
+                        }
+                        .to_owned(),
+                        shape,
+                        source_range: info.absolute_range,
+                        reciprocal: false,
+                    });
+                }
+                (
+                    role,
+                    encoding,
+                    binding.logical_shape.clone(),
+                    binding.value_tensor.clone(),
+                    planes,
+                )
+            } else {
+                if tensor.tensor_type != GgufTensorType::Bf16 {
+                    return Err(WeightPlanError::invalid(format!(
+                        "unbound Gemma GGUF tensor is not BF16: {}",
+                        tensor.name
+                    )));
+                }
+                let mut shape = tensor.dimensions.clone();
+                shape.reverse();
+                let role = if known_unconsumed.contains(tensor.name.as_str()) {
+                    crate::QuantizedTensorRole::KnownUnconsumed
+                } else if tensor.name == "model.language_model.embed_tokens.weight" {
+                    crate::QuantizedTensorRole::Embedding
+                } else if tensor.name.contains("norm") {
+                    crate::QuantizedTensorRole::Normalization
+                } else {
+                    crate::QuantizedTensorRole::Scalar
+                };
+                (
+                    role,
+                    crate::QuantizedTensorEncoding::UnquantizedBf16,
+                    shape,
+                    tensor.name.clone(),
+                    Vec::new(),
+                )
+            };
+        let descriptor = crate::QuantizedTensorDescriptor {
+            logical_name: tensor.name.clone(),
+            source_name,
+            role,
+            encoding,
+            logical_shape: logical_shape.clone(),
+            value_dtype: format!("gguf-type-{}", tensor.tensor_type.raw()),
+            value_shape: logical_shape,
+            value_range: tensor.absolute_range,
+            scale_planes,
+        };
+        if tensors
+            .insert(descriptor.logical_name.clone(), descriptor)
+            .is_some()
+        {
+            return Err(WeightPlanError::invalid(
+                "Gemma GGUF contains a duplicate logical tensor",
+            ));
+        }
+    }
+    let kv_scales = extension
+        .recipe
+        .static_fp8_kv
+        .iter()
+        .map(|scale| {
+            (
+                scale.layer,
+                crate::StaticFp8KvScale {
+                    key_decode_scale_bf16: scale.key_decode_scale_bf16,
+                    value_decode_scale_bf16: scale.value_decode_scale_bf16,
+                },
+            )
+        })
+        .collect();
+    let source = VerifiedGgufGemmaSource {
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        repository: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        file_sha256: verified.lock.output.sha256,
+        tensors,
+        kv_scales,
+        gguf: verified.gguf,
+    };
+    let plan = build_gguf_gemma_plan(lock, &source)?;
+    Ok((source, plan))
+}
+
+fn parse_quantized_role(role: &str) -> Result<crate::QuantizedTensorRole, WeightPlanError> {
+    match role {
+        "embedding" => Ok(crate::QuantizedTensorRole::Embedding),
+        "attention-projection" => Ok(crate::QuantizedTensorRole::AttentionProjection),
+        "mlp-projection" => Ok(crate::QuantizedTensorRole::MlpProjection),
+        "normalization" => Ok(crate::QuantizedTensorRole::Normalization),
+        "scalar" => Ok(crate::QuantizedTensorRole::Scalar),
+        "known-unconsumed" => Ok(crate::QuantizedTensorRole::KnownUnconsumed),
+        _ => Err(WeightPlanError::invalid(
+            "Gemma GGUF recipe has an unknown tensor role",
+        )),
+    }
+}
+
+fn build_gguf_gemma_plan(
+    lock: &crate::Gemma4ModelLock,
+    source: &VerifiedGgufGemmaSource,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if lock.schema_version != "model-lock-v2"
+        || !crate::gemma4::is_reviewed_gemma4_identity(lock)
+        || !lock.model.architecture.text.tie_word_embeddings
+        || lock.model.architecture.text.layer_types != crate::gemma4::reviewed_layer_schedule()
+    {
+        return Err(WeightPlanError::invalid(
+            "model identity is not the reviewed Gemma 4 dense contract",
+        ));
+    }
+    let expected_consumers = expected_gemma4_consumers();
+    let mut observed_consumers = BTreeSet::new();
+    let mut audio_count = 0_u64;
+    let mut vision_count = 0_u64;
+    let mut entries = Vec::with_capacity(source.tensors.len());
+    let mut destination_cursor = 0_u64;
+    let source_file = source.gguf.path().display().to_string();
+    let source_sha = source
+        .file_sha256
+        .strip_prefix("sha256:")
+        .ok_or_else(|| WeightPlanError::invalid("GGUF SHA-256 prefix differs"))?;
+    for descriptor in source.tensors.values() {
+        let (classification, consumer) = classify_gemma4_name(&descriptor.logical_name)?;
+        if let Some(key) = consumer {
+            if !observed_consumers.insert(key) {
+                return Err(WeightPlanError::invalid(format!(
+                    "duplicate GGUF Gemma weight consumer: {key:?}"
+                )));
+            }
+        }
+        if classification == WeightClassification::KnownUnconsumed {
+            if descriptor.logical_name.starts_with("model.embed_audio.") {
+                audio_count = audio_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("audio tensor count overflow"))?;
+            } else {
+                vision_count = vision_count
+                    .checked_add(1)
+                    .ok_or_else(|| WeightPlanError::invalid("vision tensor count overflow"))?;
+            }
+        }
+        let logical_bytes = descriptor
+            .logical_shape
+            .iter()
+            .try_fold(2_u64, |bytes, dimension| bytes.checked_mul(*dimension))
+            .ok_or_else(|| WeightPlanError::invalid("logical tensor bytes overflow"))?;
+        let destination_start = if classification == WeightClassification::KnownUnconsumed {
+            None
+        } else {
+            let start = destination_cursor;
+            destination_cursor = destination_cursor
+                .checked_add(logical_bytes)
+                .ok_or_else(|| WeightPlanError::invalid("destination size overflow"))?;
+            Some(start)
+        };
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.logical_name.clone(),
+            classification,
+            consumer,
+            dtype: TensorDType::Bf16,
+            shape: descriptor.logical_shape.clone(),
+            source_file: source_file.clone(),
+            locked_file_size: source.gguf.file_size(),
+            locked_file_sha256: source_sha.to_owned(),
+            source_range: descriptor.value_range,
+            destination_start,
+            chunks: Vec::new(),
+        });
+    }
+    if observed_consumers != expected_consumers
+        || audio_count != lock.model.architecture.audio.tensor_count
+        || vision_count != lock.model.architecture.vision.tensor_count
+        || entries.len() as u64 != lock.model.tensor_contract.tensor_count
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "GGUF Gemma consumer/count contract differs: consumers={}/{}, audio={audio_count}/{}, vision={vision_count}/{}, all={}/{}",
+            observed_consumers.len(),
+            expected_consumers.len(),
+            lock.model.architecture.audio.tensor_count,
+            lock.model.architecture.vision.tensor_count,
+            entries.len(),
+            lock.model.tensor_contract.tensor_count
+        )));
+    }
+    let schema_version = "gguf-quantized-model-plan-v1";
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version,
+            repo_id: &lock.model.repo_id,
+            resolved_revision: &lock.model.resolved_revision,
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: true,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: schema_version.to_owned(),
+        repo_id: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: true,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
 }
 
 /// Build the exact Gemma 4 text-only load plan from verified direct-file
@@ -1692,6 +2653,18 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn standard_nvfp4_blocks_restore_the_exact_adjacent_source_bytes() {
+        let source: Vec<u8> = (0..32).map(|index| (index * 19 + 7) as u8).collect();
+        let scales = [0x31, 0x42, 0x53, 0x64];
+        let standard = crate::repack_nvfp4_standard(&source, &scales, 1, 64).unwrap();
+        let mut restored = Vec::new();
+        for subblock in standard[4..].chunks_exact(8) {
+            append_adjacent_nibbles(subblock, 16, &mut restored);
+        }
+        assert_eq!(restored, source);
+    }
 
     #[test]
     fn gemma4_plan_classifies_exact_text_and_unconsumed_catalog() {

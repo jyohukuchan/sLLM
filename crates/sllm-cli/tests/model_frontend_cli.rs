@@ -37,17 +37,17 @@ fn model_frontend_failures_use_stderr_and_exit_two() {
 }
 
 #[test]
-fn invalid_lock_never_falls_through_to_hip_or_json_success() {
+fn invalid_derived_lock_never_falls_through_to_hip_or_json_success() {
     let output = sllm(&[
         "verify-model",
-        "--lock",
-        "/definitely/not/a/model-lock.json",
-        "--cache",
-        "/definitely/not/a/cache",
+        "--gguf",
+        "/definitely/not/a/model.gguf",
+        "--derived-lock",
+        "/definitely/not/a/derived-lock.json",
     ]);
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("model lock could not be read or validated"));
+    assert!(stderr.contains("derived GGUF lock is invalid"));
     assert!(!stderr.contains("HIP"));
 }

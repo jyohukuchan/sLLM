@@ -13,6 +13,9 @@ mod fp8_sidecar;
 mod gemma4;
 mod gemma4_execution;
 mod gemma4_graph;
+mod gguf;
+mod gguf_convert;
+mod gguf_writer;
 mod handles;
 mod kv_state;
 mod linear_attention;
@@ -90,6 +93,24 @@ pub use gemma4_graph::{
     Gemma4RequestStateSnapshot, Gemma4RequestTransition, Gemma4RopeDescriptor, Gemma4RopeType,
     build_gemma4_graph,
 };
+pub use gguf::{
+    GGUF_ALIGNMENT, GGUF_VERSION, GgufArray, GgufError, GgufExtensionV1, GgufRecipeEncoding,
+    GgufScaleBinding, GgufScaleRole, GgufStaticFp8KvBinding, GgufTensorBinding, GgufTensorInfo,
+    GgufTensorRecipeV1, GgufTensorScope, GgufTensorType, GgufValue, SLLM_EXTENSION_VERSION_KEY,
+    SLLM_FRONTEND_CONFIG_KEY, SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY,
+    SLLM_FRONTEND_TOKENIZER_CONFIG_KEY, SLLM_FRONTEND_TOKENIZER_KEY, SLLM_GGUF_EXTENSION_VERSION,
+    SLLM_TENSOR_RECIPE_KEY, SLLM_TENSOR_RECIPE_SHA256_KEY, VerifiedGguf,
+};
+pub use gguf_convert::{
+    build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan,
+    build_qwen35_moe_mxfp4_gguf_plan, repack_mxfp4_standard, repack_nvfp4_standard,
+    write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf, write_qwen35_fp8_gguf,
+    write_qwen35_moe_mxfp4_gguf,
+};
+pub use gguf_writer::{
+    DerivedGgufConverter, DerivedGgufLock, DerivedGgufOutput, GgufWritePlan, GgufWriteReport,
+    GgufWriteTensor, VerifiedDerivedGguf, read_derived_gguf_lock, verify_derived_gguf, write_gguf,
+};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
@@ -113,9 +134,9 @@ pub use model::{
     ReviewedModelKind, ReviewedModelLock, ReviewedModelRegistry, RopeParameters, RopeType,
     ScaleMode, SliceContract, StopEvaluation, StopIdentity, StopTokenHandling,
     TensorClassification, TensorContract, TensorDType, TensorDescriptor, TextConfig,
-    TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, fingerprint_for_json,
-    parse_model_lock, parse_reviewed_model_lock, qwen35_reviewed_spec, read_model_lock,
-    read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
+    TokenizerContract, TokenizerEos, VerifiedCache, VerifiedFile, builtin_reviewed_model_lock,
+    fingerprint_for_json, parse_model_lock, parse_reviewed_model_lock, qwen35_reviewed_spec,
+    read_model_lock, read_reviewed_model_lock, reviewed_qwen35_spec, validate_model_config,
     verify_gemma4_model_cache, verify_model_cache,
 };
 pub use moe::{
@@ -160,7 +181,8 @@ pub use qwen_graph::{
     QWEN35_REQUIRED_WEIGHT_COUNT, QwenGraph, QwenGraphDispatchError, QwenGraphError, QwenGraphNode,
     QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor, QwenGraphStateKind,
     QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
-    build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding, build_qwen35_graph,
+    build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
@@ -187,9 +209,11 @@ pub use qwen35_moe::{
     QWEN35_MOE_SEMANTIC_REVISION, QWEN35_MOE_TENSOR_COUNT, QWEN35_MOE_TEXT_RESIDENT_BYTES,
     QWEN35_MOE_TEXT_TENSOR_COUNT, QWEN35_MOE_VISION_TENSOR_COUNT, Qwen35MoeConfig,
     Qwen35MoeExpertProjection, Qwen35MoeExpertTensor, Qwen35MoeGraph, Qwen35MoeLayerGraph,
-    Qwen35MoeModelError, Qwen35MoeRecipe, Qwen35MoeTensorPlane, VerifiedQwen35Moe,
-    build_qwen35_moe_graph, build_qwen35_moe_weight_load_plan, qwen35_moe_generation_stop_policy,
-    qwen35_moe_layer_blob_name, validate_qwen35_moe_config, verify_qwen35_moe_artifact,
+    Qwen35MoeModelError, Qwen35MoeRecipe, Qwen35MoeTensorPlane, VerifiedGgufQwen35Moe,
+    VerifiedQwen35Moe, build_gguf_qwen35_moe_weight_load_plan, build_qwen35_moe_graph,
+    build_qwen35_moe_weight_load_plan, qwen35_moe_generation_stop_policy,
+    qwen35_moe_layer_blob_name, validate_qwen35_moe_config, verify_gguf_qwen35_moe,
+    verify_qwen35_moe_artifact,
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
@@ -202,12 +226,15 @@ pub use speculative::{
 };
 pub use tensor::{TensorError, TensorView};
 pub use weights::{
-    QwenComponentSelection, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer,
+    GgufWeightUploadRequest, QwenComponentSelection, VerifiedGgufGemmaSource,
+    VerifiedGgufWeightSource, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer,
     WeightConsumerKey, WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError,
     WeightUploadError, WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
     build_qwen_component_weight_load_plan, build_unsloth_gemma4_nvfp4_weight_load_plan,
-    build_verified_gemma4_weight_load_plan, build_verified_qwen_component_weight_load_plan,
-    build_verified_weight_load_plan, build_weight_load_plan, upload_verified_weight,
+    build_verified_gemma4_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_qwen_component_weight_load_plan,
+    build_verified_weight_load_plan, build_weight_load_plan, upload_verified_gguf_weight,
+    upload_verified_weight,
 };
 
 #[cfg(test)]

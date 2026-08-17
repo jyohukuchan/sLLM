@@ -42,22 +42,18 @@ fn print_help() {
     println!("Commands:");
     println!("  version  Print the package and ABI version");
     println!("  doctor   Probe the Phase 1 host backend boundary");
-    println!("  verify-model  Verify a locked local model cache");
+    println!("  verify-model  Verify a derived GGUF artifact");
     println!("  tokenize      Encode text with the verified tokenizer");
     println!("  render        Render Qwen3.5 chat messages");
     println!("  decode        Decode token IDs with the verified tokenizer");
     println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
     println!("  benchmark     Run the bounded Phase 5 engine benchmark lanes");
     println!();
-    println!("direct: --lane direct --lock PATH --cache PATH --row-id ID --model-size 2B|4B|9B");
-    println!("  --case-id ID --input-token-ids IDS --max-new-tokens N --device-index N");
+    println!("model source: --gguf PATH --derived-lock PATH");
+    println!("benchmark lane: --lane render-tokenize --model-size 2B|4B|9B");
+    println!("  --case-id ID --message ROLE:CONTENT --max-new-tokens N --device-index N");
     println!("  --target gfx1030|gfx1201|gfx942 --greedy [--warmups N] [--measured N]");
-    println!("  [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider PROVIDER]");
-    println!("  [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant]");
-    println!(
-        "render-tokenize: --lane render-tokenize --message ROLE:CONTENT (same execution flags)"
-    );
-    println!("  both lanes require exactly 3 warmup and 10 measured requests");
+    println!("  requires exactly 3 warmup and 10 measured requests");
     println!();
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
     println!(
@@ -66,8 +62,6 @@ fn print_help() {
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");
-    println!("  [--fp8-manifest PATH --fp8-artifact PATH]");
-    println!("  [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant]");
     println!("  [--fp8-provider native|native-fnuz|emulation|converted-bf16]");
 }
 

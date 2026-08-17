@@ -15,3 +15,7 @@ sllm-hip.workspace = true
 [[bin]]
 name = "sllm"
 path = "src/main.rs"
+
+[[bin]]
+name = "sllm-convert-gguf"
+path = "src/bin/sllm-convert-gguf.rs"

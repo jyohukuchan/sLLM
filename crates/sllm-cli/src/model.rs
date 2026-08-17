@@ -7,16 +7,16 @@ use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
     OsSamplingRandom, QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
     QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
-    ReviewedModelLock, SamplingParametersV1, VerifiedCache, VerifiedQwen35Moe,
-    VerifiedUnslothGemma4Nvfp4, WeightClassification, assemble_qwen35_multimodal_prompt,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_graph,
-    build_qwen35_moe_execution_graph, build_qwen35_moe_weight_load_plan, build_qwen35_mtp_graph,
+    ReviewedModelLock, SamplingParametersV1, VerifiedCache, VerifiedGgufGemmaSource,
+    VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, WeightClassification,
+    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph, build_qwen35_mtp_graph,
     build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
+    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
     build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
-    build_verified_weight_load_plan, qwen35_moe_generation_stop_policy, read_model_lock,
-    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar, verify_qwen35_moe_artifact,
-    verify_unsloth_gemma4_nvfp4,
+    builtin_reviewed_model_lock, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
+    verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -30,12 +30,11 @@ use sllm_frontend::{
 use sllm_hip::HipBackend;
 
 use crate::benchmark::{
-    BENCHMARK_SCHEMA_VERSION, BenchmarkEvent, BenchmarkSampleInput, BenchmarkTimeline,
-    BenchmarkTiming, MonotonicClock, RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
-    allocation_snapshot_value, compare_control_sample, control_comparison_contract,
-    validate_fixed_input_token_ids, validate_model_ready_snapshot, validate_peak_vram_snapshot,
-    validate_request_cleanup_snapshot, validate_resident_drop_snapshot, validate_sample_count,
-    validate_snapshot_accounting,
+    BenchmarkEvent, BenchmarkSampleInput, BenchmarkTimeline, BenchmarkTiming, MonotonicClock,
+    RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION, allocation_snapshot_value, compare_control_sample,
+    control_comparison_contract, validate_fixed_input_token_ids, validate_model_ready_snapshot,
+    validate_peak_vram_snapshot, validate_request_cleanup_snapshot,
+    validate_resident_drop_snapshot, validate_sample_count, validate_snapshot_accounting,
 };
 
 const REPORT_SCHEMA: &str = "model-frontend-cli-report-v1";
@@ -109,7 +108,6 @@ fn prepare_qwen_cli_images(
 enum CliFp8Provider {
     Native,
     NativeFnuz,
-    Emulation,
     ConvertedBf16,
     Nvfp4PackedDequant,
 }
@@ -119,7 +117,6 @@ impl CliFp8Provider {
         match self {
             Self::Native => "native",
             Self::NativeFnuz => "native-fnuz",
-            Self::Emulation => "emulation",
             Self::ConvertedBf16 => "converted-bf16",
             Self::Nvfp4PackedDequant => "nvfp4-packed-dequant",
         }
@@ -156,10 +153,7 @@ fn select_cli_fp8_provider(
         (selected, target),
         (CliFp8Provider::Native, "gfx1201")
             | (CliFp8Provider::NativeFnuz, "gfx942")
-            | (
-                CliFp8Provider::Emulation | CliFp8Provider::ConvertedBf16,
-                "gfx1030"
-            )
+            | (CliFp8Provider::ConvertedBf16, "gfx1030")
     );
     if !valid {
         return Err(format!(
@@ -254,22 +248,17 @@ fn multimodal_step(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkLane {
-    Direct,
     RenderTokenize,
 }
 
 impl BenchmarkLane {
     fn schema_version(self) -> &'static str {
-        match self {
-            Self::Direct => BENCHMARK_SCHEMA_VERSION,
-            Self::RenderTokenize => RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
-        }
+        RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum BenchmarkInput {
-    TokenIds(TokenIdsV1),
     Messages {
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
@@ -414,8 +403,8 @@ enum Operation {
 
 #[derive(Debug, PartialEq)]
 struct Request {
-    lock: PathBuf,
-    cache: PathBuf,
+    gguf: Option<PathBuf>,
+    derived_lock: Option<PathBuf>,
     operation: Operation,
 }
 
@@ -447,89 +436,70 @@ trait ModelFrontendBackend {
 struct ProductionBackend {
     lock: ModelLock,
     lock_path: PathBuf,
-    cache: Arc<VerifiedCache>,
+    source: QwenDenseSource,
+}
+
+enum QwenDenseSource {
+    // Kept for converter/development adapters; the public parser constructs GGUF only.
+    #[allow(dead_code)]
+    Cache(Arc<VerifiedCache>),
+    Gguf(Arc<VerifiedGgufWeightSource>),
 }
 
 struct MoeProductionBackend {
-    artifact: Arc<VerifiedQwen35Moe>,
+    source: Arc<VerifiedGgufQwen35Moe>,
 }
 
 struct GemmaProductionBackend {
     lock: Gemma4ModelLock,
-    source: GemmaModelSource,
-}
-
-enum GemmaModelSource {
-    Bf16(Arc<VerifiedCache>),
-    Quantized(Arc<VerifiedUnslothGemma4Nvfp4>),
+    source: Arc<VerifiedGgufGemmaSource>,
 }
 
 impl GemmaProductionBackend {
     fn open(lock: Gemma4ModelLock, request: &Request) -> Result<Self, String> {
-        let source = match lock.verify_cache(&request.cache) {
-            Ok(cache) => GemmaModelSource::Bf16(Arc::new(cache)),
-            Err(_) => GemmaModelSource::Quantized(Arc::new(
-                verify_unsloth_gemma4_nvfp4(&request.cache)
-                    .map_err(|_| "model directory is not a reviewed Gemma 4 artifact".to_owned())?,
-            )),
-        };
+        let gguf_path = request
+            .gguf
+            .as_ref()
+            .expect("public parser requires a GGUF path");
+        let derived_path = request
+            .derived_lock
+            .as_ref()
+            .expect("public parser requires a derived lock");
+        let derived = read_derived_gguf_lock(derived_path)
+            .map_err(|error| format!("derived GGUF lock is invalid: {error}"))?;
+        let verified = verify_derived_gguf(derived, gguf_path)
+            .map_err(|error| format!("GGUF does not match its derived lock: {error}"))?;
+        let (source, _) = build_verified_gguf_gemma_weight_load_plan(&lock, verified)
+            .map_err(|error| format!("GGUF Gemma load plan is invalid: {error}"))?;
+        let source = Arc::new(source);
         Ok(Self { lock, source })
     }
 
     fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
-        match &self.source {
-            GemmaModelSource::Bf16(cache) => {
-                TokenizerFrontendV1::from_gemma4_verified_cache(&self.lock, cache)
-            }
-            GemmaModelSource::Quantized(artifact) => {
-                TokenizerFrontendV1::from_gemma4_quantized_model(&self.lock, artifact)
-            }
-        }
-        .map_err(|error| format!("verified Gemma 4 tokenizer could not be constructed: {error}"))
+        TokenizerFrontendV1::from_gemma4_gguf(&self.lock, self.source.gguf()).map_err(|error| {
+            format!("verified Gemma 4 tokenizer could not be constructed: {error}")
+        })
     }
 }
 
 impl ModelFrontendBackend for GemmaProductionBackend {
     fn identity(&self) -> ModelIdentity {
-        let (repo_id, resolved_revision) = match &self.source {
-            GemmaModelSource::Bf16(_) => (
-                self.lock.model.repo_id.clone(),
-                self.lock.model.resolved_revision.clone(),
-            ),
-            GemmaModelSource::Quantized(artifact) => (
-                artifact.repository().to_owned(),
-                artifact.resolved_revision().to_owned(),
-            ),
-        };
         ModelIdentity {
-            repo_id,
-            resolved_revision,
+            repo_id: self.source.repository().to_owned(),
+            resolved_revision: self.source.resolved_revision().to_owned(),
             lock_fingerprint: self.lock.fingerprint().to_owned(),
         }
     }
 
     fn verify(&self) -> Result<Value, String> {
-        let (plan, verified_files, tensor_count, weight_encoding, recipe_digest) = match &self
+        let plan = self
             .source
-        {
-            GemmaModelSource::Bf16(cache) => (
-                build_verified_gemma4_weight_load_plan(&self.lock, cache)
-                    .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?,
-                cache.files.len(),
-                cache.tensors().count(),
-                "bf16",
-                None,
-            ),
-            GemmaModelSource::Quantized(artifact) => (
-                build_unsloth_gemma4_nvfp4_weight_load_plan(&self.lock, artifact).map_err(
-                    |_| "quantized tensors do not form the Gemma 4 load plan".to_owned(),
-                )?,
-                7,
-                artifact.tensors().len(),
-                "mixed-nvfp4-w4a4-fp8-w8a8",
-                Some(artifact.recipe_digest()),
-            ),
-        };
+            .build_weight_load_plan(&self.lock)
+            .map_err(|_| "GGUF tensors do not form the Gemma 4 load plan".to_owned())?;
+        let verified_files = 1;
+        let tensor_count = self.source.gguf().tensors().len();
+        let weight_encoding = "mixed-nvfp4-w4a4-fp8-w8a8";
+        let recipe_digest = Some(self.source.recipe_digest());
         let loadable = plan
             .entries
             .iter()
@@ -613,16 +583,10 @@ impl ModelFrontendBackend for GemmaProductionBackend {
         let state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
-        let plan = match &self.source {
-            GemmaModelSource::Bf16(cache) => {
-                build_verified_gemma4_weight_load_plan(&self.lock, cache)
-                    .map_err(|_| "verified tensors do not form the Gemma 4 load plan".to_owned())?
-            }
-            GemmaModelSource::Quantized(artifact) => {
-                build_unsloth_gemma4_nvfp4_weight_load_plan(&self.lock, artifact)
-                    .map_err(|_| "quantized tensors do not form the Gemma 4 load plan".to_owned())?
-            }
-        };
+        let plan = self
+            .source
+            .build_weight_load_plan(&self.lock)
+            .map_err(|_| "GGUF tensors do not form the Gemma 4 load plan".to_owned())?;
         let plan_digest = plan.digest_hex();
         let model_fingerprint = self.lock.fingerprint().to_owned();
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
@@ -634,22 +598,13 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
 
         let execution = (|| -> Result<Value, String> {
-            let resident = match &self.source {
-                GemmaModelSource::Bf16(cache) => Gemma4ResidentModel::new(
-                    Arc::clone(&session),
-                    self.lock.clone(),
-                    plan,
-                    cache,
-                    COMPLETION_TIMEOUT,
-                ),
-                GemmaModelSource::Quantized(artifact) => Gemma4ResidentModel::new_quantized(
-                    Arc::clone(&session),
-                    self.lock.clone(),
-                    plan,
-                    Arc::clone(artifact),
-                    COMPLETION_TIMEOUT,
-                ),
-            }
+            let resident = Gemma4ResidentModel::new_gguf_quantized(
+                Arc::clone(&session),
+                self.lock.clone(),
+                plan,
+                Arc::clone(&self.source),
+                COMPLETION_TIMEOUT,
+            )
             .map_err(|error| format!("Gemma resident provisioning failed: {error}"))?;
             let mut owner = resident
                 .new_request(input_len, state_capacity)
@@ -714,10 +669,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
                     "segment_count": audit.segment_count(),
                     "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": true,
-                    "weight_encoding": match &self.source {
-                        GemmaModelSource::Bf16(_) => "bf16",
-                        GemmaModelSource::Quantized(_) => "mixed-nvfp4-w4a4-fp8-w8a8",
-                    },
+                    "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
                     "fp8_provider": null,
                 },
             }))
@@ -749,22 +701,58 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 }
 
 fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBackend>, String> {
-    if request.lock.is_dir() {
-        let artifact = Arc::new(
-            verify_qwen35_moe_artifact(&request.lock)
-                .map_err(|error| format!("MoE model directory is invalid: {error}"))?,
-        );
-        return Ok(Box::new(MoeProductionBackend { artifact }));
+    let gguf_path = request
+        .gguf
+        .as_ref()
+        .expect("public parser requires a GGUF path");
+    let derived_path = request
+        .derived_lock
+        .as_ref()
+        .expect("public parser requires a derived lock");
+    let derived = read_derived_gguf_lock(derived_path)
+        .map_err(|error| format!("derived GGUF lock is invalid: {error}"))?;
+    if derived.semantic_model_id.starts_with("qwen35moe:") {
+        let verified = verify_derived_gguf(derived, gguf_path)
+            .map_err(|error| format!("GGUF does not match its derived lock: {error}"))?;
+        let source = verify_gguf_qwen35_moe(verified)
+            .map_err(|error| format!("MoE GGUF is invalid: {error}"))?;
+        return Ok(Box::new(MoeProductionBackend {
+            source: Arc::new(source),
+        }));
     }
-    match read_reviewed_model_lock(&request.lock)
-        .map_err(|_| "model lock could not be read or validated".to_owned())?
-    {
-        ReviewedModelLock::Qwen35(_) => {
-            ProductionBackend::open(request).map(|backend| Box::new(backend) as Box<_>)
+    let reviewed = builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+        .map_err(|error| format!("derived GGUF source identity is unsupported: {error}"))?;
+    match reviewed {
+        ReviewedModelLock::Qwen35(lock) => {
+            ProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
         }
         ReviewedModelLock::Gemma4(lock) => {
             GemmaProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
         }
+    }
+}
+
+impl MoeProductionBackend {
+    fn plan(&self) -> Result<sllm_core::WeightLoadPlan, String> {
+        build_gguf_qwen35_moe_weight_load_plan(&self.source).map_err(|error| error.to_string())
+    }
+
+    fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
+        TokenizerFrontendV1::from_qwen35_moe_gguf(&self.source).map_err(|error| error.to_string())
+    }
+
+    fn renderer(&self) -> Result<Qwen35ChatTemplateV1, String> {
+        Qwen35ChatTemplateV1::from_qwen35_moe_gguf(&self.source).map_err(|error| error.to_string())
+    }
+
+    fn graph(
+        &self,
+        plan: &sllm_core::WeightLoadPlan,
+        token_count: u64,
+        state_capacity: u64,
+    ) -> Result<sllm_core::QwenGraph, String> {
+        build_qwen35_gguf_moe_execution_graph(&self.source, plan, token_count, state_capacity)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -778,12 +766,13 @@ impl ModelFrontendBackend for MoeProductionBackend {
     }
 
     fn verify(&self) -> Result<Value, String> {
-        let plan =
-            build_qwen35_moe_weight_load_plan(&self.artifact).map_err(|error| error.to_string())?;
+        let plan = self.plan()?;
+        let tensor_count = self.source.gguf().tensors().len();
         Ok(json!({
             "kind": "verify-model",
             "architecture": "Qwen3_5MoeForConditionalGeneration",
-            "tensor_count": self.artifact.text_planes().len(),
+            "tensor_count": tensor_count,
+            "source_kind": "gguf",
             "weight_entries": plan.entries.len(),
             "total_destination_bytes": plan.total_destination_bytes,
             "plan_digest": plan.digest_hex(),
@@ -792,8 +781,7 @@ impl ModelFrontendBackend for MoeProductionBackend {
     }
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
-            .map_err(|error| error.to_string())?;
+        let tokenizer = self.tokenizer()?;
         let ids = tokenizer.encode(text).map_err(|error| error.to_string())?;
         Ok(json!({"kind":"tokenize","count":ids.len(),"token_ids":ids.as_slice()}))
     }
@@ -803,8 +791,7 @@ impl ModelFrontendBackend for MoeProductionBackend {
         messages: &[Qwen35ChatMessageV1],
         options: Qwen35RenderOptionsV1,
     ) -> Result<Value, String> {
-        let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&self.artifact)
-            .map_err(|error| error.to_string())?;
+        let renderer = self.renderer()?;
         let text = renderer
             .render(messages, options)
             .map_err(|error| error.to_string())?;
@@ -812,8 +799,7 @@ impl ModelFrontendBackend for MoeProductionBackend {
     }
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
-            .map_err(|error| error.to_string())?;
+        let tokenizer = self.tokenizer()?;
         let text = tokenizer
             .decode(ids, mode)
             .map_err(|error| error.to_string())?;
@@ -831,14 +817,10 @@ impl ModelFrontendBackend for MoeProductionBackend {
         {
             return Err("Qwen3.5 MoE selects its mixed MXFP4 recipe internally".to_owned());
         }
-        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_artifact(&self.artifact)
-            .map_err(|error| error.to_string())?;
+        let tokenizer = self.tokenizer()?;
         let renderer = match &request.input {
             GenerationInput::Prompt(_) => None,
-            GenerationInput::Messages { .. } => Some(
-                Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&self.artifact)
-                    .map_err(|error| error.to_string())?,
-            ),
+            GenerationInput::Messages { .. } => Some(self.renderer()?),
         };
         let stop_policy = qwen35_moe_generation_stop_policy();
         let service = GenerationServiceV1::new(&tokenizer, renderer.as_ref(), &stop_policy)
@@ -862,11 +844,8 @@ impl ModelFrontendBackend for MoeProductionBackend {
         let state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or("state capacity overflow")?;
-        let plan =
-            build_qwen35_moe_weight_load_plan(&self.artifact).map_err(|error| error.to_string())?;
-        let graph =
-            build_qwen35_moe_execution_graph(&self.artifact, &plan, input_len, state_capacity)
-                .map_err(|error| error.to_string())?;
+        let plan = self.plan()?;
+        let graph = self.graph(&plan, input_len, state_capacity)?;
         let backend = HipBackend::connect().map_err(|error| error.to_string())?;
         let session = backend
             .open_execution_session(
@@ -875,11 +854,11 @@ impl ModelFrontendBackend for MoeProductionBackend {
             )
             .map_err(|error| error.to_string())?;
         let result = (|| -> Result<Value, String> {
-            let resident = QwenResidentModel::new_moe(
+            let resident = QwenResidentModel::new_gguf_moe(
                 Arc::clone(&session),
                 graph.clone(),
                 plan.clone(),
-                Arc::clone(&self.artifact),
+                Arc::clone(&self.source),
                 COMPLETION_TIMEOUT,
             )
             .map_err(|error| error.to_string())?;
@@ -955,17 +934,106 @@ impl ModelFrontendBackend for MoeProductionBackend {
 }
 
 impl ProductionBackend {
-    fn open(request: &Request) -> Result<Self, String> {
-        let lock = read_model_lock(&request.lock)
-            .map_err(|_| "model lock could not be read or validated".to_owned())?;
-        let cache = lock
-            .verify_cache(&request.cache)
-            .map_err(|_| "model cache does not match the lock".to_owned())?;
+    fn open(lock: ModelLock, request: &Request) -> Result<Self, String> {
+        let source = match (&request.gguf, &request.derived_lock) {
+            (Some(gguf_path), Some(derived_path)) => {
+                let derived = read_derived_gguf_lock(derived_path)
+                    .map_err(|error| format!("derived GGUF lock is invalid: {error}"))?;
+                let verified = verify_derived_gguf(derived, gguf_path)
+                    .map_err(|error| format!("GGUF does not match its derived lock: {error}"))?;
+                let (source, _) = build_verified_gguf_qwen_weight_load_plan(
+                    &lock,
+                    verified,
+                    QwenComponentSelection::TEXT_ONLY,
+                )
+                .map_err(|error| format!("GGUF load plan is invalid: {error}"))?;
+                QwenDenseSource::Gguf(Arc::new(source))
+            }
+            _ => unreachable!("public parser requires paired GGUF paths"),
+        };
         Ok(Self {
             lock,
-            lock_path: request.lock.clone(),
-            cache: Arc::new(cache),
+            lock_path: PathBuf::new(),
+            source,
         })
+    }
+
+    fn cache(&self) -> Result<&Arc<VerifiedCache>, String> {
+        match &self.source {
+            QwenDenseSource::Cache(cache) => Ok(cache),
+            QwenDenseSource::Gguf(_) => Err(
+                "this operation requires the legacy development importer and is unavailable for GGUF"
+                    .to_owned(),
+            ),
+        }
+    }
+
+    fn load_plan(
+        &self,
+        selection: QwenComponentSelection,
+    ) -> Result<sllm_core::WeightLoadPlan, String> {
+        match &self.source {
+            QwenDenseSource::Cache(cache) => {
+                build_verified_qwen_component_weight_load_plan(&self.lock, cache, selection)
+            }
+            QwenDenseSource::Gguf(source) => {
+                source.build_qwen_weight_load_plan(&self.lock, selection)
+            }
+        }
+        .map_err(|error| format!("verified tensors do not form the fixed model load plan: {error}"))
+    }
+
+    fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
+        match &self.source {
+            QwenDenseSource::Cache(cache) => {
+                TokenizerFrontendV1::from_verified_cache(&self.lock, cache)
+            }
+            QwenDenseSource::Gguf(source) => {
+                TokenizerFrontendV1::from_qwen35_gguf(&self.lock, source.gguf())
+            }
+        }
+        .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))
+    }
+
+    fn renderer(&self) -> Result<Qwen35ChatTemplateV1, String> {
+        match &self.source {
+            QwenDenseSource::Cache(cache) => {
+                Qwen35ChatTemplateV1::from_verified_cache(&self.lock, cache)
+            }
+            QwenDenseSource::Gguf(source) => {
+                Qwen35ChatTemplateV1::from_qwen35_gguf(&self.lock, source.gguf())
+            }
+        }
+        .map_err(|_| "verified chat renderer could not be constructed".to_owned())
+    }
+
+    fn build_plain_graph(
+        &self,
+        plan: &sllm_core::WeightLoadPlan,
+        token_count: u64,
+        state_capacity: u64,
+        target: &str,
+    ) -> Result<sllm_core::QwenGraph, sllm_core::QwenGraphError> {
+        match &self.source {
+            QwenDenseSource::Gguf(source) if source.has_fp8_recipe() => {
+                if target != "gfx1201" {
+                    return Err(sllm_core::QwenGraphError::InvalidModel(
+                        "the embedded E4M3FN GGUF recipe currently requires the native gfx1201 provider"
+                            .to_owned(),
+                    ));
+                }
+                build_qwen35_gguf_fp8_graph(
+                    &self.lock,
+                    plan,
+                    source,
+                    token_count,
+                    state_capacity,
+                    sllm_core::DType::F8E4M3Fn,
+                    sllm_core::KvCacheEncoding::Fp16,
+                )
+            }
+            _ => build_qwen35_graph(&self.lock, plan, token_count, state_capacity),
+        }
     }
 }
 
@@ -979,18 +1047,26 @@ impl ModelFrontendBackend for ProductionBackend {
     }
 
     fn verify(&self) -> Result<Value, String> {
-        let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
-            .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
+        let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
         let loadable = plan
             .entries
             .iter()
             .filter(|entry| entry.classification != WeightClassification::KnownUnconsumed)
             .count();
+        let (source_kind, verified_files, tensor_count) = match &self.source {
+            QwenDenseSource::Cache(cache) => (
+                "development-cache",
+                cache.files.len(),
+                cache.tensors().count(),
+            ),
+            QwenDenseSource::Gguf(source) => ("gguf", 1, source.gguf().tensors().len()),
+        };
         Ok(json!({
             "kind": "verify-model",
+            "source_kind": source_kind,
             "locked_files": self.lock.model().files.len(),
-            "verified_files": self.cache.files.len(),
-            "tensor_count": self.cache.tensors().count(),
+            "verified_files": verified_files,
+            "tensor_count": tensor_count,
             "weight_entries": plan.entries.len(),
             "loadable_entries": loadable,
             "known_unconsumed_entries": plan.entries.len() - loadable,
@@ -1000,8 +1076,7 @@ impl ModelFrontendBackend for ProductionBackend {
     }
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
+        let tokenizer = self.tokenizer()?;
         let ids = tokenizer
             .encode(text)
             .map_err(|_| "text could not be tokenized".to_owned())?;
@@ -1013,8 +1088,7 @@ impl ModelFrontendBackend for ProductionBackend {
         messages: &[Qwen35ChatMessageV1],
         options: Qwen35RenderOptionsV1,
     ) -> Result<Value, String> {
-        let renderer = Qwen35ChatTemplateV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|_| "verified chat renderer could not be constructed".to_owned())?;
+        let renderer = self.renderer()?;
         let text = renderer
             .render(messages, options)
             .map_err(|_| "chat messages could not be rendered".to_owned())?;
@@ -1022,8 +1096,7 @@ impl ModelFrontendBackend for ProductionBackend {
     }
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
-        let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
+        let tokenizer = self.tokenizer()?;
         let text = tokenizer
             .decode(ids, mode)
             .map_err(|_| "token IDs could not be decoded".to_owned())?;
@@ -1034,17 +1107,26 @@ impl ModelFrontendBackend for ProductionBackend {
         let started = Instant::now();
         let (effective_input, processed_images) =
             prepare_qwen_cli_images(&request.input, &request.image_paths)?;
-        let tokenizer = TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache)
-            .map_err(|error| format!("verified tokenizer could not be constructed: {error}"))?;
+        if matches!(self.source, QwenDenseSource::Gguf(_)) {
+            if request.fp8_manifest.is_some()
+                || request.fp8_artifact.is_some()
+                || request.fp8_provider.is_some()
+            {
+                return Err(
+                    "GGUF carries its own quantization recipe and cannot be combined with legacy sidecar flags"
+                        .to_owned(),
+                );
+            }
+            if !processed_images.is_empty() {
+                return Err("GGUF vision execution is not yet available".to_owned());
+            }
+        }
+        let tokenizer = self.tokenizer()?;
         let renderer = match &effective_input {
             GenerationInput::Prompt(_) => None,
             GenerationInput::Messages { messages, options } => {
                 let _ = (messages, options);
-                Some(
-                    Qwen35ChatTemplateV1::from_verified_cache(&self.lock, &self.cache).map_err(
-                        |_| "verified chat renderer could not be constructed".to_owned(),
-                    )?,
-                )
+                Some(self.renderer()?)
             }
         };
         let service = GenerationServiceV1::new(
@@ -1073,8 +1155,11 @@ impl ModelFrontendBackend for ProductionBackend {
         let state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
-        let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
-            .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
+        let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
+        let embedded_fp8 = matches!(
+            &self.source,
+            QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
+        );
         let nvfp4_requested = request.fp8_provider == Some(CliFp8Provider::Nvfp4PackedDequant);
         let nvfp4_sidecar = match (
             nvfp4_requested,
@@ -1114,6 +1199,7 @@ impl ModelFrontendBackend for ProductionBackend {
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
         let mtp_candidate = processed_images.is_empty()
             && !has_sidecar
+            && matches!(self.source, QwenDenseSource::Cache(_))
             && request.target == "gfx1201"
             && !request.sampling.requires_logits()
             && self.lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT;
@@ -1142,7 +1228,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
                 }
                 (None, None) => {
-                    build_qwen35_graph(&self.lock, &plan, text_graph_rows, state_capacity)
+                    self.build_plain_graph(&plan, text_graph_rows, state_capacity, &request.target)
                 }
                 _ => unreachable!("quantized provider selection validated sidecar state"),
             }
@@ -1167,7 +1253,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     Arc::clone(&session),
                     graph,
                     plan.clone(),
-                    Arc::clone(&self.cache),
+                    Arc::clone(self.cache()?),
                     Arc::clone(&sidecar),
                     COMPLETION_TIMEOUT,
                 )
@@ -1191,7 +1277,7 @@ impl ModelFrontendBackend for ProductionBackend {
                             Arc::clone(&session),
                             graph,
                             plan.clone(),
-                            Arc::clone(&self.cache),
+                            Arc::clone(self.cache()?),
                             Arc::clone(&sidecar),
                             COMPLETION_TIMEOUT,
                         )
@@ -1200,20 +1286,18 @@ impl ModelFrontendBackend for ProductionBackend {
                         Arc::clone(&session),
                         graph,
                         plan.clone(),
-                        Arc::clone(&self.cache),
+                        Arc::clone(self.cache()?),
                         Arc::clone(&sidecar),
                         COMPLETION_TIMEOUT,
                     ),
-                    Some(CliFp8Provider::Native | CliFp8Provider::Emulation) => {
-                        QwenResidentModel::new_fp8(
-                            Arc::clone(&session),
-                            graph,
-                            plan.clone(),
-                            Arc::clone(&self.cache),
-                            Arc::clone(&sidecar),
-                            COMPLETION_TIMEOUT,
-                        )
-                    }
+                    Some(CliFp8Provider::Native) => QwenResidentModel::new_fp8(
+                        Arc::clone(&session),
+                        graph,
+                        plan.clone(),
+                        Arc::clone(self.cache()?),
+                        Arc::clone(&sidecar),
+                        COMPLETION_TIMEOUT,
+                    ),
                     Some(CliFp8Provider::Nvfp4PackedDequant) | None => {
                         unreachable!("FP8 sidecar requires an FP8 provider")
                     }
@@ -1230,15 +1314,13 @@ impl ModelFrontendBackend for ProductionBackend {
                         input_len,
                         state_capacity,
                     ),
-                    Some(CliFp8Provider::Native | CliFp8Provider::Emulation) => {
-                        build_qwen35_fp8_graph(
-                            &self.lock,
-                            &plan,
-                            &sidecar,
-                            input_len,
-                            state_capacity,
-                        )
-                    }
+                    Some(CliFp8Provider::Native) => build_qwen35_fp8_graph(
+                        &self.lock,
+                        &plan,
+                        &sidecar,
+                        input_len,
+                        state_capacity,
+                    ),
                     Some(CliFp8Provider::Nvfp4PackedDequant) | None => {
                         unreachable!("FP8 sidecar requires an FP8 provider")
                     }
@@ -1249,24 +1331,48 @@ impl ModelFrontendBackend for ProductionBackend {
                     .map_err(|error| format!("Qwen FP8 request provisioning failed: {error}"))?;
                 (owner, Some(resident))
             } else {
-                let owner = QwenExecutionRequest::new(
-                    Arc::clone(&session),
-                    graph,
-                    plan,
-                    Arc::clone(&self.cache),
-                    COMPLETION_TIMEOUT,
-                )
-                .map_err(|error| format!("Qwen request provisioning failed: {error}"))?;
-                (owner, None)
+                match &self.source {
+                    QwenDenseSource::Cache(cache) => {
+                        let owner = QwenExecutionRequest::new(
+                            Arc::clone(&session),
+                            graph,
+                            plan,
+                            Arc::clone(cache),
+                            COMPLETION_TIMEOUT,
+                        )
+                        .map_err(|error| format!("Qwen request provisioning failed: {error}"))?;
+                        (owner, None)
+                    }
+                    QwenDenseSource::Gguf(source) => {
+                        let request_graph = self
+                            .build_plain_graph(&plan, input_len, state_capacity, &request.target)
+                            .map_err(|error| format!("Qwen GGUF request graph failed: {error}"))?;
+                        let resident = QwenResidentModel::new_gguf(
+                            Arc::clone(&session),
+                            graph,
+                            plan.clone(),
+                            Arc::clone(source),
+                            COMPLETION_TIMEOUT,
+                        )
+                        .map_err(|error| {
+                            format!("Qwen GGUF resident provisioning failed: {error}")
+                        })?;
+                        let owner = resident.new_request(request_graph).map_err(|error| {
+                            format!("Qwen GGUF request provisioning failed: {error}")
+                        })?;
+                        (owner, Some(resident))
+                    }
+                }
             };
             let vision_bundle = if processed_images.is_empty() {
                 None
             } else {
-                let manifest = build_verified_qwen35_vision_manifest(&self.lock, &self.cache)
+                let cache = self.cache()?;
+                let manifest = build_verified_qwen35_vision_manifest(&self.lock, cache)
                     .map_err(|error| format!("vision manifest validation failed: {error}"))?;
                 let resident = QwenVisionResidentModel::new(
                     Arc::clone(&session),
-                    Arc::clone(&self.cache),
+                    Arc::clone(cache),
                     manifest.clone(),
                     COMPLETION_TIMEOUT,
                 )
@@ -1288,7 +1394,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let prompt = assemble_qwen35_multimodal_prompt(
-                    self.cache.as_ref(),
+                    cache.as_ref(),
                     &input,
                     manifest.image_pad_token,
                     &images,
@@ -1324,7 +1430,7 @@ impl ModelFrontendBackend for ProductionBackend {
             } else if mtp_candidate {
                 let mtp_plan = build_verified_qwen_component_weight_load_plan(
                     &self.lock,
-                    &self.cache,
+                    self.cache()?,
                     QwenComponentSelection::MTP_ONLY,
                 )
                 .map_err(|error| format!("MTP load plan validation failed: {error}"))?;
@@ -1334,7 +1440,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     Arc::clone(&session),
                     mtp_graph.clone(),
                     mtp_plan,
-                    Arc::clone(&self.cache),
+                    Arc::clone(self.cache()?),
                     COMPLETION_TIMEOUT,
                 )
                 .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
@@ -1415,8 +1521,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "segment_count": audit.segment_count(),
                     "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
-                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
-                    "fp8_provider": fp8_provider.map(CliFp8Provider::label),
+                    "weight_encoding": if embedded_fp8 { "ocp-e4m3fn-outer-f32" } else { match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" } },
+                    "fp8_provider": if embedded_fp8 { Some("gguf-native") } else { fp8_provider.map(CliFp8Provider::label) },
                     "image_count": processed_images.len(),
                 },
             }))
@@ -1447,6 +1553,16 @@ impl ModelFrontendBackend for ProductionBackend {
         request: &BenchmarkRequest,
         timing: BenchmarkTiming,
     ) -> Result<Value, String> {
+        if matches!(self.source, QwenDenseSource::Gguf(_))
+            && (request.fp8_manifest.is_some()
+                || request.fp8_artifact.is_some()
+                || request.fp8_provider.is_some())
+        {
+            return Err(
+                "GGUF carries its own quantization recipe and cannot be combined with legacy sidecar flags"
+                    .to_owned(),
+            );
+        }
         validate_sample_count(request.warmups, request.measured)?;
         if request.warmups != 3 || request.measured != 10 {
             return Err(
@@ -1469,33 +1585,15 @@ impl ModelFrontendBackend for ProductionBackend {
             return Err("benchmark row and case identities must not be empty".to_owned());
         }
 
-        let tokenizer = match request.lane {
-            BenchmarkLane::Direct => None,
-            BenchmarkLane::RenderTokenize => Some(
-                TokenizerFrontendV1::from_verified_cache(&self.lock, &self.cache).map_err(
-                    |error| format!("verified tokenizer could not be constructed: {error}"),
-                )?,
-            ),
-        };
-        let renderer = match &request.input {
-            BenchmarkInput::Messages { .. } => Some(
-                Qwen35ChatTemplateV1::from_verified_cache(&self.lock, &self.cache)
-                    .map_err(|_| "verified chat renderer could not be constructed".to_owned())?,
-            ),
-            BenchmarkInput::TokenIds(_) => None,
-        };
-        let seed_input = match (&request.input, &renderer, &tokenizer) {
-            (BenchmarkInput::TokenIds(ids), None, None) => TokenIdsV1::from_slice(ids.as_slice()),
-            (BenchmarkInput::Messages { messages, options }, Some(renderer), Some(tokenizer)) => {
-                let rendered = renderer
-                    .render(messages, *options)
-                    .map_err(|_| "chat messages could not be rendered".to_owned())?;
-                tokenizer
-                    .encode(&rendered)
-                    .map_err(|_| "benchmark input could not be tokenized")?
-            }
-            _ => return Err("benchmark lane and input shape do not match".to_owned()),
-        };
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        let BenchmarkInput::Messages { messages, options } = &request.input;
+        let rendered = renderer
+            .render(messages, *options)
+            .map_err(|_| "chat messages could not be rendered".to_owned())?;
+        let seed_input = tokenizer
+            .encode(&rendered)
+            .map_err(|_| "benchmark input could not be tokenized")?;
         if seed_input.is_empty() {
             return Err("benchmark input token IDs must not be empty".to_owned());
         }
@@ -1505,8 +1603,7 @@ impl ModelFrontendBackend for ProductionBackend {
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "benchmark state capacity overflowed".to_owned())?;
         let model_load_start_ns = timing.model_load_start_ns();
-        let plan = build_verified_weight_load_plan(&self.lock, &self.cache)
-            .map_err(|_| "verified tensors do not form the fixed model load plan".to_owned())?;
+        let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
         let nvfp4_requested = request.fp8_provider == Some(CliFp8Provider::Nvfp4PackedDequant);
         let nvfp4_sidecar = match (
             nvfp4_requested,
@@ -1558,7 +1655,9 @@ impl ModelFrontendBackend for ProductionBackend {
                 (Some(sidecar), Some(_)) => {
                     build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
                 }
-                (None, None) => build_qwen35_graph(&self.lock, &plan, input_len, state_capacity),
+                (None, None) => {
+                    self.build_plain_graph(&plan, input_len, state_capacity, &request.target)
+                }
                 _ => unreachable!("quantized provider selection validated sidecar state"),
             }
         }
@@ -1579,7 +1678,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     Arc::clone(&session),
                     first_graph,
                     plan.clone(),
-                    Arc::clone(&self.cache),
+                    Arc::clone(self.cache()?),
                     Arc::clone(nvfp4_sidecar),
                     COMPLETION_TIMEOUT,
                 )
@@ -1590,7 +1689,7 @@ impl ModelFrontendBackend for ProductionBackend {
                             Arc::clone(&session),
                             first_graph,
                             plan.clone(),
-                            Arc::clone(&self.cache),
+                            Arc::clone(self.cache()?),
                             Arc::clone(sidecar),
                             COMPLETION_TIMEOUT,
                         )
@@ -1600,7 +1699,7 @@ impl ModelFrontendBackend for ProductionBackend {
                             Arc::clone(&session),
                             first_graph,
                             plan.clone(),
-                            Arc::clone(&self.cache),
+                            Arc::clone(self.cache()?),
                             Arc::clone(sidecar),
                             COMPLETION_TIMEOUT,
                         )
@@ -1609,17 +1708,26 @@ impl ModelFrontendBackend for ProductionBackend {
                         Arc::clone(&session),
                         first_graph,
                         plan.clone(),
-                        Arc::clone(&self.cache),
+                        Arc::clone(self.cache()?),
                         Arc::clone(sidecar),
                         COMPLETION_TIMEOUT,
                     ),
-                    (None, None) => QwenResidentModel::new(
-                        Arc::clone(&session),
-                        first_graph,
-                        plan.clone(),
-                        Arc::clone(&self.cache),
-                        COMPLETION_TIMEOUT,
-                    ),
+                    (None, None) => match &self.source {
+                        QwenDenseSource::Cache(cache) => QwenResidentModel::new(
+                            Arc::clone(&session),
+                            first_graph,
+                            plan.clone(),
+                            Arc::clone(cache),
+                            COMPLETION_TIMEOUT,
+                        ),
+                        QwenDenseSource::Gguf(source) => QwenResidentModel::new_gguf(
+                            Arc::clone(&session),
+                            first_graph,
+                            plan.clone(),
+                            Arc::clone(source),
+                            COMPLETION_TIMEOUT,
+                        ),
+                    },
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
             }
@@ -1660,9 +1768,12 @@ impl ModelFrontendBackend for ProductionBackend {
                         input_len,
                         state_capacity,
                     ),
-                    (None, None) => {
-                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    }
+                    (None, None) => self.build_plain_graph(
+                        &plan,
+                        input_len,
+                        state_capacity,
+                        &request.target,
+                    ),
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
             }
@@ -1761,24 +1872,13 @@ impl ModelFrontendBackend for ProductionBackend {
 
             let run_sample = |sample_index: u32| -> Result<Value, String> {
                 let request_start_ns = timing.now_ns();
-                let input = match (&request.input, &renderer, &tokenizer) {
-                    (BenchmarkInput::TokenIds(ids), None, None) => {
-                        TokenIdsV1::from_slice(ids.as_slice())
-                    }
-                    (
-                        BenchmarkInput::Messages { messages, options },
-                        Some(renderer),
-                        Some(tokenizer),
-                    ) => {
-                        let rendered = renderer
-                            .render(messages, *options)
-                            .map_err(|_| "chat messages could not be rendered".to_owned())?;
-                        tokenizer
-                            .encode(&rendered)
-                            .map_err(|_| "benchmark input could not be tokenized".to_owned())?
-                    }
-                    _ => return Err("benchmark lane and input shape do not match".to_owned()),
-                };
+                let BenchmarkInput::Messages { messages, options } = &request.input;
+                let rendered = renderer
+                    .render(messages, *options)
+                    .map_err(|_| "chat messages could not be rendered".to_owned())?;
+                let input = tokenizer
+                    .encode(&rendered)
+                    .map_err(|_| "benchmark input could not be tokenized".to_owned())?;
                 validate_fixed_input_token_ids(seed_input.as_slice(), input.as_slice())?;
                 let graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
                     build_qwen35_nvfp4_graph(
@@ -1974,19 +2074,12 @@ impl ModelFrontendBackend for ProductionBackend {
             let final_memory = allocation_snapshot_value(final_snapshot);
             validate_resident_drop_snapshot(&final_memory)?;
             validate_peak_vram_snapshot(&final_memory, model_resident_high_water_bytes)?;
-            let lane_definition = match request.lane {
-                BenchmarkLane::Direct => {
-                    "pretokenized direct engine: request start excludes render/tokenize"
-                }
-                BenchmarkLane::RenderTokenize => {
-                    "CLI end-to-end: request start includes chat render and tokenizer encode"
-                }
-            };
-            let tokenizer_enabled = matches!(request.lane, BenchmarkLane::RenderTokenize);
+            let lane_definition =
+                "CLI end-to-end: request start includes chat render and tokenizer encode";
             Ok(json!({
                 "benchmark_schema_version": request.lane.schema_version(),
                 "state": "PASS",
-                "lane": match request.lane { BenchmarkLane::Direct => "direct", BenchmarkLane::RenderTokenize => "render-tokenize" },
+                "lane": "render-tokenize",
                 "lane_definition": lane_definition,
                 "row": {
                     "row_id": request.row_id,
@@ -2028,8 +2121,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "greedy": request.greedy,
                     "warmups": request.warmups,
                     "measured": request.measured,
-                    "tokenizer": tokenizer_enabled,
-                    "render": tokenizer_enabled,
+                    "tokenizer": true,
+                    "render": true,
                     "stop_policy": {
                         "stop_token_ids": [248046, 248044],
                         "visible_stop_tokens": false,
@@ -2175,8 +2268,8 @@ fn serialize_report(
 }
 
 fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Request, String> {
-    let mut lock = None;
-    let mut cache = None;
+    let mut gguf = None;
+    let mut derived_lock = None;
     let mut text = None;
     let mut token_ids = None;
     let mut messages = Vec::new();
@@ -2200,67 +2293,21 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut benchmark_case_id = None;
     let mut benchmark_warmups = None;
     let mut benchmark_measured = None;
-    let mut fp8_manifest = None;
-    let mut fp8_artifact = None;
-    let mut fp8_provider = None;
+    let fp8_manifest: Option<PathBuf> = None;
+    let fp8_artifact: Option<PathBuf> = None;
+    let fp8_provider: Option<CliFp8Provider> = None;
     let mut image_paths = Vec::new();
     let mut message_bytes = 0_usize;
     let mut arguments = arguments.peekable();
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--lock" => set_once(&mut lock, take_value(&mut arguments, "--lock")?, "--lock")?,
-            "--cache" => set_once(
-                &mut cache,
-                take_value(&mut arguments, "--cache")?,
-                "--cache",
+            "--gguf" => set_once(&mut gguf, take_value(&mut arguments, "--gguf")?, "--gguf")?,
+            "--derived-lock" => set_once(
+                &mut derived_lock,
+                take_value(&mut arguments, "--derived-lock")?,
+                "--derived-lock",
             )?,
-            "--fp8-manifest" if command == "generate" || command == "benchmark" => set_once(
-                &mut fp8_manifest,
-                PathBuf::from(take_value(&mut arguments, "--fp8-manifest")?),
-                "--fp8-manifest",
-            )?,
-            "--fp8-artifact" if command == "generate" || command == "benchmark" => set_once(
-                &mut fp8_artifact,
-                PathBuf::from(take_value(&mut arguments, "--fp8-artifact")?),
-                "--fp8-artifact",
-            )?,
-            "--nvfp4-manifest" if command == "generate" || command == "benchmark" => set_once(
-                &mut fp8_manifest,
-                PathBuf::from(take_value(&mut arguments, "--nvfp4-manifest")?),
-                "--nvfp4-manifest",
-            )?,
-            "--nvfp4-artifact" if command == "generate" || command == "benchmark" => set_once(
-                &mut fp8_artifact,
-                PathBuf::from(take_value(&mut arguments, "--nvfp4-artifact")?),
-                "--nvfp4-artifact",
-            )?,
-            "--nvfp4-provider" if command == "generate" || command == "benchmark" => {
-                let value = take_value(&mut arguments, "--nvfp4-provider")?;
-                if value != "packed-dequant" {
-                    return Err("--nvfp4-provider must be packed-dequant".to_owned());
-                }
-                set_once(
-                    &mut fp8_provider,
-                    CliFp8Provider::Nvfp4PackedDequant,
-                    "--nvfp4-provider",
-                )?;
-            }
-            "--fp8-provider" if command == "generate" || command == "benchmark" => {
-                let value = match take_value(&mut arguments, "--fp8-provider")?.as_str() {
-                    "native" => CliFp8Provider::Native,
-                    "native-fnuz" => CliFp8Provider::NativeFnuz,
-                    "emulation" => CliFp8Provider::Emulation,
-                    "converted-bf16" => CliFp8Provider::ConvertedBf16,
-                    _ => {
-                        return Err(
-                            "--fp8-provider must be native, native-fnuz, emulation, or converted-bf16"
-                                .to_owned(),
-                        );
-                    }
-                };
-                set_once(&mut fp8_provider, value, "--fp8-provider")?;
-            }
             "--text" if command == "tokenize" => {
                 let value = take_value(&mut arguments, "--text")?;
                 if value.len() > MAX_TEXT_BYTES {
@@ -2271,14 +2318,6 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             "--tokens" if command == "decode" => {
                 let value = take_value(&mut arguments, "--tokens")?;
                 set_once(&mut token_ids, parse_token_ids(&value)?, "--tokens")?;
-            }
-            "--input-token-ids" if command == "benchmark" => {
-                let value = take_value(&mut arguments, "--input-token-ids")?;
-                set_once(
-                    &mut token_ids,
-                    parse_token_ids(&value)?,
-                    "--input-token-ids",
-                )?;
             }
             "--skip-special-tokens" if command == "decode" => {
                 if skip_special_tokens {
@@ -2390,9 +2429,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             "--lane" if command == "benchmark" => {
                 let value = take_value(&mut arguments, "--lane")?;
                 let parsed = match value.as_str() {
-                    "direct" => BenchmarkLane::Direct,
                     "render-tokenize" => BenchmarkLane::RenderTokenize,
-                    _ => return Err("--lane must be direct or render-tokenize".to_owned()),
+                    _ => return Err("--lane must be render-tokenize".to_owned()),
                 };
                 set_once(&mut benchmark_lane, parsed, "--lane")?;
             }
@@ -2462,8 +2500,13 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         }
     }
 
-    let lock = PathBuf::from(lock.ok_or_else(|| "missing required --lock PATH".to_owned())?);
-    let cache = cache.map(PathBuf::from).unwrap_or_else(|| lock.clone());
+    let gguf = Some(PathBuf::from(
+        gguf.ok_or_else(|| "missing required --gguf PATH".to_owned())?,
+    ));
+    let derived_lock =
+        Some(PathBuf::from(derived_lock.ok_or_else(|| {
+            "missing required --derived-lock PATH".to_owned()
+        })?));
     let operation = match command {
         "verify-model" => Operation::Verify,
         "tokenize" => Operation::Tokenize {
@@ -2544,7 +2587,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             if !greedy {
                 return Err("benchmark requires explicit --greedy mode".to_owned());
             }
-            let lane = benchmark_lane.unwrap_or(BenchmarkLane::Direct);
+            let lane = benchmark_lane.unwrap_or(BenchmarkLane::RenderTokenize);
             let warmups = benchmark_warmups.unwrap_or(3);
             let measured = benchmark_measured.unwrap_or(10);
             validate_sample_count(warmups, measured)?;
@@ -2558,38 +2601,17 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 benchmark_model_size.ok_or_else(|| "benchmark requires --model-size".to_owned())?;
             let row_id = benchmark_row_id.unwrap_or_else(|| "cli-render-tokenize".to_owned());
             let case_id = benchmark_case_id.unwrap_or_else(|| "render-tokenize".to_owned());
-            let input = match lane {
-                BenchmarkLane::Direct => {
-                    if !messages.is_empty() || thinking.is_some() {
-                        return Err(
-                            "benchmark direct lane accepts only --input-token-ids".to_owned()
-                        );
-                    }
-                    BenchmarkInput::TokenIds(token_ids.ok_or_else(|| {
-                        "benchmark direct lane requires --input-token-ids IDS".to_owned()
-                    })?)
-                }
-                BenchmarkLane::RenderTokenize => {
-                    if token_ids.is_some() {
-                        return Err(
-                            "benchmark render-tokenize lane does not accept --input-token-ids"
-                                .to_owned(),
-                        );
-                    }
-                    if messages.is_empty() {
-                        return Err(
-                            "benchmark render-tokenize lane requires --message ROLE:CONTENT"
-                                .to_owned(),
-                        );
-                    }
-                    BenchmarkInput::Messages {
-                        messages,
-                        options: Qwen35RenderOptionsV1 {
-                            add_generation_prompt: true,
-                            thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
-                        },
-                    }
-                }
+            if messages.is_empty() {
+                return Err(
+                    "benchmark render-tokenize lane requires --message ROLE:CONTENT".to_owned(),
+                );
+            }
+            let input = BenchmarkInput::Messages {
+                messages,
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
+                },
             };
             Operation::Benchmark(BenchmarkRequest {
                 lane,
@@ -2613,8 +2635,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         _ => return Err("internal unsupported model command".to_owned()),
     };
     Ok(Request {
-        lock,
-        cache,
+        gguf,
+        derived_lock,
         operation,
     })
 }
@@ -2707,10 +2729,6 @@ mod tests {
         assert_eq!(
             select_cli_fp8_provider(true, None, "gfx942").unwrap(),
             Some(CliFp8Provider::NativeFnuz)
-        );
-        assert_eq!(
-            select_cli_fp8_provider(true, Some(CliFp8Provider::Emulation), "gfx1030").unwrap(),
-            Some(CliFp8Provider::Emulation)
         );
     }
     use sllm_core::{SamplingError, SamplingRandomSource};
@@ -2888,10 +2906,8 @@ mod tests {
             request: &BenchmarkRequest,
             timing: BenchmarkTiming,
         ) -> Result<Value, String> {
-            assert_eq!(request.lane, BenchmarkLane::Direct);
-            assert!(
-                matches!(request.input, BenchmarkInput::TokenIds(ref ids) if ids.as_slice() == [1, 3, 17])
-            );
+            assert_eq!(request.lane, BenchmarkLane::RenderTokenize);
+            assert!(matches!(request.input, BenchmarkInput::Messages { .. }));
             assert_eq!(request.row_id, "host-test");
             assert_eq!(request.model_size, "4B");
             assert_eq!(request.case_id, "host-test");
@@ -2899,9 +2915,9 @@ mod tests {
             assert_eq!(request.warmups, 3);
             assert_eq!(request.measured, 10);
             Ok(json!({
-                "benchmark_schema_version": BENCHMARK_SCHEMA_VERSION,
+                "benchmark_schema_version": RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
                 "state": "PASS",
-                "lane": "direct",
+                "lane": "render-tokenize",
                 "lane_definition": "pretokenized direct engine: request start excludes render/tokenize",
                 "row": {"row_id": request.row_id, "model_size": request.model_size, "case_id": request.case_id, "input_token_ids": [1, 3, 17], "input_token_count": 3, "requested_output_tokens": 3},
                 "identities": {"target": request.target, "device_index": request.device_index},
@@ -2922,7 +2938,7 @@ mod tests {
 
     #[test]
     fn all_model_entrances_parse_without_touching_hip() {
-        let common = ["--lock", "lock.json", "--cache", "cache"];
+        let common = ["--gguf", "model.gguf", "--derived-lock", "model.lock.json"];
         assert_eq!(
             parse_args("verify-model", &common).unwrap().operation,
             Operation::Verify
@@ -2930,7 +2946,14 @@ mod tests {
         assert!(matches!(
             parse_args(
                 "tokenize",
-                &["--lock", "lock.json", "--cache", "cache", "--text", "abc"]
+                &[
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json",
+                    "--text",
+                    "abc"
+                ]
             )
             .unwrap()
             .operation,
@@ -2944,10 +2967,10 @@ mod tests {
                     "user:a:b",
                     "--thinking",
                     "disabled",
-                    "--lock",
-                    "lock.json",
-                    "--cache",
-                    "cache"
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json"
                 ]
             )
             .unwrap()
@@ -2961,10 +2984,10 @@ mod tests {
                     "--tokens",
                     "1,3,17",
                     "--skip-special-tokens",
-                    "--cache",
-                    "cache",
-                    "--lock",
-                    "lock.json"
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json"
                 ]
             )
             .unwrap()
@@ -2975,10 +2998,10 @@ mod tests {
             parse_args(
                 "generate",
                 &[
-                    "--lock",
-                    "lock.json",
-                    "--cache",
-                    "cache",
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json",
                     "--prompt",
                     "abc",
                     "--max-new-tokens",
@@ -3005,20 +3028,20 @@ mod tests {
         let benchmark = parse_args(
             "benchmark",
             &[
-                "--lock",
-                "lock.json",
-                "--cache",
-                "cache",
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
                 "--lane",
-                "direct",
+                "render-tokenize",
                 "--row-id",
                 "host-test",
                 "--model-size",
                 "4B",
                 "--case-id",
                 "host-test",
-                "--input-token-ids",
-                "1,3,17",
+                "--message",
+                "user:abc",
                 "--max-new-tokens",
                 "3",
                 "--device-index",
@@ -3037,56 +3060,27 @@ mod tests {
                 ..
             })
         ));
-        let nvfp4_benchmark = parse_args(
-            "benchmark",
-            &[
-                "--lock",
-                "lock.json",
-                "--cache",
-                "cache",
-                "--lane",
-                "direct",
-                "--row-id",
-                "nvfp4-host-test",
-                "--model-size",
-                "2B",
-                "--case-id",
-                "short-odd",
-                "--input-token-ids",
-                "1,3,17",
-                "--max-new-tokens",
-                "17",
-                "--device-index",
-                "0",
-                "--target",
-                "gfx1030",
-                "--greedy",
-                "--nvfp4-manifest",
-                "sidecar.json",
-                "--nvfp4-artifact",
-                "sidecar.safetensors",
-                "--nvfp4-provider",
-                "packed-dequant",
-            ],
-        )
-        .unwrap();
-        assert!(matches!(
-            nvfp4_benchmark.operation,
-            Operation::Benchmark(BenchmarkRequest {
-                fp8_manifest: Some(ref manifest),
-                fp8_artifact: Some(ref artifact),
-                fp8_provider: Some(CliFp8Provider::Nvfp4PackedDequant),
-                ..
-            }) if manifest.as_path() == std::path::Path::new("sidecar.json")
-                && artifact.as_path() == std::path::Path::new("sidecar.safetensors")
-        ));
+        assert!(
+            parse_args(
+                "benchmark",
+                &[
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json",
+                    "--nvfp4-manifest",
+                    "sidecar.json"
+                ]
+            )
+            .is_err()
+        );
         let unicode = parse_args(
             "generate",
             &[
-                "--lock",
-                "lock.json",
-                "--cache",
-                "cache",
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
                 "--message",
                 "user:雪とGPU",
                 "--thinking",
@@ -3113,10 +3107,10 @@ mod tests {
         let image = parse_args(
             "generate",
             &[
-                "--lock",
-                "lock.json",
-                "--cache",
-                "cache",
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
                 "--message",
                 "user:describe",
                 "--image",
@@ -3241,17 +3235,17 @@ mod tests {
     #[test]
     fn tiny_backend_executes_all_success_entrances() {
         let cases = [
-            ("verify-model", vec!["--lock", "x", "--cache", "y"]),
+            ("verify-model", vec!["--gguf", "x", "--derived-lock", "y"]),
             (
                 "tokenize",
-                vec!["--lock", "x", "--cache", "y", "--text", "abc"],
+                vec!["--gguf", "x", "--derived-lock", "y", "--text", "abc"],
             ),
             (
                 "render",
                 vec![
-                    "--lock",
+                    "--gguf",
                     "x",
-                    "--cache",
+                    "--derived-lock",
                     "y",
                     "--message",
                     "user:abc",
@@ -3262,9 +3256,9 @@ mod tests {
             (
                 "decode",
                 vec![
-                    "--lock",
+                    "--gguf",
                     "x",
-                    "--cache",
+                    "--derived-lock",
                     "y",
                     "--tokens",
                     "1,3,17",
@@ -3274,9 +3268,9 @@ mod tests {
             (
                 "generate",
                 vec![
-                    "--lock",
+                    "--gguf",
                     "x",
-                    "--cache",
+                    "--derived-lock",
                     "y",
                     "--prompt",
                     "abc",
@@ -3301,74 +3295,17 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_uses_strict_direct_schema_and_keeps_frontend_lane_separate() {
-        assert_eq!(
-            BenchmarkLane::Direct.schema_version(),
-            "engine-performance-direct-v1"
-        );
+    fn benchmark_public_cli_keeps_the_render_tokenize_lane() {
         assert_eq!(
             BenchmarkLane::RenderTokenize.schema_version(),
             "engine-performance-render-v1"
         );
-        let request = parse_args(
-            "benchmark",
-            &[
-                "--lock",
-                "x",
-                "--cache",
-                "y",
-                "--lane",
-                "direct",
-                "--row-id",
-                "host-test",
-                "--model-size",
-                "4B",
-                "--case-id",
-                "host-test",
-                "--input-token-ids",
-                "1,3,17",
-                "--max-new-tokens",
-                "3",
-                "--device-index",
-                "0",
-                "--target",
-                "gfx1030",
-                "--greedy",
-            ],
-        )
-        .unwrap();
-        let document: Value = serde_json::from_str(
-            &execute_with_timing(
-                "benchmark",
-                request.operation,
-                &TinyBackend,
-                Some(BenchmarkTiming::start()),
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            document["benchmark_schema_version"],
-            BENCHMARK_SCHEMA_VERSION
-        );
-        assert_eq!(document["lane"], "direct");
-        assert_eq!(document["config"]["tokenizer"], false);
-        assert_eq!(document["warmups"]["count"], 3);
-        assert_eq!(document["measured"]["count"], 10);
-        assert_eq!(document["model_load"]["start_ns"], 0);
-        assert_eq!(document["model_load"]["model_ready_ns"], 1);
-        assert_eq!(document["model_load"]["duration_ns"], 1);
-        assert_eq!(document["model_load"]["load_count"], 1);
-        assert_eq!(document["audit"]["model_load_count"], 1);
-        assert_eq!(document["audit"]["request_model_load_count"], 0);
-        assert_eq!(document["audit"]["model_reused"], true);
-
         let cli_request = parse_args(
             "benchmark",
             &[
-                "--lock",
+                "--gguf",
                 "x",
-                "--cache",
+                "--derived-lock",
                 "y",
                 "--lane",
                 "render-tokenize",

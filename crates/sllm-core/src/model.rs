@@ -733,6 +733,38 @@ pub fn read_reviewed_model_lock(path: impl AsRef<Path>) -> Result<ReviewedModelL
     parse_reviewed_model_lock(&bytes)
 }
 
+/// Resolves the one reviewed source identity embedded in the runtime build.
+/// GGUF users do not supply the converter's source lock as a separate runtime
+/// artifact; the derived lock names its fingerprint and this function binds it
+/// to the corresponding compile-time reviewed contract.
+pub fn builtin_reviewed_model_lock(
+    source_fingerprints: &[String],
+) -> Result<ReviewedModelLock, ModelError> {
+    const LOCKS: &[&[u8]] = &[
+        include_bytes!("../../../docs/models/locks/qwen3.5-2b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/qwen3.5-4b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/qwen3.5-9b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/gemma4-12b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/gemma4-12b-it-bf16.json"),
+    ];
+    let mut selected = None;
+    for bytes in LOCKS {
+        let lock = parse_reviewed_model_lock(bytes)?;
+        if source_fingerprints
+            .iter()
+            .any(|fingerprint| fingerprint == lock.fingerprint())
+        {
+            if selected.is_some() {
+                return Err(invalid(
+                    "derived GGUF names more than one reviewed runtime model lock",
+                ));
+            }
+            selected = Some(lock);
+        }
+    }
+    selected.ok_or_else(|| invalid("derived GGUF has no built-in reviewed runtime model lock"))
+}
+
 /// Parse a model-lock-v1 document with duplicate-key and unknown-field rejection.
 pub fn parse_model_lock(bytes: &[u8]) -> Result<ModelLock, ModelError> {
     let value = parse_json(bytes, true, MAX_LOCK_JSON_BYTES, "model lock")?;
@@ -4559,6 +4591,24 @@ mod tests {
         let lock = read_model_lock(path).expect("reviewed Qwen lock parses");
         assert_eq!(lock.fingerprint(), QWEN35_4B_FINGERPRINT);
         assert_eq!(lock.model.architecture.text_config.dtype, TensorDType::Bf16);
+    }
+
+    #[test]
+    fn derived_fingerprints_resolve_one_builtin_reviewed_lock() {
+        let lock = builtin_reviewed_model_lock(&[
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            QWEN35_4B_FINGERPRINT.to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(lock.fingerprint(), QWEN35_4B_FINGERPRINT);
+        assert!(builtin_reviewed_model_lock(&[]).is_err());
+        assert!(
+            builtin_reviewed_model_lock(&[
+                QWEN35_4B_FINGERPRINT.to_owned(),
+                crate::GEMMA4_12B_FINGERPRINT.to_owned(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

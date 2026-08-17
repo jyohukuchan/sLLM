@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sllm_core::{
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
-    read_reviewed_model_lock,
+    builtin_reviewed_model_lock, read_derived_gguf_lock,
 };
 use sllm_server::{
     ChatGenerationBackendV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1, ModelRegistryEntryV1,
@@ -28,8 +28,8 @@ fn main() -> ExitCode {
 
 #[derive(Debug)]
 struct Config {
-    lock: PathBuf,
-    cache: PathBuf,
+    gguf: PathBuf,
+    derived_lock: PathBuf,
     device_index: u32,
     target: String,
     listen: SocketAddr,
@@ -42,9 +42,6 @@ struct Config {
     completion_timeout: Duration,
     shutdown_timeout: Duration,
     context_length: Option<u32>,
-    fp8_manifest: Option<PathBuf>,
-    fp8_artifact: Option<PathBuf>,
-    fp8_provider: Option<String>,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -62,34 +59,13 @@ fn parse_args() -> Result<Config, String> {
             .ok_or_else(|| format!("missing value for {flag}"))?;
         values.insert(flag, value);
     }
-    let lock = PathBuf::from(take_required(&mut values, "--lock")?);
-    let cache = values
-        .remove("--cache")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| lock.clone());
+    let gguf = PathBuf::from(take_required(&mut values, "--gguf")?);
+    let derived_lock = PathBuf::from(take_required(&mut values, "--derived-lock")?);
     let device_index = parse_value(
         &take_required(&mut values, "--device-index")?,
         "device index",
     )?;
     let target = take_required(&mut values, "--target")?;
-    let fp8_manifest = values
-        .remove("--fp8-manifest")
-        .or_else(|| values.remove("--nvfp4-manifest"))
-        .map(PathBuf::from);
-    let fp8_artifact = values
-        .remove("--fp8-artifact")
-        .or_else(|| values.remove("--nvfp4-artifact"))
-        .map(PathBuf::from);
-    let fp8_provider = match values.remove("--nvfp4-provider") {
-        Some(provider) if provider == "packed-dequant" => {
-            if values.contains_key("--fp8-provider") {
-                return Err("FP8 and NVFP4 providers are mutually exclusive".to_owned());
-            }
-            Some("nvfp4-packed-dequant".to_owned())
-        }
-        Some(_) => return Err("--nvfp4-provider must be packed-dequant".to_owned()),
-        None => values.remove("--fp8-provider"),
-    };
     let listen = parse_value(
         &values
             .remove("--listen")
@@ -140,8 +116,8 @@ fn parse_args() -> Result<Config, String> {
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
     Ok(Config {
-        lock,
-        cache,
+        gguf,
+        derived_lock,
         device_index,
         target,
         listen,
@@ -154,9 +130,6 @@ fn parse_args() -> Result<Config, String> {
         completion_timeout,
         shutdown_timeout,
         context_length,
-        fp8_manifest,
-        fp8_artifact,
-        fp8_provider,
     })
 }
 
@@ -166,11 +139,22 @@ fn run(config: Config) -> Result<(), String> {
         .build()
         .map_err(|error| format!("Tokio runtime construction failed: {error}"))?;
     runtime.block_on(async move {
-        let backend = if config.lock.is_dir() {
+        let derived = read_derived_gguf_lock(&config.derived_lock)
+            .map_err(|error| format!("derived GGUF lock validation failed: {error}"))?;
+        let gguf_moe = derived.semantic_model_id.starts_with("qwen35moe:");
+        let reviewed = if gguf_moe {
+            None
+        } else {
+            Some(
+                builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+                    .map_err(|error| format!("built-in model lock resolution failed: {error}"))?,
+            )
+        };
+        let backend = if gguf_moe {
             ActiveBackend::Qwen(Arc::new(
                 QwenChatBackendV1::open(QwenBackendConfigV1 {
-                    lock_path: config.lock,
-                    cache_path: config.cache,
+                    gguf_path: config.gguf,
+                    derived_lock_path: config.derived_lock,
                     device_index: config.device_index,
                     target: config.target,
                     completion_timeout: config.completion_timeout,
@@ -178,47 +162,29 @@ fn run(config: Config) -> Result<(), String> {
                     context_length: config
                         .context_length
                         .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    fp8_manifest_path: config.fp8_manifest,
-                    fp8_artifact_path: config.fp8_artifact,
-                    fp8_provider: config.fp8_provider,
                 })
                 .map_err(|error| error.to_string())?,
             ))
         } else {
-            let reviewed = read_reviewed_model_lock(&config.lock)
-                .map_err(|error| format!("model lock validation failed: {error}"))?;
-            match reviewed {
-            ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
-                QwenChatBackendV1::open(QwenBackendConfigV1 {
-                    lock_path: config.lock,
-                    cache_path: config.cache,
-                    device_index: config.device_index,
-                    target: config.target,
-                    completion_timeout: config.completion_timeout,
-                    shutdown_timeout: config.shutdown_timeout,
-                    context_length: config
-                        .context_length
-                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    fp8_manifest_path: config.fp8_manifest,
-                    fp8_artifact_path: config.fp8_artifact,
-                    fp8_provider: config.fp8_provider,
-                })
-                .map_err(|error| error.to_string())?,
-            )),
-            ReviewedModelLock::Gemma4(_) => {
-                if config.fp8_manifest.is_some()
-                    || config.fp8_artifact.is_some()
-                    || config.fp8_provider.is_some()
-                {
-                    return Err(
-                        "Gemma 4 first-class model input does not accept development sidecar flags"
-                            .to_owned(),
-                    );
-                }
-                ActiveBackend::Gemma(Arc::new(
+            match reviewed.expect("non-MoE GGUF resolved a reviewed lock") {
+                ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
+                    QwenChatBackendV1::open(QwenBackendConfigV1 {
+                        gguf_path: config.gguf,
+                        derived_lock_path: config.derived_lock,
+                        device_index: config.device_index,
+                        target: config.target,
+                        completion_timeout: config.completion_timeout,
+                        shutdown_timeout: config.shutdown_timeout,
+                        context_length: config
+                            .context_length
+                            .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                    })
+                    .map_err(|error| error.to_string())?,
+                )),
+                ReviewedModelLock::Gemma4(_) => ActiveBackend::Gemma(Arc::new(
                     Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
-                        lock_path: config.lock,
-                        cache_path: config.cache,
+                        gguf_path: config.gguf,
+                        derived_lock_path: config.derived_lock,
                         device_index: config.device_index,
                         target: config.target,
                         completion_timeout: config.completion_timeout,
@@ -228,8 +194,7 @@ fn run(config: Config) -> Result<(), String> {
                             .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
                     })
                     .map_err(|error| error.to_string())?,
-                ))
-            }
+                )),
             }
         };
         if let Some(warning) = context_length_warning(
@@ -402,7 +367,7 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --lock PATH --device-index N --target GFX [--cache PATH] [--fp8-manifest PATH --fp8-artifact PATH --fp8-provider native|native-fnuz|emulation|converted-bf16] [--nvfp4-manifest PATH --nvfp4-artifact PATH --nvfp4-provider packed-dequant] [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }
 
 #[cfg(test)]

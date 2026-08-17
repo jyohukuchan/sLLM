@@ -35,14 +35,15 @@ use crate::qwen_graph::{
 };
 use crate::tensor::{TensorError, TensorView};
 use crate::weights::{
-    WeightClassification, WeightLoadEntry, WeightLoadPlan, WeightUploadError, WeightUploadReceipt,
-    WeightUploadRequest, upload_verified_weight,
+    GgufWeightUploadRequest, VerifiedGgufWeightSource, WeightClassification, WeightLoadEntry,
+    WeightLoadPlan, WeightUploadError, WeightUploadReceipt, WeightUploadRequest,
+    upload_verified_gguf_weight, upload_verified_weight,
 };
 use crate::{
     AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_LAYER_BLOB_PREFIX, Qwen35MoeExpertProjection,
-    Qwen35MoeTensorPlane, VerifiedFp8Sidecar, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
-    decode_e4m3fn,
+    Qwen35MoeTensorPlane, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedNvfp4Sidecar,
+    VerifiedQwen35Moe, decode_e4m3fn,
 };
 
 /// Output published by a fully completed Qwen request transition.
@@ -410,6 +411,31 @@ impl QwenResidentModel {
         })
     }
 
+    pub fn new_gguf(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        source: Arc<VerifiedGgufWeightSource>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "completion timeout must be non-zero".to_owned(),
+            ));
+        }
+        if source.lock_fingerprint() != plan.lock_fingerprint {
+            return Err(QwenExecutionError::InvalidRequest(
+                "verified GGUF identity differs from the weight plan".to_owned(),
+            ));
+        }
+        let provision = GgufProvisionSource { source };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &provision)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
     /// Provisions the exact reviewed Qwen3.5-35B-A3B MXFP4 artifact. Each
     /// layer's expert planes are packed once into the native immutable blob;
     /// routing and activation quantization remain request-time GPU work.
@@ -435,6 +461,29 @@ impl QwenResidentModel {
         let source = Qwen35MoeProvisionSource { artifact };
         let inner =
             QwenResidentInner::provision(session, graph, plan, completion_timeout, &source)?;
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    pub fn new_gguf_moe(
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        plan: WeightLoadPlan,
+        source: Arc<VerifiedGgufQwen35Moe>,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        if completion_timeout.is_zero()
+            || plan.lock_fingerprint != crate::QWEN35_MOE_MODEL_FINGERPRINT
+            || graph.model_fingerprint() != crate::QWEN35_MOE_MODEL_FINGERPRINT
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "MoE GGUF, graph, and load-plan identities differ".to_owned(),
+            ));
+        }
+        let provision = GgufMoeProvisionSource { source };
+        let inner =
+            QwenResidentInner::provision(session, graph, plan, completion_timeout, &provision)?;
         Ok(Self {
             inner: Arc::new(inner),
         })
@@ -1009,6 +1058,10 @@ struct VerifiedProvisionSource {
     cache: Arc<VerifiedCache>,
 }
 
+struct GgufProvisionSource {
+    source: Arc<VerifiedGgufWeightSource>,
+}
+
 struct Fp8ProvisionSource {
     cache: Arc<VerifiedCache>,
     sidecar: Arc<VerifiedFp8Sidecar>,
@@ -1031,6 +1084,159 @@ struct Nvfp4ProvisionSource {
 
 struct Qwen35MoeProvisionSource {
     artifact: Arc<VerifiedQwen35Moe>,
+}
+
+struct GgufMoeProvisionSource {
+    source: Arc<VerifiedGgufQwen35Moe>,
+}
+
+impl QwenProvisionSource for GgufMoeProvisionSource {
+    fn upload_weight(
+        &self,
+        _plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let bytes = if let Some(layer) = binding
+            .tensor_name()
+            .strip_prefix(QWEN35_MOE_LAYER_BLOB_PREFIX)
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            self.pack_layer_blob(layer)?
+        } else {
+            self.source
+                .read_tensor(binding.tensor_name())
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?
+        };
+        if u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "GGUF MoE resident allocation differs for {}",
+                binding.tensor_name()
+            )));
+        }
+        upload_buffer_bytes(
+            session,
+            queue,
+            &destination,
+            &bytes,
+            completion_timeout,
+            "GGUF MoE weight upload",
+        )
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        let bytes = self
+            .source
+            .read_tensor(tensor_name)
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        if bytes.len() != expected_length {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "GGUF MoE attention scale length differs: {tensor_name}"
+            )));
+        }
+        Ok(Arc::from(bytes))
+    }
+}
+
+impl GgufMoeProvisionSource {
+    fn pack_layer_blob(&self, layer: u16) -> Result<Vec<u8>, QwenExecutionError> {
+        const GATE_VALUES: usize = 0;
+        const GATE_SCALES: usize = 134_217_728;
+        const UP_VALUES: usize = 142_606_336;
+        const UP_SCALES: usize = 276_824_064;
+        const DOWN_VALUES: usize = 285_212_672;
+        const DOWN_SCALES: usize = 419_430_400;
+        const SHARED_GATE: usize = 427_819_008;
+        const SHARED_UP: usize = 429_916_160;
+        const SHARED_DOWN: usize = 432_013_312;
+        const SHARED_EXPERT_GATE: usize = 434_110_464;
+        let mut blob = vec![0_u8; QWEN35_MOE_LAYER_BLOB_BYTES as usize];
+        for expert in 0..256_u16 {
+            for (projection, value_base, scale_base, value_stride, scale_stride) in [
+                (
+                    Qwen35MoeExpertProjection::Gate,
+                    GATE_VALUES,
+                    GATE_SCALES,
+                    524_288,
+                    32_768,
+                ),
+                (
+                    Qwen35MoeExpertProjection::Up,
+                    UP_VALUES,
+                    UP_SCALES,
+                    524_288,
+                    32_768,
+                ),
+                (
+                    Qwen35MoeExpertProjection::Down,
+                    DOWN_VALUES,
+                    DOWN_SCALES,
+                    524_288,
+                    32_768,
+                ),
+            ] {
+                let (values, scales) = self
+                    .source
+                    .read_expert_planes(layer, expert, projection)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                copy_bytes_into(
+                    &values,
+                    &mut blob,
+                    value_base + usize::from(expert) * value_stride,
+                )?;
+                copy_bytes_into(
+                    &scales,
+                    &mut blob,
+                    scale_base + usize::from(expert) * scale_stride,
+                )?;
+            }
+        }
+        let prefix = format!("model.language_model.layers.{layer}.mlp");
+        for (name, offset) in [
+            (
+                format!("{prefix}.shared_expert.gate_proj.weight"),
+                SHARED_GATE,
+            ),
+            (format!("{prefix}.shared_expert.up_proj.weight"), SHARED_UP),
+            (
+                format!("{prefix}.shared_expert.down_proj.weight"),
+                SHARED_DOWN,
+            ),
+            (
+                format!("{prefix}.shared_expert_gate.weight"),
+                SHARED_EXPERT_GATE,
+            ),
+        ] {
+            let bytes = self
+                .source
+                .read_tensor(&name)
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            copy_bytes_into(&bytes, &mut blob, offset)?;
+        }
+        Ok(blob)
+    }
+}
+
+fn copy_bytes_into(
+    source: &[u8],
+    output: &mut [u8],
+    offset: usize,
+) -> Result<(), QwenExecutionError> {
+    let end = offset.checked_add(source.len()).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("MoE blob byte offset overflowed".to_owned())
+    })?;
+    let destination = output.get_mut(offset..end).ok_or_else(|| {
+        QwenExecutionError::InvalidRequest("MoE blob bytes exceed layout".to_owned())
+    })?;
+    destination.copy_from_slice(source);
+    Ok(())
 }
 
 impl QwenProvisionSource for Qwen35MoeProvisionSource {
@@ -1303,6 +1509,159 @@ impl QwenProvisionSource for VerifiedProvisionSource {
         if bytes.len() != expected_length {
             return Err(QwenExecutionError::InvalidRequest(format!(
                 "verified attention scale {tensor_name} has a short or long byte read"
+            )));
+        }
+        Ok(Arc::from(bytes))
+    }
+}
+
+impl QwenProvisionSource for GgufProvisionSource {
+    fn upload_weight(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        if let Some(recipe) = self.source.recipe_binding(binding.tensor_name()) {
+            let value = self
+                .source
+                .gguf()
+                .tensor(&recipe.value_tensor)
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF FP8 value tensor is absent after verification".to_owned(),
+                    )
+                })?;
+            let value_len = usize::try_from(value.byte_length()).map_err(|_| {
+                QwenExecutionError::InvalidRequest("GGUF FP8 value is too large".to_owned())
+            })?;
+            let mut combined = self
+                .source
+                .gguf()
+                .read_tensor_range(&recipe.value_tensor, 0, value_len)
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            let scale = recipe.scales.first().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("GGUF FP8 scale binding is absent".to_owned())
+            })?;
+            if recipe.scales.len() != 1 || scale.role != crate::GgufScaleRole::Channel {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "GGUF FP8 scale recipe is not exact channel scaling".to_owned(),
+                ));
+            }
+            let scale_info = self.source.gguf().tensor(&scale.tensor).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "GGUF FP8 scale tensor is absent after verification".to_owned(),
+                )
+            })?;
+            let scale_len = usize::try_from(scale_info.byte_length()).map_err(|_| {
+                QwenExecutionError::InvalidRequest("GGUF FP8 scale is too large".to_owned())
+            })?;
+            let scale_bytes = self
+                .source
+                .gguf()
+                .read_tensor_range(&scale.tensor, 0, scale_len)
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            match recipe.encoding {
+                crate::GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale => {
+                    combined.extend_from_slice(&scale_bytes);
+                }
+                crate::GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale => {
+                    if scale_bytes.len() % 2 != 0 {
+                        return Err(QwenExecutionError::InvalidRequest(
+                            "GGUF FP8 BF16 scale byte count is odd".to_owned(),
+                        ));
+                    }
+                    for chunk in scale_bytes.chunks_exact(2) {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        combined.extend_from_slice(
+                            &f32::from_bits(u32::from(bits) << 16).to_le_bytes(),
+                        );
+                    }
+                }
+                _ => {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "GGUF Qwen recipe is not FP8".to_owned(),
+                    ));
+                }
+            }
+            if u64::try_from(combined.len()).ok() != Some(destination.size_bytes()) {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "GGUF FP8 resident allocation differs for {}",
+                    binding.tensor_name()
+                )));
+            }
+            return upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &combined,
+                completion_timeout,
+                "GGUF FP8 weight/scale upload",
+            );
+        }
+        if self.source.has_fp8_recipe() {
+            let tensor = self
+                .source
+                .gguf()
+                .tensor(binding.tensor_name())
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF BF16 tensor is absent after verification".to_owned(),
+                    )
+                })?;
+            let length = usize::try_from(tensor.byte_length()).map_err(|_| {
+                QwenExecutionError::InvalidRequest("GGUF BF16 tensor is too large".to_owned())
+            })?;
+            let bytes = self
+                .source
+                .gguf()
+                .read_tensor_range(binding.tensor_name(), 0, length)
+                .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+            if u64::try_from(bytes.len()).ok() != Some(destination.size_bytes()) {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "GGUF BF16 resident allocation differs for {}",
+                    binding.tensor_name()
+                )));
+            }
+            return upload_buffer_bytes(
+                session,
+                queue,
+                &destination,
+                &bytes,
+                completion_timeout,
+                "GGUF BF16 weight upload",
+            );
+        }
+        let receipt = upload_verified_gguf_weight(GgufWeightUploadRequest {
+            plan,
+            expected_plan_digest: *plan.digest(),
+            source: self.source.as_ref(),
+            tensor_name: binding.tensor_name(),
+            expected_dtype: binding.dtype(),
+            session,
+            queue,
+            destination,
+            completion_timeout,
+        })?;
+        validate_upload_receipt(&receipt, plan, binding)
+    }
+
+    fn read_scale_bytes(
+        &self,
+        tensor_name: &str,
+        expected_length: usize,
+    ) -> Result<Arc<[u8]>, QwenExecutionError> {
+        let bytes = self
+            .source
+            .gguf()
+            .read_tensor_range(tensor_name, 0, expected_length)
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        if bytes.len() != expected_length {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "verified GGUF tensor {tensor_name} returned a short scale read"
             )));
         }
         Ok(Arc::from(bytes))

@@ -9,6 +9,10 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 
 const SCHEMA: &str = "sllm-qwen35-fp8-sidecar-v1";
 const SCALE_SUFFIX: &str = ".sllm_fp8_scale";
@@ -43,9 +47,10 @@ pub struct Fp8SidecarTensor {
     pub scale_sha256: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct VerifiedFp8Sidecar {
     artifact_path: PathBuf,
+    artifact: Arc<File>,
     source_lock_fingerprint: String,
     manifest_fingerprint: String,
     artifact_sha256: String,
@@ -89,10 +94,8 @@ impl VerifiedFp8Sidecar {
         let tensor = self
             .tensor(name)
             .ok_or_else(|| Fp8SidecarError::invalid("FP8 tensor is absent"))?;
-        let mut artifact = File::open(&self.artifact_path)
-            .map_err(|error| Fp8SidecarError::invalid(format!("open artifact: {error}")))?;
-        let values = read_range(&mut artifact, self.data_start, tensor.value_range)?;
-        let scales = read_range(&mut artifact, self.data_start, tensor.scale_range)?;
+        let values = self.read_tensor_range(name, false, 0, range_len(tensor.value_range)?)?;
+        let scales = self.read_tensor_range(name, true, 0, range_len(tensor.scale_range)?)?;
         if sha256_bytes(&values) != tensor.value_sha256
             || sha256_bytes(&scales) != tensor.scale_sha256
         {
@@ -101,6 +104,45 @@ impl VerifiedFp8Sidecar {
             ));
         }
         Ok((values, scales))
+    }
+
+    pub fn read_tensor_range(
+        &self,
+        name: &str,
+        scale: bool,
+        offset: u64,
+        length: u64,
+    ) -> Result<Vec<u8>, Fp8SidecarError> {
+        let tensor = self
+            .tensor(name)
+            .ok_or_else(|| Fp8SidecarError::invalid("FP8 tensor is absent"))?;
+        let range = if scale {
+            tensor.scale_range
+        } else {
+            tensor.value_range
+        };
+        let plane_length = range_len(range)?;
+        if offset
+            .checked_add(length)
+            .is_none_or(|end| end > plane_length)
+        {
+            return Err(Fp8SidecarError::invalid(
+                "FP8 tensor subrange exceeds its plane",
+            ));
+        }
+        let absolute = self
+            .data_start
+            .checked_add(range[0])
+            .and_then(|start| start.checked_add(offset))
+            .ok_or_else(|| Fp8SidecarError::invalid("FP8 tensor absolute range overflows"))?;
+        let mut bytes = vec![
+            0_u8;
+            usize::try_from(length).map_err(|_| {
+                Fp8SidecarError::invalid("FP8 tensor subrange exceeds address space")
+            })?
+        ];
+        read_exact_at(&self.artifact, absolute, &mut bytes)?;
+        Ok(bytes)
     }
 }
 
@@ -300,12 +342,40 @@ pub fn verify_fp8_sidecar(
 
     Ok(VerifiedFp8Sidecar {
         artifact_path: artifact_path.to_path_buf(),
+        artifact: Arc::new(artifact),
         source_lock_fingerprint: manifest.source.lock_fingerprint,
         manifest_fingerprint: manifest.fingerprint,
         artifact_sha256: manifest.artifact.sha256,
         data_start,
         tensors,
     })
+}
+
+fn range_len(range: [u64; 2]) -> Result<u64, Fp8SidecarError> {
+    range[1]
+        .checked_sub(range[0])
+        .ok_or_else(|| Fp8SidecarError::invalid("FP8 tensor range is reversed"))
+}
+
+#[cfg(unix)]
+fn read_exact_at(
+    file: &File,
+    mut offset: u64,
+    mut output: &mut [u8],
+) -> Result<(), Fp8SidecarError> {
+    while !output.is_empty() {
+        let read = file
+            .read_at(output, offset)
+            .map_err(|error| Fp8SidecarError::invalid(format!("read artifact: {error}")))?;
+        if read == 0 {
+            return Err(Fp8SidecarError::invalid("FP8 tensor subrange is truncated"));
+        }
+        offset = offset
+            .checked_add(read as u64)
+            .ok_or_else(|| Fp8SidecarError::invalid("FP8 read offset overflows"))?;
+        output = &mut output[read..];
+    }
+    Ok(())
 }
 
 fn validate_tool(tool: &Tool) -> Result<(), Fp8SidecarError> {
@@ -401,31 +471,6 @@ fn hash_range(
         return Err(Fp8SidecarError::invalid("tensor range is truncated"));
     }
     Ok(format!("sha256:{:x}", digest.finalize()))
-}
-
-fn read_range(
-    file: &mut File,
-    data_start: u64,
-    range: [u64; 2],
-) -> Result<Vec<u8>, Fp8SidecarError> {
-    let length = range[1]
-        .checked_sub(range[0])
-        .ok_or_else(|| Fp8SidecarError::invalid("tensor range is reversed"))?;
-    file.seek(SeekFrom::Start(
-        data_start
-            .checked_add(range[0])
-            .ok_or_else(|| Fp8SidecarError::invalid("tensor absolute range overflow"))?,
-    ))
-    .map_err(|error| Fp8SidecarError::invalid(format!("seek tensor: {error}")))?;
-    let mut bytes = vec![
-        0_u8;
-        usize::try_from(length).map_err(|_| Fp8SidecarError::invalid(
-            "tensor length does not fit usize"
-        ))?
-    ];
-    file.read_exact(&mut bytes)
-        .map_err(|error| Fp8SidecarError::invalid(format!("read tensor: {error}")))?;
-    Ok(bytes)
 }
 
 struct DigestWriter<'a>(&'a mut Sha256);

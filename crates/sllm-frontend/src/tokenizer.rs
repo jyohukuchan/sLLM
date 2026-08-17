@@ -1,7 +1,9 @@
 use core::fmt;
 use std::collections::HashMap;
 
-use sllm_core::{Gemma4ModelLock, ModelLock, StopIdentity, TokenizerContract, VerifiedCache};
+use sllm_core::{
+    Gemma4ModelLock, ModelLock, StopIdentity, TokenizerContract, VerifiedCache, VerifiedGguf,
+};
 use tokenizers::{AddedToken, Tokenizer};
 
 use crate::{StopPolicyError, validate_generation_stop_policy};
@@ -351,6 +353,27 @@ impl TokenizerFrontendV1 {
         Self::from_qwen35_bytes(bytes, &lock.model().tokenizer_contract, lock.fingerprint())
     }
 
+    pub fn from_qwen35_gguf(lock: &ModelLock, gguf: &VerifiedGguf) -> Result<Self, TokenizerError> {
+        let extension = gguf.extension().ok_or(TokenizerError::FrontendAssetRead)?;
+        if gguf.architecture() != "qwen35"
+            || !extension
+                .recipe
+                .source_lock_fingerprints
+                .iter()
+                .any(|fingerprint| fingerprint == lock.fingerprint())
+        {
+            return Err(TokenizerError::LockFingerprintMismatch {
+                lock: lock.fingerprint().to_owned(),
+                cache: extension.recipe.semantic_model_id.clone(),
+            });
+        }
+        let bytes = gguf
+            .frontend_asset("tokenizer.json")
+            .ok_or(TokenizerError::FrontendAssetRead)?
+            .to_vec();
+        Self::from_qwen35_bytes(bytes, &lock.model().tokenizer_contract, lock.fingerprint())
+    }
+
     /// Constructs the same Qwen3.5 tokenizer contract from the exact reviewed
     /// MoE artifact, without requiring a Dense-model lock or cache facade.
     pub fn from_qwen35_moe_artifact(
@@ -359,6 +382,19 @@ impl TokenizerFrontendV1 {
         let bytes = artifact
             .read_support_file("tokenizer.json")
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        let contract: TokenizerContract = serde_json::from_str(QWEN35_MOE_TOKENIZER_CONTRACT)
+            .map_err(|_| TokenizerError::InvalidTokenizer)?;
+        Self::from_qwen35_bytes(bytes, &contract, sllm_core::QWEN35_MOE_MODEL_FINGERPRINT)
+    }
+
+    pub fn from_qwen35_moe_gguf(
+        source: &sllm_core::VerifiedGgufQwen35Moe,
+    ) -> Result<Self, TokenizerError> {
+        let bytes = source
+            .gguf()
+            .frontend_asset("tokenizer.json")
+            .ok_or(TokenizerError::FrontendAssetRead)?
+            .to_vec();
         let contract: TokenizerContract = serde_json::from_str(QWEN35_MOE_TOKENIZER_CONTRACT)
             .map_err(|_| TokenizerError::InvalidTokenizer)?;
         Self::from_qwen35_bytes(bytes, &contract, sllm_core::QWEN35_MOE_MODEL_FINGERPRINT)
@@ -483,6 +519,30 @@ impl TokenizerFrontendV1 {
         let bytes = artifact
             .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        Self::from_gemma4_bytes(lock, bytes)
+    }
+
+    pub fn from_gemma4_gguf(
+        lock: &Gemma4ModelLock,
+        gguf: &VerifiedGguf,
+    ) -> Result<Self, TokenizerError> {
+        let extension = gguf.extension().ok_or(TokenizerError::FrontendAssetRead)?;
+        if gguf.architecture() != "gemma4"
+            || !extension
+                .recipe
+                .source_lock_fingerprints
+                .iter()
+                .any(|fingerprint| fingerprint == lock.fingerprint())
+        {
+            return Err(TokenizerError::LockFingerprintMismatch {
+                lock: lock.fingerprint().to_owned(),
+                cache: extension.recipe.semantic_model_id.clone(),
+            });
+        }
+        let bytes = gguf
+            .frontend_asset("tokenizer.json")
+            .ok_or(TokenizerError::FrontendAssetRead)?
+            .to_vec();
         Self::from_gemma4_bytes(lock, bytes)
     }
 

@@ -8,19 +8,18 @@ use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest,
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
-    OsSamplingRandom, QWEN35_4B_FINGERPRINT, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
-    QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest,
-    QwenVisionResidentModel, ReviewedModelLock, VerifiedCache, VerifiedFp8Sidecar,
-    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, VerifiedUnslothGemma4Nvfp4, WeightLoadPlan,
-    assemble_qwen35_multimodal_prompt, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_graph, build_qwen35_moe_execution_graph, build_qwen35_moe_weight_load_plan,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_weight_load_plan,
-    build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
-    build_verified_weight_load_plan, qwen35_moe_generation_stop_policy, read_model_lock,
-    read_reviewed_model_lock, verify_fp8_sidecar, verify_nvfp4_sidecar, verify_qwen35_moe_artifact,
-    verify_unsloth_gemma4_nvfp4,
+    OsSamplingRandom, QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection,
+    QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
+    QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
+    VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
+    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan, assemble_qwen35_multimodal_prompt,
+    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, builtin_reviewed_model_lock,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
@@ -38,21 +37,17 @@ use crate::{
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
-const GEMMA4_KV_BYTES_PER_TOKEN: u64 = 344_064;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
 
 #[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
-    pub lock_path: PathBuf,
-    pub cache_path: PathBuf,
+    pub gguf_path: PathBuf,
+    pub derived_lock_path: PathBuf,
     pub device_index: u32,
     pub target: String,
     pub completion_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub context_length: u32,
-    pub fp8_manifest_path: Option<PathBuf>,
-    pub fp8_artifact_path: Option<PathBuf>,
-    pub fp8_provider: Option<String>,
 }
 
 impl QwenBackendConfigV1 {
@@ -67,44 +62,14 @@ impl QwenBackendConfigV1 {
                 "Qwen backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
-        let sidecar = self.fp8_manifest_path.is_some() && self.fp8_artifact_path.is_some();
-        if self.fp8_manifest_path.is_some() != self.fp8_artifact_path.is_some()
-            || (!sidecar && self.fp8_provider.is_some())
-        {
-            return Err(BackendErrorV1::new(
-                "FP8 server configuration requires manifest and artifact together",
-            ));
-        }
-        if sidecar {
-            let provider = self
-                .fp8_provider
-                .as_deref()
-                .unwrap_or(match self.target.as_str() {
-                    "gfx1201" => "native",
-                    "gfx942" => "native-fnuz",
-                    _ => "converted-bf16",
-                });
-            let valid = matches!(
-                (provider, self.target.as_str()),
-                ("native", "gfx1201")
-                    | ("native-fnuz", "gfx942")
-                    | ("emulation" | "converted-bf16", "gfx1030")
-                    | ("nvfp4-packed-dequant", "gfx1030" | "gfx1201")
-            );
-            if !valid {
-                return Err(BackendErrorV1::new(
-                    "FP8 server provider is incompatible with the exact target",
-                ));
-            }
-        }
         Ok(())
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct Gemma4BackendConfigV1 {
-    pub lock_path: PathBuf,
-    pub cache_path: PathBuf,
+    pub gguf_path: PathBuf,
+    pub derived_lock_path: PathBuf,
     pub device_index: u32,
     pub target: String,
     pub completion_timeout: Duration,
@@ -183,6 +148,7 @@ pub struct QwenChatBackendV1 {
 struct QwenBackendStateV1 {
     lock: Option<ModelLock>,
     moe_artifact: Option<Arc<VerifiedQwen35Moe>>,
+    gguf_moe: Option<Arc<VerifiedGgufQwen35Moe>>,
     stop_policy: GenerationStopPolicyV1,
     tokenizer: TokenizerFrontendV1,
     renderer: Qwen35ChatTemplateV1,
@@ -197,6 +163,7 @@ struct QwenBackendStateV1 {
     nvfp4_sidecar: Option<Arc<VerifiedNvfp4Sidecar>>,
     fp8_provider: Option<String>,
     cache: Option<Arc<VerifiedCache>>,
+    gguf_source: Option<Arc<VerifiedGgufWeightSource>>,
     vision_manifest: Option<QwenVisionManifest>,
     vision_resident: Option<QwenVisionResidentModel>,
     completion_timeout: Duration,
@@ -222,11 +189,6 @@ struct Gemma4BackendStateV1 {
     kv_bytes_per_token: u64,
 }
 
-enum GemmaArtifactSourceV1 {
-    Bf16(VerifiedCache),
-    Quantized(Arc<VerifiedUnslothGemma4Nvfp4>),
-}
-
 #[derive(Clone)]
 struct BackendIdentityV1 {
     target: String,
@@ -240,93 +202,60 @@ struct BackendIdentityV1 {
 impl QwenChatBackendV1 {
     pub fn open(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
-        if config.lock_path.is_dir() {
-            return Self::open_moe(config);
-        }
-        let lock = read_model_lock(&config.lock_path).map_err(|error| {
-            BackendErrorV1::new(format!("model lock validation failed: {error}"))
+        let derived = read_derived_gguf_lock(&config.derived_lock_path).map_err(|error| {
+            BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
         })?;
-        let cache = Arc::new(lock.verify_cache(&config.cache_path).map_err(|error| {
-            BackendErrorV1::new(format!("model cache verification failed: {error}"))
-        })?);
-        let vision_manifest = if lock.fingerprint() == QWEN35_4B_FINGERPRINT {
-            Some(
-                build_verified_qwen35_vision_manifest(&lock, &cache).map_err(|error| {
-                    BackendErrorV1::new(format!("vision manifest validation failed: {error}"))
-                })?,
-            )
-        } else {
-            None
+        if derived.semantic_model_id.starts_with("qwen35moe:") {
+            return Self::open_gguf_moe(config, derived);
+        }
+        let lock = match builtin_reviewed_model_lock(&derived.source_lock_fingerprints).map_err(
+            |error| BackendErrorV1::new(format!("built-in model lock resolution failed: {error}")),
+        )? {
+            ReviewedModelLock::Qwen35(lock) => lock,
+            ReviewedModelLock::Gemma4(_) => {
+                return Err(BackendErrorV1::new(
+                    "Qwen backend requires a derived GGUF for a reviewed Qwen model",
+                ));
+            }
         };
+        let verified = verify_derived_gguf(derived, &config.gguf_path)
+            .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
+        let (source, plan) = build_verified_gguf_qwen_weight_load_plan(
+            &lock,
+            verified,
+            QwenComponentSelection::TEXT_ONLY,
+        )
+        .map_err(|error| {
+            BackendErrorV1::new(format!("verified GGUF model load plan failed: {error}"))
+        })?;
+        let source = Arc::new(source);
         let tokenizer =
-            TokenizerFrontendV1::from_verified_cache(&lock, &cache).map_err(|error| {
+            TokenizerFrontendV1::from_qwen35_gguf(&lock, source.gguf()).map_err(|error| {
                 BackendErrorV1::new(format!("verified tokenizer construction failed: {error}"))
             })?;
         let renderer =
-            Qwen35ChatTemplateV1::from_verified_cache(&lock, &cache).map_err(|error| {
+            Qwen35ChatTemplateV1::from_qwen35_gguf(&lock, source.gguf()).map_err(|error| {
                 BackendErrorV1::new(format!(
                     "verified chat renderer construction failed: {error}"
                 ))
             })?;
-        let plan = build_verified_weight_load_plan(&lock, &cache).map_err(|error| {
-            BackendErrorV1::new(format!("verified model load plan failed: {error}"))
-        })?;
-        let nvfp4_requested = config.fp8_provider.as_deref() == Some("nvfp4-packed-dequant");
-        let nvfp4_sidecar = match (
-            nvfp4_requested,
-            &config.fp8_manifest_path,
-            &config.fp8_artifact_path,
-        ) {
-            (true, Some(manifest), Some(artifact)) => Some(Arc::new(
-                verify_nvfp4_sidecar(manifest, artifact, &config.lock_path, &lock).map_err(
-                    |error| {
-                        BackendErrorV1::new(format!("NVFP4 sidecar validation failed: {error}"))
-                    },
-                )?,
-            )),
-            (true, _, _) => unreachable!("validated NVFP4 configuration has paired paths"),
-            (false, _, _) => None,
-        };
-        let sidecar = match (
-            nvfp4_requested,
-            &config.fp8_manifest_path,
-            &config.fp8_artifact_path,
-        ) {
-            (false, Some(manifest), Some(artifact)) => Some(Arc::new(
-                verify_fp8_sidecar(manifest, artifact, &config.lock_path, &lock).map_err(
-                    |error| BackendErrorV1::new(format!("FP8 sidecar validation failed: {error}")),
-                )?,
-            )),
-            (false, None, None) | (true, _, _) => None,
-            _ => unreachable!("validated FP8 configuration has paired paths"),
-        };
-        let fp8_provider = if nvfp4_requested {
-            Some("nvfp4-packed-dequant".to_owned())
+        if source.has_fp8_recipe() && config.target != "gfx1201" {
+            return Err(BackendErrorV1::new(
+                "the embedded E4M3FN GGUF recipe currently requires the native gfx1201 provider",
+            ));
+        }
+        let seed_graph = if source.has_fp8_recipe() {
+            build_qwen35_gguf_fp8_graph(
+                &lock,
+                &plan,
+                &source,
+                1,
+                1,
+                sllm_core::DType::F8E4M3Fn,
+                sllm_core::KvCacheEncoding::Fp16,
+            )
         } else {
-            sidecar.as_ref().map(|_| {
-                config
-                    .fp8_provider
-                    .clone()
-                    .unwrap_or_else(|| match config.target.as_str() {
-                        "gfx1201" => "native".to_owned(),
-                        "gfx942" => "native-fnuz".to_owned(),
-                        _ => "converted-bf16".to_owned(),
-                    })
-            })
-        };
-        let seed_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
-            build_qwen35_nvfp4_graph(&lock, &plan, nvfp4_sidecar, 1, 1)
-        } else {
-            match (&sidecar, fp8_provider.as_deref()) {
-                (Some(_), Some("converted-bf16")) | (None, None) => {
-                    build_qwen35_graph(&lock, &plan, 1, 1)
-                }
-                (Some(sidecar), Some("native-fnuz")) => {
-                    build_qwen35_fp8_fnuz_graph(&lock, &plan, sidecar, 1, 1)
-                }
-                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(&lock, &plan, sidecar, 1, 1),
-                _ => unreachable!("validated FP8 configuration has a selected provider"),
-            }
+            build_qwen35_graph(&lock, &plan, 1, 1)
         }
         .map_err(|error| {
             BackendErrorV1::new(format!("resident seed graph construction failed: {error}"))
@@ -340,82 +269,14 @@ impl QwenChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
             })?;
-        let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
-            QwenResidentModel::new_nvfp4(
-                Arc::clone(&session),
-                seed_graph,
-                plan.clone(),
-                Arc::clone(&cache),
-                Arc::clone(nvfp4_sidecar),
-                config.completion_timeout,
-            )
-        } else {
-            match (&sidecar, fp8_provider.as_deref()) {
-                (Some(sidecar), Some("converted-bf16")) => {
-                    QwenResidentModel::new_fp8_converted_bf16(
-                        Arc::clone(&session),
-                        seed_graph,
-                        plan.clone(),
-                        Arc::clone(&cache),
-                        Arc::clone(sidecar),
-                        config.completion_timeout,
-                    )
-                }
-                (Some(sidecar), Some("native-fnuz")) => QwenResidentModel::new_fp8_fnuz(
-                    Arc::clone(&session),
-                    seed_graph,
-                    plan.clone(),
-                    Arc::clone(&cache),
-                    Arc::clone(sidecar),
-                    config.completion_timeout,
-                ),
-                (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
-                    Arc::clone(&session),
-                    seed_graph,
-                    plan.clone(),
-                    Arc::clone(&cache),
-                    Arc::clone(sidecar),
-                    config.completion_timeout,
-                ),
-                (None, None) => QwenResidentModel::new(
-                    Arc::clone(&session),
-                    seed_graph,
-                    plan.clone(),
-                    Arc::clone(&cache),
-                    config.completion_timeout,
-                ),
-                _ => unreachable!("validated FP8 configuration has a selected provider"),
-            }
-        }
+        let resident = QwenResidentModel::new_gguf(
+            Arc::clone(&session),
+            seed_graph,
+            plan.clone(),
+            Arc::clone(&source),
+            config.completion_timeout,
+        )
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
-        let (mtp_resident, mtp_plan) = if sidecar.is_none()
-            && nvfp4_sidecar.is_none()
-            && config.target == "gfx1201"
-            && lock.fingerprint() == QWEN35_4B_FINGERPRINT
-        {
-            let mtp_plan = build_verified_qwen_component_weight_load_plan(
-                &lock,
-                &cache,
-                QwenComponentSelection::MTP_ONLY,
-            )
-            .map_err(|error| {
-                BackendErrorV1::new(format!("MTP load plan validation failed: {error}"))
-            })?;
-            let mtp_graph = build_qwen35_mtp_graph(&lock, &mtp_plan, 1).map_err(|error| {
-                BackendErrorV1::new(format!("MTP resident graph failed: {error}"))
-            })?;
-            let mtp_resident = QwenResidentModel::new(
-                Arc::clone(&session),
-                mtp_graph,
-                mtp_plan.clone(),
-                Arc::clone(&cache),
-                config.completion_timeout,
-            )
-            .map_err(|error| BackendErrorV1::new(format!("MTP resident load failed: {error}")))?;
-            (Some(mtp_resident), Some(mtp_plan))
-        } else {
-            (None, None)
-        };
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "model-ready")?;
         let model_ready_current_bytes = ready.model_resident().current_bytes();
@@ -424,6 +285,7 @@ impl QwenChatBackendV1 {
                 "model-ready allocation accounting is not resident-only",
             ));
         }
+        let fp8_provider = source.has_fp8_recipe().then(|| "gguf-native".to_owned());
         let identity = BackendIdentityV1 {
             target: config.target.clone(),
             model_fingerprint: lock.fingerprint().to_owned(),
@@ -437,20 +299,22 @@ impl QwenChatBackendV1 {
                 stop_policy: lock.generation_stop_policy().clone(),
                 lock: Some(lock),
                 moe_artifact: None,
+                gguf_moe: None,
                 tokenizer,
                 renderer,
                 plan,
                 resident,
-                mtp_resident,
-                mtp_plan,
+                mtp_resident: None,
+                mtp_plan: None,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
-                sidecar,
-                nvfp4_sidecar,
+                sidecar: None,
+                nvfp4_sidecar: None,
                 fp8_provider,
-                cache: Some(cache),
-                vision_manifest,
+                cache: None,
+                gguf_source: Some(source),
+                vision_manifest: None,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
             })),
@@ -460,29 +324,27 @@ impl QwenChatBackendV1 {
         })
     }
 
-    fn open_moe(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
-        if config.fp8_manifest_path.is_some()
-            || config.fp8_artifact_path.is_some()
-            || config.fp8_provider.is_some()
-        {
-            return Err(BackendErrorV1::new(
-                "Qwen3.5 MoE artifact selects its mixed MXFP4 recipe internally",
-            ));
-        }
-        let artifact = Arc::new(verify_qwen35_moe_artifact(&config.lock_path).map_err(
-            |error| BackendErrorV1::new(format!("MoE artifact validation failed: {error}")),
-        )?);
-        let tokenizer =
-            TokenizerFrontendV1::from_qwen35_moe_artifact(&artifact).map_err(|error| {
-                BackendErrorV1::new(format!("MoE tokenizer construction failed: {error}"))
-            })?;
-        let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_artifact(&artifact)
-            .map_err(|error| BackendErrorV1::new(format!("MoE chat renderer failed: {error}")))?;
-        let plan = build_qwen35_moe_weight_load_plan(&artifact).map_err(|error| {
-            BackendErrorV1::new(format!("MoE load plan validation failed: {error}"))
+    fn open_gguf_moe(
+        config: QwenBackendConfigV1,
+        derived: sllm_core::DerivedGgufLock,
+    ) -> Result<Self, BackendErrorV1> {
+        let verified = verify_derived_gguf(derived, &config.gguf_path)
+            .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
+        let source = Arc::new(verify_gguf_qwen35_moe(verified).map_err(|error| {
+            BackendErrorV1::new(format!("Qwen3.5 MoE GGUF validation failed: {error}"))
+        })?);
+        let tokenizer = TokenizerFrontendV1::from_qwen35_moe_gguf(&source).map_err(|error| {
+            BackendErrorV1::new(format!("MoE tokenizer construction failed: {error}"))
         })?;
-        let seed_graph = build_qwen35_moe_execution_graph(&artifact, &plan, 1, 1)
-            .map_err(|error| BackendErrorV1::new(format!("MoE resident graph failed: {error}")))?;
+        let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_gguf(&source)
+            .map_err(|error| BackendErrorV1::new(format!("MoE chat renderer failed: {error}")))?;
+        let plan = build_gguf_qwen35_moe_weight_load_plan(&source).map_err(|error| {
+            BackendErrorV1::new(format!("MoE GGUF load plan validation failed: {error}"))
+        })?;
+        let seed_graph =
+            build_qwen35_gguf_moe_execution_graph(&source, &plan, 1, 1).map_err(|error| {
+                BackendErrorV1::new(format!("MoE GGUF resident graph failed: {error}"))
+            })?;
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
         let session = backend
@@ -492,20 +354,20 @@ impl QwenChatBackendV1 {
                 )?,
             )
             .map_err(|error| BackendErrorV1::new(format!("HIP session failed: {error}")))?;
-        let resident = QwenResidentModel::new_moe(
+        let resident = QwenResidentModel::new_gguf_moe(
             Arc::clone(&session),
             seed_graph,
             plan.clone(),
-            Arc::clone(&artifact),
+            Arc::clone(&source),
             config.completion_timeout,
         )
-        .map_err(|error| BackendErrorV1::new(format!("MoE resident load failed: {error}")))?;
+        .map_err(|error| BackendErrorV1::new(format!("MoE GGUF resident load failed: {error}")))?;
         let ready = session.memory_snapshot();
-        require_clean_request_memory(ready, "MoE model-ready")?;
+        require_clean_request_memory(ready, "MoE GGUF model-ready")?;
         let model_ready_current_bytes = ready.model_resident().current_bytes();
         if model_ready_current_bytes == 0 || ready.current_bytes() != model_ready_current_bytes {
             return Err(BackendErrorV1::new(
-                "MoE model-ready accounting is not resident-only",
+                "MoE GGUF model-ready accounting is not resident-only",
             ));
         }
         let identity = BackendIdentityV1 {
@@ -519,7 +381,8 @@ impl QwenChatBackendV1 {
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
                 lock: None,
-                moe_artifact: Some(artifact),
+                moe_artifact: None,
+                gguf_moe: Some(source),
                 stop_policy: qwen35_moe_generation_stop_policy(),
                 tokenizer,
                 renderer,
@@ -534,6 +397,7 @@ impl QwenChatBackendV1 {
                 nvfp4_sidecar: None,
                 fp8_provider: Some("ocp-mxfp4-w4a4-mixed".to_owned()),
                 cache: None,
+                gguf_source: None,
                 vision_manifest: None,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
@@ -634,51 +498,34 @@ impl QwenChatBackendV1 {
 impl Gemma4ChatBackendV1 {
     pub fn open(config: Gemma4BackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
-        let lock = match read_reviewed_model_lock(&config.lock_path).map_err(|error| {
-            BackendErrorV1::new(format!("model lock validation failed: {error}"))
-        })? {
+        let derived = read_derived_gguf_lock(&config.derived_lock_path).map_err(|error| {
+            BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
+        })?;
+        let lock = match builtin_reviewed_model_lock(&derived.source_lock_fingerprints).map_err(
+            |error| BackendErrorV1::new(format!("built-in model lock resolution failed: {error}")),
+        )? {
             ReviewedModelLock::Gemma4(lock) => lock,
             ReviewedModelLock::Qwen35(_) => {
                 return Err(BackendErrorV1::new(
-                    "Gemma backend requires a reviewed Gemma 4 lock",
+                    "Gemma backend requires a derived GGUF for a reviewed Gemma 4 model",
                 ));
             }
         };
-        let source = match lock.verify_cache(&config.cache_path) {
-            Ok(cache) => GemmaArtifactSourceV1::Bf16(cache),
-            Err(_) => GemmaArtifactSourceV1::Quantized(Arc::new(
-                verify_unsloth_gemma4_nvfp4(&config.cache_path).map_err(|error| {
-                    BackendErrorV1::new(format!("model artifact verification failed: {error}"))
-                })?,
-            )),
-        };
-        let quantized = matches!(&source, GemmaArtifactSourceV1::Quantized(_));
-        let tokenizer = match &source {
-            GemmaArtifactSourceV1::Bf16(cache) => {
-                TokenizerFrontendV1::from_gemma4_verified_cache(&lock, cache)
-            }
-            GemmaArtifactSourceV1::Quantized(artifact) => {
-                TokenizerFrontendV1::from_gemma4_quantized_model(&lock, artifact)
-            }
-        }
-        .map_err(|error| {
-            BackendErrorV1::new(format!(
-                "verified Gemma tokenizer construction failed: {error}"
-            ))
-        })?;
+        let verified = verify_derived_gguf(derived, &config.gguf_path)
+            .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
+        let (source, plan) =
+            build_verified_gguf_gemma_weight_load_plan(&lock, verified).map_err(|error| {
+                BackendErrorV1::new(format!("GGUF Gemma load plan failed: {error}"))
+            })?;
+        let source = Arc::new(source);
+        let tokenizer =
+            TokenizerFrontendV1::from_gemma4_gguf(&lock, source.gguf()).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "verified Gemma tokenizer construction failed: {error}"
+                ))
+            })?;
         let stop_policy = gemma4_generation_stop_policy(&lock).map_err(|error| {
             BackendErrorV1::new(format!("Gemma stop policy construction failed: {error}"))
-        })?;
-        let plan = match &source {
-            GemmaArtifactSourceV1::Bf16(cache) => {
-                build_verified_gemma4_weight_load_plan(&lock, cache)
-            }
-            GemmaArtifactSourceV1::Quantized(artifact) => {
-                build_unsloth_gemma4_nvfp4_weight_load_plan(&lock, artifact)
-            }
-        }
-        .map_err(|error| {
-            BackendErrorV1::new(format!("verified Gemma load plan failed: {error}"))
         })?;
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
@@ -689,22 +536,13 @@ impl Gemma4ChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("exact HIP execution session failed: {error}"))
             })?;
-        let resident = match &source {
-            GemmaArtifactSourceV1::Bf16(cache) => Gemma4ResidentModel::new(
-                Arc::clone(&session),
-                lock.clone(),
-                plan.clone(),
-                cache,
-                config.completion_timeout,
-            ),
-            GemmaArtifactSourceV1::Quantized(artifact) => Gemma4ResidentModel::new_quantized(
-                Arc::clone(&session),
-                lock.clone(),
-                plan.clone(),
-                Arc::clone(artifact),
-                config.completion_timeout,
-            ),
-        }
+        let resident = Gemma4ResidentModel::new_gguf_quantized(
+            Arc::clone(&session),
+            lock.clone(),
+            plan.clone(),
+            source,
+            config.completion_timeout,
+        )
         .map_err(|error| BackendErrorV1::new(format!("resident model load failed: {error}")))?;
         let ready = session.memory_snapshot();
         require_clean_request_memory(ready, "model-ready")?;
@@ -732,16 +570,8 @@ impl Gemma4ChatBackendV1 {
                 session,
                 target: config.target,
                 model_ready_current_bytes,
-                weight_encoding: if quantized {
-                    "mixed-nvfp4-w4a4-fp8-w8a8".to_owned()
-                } else {
-                    "bf16".to_owned()
-                },
-                kv_bytes_per_token: if quantized {
-                    GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN
-                } else {
-                    GEMMA4_KV_BYTES_PER_TOKEN
-                },
+                weight_encoding: "mixed-nvfp4-w4a4-fp8-w8a8".to_owned(),
+                kv_bytes_per_token: GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -884,7 +714,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let multimodal_prompt = if processed_images.is_empty() {
             None
         } else {
-            if state.moe_artifact.is_some() {
+            if state.moe_artifact.is_some() || state.gguf_moe.is_some() {
                 return Err(BackendErrorV1::new(
                     "Qwen3.5 MoE production path is text-only",
                 ));
@@ -971,6 +801,13 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         };
         let graph = if let Some(artifact) = &state.moe_artifact {
             build_qwen35_moe_execution_graph(artifact, &state.plan, prompt_tokens, state_capacity)
+        } else if let Some(source) = &state.gguf_moe {
+            build_qwen35_gguf_moe_execution_graph(
+                source,
+                &state.plan,
+                prompt_tokens,
+                state_capacity,
+            )
         } else if multimodal_prompt.is_some() {
             build_qwen35_multimodal_graph(
                 state.lock.as_ref().expect("dense Qwen lock"),
@@ -985,6 +822,20 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 nvfp4_sidecar,
                 prompt_tokens,
                 state_capacity,
+            )
+        } else if let Some(source) = state
+            .gguf_source
+            .as_ref()
+            .filter(|source| source.has_fp8_recipe())
+        {
+            build_qwen35_gguf_fp8_graph(
+                state.lock.as_ref().expect("dense Qwen lock"),
+                &state.plan,
+                source,
+                prompt_tokens,
+                state_capacity,
+                sllm_core::DType::F8E4M3Fn,
+                sllm_core::KvCacheEncoding::Fp16,
             )
         } else {
             match (&state.sidecar, state.fp8_provider.as_deref()) {
