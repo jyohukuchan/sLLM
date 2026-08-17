@@ -1,6 +1,6 @@
 # Phase 20: GGUF unification
 
-> 状態: active（P20-A6互換性監査で再開、2026-08-17）
+> 状態: completed（P20-A6互換性監査を完了・archive、2026-08-17）
 > 作成日: 2026-08-17
 
 ## 目的
@@ -98,17 +98,31 @@ tokenizer、vocabulary、chat template、model metadata、tensor recipeととも
 
 ## P20-A1〜A6完了証拠
 
-- `ded2264035b8138da581773e42f37d11e3693fe1`にbounded reader、deterministic writer、FP8 extension、4 converter、
-  derived lock、runtime lowering、GGUF-only CLI/serverを固定した。llama.cpp codeのimportはなく、A0で固定したsourceを参照した。
-- final BF16/FP8/NVFP4/MXFP4 GGUFは順に9,343,583,840 / 5,779,142,624 / 9,337,229,760 /
-  24,617,123,424 byte。SHA-256は`50582d6c...9ca3`、`1a9db28b...74b5`、`4e0410c6...2fb5`、
-  `44022302...1fce`で、全derived lockがconverter commit `ded22640...3fe1`を保持する。
+- `ded2264035b8138da581773e42f37d11e3693fe1`で初期実装を固定し、完了監査のfindingを
+  `1189a3e22a135a9bc547372fdebf3b22e0ce6641`と
+  `bc09604018da08434fc6e42f94d7397e21c22fc8`で修正した。GGUF tensor tableをpinned
+  `GGML_MAX_DIMS=4`へ制限し、rank 5のvision shapeはversioned recipeから復元する。GGUF MTP/visionの公開runtime接続、
+  mRoPE I32/UINT32境界、旧help表記もcloseした。llama.cpp codeのimportはなく、A0で固定したsourceを参照した。
+- final BF16/FP8/NVFP4/MXFP4 GGUFは順に9,343,583,936 / 5,779,142,720 / 9,337,229,760 /
+  24,617,123,520 byte。SHA-256は`c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675`、
+  `cf143f6c138f0e4a6372959bf348568159278202eca6081ce29346fdef1cfe0d`、
+  `4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5`、
+  `0fddb97b41868e72efa4aa9aaa690bf53599f785927975c4eacbfa32cebc9620`。derived lockはconverter commit
+  `1189a3e22a135a9bc547372fdebf3b22e0ce6641`を保持する。
+- pinned llama.cppのPython `GGUFReader`/`gguf_dump --no-tensors --json`は4 artifactをすべてversion 3、extension 1、
+  max rank 4としてparseした。C++ semantic loaderはFP8 GGUFをallocation前に固定tensor-name limitで明示的に拒否し、
+  extensionを無視した実行や破損読出しへ進まなかった。
 - Qwen BF16の独立2回変換はbyte-identical。standard NVFP4/MXFP4 repackは独立decoderとexact byte/valueで一致し、
   FP8はI8 carrier + versioned bindingとして元payloadを保持した。
 - canonical R9700 `gfx1201`とV620 `gfx1030`でQwen BF16、Gemma NVFP4 mixed、Qwen MoE MXFP4のGGUF/source top-1が一致。
-  R9700ではQwen FP8もPASSした。全caseはHIP-only、fallbackなし、cleanup 0。R9700 MoE serverのmodels/chat/shutdownもPASSした。
-- host回帰はcore 173、GGUF contract 11、CLI 24、server 27 testをfailed/skipped 0でPASSした。4 final GGUFの
-  `verify-model --gguf ... --derived-lock ...`もPASSし、旧公開引数はparserで拒否する。
+  再生成したMoEは両targetでtoken 90700、774 kernel dispatchをPASSし、R9700の再生成FP8もtoken 90700をPASSした。
+  Qwen GGUF visionは画像1枚、233-token prefillを両targetでPASSし、R9700のGGUF MTPとOpenAI server lifecycleもPASSした。
+  全caseはHIP-only、fallbackなし、cleanup 0。
+- A5のQwen BF16固定laneは各targetで3 warmup + 10 measuredを完走した。R9700 / V620のloadは10.654 / 10.331 s、
+  resident 8,411,592,192 byte、peak 8,512,933,508 byte、median TTFT 46.653 / 184.143 ms、median TPOT
+  26.689 / 29.685 ms。modelは1回だけloadし、13 sampleとcorrectness controlで再利用した。
+- host回帰はcore 174、GGUF contract 11、CLI 24、server 27 testをfailed/skipped 0でPASSした。4 final GGUFの
+  `verify-model --gguf ... --derived-lock ...`もPASSし、旧公開引数はparserで拒否しhelpにも表示しない。
 - model、GGUF binary、raw trace、生成artifactはrepositoryへ追加していない。詳細値は対応履歴を正とする。
 
 ## 停止・再計画条件

@@ -352,7 +352,10 @@ single-process profileとなった。ただしR9700をsLLM開発から占有す�
 Phase 20では同じcanonical V620 `gfx1030`とR9700 `gfx1201`で、単一GGUFからQwen3.5-4B BF16、
 Gemma 4-12B mixed NVFP4、Qwen3.5-35B-A3B MXFP4をfull-model実行し、source importerと同じtop-1、HIP-only、
 fallbackなし、cleanup 0を確認した。R9700ではQwen FP8 GGUFも同条件をPASSした。MoEのOpenAI serverはR9700で
-model list、chat completion、graceful shutdownをPASSした。この証拠は固定artifact、single request、実行済みtargetに限定する。
+model list、chat completion、graceful shutdownをPASSした。max-rank-4再生成後もMoEを両target、FP8をR9700で再実行し、
+Qwen BF16 visionの233-token prefillを両target、GGUF MTPとQwen OpenAI serverをR9700でPASSした。Qwen BF16の
+3 warmup + 10 measured固定laneはR9700/V620でload 10.654/10.331 s、median TTFT 46.653/184.143 ms、
+median TPOT 26.689/29.685 msだった。この証拠は固定artifact、single request、実行済みtargetに限定する。
 
 ## 将来AMD候補
 

@@ -173,6 +173,9 @@ encoding、mixed-precision recipe、providerをloaderが自動解決し、低bit
 Phase 20完了後の公開CLI/serverは`--gguf PATH --derived-lock PATH`だけをmodel入力として受け付ける。
 旧`--lock`/`--cache`、量子化sidecar、provider overrideは公開parserから削除した。safetensorsとsidecarのreaderはconverter・
 開発adapterに限定し、GGUFのhash/schema不一致、未対応encoding、memory/shape contract不成立はfallbackせずerrorにする。
+Qwen dense GGUFはtextだけでなく、同じverified descriptorからvision tensorとMTP componentをscope付きでlowerする。
+multimodal requestはrank-4物理tableから復元したlogical shapeでvision graphを構築し、text-only greedy `gfx1201`は同じGGUF内の
+MTP planをidentity/digest検証して内部providerへ渡す。
 
 内部状態は一つの序列へ潰さず、少なくとも次を独立に記録する。
 

@@ -17,6 +17,9 @@ frontend files remain conversion inputs only.
 - GGUF version: `3`.
 - Byte order: little-endian for the initial Linux runtime.
 - Default and required Phase 20 tensor-data alignment: 32 bytes.
+- Tensor-table rank: at most 4, matching pinned `GGML_MAX_DIMS`. A source
+  tensor above rank 4 is flattened without changing its element count, and its
+  original shape is carried by the versioned recipe described below.
 - Distribution shape: one file. Split GGUF is outside the initial contract.
 - Initial standard architecture values: `qwen35`, `qwen35moe`, and `gemma4`.
 - Standard metadata keys are used wherever the pinned source defines the same
@@ -48,6 +51,15 @@ standard I8 carrier tensors and binds them to scale tensors with versioned
 `sllm.fp8.*` metadata. Readers unaware of the extension can still inspect the
 GGUF structure; sLLM rejects missing, unknown, or ambiguous extension bindings.
 No dequantized BF16, F16, or Q8_0 substitute is produced.
+
+The same version-1 `sllm.tensor_recipe` contains a `logical_shapes` table for
+source tensors whose rank exceeds the standard four-dimensional tensor table.
+Each entry names one physical tensor and its original logical shape. The reader
+requires rank greater than 4, exact element-count preservation, one-to-one
+names, a matching recipe digest, and no unused override. The Qwen vision patch
+weight `[1024,3,2,16,16]` is therefore stored physically as
+`[16,16,6,1024]` in GGUF dimension order and restored to the source logical
+shape before graph planning.
 
 ## Container-neutral lowering
 
@@ -92,9 +104,10 @@ or tensor reads and does not reopen the path after verification.
 Before allocation or GPU work, the reader rejects unsupported version or byte
 order, duplicate metadata or tensor names, unknown architecture/type/extension,
 integer overflow, invalid dimension/block multiple, range overlap, range beyond
-EOF, bad alignment, truncated string/array/table, and incomplete or ambiguous
-recipe bindings. A GGUF failure never falls back to an unverified safetensors or
-sidecar path.
+EOF, bad alignment, rank above 4, truncated string/array/table, and incomplete
+or ambiguous recipe or logical-shape bindings. The writer applies the same rank
+limit. A GGUF failure never falls back to an unverified safetensors or sidecar
+path.
 
 ## Implemented boundary
 

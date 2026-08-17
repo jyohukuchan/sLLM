@@ -719,7 +719,7 @@ candidateを再確認した。
 - Phase 19はMoE vision/MTP、batching、expert/tensor parallel、CPU offload、GGUF writer/readerを含まない。
 - 詳細は[Phase 19 archive](archive/2026/08/11-20/phase19-qwen35-moe.md)を正とする。
 
-### Phase 20: GGUF統一（互換性監査で再開）
+### Phase 20: GGUF統一（完了）
 
 - safetensorsと量子化sidecarを変換・開発入力へ移し、ユーザー向けのモデル入力と配布artifactを
   BF16、FP8、NVFP4、MXFP4で共通の単一GGUFへ統一する。
@@ -730,8 +730,10 @@ candidateを再確認した。
   公開parserから削除し、source importerはconverter・開発用に限定した。
 - canonical V620 `gfx1030`とR9700 `gfx1201`でQwen BF16、Gemma mixed NVFP4、Qwen MoE MXFP4をsource経路と同じtop-1へ照合し、
   R9700ではQwen FP8も実行した。全実行はHIP-only、fallbackなし、cleanup 0で、MoE OpenAI server lifecycleもPASSした。
-- 完了監査でrank-5 tensorを出力していたstandard GGUF互換性、GGUF公開経路のQwen vision/MTP、A5 timing evidenceの不足を確認し、
-  closeoutを再開した。詳細は[Phase 20 active plan](active/2026/08/11-20/phase20-gguf-unification.md)を正とする。
+- 完了監査で検出したrank-5 tensor、GGUF公開経路のQwen vision/MTP、A5 timing evidence、旧help表記を修正した。
+  pinned standard readerで4 artifactをmax rank 4としてparseし、canonical V620/R9700でvision、MTP、再生成FP8/MoEと
+  3 warmup + 10 measured timing laneを確認した。詳細は
+  [Phase 20 archive](archive/2026/08/11-20/phase20-gguf-unification.md)を正とする。
 
 ### Phase X: Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元（完了）
 
@@ -769,10 +771,10 @@ candidateを再確認した。
 | 完了 | Phase 17 | Qwen3.5 MTP component、vision、multimodal CLI/API | MTP性能統合は未完、vision実機PASS |
 | 完了 | Phase 18 | MTP逐次承認、target-only数値同一、最低限の高速化 | R9700でexact MTPを内部採用、V620はtarget-only維持 |
 | 完了 | Phase 19 | Qwen3.5-35B-A3B MoE text-only production path | R9700/V620の通常CLI/APIへ統合済み |
-| 1 | Phase 20 | GGUF統一のみ | hobby user向けmodel inputと配布artifactを単一containerに固定する |
+| 完了 | Phase 20 | GGUF統一のみ | hobby user向けmodel inputと配布artifactを単一containerに固定した |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
-Phase 19/20の後または別の依存関係で残る将来項目はrequest batching、chunked prefill、KV/会話/model lockの
+Phase 20の完了後または別の依存関係で残る将来項目はrequest batching、chunked prefill、KV/会話/model lockの
 簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
 将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。

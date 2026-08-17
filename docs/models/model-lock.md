@@ -180,6 +180,8 @@ source safetensorsと量子化sidecarを最終ユーザー形式として残し�
 Phase 20では`derived-gguf-lock-v1`を実装した。各outputは全source lock fingerprint、converter repository/full commit、
 完全な引数とeffective config、environment、GGUFのsize/SHA-256、metadata digest、tensor catalog digestを含める。
 container digestは変わるがsemantic identityは維持し、runtimeは検証済みGGUFを同じopen file descriptorから読む。
+GGUF tensor tableはstandard readerに合わせてrank 4以下とし、rank 5以上のsource logical shapeはdigest対象のversioned
+`sllm.tensor_recipe.logical_shapes`へ一対一で固定する。物理shapeとlogical shapeのelement count不一致はload前に拒否する。
 format、encoding、handoffの正本は[GGUF format contract](../formats/gguf.md)と
 [P20-A0 manifest](../../ci/matrix/phase20-gguf-a0-v1.json)とする。公開runtimeはderived lockのsource fingerprintをbuild内の
 reviewed lockへ解決するため、変換元lockを別のユーザー入力として要求しない。

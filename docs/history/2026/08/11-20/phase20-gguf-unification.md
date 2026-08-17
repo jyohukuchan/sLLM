@@ -47,4 +47,40 @@
   verified descriptor、graph schema、built-in source identity、公開parserを再確認し、未解決のcorrectness/security findingはない。
   llama.cppはA0のinspection sourceだけで、code import/adaptationはない。
 
+## 2026-08-17: P20-A6 compatibility re-audit and final closeout
+
+- closeout後の監査で、Qwen vision patch weightのrank 5がpinned llama.cppの`GGML_MAX_DIMS=4`を超えること、GGUF公開経路が
+  vision request graphとMTP planを接続していないこと、A5のload/resident/peak/TTFT/TPOT値が未記録なことをfindingとして再開した。
+  さらに公開helpに削除済み`--fp8-provider`の1行が残っていた。
+- converter/writer/readerをmax rank 4へ固定し、rank 5以上はelement countを保つrank-4物理shapeとversion-1
+  `sllm.tensor_recipe.logical_shapes`へ変換した。Qwen vision patch `[1024,3,2,16,16]`はGGUF dimension
+  `[16,16,6,1024]`として格納し、runtime planで元shapeへ復元する。missing/extra/ambiguous、rank 4以下への不要override、
+  element-count driftをallocation前に拒否する。
+- 4 artifactをconverter commit `1189a3e22a135a9bc547372fdebf3b22e0ce6641`で再生成した。BF16は
+  9,343,583,936 byte / `c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675`、FP8は
+  5,779,142,720 byte / `cf143f6c138f0e4a6372959bf348568159278202eca6081ce29346fdef1cfe0d`、Gemma NVFP4は
+  9,337,229,760 byte / `4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5`、MoE MXFP4は
+  24,617,123,520 byte / `0fddb97b41868e72efa4aa9aaa690bf53599f785927975c4eacbfa32cebc9620`となった。
+- pinned llama.cpp `3cb7ffb1...c77ad934a70`のPython `GGUFReader`と`gguf_dump --no-tensors --json`は4 fileを
+  version 3、extension 1、max rank 4としてparseした。C++ semantic loaderはFP8 fileをallocation前の固定tensor-name
+  limitで明示的に拒否し、未知extensionを無視した実行や破損読出しへ進まないことも確認した。
+- GGUF plan schemaをMTP graphのidentity/digest検査へ追加し、CLI/serverからGGUF MTP residentを接続した。R9700 text greedyは
+  token 90700、492 kernel dispatch、HIP-only、fallbackなし、cleanup 0でPASSした。OpenAI serverはmodel-ready
+  9,924,199,936 byte、`/v1/models`、1-token chat、shutdown後のcurrent/request/workspace/retryable/durableが全0だった。
+- GGUF vision request graphとGGUF vision resident/manifest/prompt assemblyを接続した。実画像1枚の233-token prefillはR9700で
+  token 760、493 kernel dispatch、10.599 s、process max RSS 885,180 KiB、V620でも同token/dispatch、13.157 s、
+  max RSS 600,516 KiBとなり、両方HIP-only、fallbackなし、cleanup 0だった。途中で露見したmRoPE上限の
+  `UINT32_MAX`→`int32_t`縮小比較は、I32 ABIで表現可能な全非負値を受理する境界へ修正しhost contract testを追加した。
+- 再生成FP8はR9700でtoken 90700、740 kernel dispatchをPASSした。再生成MoEはR9700/V620の双方でtoken 90700、
+  774 kernel dispatchをPASSした。Gemma NVFP4はbyte-identical SHAのため既存の両target source/GGUF照合を再利用した。
+- A5固定laneはQwen BF16、prompt 11、output 2、3 warmup + 10 measuredで実施した。R9700はload
+  10,653,616,324 ns、median TTFT 46,653,136 ns、median TPOT 26,689,093 ns、V620はload
+  10,331,200,235 ns、median TTFT 184,142,667 ns、median TPOT 29,684,885 ns。両targetのresidentは
+  8,411,592,192 byte、peakは8,512,933,508 byteで、1 loadを13 sampleとuntimed correctness controlで再利用し、
+  HIP-only、fallbackなし、全request cleanupとmodel drop後allocation 0を確認した。
+- `bc09604018da08434fc6e42f94d7397e21c22fc8`でGGUF MTP/vision、mRoPE境界、旧help表記を固定した。最終host回帰は
+  core 174、GGUF contract 11、CLI 24、server 27 testをPASSした。native host fault binaryでは新mRoPE testを先行実行して
+  PASSした。full suiteは本変更と独立したmatmul kernel-id expectation 4 / actual 12で後続停止したため、その結果を
+  Phase 20全体のPASSへ数えず、実GPUの両target visionでも数値経路を検証した。
+
 [対応する計画](../../../../plans/archive/2026/08/11-20/phase20-gguf-unification.md)

@@ -149,8 +149,11 @@ CLI/OpenAI non-stream/SSE/cancel/recovery/seed/shutdownも通常経路でHIP-onl
 
 Phase 20では同じcanonical 2 targetで単一GGUFのQwen BF16、Gemma mixed NVFP4、Qwen MoE MXFP4をsource importerと
 同じtop-1へ照合し、R9700ではQwen FP8 GGUFも実行した。全caseはexact target、HIP-only、fallbackなし、cleanup 0をPASSした。
-R9700のMoE GGUF serverは`/v1/models`、1-token chat completion、graceful shutdownをPASSした。この証拠はcontainer/runtime
-統合の正しさに限定し、性能倍率、別artifact、別target、multi-GPUを主張しない。
+互換性再監査後のmax-rank-4 artifactでも、再生成MoEを両target、再生成FP8をR9700で再実行した。Qwen BF16 visionは画像1枚、
+233-token prefillを両targetでPASSし、R9700ではGGUF MTPとQwen GGUF serverの`/v1/models`、1-token chat、graceful
+shutdownもPASSした。Qwen BF16固定laneのR9700/V620 median TTFTは46.653/184.143 ms、median TPOTは
+26.689/29.685 msである。この証拠は固定artifact、single request、実行済みtargetへ限定し、性能倍率、別artifact、multi-GPUを
+主張しない。
 
 Phase Xでは同じV620 `gfx1030`とR9700 `gfx1201`を外部llama.cpp local-subagent runtimeの比較対象にし、
 Qwen3.8-27B Q5_K_XL、Q5_1 KV、context 262,144でHIP/Vulkanを実行した。HIP buildで
