@@ -363,6 +363,9 @@
    - Phase 20はGGUF converter、loader/runtime、metadata/tensor type、model lock、移行・互換性のcloseoutだけを扱う。
      request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20の範囲に含めない。
 
+数値roadmapから独立した`Phase X`として、Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元を完了した。
+Phase XはPhase 20の状態、完了条件、実行順を変更しない。
+
 Phase番号を割り当てない将来タスクとして、READMEの整備と人間による発表がある。発表時期は未定であり、
 Phase 19/20の完了条件、直後の作業、または番号付きPhaseとして割り当てない。
 
@@ -722,6 +725,32 @@ candidateを再確認した。
   BF16、FP8、NVFP4、MXFP4で共通の単一GGUFへ統一する。
 - Phase 20の範囲はGGUF converter、loader/runtime、standard/extension metadataとtensor type、model lock、
   移行・互換性の検証とcloseoutだけとする。その他の残機能をPhase 20へ混ぜない。
+### Phase X: Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元（完了）
+
+- Qwen3.8-27B/Qwen3.5 architectureで観測したllama.cpp HIPの長prompt prefill崩れと低decode性能を、
+  GDN prefill、GDN decode、MTP、KV/context memory、Harness/API overheadへ分解した。
+- 根因はGDNではなく、HIP buildの`GGML_CUDA_FA_ALL_QUANTS=OFF`によりQ5_1 K/VがFlash Attentionから外れたことだった。
+  `ON`のfresh buildで9,435-token promptのprefill/decode中央値はV620が340.80/33.42、R9700が
+  779.06/41.93 tok/sとなり、旧HIP build比5.59x/4.91x、11.21x/3.35xへ改善した。
+- Qwen exact shapeのQ5_1 Flash-Attention numerical testを`gfx1030`/`gfx1201`で各18/18 PASSし、CPU/backend fallbackと
+  GTT spillがないことを確認した。当時のspare V620 local subagentを修正buildへ切り替え、後続決定で同buildをTP2へ拡張した。
+- local subagentの現行起動・Pi接続・main agent利用契約は
+  [Local Qwen3.8 subagent](../development/local-qwen-subagent.md)を正とする。2026-08-17の追加決定により、現行運用は
+  V620×2 tensor split `1,1`、parallel 2、non-unified KV、actual context 491,520/slot、983,040 total、全model layer
+  GPU offload、Q5_1 target/draft KV、MTP幅3である。単一V620構成へfallbackしない。
+- boundedな委譲ではlocal Qwen subagentを優先し、Piまたは互換Harness processを合計2つまで同時実行する。Qwenが利用不能・不適切、2 slotが
+  使用中、または追加並列性が有用なら、Qwen待ちで直列化せずnative Codex subagentを使用する。subagent利用自体は従来どおり
+  完了条件ではない。main taskがsLLM GPU作業でいずれかのV620を必要とする間はQwenを利用不能として扱い、idle serviceを
+  停止してpairを解放し、Codex subagentを使用する。
+- post-closeout multi-GPU比較では独立V620 server 2基が最大aggregate throughputだったが、単一endpointで2 subagentと
+  約0.5M context/slotを両立する運用要件を優先し、V620×2 tensorを524,288から491,520/slotへ縮小して通常起動へ昇格した。
+  R9700+V620×2 layer split `5,2,2`はR9700を占有するため非運用のままとする。比較詳細は [multi-GPU selection
+  summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)を正とする。
+- VulkanはHIP原因を見分ける比較controlだけであり、sLLMの対応backendへ追加しない。Q5_K_XL/Q5_1も
+  llama.cpp診断条件に限定し、sLLMの一般INT量子化support方針を変更しない。
+- sLLMはFP16 KVを使用し、`linear_attention.gdn.v1`は原因でなかったためsource変更と新規provenance eventは不要と判断した。
+  Phase Xは数値roadmapから独立したまま完了し、Phase 20のGGUF統一条件を変更しない。詳細は
+  [Phase X archive](archive/2026/08/11-20/phase-x-qwen35-gdn-amd-performance.md)を正とする。
 
 ## 残タスクと改訂した実行順序
 
@@ -733,16 +762,104 @@ candidateを再確認した。
 | 完了 | Phase 18 | MTP逐次承認、target-only数値同一、最低限の高速化 | R9700でexact MTPを内部採用、V620はtarget-only維持 |
 | 完了 | Phase 19 | Qwen3.5-35B-A3B MoE text-only production path | R9700/V620の通常CLI/APIへ統合済み |
 | 1 | Phase 20 | GGUF統一のみ | hobby user向けmodel inputと配布artifactを単一containerに固定する |
+| 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 19/20の後または別の依存関係で残る将来項目はrequest batching、chunked prefill、KV/会話/model lockの
 簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
 将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。
 
+### Phase未割当の性能最適化backlog
+
+- 2026-08-17のcurrent source、直近full-model profile、性能historyを横断して確認できた明確な最適化余地を、
+  Phase Xへ切り出したQwen3.5系GDN/llama.cpp AMD調査を除き、この節でPhase未割当として管理する。このinventoryは
+  Phase 20のGGUF限定scopeを拡張せず、個別taskの受入条件、実装順、対象targetは着手時のfresh profileで固定する。
+  一般論だけの候補をhard gateにしない。
+- runtime dispatch・同期:
+  - 現行native runtimeはsemantic opごとにcompletion owner、HIP completion event、timing event、registry handleを
+    生成し、同一streamのsegment末尾で各ownerを個別queryする。通常実行はsegment単位のcompletion/eventへ集約し、
+    per-op timingはprofile/evidence時だけ有効化する。event/completion pool、registry lock削減、parameter更新可能な
+    native command-listまたはproduction graph replayを比較する。requestごとの素朴なgraph instantiateは再導入しない。
+  - decodeのtoken IDとpositionを別々の同期付きH2Dにせず、一つのstaging transferまたはdevice-side position生成へ
+    まとめる。terminal argmax完了と4-byte token readbackも一つのstream boundaryへ含める。
+  - full-attention layerごとのKV append host waitは、accepted stateだけを公開するtransaction contractを維持したまま、
+    stream-ordered publicationまたはstaged stateで集約できるか測る。
+- Dense BF16 execution:
+  - 直近profileでdecode GPU時間の主因だったmemory-bound M=1 matvecを継続対象とする。Q/K/V projection、gate/up、
+    RMSNorm producer、vocabulary projectionの共有load・融合、target別vector幅、weight prefetchを比較する。
+  - 現行provider選択は主にtargetとMだけを使うため、`target/M/K/N`とprojection roleを含むshape-aware provider table、
+    offlineまたはstartup tuning結果の再利用、V620/R9700/gfx942別のMMVF・custom GEMM・hipBLAS選択を検討する。
+  - production graph/command-list、gate/up+SiLU等のfusionは、attentionが支配的でない短contextの共通残差として扱う。
+- FP8、NVFP4、MXFP4 model path:
+  - Q/K/Vやgate/up等、同じBF16 activationを消費する複数linear間でdynamic FP8/NVFP4/MXFP4 activationとscaleを
+    共有する。RMSNorm等のproducerからの直接量子化、quantize+matmul融合、M=1専用quantizerも比較する。
+  - FP8 hipBLASLtはzero-workspace・単一heuristicに限定せず、有限workspace、複数solutionの実測、shape/target別
+    algorithm cache、queue/stream別handleを比較する。gfx942 FNUZは旧activation quantizer固定を解消できるか実機で測る。
+  - W4A4 quantizerはblock 16/32当たりのthread利用率、packed load/store、scale reductionを改善する。decodeとprefillで
+    実質同じscalar bodyを使う経路を分離し、prefillのM/N/K tile共有、利用可能なtargetのnative matrix path、
+    native pathを持たないtargetのpacked-dequant tiled GEMMを実装候補とする。
+  - low-bit prepared planごとの`hipMalloc` workspaceをrequest arenaへ集約し、同時実行しないlinear間で再利用する。
+- sparse MoE:
+  - 現行MXFP4 routed expertとBF16 shared expertのscalar K loopを、expertごとにtokenを実際にbatch化するgrouped GEMM、
+    target別packed/native matrix providerへ置き換える。現行のexpert別groupingはblock順序を整えるだけであり、
+    weight tileを複数tokenで共有するGEMMにはなっていない。
+  - routed gate/up、SiLU、intermediate quantization、down、routing weight、shared expert combineの境界をprofileし、
+    数値順序を保てる範囲でfusionとweight/activation tile再利用を行う。shared expertは既存BF16 providerを再利用する。
+  - routerのstable top-8、softmax、expert groupingはthread-0/全pair再走査からwave-parallel reduction、stable selection、
+    prefix-sum/compactionへ移す。router projection、status初期化、top-k/group metadata生成の融合も候補とする。
+- exact MTP:
+  - draft argmaxしか使わない経路のfull-vocabulary logits D2Hを除去し、target/MTP hidden stateをhost `Vec`経由で
+    D2H/H2Dせずdevice residentのまま接続する。MTP prompt prefillのtoken-by-token host loopもdevice側でまとめる。
+  - draft、serial-equivalent verify、逐次acceptをdevice-side orchestrationへ寄せ、reject時のaccepted-prefix replayを
+    staged/COW state commitへ置き換えられるか検討する。通常逐次生成とのtoken、logits、KV、sampling結果の一致は維持する。
+  - overhead削減後にacceptance率とtarget別profileからdraft幅を自動選択する。R9700の幅拡大、量子化path、sampled path、
+    V620再評価は同じ内部UXで行い、現行の遅い幅を無条件に有効化しない。
+- sampling、frontend、service:
+  - non-greedy requestのfull-vocabulary BF16 logits D2H、CPU F32変換、全語彙penalty・sortをGPU samplingへ移し、
+    hostへは選択tokenだけを返す。CPU samplingを残す場合もcandidate buffer、token count、partial selectionを再利用する。
+  - schedulerの単一workerとgeneration全体を保持するbackend mutexをcontinuous batchingへ置き換え、decode batch、
+    chunked prefillとのinterleave、per-sequence state、queue/stream別library handleを設計する。
+  - bounded SSE event channelの`blocking_send`でGPU generationまで停止しないよう、boundedな内部ringとnetwork writerを
+    分離する。disconnect cancellation、backpressure上限、visible output順序は維持する。
+  - generationごとに全既出tokenを複製してprefix全体をdecodeし、全文snapshotを保持するhost O(n^2)経路を、
+    byte-fallbackを保つincremental decoderと短いrollback windowへ置き換える。
+- request state、memory、long context:
+  - requestごとのgraph再構築、dynamic tensor単位のdevice allocation、KV/GDN state、prepared cacheの作り直しを、
+    graph template cache、liveness arena、tensor alias、request owner/state pool、decode M=1 plan再利用へ移す。
+  - prefix token列、model lock fingerprint、KV encodingをkeyにしたprefix/KV cacheとvAttention page共有/COWを検討する。
+    KV、会話、model identityの簡易永続化は再起動後の再prefill削減にも利用する。
+  - chunked prefillは長promptのlatency/peak memoryとrequest間fairnessを改善し、現行matmul一dispatchのM上限
+    `65,536`を超える設定contextを実行可能にする境界として実装する。
+  - gfx942実機はVMM capabilityがtrueだったため、長い設定contextで全capacityを物理確保する
+    `contiguous-resident`固定と、virtual-contiguousまたは増分commit providerを再比較する。
+- model load、GGUF、vision:
+  - shard/artifact検証後の再読込とtensor/chunkごとの同期uploadを、mmap、並列hash、disk read/CPU変換/H2Dの
+    double buffering、複数transferの集約waitへ移す。検証済みidentity cacheは内容検証contractを弱めず利用する。
+  - GGUF converterは単一container化だけでなく、runtimeのrow-major/transposed packed weight、scale plane、MoE layer blobを
+    execution-readyに配置し、起動時repack、sidecar join、FNUZ等のtarget変換を減らせる余地を残す。ただしこの性能項目を
+    Phase 20の追加完了条件にはしない。
+  - visionはlazy residentのcold start、複数画像の逐次実行、vision embeddingのhost readback/text graph再uploadを対象に、
+    preload、image batch、device-to-device binding、image digest cache、greedy multimodalの不要logits readbackを検討する。
+- context・target依存の条件付き候補:
+  - 短contextではfull attentionは支配要因でない。long-context fresh profileで支配的になった場合だけ、full/sliding-window別
+    tiled online softmax、FlashAttention系provider、quantized KVのvectorized unpack/scale共有、GQA head間KV tile共有を扱う。
+  - gfx942はBF16で固定llama.cpp比の大きな差が残るため、実機再取得時にwave64 MMVF、launch replay、GEMM solution、
+    FNUZ quantizerを分離して再profileする。単一MI300X VMの結果を別CDNA SKUへ一般化しない。
+  - multi-GPU、expert/tensor/pipeline parallel、Infinity Fabric/RCCL/RDMAはcapacity・batch throughput候補とし、
+    単一requestやPCIe構成では通信費を含む実測後に採否を決める。
+- 現時点でそのまま再提案しない候補:
+  - V620の一般的なM>1 hipBLAS切替、R9700のtransposed GDN state、既存weight-only NVFP4 decodeの複数N列・
+    scale broadcast、V620で現状のままMTP幅2を有効化する案は既存実測で改善しなかったため再採用しない。
+  - 短contextでのfull attention/FA3-like最優先化とrequestごとのproduction HIP Graph instantiateも再採用しない。
+    前提となるprofileまたは実装構造が変わった場合だけ、新しいcandidateとして別に測定する。
+
 ## 現在の状態と次の作業
 
 - Phase 19のQwen3.5-35B-A3B MoE text-only production統合は完了した。次はPhase 20としてGGUF統一だけを行う。
   MTPの別model、request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20へ混ぜない。
+- Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元は数値roadmapから独立したPhase Xとして完了した。
+  Q5_1 HIP Flash Attentionをall-quant buildで有効化してlocal V620 subagentへ採用し、sLLM GDN source変更は不要と判断した。
+  GGUF統一の完了条件へ含めず、上記inventoryの残りはPhase未割当のbacklogとして維持する。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
   起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
 - 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 20へ割り当てた。現在のsafetensors direct loadと

@@ -1,0 +1,245 @@
+{
+  "schema_version": "phase-x-qwen38-v620-tp2-1m-summary-v1",
+  "state": "PASS_WITH_LIMITS",
+  "date": "2026-08-17",
+  "scope": "non-operational llama.cpp tensor-split capacity and short performance measurement on two local V620 GPUs",
+  "operational_configuration": false,
+  "user_directive": "Measure V620 x2 at a 1M-token context and record only the result; do not make it the normal startup configuration.",
+  "source": {
+    "llama_cpp_commit": "4df29be4f4c3673f428170fda944a5b19f743bb8",
+    "llama_cpp_build": 901,
+    "build_type": "Release",
+    "cmake": {
+      "GGML_HIP": true,
+      "GGML_HIP_GRAPHS": true,
+      "GGML_CUDA_FA": true,
+      "GGML_CUDA_FA_ALL_QUANTS": true
+    }
+  },
+  "model": {
+    "path": "/home/homelab1/datapool/ai_models/gguf/qwen3.8-27b-UD/Qwen3.8-27B-UD-Q5_K_XL.gguf",
+    "sha256": "176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab",
+    "architecture": "qwen35",
+    "parameters": 27320697856,
+    "native_context_tokens": 262144
+  },
+  "software": {
+    "os": "Ubuntu 24.04.4 LTS x86_64",
+    "kernel": "6.17.0-35-generic",
+    "rocm": "7.14.0",
+    "hip_runtime": "7.14.60850",
+    "compiler": "AMD clang 23.0.0git"
+  },
+  "hardware": [
+    {
+      "logical_device": 0,
+      "target": "gfx1030",
+      "product": "AMD Radeon Pro V620",
+      "role": "canonical",
+      "bdf": "0000:03:00.0",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "vram_total_bytes": 34342961152
+    },
+    {
+      "logical_device": 1,
+      "target": "gfx1030",
+      "product": "AMD Radeon Pro V620",
+      "role": "spare",
+      "bdf": "0000:43:00.0",
+      "gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+      "vram_total_bytes": 34342961152
+    }
+  ],
+  "topology": {
+    "link": "PCIe",
+    "hops": 2,
+    "weight": 40,
+    "peer_or_infinity_fabric_claim": false
+  },
+  "server": {
+    "actual_context_tokens": 1048576,
+    "actual_context_verified_with_props": true,
+    "parallel": 1,
+    "batch": 512,
+    "ubatch": 128,
+    "model_kv": "Q5_1",
+    "draft_kv": "Q5_1",
+    "mtp_width": 3,
+    "flash_attention": true,
+    "gpu_layers": "all",
+    "fit": false,
+    "split_mode": "tensor",
+    "tensor_split": [1, 1],
+    "main_gpu": 0,
+    "visible_gpu_uuids": [
+      "GPU-76a08c022586fed6",
+      "GPU-08b2ddcbd6e6b36c"
+    ],
+    "command_argument_template": [
+      "--model", "<model.path>",
+      "--ctx-size", "1048576",
+      "--override-kv", "qwen35.context_length=int:1048576",
+      "--fit", "off",
+      "--batch-size", "512",
+      "--ubatch-size", "128",
+      "--parallel", "1",
+      "--cache-type-k", "q5_1",
+      "--cache-type-v", "q5_1",
+      "--cache-type-k-draft", "q5_1",
+      "--cache-type-v-draft", "q5_1",
+      "--flash-attn", "on",
+      "--gpu-layers", "all",
+      "--split-mode", "tensor",
+      "--tensor-split", "1,1",
+      "--main-gpu", "0",
+      "--spec-type", "draft-mtp",
+      "--spec-draft-n-max", "3",
+      "--spec-draft-n-min", "1"
+    ]
+  },
+  "runtime_warnings": {
+    "internal_allreduce": "Initialization failed and llama.cpp used the meta-backend butterfly path.",
+    "sampling": "Backend sampling is unsupported with split-mode tensor; token sampling fell back to CPU.",
+    "model_compute_scope": "All model layers and target/draft contexts remained GPU-resident; the CPU warning applies to token sampling, not model-layer offload."
+  },
+  "protocol": {
+    "task": "Generate an appropriate Python implementation from a real Python source prompt.",
+    "prompt_source": "/home/homelab1/coding-local/sLLM/ci/tools/run_h3_public_runtime_compile.py",
+    "prompt_source_chars": 33900,
+    "rendered_prompt_chars": 34183,
+    "prompt_sha256": "40225ad16c22a83f4065c7e666b54c3b5ea48e5aa9959c2f3d5da30a8b46977f",
+    "prompt_tokens": 9435,
+    "max_visible_tokens": 128,
+    "temperature": 0,
+    "seed": 1234,
+    "prompt_cache": false,
+    "repetitions": "one warmup plus three measured"
+  },
+  "performance": {
+    "warmup": {
+      "prefill_tps": 416.8026742165601,
+      "prefill_ms": 22636.611,
+      "decode_tps": 48.90726912206831,
+      "decode_ms": 2596.751,
+      "visible_tokens": 128,
+      "wall_seconds": 25.280597110002418,
+      "draft_tokens": 110,
+      "accepted_draft_tokens": 90,
+      "mtp_acceptance": 0.8181818
+    },
+    "measured": [
+      {
+        "prefill_tps": 418.07741021183875,
+        "prefill_ms": 22567.591,
+        "decode_tps": 47.83402272078414,
+        "decode_ms": 2655.014,
+        "visible_tokens": 128,
+        "wall_seconds": 25.2481966330015,
+        "draft_tokens": 113,
+        "accepted_draft_tokens": 89,
+        "mtp_acceptance": 0.7876106
+      },
+      {
+        "prefill_tps": 416.7979421888223,
+        "prefill_ms": 22636.868,
+        "decode_tps": 48.02194943402162,
+        "decode_ms": 2644.624,
+        "visible_tokens": 128,
+        "wall_seconds": 25.306608912003867,
+        "draft_tokens": 113,
+        "accepted_draft_tokens": 89,
+        "mtp_acceptance": 0.7876106
+      },
+      {
+        "prefill_tps": 415.53535862375037,
+        "prefill_ms": 22705.649,
+        "decode_tps": 47.90245701886037,
+        "decode_ms": 2651.221,
+        "visible_tokens": 128,
+        "wall_seconds": 25.382052389002638,
+        "draft_tokens": 113,
+        "accepted_draft_tokens": 89,
+        "mtp_acceptance": 0.7876106
+      }
+    ],
+    "measured_mean": {
+      "prefill_tps": 416.8035703414705,
+      "decode_tps": 47.91947639122204,
+      "wall_seconds": 25.312285978002667
+    },
+    "measured_median": {
+      "prefill_tps": 416.7979421888223,
+      "decode_tps": 47.90245701886037,
+      "wall_seconds": 25.306608912003867
+    }
+  },
+  "memory": {
+    "source": "amdgpu sysfs mem_info_vram_used and mem_info_gtt_used",
+    "before_requests": [
+      {
+        "bdf": "0000:03:00.0",
+        "vram_used_bytes": 33217376256,
+        "gtt_used_bytes": 17133568
+      },
+      {
+        "bdf": "0000:43:00.0",
+        "vram_used_bytes": 33229271040,
+        "gtt_used_bytes": 23449600
+      }
+    ],
+    "observed_peak_during_requests": [
+      {
+        "bdf": "0000:03:00.0",
+        "vram_used_bytes": 33274519552,
+        "vram_headroom_bytes": 1068441600,
+        "vram_used_percent": 96.88890659349047,
+        "gtt_used_bytes": 17141760
+      },
+      {
+        "bdf": "0000:43:00.0",
+        "vram_used_bytes": 33286418432,
+        "vram_headroom_bytes": 1056542720,
+        "vram_used_percent": 96.92355380969101,
+        "gtt_used_bytes": 23457792
+      }
+    ],
+    "combined_observed_peak": {
+      "vram_used_bytes": 66560937984,
+      "vram_total_bytes": 68685922304,
+      "vram_used_gib": 61.98970413208008,
+      "vram_used_percent": 96.90623020159073,
+      "vram_headroom_bytes": 2124984320,
+      "vram_headroom_gib": 1.9790458679199219,
+      "gtt_used_bytes": 40599552
+    },
+    "gtt_spill_observed": false
+  },
+  "comparison": {
+    "reference": "Phase X single-V620, 262144 context, batch/ubatch 2048/512, same 9435-token prompt",
+    "reference_median_prefill_tps": 340.80,
+    "reference_median_decode_tps": 33.42,
+    "tp2_to_reference_prefill_ratio": 1.2229986566573423,
+    "tp2_to_reference_decode_ratio": 1.4333470083441162,
+    "strict_scaling_claim": false,
+    "limitation": "The context reservation and batch sizes differ, so these ratios are orientation only and are not tensor-parallel scaling evidence."
+  },
+  "restoration": {
+    "temporary_server_stopped": true,
+    "normal_service_restored": true,
+    "normal_gpu_uuid": "GPU-08b2ddcbd6e6b36c",
+    "normal_actual_context_tokens": 368640,
+    "normal_gpu_layers": "all",
+    "normal_model_kv": "Q5_1",
+    "normal_draft_kv": "Q5_1",
+    "normal_mtp_width": 3,
+    "other_v620_idle_vram_bytes_after_restore": 21438464
+  },
+  "scope_limits": [
+    "The 1M context was allocated and reported by /props, but a 1M-token input was not evaluated.",
+    "The short 9435-token prompt and 128-token generation do not prove maximum-context correctness, quality beyond the model's native 262144-token metadata, or long-duration stability.",
+    "llama.cpp split-mode tensor is experimental in this build; internal AllReduce was unavailable and the meta-backend butterfly path was used.",
+    "CPU token sampling occurred because backend sampling does not support split-mode tensor; this is not a GPU-only end-to-end execution claim.",
+    "The two V620s communicate over a two-hop PCIe path, so results do not generalize to peer-linked or Infinity Fabric systems.",
+    "This configuration is benchmark-only and must not be used by the normal qwen38-subagent startup path."
+  ]
+}

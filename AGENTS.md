@@ -29,6 +29,40 @@
 - Future changes to `AGENTS.md` or `sLLM.md` still require explicit user
   confirmation.
 
+## Local Qwen subagent
+
+- When delegation is useful for a bounded repository inspection, coding, test,
+  or summary task, prefer the `qwen38-subagent` skill. This is a command-backed
+  Pi/Qwen agent, not a native Codex subagent and not a replacement for
+  the main agent.
+- Check it with `/home/homelab1/.local/bin/qwen38-subagent-server status`, then
+  delegate one bounded task from its target workspace with
+  `/home/homelab1/.local/bin/qwen38-pi --profile standard --read-only "<task>"`.
+  The wrapper starts the localhost-only service when needed. Use `fast` for an
+  exact lookup and `deep` for bounded multi-file implementation or review.
+- State the workspace, allowed files, whether edits are allowed, and expected
+  output. The main agent must inspect edits and run relevant checks before
+  accepting the report. Do not let the subagent commit or push unless the user
+  explicitly requests it.
+- Use `qwen38-pi --read-only` for inspection and
+  `qwen38-pi --workspace-write` only for an explicitly bounded editing task.
+  Landlock limits writes to ephemeral scratch and, in workspace-write mode,
+  the current workspace. When these instructions are being read by Qwen in Pi, it is
+  already the delegated agent and must perform the task directly rather than
+  invoking the wrapper or attempting recursive delegation.
+- The normal local runtime is one V620 x2 tensor-parallel endpoint with two
+  non-unified 491,520-token slots. Up to two independent Qwen tasks may
+  run concurrently. Do not start or silently fall back to a single-V620 Qwen
+  configuration.
+- If Qwen is unavailable or unsuitable, both local slots are occupied, or more
+  parallel subagents are useful, use native Codex subagents without waiting for
+  Qwen capacity. Do not serialize work merely to force all delegation through
+  Qwen. When the main task needs either V620 for sLLM GPU work, treat local Qwen
+  as unavailable; stop the idle Qwen service to reclaim the pair and use Codex
+  subagents during that GPU work. The canonical runtime contract, verified
+  configuration, scheduling policy, and failure procedure are in
+  `docs/development/local-qwen-subagent.md`.
+
 ## Work lanes and identity
 
 - Draft: run focused relevant tests, allow a dirty local tree, and require
@@ -111,5 +145,6 @@
 - Runtime architecture: `docs/architecture/runtime.md`
 - Model locking: `docs/models/model-lock.md`
 - OpenAI compatibility: `docs/api/openai-compatibility.md`
+- Local Qwen subagent: `docs/development/local-qwen-subagent.md`
 - CI and tests: `docs/plans/active/2026/08/1-10/ci-test-strategy.md`
 - Provenance: `docs/provenance/README.md`

@@ -147,6 +147,20 @@ exactに記録した。resident/peakは22,009,574,016/22,230,758,892 byteであ�
 CLI/OpenAI non-stream/SSE/cancel/recovery/seed/shutdownも通常経路でHIP-only、fallbackなし、cleanup 0をPASSした。
 このevidenceはfixed artifact、batch 1、text-only、実行済みtupleへ限定し、vision/MTP、multi-GPU、別model/SKUへ一般化しない。
 
+Phase Xでは同じV620 `gfx1030`とR9700 `gfx1201`を外部llama.cpp local-subagent runtimeの比較対象にし、
+Qwen3.8-27B Q5_K_XL、Q5_1 KV、context 262,144でHIP/Vulkanを実行した。HIP buildで
+`GGML_CUDA_FA_ALL_QUANTS=ON`にすると、Q5_1 Flash Attention exact Qwen shapeが両target各18/18でCPU oracleへ一致し、
+旧HIP build比でprefill 5.59x/11.21x、decode 4.91x/3.35xへ改善した。これはsLLM backend lifecycleを変更せず、
+外部runtimeと固定tupleだけのevidenceである。
+
+post-closeoutでは外部runtimeのmulti-GPU controlも実行し、独立V620 2 server、V620×2 layer/tensor、
+R9700+V620×2 layer/tensorを比較した。独立2 serverが最大aggregate throughput、exact 524,288 context/slotを
+single processで必要とする場合はV620×2 experimental tensor、3 GPUを明示的に空けられる場合はlayer split
+`5,2,2`をbounded候補とした。後続のユーザー決定でV620×2 tensorを491,520 context/slotへ縮小し、parallel 2、
+non-unified KVの通常local-subagent起動へ昇格した。これは外部runtimeの運用であり、sLLMのmulti-GPU support evidenceではない。
+詳細は[selection summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)と
+[local Qwen運用正本](../development/local-qwen-subagent.md)を参照する。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

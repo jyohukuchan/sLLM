@@ -283,6 +283,42 @@ target別release buildで実行した。actual-weight oracle、40層full-model p
 seeded sampling、shutdownは全dispatch HIP、fallbackなし、cleanup 0をPASSした。software lifecycleは`experimental`のままで、
 別runtime/driver/kernel、別artifact、multi-GPU、長時間運転へ一般化しない。
 
+### 2026-08-17 Phase X llama.cpp Qwen3.8 quantized-KV tuple
+
+Linux kernel `6.17.0-35-generic`、ROCm 7.14.0、HIP runtime 7.14.60850、LLVM 23、rocprofv3 1.3.2で、
+llama.cpp build 901 commit `4df29be4f4c3673f428170fda944a5b19f743bb8`をexact V620 `gfx1030`と
+R9700 `gfx1201`向けにbuildした。Qwen3.8-27B Q5_K_XL、context 262,144、Q5_1 model/draft KV、MTP幅3の
+9,435-token実code promptを使用した。
+
+baselineの`GGML_CUDA_FA_ALL_QUANTS=OFF`ではHIP prefill/decodeがV620 60.99/6.81、R9700
+69.50/12.50 tok/sだった。`GGML_CUDA_FA_ALL_QUANTS=ON`の1 warmup + 5 measured中央値はV620
+340.80/33.42、R9700 779.06/41.93 tok/sで、Q5_1 Flash Attention exact Qwen shapeをCPU numerical oracleへ
+照合して両target各18/18 PASSした。CPU/backend fallbackとGTT spillはない。これは外部llama.cpp local-subagent runtimeの
+限定evidenceであり、sLLM software lifecycle、別model/KV、別tuple、multi-GPU、長時間安定性を証明しない。詳細は
+[Phase X bounded summary](../../ci/matrix/phase-x-qwen38-amd-summary-v1.json)を正とする。
+
+同日の非運用ベンチマークでは、2基のV620をllama.cppのexperimental tensor split `1,1`で使用し、actual context
+1,048,576、Q5_1 target/draft KV、MTP幅3、batch/ubatch 512/128を起動した。9,435-token code promptの
+1 warmup + 3 measured中央値はprefill/decode 416.80/47.90 tok/s、合計observed peak VRAMは
+66,560,937,984/68,685,922,304 byte（96.91%）、GTTは40,599,552 byteだった。2-hop PCIe構成でinternal AllReduceは
+初期化できずmeta-backend butterflyを使い、token samplerはCPUへfallbackした。1M-token実入力は未実施であり、
+maximum-context correctness、長時間安定性、strict scalingを証明しない。後続のユーザー決定で同じV620×2 tensor shapeを
+491,520 context/slot、983,040 total、parallel 2、non-unified KVへ縮小して通常起動へ昇格した。
+[TP2 1M bounded summary](../../ci/matrix/phase-x-qwen38-v620-tp2-1m-summary-v1.json)は昇格前の計測値を保持する。
+
+同じbuild 901に`gfx1030;gfx1201`を含む比較用HIP buildを追加し、独立V620×2、V620×2 layer/tensor、
+R9700+V620×2 layer/tensorを11,058-token code promptの同時2要求で比較した。V620だけの最大throughputは
+独立2 server、V620だけで524,288 context/slotを必要とする場合はexperimental tensor、3基を明示的に空けられる
+場合のsingle-process候補はlayer split `5,2,2`となった。rowはupstream非推奨のため除外した。比較buildと全一時serverは
+停止した。後続決定ではR9700を占有しないV620×2 tensorの縮小構成だけを通常runtimeへ昇格した。詳細は
+[multi-GPU selection summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)を参照する。
+
+現行local subagentのagent layerはPi coding agent 0.84.2をChat Completions経由で使用する。model catalogはcombined totalではなく
+actual 491,520 context/slot、max output 8,192へ同期し、read-only/workspace-write Landlock sandboxと2 process leaseを使う。
+2つの同時taskは別slotで完了し、3つ目はqueueせずstatus 75で終了する。DeepSeek HarnessはResponses translation問題の
+compatibility/debug経路に限定する。このagent-layer変更はllama.cpp build、model、GPU/KV/MTP tupleを変更しない。
+運用と実測は[Local Qwen3.8 subagent](../development/local-qwen-subagent.md)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

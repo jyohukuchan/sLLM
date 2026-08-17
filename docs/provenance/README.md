@@ -192,6 +192,15 @@ vLLM containerによる同一artifactのblack-box起動はhealth到達前に停�
 入力にもしていない。このPhaseによる新規第三者code importと`THIRD_PARTY_NOTICES.md`追加はない。model shard、生成token trace、
 profile artifactはrepositoryへ含めず、model artifactのlicense/noticeはsLLM runtimeのMIT licenseと別に扱う。
 
+## Phase X llama.cpp Qwen3.8 performance investigation record
+
+Phase Xはllama.cpp build 901 commit `4df29be4f4c3673f428170fda944a5b19f743bb8`を外部local-subagent runtimeと
+技術比較対象にし、Qwen3.8-27B/Qwen3.5 architectureのHIP性能低下をprofileした。採用変更はllama.cppの既存CMake option
+`GGML_CUDA_FA_ALL_QUANTS=ON`によるQ5_1 Flash Attention build coverageであり、sLLM sourceへllama.cppのcode expression、
+control flow、kernelをcopy、adapt、portしていない。sLLMの`linear_attention.gdn.v1`も変更していないため、既存
+`llama-cpp-phase9-gdn-layout-001`を更新せず、新しいimport eventまたは`THIRD_PARTY_NOTICES.md` entryを追加しない。
+local llama.cpp exact-shape test patchはupstream未投稿でsLLM repositoryへ含めず、model、raw trace、生成全文、binaryも含めない。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

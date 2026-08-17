@@ -1,0 +1,155 @@
+{
+  "schema_version": "phase-x-qwen38-amd-summary-v1",
+  "state": "PASS",
+  "result": "fixed",
+  "date": "2026-08-17",
+  "scope": "llama.cpp Qwen3.5-architecture Qwen3.8-27B local subagent runtime; sLLM source unchanged",
+  "source": {
+    "llama_cpp_commit": "4df29be4f4c3673f428170fda944a5b19f743bb8",
+    "llama_cpp_build": 901,
+    "build_type": "Release",
+    "cmake": {
+      "GGML_HIP": true,
+      "GGML_HIP_GRAPHS": true,
+      "GGML_CUDA_FA": true,
+      "GGML_CUDA_FA_ALL_QUANTS": true
+    },
+    "v620_llama_server_sha256": "fe796954401162a6c9e554e3acb1feb3cd6d0d1ee8c6620c135f1c432b99d9d0",
+    "r9700_llama_server_sha256": "6848726962fef1aed553753dcb5cc14044d3479523c59427061eb91c53baf70e",
+    "exact_q5_1_flash_attention_test_patch_sha256": "49a0ed45cea477d2596e31becd56590aeaa58d37dc27916070ab6391c15816d6"
+  },
+  "model": {
+    "path": "/home/homelab1/datapool/ai_models/gguf/qwen3.8-27b-UD/Qwen3.8-27B-UD-Q5_K_XL.gguf",
+    "sha256": "176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab",
+    "bytes": 20218178624,
+    "architecture": "qwen35",
+    "parameters": 27320697856,
+    "native_context_tokens": 262144,
+    "main_blocks": 64,
+    "mtp_blocks": 1,
+    "attention": {"query_heads": 24, "kv_heads": 4, "key_head_dim": 256, "value_head_dim": 256},
+    "gdn": {"state_size": 128, "inner_size": 6144, "groups": 16, "time_step_rank": 48, "conv_kernel": 4}
+  },
+  "software": {
+    "os": "Ubuntu 24.04.4 LTS x86_64",
+    "kernel": "6.17.0-35-generic",
+    "rocm": "7.14.0",
+    "hip_runtime": "7.14.60850",
+    "compiler": "AMD clang 23.0.0git",
+    "rocprofv3": "1.3.2",
+    "vulkan_loader_instance_api": "1.3.275",
+    "mesa_radv": "25.2.8",
+    "vulkan_device_api": "1.4.318"
+  },
+  "hardware": [
+    {"target": "gfx1030", "product": "AMD Radeon Pro V620", "role": "spare", "bdf": "0000:43:00.0", "gpu_uuid": "GPU-08b2ddcbd6e6b36c"},
+    {"target": "gfx1201", "product": "AMD Radeon AI PRO R9700", "role": "canonical", "bdf": "0000:07:00.0", "gpu_uuid": "GPU-a8e9ddefa2d60f55"}
+  ],
+  "protocol": {
+    "build_command_template": "cmake -S /home/homelab1/llama.cpp-src -B <target-build-dir> -DCMAKE_BUILD_TYPE=Release -DGGML_HIP=ON -DGGML_HIP_GRAPHS=ON -DGGML_CUDA_FA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON -DCMAKE_HIP_ARCHITECTURES=<gfx1030|gfx1201>; cmake --build <target-build-dir> --target llama-server test-backend-ops -j",
+    "server_argument_template": ["--model", "<model.path>", "--ctx-size", "262144", "--parallel", "1", "--batch-size", "2048", "--ubatch-size", "512", "--cache-type-k", "q5_1", "--cache-type-v", "q5_1", "--cache-type-k-draft", "q5_1", "--cache-type-v-draft", "q5_1", "--flash-attn", "on", "--gpu-layers", "all", "--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-n-min", "1"],
+    "prompt_source": "/home/homelab1/coding-local/sLLM/ci/tools/run_h3_public_runtime_compile.py",
+    "prompt_source_chars": 33900,
+    "rendered_prompt_chars": 34183,
+    "prompt_sha256": "40225ad16c22a83f4065c7e666b54c3b5ea48e5aa9959c2f3d5da30a8b46977f",
+    "prompt_tokens": 9435,
+    "context_tokens": 262144,
+    "batch": 2048,
+    "ubatch": 512,
+    "parallel": 1,
+    "model_kv": "Q5_1",
+    "draft_kv": "Q5_1",
+    "mtp_width": 3,
+    "seed": 1234,
+    "max_visible_tokens": 128,
+    "prompt_cache": false,
+    "performance_statistics": "one fresh baseline; survivor candidate one warmup plus five measured",
+    "baseline_repeat_exception": "The user explicitly required stopping runs that remained at only a few decode tokens/s after minutes; slow baselines were not repeated five times."
+  },
+  "fresh_four_way_baseline": [
+    {"target": "gfx1030", "backend": "HIP", "prefill_tps": 60.99, "decode_tps": 6.81, "mtp_acceptance": 0.73729, "peak_vram_bytes": 27434127360, "peak_gtt_bytes": 23449600, "summary_sha256": "64d20e87a193f21cf8835624409432fe5d184cedf51d53ce1b7877f30f66b01f"},
+    {"target": "gfx1201", "backend": "HIP", "prefill_tps": 69.50, "decode_tps": 12.50, "mtp_acceptance": 0.81651, "peak_vram_bytes": 27574702080, "peak_gtt_bytes": 34492416, "summary_sha256": "7e5bfd24f231dca79fcdeaa902fd14305271758d49ca7283757a10586e381c9c"},
+    {"target": "gfx1030", "backend": "Vulkan", "prefill_tps": 207.18, "decode_tps": 36.56, "mtp_acceptance": 0.79464, "peak_vram_bytes": 27600986112, "peak_gtt_bytes": 653701120, "summary_sha256": "b03e80a2142de61d0c6b65f589fbcc234942c8305a1948a0d01e7a0f6827e4f5"},
+    {"target": "gfx1201", "backend": "Vulkan", "prefill_tps": 726.48, "decode_tps": 51.91, "mtp_acceptance": 0.76522, "peak_vram_bytes": 27726155776, "peak_gtt_bytes": 671010816, "summary_sha256": "634dce877a28c31f0fe9693275c273e24a11ec6c7168db4dfc4b576c3fc5d006"}
+  ],
+  "candidate_o2": [
+    {
+      "target": "gfx1030",
+      "backend": "HIP",
+      "prefill_tps_warmup": 347.30,
+      "prefill_tps_measured": [343.69, 341.38, 340.80, 340.34, 340.47],
+      "prefill_tps_mean": 341.336,
+      "prefill_tps_median": 340.80,
+      "decode_tps_warmup": 33.74,
+      "decode_tps_measured": [33.57, 33.41, 33.46, 33.27, 33.42],
+      "decode_tps_mean": 33.426,
+      "decode_tps_median": 33.42,
+      "baseline_speedup_prefill": 5.59,
+      "baseline_speedup_decode": 4.91,
+      "peak_vram_bytes": 30068932608,
+      "peak_gtt_bytes": 23449600,
+      "summary_sha256": "e408fb912a2d7a109c3c943966c04f00215195f3c28329b24c032c598405a89f"
+    },
+    {
+      "target": "gfx1201",
+      "backend": "HIP",
+      "prefill_tps_warmup": 795.47,
+      "prefill_tps_measured": [788.79, 780.20, 778.72, 779.06, 778.51],
+      "prefill_tps_mean": 781.056,
+      "prefill_tps_median": 779.06,
+      "decode_tps_warmup": 42.66,
+      "decode_tps_measured": [42.18, 41.85, 41.92, 41.93, 41.93],
+      "decode_tps_mean": 41.962,
+      "decode_tps_median": 41.93,
+      "baseline_speedup_prefill": 11.21,
+      "baseline_speedup_decode": 3.35,
+      "peak_vram_bytes": 30200770560,
+      "peak_gtt_bytes": 34492416,
+      "summary_sha256": "678a3f69254649f2d24679c46ff7487e4a07c2ff9eec33ad6bdc5637e4d45d4b"
+    }
+  ],
+  "attribution": {
+    "root_cause": "The baseline HIP build had GGML_CUDA_FA_ALL_QUANTS=OFF. ggml-cuda therefore rejected Q5_1 K/V in ggml_cuda_fattn_kv_type_supported and used the non-Flash-Attention path; Vulkan supported this quantized-KV case.",
+    "gdn_finding": "Current fused GGML_OP_GATED_DELTA_NET was active. The profiled R9700 MTP-off baseline issued 1152 fused GDN kernels, not the historical approximately 15000 small-GEMM GDN expansion.",
+    "r9700_baseline_profile": {"prompt_tokens": 2306, "prefill_tps_under_trace": 216.43, "decode_tps": 12.71, "hip_api_calls": 87586, "kernel_dispatches": 48113, "hip_api_time_share": 0.5782, "kernel_time_share": 0.2752, "memcopy_time_share": 0.1467, "fused_gdn_kernel_time_share": 0.0616},
+    "r9700_candidate_profile": {"prompt_tokens": 2306, "prefill_tps_under_trace": 833.58, "decode_tps": 20.48, "fused_gdn_kernel_time_share": 0.0590, "flash_attention_kernels_observed": true},
+    "ablation": {
+      "ubatch_512_vs_2048": "rejected as root cause",
+      "mtp": "working; width 3 had the best visible decode rate in the short control",
+      "context_reservation_32k_vs_262k": "rejected as root cause for Q5_1",
+      "f16_kv_32k": {"prefill_tps": 742.50, "decode_tps": 41.46},
+      "f16_kv_262k": "OOM while allocating 16 GiB KV; not a PASS"
+    }
+  },
+  "correctness": {
+    "existing_q5_1_flash_attention_cases_gfx1030": {"passed": 336, "expected": 336},
+    "exact_qwen_head_dim_256_cases": {"shapes": "GQA ratio 6; KV 113/512/1024; query batches 1/3/17", "gfx1030": {"passed": 18, "expected": 18}, "gfx1201": {"passed": 18, "expected": 18}, "oracle": "llama.cpp CPU backend comparison"},
+    "gdn_operator_changed": false,
+    "cpu_or_backend_fallback": false,
+    "gtt_spill": false
+  },
+  "local_subagent_validation": {
+    "target": "spare V620 gfx1030 only",
+    "transport": "Responses-compatible llama-server endpoint through DeepSeek Harness",
+    "task": "Read a 3091-line Python program and return a five-item implementation plan without editing files",
+    "result": "PASS",
+    "request_timings": [
+      {"task_id": 0, "prompt_tokens": 9338, "prefill_tps": 340.28, "visible_tokens": 148, "decode_tps": 35.44, "mtp_acceptance": 0.84127},
+      {"task_id": 52, "prompt_tokens": 19378, "prefill_tps": 302.47, "visible_tokens": 86, "decode_tps": 34.38, "mtp_acceptance": 0.89855},
+      {"task_id": 88, "prompt_tokens": 17735, "prefill_tps": 255.65, "visible_tokens": 89, "decode_tps": 31.26, "mtp_acceptance": 0.88889},
+      {"task_id": 124, "prompt_tokens": 16821, "prefill_tps": 224.16, "visible_tokens": 2326, "decode_tps": 21.85, "mtp_acceptance": 0.57843, "cumulative_slot_tokens": 46531}
+    ]
+  },
+  "disposition": {
+    "local_subagent": "Use the spare V620 HIP fa-all-quant build through llama-server, Responses-compatible endpoint, and DeepSeek Harness with context 262144, Q5_1 model/draft KV, and MTP width 3.",
+    "sllm": "No source change. sLLM currently uses FP16 KV and its linear_attention.gdn.v1 implementation was not implicated.",
+    "provenance": "No new sLLM code import or adaptation; no notice change required.",
+    "upstream": "No exact existing issue or PR for Q5_1 HIP Flash Attention being omitted by a default-disabled all-quant build option was found; no external issue or PR was posted."
+  },
+  "scope_limits": [
+    "single GPU, parallel 1, Qwen3.8-27B Q5_K_XL artifact, Q5_1 KV, and the recorded software tuple only",
+    "Vulkan is a comparison control, not an sLLM backend support statement",
+    "F16 KV at context 262144 failed allocation and is not correctness or performance evidence",
+    "the exact Qwen Flash-Attention test addition remains a local llama.cpp test patch and has not been submitted upstream"
+  ]
+}

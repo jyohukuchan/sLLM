@@ -1,0 +1,221 @@
+{
+  "schema_version": "phase-x-qwen38-multi-gpu-selection-v1",
+  "state": "PASS_WITH_LIMITS",
+  "date": "2026-08-17",
+  "scope": "non-operational Qwen3.8-27B comparison of independent V620 servers, V620 split modes, and heterogeneous R9700 plus V620 x2",
+  "operational_configuration_changed": false,
+  "source": {
+    "llama_cpp_commit": "4df29be4f4c3673f428170fda944a5b19f743bb8",
+    "llama_cpp_build": 901,
+    "build_type": "Release",
+    "v620_targets": ["gfx1030"],
+    "mixed_targets": ["gfx1030", "gfx1201"],
+    "cmake": {
+      "GGML_HIP": true,
+      "GGML_HIP_GRAPHS": true,
+      "GGML_HIP_RCCL": false,
+      "GGML_CUDA_FA": true,
+      "GGML_CUDA_FA_ALL_QUANTS": true
+    }
+  },
+  "model": {
+    "path": "/home/homelab1/datapool/ai_models/gguf/qwen3.8-27b-UD/Qwen3.8-27B-UD-Q5_K_XL.gguf",
+    "sha256": "176a6a3f034e9cdc447c10cd00329fc9b31002e6589b9295f2ad4f1eefe0f6ab",
+    "architecture": "qwen35",
+    "native_context_tokens": 262144
+  },
+  "hardware": [
+    {"logical_role": "V620-A", "target": "gfx1030", "bdf": "0000:03:00.0", "gpu_uuid": "GPU-76a08c022586fed6", "vram_total_bytes": 34342961152},
+    {"logical_role": "R9700", "target": "gfx1201", "bdf": "0000:07:00.0", "gpu_uuid": "GPU-a8e9ddefa2d60f55", "vram_total_bytes": 34208743424},
+    {"logical_role": "V620-B", "target": "gfx1030", "bdf": "0000:43:00.0", "gpu_uuid": "GPU-08b2ddcbd6e6b36c", "vram_total_bytes": 34342961152}
+  ],
+  "topology": {
+    "link": "PCIe",
+    "pairwise_hops": 2,
+    "pairwise_weight": 40,
+    "peer_or_infinity_fabric_claim": false
+  },
+  "protocol": {
+    "task": "Refactor a real Python GPU test runner into a typed module while preserving fail-closed GPU semantics.",
+    "prompt_source": "/home/homelab1/coding-local/sLLM/ci/tools/run_h3_public_runtime_compile.py",
+    "rendered_prompt_chars": 40283,
+    "prompt_sha256": "dd86d2a46aee081b18a05d6821ec964401bbeb9a4ef2e5b9e3a2f722652e6072",
+    "prompt_tokens_per_request": 11058,
+    "output_tokens_per_request": 128,
+    "simultaneous_requests": 2,
+    "repetitions": "one simultaneous warmup plus one simultaneous measured run, except heterogeneous tensor used one measured run only",
+    "temperature": 0,
+    "seed": 1234,
+    "prompt_cache": false,
+    "batch": 512,
+    "ubatch": 128,
+    "model_kv": "Q5_1",
+    "draft_kv": "Q5_1",
+    "mtp_width": 3,
+    "gpu_layers": "all",
+    "fit": false
+  },
+  "results": [
+    {
+      "configuration": "independent-v620x2",
+      "servers": 2,
+      "split_mode": "none",
+      "parallel_per_server": 1,
+      "actual_context_per_request": 368640,
+      "measured_wall_seconds": [45.58147611399909, 47.01331890500296],
+      "reported_prefill_tps": [263.33, 254.92],
+      "reported_decode_tps": [35.66, 35.21],
+      "simultaneous_sum_prefill_tps": 518.25,
+      "simultaneous_sum_decode_tps": 70.87,
+      "peak_vram_bytes": {"V620-A": 33204789248, "V620-B": 33204801536},
+      "minimum_vram_headroom_bytes": 1138159616,
+      "cpu_model_fallback": false,
+      "gtt_spill_observed": false,
+      "result": "best aggregate throughput and best two-request completion time; each request is limited to 368640 context"
+    },
+    {
+      "configuration": "layer-v620x2-1m-p2",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [1, 1],
+      "parallel": 2,
+      "configured_total_context": 1048576,
+      "result": "FAIL_OOM",
+      "failure": "MTP compute-buffer allocation failed at 4649.08 MiB on one V620; retry without pipeline parallelism failed at 4244.27 MiB"
+    },
+    {
+      "configuration": "layer-v620x2-896k-p2",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [1, 1],
+      "parallel": 2,
+      "configured_total_context": 917504,
+      "actual_context_per_slot": 458752,
+      "measured_wall_seconds": [67.31417425899417, 69.55685436099884],
+      "reported_prefill_tps": [320.88, 173.72],
+      "reported_decode_tps": [3.93, 23.82],
+      "peak_vram_bytes": {"V620-A": 25793060864, "V620-B": 32270176256},
+      "cpu_model_fallback": false,
+      "gtt_spill_observed": false,
+      "result": "fits after context reduction but concurrent serving is slower and memory is asymmetric"
+    },
+    {
+      "configuration": "tensor-v620x2-1m-p2",
+      "servers": 1,
+      "split_mode": "tensor",
+      "tensor_split": [1, 1],
+      "parallel": 2,
+      "configured_total_context": 1048576,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [59.14254097400408, 60.780393850996916],
+      "reported_prefill_tps": [369.19, 195.65],
+      "reported_decode_tps": [4.44, 35.21],
+      "peak_vram_bytes": {"V620-A": 33339228160, "V620-B": 33351860224},
+      "minimum_vram_headroom_bytes": 991100928,
+      "backend_sampling": "CPU",
+      "allreduce": "meta-backend butterfly over host-staged PCIe",
+      "cpu_model_fallback": false,
+      "gtt_spill_observed": false,
+      "result": "best V620-only choice when exactly 524288 context per simultaneous request is required; experimental and slower than independent servers"
+    },
+    {
+      "configuration": "layer-r9700-v620x2-equal",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [1, 1, 1],
+      "parallel": 2,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [51.7015249899996, 53.77590384799987],
+      "reported_prefill_tps": [420.90, 228.40],
+      "reported_decode_tps": [5.12, 27.27],
+      "peak_vram_bytes": {"R9700": 20028698624, "V620-A": 21463310336, "V620-B": 27153641472},
+      "result": "works but leaves R9700 underweighted"
+    },
+    {
+      "configuration": "layer-r9700-v620x2-3-2-2",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [3, 2, 2],
+      "parallel": 2,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [48.348690525002894, 50.491199748001236],
+      "reported_prefill_tps": [453.01, 244.34],
+      "reported_decode_tps": [5.44, 27.85],
+      "peak_vram_bytes": {"R9700": 25350238208, "V620-A": 18958589952, "V620-B": 24337866752},
+      "result": "balanced intermediate"
+    },
+    {
+      "configuration": "layer-r9700-v620x2-2-1-1",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [2, 1, 1],
+      "parallel": 2,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [46.50365983699885, 48.52212296200014],
+      "reported_prefill_tps": [475.58, 255.96],
+      "reported_decode_tps": [5.60, 27.20],
+      "peak_vram_bytes": {"R9700": 28157276160, "V620-A": 16758702080, "V620-B": 23724773376},
+      "result": "near-optimal but 5:2:2 was slightly faster"
+    },
+    {
+      "configuration": "layer-r9700-v620x2-5-2-2",
+      "servers": 1,
+      "split_mode": "layer",
+      "tensor_split": [5, 2, 2],
+      "parallel": 2,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [45.823031640997215, 47.89793517499493],
+      "reported_prefill_tps": [481.18, 258.73],
+      "reported_decode_tps": [5.69, 27.79],
+      "peak_vram_bytes": {"R9700": 30968627200, "V620-A": 16144252928, "V620-B": 21522845696},
+      "minimum_vram_headroom_bytes": 3240116224,
+      "cpu_model_fallback": false,
+      "gtt_spill_observed": false,
+      "result": "best single 1M-total two-slot configuration in this bounded comparison; keep non-operational because it consumes the sLLM development R9700"
+    },
+    {
+      "configuration": "tensor-r9700-v620x2-equal",
+      "servers": 1,
+      "split_mode": "tensor",
+      "tensor_split": [1, 1, 1],
+      "parallel": 2,
+      "actual_context_per_slot": 524288,
+      "measured_wall_seconds": [63.45136611400085, 65.08345713200106],
+      "reported_prefill_tps": [336.53, 179.15],
+      "reported_decode_tps": [4.16, 38.14],
+      "peak_vram_bytes": {"R9700": 25708199936, "V620-A": 25094950912, "V620-B": 25505828864},
+      "backend_sampling": "CPU",
+      "allreduce": "meta-backend butterfly over host-staged PCIe",
+      "result": "works but is slower than V620 x2 tensor and substantially slower than heterogeneous layer split"
+    }
+  ],
+  "selection": {
+    "normal_local_subagent": "one spare V620, one server, context 368640; unchanged",
+    "gpu_free_task_maximum_throughput": "two independent V620 servers at context 368640 each, provided a dispatcher explicitly routes one task to each server",
+    "v620_only_exact_half_million_context_each": "V620 x2 tensor split, total context 1048576, parallel 2; experimental measurement profile only",
+    "all_three_gpus_exact_half_million_context_each": "R9700 plus V620 x2 layer split 5:2:2, total context 1048576, parallel 2; only when the R9700 is explicitly free",
+    "rejected": ["row split", "V620 x2 layer split at 1M total", "heterogeneous tensor split"]
+  },
+  "upstream_constraints": {
+    "multi_gpu_guide": "https://github.com/ggml-org/llama.cpp/blob/master/docs/multi-gpu.md",
+    "row_mode": "deprecated upstream; not benchmarked",
+    "tensor_mode": "experimental upstream, sensitive to interconnect, and not guaranteed on HIP",
+    "hip_allreduce": "the current internal allreduce implementation is disabled for HIP, so these tensor runs used the generic butterfly path",
+    "quantized_tensor_kv_documentation_mismatch": "the current upstream guide says tensor mode requires unquantized KV, while commit 4df29be accepted Q5_1 in these local runs; do not promote this undocumented combination without quality and long-context validation",
+    "mixed_arch_issue": "https://github.com/ggml-org/llama.cpp/issues/19893",
+    "tensor_kv_issue": "https://github.com/ggml-org/llama.cpp/issues/21788"
+  },
+  "limits": [
+    "The prompt is 11058 tokens, not a 524288-token or 1M-token input.",
+    "Configured context beyond model-native 262144 is capacity evidence, not quality evidence.",
+    "Each successful configuration has one warmup and one measured repetition only, except heterogeneous tensor has no warmup.",
+    "Per-slot llama.cpp timing includes scheduler interference; wall times are the primary concurrent-serving comparison.",
+    "No dispatcher or second DeepSeek Harness endpoint was implemented for the independent-server profile.",
+    "The local Qwen read-only review generated approximately 8192 internal tokens and returned no visible report; no subagent claim was used in this selection."
+  ],
+  "cleanup": {
+    "temporary_servers_stopped": true,
+    "normal_single_v620_service_restored": true,
+    "normal_service_actual_context": 368640
+  }
+}

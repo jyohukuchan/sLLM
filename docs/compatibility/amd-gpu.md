@@ -316,6 +316,39 @@ high-waterは22,230,758,892 byteだった。2 warmup + 11 measuredのprefill/dec
 216.258/204.198 ms、V620が537.832/370.711 msである。通常CLI/API、SSE、cancel/recovery、seeded sampling、shutdownを
 HIP-only、fallbackなし、cleanup 0でPASSした。別SKU/tuple、MoE vision/MTP、multi-GPU、batchingへ一般化しない。
 
+### 2026-08-17 Phase X llama.cpp Qwen3.8 quantized-KV evidence
+
+canonical R9700 `gfx1201`（UUID `GPU-a8e9ddefa2d60f55`）とspare V620 `gfx1030`
+（UUID `GPU-08b2ddcbd6e6b36c`）で、fixed Qwen3.8-27B Q5_K_XL、Q5_1 model/draft KV、MTP幅3、
+context 262,144のllama.cpp HIP/Vulkan controlを実行した。HIP baseline低下の根因はGDNではなく、
+`GGML_CUDA_FA_ALL_QUANTS=OFF`でQ5_1 K/VがFlash Attentionから外れたことだった。`ON`のfresh HIP buildは
+9,435-token promptのprefill/decode中央値がV620 340.80/33.42、R9700 779.06/41.93 tok/sとなった。
+
+Qwenのhead dimension 256、GQA比6、KV長113/512/1024、query batch 1/3/17を覆うQ5_1 Flash-Attention testは、
+CPU numerical oracleに対して両target各18/18 PASSした。peak VRAMは約30.1/30.2 GBで、CPU/backend fallbackと
+GTT spillはない。このevidenceは外部llama.cpp local-subagent runtimeと固定tupleだけに限定し、sLLMのFP16 KV/GDN、
+Vulkan backend support、別model/SKUまたは一般的なquantized-KV supportへ一般化しない。詳細は
+[Phase X bounded summary](../../ci/matrix/phase-x-qwen38-amd-summary-v1.json)を正とする。
+
+非運用のV620×2 tensor-split controlではactual context 1,048,576を確保し、同じ9,435-token code promptの
+1 warmup + 3 measured中央値がprefill/decode 416.80/47.90 tok/sだった。request中の合計observed peak VRAMは
+66,560,937,984/68,685,922,304 byte（61.99 GiB、96.91%）、headroomは2,124,984,320 byte、GTTは
+40,599,552 byteである。2基間は2-hop PCIeで、internal AllReduceは使用できずmeta-backend butterflyへ移行し、
+token samplerはCPUへfallbackした。全model layerとtarget/draft contextはGPU residentだが、1M-token実入力、
+GPU-only end-to-end、strict scalingまたは長時間安定性の証拠ではない。この計測後のユーザー決定で同じV620×2 tensor shapeを
+491,520 context/slot、983,040 totalへ縮小し、parallel 2、non-unified KVの通常local-subagent構成へ昇格した。
+現行構成はidle時約2.48 GB/GPUのheadroomを持ち、2つの同時taskを別slotで完了し、3つ目をqueueせず拒否することを確認した。
+[TP2 1M bounded summary](../../ci/matrix/phase-x-qwen38-v620-tp2-1m-summary-v1.json)は昇格前の計測値、
+[運用正本](../development/local-qwen-subagent.md)は現行値を管理する。
+
+同日の2要求follow-upでは、独立V620 server 2基が368,640 context/要求で45.58/47.01秒、V620×2 tensor splitが
+524,288 context/slotで59.14/60.78秒だった。V620×2 layer splitは1M totalでMTP compute-buffer OOMとなり、
+917,504 totalへ縮小しても67.31/69.56秒だった。R9700+V620×2はmulti-target HIP buildで動作し、layer split
+`5,2,2`が524,288 context/slot、45.82/47.90秒、peak VRAM 30.97/16.14/21.52 GBでbounded比較の最良
+single-process profileとなった。ただしR9700をsLLM開発から占有するため非運用とする。3基tensor splitは
+63.45/65.08秒で棄却した。この比較後に上記V620×2 tensorの縮小構成だけを通常運用へ昇格した。詳細は
+[multi-GPU selection summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)を参照する。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。
