@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase27-weight-stream-summary-v1.schema.json",
+  "title": "sLLM Phase 27 decode projection weight-stream disposition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision", "recorded_at", "identity", "frozen_contract", "production_baseline", "profile_accounting", "candidate_accounting", "disposition"],
+  "properties": {
+    "schema_version": {"const": "phase27-weight-stream-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "NO_COMMON_PROJECTION_CANDIDATE"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"$ref": "#/$defs/nonempty_object"},
+    "frozen_contract": {"$ref": "#/$defs/nonempty_object"},
+    "production_baseline": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/production_row"}
+    },
+    "profile_accounting": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/profile_row"}
+    },
+    "candidate_accounting": {"$ref": "#/$defs/nonempty_object"},
+    "disposition": {"$ref": "#/$defs/nonempty_object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonempty_object": {"type": "object", "minProperties": 1},
+    "production_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "gpu_uuid", "sllm_binary_sha256", "sllm_evidence_sha256", "sllm_decode_tokens_per_second", "sllm_decode_mad", "llama_binary_sha256", "llama_decode_tokens_per_second", "llama_decode_stddev", "throughput_ratio", "comparison_class", "fallback_used", "cleanup_terminal_zero"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "gpu_uuid": {"type": "string", "minLength": 1},
+        "sllm_binary_sha256": {"$ref": "#/$defs/sha256"},
+        "sllm_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "sllm_decode_tokens_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "sllm_decode_mad": {"type": "number", "minimum": 0},
+        "llama_binary_sha256": {"$ref": "#/$defs/sha256"},
+        "llama_decode_tokens_per_second": {"type": "number", "exclusiveMinimum": 0},
+        "llama_decode_stddev": {"type": "number", "minimum": 0},
+        "throughput_ratio": {"type": "number", "exclusiveMinimum": 0},
+        "comparison_class": {"const": "E1-system-equivalent"},
+        "fallback_used": {"const": false},
+        "cleanup_terminal_zero": {"const": true}
+      }
+    },
+    "profile_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "sllm_profile_sha256", "llama_profile_sha256", "mandatory_projection_bytes_per_token", "sllm_projection_ns_per_token", "llama_projection_ns_per_token", "projection_latency_delta", "sllm_effective_weight_stream_gbps", "llama_effective_weight_stream_gbps", "sllm_projection_excluded_coarse_ns_per_nominal_decode_step", "llama_projection_excluded_coarse_ns_per_nominal_decode_step", "projection_excluded_scope"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "sllm_profile_sha256": {"$ref": "#/$defs/sha256"},
+        "llama_profile_sha256": {"$ref": "#/$defs/sha256"},
+        "mandatory_projection_bytes_per_token": {"type": "integer", "minimum": 1},
+        "sllm_projection_ns_per_token": {"type": "number", "exclusiveMinimum": 0},
+        "llama_projection_ns_per_token": {"type": "number", "exclusiveMinimum": 0},
+        "projection_latency_delta": {"type": "number"},
+        "sllm_effective_weight_stream_gbps": {"type": "number", "exclusiveMinimum": 0},
+        "llama_effective_weight_stream_gbps": {"type": "number", "exclusiveMinimum": 0},
+        "sllm_projection_excluded_coarse_ns_per_nominal_decode_step": {"type": "number", "exclusiveMinimum": 0},
+        "llama_projection_excluded_coarse_ns_per_nominal_decode_step": {"type": "number", "exclusiveMinimum": 0},
+        "projection_excluded_scope": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

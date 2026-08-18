@@ -344,7 +344,9 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
           "causal attention completion allocation failed before enqueue");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = queue_profiles_completions(queue)
+                                        ? hipEventCreateWithFlags(&native_event, 0U)
+                                        : hipSuccess;
     if (event_status != hipSuccess) {
       execute_guard.disarm();
       (void)rollback_reserved_causal_attention(state, queue, {query, output},
@@ -354,8 +356,10 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
     event_guard.adopt(context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
+    const hipError_t timing_status = queue_profiles_completions(queue)
+                                         ? hipEventCreateWithFlags(
+                                               &timing_start_event, 0U)
+                                         : hipSuccess;
     if (timing_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -379,10 +383,14 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
           candidate, event_guard,
           "causal attention completion token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
     const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
+        candidate->timing_start_event != nullptr
+            ? hipEventRecord(candidate->timing_start_event, queue->stream)
+            : hipSuccess;
     if (timing_record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(
@@ -415,7 +423,9 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
                                        error_sink);
     }
     const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
+        candidate->event != nullptr
+            ? hipEventRecord(candidate->event, queue->stream)
+            : hipSuccess;
     if (record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, record_status,

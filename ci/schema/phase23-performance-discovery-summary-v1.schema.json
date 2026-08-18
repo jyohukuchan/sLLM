@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase23-performance-discovery-summary-v1.schema.json",
+  "title": "sLLM Phase 23 performance discovery summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "recorded_at",
+    "identity",
+    "comparison",
+    "measurements",
+    "critical_path",
+    "serving_controls",
+    "secondary_model",
+    "opportunities",
+    "backlog_reclassification",
+    "phase24_shortlist",
+    "verification"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase23-performance-discovery-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"$ref": "#/$defs/object"},
+    "comparison": {"$ref": "#/$defs/object"},
+    "measurements": {
+      "type": "array",
+      "minItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["lane", "target", "state", "evidence_sha256", "result"],
+        "properties": {
+          "lane": {"type": "string", "minLength": 1},
+          "target": {"enum": ["gfx1030", "gfx1201"]},
+          "state": {"const": "PASS"},
+          "evidence_sha256": {"$ref": "#/$defs/sha256"},
+          "result": {"$ref": "#/$defs/object"}
+        }
+      }
+    },
+    "critical_path": {"$ref": "#/$defs/object"},
+    "serving_controls": {"$ref": "#/$defs/object"},
+    "secondary_model": {"$ref": "#/$defs/object"},
+    "opportunities": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id", "rank", "classification", "observation", "hypothesis",
+          "amdahl_upper_bound", "credible_improvement", "coverage", "confidence",
+          "implementation_cost", "verification_cost", "risk", "provenance",
+          "falsification", "expiry"
+        ],
+        "properties": {
+          "id": {"type": "string", "pattern": "^P23-O[0-9]+$"},
+          "rank": {"type": "integer", "minimum": 1},
+          "classification": {"enum": ["new", "existing-backlog", "premise-changed", "disproved"]},
+          "observation": {"type": "string", "minLength": 1},
+          "hypothesis": {"type": "string", "minLength": 1},
+          "amdahl_upper_bound": {"$ref": "#/$defs/object"},
+          "credible_improvement": {"$ref": "#/$defs/object"},
+          "coverage": {"type": "string", "minLength": 1},
+          "confidence": {"enum": ["high", "medium", "low"]},
+          "implementation_cost": {"enum": ["small", "medium", "large"]},
+          "verification_cost": {"enum": ["small", "medium", "large"]},
+          "risk": {"type": "string", "minLength": 1},
+          "provenance": {"type": "string", "minLength": 1},
+          "falsification": {"type": "string", "minLength": 1},
+          "expiry": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "backlog_reclassification": {
+      "type": "array",
+      "minItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["family", "classification", "reason"],
+        "properties": {
+          "family": {"type": "string", "minLength": 1},
+          "classification": {"enum": ["confirmed", "new", "lower-priority", "disproved", "premise-changed"]},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "phase24_shortlist": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^P23-O[0-9]+$"}
+    },
+    "verification": {"$ref": "#/$defs/object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "object": {"type": "object", "minProperties": 1}
+  }
+}

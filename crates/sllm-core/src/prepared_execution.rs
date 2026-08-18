@@ -12,8 +12,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::execution::{
-    BoundSemanticOp, CausalAttentionSubmission, ExecutionError, ExecutionSession, ExecutionState,
-    KvStateAppendSubmission, LinearAttentionSubmission, OwnedTensorBinding, PreparedOperation,
+    BoundSemanticOp, CausalAttentionSubmission, ExecutionError, ExecutionQueue,
+    ExecutionQueueFence, ExecutionSession, ExecutionState, KvStateAppendSubmission,
+    LinearAttentionSubmission, OwnedTensorBinding, PreparedOperation, QueueCompletionMode,
     Submission,
 };
 use crate::{AccessMode, DispatchEvidence, SemanticOpDescriptor, TensorView};
@@ -317,12 +318,25 @@ impl<N> PreparedExecutionPlan<N> {
 
 trait SegmentCompletionOwner: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        self.query()
+    }
     fn dispatch(&self) -> &DispatchEvidence;
 }
 
 impl SegmentCompletionOwner for Submission {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
+    }
+
+    fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        self.finalize_after_fence(fence)
     }
 
     fn dispatch(&self) -> &DispatchEvidence {
@@ -335,6 +349,13 @@ impl SegmentCompletionOwner for CausalAttentionSubmission {
         self.query()
     }
 
+    fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        self.finalize_after_fence(fence)
+    }
+
     fn dispatch(&self) -> &DispatchEvidence {
         self.dispatch()
     }
@@ -343,6 +364,13 @@ impl SegmentCompletionOwner for CausalAttentionSubmission {
 impl SegmentCompletionOwner for LinearAttentionSubmission {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
+    }
+
+    fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        self.finalize_after_fence(fence)
     }
 
     fn dispatch(&self) -> &DispatchEvidence {
@@ -359,9 +387,45 @@ struct RetainedSubmission {
 #[derive(Default)]
 pub(crate) struct ExecutionSegment {
     pending: Vec<RetainedSubmission>,
+    deferred: Option<(ExecutionSession, ExecutionQueue, Duration)>,
+    profiled_timeout: Option<Duration>,
 }
 
 impl ExecutionSegment {
+    pub(crate) fn profiled(timeout: Duration) -> Self {
+        Self {
+            pending: Vec::new(),
+            deferred: None,
+            profiled_timeout: Some(timeout),
+        }
+    }
+
+    // Phase 21 proved this mode structurally but rejected it as the production
+    // default after the final counterbalanced wall-time comparison.
+    #[allow(dead_code)]
+    pub(crate) fn deferred(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        timeout: Duration,
+    ) -> Result<Self, ExecutionError> {
+        match session.set_queue_completion_mode(queue, QueueCompletionMode::Deferred) {
+            Ok(()) => {}
+            Err(ExecutionError::Unsupported { .. }) => {
+                return Ok(Self {
+                    pending: Vec::new(),
+                    deferred: None,
+                    profiled_timeout: Some(timeout),
+                });
+            }
+            Err(error) => return Err(error),
+        }
+        Ok(Self {
+            pending: Vec::new(),
+            deferred: Some((session.clone(), queue.clone(), timeout)),
+            profiled_timeout: Some(timeout),
+        })
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
@@ -399,11 +463,98 @@ impl ExecutionSegment {
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
         let had_work = !self.pending.is_empty();
+        if had_work && let Some((session, queue, timeout)) = &self.deferred {
+            let mut fence = session.create_queue_fence(queue)?;
+            require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
+            for mut retained in self.pending.drain(..) {
+                require_terminal_success(
+                    &retained.label,
+                    retained.owner.finalize_after_fence(&fence)?,
+                )?;
+                audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+            }
+        } else {
+            for mut retained in self.pending.drain(..) {
+                require_terminal_success(&retained.label, retained.owner.query()?)?;
+                audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+            }
+        }
+        audit.record_boundary(boundary, had_work)?;
+        Ok(())
+    }
+
+    pub(crate) fn flush_with_semantic(
+        &mut self,
+        label: &str,
+        terminal: &mut Submission,
+        boundary: ExecutionBoundaryKind,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<(), PreparedExecutionError> {
+        let Some((session, queue, timeout)) = &self.deferred else {
+            let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
+            require_terminal_success(label, terminal.wait(timeout)?)?;
+            self.flush(boundary, audit)?;
+            audit.record_labeled(label, terminal.dispatch())?;
+            return Ok(());
+        };
+        let mut fence = session.create_queue_fence(queue)?;
+        require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
+        for mut retained in self.pending.drain(..) {
+            require_terminal_success(
+                &retained.label,
+                retained.owner.finalize_after_fence(&fence)?,
+            )?;
+            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        }
+        require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
+        audit.record_labeled(label, terminal.dispatch())?;
+        audit.record_boundary(boundary, true)?;
+        Ok(())
+    }
+
+    pub(crate) fn flush_with_kv_append(
+        &mut self,
+        label: &str,
+        terminal: &mut KvStateAppendSubmission,
+        audited_boundary: Option<ExecutionBoundaryKind>,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<(), PreparedExecutionError> {
+        let Some((session, queue, timeout)) = &self.deferred else {
+            let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
+            require_terminal_success(label, terminal.wait(timeout)?)?;
+            if let Some(boundary) = audited_boundary {
+                self.flush(boundary, audit)?;
+            } else {
+                self.flush_without_boundary(audit)?;
+            }
+            audit.record_labeled(label, terminal.dispatch())?;
+            return Ok(());
+        };
+        let mut fence = session.create_queue_fence(queue)?;
+        require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
+        for mut retained in self.pending.drain(..) {
+            require_terminal_success(
+                &retained.label,
+                retained.owner.finalize_after_fence(&fence)?,
+            )?;
+            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        }
+        require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
+        audit.record_labeled(label, terminal.dispatch())?;
+        if let Some(boundary) = audited_boundary {
+            audit.record_boundary(boundary, true)?;
+        }
+        Ok(())
+    }
+
+    fn flush_without_boundary(
+        &mut self,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<(), PreparedExecutionError> {
         for mut retained in self.pending.drain(..) {
             require_terminal_success(&retained.label, retained.owner.query()?)?;
             audit.record_labeled(&retained.label, retained.owner.dispatch())?;
         }
-        audit.record_boundary(boundary, had_work)?;
         Ok(())
     }
 
@@ -755,22 +906,6 @@ pub(crate) fn require_terminal_success(
             stage: stage.to_owned(),
         }),
     }
-}
-
-pub(crate) fn wait_terminal_submission(
-    stage: &str,
-    submission: &mut Submission,
-    timeout: Duration,
-) -> Result<(), PreparedExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
-}
-
-pub(crate) fn wait_terminal_kv_append(
-    stage: &str,
-    submission: &mut KvStateAppendSubmission,
-    timeout: Duration,
-) -> Result<(), PreparedExecutionError> {
-    require_terminal_success(stage, submission.wait(timeout)?)
 }
 
 #[cfg(test)]

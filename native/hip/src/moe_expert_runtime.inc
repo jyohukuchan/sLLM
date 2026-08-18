@@ -322,14 +322,18 @@ sllm_moe_expert_execute(const sllm_moe_expert_plan_t *const raw_plan,
           "moe_expert completion allocation failed before enqueue");
     }
     hipEvent_t native_event = nullptr;
-    hipError_t status = hipEventCreateWithFlags(&native_event, 0U);
+    hipError_t status = queue_profiles_completions(queue)
+                            ? hipEventCreateWithFlags(&native_event, 0U)
+                            : hipSuccess;
     if (status != hipSuccess) {
       return hip_failure(error_sink, status, "hipEventCreateWithFlags");
     }
     event_guard.adopt(plan->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    status = hipEventCreateWithFlags(&timing_start_event, 0U);
+    status = queue_profiles_completions(queue)
+                 ? hipEventCreateWithFlags(&timing_start_event, 0U)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -353,9 +357,13 @@ sllm_moe_expert_execute(const sllm_moe_expert_plan_t *const raw_plan,
           candidate, event_guard,
           "moe_expert completion handle allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
-    status = hipEventRecord(candidate->timing_start_event, queue->stream);
+    status = candidate->timing_start_event != nullptr
+                 ? hipEventRecord(candidate->timing_start_event, queue->stream)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,
@@ -382,7 +390,9 @@ sllm_moe_expert_execute(const sllm_moe_expert_plan_t *const raw_plan,
                                        "moe_expert kernel launch", queue,
                                        error_sink);
     }
-    status = hipEventRecord(candidate->event, queue->stream);
+    status = candidate->event != nullptr
+                 ? hipEventRecord(candidate->event, queue->stream)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,

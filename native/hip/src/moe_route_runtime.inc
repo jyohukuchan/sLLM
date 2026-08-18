@@ -326,7 +326,9 @@ sllm_moe_route_execute(const sllm_moe_route_plan_t *const raw_plan,
     }
 
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = queue_profiles_completions(queue)
+                                        ? hipEventCreateWithFlags(&native_event, 0U)
+                                        : hipSuccess;
     if (event_status != hipSuccess) {
       if (!rollback_reserved_argmax_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -338,8 +340,10 @@ sllm_moe_route_execute(const sllm_moe_route_plan_t *const raw_plan,
     event_guard.adopt(plan->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
+    const hipError_t timing_event_status = queue_profiles_completions(queue)
+                                               ? hipEventCreateWithFlags(
+                                                     &timing_start_event, 0U)
+                                               : hipSuccess;
     if (timing_event_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -365,10 +369,14 @@ sllm_moe_route_execute(const sllm_moe_route_plan_t *const raw_plan,
           candidate, event_guard,
           "moe_route completion handle token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
     const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
+        candidate->timing_start_event != nullptr
+            ? hipEventRecord(candidate->timing_start_event, queue->stream)
+            : hipSuccess;
     if (timing_record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, timing_record_status,
@@ -409,7 +417,9 @@ sllm_moe_route_execute(const sllm_moe_route_plan_t *const raw_plan,
                                        error_sink);
     }
     const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
+        candidate->event != nullptr
+            ? hipEventRecord(candidate->event, queue->stream)
+            : hipSuccess;
     if (record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, record_status,

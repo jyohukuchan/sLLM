@@ -322,6 +322,10 @@ typedef uint32_t sllm_elementwise_operation_t;
 #define SLLM_COMPLETION_STATE_SUCCESS UINT32_C(1)
 #define SLLM_COMPLETION_STATE_FAILURE UINT32_C(2)
 
+typedef uint32_t sllm_queue_completion_mode_t;
+#define SLLM_QUEUE_COMPLETION_MODE_PROFILED UINT32_C(0)
+#define SLLM_QUEUE_COMPLETION_MODE_DEFERRED UINT32_C(1)
+
 /* These handles have no public layout and must not be dereferenced by callers.
  */
 typedef struct sllm_context_t sllm_context_t;
@@ -1185,6 +1189,24 @@ SLLM_HIP_API sllm_status_t sllm_buffer_copy_h2d(
 SLLM_HIP_API sllm_status_t sllm_buffer_copy_d2h(
     const sllm_queue_t *queue, const sllm_buffer_t *buffer,
     const sllm_transfer_desc_t *transfer, sllm_completion_t **completion,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Production execution may defer numeric-operation completion events until
+ * one ordered queue fence closes a model-neutral segment.  PROFILED remains
+ * the default and preserves standalone per-operation timing semantics. */
+SLLM_HIP_API sllm_status_t sllm_queue_set_completion_mode(
+    const sllm_queue_t *queue, sllm_queue_completion_mode_t mode,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_queue_fence(
+    const sllm_queue_t *queue, sllm_completion_t **completion,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+/* Finalizes an eventless numeric completion after a successful fence on the
+ * same context, queue, and stream. */
+SLLM_HIP_API sllm_status_t sllm_completion_finalize_after(
+    sllm_completion_t *completion, sllm_completion_t *fence,
+    sllm_completion_result_t *result,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_completion_query(

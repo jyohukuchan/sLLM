@@ -1,0 +1,276 @@
+{
+  "schema_version": "phase23-performance-discovery-summary-v1",
+  "state": "COMPLETE",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "source_state": "dirty integration tree containing Phase 21/22 work; binaries and reports are bound independently",
+    "runner_sha256": "96b0bcf78c7f6459aa39d1f3aec0c7bcd0eb6d7dc76706d173d626f81b6f82aa",
+    "rocm": "7.14.0",
+    "profiler": "rocprofv3 1.3.2",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "model_lock_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "gfx1030_cli_sha256": "a65948d8bff2ca1fbcaeec528bc1e0c2b6891427acdc377adaad1e409ec65069",
+    "gfx1201_cli_sha256": "3a972114750b032509faa6050faa97816cee00cedc38538046e656226929ecf9",
+    "gfx1030_server_sha256": "94e4b8837bc4ce74dadaec887e31d86a98bbf87dbdd69365e716a019271b166d",
+    "gfx1201_server_sha256": "568b06cd4744554aeb6c564d53a1eef751f65d5b52c43e4e4771cbc306ecbe5c"
+  },
+  "comparison": {
+    "primary_peer": "llama.cpp f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "immutable_peer_evidence_sha256": "53845c6501e78357b9b75ddcd8f960b2499cdbd64c94a2799afb95043799dccf",
+    "classification": {
+      "prefill_256": "E1 system-equivalent: same source revision, BF16, GPU, input tokens and greedy semantics; artifact layout and requested output length differ, so only the prefill/system gap is used",
+      "decode_fresh": "E2 diagnostic-only: fresh sLLM 28/128 and fixed peer 32/256 differ in token sequence and output length; values are shown separately without a winner ratio",
+      "phase9_exact_decode": "historical E1 17/17 corroboration, not substituted for the fresh current-tree run",
+      "api": "sLLM-only transport and queue decomposition"
+    },
+    "llama_prefill_256_ns": {"gfx1030": 352427471, "gfx1201": 48113330},
+    "llama_decode_long_tokens_per_second": {"gfx1030": 42.67637792931872, "gfx1201": 54.37859339427723},
+    "llama_model_load_ns": {"gfx1030": 1178333894, "gfx1201": 1178333894}
+  },
+  "measurements": [
+    {
+      "lane": "warm-chat-13-to-stop",
+      "target": "gfx1030",
+      "state": "PASS",
+      "evidence_sha256": "5ebb99919d0424ea6b8fecd80711cecb2aef1e876b9a0de00920a079103d4019",
+      "result": {"input_tokens": 13, "actual_completion_tokens": 10, "ttft_ns_median": 186770371, "e2e_ns_median": 473553340, "decode_tokens_per_second_median": 32.497684705024504}
+    },
+    {
+      "lane": "warm-chat-13-to-stop",
+      "target": "gfx1201",
+      "state": "PASS",
+      "evidence_sha256": "3e6be438be5efb4d55b85c5594af977233cff2cca615cce437fe32a5468bf071",
+      "result": {"input_tokens": 13, "actual_completion_tokens": 10, "ttft_ns_median": 48527491, "e2e_ns_median": 295813716.5, "decode_tokens_per_second_median": 37.82838654827346}
+    },
+    {
+      "lane": "prefill-256-output-2",
+      "target": "gfx1030",
+      "state": "PASS",
+      "evidence_sha256": "e2b0806bd457fd5420aebd67ed4c82b0f43006dd936da831645c5e3dc8688704",
+      "result": {"input_tokens": 256, "prefill_ns_median": 2269818929.5, "e2e_ns_median": 2343203819, "prefill_share": 0.9686818155104756, "llama_system_gap": 6.440527814303103}
+    },
+    {
+      "lane": "prefill-256-output-2",
+      "target": "gfx1201",
+      "state": "PASS",
+      "evidence_sha256": "35d9552cabdb1e66a30b4828e259f017eb96d6c6b785dfe0b74867d9db8b7f82",
+      "result": {"input_tokens": 256, "prefill_ns_median": 317584578.5, "e2e_ns_median": 392986431.5, "prefill_share": 0.8081311542686176, "llama_system_gap": 6.600760714338417}
+    },
+    {
+      "lane": "decode-28-output-128",
+      "target": "gfx1030",
+      "state": "PASS",
+      "evidence_sha256": "d2b7358cd39418b18e3c4a3cccd15d056d7bf7452bffee7cb4da3b2ee4db8a99",
+      "result": {"input_tokens": 28, "actual_completion_tokens": 128, "e2e_ns_median": 4254372496.5, "decode_tokens_per_second_median": 32.42540699996458, "post_ttft_wall_share": 0.9234004164496413}
+    },
+    {
+      "lane": "decode-28-output-128",
+      "target": "gfx1201",
+      "state": "PASS",
+      "evidence_sha256": "0f5d1d1da394f2388ccbc62a1e987581824d423ff123933da6637e3f5714208d",
+      "result": {"input_tokens": 28, "actual_completion_tokens": 128, "e2e_ns_median": 3513150837, "decode_tokens_per_second_median": 36.99089703290832, "post_ttft_wall_share": 0.9811963789586641}
+    },
+    {
+      "lane": "api-nonstream-sse-concurrency-2",
+      "target": "gfx1030",
+      "state": "PASS",
+      "evidence_sha256": "c88f67ab2dc1f89baff69c58a987d36b5619a011dc308cc17f81da98c20e3552",
+      "result": {"nonstream_http_ns_median": 462662696.5, "transport_residual_ns_median": 546099, "sse_transport_residual_ns_median": 522363, "concurrency_2_first_ns": 471014817, "concurrency_2_second_ns": 937413478}
+    },
+    {
+      "lane": "api-nonstream-sse-concurrency-2",
+      "target": "gfx1201",
+      "state": "PASS",
+      "evidence_sha256": "48de7c5c51494aee2c900482b7e52c4fe9cd091506aff291d4ae3161163e7e2b",
+      "result": {"nonstream_http_ns_median": 324008468.5, "transport_residual_ns_median": 596541, "sse_transport_residual_ns_median": 515718.5, "concurrency_2_first_ns": 325142733, "concurrency_2_second_ns": 650869990}
+    },
+    {
+      "lane": "cold-process-model-ready-5",
+      "target": "gfx1030",
+      "state": "PASS",
+      "evidence_sha256": "554c107b066cddca33fd25c9a88563e8936f2b258677b3ee3a6efad434e3d272",
+      "result": {"samples": 5, "os_page_cache": "uncontrolled-warm", "median_ns": 10531348895, "mad_ns": 121335206}
+    },
+    {
+      "lane": "cold-process-model-ready-5",
+      "target": "gfx1201",
+      "state": "PASS",
+      "evidence_sha256": "403f08709ad6c4834c294df62f5348db756f70e6e33aad31d944136a03582e09",
+      "result": {"samples": 5, "os_page_cache": "uncontrolled-warm", "median_ns": 11603970162, "mad_ns": 307440950}
+    }
+  ],
+  "critical_path": {
+    "normal_wall": {
+      "gfx1030_short_ns_median": {"request_to_prefill_submit": 7123150, "prefill": 179687101.5, "prefill_complete_to_first_token": 745, "stop_to_cleanup": 9815113},
+      "gfx1201_short_ns_median": {"request_to_prefill_submit": 6514226.5, "prefill": 41969104, "prefill_complete_to_first_token": 595, "stop_to_cleanup": 9356726.5},
+      "accounting_note": "component medians are not arithmetically added; decode/body and residual are derived only from common request boundaries"
+    },
+    "profiler_observer_lane": {
+      "short_gfx1030_aggregate_sha256": "d2c148c8c0ff6bc0655dc355e6c299029f0415ec7db98319477911516b116ae9",
+      "short_gfx1201_aggregate_sha256": "0c7b77611ba29de1784561a4d035de894fff5bfd580e007df68444b874b57257",
+      "prefill_gfx1030_aggregate_sha256": "d55e47fb7ffa2c0b1f5bbfa8b1ae27bff24d77a219479bcb676a9564c9b7ec28",
+      "prefill_gfx1201_aggregate_sha256": "1ba14226bc4e00f5b82b7bca5007519b3676e68d655e241f75860ecff78ef26b",
+      "prefill_device_categories": {
+        "gfx1030": {"prefill_matmul_share": 0.8846631942633678, "linear_attention_share": 0.09500351673638484, "lm_head_shape_share": 0.13482402194765306},
+        "gfx1201": {"decode_or_recurrent_matvec_share": 0.599132154334253, "linear_attention_share": 0.24211426147568582, "lm_head_shape_share": 0.4692246346570357}
+      },
+      "observer_effect": "rocprofv3 increased or perturbed wall time; shares and dispatch mechanisms are used, instrumented wall is not a production performance value"
+    },
+    "cold_start": {
+      "source_mechanisms": ["full GGUF SHA-256 on every process open", "one resident allocation per binding", "binding/chunk upload followed by an immediate completion wait"],
+      "trace_mechanisms": {"gfx1030_h2d_calls": 660, "gfx1030_h2d_ns": 541049914, "gfx1201_h2d_calls": 754, "gfx1201_h2d_ns": 714278987, "gfx1201_module_load_ns": 1090809633},
+      "residual": "most of the 10.5-11.6 s startup is host verification/read/allocation/serialized upload orchestration, not measured GPU copy duration"
+    }
+  },
+  "serving_controls": {
+    "vllm_revision": "568afb3a13806beb53bb2e6bd518269357b237c0",
+    "sglang_revision": "fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1",
+    "execution_state": "E2 technical comparison only",
+    "non_execution_reason": "neither Python module nor a local vLLM/SGLang container image is installed; constructing a new PyTorch/ROCm engine stack was outside the fixed Phase 23 environment and would not be a matched pre-existing control",
+    "reproduction": ["python3 -c 'import vllm'", "python3 -c 'import sglang'", "podman images --format '{{.Repository}}:{{.Tag}}'"],
+    "technical_difference": "sLLM owns one FIFO worker that awaits each whole generation; vLLM tracks waiting/running sets and token budgets, while SGLang maintains running batches, merges new work and has an overlap loop"
+  },
+  "secondary_model": {
+    "model": "google/gemma-4-12B-it mixed NVFP4 W4A4 / FP8 W8A8",
+    "target": "gfx1201",
+    "gguf_sha256": "4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+    "derived_lock_sha256": "962d818331161c9f454ce4c7763435180c58436430093509cbaad8ec28210368",
+    "profile_aggregate_sha256": "c6014589d9f945c89fe7b2b57a0dae89643f3f2ffddce0f7e1dc473034788cad",
+    "state": "PASS",
+    "scope": "1 prompt token / 3 generated tokens, profiler observer lane only",
+    "matvec_device_time_share": 0.836669768594492,
+    "conclusion": "decode matrix work is cross-model; the exact BF16 kernel/provider is not transferable to mixed low-bit Gemma"
+  },
+  "opportunities": [
+    {
+      "id": "P23-O1",
+      "rank": 1,
+      "classification": "new",
+      "observation": "prefill computes [M,vocab] logits and M argmax values although generation consumes only the last row; the 256-token LM-head-shaped trace is 13.48%/46.92% of V620/R9700 device time",
+      "hypothesis": "slice the final hidden row before LM head and run a one-row projection/argmax while preserving optional all-logits and MTP hooks behind their explicit paths",
+      "amdahl_upper_bound": {"gfx1030_prefill_case_e2e": 0.1306, "gfx1201_prefill_case_e2e": 0.3792},
+      "credible_improvement": {"gfx1030_prefill_case_e2e": "8-13%", "gfx1201_prefill_case_e2e": "20-38%"},
+      "coverage": "dense Qwen and likely other generation paths with M>1 prefill; no benefit to M=1 decode",
+      "confidence": "high",
+      "implementation_cost": "medium",
+      "verification_cost": "medium",
+      "risk": "all-logits, MTP hidden/logits and sampling contracts must not silently lose rows",
+      "provenance": "independent sLLM trace and source inspection; no external code reuse",
+      "falsification": "last-row projection microcase must reduce LM-head grid from M*vocab to vocab and improve 256-token production wall on both GPUs with identical first token/logits oracle",
+      "expiry": "expires if graph lowering already proves a last-row view or a fresh trace shows less than 5% E2E share on both canonical GPUs"
+    },
+    {
+      "id": "P23-O2",
+      "rank": 2,
+      "classification": "existing-backlog",
+      "observation": "fresh long decode is 32.43/36.99 tok/s on V620/R9700; historical exact 17/17 ratios to llama.cpp were 0.724/0.712, and fresh Gemma matvec share is 83.67%",
+      "hypothesis": "optimize projection families as fused/shared-load graph units and reuse launch plans rather than tuning one M=1 shape in isolation",
+      "amdahl_upper_bound": {"qwen_decode_device_share_history": 0.6328, "gemma_decode_device_share_fresh": 0.8367},
+      "credible_improvement": {"qwen_decode_e2e": "8-20%", "gemma_decode_e2e": "model/provider-specific; measure before claim"},
+      "coverage": "steady-state decode across dense BF16 and mixed low-bit models, with provider-specific kernels",
+      "confidence": "high",
+      "implementation_cost": "large",
+      "verification_cost": "large",
+      "risk": "fusion can change accumulation order, provider coverage and transactional state publication",
+      "provenance": "sLLM profiles plus facts-only engine comparison; llama.cpp reuse would require a separate exact import record",
+      "falsification": "a fused gate/up or QKV microcase must improve its complete family and at least 5% full-model decode wall on one target without worsening the other target's selected provider",
+      "expiry": "expires when model-wide matrix share falls below 30% or a provider change closes the matched decode residual"
+    },
+    {
+      "id": "P23-O3",
+      "rank": 3,
+      "classification": "existing-backlog",
+      "observation": "two simultaneous API requests serialize: the second completes at 0.937/0.651 s versus first 0.471/0.325 s on V620/R9700; HTTP and SSE add only about 0.5-0.6 ms",
+      "hypothesis": "replace the single whole-generation worker with continuous decode batching and bounded prefill/decode interleave",
+      "amdahl_upper_bound": {"concurrency_2_aggregate_throughput": "approaches 2x if two requests batch at unchanged per-step cost", "single_request_latency": 0},
+      "credible_improvement": {"concurrency_2_throughput": "30-80%", "single_request_latency": "0-5%"},
+      "coverage": "OpenAI service under concurrent requests; direct single-request users do not benefit",
+      "confidence": "high",
+      "implementation_cost": "large",
+      "verification_cost": "large",
+      "risk": "cancellation, fairness, KV ownership, backpressure and sampling isolation",
+      "provenance": "sLLM measurement and facts-only vLLM/SGLang source inspection; no non-llama code reuse",
+      "falsification": "Q1/Q2 prototype must overlap or batch GPU steps and raise aggregate token throughput without violating per-request token/stop/cleanup order",
+      "expiry": "expires if the product remains explicitly single-request-only or hardware saturation prevents any concurrency gain"
+    },
+    {
+      "id": "P23-O4",
+      "rank": 4,
+      "classification": "existing-backlog",
+      "observation": "fresh-process model-ready median is 10.53/11.60 s while fixed llama.cpp reports 1.18 s; sLLM performs full-file SHA-256 and serialized per-binding/chunk upload waits",
+      "hypothesis": "cache verified identity safely, pipeline file read/hash with staged H2D, and aggregate upload completions",
+      "amdahl_upper_bound": {"cold_start": "about 89-90% relative to the fixed peer system result", "warm_request": 0},
+      "credible_improvement": {"cold_start": "30-70%", "warm_request": "0%"},
+      "coverage": "all model starts and scale-out; no steady-state benefit",
+      "confidence": "high",
+      "implementation_cost": "medium",
+      "verification_cost": "large",
+      "risk": "identity cache must not weaken content verification or permit changed/unlinked artifacts",
+      "provenance": "independent sLLM source/profile inspection",
+      "falsification": "five fresh processes with an explicit page-cache state must reduce model-ready median while detecting one-byte artifact and lock mutations",
+      "expiry": "expires if deployment keeps models resident and startup is removed from product objectives"
+    },
+    {
+      "id": "P23-O5",
+      "rank": 5,
+      "classification": "premise-changed",
+      "observation": "even before terminal-row removal, 256-token prefill is 6.44/6.60x the E1 fixed-peer system result; V620 is dominated by tiled16 matmul and R9700 by matvec/recurrent linear attention",
+      "hypothesis": "after P23-O1, re-profile target-specific M>1 GEMM and recurrent-GDN providers and cache selected library solutions",
+      "amdahl_upper_bound": {"gfx1030_prefill_case_e2e": 0.8183, "gfx1201_prefill_case_e2e": 0.6857},
+      "credible_improvement": {"prefill_case_e2e_after_O1": "10-40%"},
+      "coverage": "prefill; target and architecture dependent",
+      "confidence": "medium",
+      "implementation_cost": "large",
+      "verification_cost": "large",
+      "risk": "current profiler observer effect and terminal-row waste confound provider shares",
+      "provenance": "sLLM and fixed-peer measurements; no peer kernel implementation inferred",
+      "falsification": "repeat 255/256/257 and 2047/2049 after O1; abandon if the residual is under 10% or cannot be attributed to a provider",
+      "expiry": "re-rank immediately after P23-O1 changes the prefill topology"
+    },
+    {
+      "id": "P23-O6",
+      "rank": 6,
+      "classification": "disproved",
+      "observation": "HTTP/SSE residual is about 0.5-0.6 ms and Phase 21 completion-event aggregation was noise-neutral",
+      "hypothesis": "frontend JSON/SSE or another isolated event-count reduction is not the next large single-request optimization",
+      "amdahl_upper_bound": {"short_api_e2e": 0.002},
+      "credible_improvement": {"short_api_e2e": "below 1%"},
+      "coverage": "current local API and profiled completion path",
+      "confidence": "high",
+      "implementation_cost": "small",
+      "verification_cost": "small",
+      "risk": "none; this is a negative prioritization result",
+      "provenance": "sLLM measurements only",
+      "falsification": "reopen only if network/backpressure workloads show a new residual above 5%",
+      "expiry": "expires when transport, event ownership or deployment network changes materially"
+    }
+  ],
+  "backlog_reclassification": [
+    {"family": "runtime dispatch and completion events", "classification": "lower-priority", "reason": "Phase 21 was noise-neutral; graph/family fusion remains under P23-O2, isolated event reduction does not"},
+    {"family": "dense BF16 M=1 matvec", "classification": "premise-changed", "reason": "single-shape tuning failed, but model-wide projection-family fusion remains dominant"},
+    {"family": "prefill last-row logits and argmax", "classification": "new", "reason": "fresh trace and source show unused prompt-row vocabulary work"},
+    {"family": "prefill M>1 and recurrent GDN provider", "classification": "confirmed", "reason": "256-token prefill is over 6x the E1 peer system result on both targets"},
+    {"family": "FP8/NVFP4/MXFP4 model path", "classification": "confirmed", "reason": "fresh Gemma mixed-low-bit trace assigns 83.67% of device time to matvec; provider-specific work is required"},
+    {"family": "sparse MoE", "classification": "lower-priority", "reason": "not selected by the primary broad scan; no new common evidence beyond existing backlog"},
+    {"family": "exact MTP", "classification": "lower-priority", "reason": "primary normal decode, prefill and service gaps are larger and MTP was outside the matched lane"},
+    {"family": "sampling", "classification": "lower-priority", "reason": "greedy argmax is small in short trace; non-greedy full-logits cost remains unmeasured and is not disproved"},
+    {"family": "frontend JSON and SSE", "classification": "disproved", "reason": "measured local transport residual is below 1 ms"},
+    {"family": "continuous batching and scheduler", "classification": "confirmed", "reason": "Q1 requests serialize completely and fixed serving engines use running/waiting batch schedulers"},
+    {"family": "request state and prefix/KV cache", "classification": "lower-priority", "reason": "direct request setup is about 6.5-7.1 ms; prefix reuse and long context were not matched"},
+    {"family": "model load and GGUF upload", "classification": "confirmed", "reason": "five-process startup is 10.5-11.6 s with full-file hash and serialized upload waits"},
+    {"family": "vision", "classification": "lower-priority", "reason": "not exercised by the text primary or secondary confirmation"},
+    {"family": "full attention and long context", "classification": "lower-priority", "reason": "full-attention/KV share stayed below 7% in selected traces; 2K boundary was not needed after stronger prefill findings"},
+    {"family": "multi-GPU and RDMA", "classification": "lower-priority", "reason": "capacity/aggregate-throughput work does not close the observed single-GPU critical paths"}
+  ],
+  "phase24_shortlist": ["P23-O1", "P23-O2", "P23-O3"],
+  "verification": {
+    "gpu_runs": "all selected runs PASS, exact target, HIP-only, fallback=false, terminal cleanup; health snapshots and raw reports remain local and are digest-bound",
+    "raw_policy": "models, binaries and raw profiler traces are not tracked",
+    "production_changes": false,
+    "public_api_changes": false,
+    "performance_claim": "discovery only; Phase 23 did not optimize production"
+  }
+}

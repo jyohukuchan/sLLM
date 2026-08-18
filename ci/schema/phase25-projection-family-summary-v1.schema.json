@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase25-projection-family-summary-v1.schema.json",
+  "title": "sLLM Phase 25 projection-family discovery summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision", "recorded_at", "identity", "frozen_contract", "profiles", "candidate_accounting", "disposition"],
+  "properties": {
+    "schema_version": {"const": "phase25-projection-family-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "NO_CANDIDATE"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"$ref": "#/$defs/nonempty_object"},
+    "frozen_contract": {"$ref": "#/$defs/nonempty_object"},
+    "profiles": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/profile"}
+    },
+    "candidate_accounting": {"$ref": "#/$defs/nonempty_object"},
+    "disposition": {"$ref": "#/$defs/nonempty_object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonempty_object": {"type": "object", "minProperties": 1},
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "gpu_uuid", "binary_sha256", "report_sha256", "kernel_stats_sha256", "hip_api_stats_sha256", "kernel_trace_sha256", "generated_tokens", "decode_steps", "kernel_device_time_ns", "projection_device_time_ns", "projection_device_share", "hip_launch_calls", "hip_launch_total_ns", "profiled_launch_average_ns", "gate_up_launch_only_upper_bound_fraction_of_tpot"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "gpu_uuid": {"type": "string", "minLength": 1},
+        "binary_sha256": {"$ref": "#/$defs/sha256"},
+        "report_sha256": {"$ref": "#/$defs/sha256"},
+        "kernel_stats_sha256": {"$ref": "#/$defs/sha256"},
+        "hip_api_stats_sha256": {"$ref": "#/$defs/sha256"},
+        "kernel_trace_sha256": {"$ref": "#/$defs/sha256"},
+        "generated_tokens": {"type": "integer", "minimum": 1},
+        "decode_steps": {"type": "integer", "minimum": 1},
+        "kernel_device_time_ns": {"type": "integer", "minimum": 1},
+        "projection_device_time_ns": {"type": "integer", "minimum": 1},
+        "projection_device_share": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "hip_launch_calls": {"type": "integer", "minimum": 1},
+        "hip_launch_total_ns": {"type": "integer", "minimum": 1},
+        "profiled_launch_average_ns": {"type": "number", "exclusiveMinimum": 0},
+        "gate_up_launch_only_upper_bound_fraction_of_tpot": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    }
+  }
+}

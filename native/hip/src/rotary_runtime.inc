@@ -349,14 +349,18 @@ extern "C" sllm_status_t sllm_rotary_execute(
           "rotary completion allocation failed before enqueue");
     }
     hipEvent_t native_event = nullptr;
-    status = hipEventCreateWithFlags(&native_event, 0U);
+    status = queue_profiles_completions(queue)
+                 ? hipEventCreateWithFlags(&native_event, 0U)
+                 : hipSuccess;
     if (status != hipSuccess) {
       return hip_failure(error_sink, status, "hipEventCreateWithFlags");
     }
     event_guard.adopt(plan->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    status = hipEventCreateWithFlags(&timing_start_event, 0U);
+    status = queue_profiles_completions(queue)
+                 ? hipEventCreateWithFlags(&timing_start_event, 0U)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -380,9 +384,13 @@ extern "C" sllm_status_t sllm_rotary_execute(
           candidate, event_guard,
           "rotary completion handle allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
-    status = hipEventRecord(candidate->timing_start_event, queue->stream);
+    status = candidate->timing_start_event != nullptr
+                 ? hipEventRecord(candidate->timing_start_event, queue->stream)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,
@@ -412,7 +420,9 @@ extern "C" sllm_status_t sllm_rotary_execute(
                                        "rotary kernel launch", queue,
                                        error_sink);
     }
-    status = hipEventRecord(candidate->event, queue->stream);
+    status = candidate->event != nullptr
+                 ? hipEventRecord(candidate->event, queue->stream)
+                 : hipSuccess;
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,

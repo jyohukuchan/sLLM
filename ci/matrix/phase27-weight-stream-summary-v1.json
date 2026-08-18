@@ -1,0 +1,110 @@
+{
+  "schema_version": "phase27-weight-stream-summary-v1",
+  "state": "COMPLETE",
+  "decision": "NO_COMMON_PROJECTION_CANDIDATE",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "source_state": "dirty integration tree containing the adopted Phase 24 source and rejected Phase 25/26 work; binaries and evidence are digest-bound independently",
+    "qwen_execution_sha256": "770027518e622f7ba7363f02607d5669cb447bce218a2662d1b878ff5a96a7dc",
+    "matmul_kernel_sha256": "070516210e9b3258cf98200c68bff0955992d4e3c95dff6eede564b986f32324",
+    "matmul_provider_sha256": "8c6dedaf4da604628723cfad710ac337119cec5cee79ecc25a896744d5386701",
+    "matmul_runtime_sha256": "e547e574369a44a7df00e5202177c550027560718f3dfbdb1c77d1887bf1b07f",
+    "rocm": "7.14.0",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "sllm_gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "llama_gguf_sha256": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045",
+    "llama_commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "llama_tree": "e9b6173953477054a4068884aa5fc9aeef6475e8"
+  },
+  "frozen_contract": {
+    "primary_model": "Qwen3.5-4B dense BF16",
+    "targets": ["gfx1030", "gfx1201"],
+    "sllm_workload": "28 rendered prompt tokens, 128 greedy completion tokens, 3 warmups, 10 measured requests",
+    "llama_workload": "128 decode tokens, 10 measured repetitions, plus a 28+128 combined control",
+    "comparison_limit": "E1 only: logical model revision, BF16, targets and decode budget match, but GGUF bytes, token stream and engine timing boundary do not",
+    "adoption_rule": "all fixed target/pattern aggregates non-regressing and any full-model decode TPOT or post-TTFT E2E improvement at least 5 percent",
+    "candidate_rule": "one common projection provider candidate only; target split only for a material target-specific problem"
+  },
+  "production_baseline": [
+    {
+      "target": "gfx1030",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "sllm_binary_sha256": "f06a25d7d6194dcecaedaea3a867e46190e7b44965a8445221486444a4bc26ae",
+      "sllm_evidence_sha256": "5e4261f7b6d3d6b18931e74e664fd10f0dc03e4967156320581f3120c52fa9e7",
+      "sllm_decode_tokens_per_second": 32.383827750429745,
+      "sllm_decode_mad": 0.23717860685359327,
+      "llama_binary_sha256": "758084b1c121a2f999378d1737272a0322b8675cd4ef2ed3b05cd5a3ae9d3468",
+      "llama_decode_tokens_per_second": 48.940309,
+      "llama_decode_stddev": 0.118751,
+      "throughput_ratio": 0.6617005166524336,
+      "comparison_class": "E1-system-equivalent",
+      "fallback_used": false,
+      "cleanup_terminal_zero": true
+    },
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "sllm_binary_sha256": "4584de6de507af014e0c53bf85dd1a7547703248b153e502c1367ed91247f487",
+      "sllm_evidence_sha256": "a33a7ffc03c9037289670e0d5d7fa881c655a419abe31cf8b816dcf5ef930087",
+      "sllm_decode_tokens_per_second": 36.9990024485831,
+      "sllm_decode_mad": 0.1553674117082302,
+      "llama_binary_sha256": "5d96a03f70d24f0d2caccd0e5172569523cc72763f9f7a4f915b9dece7a6acc4",
+      "llama_decode_tokens_per_second": 53.964127,
+      "llama_decode_stddev": 0.161091,
+      "throughput_ratio": 0.6856221809829908,
+      "comparison_class": "E1-system-equivalent",
+      "fallback_used": false,
+      "cleanup_terminal_zero": true
+    }
+  ],
+  "profile_accounting": [
+    {
+      "target": "gfx1030",
+      "sllm_profile_sha256": "8177cd5de2022cab10a8731c347143c8da55143c790c0dcff95f0b12ed350b95",
+      "llama_profile_sha256": "9727472381fed3816b3f8cc5ae5a8eff909e934530e9484751d684d4e5d1464a",
+      "mandatory_projection_bytes_per_token": 8409579520,
+      "sllm_projection_ns_per_token": 17711008.666666668,
+      "llama_projection_ns_per_token": 18994185.647058822,
+      "projection_latency_delta": -0.06755630403090485,
+      "sllm_effective_weight_stream_gbps": 474.8221672900768,
+      "llama_effective_weight_stream_gbps": 442.7449365960151,
+      "sllm_projection_excluded_coarse_ns_per_nominal_decode_step": 5379132.444444444,
+      "llama_projection_excluded_coarse_ns_per_nominal_decode_step": 1414277.1176470588,
+      "projection_excluded_scope": "diagnostic only: the sLLM aggregate still contains nonprojection prefill kernels and the llama.cpp boundary is unmatched; this is not decode-only time and no cross-engine ratio may be formed"
+    },
+    {
+      "target": "gfx1201",
+      "sllm_profile_sha256": "f3e24f9b88d32321c1c499d376520bb6fc28772727c69660690c533e0d7fbfcf",
+      "llama_profile_sha256": "c357d293707652ec9f6a2fd2fbc2b01304f4eb32b91fe8811c9eb51aacc6721f",
+      "mandatory_projection_bytes_per_token": 8409579520,
+      "sllm_projection_ns_per_token": 17852274.0,
+      "llama_projection_ns_per_token": 15863944.176470589,
+      "projection_latency_delta": 0.12533641075707402,
+      "sllm_effective_weight_stream_gbps": 471.06489178913563,
+      "llama_effective_weight_stream_gbps": 530.1064745596553,
+      "sllm_projection_excluded_coarse_ns_per_nominal_decode_step": 5257259.666666667,
+      "llama_projection_excluded_coarse_ns_per_nominal_decode_step": 1485071.4705882352,
+      "projection_excluded_scope": "diagnostic only: the sLLM aggregate still contains nonprojection prefill kernels and MTP-internal work while the llama.cpp boundary is unmatched; this is not decode-only time and no cross-engine ratio may be formed"
+    }
+  ],
+  "candidate_accounting": {
+    "gfx1030_projection_result": "sLLM is 6.76 percent faster than llama.cpp for mandatory decode projection device time; projection provider replacement cannot explain or close the peer gap on this target",
+    "gfx1201_projection_result": "sLLM is 12.53 percent slower for projection device time; matching the peer would save about 1.99 ms/token or 7.36 percent of production TPOT",
+    "shared_provider_conflict": "the only target with a projection opportunity is gfx1201 while the shared gfx1030 provider is already ahead",
+    "prior_candidate_control": "Phase 22 wave32x8 improved the V620 gate/up operator but regressed R9700 by about 13 percent and failed V620 full-model by 0.52 percent",
+    "excluded_fusion_control": "llama.cpp fuses gate/up/GLU, but Phase 25 bounded shared-activation and launch-only savings below 5 percent and Phase 27 explicitly excludes repeating that fusion work unit",
+    "dominant_remaining_gap": "a projection-excluded residual remains on both targets, but the Phase 27 aggregate is contaminated by prefill nonprojection work and unmatched MTP/timing boundaries; Phase 28 must isolate committed decode steps before ranking it",
+    "candidate_frozen": false,
+    "reason": "no common projection-only candidate has credible 5 percent full-model upside without a known target regression"
+  },
+  "disposition": {
+    "production_source_changed": false,
+    "candidate_implemented": false,
+    "candidate_adopted": false,
+    "target_specific_split_added": false,
+    "cross_engine_winner_claimed": false,
+    "phase27_complete_as_negative_discovery": true,
+    "next_reconsideration": "measure the projection-external per-token device/host residual as a separate phase, or revisit gfx1201-only projection selection only after a concrete provider passes gfx1030 non-regression"
+  }
+}

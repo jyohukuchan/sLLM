@@ -49,12 +49,13 @@ pub use execution::{
     BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DispatchEvidence,
     ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
     ExecutionCausalAttentionSubmissionAdapter, ExecutionError, ExecutionKvStateSubmissionAdapter,
-    ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue, ExecutionQueueId,
-    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId,
-    ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
-    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
-    LinearAttentionStateId, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
-    PreparedOperation, PreparedOperationId, Readback, ShutdownReport, Submission, Transfer,
+    ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue, ExecutionQueueFence,
+    ExecutionQueueFenceAdapter, ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest, ExecutionState,
+    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvState, KvStateAppendSubmission,
+    KvStateId, LinearAttentionBindings, LinearAttentionState, LinearAttentionStateId,
+    LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{

@@ -1,0 +1,82 @@
+{
+  "schema_version": "phase25-projection-family-summary-v1",
+  "state": "COMPLETE",
+  "decision": "NO_CANDIDATE",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "source_state": "dirty integration tree containing the adopted Phase 24 source; profile artifacts and binaries are digest-bound independently",
+    "qwen_execution_sha256": "770027518e622f7ba7363f02607d5669cb447bce218a2662d1b878ff5a96a7dc",
+    "qwen_graph_sha256": "4c5bc6b11de85014da150bf60aa28df5a01a7b7e2c84ff2ea0f7965008095bf2",
+    "matmul_runtime_sha256": "e547e574369a44a7df00e5202177c550027560718f3dfbdb1c77d1887bf1b07f",
+    "matmul_kernel_sha256": "070516210e9b3258cf98200c68bff0955992d4e3c95dff6eede564b986f32324",
+    "rocm": "7.14.0",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675"
+  },
+  "frozen_contract": {
+    "primary_model": "Qwen3.5-4B dense BF16",
+    "targets": ["gfx1030", "gfx1201"],
+    "adoption_rule": "all fixed target/pattern aggregates non-regressing and any full-model E2E or TPOT improvement at least 5 percent",
+    "candidate_rule": "do not implement when the fresh critical-path profile shows no projection-family work unit with a credible removable fraction capable of reaching the adoption threshold",
+    "phase26_batch_rows": [1, 2, 3, 4, 7, 8, 16, 17]
+  },
+  "profiles": [
+    {
+      "target": "gfx1030",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "binary_sha256": "f06a25d7d6194dcecaedaea3a867e46190e7b44965a8445221486444a4bc26ae",
+      "report_sha256": "3ed438c5cf508822580026a9167e31c137439ff2003c4ba187f784ad5dc93a1b",
+      "kernel_stats_sha256": "47ad1ed4c75acbe5d0425dce1ab3ae0a0fb1ff84611329cc1ae7791dbcc3e736",
+      "hip_api_stats_sha256": "f7209844c4bf73304ca896c9e24a32351a37c80669cf424d584e51a2043ea854",
+      "kernel_trace_sha256": "4c95efe4e32be31998b385d093ecb406a68996806fb70e4d2d34342912b77c65",
+      "generated_tokens": 10,
+      "decode_steps": 9,
+      "kernel_device_time_ns": 361245259,
+      "projection_device_time_ns": 312408973,
+      "projection_device_share": 0.8648112749349605,
+      "hip_launch_calls": 4920,
+      "hip_launch_total_ns": 43987000,
+      "profiled_launch_average_ns": 8940.447154471545,
+      "gate_up_launch_only_upper_bound_fraction_of_tpot": 0.009383217741655936
+    },
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "binary_sha256": "4584de6de507af014e0c53bf85dd1a7547703248b153e502c1367ed91247f487",
+      "report_sha256": "6b3e40f210c5fd3333214e357efbab71b5da4abb9f6481e85f512ee071f68483",
+      "kernel_stats_sha256": "bedcde18ff912029280e637f0d8b2178c0a59b351884523aa17d73bd0932923c",
+      "hip_api_stats_sha256": "77517e68e9cb8280401e158b64159cc56deb72593e25456a2229af9754bc2bb4",
+      "kernel_trace_sha256": "77f3046601e9d0253a1aa0cd6add3b31e82f4457ae0fc6b76bfe2f770866a5df",
+      "generated_tokens": 10,
+      "decode_steps": 9,
+      "kernel_device_time_ns": 226733868,
+      "projection_device_time_ns": 179632840,
+      "projection_device_share": 0.7922629362103063,
+      "hip_launch_calls": 3278,
+      "hip_launch_total_ns": 71542000,
+      "profiled_launch_average_ns": 21824.893227577792,
+      "gate_up_launch_only_upper_bound_fraction_of_tpot": 0.025972353413257317
+    }
+  ],
+  "candidate_accounting": {
+    "gate_up_shape": {"m": 1, "k": 2560, "n_each": 9216, "layers": 32},
+    "gate_up_weight_bytes_per_layer": 94371840,
+    "activation_bytes_per_row": 5120,
+    "maximum_shared_activation_fraction_of_weight_traffic": 0.00005425347222222222,
+    "profiled_launch_savings_are_observer_inflated": true,
+    "gate_up_upper_bound_below_five_percent_on_both_targets": true,
+    "qkv_scope": "linear-attention projections are already packed; remaining full-attention Q/K/V launch removal is smaller than gate/up and cannot change the decision",
+    "terminal_scope": "wide-vocabulary M=1 is already on the measured decode reduction provider and its full elimination, which no correct candidate can achieve, is only a single-digit TPOT bound",
+    "prepared_scope": "prepared descriptors are already cached and fresh HIP API accounting does not expose a reusable semantic prepare or replay span large enough to reach 5 percent"
+  },
+  "disposition": {
+    "production_source_changed": false,
+    "candidate_implemented": false,
+    "candidate_retained": false,
+    "target_specific_split_added": false,
+    "phase25_complete_as_negative_discovery": true,
+    "phase26_unblocked": true,
+    "reconsider_when": "a provider can remove weight traffic or measured uninstrumented family overhead reaches 5 percent; request batching changes M and is evaluated independently in Phase 26"
+  }
+}

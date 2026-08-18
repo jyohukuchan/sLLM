@@ -2229,6 +2229,155 @@ bool rmsnorm_registered_exception_with_event_destroy_failure_is_quarantined() {
   return true;
 }
 
+bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *scale = nullptr;
+  sllm_buffer_t *output = nullptr;
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_buffer_sized(context, 4096U, &activation) ||
+      !create_buffer_sized(context, 2048U, &scale) ||
+      !create_buffer_sized(context, 4096U, &output)) {
+    return false;
+  }
+  const sllm_rmsnorm_desc_t descriptor =
+      rmsnorm_descriptor(activation, 0U, scale, 0U, output, 0U, 2U, 257U);
+  std::array<sllm_rmsnorm_plan_t *, 17> plans{};
+  Error error;
+  for (auto &plan : plans) {
+    if (!expect_status(
+            sllm_rmsnorm_prepare(context, &descriptor, &plan, &error.sink),
+            SLLM_STATUS_OK, "deferred segment prepare", error)) {
+      return false;
+    }
+  }
+  if (!expect_status(sllm_queue_set_completion_mode(
+                         queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
+                         &error.sink),
+                     SLLM_STATUS_OK, "set deferred completion mode", error)) {
+    return false;
+  }
+  const std::size_t events_before = fake_hip::live_events();
+  std::array<sllm_completion_t *, 17> operations{};
+  for (std::size_t index = 0U; index != operations.size(); ++index) {
+    auto info = rmsnorm_dispatch_info();
+    if (!expect_status(sllm_rmsnorm_execute(plans[index], queue,
+                                            &operations[index], &info,
+                                            &error.sink),
+                       SLLM_STATUS_OK, "deferred segment execute", error) ||
+        operations[index] == nullptr ||
+        fake_hip::live_events() != events_before) {
+      std::cerr << "deferred execute invariant failed at " << index
+                << " events=" << fake_hip::live_events()
+                << " baseline=" << events_before << '\n';
+      return false;
+    }
+  }
+  if (!expect_status(sllm_queue_set_completion_mode(
+                         queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED,
+                         &error.sink),
+                     SLLM_STATUS_PUBLIC_BUSY,
+                     "completion mode change with active segment", error)) {
+    return false;
+  }
+  sllm_completion_result_t result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(sllm_completion_query(operations[0], &result,
+                                            &error.sink),
+                     SLLM_STATUS_PUBLIC_PENDING,
+                     "eventless completion query", error) ||
+      result.state != SLLM_COMPLETION_STATE_PENDING) {
+    std::cerr << "deferred pending-query invariant failed, state="
+              << result.state << '\n';
+    return false;
+  }
+  sllm_completion_t *fence = nullptr;
+  if (!expect_status(sllm_queue_fence(queue, &fence, &error.sink),
+                     SLLM_STATUS_OK, "deferred segment fence", error) ||
+      fence == nullptr || fake_hip::live_events() != events_before + 1U) {
+    std::cerr << "deferred fence creation invariant failed, events="
+              << fake_hip::live_events() << '\n';
+    return false;
+  }
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(sllm_completion_finalize_after(
+                         operations[0], fence, &result, &error.sink),
+                     SLLM_STATUS_PUBLIC_NOT_READY,
+                     "finalize before fence success", error) ||
+      result.state != SLLM_COMPLETION_STATE_PENDING) {
+    return false;
+  }
+  result = {};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  if (!expect_status(sllm_completion_wait(fence, 1000U, &result, &error.sink),
+                     SLLM_STATUS_OK, "deferred segment fence wait", error) ||
+      result.state != SLLM_COMPLETION_STATE_SUCCESS) {
+    std::cerr << "deferred fence wait invariant failed, state=" << result.state
+              << '\n';
+    return false;
+  }
+  for (std::size_t index = 0U; index != operations.size(); ++index) {
+    auto *const operation = operations[index];
+    result = {};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    if (!expect_status(sllm_completion_finalize_after(
+                           operation, fence, &result, &error.sink),
+                       SLLM_STATUS_OK, "deferred completion finalize", error) ||
+        result.state != SLLM_COMPLETION_STATE_SUCCESS) {
+      std::cerr << "deferred finalize invariant failed at " << index
+                << ", state=" << result.state << '\n';
+      return false;
+    }
+  }
+  for (auto &operation : operations) {
+    if (!release_completion(&operation)) {
+      std::cerr << "deferred operation release invariant failed\n";
+      return false;
+    }
+  }
+  if (!release_completion(&fence) || fake_hip::live_events() != events_before ||
+      !expect_status(sllm_queue_set_completion_mode(
+                         queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED,
+                         &error.sink),
+                     SLLM_STATUS_OK, "restore profiled completion mode", error)) {
+    std::cerr << "deferred fence cleanup invariant failed, events="
+              << fake_hip::live_events() << '\n';
+    return false;
+  }
+  fake_hip::set_event_record_status(hipErrorUnknown);
+  fence = reinterpret_cast<sllm_completion_t *>(UINTPTR_MAX);
+  if (!expect_status(sllm_queue_fence(queue, &fence, &error.sink),
+                     SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                     "queue fence record failure", error) ||
+      fence != nullptr || fake_hip::live_events() != events_before) {
+    return false;
+  }
+  fake_hip::set_event_record_status(hipSuccess);
+  for (auto &plan : plans) {
+    if (!expect_status(sllm_rmsnorm_plan_release(&plan, &error.sink),
+                       SLLM_STATUS_OK, "deferred segment plan release", error)) {
+      return false;
+    }
+  }
+  const bool released = release_queue(&queue) && release_buffer(&activation) &&
+                        release_buffer(&scale) && release_buffer(&output) &&
+                        release_context(&context);
+  if (!released || fake_hip::live_events() != events_before) {
+    std::cerr << "deferred final cleanup invariant failed, events="
+              << fake_hip::live_events() << '\n';
+    return false;
+  }
+  return true;
+}
+
 bool rmsnorm_execute_row_limit_and_overflow() {
   constexpr uint64_t rows[] = {UINT64_C(4294967295), UINT64_C(4294967296)};
   for (const uint64_t row_count : rows) {
@@ -4889,6 +5038,10 @@ int main() {
   }
   if (!rmsnorm_registered_exception_with_event_destroy_failure_is_quarantined()) {
     std::cerr << "RMSNorm registered-exception ambiguous-cleanup test failed\n";
+    return 1;
+  }
+  if (!deferred_segment_uses_one_fence_event_and_finalizes_exactly()) {
+    std::cerr << "deferred segment completion-mode test failed\n";
     return 1;
   }
   if (!rmsnorm_execute_row_limit_and_overflow()) {

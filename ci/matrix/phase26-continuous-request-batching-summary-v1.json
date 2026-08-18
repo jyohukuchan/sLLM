@@ -1,0 +1,95 @@
+{
+  "schema_version": "phase26-continuous-request-batching-summary-v1",
+  "state": "COMPLETE",
+  "decision": "REJECTED_NO_GPU_BATCH",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "source_state": "dirty Phase 21 through Phase 26 integration tree; binaries and local runtime evidence are digest-bound independently",
+    "scheduler_sha256": "041e8c950ce7c33f882bd2c047aca8a7a3e641913cb92b5d932825048d109e69",
+    "production_backend_sha256": "d5566ab28f29d1140c226493ef7450ed5f2700a4773b5b0e454ad2fabf4a98d7",
+    "qwen_execution_sha256": "770027518e622f7ba7363f02607d5669cb447bce218a2662d1b878ff5a96a7dc",
+    "batch_planner_sha256": "a5e59e287d9ed8e39cf94778afdf4a1a6c33e9cdf8407fd12f33405f1f054872",
+    "rocm": "7.14.0",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675"
+  },
+  "frozen_contract": {
+    "primary_model": "Qwen3.5-4B dense BF16",
+    "targets": ["gfx1030", "gfx1201"],
+    "concurrency": [1, 2, 3, 4, 7, 8],
+    "gpu_batch_required": true,
+    "c2_primary_improvement": 0.30,
+    "c2_secondary_improvement": 0.20,
+    "singleton_lanes": ["MTP", "multimodal", "MoE", "low-bit", "Gemma4"]
+  },
+  "baseline": [
+    {
+      "target": "gfx1030",
+      "gpu_uuid": "GPU-76a08c022586fed6",
+      "binary_sha256": "88984595ac68810d7a59ff6efe776ff48e57fee5d36bef7ffea8eb8f695e7a15",
+      "evidence_sha256": "39d0a5294d80f559adb0be2b3f8885e2215a11db43c63daf4446228c8e8647a4",
+      "single_http_median_ns": 472875557.0,
+      "concurrency_2_first_ns": 457167809,
+      "concurrency_2_last_ns": 908293197,
+      "concurrency_2_finish_ratio": 1.9867829254793397,
+      "aggregate_rps_change_from_single": 0.04123989602005129,
+      "gpu_batch_rows": 1,
+      "fallback_used": false,
+      "cleanup_terminal_zero": true
+    },
+    {
+      "target": "gfx1201",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "binary_sha256": "7bb05a3ed74e7d81a34df63d3ab1e6eb568632254e229b60923b34f056f3edf8",
+      "evidence_sha256": "d3b6530d86510f0464831a4103d9f81f0c3ce163d2306cf4063ece372e3d607d",
+      "single_http_median_ns": 317181303.5,
+      "concurrency_2_first_ns": 326532106,
+      "concurrency_2_last_ns": 646447630,
+      "concurrency_2_finish_ratio": 1.979736810321494,
+      "aggregate_rps_change_from_single": -0.01869451203649708,
+      "gpu_batch_rows": 1,
+      "fallback_used": false,
+      "cleanup_terminal_zero": true
+    }
+  ],
+  "host_contract": {
+    "retained": true,
+    "production_connected": false,
+    "request_counts_tested": [1, 2, 3, 4, 7, 8],
+    "tests_passed": 5,
+    "server_tests_passed": 32,
+    "features": [
+      "bounded active admission",
+      "waiting and decode-ready queues",
+      "checked unique batch-row mapping",
+      "compatibility-class separation",
+      "round-robin fairness",
+      "bounded prefill insertion",
+      "backpressure exclusion and resume",
+      "request-local finish, cancellation, and failure"
+    ]
+  },
+  "gpu_feasibility": {
+    "production_batched_decode_implemented": false,
+    "maximum_observed_gpu_batch_rows": 1,
+    "current_qwen_committed_length_is_per_owner_scalar": true,
+    "current_kv_and_linear_state_maps_are_per_owner": true,
+    "existing_m_greater_than_one_decode_semantics": "ordered speculative token block within one request",
+    "unsafe_reuse_rejected": "treating independent requests as one token block would share causal KV/GDN history and corrupt request state",
+    "required_additive_boundary": "per-row position and independent KV/GDN state bindings plus transactional row-local publication across core, HIP wrappers, public native ABI, kernels, and production ownership",
+    "work_unit_replanned": true,
+    "replan_reason": "the required stateful ABI expansion exceeded the fixed Phase 26 work estimate by more than 1.5x; connecting the host row map without it would violate the frozen correctness gate"
+  },
+  "disposition": {
+    "continuous_request_batching_adopted": false,
+    "production_scheduler_changed": false,
+    "production_backend_mutex_changed": false,
+    "gpu_b_greater_than_one_claimed": false,
+    "throughput_threshold_claimed": false,
+    "host_planner_retained_as_nonproduction_infrastructure": true,
+    "target_specific_split_added": false,
+    "phase26_complete_as_rejected_candidate": true,
+    "follow_up": "design an additive multi-sequence KV/GDN execution ABI and numerical oracle as a separately estimated phase before reconnecting this checked host row map"
+  }
+}

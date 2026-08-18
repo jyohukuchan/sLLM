@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase26-continuous-request-batching-summary-v1.schema.json",
+  "title": "sLLM Phase 26 continuous request batching disposition",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision", "recorded_at", "identity", "frozen_contract", "baseline", "host_contract", "gpu_feasibility", "disposition"],
+  "properties": {
+    "schema_version": {"const": "phase26-continuous-request-batching-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "REJECTED_NO_GPU_BATCH"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"$ref": "#/$defs/nonempty_object"},
+    "frozen_contract": {"$ref": "#/$defs/nonempty_object"},
+    "baseline": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/baseline"}
+    },
+    "host_contract": {"$ref": "#/$defs/nonempty_object"},
+    "gpu_feasibility": {"$ref": "#/$defs/nonempty_object"},
+    "disposition": {"$ref": "#/$defs/nonempty_object"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonempty_object": {"type": "object", "minProperties": 1},
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "gpu_uuid", "binary_sha256", "evidence_sha256", "single_http_median_ns", "concurrency_2_first_ns", "concurrency_2_last_ns", "concurrency_2_finish_ratio", "aggregate_rps_change_from_single", "gpu_batch_rows", "fallback_used", "cleanup_terminal_zero"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "gpu_uuid": {"type": "string", "minLength": 1},
+        "binary_sha256": {"$ref": "#/$defs/sha256"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "single_http_median_ns": {"type": "number", "exclusiveMinimum": 0},
+        "concurrency_2_first_ns": {"type": "integer", "minimum": 1},
+        "concurrency_2_last_ns": {"type": "integer", "minimum": 1},
+        "concurrency_2_finish_ratio": {"type": "number", "minimum": 1},
+        "aggregate_rps_change_from_single": {"type": "number"},
+        "gpu_batch_rows": {"const": 1},
+        "fallback_used": {"const": false},
+        "cleanup_terminal_zero": {"const": true}
+      }
+    }
+  }
+}

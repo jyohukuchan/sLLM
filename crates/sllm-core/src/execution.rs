@@ -303,6 +303,12 @@ pub enum ExecutionState {
     Failure,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueueCompletionMode {
+    Profiled,
+    Deferred,
+}
+
 /// Backend-neutral dispatch metadata returned only after a successful submit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispatchEvidence {
@@ -550,6 +556,27 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         access: &ExecutionAdapterAccess<'_>,
     ) -> Result<AdapterResource, ExecutionError>;
 
+    fn set_queue_completion_mode(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _mode: QueueCompletionMode,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support queue completion modes".to_owned(),
+        })
+    }
+
+    fn create_queue_fence(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+    ) -> Result<Box<dyn ExecutionQueueFenceAdapter>, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support queue fences".to_owned(),
+        })
+    }
+
     fn allocate(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -748,6 +775,14 @@ pub trait ExecutionSessionAdapter: Send + Sync {
 pub trait ExecutionSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence_token: u64,
+    ) -> Result<ExecutionState, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support deferred completion finalization".to_owned(),
+        })
+    }
     fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
         Ok(None)
     }
@@ -756,6 +791,11 @@ pub trait ExecutionSubmissionAdapter: Send {
         access: &ExecutionAdapterAccess<'_>,
         output: &OwnedTensorBinding,
     ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError>;
+}
+
+pub trait ExecutionQueueFenceAdapter: Send {
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn token(&self) -> Result<u64, ExecutionError>;
 }
 
 /// Adapter-owned mutable transfer state.
@@ -777,6 +817,14 @@ pub trait ExecutionReadbackAdapter: Send {
 pub trait ExecutionKvStateSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence_token: u64,
+    ) -> Result<ExecutionState, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support deferred KV completion finalization".to_owned(),
+        })
+    }
 }
 
 /// Adapter-owned mutable causal-attention completion. It is separate from a
@@ -784,6 +832,15 @@ pub trait ExecutionKvStateSubmissionAdapter: Send {
 pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence_token: u64,
+    ) -> Result<ExecutionState, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support deferred attention completion finalization"
+                .to_owned(),
+        })
+    }
 }
 
 /// Adapter-owned completion for one transactional linear-attention state
@@ -791,6 +848,15 @@ pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
 pub trait ExecutionLinearAttentionSubmissionAdapter: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence_token: u64,
+    ) -> Result<ExecutionState, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support deferred linear-attention completion finalization"
+                .to_owned(),
+        })
+    }
 }
 
 struct ExecutionSessionState {
@@ -901,6 +967,38 @@ impl ExecutionSession {
             state: Arc::clone(&self.state),
             id: ExecutionQueueId::new(next_execution_id()),
             payload: resource.payload,
+        })
+    }
+
+    pub fn set_queue_completion_mode(
+        &self,
+        queue: &ExecutionQueue,
+        mode: QueueCompletionMode,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.state.adapter.set_queue_completion_mode(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            mode,
+        )
+    }
+
+    pub fn create_queue_fence(
+        &self,
+        queue: &ExecutionQueue,
+    ) -> Result<ExecutionQueueFence, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        let inner = self
+            .state
+            .adapter
+            .create_queue_fence(&ExecutionAdapterAccess { session: self }, queue)?;
+        Ok(ExecutionQueueFence {
+            _state: Arc::clone(&self.state),
+            _queue: queue.clone(),
+            completion_state: ExecutionState::Pending,
+            inner,
         })
     }
 
@@ -1837,6 +1935,38 @@ impl ExecutionQueue {
     }
 }
 
+pub struct ExecutionQueueFence {
+    _state: Arc<ExecutionSessionState>,
+    _queue: ExecutionQueue,
+    completion_state: ExecutionState,
+    inner: Box<dyn ExecutionQueueFenceAdapter>,
+}
+
+impl fmt::Debug for ExecutionQueueFence {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExecutionQueueFence")
+            .field("queue", &self._queue.id())
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ExecutionQueueFence {
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn token(&self) -> Result<u64, ExecutionError> {
+        if self.completion_state != ExecutionState::Success {
+            return Err(ExecutionError::NotReady);
+        }
+        self.inner.token()
+    }
+}
+
 /// Opaque, backend-owned request-local full-attention KV state.
 #[derive(Clone)]
 pub struct KvState {
@@ -2086,6 +2216,18 @@ impl LinearAttentionSubmission {
         Ok(completion)
     }
 
+    pub fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(self.completion_state);
+        };
+        let completion = inner.finalize_after_fence(fence.token()?)?;
+        self.record_completion(completion);
+        Ok(completion)
+    }
+
     fn record_completion(&mut self, completion: ExecutionState) {
         self.completion_state = completion;
         if completion != ExecutionState::Pending {
@@ -2184,6 +2326,19 @@ impl KvStateAppendSubmission {
         Ok(state)
     }
 
+    pub fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("KV submission adapter remains owned until drop")
+            .finalize_after_fence(fence.token()?)?;
+        self.record_completion(state);
+        Ok(state)
+    }
+
     fn record_completion(&mut self, state: ExecutionState) {
         self.completion_state = state;
         if state != ExecutionState::Pending {
@@ -2276,6 +2431,19 @@ impl CausalAttentionSubmission {
             .as_mut()
             .expect("attention submission adapter remains owned until drop")
             .wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("attention submission adapter remains owned until drop")
+            .finalize_after_fence(fence.token()?)?;
         self.completion_state = state;
         Ok(state)
     }
@@ -3144,6 +3312,15 @@ impl Submission {
 
     pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
         let state = self.inner.wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.finalize_after_fence(fence.token()?)?;
         self.completion_state = state;
         Ok(state)
     }

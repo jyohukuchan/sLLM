@@ -596,7 +596,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
                 .map_err(|_| "invalid exact HIP session request".to_owned())?;
         let session = backend
             .open_execution_session(session_request)
-            .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
 
         let execution = (|| -> Result<Value, String> {
             let resident = Gemma4ResidentModel::new_gguf_quantized(
@@ -1243,7 +1243,7 @@ impl ModelFrontendBackend for ProductionBackend {
                 .map_err(|_| "invalid exact HIP session request".to_owned())?;
         let session = backend
             .open_execution_session(session_request)
-            .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
 
         let execution = (|| -> Result<Value, String> {
             let (mut owner, _resident) = if let Some(sidecar) = nvfp4_sidecar {
@@ -1716,7 +1716,7 @@ impl ModelFrontendBackend for ProductionBackend {
                 .map_err(|_| "invalid exact HIP session request".to_owned())?;
         let session = backend
             .open_execution_session(session_request)
-            .map_err(|_| "exact HIP execution session could not be opened".to_owned())?;
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
 
         let execution = (|| -> Result<Value, String> {
             let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {

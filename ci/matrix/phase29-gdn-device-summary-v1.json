@@ -1,0 +1,89 @@
+{
+  "schema_version": "phase29-gdn-device-summary-v1",
+  "state": "COMPLETE",
+  "decision": "ADOPTED_ANALYTIC_ERROR_REDUCTION",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "kernel_source_sha256": "62b5d6caab9e06044e29c5f043046a65eace243faafa034aca1b3f2ce8eb3dc6",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "rocm": "7.14.0",
+    "baseline_gfx1030_binary_sha256": "55a4b66c77da6560fcee2be41e35d27d13a549038e6726cd3f982f8239895bc4",
+    "candidate_gfx1030_binary_sha256": "040cb7e2103696cfb3c1b66343ae8791d734b0f743c2539becd95f86d1518b83",
+    "baseline_gfx1201_binary_sha256": "ee3d50f7c694ab2696ce51ee00d5b36bf65e7fbc29fdf5d3d6d877ec61b4095e",
+    "candidate_gfx1201_binary_sha256": "dd25b7cafa8712a94faf2eb983e9cc2cfd9fb9df18c5f66c40d5f02417c32b6b"
+  },
+  "adoption_rule": "Phase 29 uses GDN family device p50 only: every validation pattern in scope must be non-regressing and at least one representative pattern must improve by >=5%; analytically error-reducing N1 numerical changes may differ in token sequence and full-model timing remains diagnostic only",
+  "metric_contract": {
+    "primary": "GDN family device ns per committed decode step p50",
+    "threshold_percent": 5,
+    "full_model_is_gate": false,
+    "requests": 14,
+    "output_tokens": 16,
+    "decode_steps": 210,
+    "processes_per_variant": 3
+  },
+  "numerical_policy": {
+    "classification": "N1",
+    "registry": "docs/compatibility/numerical-output-changes.md#out-2026-08-18-p29-gdn-norm-wave32-tree-reduction",
+    "real_semantics_changed": false,
+    "analytic_error_direction": "reduced",
+    "token_exactness_is_gate": false,
+    "high_precision_provider_required": false
+  },
+  "patterns": [
+    {"target":"gfx1030","pattern":"B0","prompt_tokens":17,"baseline_process_p50_ns":1359040.0,"candidate_process_p50_ns":1329098.5,"improvement_percent":2.2031360372027313,"baseline_endpoint_drift_percent":0.44046959301421873,"baseline_processes":3,"candidate_processes":3,"non_regressing":true},
+    {"target":"gfx1030","pattern":"B1","prompt_tokens":28,"baseline_process_p50_ns":1360983.5,"candidate_process_p50_ns":1331744.0,"improvement_percent":2.1484095876254194,"baseline_endpoint_drift_percent":0.05747622766319077,"baseline_processes":3,"candidate_processes":3,"non_regressing":true},
+    {"target":"gfx1030","pattern":"B2","prompt_tokens":255,"baseline_process_p50_ns":1363004.0,"candidate_process_p50_ns":1333446.5,"improvement_percent":2.168555631531529,"baseline_endpoint_drift_percent":0.055832558084935924,"baseline_processes":3,"candidate_processes":3,"non_regressing":true},
+    {"target":"gfx1201","pattern":"B0","prompt_tokens":17,"baseline_process_p50_ns":625386.5,"candidate_process_p50_ns":574728.0,"improvement_percent":8.100350743100467,"baseline_endpoint_drift_percent":0.6566369811030733,"baseline_processes":3,"candidate_processes":3,"non_regressing":true},
+    {"target":"gfx1201","pattern":"B1","prompt_tokens":28,"baseline_process_p50_ns":619072.0,"candidate_process_p50_ns":567607.0,"improvement_percent":8.313249508942418,"baseline_endpoint_drift_percent":0.10087679623694822,"baseline_processes":3,"candidate_processes":3,"non_regressing":true},
+    {"target":"gfx1201","pattern":"B2","prompt_tokens":255,"baseline_process_p50_ns":616250.0,"candidate_process_p50_ns":559465.5,"improvement_percent":9.214523326572008,"baseline_endpoint_drift_percent":1.3334012076148376,"baseline_processes":3,"candidate_processes":3,"non_regressing":true}
+  ],
+  "correctness": {
+    "gfx1030_oracle": "PASS",
+    "gfx1201_oracle": "PASS",
+    "short16_token_records_equal": true,
+    "long128_token_records_equal": false,
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "cleanup_valid": true
+  },
+  "implementation": {
+    "evaluated_change": "replace serial 128-element Q, K, and output norm reductions with deterministic wave32 reductions and a fixed four-wave final sum inside the existing fused recurrent kernel",
+    "production_change": "use fixed wave32 tree reductions for Q, K, and output squared sums in the shared Phase 29 GDN provider",
+    "shared_path": true,
+    "target_split_added": false,
+    "final_binary_matches_candidate": true,
+    "launch_count_changed": false,
+    "workspace_bytes_added": 0,
+    "workgroup_x": 128,
+    "grid_x": 4096,
+    "gdn_calls_per_decode_step": 24,
+    "candidate_removed": false,
+    "semantic_boundaries": "production retains Phase 28 FP32 recurrent state, BF16 RNE stages, state publication, graph order, target-specific state index and fallback policy; only the association of nonnegative squared-sum reductions changes"
+  },
+  "diagnostics": {
+    "profiler": "rocprofv3 1.3.2 kernel trace",
+    "counterbalance": "baseline-candidate-candidate-baseline-candidate-baseline",
+    "single_gpu_sequential": true,
+    "foreign_process_pre_post": "none",
+    "profiled_wall_used_for_adoption": false,
+    "full_model_used_for_adoption": false,
+    "full_wave_long_generation": {
+      "output_tokens": 128,
+      "gfx1030_decode_tps_change_percent": {"B0": -0.03181856318310583, "B1": 0.241085339976288, "B2": 0.32425682377574816},
+      "gfx1201_decode_tps_change_percent": {"B0": 0.0600883462712698, "B1": 0.39544169104488436, "B2": 0.09032332806886423},
+      "token_equal_patterns": ["gfx1030/B1"],
+      "token_divergent_patterns": ["gfx1030/B0@105", "gfx1030/B2@20", "gfx1201/B0@111", "gfx1201/B1@112", "gfx1201/B2@108"]
+    },
+    "bounded_variants": {
+      "qk_wave_only_gfx1201_B1_p50_ns": 582426.5,
+      "qk_wave_only_gfx1201_B1_improvement_percent": 5.919424558048175,
+      "qk_wave_only_long128_token_equal": false,
+      "output_wave_only_gfx1201_B1_p50_ns": 608885.5,
+      "output_wave_only_gfx1201_B1_improvement_percent": 1.6454467331748166,
+      "output_wave_only_threshold_met": false
+    }
+  }
+}

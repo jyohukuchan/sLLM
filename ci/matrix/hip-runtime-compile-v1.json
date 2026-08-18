@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "68be3b461634256f97c90d31bf40a7f0656be4d632af05834c5702b266eceef6"
+        "sha256": "44a5401f3d74500ec35f5dc22a13b06fc17782a29209b49a11e96e6776ada1bd"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "73c41d5fc85a10e36d6de2b904b7ee710dfc49773dae5a2f53f4a6c1539f1e17"
+        "sha256": "e0c61e8a575bc187b67ec891c4bb8a80b1012f0669e6b845f6a98504591963fe"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
+        "sha256": "aad45681066f9e15d2fdbf104b9825e8003a707a3490af74142e10cf30aa0ca5"
       }
     ],
-    "source_set_sha256": "37bc3004be8a1d28853763ebe684ffcb3ba186db46614483418e799174e84c7c"
+    "source_set_sha256": "ec930f346addbfb15d1221ecaa15f556d416d66bb4fb0d8bef84199c1b1a100c"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -105,7 +105,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "68be3b461634256f97c90d31bf40a7f0656be4d632af05834c5702b266eceef6"
+        "sha256": "44a5401f3d74500ec35f5dc22a13b06fc17782a29209b49a11e96e6776ada1bd"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -125,31 +125,31 @@
       },
       {
         "path": "native/hip/src/argmax_runtime.inc",
-        "sha256": "9930a8b971ed486d852ac92f9fc0d0697330bd07eebb7e552c8ea29b43733f18"
+        "sha256": "ab94a5885715432fb75542a112a36e2b78f6f19696aea5db170eb279ae95cbd4"
       },
       {
         "path": "native/hip/src/attention_preprocess_api.cpp",
-        "sha256": "6a64f79d6ac220424def20c25ec84b40b2704ceaf9961fad42ea725dc1408081"
+        "sha256": "b42b06f9ed5017285aa27d69fa1c6836321e3ff9e7f683dc1147a444fa0a86cf"
       },
       {
         "path": "native/hip/src/attention_preprocess_api.hpp",
-        "sha256": "04e3c3d9369bc4a0aa52f4be710a0e8910a102f2b8ceabfaa4cfce9e314f88c1"
+        "sha256": "de03d6112f483aeb7f5f16290f40d9b06fb116bb0ef19959c4b1bff679180b2b"
       },
       {
         "path": "native/hip/src/attention_preprocess_kernel.hip.cpp",
-        "sha256": "9140e079066568eb25199c38e7a2576528f69206542c4832e5bcedbcfcb92325"
+        "sha256": "1d2a73efa4bb4cb94336f1ce7e485d137868ded6c427d97772ec037f8a816251"
       },
       {
         "path": "native/hip/src/attention_preprocess_kernel_internal.hpp",
-        "sha256": "ceaf1dcdd44c7b8e9276863ae7c0991f0eeb98f77dde9c8aaada93603d5b6b7a"
+        "sha256": "95a01b83346b2ade5c4d16fe2b94168f96f216705cfa2370e7e8a1af207c21f7"
       },
       {
         "path": "native/hip/src/attention_preprocess_runtime.inc",
-        "sha256": "480b493a714f4bb68d6b9e035c9c2fdba760ca0a50406a582b6c7bf99fa7cfa0"
+        "sha256": "86d255102a259b83dcce47926e4295300b288255dffdd36537622193511ab1f3"
       },
       {
         "path": "native/hip/src/causal_attention_api.cpp",
-        "sha256": "54023b0b6f97d222c0336291ad5d97094bd3fcdef07c1369a7f50356300e2815"
+        "sha256": "347eb5fe92114bdb318b3892ee3f5bf26eb3d4d279b73520d6f38626cec70c63"
       },
       {
         "path": "native/hip/src/causal_attention_api.hpp",
@@ -157,15 +157,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "5aa39494e710079a43d7f0c67bf29e673e190dc54d88fba97e4acac752b994b5"
+        "sha256": "1c3f85ce85471e94192878705ab676c4f757d1c8a04af3afd05e08b9d2fe7374"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "8381641713c84f1a792c0e754fe789e9bca3664ba0779cd36f2b56b4a63fc44a"
+        "sha256": "fc25c9e407b1aaa41a7ae5a66d7e5afba855d609690aa56e25baca336c3b612e"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "cc5d3faed724c7bbbfcdeb398fa0d6dc00709704b8b4abc1b18232f74027b9c3"
+        "sha256": "044279d6b493508d8e386125cebde0922182ff29454212299b6136fcfa13eff9"
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
@@ -201,7 +201,7 @@
       },
       {
         "path": "native/hip/src/embedding_runtime.inc",
-        "sha256": "db6395b11762f062cb97f4e83a4e2f4052392dc695704520b6028f5f0f37f39b"
+        "sha256": "0f22c051dbff27944fc3c622e80abbbee1550e5210e585437f130ba09ba424bd"
       },
       {
         "path": "native/hip/src/evidence_abi.h",
@@ -221,19 +221,19 @@
       },
       {
         "path": "native/hip/src/kv_state_api.cpp",
-        "sha256": "8bb03f178d1b3d0864178f3b43f67b2c222857ccf3f6819bf03ba382a4bf7ccc"
+        "sha256": "dd42248f8dac7438b9684dac0eb4cf8795fb40fbc6dc9169386fbaaad03e1069"
       },
       {
         "path": "native/hip/src/kv_state_api.hpp",
-        "sha256": "88958340692b29cf72d076e5e3029d70758ddab8ac8f3772759dacf16a2c9351"
+        "sha256": "b18669b7bff1deddc91fc3bb6d96c9673d80833f96ccc1a43b08857f662c896f"
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "909928d31461fc0a287edc8e572aed5bc55900eec39fd1b3053b0d5c5f983ef8"
+        "sha256": "9399e409da9a25cb7934738067df9985c17f6396e0eef1f7b109063e63c8bff7"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
-        "sha256": "983f9727575809894e7ee3e770dfb8e13322642478e0410a185278ddc82f3364"
+        "sha256": "952c499ba8a68f6c3bb4417b27e99d062528ec6570cf125efae885b85f42d1ad"
       },
       {
         "path": "native/hip/src/linear_attention_api.cpp",
@@ -245,7 +245,7 @@
       },
       {
         "path": "native/hip/src/linear_attention_kernel.hip.cpp",
-        "sha256": "05faf73a9aa1e5854b5f8f81833b9cbfeaedbfe05396abe726798c19e1a22c7a"
+        "sha256": "62b5d6caab9e06044e29c5f043046a65eace243faafa034aca1b3f2ce8eb3dc6"
       },
       {
         "path": "native/hip/src/linear_attention_kernel_internal.hpp",
@@ -253,35 +253,35 @@
       },
       {
         "path": "native/hip/src/linear_attention_runtime.inc",
-        "sha256": "5478d0ca775ca3cf4557067e5ad05837c862d79d0643d0caf03d69182a32388f"
+        "sha256": "afb20db4d4926844c1b7e4796d386bff651be8705165a2d5356cfa9deb12e172"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
-        "sha256": "be9c943ac0d03c92a2e6bdde70ea592a6efeb9acf17993c21760e8df9ba79d9e"
+        "sha256": "a1e44d159dcc30a88b1980907c4e56e72e470a7c0b83efcf6b1b96eccb626808"
       },
       {
         "path": "native/hip/src/matmul_api.hpp",
-        "sha256": "254255a2279937f2504f1b3b0406870a70b3856f717cbac4584faf05d953dbbf"
+        "sha256": "bbca80c4d2ea9a32bc1d128bb6f80375fffea8c39a7443c97db56d0b75b8eb28"
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "c191462a972a686609e89c1fba040ff38cea23dc791f086e372bd527b96c5d94"
+        "sha256": "070516210e9b3258cf98200c68bff0955992d4e3c95dff6eede564b986f32324"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "c2174b3c1e3fb97c42676bc48e7c1f304f019424287fd3383d7a1d191b1e2da2"
+        "sha256": "8c6dedaf4da604628723cfad710ac337119cec5cee79ecc25a896744d5386701"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "c316d04d493981f848d2a47b9ca36040bba20fedfedc402a20ee1ad60ba63475"
+        "sha256": "e547e574369a44a7df00e5202177c550027560718f3dfbdb1c77d1887bf1b07f"
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "73c41d5fc85a10e36d6de2b904b7ee710dfc49773dae5a2f53f4a6c1539f1e17"
+        "sha256": "e0c61e8a575bc187b67ec891c4bb8a80b1012f0669e6b845f6a98504591963fe"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "db65482614c7a856e0096466d9b86dcb9df3d5a4b6dd55cd585f5a599faa7a93"
+        "sha256": "aad45681066f9e15d2fdbf104b9825e8003a707a3490af74142e10cf30aa0ca5"
       },
       {
         "path": "native/hip/src/rmsnorm_api.cpp",
@@ -317,7 +317,7 @@
       },
       {
         "path": "native/hip/src/rotary_runtime.inc",
-        "sha256": "bf48dca06358a613607d0239807f4c4493288309ccf7db5cbd81594b3ac97beb"
+        "sha256": "7da5e39b3c15fb09fed8dc395bff177195cf415652288056dbbdcb063f21f9d0"
       },
       {
         "path": "native/hip/src/windowed_attention_api.cpp",
@@ -329,10 +329,10 @@
       },
       {
         "path": "native/hip/src/windowed_attention_runtime.inc",
-        "sha256": "30f0aa52e7cdb671ec2e448698a0ebd85d3db3f937b4e4ae072e0f6a8a6633de"
+        "sha256": "ff5bcf9fefade967589953e04c23be441a7fc71e1a4ffb9dd981a2736cdea968"
       }
     ],
-    "source_set_sha256": "893710383c9ccd7f92d30ef7fd4fbf29dd09ef78fd7b7ec8617eed1be2471919"
+    "source_set_sha256": "7169128c4937f2dc1bdcd34052754d07a971791a0a3affa017f40ae5cfdb0862"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
@@ -348,6 +348,7 @@
     "sllm_buffer_release",
     "sllm_buffer_size",
     "sllm_causal_attention_execute",
+    "sllm_completion_finalize_after",
     "sllm_completion_query",
     "sllm_completion_read",
     "sllm_completion_release",
@@ -385,7 +386,9 @@
     "sllm_matmul_prepare",
     "sllm_query_version",
     "sllm_queue_create",
+    "sllm_queue_fence",
     "sllm_queue_release",
+    "sllm_queue_set_completion_mode",
     "sllm_rmsnorm_execute",
     "sllm_rmsnorm_plan_release",
     "sllm_rmsnorm_prepare",

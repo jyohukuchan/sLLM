@@ -482,7 +482,7 @@ enum PendingCleanup {
         raw: Option<NonNull<sys::sllm_completion_t>>,
         context: Arc<ContextInner>,
         queue: Arc<QueueInner>,
-        buffer: Arc<BufferInner>,
+        buffer: Option<Arc<BufferInner>>,
         disposition: CleanupDisposition,
     },
     KvState {
@@ -1663,6 +1663,40 @@ fn release_completion_once(
     let mut native = raw.as_ptr();
     let status = unsafe { sys::sllm_completion_release(&mut native, &mut error_sink) };
     (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn finalize_completion_after(
+    completion: NonNull<sys::sllm_completion_t>,
+    fence: NonNull<sys::sllm_completion_t>,
+) -> Result<CompletionState, RuntimeError> {
+    reap_pending_cleanup();
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut result = Completion::result();
+    let raw = unsafe {
+        sys::sllm_completion_finalize_after(
+            completion.as_ptr(),
+            fence.as_ptr(),
+            &mut result,
+            &mut error_sink,
+        )
+    };
+    ensure_ok(raw, &error_buffer, error_sink.message_length)?;
+    CompletionState::from_raw(result.state)
+}
+
+pub(crate) fn completion_from_opaque_token(
+    token: u64,
+) -> Result<NonNull<sys::sllm_completion_t>, RuntimeError> {
+    let address = usize::try_from(token).map_err(|_| {
+        RuntimeError::local(
+            RuntimeStatus::InvalidHandle,
+            "queue fence token does not fit the native pointer width",
+        )
+    })?;
+    NonNull::new(address as *mut sys::sllm_completion_t).ok_or_else(|| {
+        RuntimeError::local(RuntimeStatus::InvalidHandle, "queue fence token was null")
+    })
 }
 
 pub(crate) fn release_kv_state_once(
@@ -3388,6 +3422,21 @@ pub struct Queue {
     inner: Arc<QueueInner>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueueCompletionMode {
+    Profiled,
+    Deferred,
+}
+
+impl QueueCompletionMode {
+    const fn raw(self) -> sys::sllm_queue_completion_mode_t {
+        match self {
+            Self::Profiled => sys::SLLM_QUEUE_COMPLETION_MODE_PROFILED,
+            Self::Deferred => sys::SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
+        }
+    }
+}
+
 impl fmt::Debug for Queue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.debug_struct("Queue").finish_non_exhaustive()
@@ -3431,6 +3480,42 @@ impl Queue {
                 context: Arc::clone(&context.inner),
             }),
         })
+    }
+
+    pub fn set_completion_mode(&self, mode: QueueCompletionMode) -> Result<(), RuntimeError> {
+        reap_pending_cleanup();
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let raw = unsafe {
+            sys::sllm_queue_set_completion_mode(
+                self.raw_handle()?.as_ptr(),
+                mode.raw(),
+                &mut error_sink,
+            )
+        };
+        ensure_ok(raw, &error_buffer, error_sink.message_length)
+    }
+
+    pub fn fence(&self) -> Result<Completion, RuntimeError> {
+        reap_pending_cleanup();
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut raw_completion = std::ptr::null_mut();
+        let raw = unsafe {
+            sys::sllm_queue_fence(
+                self.raw_handle()?.as_ptr(),
+                &mut raw_completion,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(raw, &error_buffer, error_sink.message_length)?;
+        let raw_completion = NonNull::new(raw_completion).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native queue fence returned a null completion on success",
+            )
+        })?;
+        Ok(Completion::from_queue_fence(raw_completion, self))
     }
 
     pub fn copy_to_device(
@@ -3673,7 +3758,7 @@ pub struct Completion {
     raw: Option<NonNull<sys::sllm_completion_t>>,
     _context: Arc<ContextInner>,
     _queue: Arc<QueueInner>,
-    _buffer: Arc<BufferInner>,
+    _buffer: Option<Arc<BufferInner>>,
     transfer_size_bytes: u64,
     d2h: bool,
     terminal: bool,
@@ -3710,12 +3795,57 @@ impl Completion {
             raw: Some(raw),
             _context: Arc::clone(&context.inner),
             _queue: Arc::clone(&queue.inner),
-            _buffer: Arc::clone(&buffer.inner),
+            _buffer: Some(Arc::clone(&buffer.inner)),
             transfer_size_bytes,
             d2h,
             terminal: false,
             safe_to_release: false,
         }
+    }
+
+    fn from_queue_fence(raw: NonNull<sys::sllm_completion_t>, queue: &Queue) -> Self {
+        Self {
+            raw: Some(raw),
+            _context: Arc::clone(&queue.inner.context),
+            _queue: Arc::clone(&queue.inner),
+            _buffer: None,
+            transfer_size_bytes: 0,
+            d2h: false,
+            terminal: false,
+            safe_to_release: false,
+        }
+    }
+
+    pub(crate) fn raw_handle(&self) -> Result<NonNull<sys::sllm_completion_t>, RuntimeError> {
+        self.raw.ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InvalidHandle,
+                "completion was already released",
+            )
+        })
+    }
+
+    pub(crate) fn opaque_token(&self) -> Result<u64, RuntimeError> {
+        u64::try_from(self.raw_handle()?.as_ptr() as usize).map_err(|_| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "completion token does not fit the core fence representation",
+            )
+        })
+    }
+
+    pub(crate) fn finalize_after_token(
+        &mut self,
+        fence_token: u64,
+    ) -> Result<CompletionState, RuntimeError> {
+        finalize_completion_after(
+            self.raw_handle()?,
+            completion_from_opaque_token(fence_token)?,
+        )
+        .inspect(|state| {
+            self.terminal = *state != CompletionState::Pending;
+            self.safe_to_release = *state == CompletionState::Success;
+        })
     }
 
     fn result() -> sys::sllm_completion_result_t {
@@ -3883,7 +4013,7 @@ impl Drop for Completion {
             raw: Some(raw),
             context: Arc::clone(&self._context),
             queue: Arc::clone(&self._queue),
-            buffer: Arc::clone(&self._buffer),
+            buffer: self._buffer.as_ref().map(Arc::clone),
             disposition: CleanupDisposition::Recoverable,
         };
         if let Some(cleanup) = cleanup.try_once() {
@@ -3969,7 +4099,7 @@ fn submit_copy(
         raw: Some(raw_completion),
         _context: Arc::clone(&queue.inner.context),
         _queue: Arc::clone(&queue.inner),
-        _buffer: Arc::clone(&buffer.inner),
+        _buffer: Some(Arc::clone(&buffer.inner)),
         transfer_size_bytes: size_bytes_u64,
         d2h,
         terminal: false,
@@ -4113,10 +4243,10 @@ mod tests {
                 raw: None,
                 context: Arc::new(ContextInner::new(None)),
             }),
-            buffer: Arc::new(BufferInner {
+            buffer: Some(Arc::new(BufferInner {
                 raw: None,
                 _context: Arc::new(ContextInner::new(None)),
-            }),
+            })),
             disposition: CleanupDisposition::Poisoned,
         };
         assert!(cleanup.try_once().is_some());
@@ -4369,7 +4499,7 @@ mod tests {
                     raw: Some(NonNull::dangling()),
                     _context: Arc::clone(&context),
                     _queue: Arc::clone(&queue),
-                    _buffer: Arc::clone(&buffer),
+                    _buffer: Some(Arc::clone(&buffer)),
                     transfer_size_bytes: 1,
                     d2h: false,
                     terminal: false,

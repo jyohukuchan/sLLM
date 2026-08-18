@@ -1,0 +1,33 @@
+{
+  "schema_version": "phase28-nonprojection-summary-v1",
+  "state": "COMPLETE",
+  "decision": "ADOPTED_BY_EXPLICIT_USER_EXCEPTION",
+  "recorded_at": "2026-08-18",
+  "identity": {
+    "source_base_commit": "5fd22f6925ada3fe083620a1714044af2dc1f2f6",
+    "kernel_source_sha256": "44e0b6a0b3e5bb01cd21423a2796f14dd20d8a40f5bbc7ac5c56535a38e3807f",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "rocm": "7.14.0"
+  },
+  "adoption_rule": "scope representative full-model improvement >=5% and every validation case in scope non-regressing; rule unchanged",
+  "exception": {
+    "authorized_by": "explicit user instruction on 2026-08-18",
+    "scope": "Qwen3.5 GDN recurrent gated norm, shared gfx1030/gfx1201 kernel path",
+    "reason": "adopt the measured state-pass consolidation without changing the general 5% rule"
+  },
+  "exact_step_baseline": [
+    {"target":"gfx1030","decode_steps":210,"device_ns_per_step":21317505,"projection_ns_per_step":17733287,"nonprojection_ns_per_step":3584219,"gdn_recurrent_ns_per_step":1763151,"attention_preprocess_ns_per_step":417464},
+    {"target":"gfx1201","decode_steps":210,"device_ns_per_step":18408651,"projection_ns_per_step":15080819,"nonprojection_ns_per_step":3327833,"gdn_recurrent_ns_per_step":1415388,"attention_preprocess_ns_per_step":642066}
+  ],
+  "candidate": [
+    {"target":"gfx1030","gdn_recurrent_ns_per_step":1354449,"gdn_reduction_percent":23.1836,"baseline_tokens_per_second":32.77027913643004,"candidate_tokens_per_second":33.27651631938411,"full_model_improvement_percent":1.5448058310595592,"token_ids_equal":true,"all_dispatches_hip":true,"fallback_used":false,"cleanup_valid":true},
+    {"target":"gfx1201","gdn_recurrent_ns_per_step":619505,"gdn_reduction_percent":56.2307,"baseline_tokens_per_second":37.205503557143786,"candidate_tokens_per_second":38.30925593229589,"full_model_improvement_percent":2.966637377873016,"token_ids_equal":true,"all_dispatches_hip":true,"fallback_used":false,"cleanup_valid":true}
+  ],
+  "implementation": {
+    "change": "combine initial transactional-state copy, decay, and previous projection into one recurrent-state traversal",
+    "semantic_boundaries": "FP32 state, BF16 RNE stages, operation order, double-buffer publication, graph and target selection unchanged",
+    "shared_path": true,
+    "target_split_added": false
+  }
+}

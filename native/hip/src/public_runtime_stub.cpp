@@ -464,6 +464,53 @@ sllm_queue_release(sllm_queue_t **const queue,
   }
 }
 
+extern "C" sllm_status_t sllm_queue_set_completion_mode(
+    const sllm_queue_t *const queue, const sllm_queue_completion_mode_t mode,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (queue == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                         "queue handle is null");
+    }
+    if (mode != SLLM_QUEUE_COMPLETION_MODE_PROFILED &&
+        mode != SLLM_QUEUE_COMPLETION_MODE_DEFERRED) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "queue completion mode is unsupported");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception setting queue completion mode");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_queue_fence(const sllm_queue_t *const queue,
+                 sllm_completion_t **const completion,
+                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (queue == nullptr || completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "queue fence input or output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception creating queue fence");
+  }
+}
+
 extern "C" sllm_status_t
 sllm_buffer_create(const sllm_context_t *const context,
                    const sllm_buffer_create_info_t *const info,
@@ -673,6 +720,33 @@ sllm_completion_wait(sllm_completion_t *const completion,
                      sllm_completion_result_t *const result,
                      sllm_error_sink_t *const error_sink) noexcept {
   return sllm_completion_query(completion, result, error_sink);
+}
+
+extern "C" sllm_status_t sllm_completion_finalize_after(
+    sllm_completion_t *const completion, sllm_completion_t *const fence,
+    sllm_completion_result_t *const result,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t result_status =
+        validate_completion_result(result, error_sink);
+    if (result_status != SLLM_STATUS_OK) {
+      return result_status;
+    }
+    if (completion == nullptr || fence == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                         "completion or queue fence handle is null");
+    }
+    result->state = SLLM_COMPLETION_STATE_FAILURE;
+    return write_error(error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                       "completion handle is not owned by the public runtime");
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception finalizing completion after fence");
+  }
 }
 
 extern "C" sllm_status_t sllm_completion_read(

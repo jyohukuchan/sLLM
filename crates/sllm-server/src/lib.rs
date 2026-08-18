@@ -5,6 +5,7 @@
 //! backend trait so one bounded worker can own the initial single-GPU runtime.
 
 mod api;
+mod batching;
 mod production;
 mod runtime;
 mod service;

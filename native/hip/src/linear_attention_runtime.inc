@@ -798,15 +798,19 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           "linear attention completion allocation failed");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = queue_profiles_completions(queue)
+                                        ? hipEventCreateWithFlags(&native_event, 0U)
+                                        : hipSuccess;
     if (event_status != hipSuccess) {
       return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
     }
     event_guard.adopt(context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
+    const hipError_t timing_status = queue_profiles_completions(queue)
+                                         ? hipEventCreateWithFlags(
+                                               &timing_start_event, 0U)
+                                         : hipSuccess;
     if (timing_status != hipSuccess) {
       return rollback_unpublished_submission(
           candidate, event_guard,
@@ -827,10 +831,14 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           candidate, event_guard,
           "linear attention completion token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
     const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
+        candidate->timing_start_event != nullptr
+            ? hipEventRecord(candidate->timing_start_event, queue->stream)
+            : hipSuccess;
     if (timing_record_status != hipSuccess) {
       return cleanup_failed_submission(
           candidate, token, timing_record_status,
@@ -884,7 +892,9 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        queue, error_sink);
     }
     const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
+        candidate->event != nullptr
+            ? hipEventRecord(candidate->event, queue->stream)
+            : hipSuccess;
     if (record_status != hipSuccess) {
       return cleanup_failed_submission(candidate, token, record_status,
                                        "hipEventRecord linear attention", queue,

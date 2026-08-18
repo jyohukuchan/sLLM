@@ -416,11 +416,18 @@ struct Queue final : QuarantineNode {
   hipStream_t stream;
   sllm_public_runtime::AccountingState accounting;
   bool release_active;
+  uint32_t completion_mode;
 
   Queue(Context *const context_value, const hipStream_t stream_value)
       : QuarantineNode(HandleKind::Queue), context(context_value),
-        stream(stream_value), accounting(), release_active(false) {}
+        stream(stream_value), accounting(), release_active(false),
+        completion_mode(SLLM_QUEUE_COMPLETION_MODE_PROFILED) {}
 };
+
+bool queue_profiles_completions(const Queue *const queue) noexcept {
+  return queue != nullptr &&
+         queue->completion_mode == SLLM_QUEUE_COMPLETION_MODE_PROFILED;
+}
 
 struct Buffer final : QuarantineNode {
   Context *context;
@@ -888,6 +895,7 @@ struct Completion final : QuarantineNode {
   uint64_t linear_attention_start;
   uint64_t linear_attention_count;
   uint64_t linear_attention_end;
+  bool queue_fence;
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, const uint64_t transfer_size,
@@ -962,7 +970,7 @@ struct Completion final : QuarantineNode {
         linear_attention(false), linear_attention_state(nullptr),
         linear_attention_buffers(), linear_attention_token(0U),
         linear_attention_start(0U), linear_attention_count(0U),
-        linear_attention_end(0U) {}
+        linear_attention_end(0U), queue_fence(false) {}
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, ElementwisePlan *const plan_value,
@@ -3139,7 +3147,10 @@ bool release_submission_references(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->rmsnorm) {
+    if (completion->queue_fence) {
+      released = sllm_public_runtime::AccountingState::
+          release_queue_fence_active(completion->queue->accounting);
+    } else if (completion->rmsnorm) {
       released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
           completion->queue->accounting,
           completion->rmsnorm_activation->accounting,
@@ -3220,7 +3231,10 @@ bool rollback_submission_references(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->rmsnorm) {
+    if (completion->queue_fence) {
+      released = sllm_public_runtime::AccountingState::rollback_queue_fence(
+          completion->context->accounting, completion->queue->accounting);
+    } else if (completion->rmsnorm) {
       released =
           sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
               completion->context->accounting, completion->queue->accounting,
@@ -3315,7 +3329,11 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   bool released = false;
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
-    if (completion->rmsnorm) {
+    if (completion->queue_fence) {
+      released = sllm_public_runtime::AccountingState::
+          release_queue_fence_completion(completion->context->accounting,
+                                         completion->queue->accounting);
+    } else if (completion->rmsnorm) {
       released =
           sllm_public_runtime::AccountingState::release_rmsnorm_completion(
               completion->context->accounting, completion->queue->accounting,
@@ -3376,6 +3394,45 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   return released;
 }
 
+sllm_status_t finalize_completion_success(
+    Completion *const completion, sllm_error_sink_t *const sink) noexcept {
+  if (!release_submission_references(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->safety.quarantine();
+    completion->reference_accounting_failed = true;
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "completion reference accounting failed; release is disabled");
+  }
+  if (!finalize_kv_append(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->failure_status = hipErrorInvalidValue;
+    completion->safety.quarantine();
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "KV append transition finalization failed; context poisoned");
+  }
+  if (!finalize_linear_attention(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->failure_status = hipErrorInvalidValue;
+    completion->safety.quarantine();
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "linear attention transition finalization failed; context poisoned");
+  }
+  completion->terminal = true;
+  completion->success = true;
+  completion->safety.observe_positive_completion();
+  completion->safe_to_release = true;
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t poll_completion(Completion *const completion,
                               sllm_error_sink_t *const sink) noexcept {
   if (completion->terminal) {
@@ -3389,6 +3446,9 @@ sllm_status_t poll_completion(Completion *const completion,
     }
     return hip_failure(sink, completion->failure_status,
                        "completion event query");
+  }
+  if (completion->event == nullptr) {
+    return SLLM_STATUS_PUBLIC_PENDING;
   }
   hipError_t status = hipSuccess;
   if (sllm_public_runtime::FaultInjector::consume(
@@ -3457,41 +3517,7 @@ sllm_status_t poll_completion(Completion *const completion,
             "hipEventElapsedTime rounded to zero nanoseconds");
       }
     }
-    if (!release_submission_references(completion)) {
-      completion->terminal = true;
-      completion->success = false;
-      completion->safe_to_release = false;
-      completion->safety.quarantine();
-      completion->reference_accounting_failed = true;
-      return sllm_public_runtime::write_error(
-          sink, SLLM_STATUS_INTERNAL_ERROR,
-          "completion reference accounting failed; release is disabled");
-    }
-    if (!finalize_kv_append(completion)) {
-      completion->terminal = true;
-      completion->success = false;
-      completion->safe_to_release = false;
-      completion->failure_status = hipErrorInvalidValue;
-      completion->safety.quarantine();
-      return sllm_public_runtime::write_error(
-          sink, SLLM_STATUS_INTERNAL_ERROR,
-          "KV append transition finalization failed; context poisoned");
-    }
-    if (!finalize_linear_attention(completion)) {
-      completion->terminal = true;
-      completion->success = false;
-      completion->safe_to_release = false;
-      completion->failure_status = hipErrorInvalidValue;
-      completion->safety.quarantine();
-      return sllm_public_runtime::write_error(
-          sink, SLLM_STATUS_INTERNAL_ERROR,
-          "linear attention transition finalization failed; context poisoned");
-    }
-    completion->terminal = true;
-    completion->success = true;
-    completion->safety.observe_positive_completion();
-    completion->safe_to_release = true;
-    return SLLM_STATUS_OK;
+    return finalize_completion_success(completion, sink);
   }
   if (status == hipErrorNotReady) {
     return SLLM_STATUS_PUBLIC_PENDING;
@@ -3566,15 +3592,17 @@ sllm_status_t cleanup_failed_submission(
     return hip_failure(sink, synchronize_status,
                        "hipStreamSynchronize cleanup after async failure");
   }
-  const hipError_t destroy_status =
-      destroy_event_with_fault_injection(candidate->event);
-  if (destroy_status != hipSuccess) {
-    candidate->orphaned = true;
-    retain_poisoned(candidate, candidate->context);
-    return hip_failure(sink, destroy_status,
-                       "hipEventDestroy cleanup after async failure");
+  if (candidate->event != nullptr) {
+    const hipError_t destroy_status =
+        destroy_event_with_fault_injection(candidate->event);
+    if (destroy_status != hipSuccess) {
+      candidate->orphaned = true;
+      retain_poisoned(candidate, candidate->context);
+      return hip_failure(sink, destroy_status,
+                         "hipEventDestroy cleanup after async failure");
+    }
+    candidate->event = nullptr;
   }
-  candidate->event = nullptr;
   if (candidate->timing_start_event != nullptr) {
     const hipError_t timing_destroy_status =
         destroy_event_with_fault_injection(candidate->timing_start_event);
@@ -5450,6 +5478,243 @@ sllm_buffer_copy_d2h(const sllm_queue_t *const queue,
   }
 }
 
+extern "C" sllm_status_t sllm_queue_set_completion_mode(
+    const sllm_queue_t *const raw_queue, const uint32_t mode,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (mode != SLLM_QUEUE_COMPLETION_MODE_PROFILED &&
+        mode != SLLM_QUEUE_COMPLETION_MODE_DEFERRED) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "queue completion mode is unknown");
+    }
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    Queue *const queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+    if (queue == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "queue completion-mode handle is stale or has the wrong kind");
+    }
+    if (queue->release_active || queue->context->poisoned.load()) {
+      return sllm_public_runtime::write_error(
+          error_sink,
+          queue->release_active ? SLLM_STATUS_PUBLIC_BUSY
+                                : SLLM_STATUS_INTERNAL_ERROR,
+          queue->release_active
+              ? "queue release is already in progress"
+              : "queue context is poisoned by an unresolved cleanup failure");
+    }
+    std::lock_guard<std::mutex> accounting_lock(
+        queue->context->accounting_mutex);
+    if (queue->accounting.active_submissions != 0U) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_BUSY,
+          "queue completion mode cannot change while submissions are active");
+    }
+    queue->completion_mode = mode;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in queue completion-mode update");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_queue_fence(const sllm_queue_t *const raw_queue,
+                 sllm_completion_t **const completion_output,
+                 sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion_output != nullptr) {
+      *completion_output = nullptr;
+    }
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (raw_queue == nullptr || completion_output == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "queue fence input or output is null");
+    }
+    Queue *queue = nullptr;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+      if (queue == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "queue fence handle is stale or has the wrong kind");
+      }
+      if (queue->release_active || queue->context->poisoned.load()) {
+        return sllm_public_runtime::write_error(
+            error_sink,
+            queue->release_active ? SLLM_STATUS_PUBLIC_BUSY
+                                  : SLLM_STATUS_INTERNAL_ERROR,
+            queue->release_active
+                ? "queue release is already in progress"
+                : "queue context is poisoned by an unresolved cleanup failure");
+      }
+      std::lock_guard<std::mutex> accounting_lock(
+          queue->context->accounting_mutex);
+      if (!sllm_public_runtime::AccountingState::reserve_queue_fence(
+              queue->context->accounting, queue->accounting)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "queue fence accounting is exhausted");
+      }
+    }
+    const auto rollback = [queue, error_sink]() {
+      std::lock_guard<std::mutex> lock(queue->context->accounting_mutex);
+      if (!sllm_public_runtime::AccountingState::rollback_queue_fence(
+              queue->context->accounting, queue->accounting)) {
+        poison_context_locked(queue->context);
+        (void)sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "queue fence accounting rollback failed; context poisoned");
+        return false;
+      }
+      return true;
+    };
+    const sllm_status_t device_status =
+        select_context_device(queue->context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      return rollback() ? device_status : SLLM_STATUS_INTERNAL_ERROR;
+    }
+    std::unique_ptr<Completion> candidate;
+    try {
+      candidate = std::make_unique<Completion>(
+          queue->context, queue, nullptr, 0U, false,
+          std::vector<uint8_t>{});
+      candidate->queue_fence = true;
+    } catch (...) {
+      (void)rollback();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "queue fence completion allocation failed");
+    }
+    hipEvent_t native_event = nullptr;
+    const hipError_t create_status = hipEventCreateWithFlags(
+        &native_event, hipEventDisableTiming);
+    if (create_status != hipSuccess) {
+      (void)rollback();
+      return hip_failure(error_sink, create_status,
+                         "hipEventCreateWithFlags queue fence");
+    }
+    NativeEventGuard event_guard(queue->context, native_event);
+    candidate->event = native_event;
+    uintptr_t token = 0U;
+    try {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      token = register_handle(candidate.get(), HandleKind::Completion);
+    } catch (...) {
+      const hipError_t cleanup = event_guard.cleanup();
+      (void)rollback();
+      return cleanup == hipSuccess
+                 ? sllm_public_runtime::write_error(
+                       error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "queue fence registry allocation failed")
+                 : hip_failure(error_sink, cleanup,
+                               "hipEventDestroy queue fence rollback");
+    }
+    if (token == 0U) {
+      const hipError_t cleanup = event_guard.cleanup();
+      (void)rollback();
+      return cleanup == hipSuccess
+                 ? sllm_public_runtime::write_error(
+                       error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "queue fence handle allocation failed")
+                 : hip_failure(error_sink, cleanup,
+                               "hipEventDestroy queue fence rollback");
+    }
+    event_guard.release();
+    const hipError_t record_status =
+        hipEventRecord(candidate->event, queue->stream);
+    if (record_status != hipSuccess) {
+      return cleanup_failed_submission(candidate, token, record_status,
+                                       "hipEventRecord queue fence", queue,
+                                       error_sink);
+    }
+    *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+    (void)candidate.release();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in queue fence");
+  }
+}
+
+extern "C" sllm_status_t sllm_completion_finalize_after(
+    sllm_completion_t *const raw_completion,
+    sllm_completion_t *const raw_fence,
+    sllm_completion_result_t *const result,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t result_status =
+        sllm_public_runtime::validate_completion_result(result, error_sink);
+    if (result_status != SLLM_STATUS_OK) {
+      return result_status;
+    }
+    Completion *completion = nullptr;
+    Completion *fence = nullptr;
+    const sllm_status_t completion_pin =
+        pin_completion(raw_completion, &completion, error_sink);
+    if (completion_pin != SLLM_STATUS_OK) {
+      return completion_pin;
+    }
+    CompletionPin completion_guard(completion);
+    const sllm_status_t fence_pin =
+        pin_completion(raw_fence, &fence, error_sink);
+    if (fence_pin != SLLM_STATUS_OK) {
+      return fence_pin;
+    }
+    CompletionPin fence_guard(fence);
+    if (completion == fence) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "completion cannot be finalized by itself");
+    }
+    std::scoped_lock state_locks(completion->state_mutex,
+                                 fence->state_mutex);
+    if (!fence->queue_fence || !fence->terminal || !fence->success ||
+        !fence->safe_to_release || completion->context != fence->context ||
+        completion->queue != fence->queue) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_NOT_READY,
+          "completion fence is not a successful fence on the same queue");
+    }
+    if (completion->terminal || completion->event != nullptr ||
+        completion->timing_start_event != nullptr || completion->queue_fence) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "completion is not an eventless deferred numeric operation");
+    }
+    const sllm_status_t status =
+        finalize_completion_success(completion, error_sink);
+    if (status == SLLM_STATUS_OK) {
+      completion->event_destroyed = true;
+    }
+    fill_completion_result(completion, result);
+    return status;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in completion fence finalization");
+  }
+}
+
 extern "C" sllm_status_t
 sllm_completion_query(sllm_completion_t *const raw_completion,
                       sllm_completion_result_t *const result,
@@ -6313,29 +6578,33 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           "RMSNorm completion allocation failed before enqueue");
     }
 
-    hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
-    if (event_status != hipSuccess) {
-      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+    if (queue_profiles_completions(queue)) {
+      hipEvent_t native_event = nullptr;
+      const hipError_t event_status =
+          hipEventCreateWithFlags(&native_event, 0U);
+      if (event_status != hipSuccess) {
+        if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+          execute_guard.disarm();
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
         execute_guard.disarm();
-        return SLLM_STATUS_INTERNAL_ERROR;
+        return hip_failure(error_sink, event_status,
+                           "hipEventCreateWithFlags");
       }
-      execute_guard.disarm();
-      return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
-    }
-    event_guard.adopt(plan->context, native_event);
-    candidate->event = native_event;
+      event_guard.adopt(plan->context, native_event);
+      candidate->event = native_event;
 
-    hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
-    if (timing_event_status != hipSuccess) {
-      execute_guard.disarm();
-      return rollback_unpublished_submission(
-          candidate, event_guard,
-          "RMSNorm timing event creation failed before enqueue", error_sink);
+      hipEvent_t timing_start_event = nullptr;
+      const hipError_t timing_event_status =
+          hipEventCreateWithFlags(&timing_start_event, 0U);
+      if (timing_event_status != hipSuccess) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "RMSNorm timing event creation failed before enqueue", error_sink);
+      }
+      candidate->timing_start_event = timing_start_event;
     }
-    candidate->timing_start_event = timing_start_event;
 
     uintptr_t token = 0U;
     try {
@@ -6354,17 +6623,21 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           candidate, event_guard,
           "RMSNorm completion handle token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
     throw_after_rmsnorm_registration_if_requested();
 
-    const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
-    if (timing_record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, timing_record_status,
-                                       "hipEventRecord timing start", queue,
-                                       error_sink);
+    if (candidate->timing_start_event != nullptr) {
+      const hipError_t timing_record_status =
+          hipEventRecord(candidate->timing_start_event, queue->stream);
+      if (timing_record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, timing_record_status,
+                                         "hipEventRecord timing start", queue,
+                                         error_sink);
+      }
     }
 
     const auto byte_pointer = [](Buffer *const buffer,
@@ -6393,12 +6666,14 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
                                        "RMSNorm kernel launch", queue,
                                        error_sink);
     }
-    const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
-    if (record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, record_status,
-                                       "hipEventRecord", queue, error_sink);
+    if (candidate->event != nullptr) {
+      const hipError_t record_status =
+          hipEventRecord(candidate->event, queue->stream);
+      if (record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, record_status,
+                                         "hipEventRecord", queue, error_sink);
+      }
     }
     initialize_rmsnorm_dispatch_info(dispatch_info, dispatch_id, row_count,
                                      normalized_size, arch_name);
@@ -6784,7 +7059,9 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     }
 
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = queue_profiles_completions(queue)
+                                        ? hipEventCreateWithFlags(&native_event, 0U)
+                                        : hipSuccess;
     if (event_status != hipSuccess) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -6797,8 +7074,10 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     candidate->event = native_event;
 
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
+    const hipError_t timing_event_status = queue_profiles_completions(queue)
+                                               ? hipEventCreateWithFlags(
+                                                     &timing_start_event, 0U)
+                                               : hipSuccess;
     if (timing_event_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -6825,11 +7104,15 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
           candidate, event_guard,
           "elementwise completion handle token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
 
     const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
+        candidate->timing_start_event != nullptr
+            ? hipEventRecord(candidate->timing_start_event, queue->stream)
+            : hipSuccess;
     if (timing_record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, timing_record_status,
@@ -6892,7 +7175,9 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
                                        error_sink);
     }
     const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
+        candidate->event != nullptr
+            ? hipEventRecord(candidate->event, queue->stream)
+            : hipSuccess;
     if (record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, record_status,
@@ -8348,7 +8633,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV append completion allocation failed before enqueue");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
+    const hipError_t event_status = queue_profiles_completions(queue)
+                                        ? hipEventCreateWithFlags(&native_event, 0U)
+                                        : hipSuccess;
     if (event_status != hipSuccess) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
@@ -8360,8 +8647,10 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     event_guard.adopt(state->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
+    const hipError_t timing_status = queue_profiles_completions(queue)
+                                         ? hipEventCreateWithFlags(
+                                               &timing_start_event, 0U)
+                                         : hipSuccess;
     if (timing_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -8385,10 +8674,14 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           candidate, event_guard,
           "KV append completion token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
     const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
+        candidate->timing_start_event != nullptr
+            ? hipEventRecord(candidate->timing_start_event, queue->stream)
+            : hipSuccess;
     if (timing_record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, timing_record_status,
@@ -8421,7 +8714,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
                                        error_sink);
     }
     const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
+        candidate->event != nullptr
+            ? hipEventRecord(candidate->event, queue->stream)
+            : hipSuccess;
     if (record_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, record_status,

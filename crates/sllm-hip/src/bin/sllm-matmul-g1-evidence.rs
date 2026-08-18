@@ -31,7 +31,7 @@ struct CaseShape {
 
 // Keep the boundary coverage broad without taking the Cartesian product of
 // all M/K/N values.  K=5 is retained as a small non-boundary reduction case.
-const CASES: [CaseShape; 17] = [
+const CASES: [CaseShape; 18] = [
     CaseShape { m: 1, k: 1, n: 1 },
     CaseShape { m: 1, k: 3, n: 17 },
     CaseShape { m: 3, k: 17, n: 3 },
@@ -68,6 +68,11 @@ const CASES: [CaseShape; 17] = [
         m: 1,
         k: 2560,
         n: 9216,
+    },
+    CaseShape {
+        m: 1,
+        k: 9216,
+        n: 2560,
     },
 ];
 
@@ -427,6 +432,20 @@ fn validate_dispatch(
                 "matmul.bf16_fp32.v1",
                 "sllm_matmul_bf16_fp32_v1",
             )
+        } else if shape.m > 1 && shape.m <= 8 && target == "gfx942" {
+            (
+                13,
+                shape.n as u32,
+                "matmul.bf16_fp32.decode.serial_rows.wave64.v1",
+                "sllm_matmul_bf16_fp32_decode_serial_rows_wave64_v1",
+            )
+        } else if shape.m > 1 && shape.m <= 8 {
+            (
+                12,
+                shape.n as u32,
+                "matmul.bf16_fp32.decode.serial_rows.v1",
+                "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
+            )
         } else if shape.m > 1 && matches!(target, "gfx1201" | "gfx942") {
             (
                 4,
@@ -735,7 +754,7 @@ mod tests {
 
     #[test]
     fn required_case_coverage_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 17);
+        assert_eq!(CASES.len(), 18);
         assert!(CASES.iter().any(|case| case.m == 1));
         assert!(CASES.iter().any(|case| case.m == 3));
         assert!(CASES.iter().any(|case| case.m == 17));

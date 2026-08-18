@@ -1,0 +1,19 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://sllm.local/schema/phase28-nonprojection-summary-v1.schema.json",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","state","decision","recorded_at","identity","adoption_rule","exception","exact_step_baseline","candidate","implementation"],
+  "properties":{
+    "schema_version":{"const":"phase28-nonprojection-summary-v1"},
+    "state":{"const":"COMPLETE"},
+    "decision":{"const":"ADOPTED_BY_EXPLICIT_USER_EXCEPTION"},
+    "recorded_at":{"type":"string","format":"date"},
+    "identity":{"type":"object","minProperties":1},
+    "adoption_rule":{"type":"string","minLength":1},
+    "exception":{"type":"object","minProperties":1},
+    "exact_step_baseline":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"object","required":["target","decode_steps","device_ns_per_step","projection_ns_per_step","nonprojection_ns_per_step","gdn_recurrent_ns_per_step","attention_preprocess_ns_per_step"]}},
+    "candidate":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"object","required":["target","gdn_recurrent_ns_per_step","gdn_reduction_percent","baseline_tokens_per_second","candidate_tokens_per_second","full_model_improvement_percent","token_ids_equal","all_dispatches_hip","fallback_used","cleanup_valid"]}},
+    "implementation":{"type":"object","minProperties":1}
+  }
+}

@@ -436,28 +436,32 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           "matmul completion allocation failed before enqueue");
     }
 
-    hipEvent_t native_event = nullptr;
-    const hipError_t event_status = hipEventCreateWithFlags(&native_event, 0U);
-    if (event_status != hipSuccess) {
-      if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
+    if (queue_profiles_completions(queue)) {
+      hipEvent_t native_event = nullptr;
+      const hipError_t event_status =
+          hipEventCreateWithFlags(&native_event, 0U);
+      if (event_status != hipSuccess) {
+        if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
+          execute_guard.disarm();
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
         execute_guard.disarm();
-        return SLLM_STATUS_INTERNAL_ERROR;
+        return hip_failure(error_sink, event_status,
+                           "hipEventCreateWithFlags");
       }
-      execute_guard.disarm();
-      return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
+      event_guard.adopt(plan->context, native_event);
+      candidate->event = native_event;
+      hipEvent_t timing_start_event = nullptr;
+      const hipError_t timing_event_status =
+          hipEventCreateWithFlags(&timing_start_event, 0U);
+      if (timing_event_status != hipSuccess) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "matmul timing event creation failed before enqueue", error_sink);
+      }
+      candidate->timing_start_event = timing_start_event;
     }
-    event_guard.adopt(plan->context, native_event);
-    candidate->event = native_event;
-    hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status =
-        hipEventCreateWithFlags(&timing_start_event, 0U);
-    if (timing_event_status != hipSuccess) {
-      execute_guard.disarm();
-      return rollback_unpublished_submission(
-          candidate, event_guard,
-          "matmul timing event creation failed before enqueue", error_sink);
-    }
-    candidate->timing_start_event = timing_start_event;
 
     uintptr_t token = 0U;
     try {
@@ -476,16 +480,20 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
           candidate, event_guard,
           "matmul completion handle token allocation failed", error_sink);
     }
-    event_guard.release();
+    if (candidate->event != nullptr) {
+      event_guard.release();
+    }
     execute_guard.completion_registered(token);
 
-    const hipError_t timing_record_status =
-        hipEventRecord(candidate->timing_start_event, queue->stream);
-    if (timing_record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, timing_record_status,
-                                       "hipEventRecord timing start", queue,
-                                       error_sink);
+    if (candidate->timing_start_event != nullptr) {
+      const hipError_t timing_record_status =
+          hipEventRecord(candidate->timing_start_event, queue->stream);
+      if (timing_record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, timing_record_status,
+                                         "hipEventRecord timing start", queue,
+                                         error_sink);
+      }
     }
     const auto byte_pointer = [](Buffer *const buffer,
                                  const uint64_t offset) -> void * {
@@ -708,12 +716,14 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
                                        "matmul kernel launch", queue,
                                        error_sink);
     }
-    const hipError_t record_status =
-        hipEventRecord(candidate->event, queue->stream);
-    if (record_status != hipSuccess) {
-      execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, record_status,
-                                       "hipEventRecord", queue, error_sink);
+    if (candidate->event != nullptr) {
+      const hipError_t record_status =
+          hipEventRecord(candidate->event, queue->stream);
+      if (record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, record_status,
+                                         "hipEventRecord", queue, error_sink);
+      }
     }
     initialize_matmul_dispatch_info(dispatch_info, dispatch_id,
                                     plan->matmul_metadata, arch_name);

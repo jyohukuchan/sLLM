@@ -237,6 +237,26 @@
 - 対応、動作、native高速path、変換、emulationを同じ意味で使わない。
 - 性能計測ではInferenceXと比較可能な種類のデータを収集し、グラフを作成する。
 - 単一リクエストのllama.cpp比較では、model revision、llama.cpp commit、GPU target、数値型、入力長、出力長を記録する。
+- 性能candidateの採用単位を`adoption scope S`とする。`S`は同じproviderへrouteされるproduction入力の集合で、実行前に評価できる
+  stable dispatch keyから定義する。
+- dispatch keyはexact target、dtype/encoding、semantic op、shape/layout/alignment、request mode、mechanism上意味のあるcontext境界等で
+  構成する。benchmark case名、prompt内容、実測後の結果、個別token列をkeyにしたoverfit分岐は作らない。
+- candidateは次の全条件を満たすscope `S`へ採用できる。
+  1. `S`の代表full-model caseの少なくとも一つがbaseline比5%以上改善する。
+  2. `S`に属する全validation caseでstableな悪化を残さない。
+  3. `S`外はbaseline providerへrouteされ、provider identityとselection overhead込みの性能にstableな悪化がない。
+  4. correctness、fallback、resource、cleanup条件を全経路で満たす。
+- `shared adoption`は`S`が固定matrix全体の場合、`scoped adoption`は`S`がその真部分集合の場合とする。管理性のためsharedを優先するが、
+  scope外のcandidate単体悪化を理由に、安全に分離できる5%以上のscoped improvementを棄却しない。
+- 数値範囲やcontext閾値をkeyにする場合は境界`B-1/B/B+1`とscope内の複数代表値を検証する。単一benchmark点しか裏付けないscopeは
+  production採用しない。scopeのkey、代表case、境界、baseline complementをfinal performance run前にmanifestへ固定する。
+- Phase 29だけは2026-08-18のユーザー明示決定により、上記1の5% thresholdをfull-modelではなくcommitted decode step内の
+  GDN recurrent family全kernelのdevice時間へ適用する。full-model値はdiagnosticとし、このPhase固有例外を他Phaseへ一般化しない。
+- 数値実装変更は[数値・出力影響変更台帳](../compatibility/numerical-output-changes.md)へ一元記録する。変更前とtoken列が異なっても、
+  real-number semanticを維持し、差の原因が説明可能で、解析上の誤差boundまたは期待誤差が非増加となるN1変更は数値gateを自動承認する。
+  既存tolerance内でも誤差が僅かに増加するN2変更は人間判断とし、原因不明・非有界・非決定のN3変更は採用しない。
+- N1自動承認は数値互換性だけに適用し、性能、state/fallback、resource、cleanup、ABI、security/correctness defectのhard conditionは維持する。
+  N1の定常承認に専用FP64/high-precision providerを要求せず、解析が曖昧なN2/N3の解消時だけ任意で作成する。
 
 ## 正しさ確認方針とCI・テスト
 
@@ -362,12 +382,70 @@
    - 公開runtimeはGGUFを正本として読み込み、変換元と出力をmodel lockで再現可能に固定する。
    - Phase 20はGGUF converter、loader/runtime、metadata/tensor type、model lock、移行・互換性のcloseoutだけを扱う。
      request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20の範囲に含めない。
+21. 通常decodeのsegment同期を限定的に最適化する。（完了、candidate棄却）
+   - 通常modeのper-op timingを無効化し、同一streamの非空segmentを最大1 terminal completion eventへ集約する。
+   - semantic op、kernel、provider、state publicationは変更せず、改善しないcandidateはdefaultへ採用しない。
+   - 17 ownerを1 fence eventへ集約する構造削減は成立したが、final dual-GPU比較は0.14%/0.18%遅くnoise内だった。
+     production defaultはprofiledへ戻した。詳細は[Phase 21 archive](archive/2026/08/11-20/phase21-limited-decode-sync-optimization.md)を正とする。
+22. profile-guidedに通常decodeのBF16 `M=1` matvecを限定最適化する。（完了、candidate棄却）
+   - Phase 21でwall改善を示さなかったevent同期candidateは拡張せず、current v4をbaselineにexact targetと実`K/N`を使う
+     shape-aware providerを一候補ずつ比較する。
+   - 最初のwork unitはQwen3.5-4B dense BF16のMLP `2560→9216` / `9216→2560`とし、vocabulary projectionは
+     独立controlとして測る。DeepSeek V4、TurboQuant、fusion、batching、graph replayは混ぜない。
+   - 8 shapeのfresh profileとwave32x8 candidateを評価したが、最終counterbalanced V620 wallは0.52%遅かった。
+     candidateを除去しcurrent v4を維持した。詳細は
+     [Phase 22 archive](archive/2026/08/11-20/phase22-profile-guided-decode-matvec-optimization.md)を正とする。
+23. 既存推論engineとの差分と細粒度critical-path計測から、見落としている最適化余地を探索する。（完了）
+   - Qwen3.5-4B BF16とcanonical V620/R9700でcold load、direct/API、prefill、decode、concurrencyを計測し、
+     固定llama.cppとの比較可能性をE1/E2へ分離した。vLLM/SGLangはmatched runtimeがないためfacts-only比較に限定した。
+   - 最大の新規発見は、prefillで最終行だけを消費するのに全`M`行のvocabulary projection/argmaxを実行することだった。
+     256-token E2E Amdahl上限はV620 13.06%、R9700 37.92%である。
+   - Phase 24候補をlast-row projection、projection-family fusion/shared load/plan replay、continuous batchingの順に絞った。
+     production最適化はPhase 23へ含めていない。詳細は
+     [Phase 23 archive](archive/2026/08/11-20/phase23-cross-engine-differential-performance-discovery.md)を正とする。
+24. 通常prefillのterminal LM head/Argmaxを最終行だけへ限定する。（完了、shared candidate採用）
+   - final RMSNorm後のchecked last-row viewで255 token以上の通常prefillのterminal projection/Argmaxを一行へした。
+     short request、明示all-logits、MTP target/draftはall-rowを維持する。
+   - 固定10 target/patternはすべて非悪化で、V620のP1/P2/P3は13.14%/12.08%/12.73%改善した。R9700も全patternで
+     0.09〜0.49%改善したため、改訂後の全pattern非悪化かつ任意pattern 5%以上を満たした。
+   - physical workspaceを126,644,220 bytes縮小し、dual-GPU oracle、sampling、MTP、profileをPASSした。
+     target固有問題が残らなかったためgfx1030/gfx1201分岐は追加していない。詳細は
+     [Phase 24 archive](archive/2026/08/11-20/phase24-prefill-terminal-row-projection-optimization.md)を正とする。
+25. decode projection familyをbatch-compatibleに最適化する。（完了、A0でcandidateなし）
+   - Phase 24後のfresh profileでprojection shareはV620 86.48%、R9700 79.23%だったが、支配分は異なるweightの必須readだった。
+   - gate/upの共有可能activationはweight trafficの0.00543%で、profiler observer effect込みのlaunch完全除去上限も
+     TPOTの0.94%/2.60%だった。5% full-model条件へ届くcredible work unitがないためproduction実装を開始せず完了した。
+     詳細は[Phase 25 archive](archive/2026/08/11-20/phase25-batch-compatible-projection-family-optimization.md)を正とする。
+26. continuous request batchingを実装する。（完了、candidate棄却）
+   - waiting/decode-ready、checked row map、compatibility class、round-robin、backpressureのhost contractはPASSした。
+   - 現行KV/GDN stateとpositionはrequestごとのscalarであり、既存`M>1`は一request内の連続token専用だった。独立requestへ
+     流用せず、GPU `B>1`とthroughput改善を未達としてcandidateを棄却した。詳細は
+     [Phase 26 archive](archive/2026/08/11-20/phase26-continuous-request-batching.md)を正とする。
+27. exact decode差分からprojectionのweight-stream/providerを最適化する。（完了、candidateなし）
+   - current sLLMと固定llama.cppをfresh比較したが、GGUF bytes、token stream、timing boundaryが一致しないためE1に限定した。
+   - projectionはV620でsLLMが6.76%速く、R9700で12.53%遅かった。projection除外残差はprefill/MTP境界を含むcoarse値で、
+     decode-onlyのcross-engine比率には使わない。
+   - 全target非悪化かつ任意pattern 5%以上へ届く共通projection candidateを固定できず、production変更なしで完了した。詳細は
+     [Phase 27 archive](archive/2026/08/11-20/phase27-exact-decode-projection-weight-stream-provider-optimization.md)を正とする。
+28. decodeのprojection外device処理を限定最適化する。（完了、明示例外採用）
+   - committed decodeを再計測し、最大familyのGDN recurrent state passを統合した。
+   - full-model改善はV620 1.54%、R9700 2.97%で通常の5%基準未達だが、ユーザー明示例外としてshared pathへ採用した。
+   - 5%規則自体は維持する。詳細は
+     [Phase 28 archive](archive/2026/08/11-20/phase28-decode-nonprojection-device-optimization.md)を正とする。
+29. GDNのuseful-workgroup並列化を限定最適化する。（完了、N1 shared candidate採用）
+   - 現行32 workgroupに対する16/64/128/256の単純分割は、head直列化、idle thread、Q/K norm重複、output finalize追加により
+     全variantが悪化した。workgroup数とCU数を一致させるだけの探索は繰り返さない。
+   - Q/K/output normのwave32 reductionはV620の全patternを2.15〜2.20%、R9700を8.10〜9.21%短縮し、GDN-only性能条件を満たした。
+   - output 128の5/6 target/patternでbaselineと生成token列が分岐したが、非負二乗和の逐次深さ127を固定tree深さ概ね8へ減らす
+     解析的誤差低減N1変更として数値gateを自動承認した。性能条件も満たすためfull wave candidateをshared採用した。詳細は
+     [Phase 29 archive](archive/2026/08/11-20/phase29-gdn-useful-workgroup-parallelization.md)と
+     [bounded summary](../../ci/matrix/phase29-gdn-device-summary-v1.json)を正とする。
 
 数値roadmapから独立した`Phase X`として、Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元を完了した。
 Phase XはPhase 20の状態、完了条件、実行順を変更しない。
 
 Phase番号を割り当てない将来タスクとして、READMEの整備と人間による発表がある。発表時期は未定であり、
-Phase 19/20の完了条件、直後の作業、または番号付きPhaseとして割り当てない。
+Phase 19/20/21/22/23/24/25/26/27/28/29の完了条件、直後の作業、または番号付きPhaseとして割り当てない。
 
 Phase 12のMI300Xを管理できない期間は、Phase番号と依存関係を維持したままPhase 13以降のlocal-only workを
 先行できる。現在のGitHub CI不整合は製品Phaseを繰り下げず、Phase 12待機中のremediation subphase
@@ -735,6 +813,134 @@ candidateを再確認した。
   3 warmup + 10 measured timing laneを確認した。詳細は
   [Phase 20 archive](archive/2026/08/11-20/phase20-gguf-unification.md)を正とする。
 
+### Phase 21: 限定decode segment同期最適化（完了、candidate棄却）
+
+- 単一request、batch 1の通常text decodeで、semantic opごとに作成・record・query・destroyしているcompletion/timing eventを、
+  既存model-neutral execution segmentのterminal completionへ集約する。
+- 通常modeのper-op timingを無効化し、profile/evidence modeだけでper-op HIP timingを維持する。非空segment当たりの
+  terminal completion eventを最大1個とし、terminal成功後にownerを個別HIP queryなしでfinalizeする。
+- semantic op、kernel、provider、tensor layout、transactional state publication、public standalone completion ABIは変更しない。
+- token/position H2D統合、KV publication変更、HIP Graph/command-list、event pool、GEMV、batching、DeepSeek V4、TurboQuant、
+  multi-GPUはPhase 21へ含めない。
+- Qwen3.5-4B BF16 GGUFをprimary laneとしてcanonical V620/R9700でfresh baselineとcandidateを比較した。
+  17 ownerを1 fence eventへ集約する構造削減、token/audit/cleanup一致はPASSしたが、final counterbalanced中央値は
+  V620/R9700でcandidateが0.14%/0.18%遅く、いずれもnoise内だった。
+- 固定した採用条件に従ってproduction candidateを棄却し、Qwen/GemmaはPROFILED defaultを維持する。
+  deferred ABI/core primitiveはfault-testedな実験基盤として残すが、性能成果とは表記しない。詳細は
+  [Phase 21 archive](archive/2026/08/11-20/phase21-limited-decode-sync-optimization.md)を正とする。
+
+### Phase 22: profile-guided decode M=1 matvec最適化（完了、candidate棄却）
+
+- Phase 21のevent集約は構造削減だけが成立してwall改善を示さなかったため、同じ同期micro-optimizationを継続せず、
+  直近profileでGPU時間の主因だったdense BF16 `M=1` matvec本体を限定対象にする。
+- P22-A0でcurrent providerを調査し、BF16 decodeが`M`とexact targetだけでsingle v4/wave64 variantを選び、`K/N`を
+  選択に使っていないことを確認した。Qwen3.5-4Bの1-token graphは249 matvecで、MLP gate/up 64回とdown 32回を含む。
+- 最初の比較familyをMLP `K=2560,N=9216` / `K=9216,N=2560`へ固定した。tied vocabulary
+  `K=2560,N=248320`は同じfresh profileの独立controlとし、測定なしに同variantへ束ねない。
+- 8 distinct shapeのfresh profileを両GPUで取得し、wave32x8 candidateを比較した。V620 gate/upはoperatorで約32%短縮したが、
+  downは約35%、R9700主要2 shape加重値は約13%悪化した。gate/upだけへ絞った最終V620 wallも0.52%遅かった。
+- 固定した採用条件に従ってcandidateを棄却し、新kernel ID/symbol/selectionを最終sourceから除去した。
+  current v4/wave64をproduction defaultに維持し、8-shape profile evidenceと18-case f64 oracle拡張だけを残した。
+- DeepSeek V4、TurboQuant、量子化path、fusion、H2D統合、event pool、graph replay、batchingは非対象とする。詳細は
+  [Phase 22 archive](archive/2026/08/11-20/phase22-profile-guided-decode-matvec-optimization.md)を正とする。
+
+### Phase 23: cross-engine differential performance discovery（完了）
+
+- Qwen3.5-4B BF16のcanonical V620/R9700でcold load、warm direct/API、256-token prefill、128-token decode、
+  concurrency=2を取得した。全production laneはHIP-only、fallbackなし、cleanup 0だった。
+- 固定llama.cpp peerとの256-token prefillはE1 system-equivalentでsLLMが6.44x/6.60x長かった。fresh decodeはtoken列と
+  出力長が異なるためE2に限定し、勝敗ratioを作らなかった。vLLM/SGLangもmatched runtime不在のためfacts-onlyとした。
+- prefillの全行LM head/argmaxという見落としを新規発見した。LM-head-shaped workはdevice timeの13.48%/46.92%、
+  normal E2E Amdahl上限は13.06%/37.92%だった。
+- Gemma 4 R9700 controlはmatvec device share 83.67%を示し、decode matrix familyのmodel横断性を確認した。
+  同時2 API要求はほぼ完全に直列化し、HTTP/SSE residualは約0.5〜0.6 msに留まった。fresh-process model-readyは
+  10.53/11.60 sで、full-file hashと直列upload completionがcold path候補になった。
+- Phase 24 shortlistは`P23-O1` last-row-only prefill projection、`P23-O2` projection-family fusion/shared load/plan replay、
+  `P23-O3` continuous batchingである。production source/default/API/model formatは変更していない。詳細は
+  [Phase 23 archive](archive/2026/08/11-20/phase23-cross-engine-differential-performance-discovery.md)、
+  [bounded summary](../../ci/matrix/phase23-performance-discovery-summary-v1.json)、
+  [technical note](../references/phase23-inference-engine-performance-differential.md)を正とする。
+
+### Phase 24: prefill terminal-row projection optimization（完了、shared candidate採用）
+
+- Phase 23の最上位`P23-O1`について、final RMSNorm後のlast-row viewから`[1,vocab]` logitsと`[1]` Argmaxを作る
+  Qwen bounded candidateを実装し、明示all-logits/MTP pathを全行のまま分離した。
+- 改訂後のP0/P1/P2/P3/D0 dual-GPU matrixは全10組で非悪化だった。V620 P1/P2/P3は13.14%/12.08%/12.73%、
+  R9700の全5 patternも0.09〜0.49%改善し、任意pattern 5%以上の採用条件を満たした。
+- one-row pathは通常requestの255 token以上に限定し、short request、明示all-logits、MTP target/draftはall-rowを維持した。
+  host 19 test、dual-GPU distinctive-row oracle、sampling 3 profile、MTP幅2、profiler mechanism proofをPASSした。
+- workspace high-waterは1,149,766,656 bytesから1,023,122,436 bytesへ縮小し、model-resident bytesは不変だった。
+  correctness defectも性能悪化も残らなかったためgfx1030/gfx1201で共通経路を採用し、target分岐は追加していない。
+  詳細は[Phase 24 archive](archive/2026/08/11-20/phase24-prefill-terminal-row-projection-optimization.md)と
+  [bounded summary](../../ci/matrix/phase24-terminal-row-summary-v1.json)を正とする。
+
+### Phase 25: batch-compatible projection-family optimization（完了、A0 negative discovery）
+
+- fresh profileのprojection device shareはV620 86.48%、R9700 79.23%だったが、familyで除去できない各weight readが大半だった。
+- gate/up pairの共有可能activation readはweight trafficの0.00543%で、32 launch/tokenを完全に除去するprofiler上限も
+  V620 0.94%、R9700 2.60%だった。linear attentionは既にpacked、terminalは現行decode provider、prepared descriptorはcache済みである。
+- 5% full-model条件へ届くcredible removable fractionがないため、A0でcandidateなしと判定した。production source、default、
+  target分岐は変更していない。詳細は[Phase 25 archive](archive/2026/08/11-20/phase25-batch-compatible-projection-family-optimization.md)と
+  [bounded summary](../../ci/matrix/phase25-projection-family-summary-v1.json)を正とする。
+
+### Phase 26: continuous request batching（完了、candidate棄却）
+
+- fresh C2完了時刻はV620 0.457/0.908秒、R9700 0.327/0.646秒で、現行productionの直列性を再確認した。
+- `C=1,2,3,4,7,8`、compatibility class、row map、fairness、backpressure、cancel/errorを持つhost plannerを追加し、
+  focused 5 testとserver全32 testをPASSした。in-flight cancelはcompletionまでactive resourceを保持して結果を非公開にする。
+  ただしmodel/device resourceを所有せずproductionへ未接続である。
+- 現行coreの`M>1`は同一request内の連続tokenで、KV/GDN length/stateはper-owner scalarである。独立requestを流用すると
+  causal stateを共有するため、GPU `B>1`へ接続しなかった。必要なmulti-sequence state ABIは見積り1.5倍超として再計画対象にした。
+- production scheduler/backend mutex/defaultは維持し、GPU batching/throughput改善を主張しない。詳細は
+  [Phase 26 archive](archive/2026/08/11-20/phase26-continuous-request-batching.md)と
+  [bounded summary](../../ci/matrix/phase26-continuous-request-batching-summary-v1.json)を正とする。
+
+### Phase 27: exact decode projection weight-stream/provider optimization（完了、negative discovery）
+
+- current sLLMの28-token prompt / 128-token decodeはV620 32.38 tok/s、R9700 37.00 tok/s、固定llama.cppのdecode-onlyは
+  48.94/53.96 tok/sだった。GGUF bytes、token列、timing boundaryが異なるためE1 system-equivalentに限定し、engine勝敗は主張しない。
+- mandatory projection 8.41 GB/tokenのdevice timeはV620でsLLM/llama.cpp 17.71/18.99 ms、R9700で17.85/15.86 msだった。
+  V620ではsLLM projectionが6.76%速く、R9700だけ12.53%遅いため、両target共通のprojection provider gapではなかった。
+- projectionを除くcoarse residualは両targetに残ったが、prefillの非projection kernel、R9700 MTP内部work、unmatched timing boundaryを
+  含むためdecode-onlyのpeer比率には使えない。Phase 22で反対targetを悪化させた同系providerとPhase 25で棄却済みのfusionを再開せず、
+  全target非悪化かつ任意pattern 5%改善へ届く共通candidateは`NO_COMMON_PROJECTION_CANDIDATE`とした。
+- production source/default/target splitを変更せずnegative discoveryとして完了した。詳細は
+  [Phase 27 archive](archive/2026/08/11-20/phase27-exact-decode-projection-weight-stream-provider-optimization.md)と
+  [bounded summary](../../ci/matrix/phase27-weight-stream-summary-v1.json)を正とする。
+
+### Phase 28: decode projection外device処理の限定最適化（完了、明示例外採用）
+
+- Phase 27のprojection除外残差は、prefill projectionだけを除いたaggregateをnominal decode stepで割っており、prefillの
+  GDN/attention/normとR9700のMTP内部workが残っていた。3.80倍/3.54倍というdecode-only比較を撤回し、A0/A1で再計測する。
+- execution transactionのcommitted output stepを正規境界に、prefill、target decode、MTP draft/verify/replayを分離する。
+  evidence/profile laneだけでdispatchをcomponent/familyへ写像し、production defaultへper-op timing overheadを追加しない。
+- GDN recurrent、attention preprocess、causal attention/KV、RMSNorm、elementwise、Argmax、device copy/fillを分解し、
+  fixable contributionが最大のcoherent work unitを一つ固定する。projectionとhost residualは計測controlに限定する。
+- committed decode再計測ではprojection外がV620 3.584 ms、R9700 3.328 ms/token、最大familyはGDN recurrentだった。
+  state copy/decay/projectionのpass統合でGDNを23.18%/56.23%、full-modelを1.54%/2.97%改善した。
+- 5%規則は変更していないが、ユーザー明示承認により本candidateだけを例外採用した。token IDs、all-HIP、fallback、cleanupを確認し、
+  target splitなしのshared pathとした。詳細は[Phase 28 archive](archive/2026/08/11-20/phase28-decode-nonprojection-device-optimization.md)と
+  [bounded summary](../../ci/matrix/phase28-nonprojection-summary-v1.json)を正とする。
+
+### Phase 29: GDN useful-workgroup並列化最適化（完了、N1 shared candidate採用）
+
+- Phase 28 productionの32-workgroup fused GDNをbaselineにする。探索した16 workgroupはV620/R9700のGDN device時間を
+  135.6%/373.9%、64/128/256 workgroupの単純row splitも最低3.17%/11.82%悪化させた。
+- 原因はworkgroup数不足だけではなく、16でのvalue-head直列化、64以上でのidle thread、Q/K norm・gate・decay重複、
+  block間同期に伴うoutput finalize追加である。CU数だけからworkgroup総数を選ぶruntime policyは作らない。
+- prepared/tiled構造とbounded variantを比較し、追加launch/scratchなしのwave32 reductionを最終候補に固定した。
+  projection、causal convolution、attention、scheduler、GGUF/KV formatは変更していない。
+- ユーザー明示決定により、Phase 29の採用可否はfull-modelではなくcommitted decode stepのGDN recurrent family全kernelの
+  device p50で判定する。scope内全validation pattern非悪化かつ任意代表pattern5%以上ならshared/scoped adoptionできる。
+  full-model TPOT/E2Eはdiagnosticとして記録するが採否を変更しない。
+- 14 request × 16 output、B0/B1/B2、各variant 3 processを一度に一GPUだけで取得した。full wave candidateはV620 2.15〜2.20%、
+  R9700 8.10〜9.21%短縮し、baseline endpoint driftは最大1.34%だった。
+- model-free oracleと16-token列は一致し、output 128では6 pattern中5 patternが20〜112 token目で分岐した。同一provider repeatは再現した。
+  対象が非負二乗和で、実数式不変のまま逐次深さ127を固定tree深さ概ね8へ減らすためN1へ分類し、token差を台帳へ記録して
+  数値gateを自動承認した。GDN性能条件も満たすfull wave candidateをshared採用し、target splitは追加していない。詳細は
+  [Phase 29 archive](archive/2026/08/11-20/phase29-gdn-useful-workgroup-parallelization.md)と
+  [bounded summary](../../ci/matrix/phase29-gdn-device-summary-v1.json)を正とする。
+
 ### Phase X: Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元（完了）
 
 - Qwen3.8-27B/Qwen3.5 architectureで観測したllama.cpp HIPの長prompt prefill崩れと低decode性能を、
@@ -772,34 +978,65 @@ candidateを再確認した。
 | 完了 | Phase 18 | MTP逐次承認、target-only数値同一、最低限の高速化 | R9700でexact MTPを内部採用、V620はtarget-only維持 |
 | 完了 | Phase 19 | Qwen3.5-35B-A3B MoE text-only production path | R9700/V620の通常CLI/APIへ統合済み |
 | 完了 | Phase 20 | GGUF統一のみ | hobby user向けmodel inputと配布artifactを単一containerに固定した |
+| 完了・棄却 | Phase 21 | 通常decodeのper-op timing無効化とsegment terminal completion集約 | 構造削減はPASSしたがdual-GPU wall差がnoise内のためproduction defaultへ不採用 |
+| 完了・棄却 | Phase 22 | shape-aware BF16 M=1 matvec providerの限定比較 | operator局所改善がwallへ転化せずcurrent v4を維持した |
+| 完了 | Phase 23 | cross-engine差分と細粒度critical-path計測による最適化余地探索 | prefill全行LM head、decode projection family、service serializationを上位候補として抽出した |
+| 完了・採用 | Phase 24 | prefill terminal LM head/Argmaxのlast-row限定 | 固定10組非悪化、V620の3 prefill caseで12.08〜13.14%改善しshared pathを採用した |
+| 完了・候補なし | Phase 25 | batch-compatible projection-family最適化 | fresh profileで5%へ届くcredible removable fractionがなく、production変更なしでnegative closeoutした |
+| 完了・棄却 | Phase 26 | continuous request batching | host plannerはPASSしたがscalar KV/GDN ABIを安全なGPU `B>1`へ接続できずproduction未採用 |
+| 完了・候補なし | Phase 27 | fresh decode差分とprojection weight-stream/provider調査 | 比較はE1に限定し、共通projection candidateなしでproduction変更せず完了した |
+| 完了・例外採用 | Phase 28 | committed-step単位のprojection外device短縮 | GDN state pass統合を両GPU共通pathへ採用。通常の5%規則は維持 |
+| 完了・採用 | Phase 29 | GDN useful-workgroup並列化 | 解析的誤差低減N1としてtoken差を記録し、GDN性能条件を満たすshared wave reductionを採用した |
+| 計画済み | Phase 30 | RDNA4 native attention/KV hardware-path最適化 | software FP8/vector-only baselineからnative conversion、decode tile、prefill matrix providerをscope別に比較する |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
-Phase 20の完了後または別の依存関係で残る将来項目はrequest batching、chunked prefill、KV/会話/model lockの
+Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
+最上位last-row projectionをPhase 24、projection-family最適化をPhase 25、continuous request batchingをPhase 26へ、
+残るexact decode weight-stream/provider差分をPhase 27、committed decodeのprojection外device短縮をPhase 28、
+GDNのuseful-workgroup並列化をPhase 29へ
+ユーザー指示で割り当てた。2026-08-19のlong-context KV調査で、FP16/FP8 causal attentionがgfx1201でも同じ
+scalar/vector kernelを使い、native FP8 conversion、packed dot、WMMA/SWMMACを使用していないことを確認したため、
+RDNA4 native attention/KV hardware-path最適化をPhase 30へ割り当てた。その他に残る将来項目はchunked prefill、KV/会話/model lockの
 簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
 将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。
 
-### Phase未割当の性能最適化backlog
+### 性能最適化backlog
 
-- 2026-08-17のcurrent source、直近full-model profile、性能historyを横断して確認できた明確な最適化余地を、
-  Phase Xへ切り出したQwen3.5系GDN/llama.cpp AMD調査を除き、この節でPhase未割当として管理する。このinventoryは
-  Phase 20のGGUF限定scopeを拡張せず、個別taskの受入条件、実装順、対象targetは着手時のfresh profileで固定する。
+- 2026-08-18のcurrent source、直近full-model profile、性能historyを横断して確認できた明確な最適化余地を、
+  Phase Xへ切り出したQwen3.5系GDN/llama.cpp AMD調査とPhase 21で棄却した限定segment同期を除き、
+  この節で管理する。dense BF16 `M=1` matvecの最初のwork unitをPhase 22へ割り当て、Phase 23でinventoryを
+  cross-engine差分、critical-path share、Amdahl上限から再分類した。prefill last-row projectionをPhase 24、
+  batch-compatible projection-family optimizationをPhase 25、continuous request batchingをPhase 26、
+  exact decode weight-stream/provider optimizationをPhase 27、projection外device短縮をPhase 28へ割り当て、
+  cold loaderは未割当のまま維持する。
+  このinventoryは完了Phaseのscopeを拡張せず、個別taskの受入条件、
+  実装順、対象targetは着手時のfresh profileで固定する。
   一般論だけの候補をhard gateにしない。
 - runtime dispatch・同期:
   - 現行native runtimeはsemantic opごとにcompletion owner、HIP completion event、timing event、registry handleを
-    生成し、同一streamのsegment末尾で各ownerを個別queryする。通常実行はsegment単位のcompletion/eventへ集約し、
-    per-op timingはprofile/evidence時だけ有効化する。event/completion pool、registry lock削減、parameter更新可能な
-    native command-listまたはproduction graph replayを比較する。requestごとの素朴なgraph instantiateは再導入しない。
+    生成し、同一streamのsegment末尾で各ownerを個別queryする。Phase 21でsegment単位completionを比較したがwall改善が
+    noise内だったため通常defaultへ採用しなかった。event/completion pool、
+    registry lock削減、parameter更新可能なnative command-listまたはproduction graph replayはPhase 21へ含めず、
+    未割当backlogとして維持する。requestごとの素朴なgraph instantiateは再導入しない。
   - decodeのtoken IDとpositionを別々の同期付きH2Dにせず、一つのstaging transferまたはdevice-side position生成へ
     まとめる。terminal argmax完了と4-byte token readbackも一つのstream boundaryへ含める。
   - full-attention layerごとのKV append host waitは、accepted stateだけを公開するtransaction contractを維持したまま、
     stream-ordered publicationまたはstaged stateで集約できるか測る。
+- attention・KV hardware path:
+  - 現行generic causal attentionはFP16 ID 2とpacked-KV ID 3を報告するが、実体はencoding引数で分岐する同一kernelであり、
+    gfx1201 code objectにもnative FP8 conversion、packed dot、WMMA/SWMMACがない。Phase 16のcorrectness/memory baselineとしては正しいが、
+    RDNA4 hardware性能を評価するproviderではない。
+  - Phase 30でgfx1201 native FP8 codec、decode packed-dot/wave tile、prefill matrix attentionを別work unitとして比較する。
+    gfx1030はbaseline controlを維持し、target/encoding/mode/contextのstable scopeごとに一般の5% full-model規則で採否を決める。
+  - Q/PのFP16/FP8化、softmax順序、accumulator変更は数値台帳のN0〜N3へ分類し、N2を性能だけで自動採用しない。
 - Dense BF16 execution:
-  - 直近profileでdecode GPU時間の主因だったmemory-bound M=1 matvecを継続対象とする。Q/K/V projection、gate/up、
-    RMSNorm producer、vocabulary projectionの共有load・融合、target別vector幅、weight prefetchを比較する。
-  - 現行provider選択は主にtargetとMだけを使うため、`target/M/K/N`とprojection roleを含むshape-aware provider table、
-    offlineまたはstartup tuning結果の再利用、V620/R9700/gfx942別のMMVF・custom GEMM・hipBLAS選択を検討する。
-  - production graph/command-list、gate/up+SiLU等のfusionは、attentionが支配的でない短contextの共通残差として扱う。
+  - Phase 27のfresh E1比較では、V620 projectionはpeerより6.76%速く、R9700だけ12.53%遅かった。両target共通の
+    projection provider gapではなく、全target非悪化かつ任意pattern 5%改善へ届くwork unitを固定できなかった。
+  - Phase 27のprojection除外coarse residualはprefill非projection workとR9700 MTP内部stepを含んでいたため、peerに対する
+    3.80倍/3.54倍claimを撤回した。Phase 28でcommitted output step単位にfamilyを分解し、device処理だけを短縮する。
+  - production graph/command-list、gate/up+SiLU等のfamily fusion、R9700限定projection providerは未割当backlogとして維持する。
+    後者はR9700のstable adoption scopeで5%以上改善し、gfx1030等をbaselineへ確実にrouteできる共通registry keyがあれば再検討できる。
 - FP8、NVFP4、MXFP4 model path:
   - Q/K/Vやgate/up等、同じBF16 activationを消費する複数linear間でdynamic FP8/NVFP4/MXFP4 activationとscaleを
     共有する。RMSNorm等のproducerからの直接量子化、quantize+matmul融合、M=1専用quantizerも比較する。
@@ -865,18 +1102,37 @@ Phase 20の完了後または別の依存関係で残る将来項目はrequest b
 
 ## 現在の状態と次の作業
 
-- Phase 19のQwen3.5-35B-A3B MoE text-only production統合は完了した。次はPhase 20としてGGUF統一だけを行う。
-  MTPの別model、request batching、chunked prefill、簡易永続化、残るmodel/KV形式をPhase 20へ混ぜない。
+- Phase 29はGDN-only採用指標で性能条件を満たすwave reductionを得た。長生成token差は非負二乗和の固定tree化による説明可能な
+  解析的誤差低減N1として台帳へ記録し、数値gateを自動承認してshared production pathへ採用した。target splitはない。詳細は
+  [Phase 29 archive](archive/2026/08/11-20/phase29-gdn-useful-workgroup-parallelization.md)と
+  [bounded summary](../../ci/matrix/phase29-gdn-device-summary-v1.json)を正とする。
+- Phase 28はGDN state pass統合を明示例外として完了し、Phase 29のproduction baselineとする。Phase 28自身の通常5%規則は維持する。詳細は
+  [Phase 28 archive](archive/2026/08/11-20/phase28-decode-nonprojection-device-optimization.md)を正とする。
+- Phase 27はfresh E1比較とweight-stream accountingを完了した。V620のprojectionはpeerより速く、R9700だけに約7.36%の
+  full-model楽観上限があったため、全target非悪化かつ任意pattern 5%以上へ届く共通projection candidateはなかった。
+  production sourceとtarget分岐を変更せずnegative completionとした。詳細は
+  [Phase 27 archive](archive/2026/08/11-20/phase27-exact-decode-projection-weight-stream-provider-optimization.md)を正とする。
+- Phase 25はPhase 24後のfresh dual-GPU profileで5%へ届くprojection-family候補がないことを確認し、production sourceを
+  変更せずnegative completionとした。Phase 26もfresh C2 baselineとhost plannerを完了したが、現行scalar KV/GDN ABIでは
+  独立requestのGPU `B>1`が安全に表現できずcandidateを棄却した。batching再開にはmulti-sequence state ABIの独立計画が必要である。
+- Phase 24は改訂後の採用条件を満たして完了した。固定10 target/patternはすべて非悪化で、V620 P1/P2/P3は
+  13.14%/12.08%/12.73%改善した。shared last-row pathとphysical one-row allocationを採用し、gfx1030/gfx1201分岐は
+  追加していない。short request、明示all-logits、MTP target/draftはall-rowを維持する。
+- Phase 21は17 ownerを1 fenceへ集約する構造削減をPASSしたが、canonical V620/R9700のE2E中央値が
+  0.14%/0.18%遅くnoise内だったためcandidateを棄却し、production defaultをPROFILEDへ戻して完了した。
+- Phase 22は8 distinct shapeのfresh profile、wave32x8 candidate、dual-GPU oracle、counterbalanced full-model比較を完了した。
+  V620 gate/upのoperator改善はwallへ転化せず、最終candidateが0.52%遅かったため棄却した。current v4/wave64を維持し、
+  profile evidenceと18-case oracle拡張だけを残した。DeepSeek V4、TurboQuant、fusion、H2D統合、event pool、graph replay、
+  batchingはPhase 22へ含めていない。
 - Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元は数値roadmapから独立したPhase Xとして完了した。
   Q5_1 HIP Flash Attentionをall-quant buildで有効化してlocal V620 subagentへ採用し、sLLM GDN source変更は不要と判断した。
-  GGUF統一の完了条件へ含めず、上記inventoryの残りはPhase未割当のbacklogとして維持する。
+  GGUF統一の完了条件へ含めず、上記inventoryのうちPhase 25/26へ割り当てていないproduction実装は未割当backlogとして維持する。Phase 23は
+  inventoryの計測・再分類だけを担当する。
 - 2026-08-16のユーザー決定により、提供元NVFP4/MXFP4 QAT/native modelを公式入力とし、低bit形式を理由とする追加opt-in、
   起動コマンド差、通常警告を最終UXへ設けない。内部状態とconverter品質は上記FP4製品方針に従って分離する。
-- 最終的なユーザー向けモデル形式をGGUFへ統一する決定はPhase 20へ割り当てた。現在のsafetensors direct loadと
-  量子化sidecarは移行完了まで維持する。Phase 16Fのcontainer-neutral encoding/recipe descriptorをGGUFへ引き渡すが、
-  最終GGUF writer/runtimeをPhase 16Fへ前倒ししない。Phase 20にrequest batching、chunked prefill、簡易永続化、
-  残るmodel/KV形式を含めない。
-- README整備と人間による発表は時期未定の将来タスクであり、番号付きPhaseやPhase 19/20の完了条件に割り当てない。
+- 最終的なユーザー向けモデル形式をGGUFへ統一するPhase 20は完了し、safetensors direct loadと量子化sidecarは
+  converter・開発入力へ移行した。Phase 21/22はGGUF/model-lock形式を変更しない。
+- README整備と人間による発表は時期未定の将来タスクであり、番号付きPhaseやPhase 19/20/21/22/23/24/25/26/27の完了条件に割り当てない。
 - MI300Xを管理できなかった期間はPhase 12を`ready`で保持し、local forward queueに従ってPhase 12R、Phase 13、
   Phase 14、共通RDNA性能bridge、Phase 15の順に先行する。Phase 12RでGitHub host/compileとtrusted local GPUの
   verification境界を修復し、Phase 13で共通execution制御を抽出し、Phase 14でGemma 4 production pathを完了した。

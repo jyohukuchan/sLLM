@@ -42,6 +42,8 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
     "p1.engine-performance.schema",
     "p1.engine-performance.runner",
     "p1.engine-performance.aggregate",
+    "p23.performance-discovery.contract",
+    "p29.gdn-device.contract",
 ]
 EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
 EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
@@ -97,6 +99,14 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
     "ci/tests/test_engine_performance_schema.py",
     "ci/tests/test_engine_performance_runner.py",
     "ci/tests/test_engine_performance_aggregate.py",
+    "ci/tools/run_phase23_discovery.py",
+    "ci/schema/phase23-performance-discovery-summary-v1.schema.json",
+    "ci/matrix/phase23-performance-discovery-summary-v1.json",
+    "ci/tests/test_phase23_discovery.py",
+    "ci/tools/phase29_gdn_device.py",
+    "ci/schema/phase29-gdn-device-summary-v1.schema.json",
+    "ci/matrix/phase29-gdn-device-summary-v1.json",
+    "ci/tests/test_phase29_gdn_device_summary.py",
 }
 EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES = {
     "ci/matrix/engine-performance-render-v1.json",
@@ -733,6 +743,7 @@ def validate_phase5_suite_registration(
             {"command_id": "engine-performance-host-contracts", "argv": [
                 "{python}", "-m", "unittest", "ci.tests.test_engine_performance_schema",
                 "ci.tests.test_engine_performance_runner", "ci.tests.test_engine_performance_aggregate",
+                "ci.tests.test_phase23_discovery", "ci.tests.test_phase29_gdn_device_summary",
             ]},
             EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES,
         ),
@@ -908,12 +919,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 26:
-            raise ContractError("suites-v1 identity is not revision 26")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 27:
+            raise ContractError("suites-v1 identity is not revision 27")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 19:
             raise ContractError("host-v1 identity is not revision 19")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 40:
-            raise ContractError("path-to-suite-v1 identity is not revision 40")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 41:
+            raise ContractError("path-to-suite-v1 identity is not revision 41")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

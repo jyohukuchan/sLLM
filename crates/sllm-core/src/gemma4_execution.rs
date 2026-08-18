@@ -1435,7 +1435,7 @@ impl Gemma4ProvisionedBuffers {
             .prepared_execution_plan()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let prepared_transition = transition.transition();
-        let mut pending = ExecutionSegment::default();
+        let mut pending = ExecutionSegment::profiled(options.completion_timeout);
         let mut audit = ExecutionAuditAccumulator::new(options.expected_backend);
         let mut terminal_bytes = None;
 
@@ -1491,17 +1491,25 @@ impl Gemma4ProvisionedBuffers {
                             graph.start_position(),
                             graph.start_position(),
                         )
-                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-                    require_terminal_success(
-                        &format!("{}.static_kv_append", graph_node.label()),
-                        append.wait(options.completion_timeout).map_err(|error| {
-                            Gemma4ExecutionLayoutError::invalid(error.to_string())
-                        })?,
-                    )
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-                    audit
-                        .record(append.dispatch())
-                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                        .map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(format!(
+                                "{} static KV append failed: {error}",
+                                graph_node.label()
+                            ))
+                        })?;
+                    pending
+                        .flush_with_kv_append(
+                            &format!("{}.static_kv_append", graph_node.label()),
+                            &mut append,
+                            None,
+                            &mut audit,
+                        )
+                        .map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(format!(
+                                "{} static KV boundary flush failed: {error}",
+                                graph_node.label()
+                            ))
+                        })?;
                     drop(append);
                     let query = self.bind(layout, node.inputs[0], AccessMode::Read)?;
                     let output = self.bind(layout, node.outputs[0], AccessMode::Write)?;
@@ -1514,14 +1522,25 @@ impl Gemma4ProvisionedBuffers {
                     let attention = self
                         .session
                         .causal_attention(state, queue, query, output, descriptor)
-                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                        .map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(format!(
+                                "{} causal attention failed: {error}",
+                                graph_node.label()
+                            ))
+                        })?;
                     pending.retain_causal_attention(graph_node.label(), attention);
                     return Ok(());
                 }
 
                 for append in self.bind_kv_appends(layout, node)? {
-                    let submission =
-                        self.submit_bound(append, queue, PreparedCachePolicy::Transient)?;
+                    let submission = self
+                        .submit_bound(append, queue, PreparedCachePolicy::Transient)
+                        .map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(format!(
+                                "{} KV append submit failed: {error}",
+                                graph_node.label()
+                            ))
+                        })?;
                     pending
                         .retain_semantic(format!("{}.kv_append", graph_node.label()), submission);
                 }
@@ -1535,21 +1554,30 @@ impl Gemma4ProvisionedBuffers {
                         0,
                     ))
                 };
-                let mut submission = self.submit_bound(operation, queue, cache_policy)?;
+                let mut submission =
+                    self.submit_bound(operation, queue, cache_policy)
+                        .map_err(|error| {
+                            Gemma4ExecutionLayoutError::invalid(format!(
+                                "{} submit failed: {error}",
+                                graph_node.label()
+                            ))
+                        })?;
                 let boundary = planned.boundary_after();
                 if boundary.is_none() {
                     pending.retain_semantic(graph_node.label(), submission);
                     return Ok(());
                 }
-                require_terminal_success(
-                    graph_node.label(),
-                    submission
-                        .wait(options.completion_timeout)
-                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
-                )
-                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let boundary = boundary.expect("checked boundary presence");
+                pending
+                    .flush_with_semantic(graph_node.label(), &mut submission, boundary, &mut audit)
+                    .map_err(|error| {
+                        Gemma4ExecutionLayoutError::invalid(format!(
+                            "{} boundary flush failed: {error}",
+                            graph_node.label()
+                        ))
+                    })?;
 
-                if boundary == Some(ExecutionBoundaryKind::TerminalReadback) {
+                if boundary == ExecutionBoundaryKind::TerminalReadback {
                     if node.descriptor.kind() != SemanticOpKind::Argmax || node.outputs.len() != 1 {
                         return Err(Gemma4ExecutionLayoutError::invalid(
                             "terminal boundary is not one Argmax output",
@@ -1584,11 +1612,6 @@ impl Gemma4ProvisionedBuffers {
                         ));
                     }
                 }
-                pending.retain_semantic(graph_node.label(), submission);
-                let boundary = boundary.expect("checked boundary presence");
-                pending
-                    .flush(boundary, &mut audit)
-                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
                 transition
                     .complete_boundary(boundary)
                     .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;

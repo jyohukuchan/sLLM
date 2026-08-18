@@ -284,6 +284,9 @@ pub const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP: sllm_elementwise_operation_t 
 pub const SLLM_COMPLETION_STATE_PENDING: u32 = 0;
 pub const SLLM_COMPLETION_STATE_SUCCESS: u32 = 1;
 pub const SLLM_COMPLETION_STATE_FAILURE: u32 = 2;
+pub type sllm_queue_completion_mode_t = u32;
+pub const SLLM_QUEUE_COMPLETION_MODE_PROFILED: sllm_queue_completion_mode_t = 0;
+pub const SLLM_QUEUE_COMPLETION_MODE_DEFERRED: sllm_queue_completion_mode_t = 1;
 
 #[repr(C)]
 pub struct sllm_context_t {
@@ -1229,6 +1232,22 @@ unsafe extern "C" {
         buffer: *const sllm_buffer_t,
         transfer: *const sllm_transfer_desc_t,
         completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_queue_set_completion_mode(
+        queue: *const sllm_queue_t,
+        mode: sllm_queue_completion_mode_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_queue_fence(
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_completion_finalize_after(
+        completion: *mut sllm_completion_t,
+        fence: *mut sllm_completion_t,
+        result: *mut sllm_completion_result_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_completion_query(

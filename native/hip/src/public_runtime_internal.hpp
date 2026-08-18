@@ -119,6 +119,55 @@ struct AccountingState final {
     return true;
   }
 
+  static bool reserve_queue_fence(AccountingState &context,
+                                  AccountingState &queue) noexcept {
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards)) {
+      return false;
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    return true;
+  }
+
+  static bool release_queue_fence_active(AccountingState &queue) noexcept {
+    if (queue.active_submissions == 0U) {
+      return false;
+    }
+    --queue.active_submissions;
+    return true;
+  }
+
+  static bool rollback_queue_fence(AccountingState &context,
+                                   AccountingState &queue) noexcept {
+    if (queue.active_submissions == 0U ||
+        queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    return true;
+  }
+
+  static bool release_queue_fence_completion(
+      AccountingState &context, AccountingState &queue) noexcept {
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    return true;
+  }
+
   static void rmsnorm_buffer_counts(const AccountingState *const activation,
                                     const AccountingState *const raw_scale,
                                     const AccountingState *const output,

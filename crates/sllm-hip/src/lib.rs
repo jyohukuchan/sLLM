@@ -61,8 +61,8 @@ pub use rmsnorm::{
 };
 pub use rotary::{PreparedRotary, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission};
 pub use runtime::{
-    Buffer, Completion, CompletionState, Context, DeviceInfo, Event, Queue, RuntimeError,
-    RuntimeStatus,
+    Buffer, Completion, CompletionState, Context, DeviceInfo, Event, Queue, QueueCompletionMode,
+    RuntimeError, RuntimeStatus,
 };
 pub use windowed_attention::{
     PreparedWindowedAttention, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,

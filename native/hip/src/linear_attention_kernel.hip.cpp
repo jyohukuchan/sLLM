@@ -45,6 +45,14 @@ __device__ __forceinline__ float softplus(const float value) noexcept {
   return fmaxf(value, 0.0F) + log1pf(expf(-fabsf(value)));
 }
 
+template <uint32_t WaveWidth>
+__device__ __forceinline__ float wave_sum(float value) noexcept {
+  for (uint32_t offset = WaveWidth / 2U; offset != 0U; offset >>= 1U) {
+    value += __shfl_down(value, offset, WaveWidth);
+  }
+  return value;
+}
+
 __device__ __forceinline__ uint64_t recurrent_state_index(
     const uint64_t state_base, const uint32_t dimension,
     const uint32_t key_dimension, const uint32_t head_dim) noexcept {
@@ -133,16 +141,6 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
   const uint32_t qk_head = value_head / (value_heads / qk_heads);
   const uint64_t state_base =
       static_cast<uint64_t>(value_head) * head_dim * head_dim;
-  // The recurrent matrix is private runtime state, so its physical layout can
-  // be exact-target selected while the BF16/FP32 numerical boundaries and
-  // transactional double-buffer publication remain unchanged.
-  for (uint32_t key_dimension = 0U; key_dimension != head_dim;
-       ++key_dimension) {
-    const uint64_t state_index =
-        recurrent_state_index(state_base, dimension, key_dimension, head_dim);
-    next_recurrent_state[state_index] = previous_recurrent_state[state_index];
-  }
-
   __shared__ float q_values[sllm_linear_attention_kernel::kHeadDim];
   __shared__ float k_values[sllm_linear_attention_kernel::kHeadDim];
   __shared__ float q_inverse_norm;
@@ -151,6 +149,11 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
   __shared__ float decay;
   __shared__ float output_values[sllm_linear_attention_kernel::kHeadDim];
   __shared__ float output_inverse_rms;
+  __shared__ float q_wave_sums[4];
+  __shared__ float k_wave_sums[4];
+  __shared__ float output_wave_sums[4];
+  const uint32_t lane = dimension & 31U;
+  const uint32_t wave = dimension >> 5U;
 
   for (uint32_t token = 0U; token != token_count; ++token) {
     const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
@@ -161,12 +164,21 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         convolved_qkv[qkv_row + static_cast<uint64_t>(qk_heads) * head_dim +
                       static_cast<uint64_t>(qk_head) * head_dim + dimension]);
     __syncthreads();
+    const float q_square = q_values[dimension] * q_values[dimension];
+    const float k_square = k_values[dimension] * k_values[dimension];
+    const float q_wave_sum = wave_sum<32U>(q_square);
+    const float k_wave_sum = wave_sum<32U>(k_square);
+    if (lane == 0U) {
+      q_wave_sums[wave] = q_wave_sum;
+      k_wave_sums[wave] = k_wave_sum;
+    }
+    __syncthreads();
     if (dimension == 0U) {
       float q_sum = 0.0F;
       float k_sum = 0.0F;
-      for (uint32_t index = 0U; index != head_dim; ++index) {
-        q_sum += q_values[index] * q_values[index];
-        k_sum += k_values[index] * k_values[index];
+      for (uint32_t index = 0U; index != 4U; ++index) {
+        q_sum += q_wave_sums[index];
+        k_sum += k_wave_sums[index];
       }
       q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
       k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
@@ -188,19 +200,20 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
         float_to_bf16_rne_bits(k_values[dimension] * k_inverse_norm));
     __syncthreads();
 
-    for (uint32_t key_dimension = 0U; key_dimension != head_dim;
-         ++key_dimension) {
-      const uint64_t state_index =
-          recurrent_state_index(state_base, dimension, key_dimension, head_dim);
-      next_recurrent_state[state_index] *= decay;
-    }
     float previous_projection = 0.0F;
     for (uint32_t key_dimension = 0U; key_dimension != head_dim;
          ++key_dimension) {
       const uint64_t state_index =
           recurrent_state_index(state_base, dimension, key_dimension, head_dim);
-      previous_projection +=
-          next_recurrent_state[state_index] * k_values[key_dimension];
+      // The first token reads the previous transactional buffer directly;
+      // later tokens continue from this request's next buffer. Combining the
+      // copy, decay, and projection pass preserves the original FP32
+      // operation order while removing one full recurrent-state traversal.
+      const float state = token == 0U ? previous_recurrent_state[state_index]
+                                      : next_recurrent_state[state_index];
+      const float decayed = state * decay;
+      next_recurrent_state[state_index] = decayed;
+      previous_projection += decayed * k_values[key_dimension];
     }
     const float value = bf16_to_float(
         convolved_qkv[qkv_row +
@@ -220,11 +233,17 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     }
     output_values[dimension] =
         bf16_to_float(float_to_bf16_rne_bits(current_projection));
+    const float output_square =
+        output_values[dimension] * output_values[dimension];
+    const float output_wave_sum = wave_sum<32U>(output_square);
+    if (lane == 0U) {
+      output_wave_sums[wave] = output_wave_sum;
+    }
     __syncthreads();
     if (dimension == 0U) {
       float sum = 0.0F;
-      for (uint32_t index = 0U; index != head_dim; ++index) {
-        sum += output_values[index] * output_values[index];
+      for (uint32_t index = 0U; index != 4U; ++index) {
+        sum += output_wave_sums[index];
       }
       output_inverse_rms =
           1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);

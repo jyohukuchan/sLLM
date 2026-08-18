@@ -18,9 +18,10 @@ use sllm_core::{
     AdapterResource, BoundSemanticOp, BufferRange, CausalAttentionDescriptor, DispatchEvidence,
     ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
     ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
-    ExecutionReadbackAdapter, ExecutionSession, ExecutionSessionAdapter, ExecutionSessionRequest,
-    ExecutionState, ExecutionSubmissionAdapter, ExecutionTransferAdapter, OwnedTensorBinding,
-    PrepareSupport, PreparedOperation, ShutdownReport,
+    ExecutionQueueFenceAdapter, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
+    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport,
 };
 
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
@@ -40,9 +41,10 @@ use crate::{
     MatmulSubmission, MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission,
     MoeRouteDescriptor, MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess,
     PreparedElementwise, PreparedEmbedding, PreparedMatmul, PreparedMoeExpert, PreparedMoeRoute,
-    PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue, RmsNormDescriptor,
-    RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission,
-    RuntimeError, RuntimeStatus, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
+    PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue,
+    QueueCompletionMode as HipQueueCompletionMode, RmsNormDescriptor, RmsNormDispatchInfo,
+    RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
+    RuntimeStatus, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
     WindowedAttentionSubmission, moe_expert_workspace_bytes,
 };
 
@@ -312,6 +314,38 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         Queue::create(&self.context)
             .map(AdapterResource::new)
             .map_err(map_backend_error)
+    }
+
+    fn set_queue_completion_mode(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        mode: CoreQueueCompletionMode,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?;
+        let mode = match mode {
+            CoreQueueCompletionMode::Profiled => HipQueueCompletionMode::Profiled,
+            CoreQueueCompletionMode::Deferred => HipQueueCompletionMode::Deferred,
+        };
+        queue.set_completion_mode(mode).map_err(map_backend_error)
+    }
+
+    fn create_queue_fence(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+    ) -> Result<Box<dyn ExecutionQueueFenceAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let ticket = self.state.acquire_active()?;
+        let completion = access
+            .downcast_queue_payload::<Queue>(queue)?
+            .fence()
+            .map_err(map_backend_error)?;
+        Ok(Box::new(HipQueueFence {
+            completion,
+            _ticket: ticket,
+        }))
     }
 
     fn allocate(
@@ -1135,6 +1169,24 @@ impl HipSemanticSubmission {
         }
     }
 
+    fn finalize_after_token(&mut self, fence_token: u64) -> Result<CompletionState, RuntimeError> {
+        match self {
+            Self::RmsNorm(submission) => submission.finalize_after_token(fence_token),
+            Self::Elementwise(submission) => submission.finalize_after_token(fence_token),
+            Self::Embedding(submission) => submission.finalize_after_token(fence_token),
+            Self::Matmul(submission) => submission.finalize_after_token(fence_token),
+            Self::Argmax(submission) => submission.finalize_after_token(fence_token),
+            Self::AttentionPreprocess(submission) => submission.finalize_after_token(fence_token),
+            Self::Rotary(submission) => submission.finalize_after_token(fence_token),
+            Self::WindowedAttention(submission) => submission.finalize_after_token(fence_token),
+            Self::SparseMoe(submission) => {
+                submission.router.finalize_after_token(fence_token)?;
+                submission.route.finalize_after_token(fence_token)?;
+                submission.expert.finalize_after_token(fence_token)
+            }
+        }
+    }
+
     fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.kernel_elapsed_ns(),
@@ -1176,6 +1228,13 @@ impl ExecutionSubmissionAdapter for HipSubmission {
             .map_err(map_async_error)
     }
 
+    fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
+        self.submission
+            .finalize_after_token(fence_token)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
     fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
         self.submission
             .kernel_elapsed_ns()
@@ -1212,6 +1271,24 @@ struct HipTransfer {
     _ticket: ActiveOperation,
 }
 
+struct HipQueueFence {
+    completion: Completion,
+    _ticket: ActiveOperation,
+}
+
+impl ExecutionQueueFenceAdapter for HipQueueFence {
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn token(&self) -> Result<u64, ExecutionError> {
+        self.completion.opaque_token().map_err(map_backend_error)
+    }
+}
+
 struct HipKvSubmission {
     completion: KvAppendCompletion,
     _ticket: ActiveOperation,
@@ -1243,6 +1320,13 @@ impl ExecutionLinearAttentionSubmissionAdapter for HipLinearAttentionSubmission 
             .map(map_completion_state)
             .map_err(map_async_error)
     }
+
+    fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .finalize_after_token(fence_token)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
 }
 
 impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission {
@@ -1259,6 +1343,13 @@ impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission 
             .map(map_completion_state)
             .map_err(map_async_error)
     }
+
+    fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .finalize_after_token(fence_token)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
 }
 
 impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
@@ -1272,6 +1363,13 @@ impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {
     fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .wait(timeout)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .finalize_after_token(fence_token)
             .map(map_completion_state)
             .map_err(map_async_error)
     }

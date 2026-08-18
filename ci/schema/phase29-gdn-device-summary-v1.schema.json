@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schema/phase29-gdn-device-summary-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "decision", "recorded_at", "identity", "adoption_rule", "metric_contract", "numerical_policy", "patterns", "correctness", "implementation", "diagnostics"],
+  "properties": {
+    "schema_version": {"const": "phase29-gdn-device-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "ADOPTED_ANALYTIC_ERROR_REDUCTION"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1},
+      "required": ["source_base_commit", "kernel_source_sha256", "gguf_sha256", "derived_lock_sha256", "rocm", "baseline_gfx1030_binary_sha256", "candidate_gfx1030_binary_sha256", "baseline_gfx1201_binary_sha256", "candidate_gfx1201_binary_sha256"]
+    },
+    "adoption_rule": {"type": "string", "minLength": 1},
+    "metric_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["primary", "threshold_percent", "full_model_is_gate", "requests", "output_tokens", "decode_steps", "processes_per_variant"],
+      "properties": {
+        "primary": {"const": "GDN family device ns per committed decode step p50"},
+        "threshold_percent": {"const": 5},
+        "full_model_is_gate": {"const": false},
+        "requests": {"const": 14},
+        "output_tokens": {"const": 16},
+        "decode_steps": {"const": 210},
+        "processes_per_variant": {"type": "integer", "minimum": 3}
+      }
+    },
+    "numerical_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "registry", "real_semantics_changed", "analytic_error_direction", "token_exactness_is_gate", "high_precision_provider_required"],
+      "properties": {
+        "classification": {"const": "N1"},
+        "registry": {"const": "docs/compatibility/numerical-output-changes.md#out-2026-08-18-p29-gdn-norm-wave32-tree-reduction"},
+        "real_semantics_changed": {"const": false},
+        "analytic_error_direction": {"const": "reduced"},
+        "token_exactness_is_gate": {"const": false},
+        "high_precision_provider_required": {"const": false}
+      }
+    },
+    "patterns": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["target", "pattern", "prompt_tokens", "baseline_process_p50_ns", "candidate_process_p50_ns", "improvement_percent", "baseline_endpoint_drift_percent", "baseline_processes", "candidate_processes", "non_regressing"],
+        "properties": {
+          "target": {"enum": ["gfx1030", "gfx1201"]},
+          "pattern": {"enum": ["B0", "B1", "B2"]},
+          "prompt_tokens": {"enum": [17, 28, 255]},
+          "baseline_process_p50_ns": {"type": "number", "exclusiveMinimum": 0},
+          "candidate_process_p50_ns": {"type": "number", "exclusiveMinimum": 0},
+          "improvement_percent": {"type": "number"},
+          "baseline_endpoint_drift_percent": {"type": "number", "minimum": 0, "maximum": 2},
+          "baseline_processes": {"type": "integer", "minimum": 3},
+          "candidate_processes": {"type": "integer", "minimum": 3},
+          "non_regressing": {"const": true}
+        }
+      }
+    },
+    "correctness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gfx1030_oracle", "gfx1201_oracle", "short16_token_records_equal", "long128_token_records_equal", "all_dispatches_hip", "fallback_used", "cleanup_valid"],
+      "properties": {
+        "gfx1030_oracle": {"const": "PASS"},
+        "gfx1201_oracle": {"const": "PASS"},
+        "short16_token_records_equal": {"const": true},
+        "long128_token_records_equal": {"const": false},
+        "all_dispatches_hip": {"const": true},
+        "fallback_used": {"const": false},
+        "cleanup_valid": {"const": true}
+      }
+    },
+    "implementation": {"type": "object", "minProperties": 1},
+    "diagnostics": {"type": "object", "minProperties": 1}
+  }
+}

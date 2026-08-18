@@ -16,10 +16,11 @@ use sllm_hip_sys as sys;
 use crate::Buffer;
 use crate::rmsnorm::TensorBinding;
 use crate::runtime::{
-    CompletionState, Context, Queue, RuntimeError, RuntimeStatus,
+    CompletionState, Context, Queue, RuntimeError, RuntimeStatus, completion_from_opaque_token,
     enqueue_linear_attention_completion_cleanup, enqueue_linear_attention_state_cleanup, ensure_ok,
-    gcn_arch_matches, logical_gcn_arch_name, release_linear_attention_completion_once,
-    release_linear_attention_state_once, result_error, sink,
+    finalize_completion_after, gcn_arch_matches, logical_gcn_arch_name,
+    release_linear_attention_completion_once, release_linear_attention_state_once, result_error,
+    sink,
 };
 
 const ERROR_CAPACITY: usize = 256;
@@ -316,6 +317,18 @@ impl LinearAttentionCompletion {
 
     pub(crate) fn wait(&mut self, timeout: Duration) -> Result<CompletionState, RuntimeError> {
         self.call_completion(Some(timeout))
+    }
+
+    pub(crate) fn finalize_after_token(
+        &mut self,
+        fence_token: u64,
+    ) -> Result<CompletionState, RuntimeError> {
+        let state = finalize_completion_after(
+            self.raw_handle()?,
+            completion_from_opaque_token(fence_token)?,
+        )?;
+        self.terminal = state != CompletionState::Pending;
+        Ok(state)
     }
 
     fn raw_handle(&self) -> Result<NonNull<sys::sllm_completion_t>, RuntimeError> {

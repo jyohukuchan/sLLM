@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use crate::execution::{
     ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, KvState,
-    LinearAttentionBindings, LinearAttentionState, OwnedTensorBinding, PrepareSupport, Submission,
+    KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState, OwnedTensorBinding,
+    PrepareSupport, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
 use crate::kv_state::{CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateDescriptor};
@@ -27,7 +28,6 @@ use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, ExecutionTransaction,
     PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionError, PreparedExecutionPlan,
     PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
-    wait_terminal_kv_append, wait_terminal_submission,
 };
 use crate::qwen_graph::{
     QwenGraph, QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphTensorBacking,
@@ -40,7 +40,7 @@ use crate::weights::{
     upload_verified_gguf_weight, upload_verified_weight,
 };
 use crate::{
-    AccessMode, DType, DispatchEvidence, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
+    AccessMode, DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity,
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_LAYER_BLOB_PREFIX, Qwen35MoeExpertProjection,
     Qwen35MoeTensorPlane, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedNvfp4Sidecar,
     VerifiedQwen35Moe, decode_e4m3fn,
@@ -982,6 +982,14 @@ struct PendingSpeculativeBlock {
     start_length: u64,
     token_ids: Vec<i32>,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TerminalOutputRows {
+    Last,
+    All,
+}
+
+const TERMINAL_ROW_MIN_TOKENS: u64 = 255;
 
 #[derive(Clone)]
 struct TensorAllocation {
@@ -2696,6 +2704,22 @@ impl QwenExecutionCore {
             })
             .transpose()?;
 
+        let terminal_rows = if token_count < TERMINAL_ROW_MIN_TOKENS
+            || include_all_logits_bf16
+            || include_hidden_states
+            || self.graph.is_mtp()
+        {
+            TerminalOutputRows::All
+        } else {
+            TerminalOutputRows::Last
+        };
+        if terminal_rows == TerminalOutputRows::All
+            && self.graph.token_count() >= TERMINAL_ROW_MIN_TOKENS
+            && !self.graph.is_mtp()
+        {
+            self.ensure_terminal_output_capacity(token_count)?;
+        }
+
         // A stale state before any new upload/dispatch is an admission error,
         // not a graph-wide partial mutation. Once the guard begins, every
         // error path poisons the request.
@@ -2715,9 +2739,10 @@ impl QwenExecutionCore {
             rope_start_position,
             expected_length,
             position_mode,
+            terminal_rows,
         )?;
         let last_logits = include_last_logits
-            .then(|| self.read_last_logits(token_count))
+            .then(|| self.read_last_logits(token_count, terminal_rows))
             .transpose()?;
         let logits_bf16 = include_all_logits_bf16
             .then(|| self.read_logits_bf16(token_count))
@@ -2769,6 +2794,7 @@ impl QwenExecutionCore {
         rope_start_position: u64,
         expected_length: u64,
         position_mode: AttentionPreprocessPositionMode,
+        terminal_rows: TerminalOutputRows,
     ) -> Result<Vec<i32>, QwenExecutionError> {
         let plan = self.execution_plan.clone();
         let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
@@ -2778,7 +2804,7 @@ impl QwenExecutionCore {
             ));
         }
         let mut argmax = None;
-        let mut pending = ExecutionSegment::default();
+        let mut pending = ExecutionSegment::profiled(self.completion_timeout);
         plan.execute(transition, |planned, transition| {
             let node = planned.operation();
             match node.kind() {
@@ -2787,6 +2813,7 @@ impl QwenExecutionCore {
                         node,
                         transition.token_count(),
                         planned.boundary_after(),
+                        terminal_rows,
                         &mut pending,
                     )?;
                     if let Some(output) = output {
@@ -2876,7 +2903,11 @@ impl QwenExecutionCore {
         ))
     }
 
-    fn read_last_logits(&self, token_count: u64) -> Result<Vec<f32>, QwenExecutionError> {
+    fn read_last_logits(
+        &self,
+        token_count: u64,
+        terminal_rows: TerminalOutputRows,
+    ) -> Result<Vec<f32>, QwenExecutionError> {
         let argmax = self.graph.nodes().last().ok_or_else(|| {
             QwenExecutionError::InvalidGraph("graph has no terminal Argmax node".to_owned())
         })?;
@@ -2890,15 +2921,23 @@ impl QwenExecutionCore {
             ));
         }
         let logits_id = argmax.inputs()[0];
-        let view = self.view(logits_id, token_count)?;
+        let full_view = self.view(logits_id, token_count)?;
+        let view = match terminal_rows {
+            TerminalOutputRows::Last => first_row_view(&full_view)?,
+            TerminalOutputRows::All => full_view,
+        };
         if view.dtype() != DType::Bf16
             || view.shape()
                 != [
-                    usize::try_from(token_count).map_err(|_| {
-                        QwenExecutionError::InvalidRequest(
-                            "token count does not fit usize".to_owned(),
-                        )
-                    })?,
+                    if terminal_rows == TerminalOutputRows::Last {
+                        1
+                    } else {
+                        usize::try_from(token_count).map_err(|_| {
+                            QwenExecutionError::InvalidRequest(
+                                "token count does not fit usize".to_owned(),
+                            )
+                        })?
+                    },
                     QWEN35_VOCAB_SIZE,
                 ]
         {
@@ -2912,9 +2951,12 @@ impl QwenExecutionCore {
             .ok_or_else(|| {
                 QwenExecutionError::InvalidGraph("logits row bytes overflowed".to_owned())
             })?;
-        let row_index = token_count.checked_sub(1).ok_or_else(|| {
-            QwenExecutionError::InvalidRequest("cannot read logits for zero tokens".to_owned())
-        })?;
+        let row_index = match terminal_rows {
+            TerminalOutputRows::Last => 0,
+            TerminalOutputRows::All => token_count.checked_sub(1).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("cannot read logits for zero tokens".to_owned())
+            })?,
+        };
         let row_offset = view
             .byte_offset()
             .checked_add(row_index.checked_mul(row_bytes).ok_or_else(|| {
@@ -3091,6 +3133,151 @@ impl QwenExecutionCore {
         node: &QwenGraphNode,
         token_count: u64,
         boundary_after: Option<ExecutionBoundaryKind>,
+        terminal_rows: TerminalOutputRows,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
+        if terminal_rows == TerminalOutputRows::All {
+            return self.execute_semantic_all_rows(node, token_count, boundary_after, pending);
+        }
+        let operation = node.operation().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!(
+                "semantic node {} has no descriptor",
+                node.label()
+            ))
+        })?;
+        if operation.kind() == SemanticOpKind::AttentionPreprocess {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "attention preprocess must use the typed D0 node: {}",
+                node.label()
+            )));
+        }
+        let is_terminal_projection = self.is_terminal_projection(node)?;
+        let is_terminal_argmax = operation.kind() == SemanticOpKind::Argmax;
+        let (inputs, outputs, input_bindings, output_bindings) = if is_terminal_projection {
+            if node.inputs().len() != 2 || node.outputs().len() != 1 {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "terminal projection does not have two inputs and one output".to_owned(),
+                ));
+            }
+            let activation = last_row_view(&self.view(node.inputs()[0], token_count)?)?;
+            let weight = self.view(node.inputs()[1], token_count)?;
+            let logits = first_row_view(&self.view(node.outputs()[0], token_count)?)?;
+            let input_bindings = vec![
+                self.bind_view(node.inputs()[0], activation.clone(), AccessMode::Read)?,
+                self.bind(node.inputs()[1], token_count, AccessMode::Read)?,
+            ];
+            let output_bindings =
+                vec![self.bind_view(node.outputs()[0], logits.clone(), AccessMode::Write)?];
+            (
+                vec![activation, weight],
+                vec![logits],
+                input_bindings,
+                output_bindings,
+            )
+        } else if is_terminal_argmax {
+            if node.inputs().len() != 1 || node.outputs().len() != 1 {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "terminal Argmax does not have one input and one output".to_owned(),
+                ));
+            }
+            let logits = first_row_view(&self.view(node.inputs()[0], token_count)?)?;
+            let output = first_row_view(&self.view(node.outputs()[0], token_count)?)?;
+            let input_bindings =
+                vec![self.bind_view(node.inputs()[0], logits.clone(), AccessMode::Read)?];
+            let output_bindings =
+                vec![self.bind_view(node.outputs()[0], output.clone(), AccessMode::Write)?];
+            (vec![logits], vec![output], input_bindings, output_bindings)
+        } else {
+            (
+                self.views(node.inputs(), token_count)?,
+                self.views(node.outputs(), token_count)?,
+                self.bind_many(node.inputs(), token_count, AccessMode::Read)?,
+                self.bind_many(node.outputs(), token_count, AccessMode::Write)?,
+            )
+        };
+        let descriptor = match operation.kind() {
+            SemanticOpKind::RmsNorm => SemanticOpDescriptor::new_rms_norm_with_contract(
+                inputs,
+                outputs,
+                operation.rms_norm_contract().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "RMSNorm node {} has no contract",
+                        node.label()
+                    ))
+                })?,
+            )?,
+            SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
+                inputs,
+                outputs,
+                operation.sparse_moe_contract().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "SparseMoe node {} has no contract",
+                        node.label()
+                    ))
+                })?,
+            )?,
+            kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
+        };
+        let kind = descriptor.kind();
+        let mut submission = self.submit_semantic(
+            descriptor,
+            input_bindings,
+            output_bindings,
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+        )?;
+        if kind != SemanticOpKind::Argmax {
+            if boundary_after.is_some() {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "non-terminal semantic node {} declares a boundary",
+                    node.label()
+                )));
+            }
+            pending.retain_semantic(node.label(), submission);
+            return Ok(None);
+        }
+        // The terminal argmax completion is the final stream-ordered segment
+        // boundary. Once it succeeds, every earlier completion can be checked
+        // without serially sleeping between individual semantic operations.
+        if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal Argmax lacks its readback boundary".to_owned(),
+            ));
+        }
+        self.close_boundary_with_semantic(
+            pending,
+            node.label(),
+            &mut submission,
+            ExecutionBoundaryKind::TerminalReadback,
+        )?;
+        if node.outputs().len() != 1 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "argmax node must have exactly one output".to_owned(),
+            ));
+        }
+        let output_view = first_row_view(&self.view(node.outputs()[0], token_count)?)?;
+        let byte_length = usize::try_from(output_view.payload_bytes()).map_err(|_| {
+            QwenExecutionError::InvalidGraph(
+                "argmax output byte length does not fit usize".to_owned(),
+            )
+        })?;
+        let mut readback = submission.start_output_readback(0)?;
+        require_terminal_success(node.label(), readback.wait(self.completion_timeout)?)?;
+        let mut bytes = vec![0_u8; byte_length];
+        let copied = readback.read_into(&mut bytes)?;
+        if copied != u64::try_from(bytes.len()).expect("usize always fits u64") {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "argmax readback for {} returned a short or long byte count",
+                node.label()
+            )));
+        }
+        Ok(Some(decode_argmax_bytes(&bytes)?))
+    }
+
+    fn execute_semantic_all_rows(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
         pending: &mut ExecutionSegment,
     ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
         let operation = node.operation().ok_or_else(|| {
@@ -3149,17 +3336,17 @@ impl QwenExecutionCore {
             pending.retain_semantic(node.label(), submission);
             return Ok(None);
         }
-        // The terminal argmax completion is the final stream-ordered segment
-        // boundary. Once it succeeds, every earlier completion can be checked
-        // without serially sleeping between individual semantic operations.
         if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
             return Err(QwenExecutionError::InvalidGraph(
                 "terminal Argmax lacks its readback boundary".to_owned(),
             ));
         }
-        wait_terminal_submission(node.label(), &mut submission, self.completion_timeout)?;
-        self.close_boundary(pending, ExecutionBoundaryKind::TerminalReadback)?;
-        self.record_dispatch(submission.dispatch())?;
+        self.close_boundary_with_semantic(
+            pending,
+            node.label(),
+            &mut submission,
+            ExecutionBoundaryKind::TerminalReadback,
+        )?;
         if node.outputs().len() != 1 {
             return Err(QwenExecutionError::InvalidGraph(
                 "argmax node must have exactly one output".to_owned(),
@@ -3285,7 +3472,6 @@ impl QwenExecutionCore {
             execution.start_position,
             execution.start_position,
         )?;
-        wait_terminal_kv_append(node.label(), &mut submission, self.completion_timeout)?;
         // KV publication is an unavoidable state boundary. The append event
         // is after all earlier work on the stream, so drain the preceding
         // segment now and then publish this state transition.
@@ -3295,8 +3481,12 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        self.close_boundary(pending, ExecutionBoundaryKind::StatePublication)?;
-        self.record_dispatch(submission.dispatch())
+        self.close_boundary_with_kv_append(
+            pending,
+            node.label(),
+            &mut submission,
+            ExecutionBoundaryKind::StatePublication,
+        )
     }
 
     fn execute_causal_attention(
@@ -3382,11 +3572,35 @@ impl QwenExecutionCore {
         pending.flush(boundary, &mut audit).map_err(Into::into)
     }
 
-    fn record_dispatch(&self, evidence: &DispatchEvidence) -> Result<(), QwenExecutionError> {
-        self.audit
+    fn close_boundary_with_semantic(
+        &self,
+        pending: &mut ExecutionSegment,
+        label: &str,
+        terminal: &mut Submission,
+        boundary: ExecutionBoundaryKind,
+    ) -> Result<(), QwenExecutionError> {
+        let mut audit = self
+            .audit
             .lock()
-            .map_err(|_| QwenExecutionError::Poisoned)?
-            .record(evidence)
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        pending
+            .flush_with_semantic(label, terminal, boundary, &mut audit)
+            .map_err(Into::into)
+    }
+
+    fn close_boundary_with_kv_append(
+        &self,
+        pending: &mut ExecutionSegment,
+        label: &str,
+        terminal: &mut KvStateAppendSubmission,
+        boundary: ExecutionBoundaryKind,
+    ) -> Result<(), QwenExecutionError> {
+        let mut audit = self
+            .audit
+            .lock()
+            .map_err(|_| QwenExecutionError::Poisoned)?;
+        pending
+            .flush_with_kv_append(label, terminal, Some(boundary), &mut audit)
             .map_err(Into::into)
     }
 
@@ -3720,6 +3934,52 @@ impl QwenExecutionCore {
             self.view(tensor_id, token_count)?,
             access,
         )?)
+    }
+
+    fn bind_view(
+        &self,
+        tensor_id: usize,
+        view: TensorView,
+        access: AccessMode,
+    ) -> Result<OwnedTensorBinding, QwenExecutionError> {
+        let allocation = self.tensors.get(tensor_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(format!("tensor allocation {tensor_id} is absent"))
+        })?;
+        Ok(self.session.bind(&allocation.buffer, view, access)?)
+    }
+
+    fn ensure_terminal_output_capacity(
+        &mut self,
+        token_count: u64,
+    ) -> Result<(), QwenExecutionError> {
+        for tensor_id in terminal_output_tensor_ids(&self.graph)? {
+            let required = self.view(tensor_id, token_count)?.end_offset();
+            let allocation = self.tensors.get_mut(tensor_id).ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(format!(
+                    "terminal tensor allocation {tensor_id} is absent"
+                ))
+            })?;
+            if allocation.buffer.size_bytes() < required {
+                allocation.buffer = self
+                    .session
+                    .allocate_with_category(required, crate::AllocationCategory::Workspace)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn is_terminal_projection(&self, node: &QwenGraphNode) -> Result<bool, QwenExecutionError> {
+        let argmax = self.graph.nodes().last().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("graph has no terminal Argmax node".to_owned())
+        })?;
+        let logits_id = *argmax.inputs().first().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("terminal Argmax has no logits input".to_owned())
+        })?;
+        Ok(node.outputs() == [logits_id]
+            && matches!(
+                node.kind(),
+                QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+            ))
     }
 
     fn view(&self, tensor_id: usize, token_count: u64) -> Result<TensorView, QwenExecutionError> {
@@ -4286,13 +4546,22 @@ fn allocate_request_tensors(
     layout: &GraphLayout,
     resident_tensors: &BTreeMap<String, TensorAllocation>,
 ) -> Result<Vec<TensorAllocation>, QwenExecutionError> {
+    let terminal_outputs = terminal_output_tensor_ids(graph)?;
     let mut allocations: Vec<TensorAllocation> = Vec::with_capacity(graph.tensor_metadata().len());
     for tensor in graph.tensor_metadata() {
         let buffer = match tensor.backing() {
             QwenGraphTensorBacking::Owned => {
                 if layout.dynamic_tensors[tensor.id()] {
+                    let allocation_end = compact_terminal_allocation_end(
+                        graph.token_count(),
+                        graph.is_mtp(),
+                        tensor.id(),
+                        terminal_outputs,
+                        tensor.view(),
+                    )?
+                    .unwrap_or_else(|| tensor.view().end_offset());
                     session.allocate_with_category(
-                        tensor.view().end_offset(),
+                        allocation_end,
                         crate::AllocationCategory::Workspace,
                     )?
                 } else {
@@ -4375,20 +4644,31 @@ fn allocate_tensors(
     session: &ExecutionSession,
     graph: &QwenGraph,
 ) -> Result<Vec<TensorAllocation>, QwenExecutionError> {
+    let terminal_outputs = terminal_output_tensor_ids(graph)?;
     let mut allocations: Vec<TensorAllocation> = Vec::with_capacity(graph.tensor_metadata().len());
     for tensor in graph.tensor_metadata() {
         let buffer = match tensor.backing() {
-            QwenGraphTensorBacking::Owned => session.allocate(
-                tensor
-                    .view()
-                    .byte_offset()
-                    .checked_add(resident_weight_bytes(tensor.view())?)
-                    .ok_or_else(|| {
-                        QwenExecutionError::InvalidGraph(
-                            "test tensor allocation size overflowed".to_owned(),
-                        )
-                    })?,
-            )?,
+            QwenGraphTensorBacking::Owned => {
+                let allocation_end = compact_terminal_allocation_end(
+                    graph.token_count(),
+                    graph.is_mtp(),
+                    tensor.id(),
+                    terminal_outputs,
+                    tensor.view(),
+                )?
+                .unwrap_or(
+                    tensor
+                        .view()
+                        .byte_offset()
+                        .checked_add(resident_weight_bytes(tensor.view())?)
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidGraph(
+                                "test tensor allocation size overflowed".to_owned(),
+                            )
+                        })?,
+                );
+                session.allocate(allocation_end)?
+            }
             QwenGraphTensorBacking::Alias { tensor_id } => {
                 let source = allocations.get(tensor_id).ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(format!(
@@ -4724,6 +5004,92 @@ fn runtime_view(
         &shape,
         &strides,
         graph_view.byte_offset(),
+    )?)
+}
+
+fn first_row_view(view: &TensorView) -> Result<TensorView, QwenExecutionError> {
+    row_view(view, 0)
+}
+
+fn terminal_output_tensor_ids(graph: &QwenGraph) -> Result<[usize; 2], QwenExecutionError> {
+    let argmax = graph.nodes().last().ok_or_else(|| {
+        QwenExecutionError::InvalidGraph("graph has no terminal Argmax node".to_owned())
+    })?;
+    if !matches!(
+        argmax.kind(),
+        QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
+    ) || argmax.inputs().len() != 1
+        || argmax.outputs().len() != 1
+    {
+        return Err(QwenExecutionError::InvalidGraph(
+            "terminal Argmax does not have one logits input and one output".to_owned(),
+        ));
+    }
+    Ok([argmax.inputs()[0], argmax.outputs()[0]])
+}
+
+fn compact_terminal_allocation_end(
+    graph_token_count: u64,
+    is_mtp: bool,
+    tensor_id: usize,
+    terminal_outputs: [usize; 2],
+    view: &TensorView,
+) -> Result<Option<u64>, QwenExecutionError> {
+    if graph_token_count < TERMINAL_ROW_MIN_TOKENS
+        || is_mtp
+        || !terminal_outputs.contains(&tensor_id)
+    {
+        return Ok(None);
+    }
+    Ok(Some(first_row_view(view)?.end_offset()))
+}
+
+fn last_row_view(view: &TensorView) -> Result<TensorView, QwenExecutionError> {
+    let rows = view.shape().first().copied().ok_or_else(|| {
+        QwenExecutionError::InvalidGraph("terminal tensor is not row-shaped".to_owned())
+    })?;
+    row_view(
+        view,
+        rows.checked_sub(1).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("terminal tensor has zero rows".to_owned())
+        })?,
+    )
+}
+
+fn row_view(view: &TensorView, row: usize) -> Result<TensorView, QwenExecutionError> {
+    let rows = view.shape().first().copied().ok_or_else(|| {
+        QwenExecutionError::InvalidGraph("terminal tensor is not row-shaped".to_owned())
+    })?;
+    if rows == 0 || row >= rows || !(1..=2).contains(&view.shape().len()) || !view.is_contiguous() {
+        return Err(QwenExecutionError::InvalidGraph(
+            "terminal tensor row view is empty, out of range, unsupported-rank, or non-contiguous"
+                .to_owned(),
+        ));
+    }
+    let row_count = u64::try_from(rows).map_err(|_| {
+        QwenExecutionError::InvalidGraph("terminal row count does not fit u64".to_owned())
+    })?;
+    if view.payload_bytes() % row_count != 0 {
+        return Err(QwenExecutionError::InvalidGraph(
+            "terminal tensor payload is not row divisible".to_owned(),
+        ));
+    }
+    let row_bytes = view.payload_bytes() / row_count;
+    let row_offset = u64::try_from(row)
+        .ok()
+        .and_then(|index| index.checked_mul(row_bytes))
+        .and_then(|offset| view.byte_offset().checked_add(offset))
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("terminal row offset overflowed".to_owned())
+        })?;
+    let mut shape = view.shape().to_vec();
+    shape[0] = 1;
+    Ok(TensorView::new(
+        view.dtype(),
+        view.encoding(),
+        &shape,
+        view.strides(),
+        row_offset,
     )?)
 }
 
@@ -5671,6 +6037,89 @@ mod tests {
     }
 
     #[test]
+    fn terminal_row_views_cover_non_aligned_boundaries() {
+        for rows in [1_usize, 2, 3, 17, 255, 256, 257, 2_047, 2_049] {
+            let matrix = TensorView::contiguous(DType::Bf16, &[rows, 7]).unwrap();
+            let last = last_row_view(&matrix).unwrap();
+            assert_eq!(last.shape(), [1, 7]);
+            assert_eq!(last.strides(), [7, 1]);
+            assert_eq!(last.byte_offset(), ((rows - 1) * 7 * 2) as u64);
+            assert_eq!(last.payload_bytes(), 14);
+
+            let vector = TensorView::contiguous(DType::I32, &[rows]).unwrap();
+            let last = last_row_view(&vector).unwrap();
+            assert_eq!(last.shape(), [1]);
+            assert_eq!(last.byte_offset(), ((rows - 1) * 4) as u64);
+            assert_eq!(last.payload_bytes(), 4);
+        }
+    }
+
+    #[test]
+    fn terminal_allocation_compaction_starts_at_the_measured_crossover() {
+        let view = TensorView::contiguous(DType::Bf16, &[257, 7]).unwrap();
+        let outputs = [4, 5];
+        assert_eq!(
+            compact_terminal_allocation_end(254, false, 4, outputs, &view).unwrap(),
+            None
+        );
+        assert_eq!(
+            compact_terminal_allocation_end(255, false, 4, outputs, &view).unwrap(),
+            Some(first_row_view(&view).unwrap().end_offset())
+        );
+        assert_eq!(
+            compact_terminal_allocation_end(255, true, 4, outputs, &view).unwrap(),
+            None
+        );
+        assert_eq!(
+            compact_terminal_allocation_end(255, false, 3, outputs, &view).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn explicit_all_logits_block_preserves_every_row() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![11],
+            vec![21, 22, 23],
+        ]));
+        let (mut core, _) = provisioned_core(recorder);
+        assert_eq!(core.prefill(&[1]).unwrap().token_ids(), [11]);
+        let block = core
+            .decode_block_with_mtp_state_and_logits(&[2, 3, 4])
+            .expect("all-logits block succeeds");
+        assert_eq!(block.token_ids(), [21, 22, 23]);
+        assert_eq!(
+            block.logits_bf16().expect("all logits are published").len(),
+            3 * QWEN35_VOCAB_SIZE
+        );
+        assert_eq!(
+            block
+                .hidden_states_bf16()
+                .expect("all hidden rows are published")
+                .len(),
+            3 * 2_560
+        );
+    }
+
+    #[test]
+    fn mtp_target_prefill_preserves_every_argmax_and_hidden_row() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![11, 12, 13]]));
+        let (mut core, _) = provisioned_core(recorder);
+
+        let output = core
+            .prefill_with_mtp_state(&[1, 2, 3])
+            .expect("MTP target prefill succeeds");
+        assert_eq!(output.token_ids(), [11, 12, 13]);
+        assert_eq!(
+            output
+                .hidden_states_bf16()
+                .expect("MTP target hidden rows are published")
+                .len(),
+            3 * 2_560
+        );
+    }
+
+    #[test]
     fn mtp_graph_requires_hidden_row_and_advances_opaque_state() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
             vec![11],
@@ -5975,11 +6424,11 @@ mod tests {
 
     #[test]
     fn argmax_sentinel_is_not_published_after_state_updates() {
-        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![-1, 2, 3]]));
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![1, 2, -1]]));
         let (mut core, _) = provisioned_core(Arc::clone(&recorder));
         assert!(matches!(
             core.prefill(&[1, 2, 3]),
-            Err(QwenExecutionError::ArgmaxSentinel { index: 0 })
+            Err(QwenExecutionError::ArgmaxSentinel { index: 2 })
         ));
         assert!(core.lifecycle.is_poisoned());
         assert_eq!(core.committed_length, 0);
@@ -6022,9 +6471,9 @@ mod tests {
     #[test]
     fn argmax_token_outside_vocabulary_poison_rejects_publication() {
         let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
-            QWEN35_VOCAB_SIZE as i32,
+            1,
             2,
-            3,
+            QWEN35_VOCAB_SIZE as i32,
         ]]));
         let (mut core, _) = provisioned_core(recorder);
         assert!(matches!(

@@ -352,6 +352,13 @@ impl RmsNormSubmission {
     pub fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
         self.completion.kernel_elapsed_ns()
     }
+
+    pub(crate) fn finalize_after_token(
+        &mut self,
+        fence_token: u64,
+    ) -> Result<CompletionState, RuntimeError> {
+        self.completion.finalize_after_token(fence_token)
+    }
 }
 
 impl HipBackend {

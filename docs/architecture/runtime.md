@@ -128,6 +128,12 @@ adapterが`StatePublication`、`TerminalReadback`、`Cancellation`、`Error` bou
 segment内の先行completionをqueryしてdispatch evidenceを集約する。`PreparedExecutionAudit`はexact backend/target、
 submission/kernel、fallback、segment/boundary countを成功済みrequestだけへ公開する。
 
+Phase 21では、通常opをeventlessにして非空segmentを一つのuntimed queue fenceで閉じ、同一queueのownerをfence成功後に
+個別queryなしでfinalizeできるadditive ABI/core primitiveを実装した。standalone completionとprofile/evidenceの
+`PROFILED` timing contractは維持される。17 ownerを1 eventへ集約する構造削減はhostで成立したが、final dual-GPU
+counterbalanced laneではV620/R9700ともwall中央値が0.14%/0.18%遅くnoise内だったため、Qwen/Gemma productionは
+`ExecutionSegment::profiled`を選び続ける。deferred primitiveは実験基盤であり、現在のproduction defaultや性能claimではない。
+
 request lifecycleは共通`ExecutionTransaction`がsingle in-flight、commit、drop/cancel/error時のpoisonを管理する。
 adapterはtransaction開始前にmodel固有stateをadmitし、completion・readback・state length検証の後だけcommitして公開する。
 pending、timeout、query failure、partial mutation、guard dropではoutput/stateを公開せず、同じrequest ownerの再利用を拒否する。
@@ -238,6 +244,14 @@ nonempty content delta、terminal finish chunk、exact `[DONE]`の順に送る�
 standard error envelopeを一つのSSE data eventとして送り、finish chunkと`[DONE]`なしでcloseする。receiver dropは
 request cancellationを発火し、scheduler timeoutとgraceful shutdownも同じflagへ伝播する。backendはbounded sink
 へのpublish前後とlong-running operationの境界でcancellationを観測し、request-local stateを解放する。
+
+Phase 26ではwaiting/decode-ready、compatibility class、checked row map、round-robin、bounded prefill挿入、backpressureを
+model/device非依存に検証するhost plannerを追加したが、production schedulerへは接続していない。現行Qwen ownerの
+`committed_length`、KV state、linear/GDN stateはrequestごとのscalar contractであり、既存`M>1` decodeは一request内の
+speculative token blockである。独立requestをこの形へ束ねるとcausal stateを共有するため、GPU `B>1`として使用しない。
+production continuous request batchingには、per-row positionと独立KV/GDN binding、row-local transactional publicationを
+core/native ABI/kernelまでadditiveに通す別work unitが必要である。Phase 26はこの境界でcandidate棄却となり、初期serverの
+FIFO、whole-generation backend mutex、production defaultは維持している。
 
 A6以降のproduction backendはreviewed model lock kindからQwen/Gemmaを選び、verified tokenizer/templateまたは明示的な
 Gemma raw-text transcript、weight plan、exact HIP sessionを一度loadする。`QwenResidentModel`または

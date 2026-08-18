@@ -214,6 +214,32 @@ P20-A1〜A6もこの境界を維持し、reader、writer、converter、block rep
 llama.cppからのcode expression、control flow、test vectorのimport/adaptationはなく、Phase 20 closeout時点でも
 import eventと`THIRD_PARTY_NOTICES.md` entryは不要である。
 
+## Phase 23 performance discovery record
+
+Phase 23はllama.cpp commit `f5919bf458ef190468b5c329bb293f8a54a1e69c`の既存immutable Phase 5 resultを
+system-level performance peerとして再利用した。vLLM commit `568afb3a13806beb53bb2e6bd518269357b237c0`とSGLang commit
+`fdebc938f7f4d16fe6b9f55dcd9a767cf0899ea1`はscheduler構造のfacts-only inspectionに限定した。
+[technical-difference note](../references/phase23-inference-engine-performance-differential.md)をimplementation案から分離し、
+source expression、control flow、testをcopy、adapt、portしていない。Phase 23はproduction sourceを変更せず、新規第三者code
+importと`THIRD_PARTY_NOTICES.md` entryはない。model、binary、raw trace、生成全文はrepositoryへ含めない。
+
+## Phase 24 terminal-row implementation record
+
+Phase 24のlast-row view、row-policy contract、physical terminal allocation、distinctive-row GPU oracle、host tests、dual-GPU計測は
+sLLMの既存Qwen graph/runtime contractとPhase 23の内部trace observationから独立に作成した。外部engineのsource expression、
+control flow、kernel、testをcopy、adapt、portしていない。改訂後の採用条件を満たしたshared candidateはproduction sourceへ保持したが、
+新規第三者code import、import event、`THIRD_PARTY_NOTICES.md` entryはない。model、candidate binary、raw result、rocprof trace、
+生成全文はrepositoryへ含めず、追跡するbounded summaryにはaggregateとSHA-256だけを記録する。
+
+## Phase 27 llama.cpp weight-stream comparison record
+
+Phase 27はllama.cpp commit `f5919bf458ef190468b5c329bb293f8a54a1e69c`（tree
+`e9b6173953477054a4068884aa5fc9aeef6475e8`）の`ggml/src/ggml-cuda/mmvf.cu`、`common.cuh`、
+`ggml-cuda.cu`と`src/models/qwen35.cpp`を、BF16 matvec provider、gate/up/GLU fusion、kernel dispatchのfacts-only性能比較に使用した。
+sLLM sourceへcode expression、control flow、kernel、testをcopy、adapt、portせず、Phase 27はproduction sourceを変更していない。
+したがって新規import eventと`THIRD_PARTY_NOTICES.md` entryはない。llama.cpp build、model、raw trace DB、生成全文はrepositoryへ
+含めず、tracked summaryにはrevision、aggregate、digestとE1比較限界だけを記録する。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.
