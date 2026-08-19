@@ -24,6 +24,7 @@ use crate::{AccessMode, DispatchEvidence, SemanticOpDescriptor, TensorView};
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ExecutionBoundaryKind {
     StatePublication,
+    PrefillChunkCompletion,
     TerminalReadback,
     Cancellation,
     Error,

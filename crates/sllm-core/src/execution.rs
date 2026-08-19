@@ -549,6 +549,14 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         None
     }
 
+    /// Physical device memory observed when the session was opened. This is
+    /// kept separate from the placement budget above because chunk policy
+    /// uses the physical 16 GiB device boundary while admission uses free
+    /// bytes.
+    fn total_memory_bytes(&self) -> Option<u64> {
+        None
+    }
+
     fn supports(&self, descriptor: &SemanticOpDescriptor) -> PrepareSupport;
 
     fn create_queue(
@@ -928,6 +936,11 @@ impl ExecutionSession {
     pub fn available_memory_bytes(&self) -> Result<Option<u64>, ExecutionError> {
         self.ensure_open()?;
         Ok(self.state.adapter.available_memory_bytes())
+    }
+
+    pub fn total_memory_bytes(&self) -> Result<Option<u64>, ExecutionError> {
+        self.ensure_open()?;
+        Ok(self.state.adapter.total_memory_bytes())
     }
 
     /// Returns exact current and high-water accounting for this session.

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sllm_core::{
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
-    builtin_reviewed_model_lock, read_derived_gguf_lock,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
+    ReviewedModelLock, builtin_reviewed_model_lock, read_derived_gguf_lock,
 };
 use sllm_server::{
     ChatGenerationBackendV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1, ModelRegistryEntryV1,
@@ -42,6 +42,7 @@ struct Config {
     completion_timeout: Duration,
     shutdown_timeout: Duration,
     context_length: Option<u32>,
+    kv_cache_encoding: KvCacheEncoding,
 }
 
 fn parse_args() -> Result<Config, String> {
@@ -112,6 +113,21 @@ fn parse_args() -> Result<Config, String> {
     if context_length == Some(0) {
         return Err("context length must be nonzero".to_owned());
     }
+    let kv_cache_encoding = match values
+        .remove("--kv-cache-encoding")
+        .unwrap_or_else(|| "fp16".to_owned())
+        .as_str()
+    {
+        "fp16" => KvCacheEncoding::Fp16,
+        "fp8" => KvCacheEncoding::Fp8E4M3Fn,
+        "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
+        "nvfp4" => KvCacheEncoding::Nvfp4,
+        value => {
+            return Err(format!(
+                "KV cache encoding must be fp16, fp8, fp8-static, or nvfp4: {value}"
+            ));
+        }
+    };
     if let Some(flag) = values.keys().next() {
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
@@ -130,6 +146,7 @@ fn parse_args() -> Result<Config, String> {
         completion_timeout,
         shutdown_timeout,
         context_length,
+        kv_cache_encoding,
     })
 }
 
@@ -162,6 +179,7 @@ fn run(config: Config) -> Result<(), String> {
                     context_length: config
                         .context_length
                         .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                    kv_cache_encoding: config.kv_cache_encoding,
                 })
                 .map_err(|error| error.to_string())?,
             ))
@@ -178,11 +196,19 @@ fn run(config: Config) -> Result<(), String> {
                         context_length: config
                             .context_length
                             .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                        kv_cache_encoding: config.kv_cache_encoding,
                     })
                     .map_err(|error| error.to_string())?,
                 )),
-                ReviewedModelLock::Gemma4(_) => ActiveBackend::Gemma(Arc::new(
-                    Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
+                ReviewedModelLock::Gemma4(_) => {
+                    if config.kv_cache_encoding != KvCacheEncoding::Fp16 {
+                        return Err(
+                            "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
+                                .to_owned(),
+                        );
+                    }
+                    ActiveBackend::Gemma(Arc::new(Gemma4ChatBackendV1::open(
+                        Gemma4BackendConfigV1 {
                         gguf_path: config.gguf,
                         derived_lock_path: config.derived_lock,
                         device_index: config.device_index,
@@ -192,9 +218,10 @@ fn run(config: Config) -> Result<(), String> {
                         context_length: config
                             .context_length
                             .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    })
-                    .map_err(|error| error.to_string())?,
-                )),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?))
+                }
             }
         };
         if let Some(warning) = context_length_warning(
@@ -367,7 +394,7 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }
 
 #[cfg(test)]

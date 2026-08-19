@@ -62,6 +62,7 @@ pub(crate) fn open_execution_session(
         state: Arc::new(HipSessionState::new()),
         backend,
         context,
+        total_memory_bytes: device.total_memory_bytes,
         available_memory_bytes: device.available_memory_bytes,
     });
     Ok(Arc::new(ExecutionSession::new(HIP_BACKEND_NAME, adapter)))
@@ -257,6 +258,7 @@ struct HipExecutionSession {
     state: Arc<HipSessionState>,
     backend: HipBackend,
     context: Context,
+    total_memory_bytes: u64,
     available_memory_bytes: u64,
 }
 
@@ -267,6 +269,10 @@ impl ExecutionSessionAdapter for HipExecutionSession {
 
     fn available_memory_bytes(&self) -> Option<u64> {
         Some(self.available_memory_bytes)
+    }
+
+    fn total_memory_bytes(&self) -> Option<u64> {
+        Some(self.total_memory_bytes)
     }
 
     fn supports(&self, descriptor: &sllm_core::SemanticOpDescriptor) -> PrepareSupport {
@@ -1740,6 +1746,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
             available_memory_bytes: u64::MAX,
         };
         assert_eq!(
@@ -1840,6 +1847,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
             available_memory_bytes: u64::MAX,
         };
         assert_eq!(
@@ -1854,6 +1862,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
             available_memory_bytes: u64::MAX,
         };
         let contract = SplitHalfRotaryContract::new(3, 1, 6, 4, 10_000.0, 255, 3, 262_144)
@@ -1880,6 +1889,7 @@ mod tests {
             state: Arc::new(HipSessionState::new()),
             backend: HipBackend { _private: () },
             context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
             available_memory_bytes: u64::MAX,
         };
         let contract = WindowedCausalAttentionContract::new(3, 1, 6, 2, 3, 5, Some(4), 1.0)

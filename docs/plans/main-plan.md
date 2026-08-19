@@ -987,7 +987,8 @@ candidateを再確認した。
 | 完了・候補なし | Phase 27 | fresh decode差分とprojection weight-stream/provider調査 | 比較はE1に限定し、共通projection candidateなしでproduction変更せず完了した |
 | 完了・例外採用 | Phase 28 | committed-step単位のprojection外device短縮 | GDN state pass統合を両GPU共通pathへ採用。通常の5%規則は維持 |
 | 完了・採用 | Phase 29 | GDN useful-workgroup並列化 | 解析的誤差低減N1としてtoken差を記録し、GDN性能条件を満たすshared wave reductionを採用した |
-| 計画済み | Phase 30 | RDNA4 native attention/KV hardware-path最適化 | software FP8/vector-only baselineからnative conversion、decode tile、prefill matrix providerをscope別に比較する |
+| 完了・限定採用 | Phase 30 | RDNA4 native attention/KV hardware-path最適化 | gfx1201 native FP8 readとwave providerをM=1/M>=32へ採用、append encodeとmatrix候補は不採用 |
+| 完了・採用 | Phase 31 | low-bit KV通常運用向けchunked prefill・workspace memory基盤 | arenaを約86.79%縮小し、両targetの10k+ FP16/FP8とgfx1201の16,385-token 2-chunkを成立させた |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -996,8 +997,19 @@ Phase 23は残る性能候補を実装せず、既存engineとのmatched compari
 GDNのuseful-workgroup並列化をPhase 29へ
 ユーザー指示で割り当てた。2026-08-19のlong-context KV調査で、FP16/FP8 causal attentionがgfx1201でも同じ
 scalar/vector kernelを使い、native FP8 conversion、packed dot、WMMA/SWMMACを使用していないことを確認したため、
-RDNA4 native attention/KV hardware-path最適化をPhase 30へ割り当てた。その他に残る将来項目はchunked prefill、KV/会話/model lockの
-簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、
+RDNA4 native attention/KV hardware-path最適化をPhase 30へ割り当てた。Phase 30はgfx1201 native E4M3FN readと
+wave32 causal attentionを`M=1`/`M>=32`へ限定採用し、Qwen3.5-4B BF16の4108 inputでTTFT 9.60%、decode throughput
+7.86%の3-process中央値改善を確認して完了した。native append encodeはchunk 256悪化、matrix/FlashAttention providerは
+bounded N0/N1 work unitを越えるため不採用とした。low-bit KVの通常運用に必要な10k+ full-model検証を成立させるため、
+chunked prefillとliveness-aware workspace memory基盤をPhase 31へ割り当てた。Phase 31はvAttention型
+`virtual-contiguous` providerを維持したまま完了した。completion-boundary liveness slotにより10,001-token workspaceを
+39.95 GB相当から5.28 GBへ縮小し、gfx1030/gfx1201の10,001-token FP16/dynamic FP8、gfx1201の16,385-token
+FP16/dynamic FP8 2-chunkをHIP-onlyでPASSした。CLI/serverへ明示的なFP16/dynamic FP8/static FP8/NVFP4選択を追加したが、
+defaultはFP16を維持する。Paged Attention、native FP8 append encode再検証、low-bit KVのdefault昇格は含めない。
+詳細なacceptanceと結果は[Phase 31 archive](archive/2026/08/11-20/phase31-chunked-prefill-memory-foundation.md)および
+[bounded summary](../../ci/matrix/phase31-chunked-prefill-summary-v1.json)を正とする。
+その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
+multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
 将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。
 
@@ -1027,8 +1039,9 @@ RDNA4 native attention/KV hardware-path最適化をPhase 30へ割り当てた。
   - 現行generic causal attentionはFP16 ID 2とpacked-KV ID 3を報告するが、実体はencoding引数で分岐する同一kernelであり、
     gfx1201 code objectにもnative FP8 conversion、packed dot、WMMA/SWMMACがない。Phase 16のcorrectness/memory baselineとしては正しいが、
     RDNA4 hardware性能を評価するproviderではない。
-  - Phase 30でgfx1201 native FP8 codec、decode packed-dot/wave tile、prefill matrix attentionを別work unitとして比較する。
-    gfx1030はbaseline controlを維持し、target/encoding/mode/contextのstable scopeごとに一般の5% full-model規則で採否を決める。
+  - Phase 30でgfx1201 native FP8 codec、decode wave tile、prefill matrix attentionを別work unitとして比較した。native FP8 readと
+    wave32 reductionは採用し、gfx1030と`M=2..31`はbaseline controlを維持する。native append encodeとmatrix providerは不採用である。
+    10000+ full-model prefillは現行workspaceが利用可能VRAMを超えるため、chunked-prefill/resource workをPhase 31へ割り当てた。
   - Q/PのFP16/FP8化、softmax順序、accumulator変更は数値台帳のN0〜N3へ分類し、N2を性能だけで自動採用しない。
 - Dense BF16 execution:
   - Phase 27のfresh E1比較では、V620 projectionはpeerより6.76%速く、R9700だけ12.53%遅かった。両target共通の
@@ -1075,8 +1088,13 @@ RDNA4 native attention/KV hardware-path最適化をPhase 30へ割り当てた。
     graph template cache、liveness arena、tensor alias、request owner/state pool、decode M=1 plan再利用へ移す。
   - prefix token列、model lock fingerprint、KV encodingをkeyにしたprefix/KV cacheとvAttention page共有/COWを検討する。
     KV、会話、model identityの簡易永続化は再起動後の再prefill削減にも利用する。
+  - Phase 31ではchunked prefillによりprefill workspaceをselected chunkへboundedとし、同時liveでないrequest-owned
+    intermediateだけをliveness arenaで再利用する。automatic defaultはtotal VRAM `<=16 GiB`で512、`>16 GiB`で
+    16K/8K/4K/2Kを大きい順にfit判定する。vAttention型`virtual-contiguous` providerをproduction defaultとして維持し、
+    Paged Attentionはopaque KV state下の別physical-layout providerとして後続比較へ残す。
   - chunked prefillは長promptのlatency/peak memoryとrequest間fairnessを改善し、現行matmul一dispatchのM上限
-    `65,536`を超える設定contextを実行可能にする境界として実装する。
+    `65,536`を超える設定contextを実行可能にする境界として実装する。Phase 31の直接の採用目的はまず10k+ full-modelの
+    memory feasibilityとlow-bit KV検証成立であり、5%速度改善を要求しない。
   - gfx942実機はVMM capabilityがtrueだったため、長い設定contextで全capacityを物理確保する
     `contiguous-resident`固定と、virtual-contiguousまたは増分commit providerを再比較する。
 - model load、GGUF、vision:

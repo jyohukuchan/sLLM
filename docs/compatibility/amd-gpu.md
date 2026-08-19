@@ -357,6 +357,36 @@ Qwen BF16 visionの233-token prefillを両target、GGUF MTPとQwen OpenAI server
 3 warmup + 10 measured固定laneはR9700/V620でload 10.654/10.331 s、median TTFT 46.653/184.143 ms、
 median TPOT 26.689/29.685 msだった。この証拠は固定artifact、single request、実行済みtargetに限定する。
 
+### 2026-08-19 Phase 30 RDNA4 attention/KV evidence
+
+canonical R9700 UUID `GPU-a8e9ddefa2d60f55`のexact `gfx1201`で、causal attentionのE4M3FN readを
+`v_cvt_f32_fp8`へ置き換え、256-thread LDS reductionをwave32 shuffleと8 wave partialへ変更した。
+`query_count=1`と`query_count>=32`だけがtarget-scoped providerへrouteし、2〜31およびcanonical V620 UUID
+`GPU-76a08c022586fed6`のexact `gfx1030`はbaselineを維持する。gfx1201/gfx1030 × FP16/FP8の各17 caseは
+全出力一致、fallback 0、cleanup failure 0だった。gfx1201 native decodeは全256 E4M3FN code（NaN 2 codeを含む）を
+software contractへbit exact照合し、code objectで`v_cvt_f32_fp8`とwave shuffleを確認した。gfx1030 code objectへ
+native FP8命令はない。
+
+Qwen3.5-4B BF16、4108 input、output 32の3 independent process中央値はgfx1201 baseline比でTTFT 9.60%、
+prefill 9.72%、E2E 9.16%、decode throughput 7.86%改善した。10000+ inputはfull-prefill workspace preflightが
+53,758,880,592 byteを要求し、available 34,135,343,104 byteでは起動しなかったため性能PASSへ数えていない。
+native append encodeはchunk 256で68.69%悪化して棄却し、software encoderを維持した。prefill matrix/FlashAttention
+providerも本Phaseでは採用していない。詳細は[Phase 30 summary](../../ci/matrix/phase30-rdna4-attention-kv-summary-v1.json)を正とする。
+
+### 2026-08-19 Phase 31 chunked prefill・low-bit KV evidence
+
+Phase 30と同じQwen3.5-4B BF16 GGUF/lock、ROCm 7.14.0、canonical exact gfx1201/gfx1030をtarget別release buildで
+実行した。completion-boundary liveness arenaにより10,001-token workspaceは個別allocation合計39,950,821,120 byteから
+high-water 5,278,049,280 byte相当へ縮小し、従来53.76 GB requiredで拒否された10k+ full-modelを両targetで完走した。
+gfx1201の16,385 tokenは16,384+1の2 chunkとなり、workspace high-water 8,646,688,768 byte、HIP-only、fallbackなし、
+cleanup 0だった。gfx1030/gfx1201の10,001-token dynamic FP8 KVも1 decode stepを含めて同条件をPASSし、gfx1201では
+16,385-token dynamic FP8と10,001-token static FP8もPASSした。NVFP4はgfx1201の513-token spotに限定する。
+
+この証拠はchunk/arenaのmemory feasibilityとlow-bit routingの限定証拠であり、single-run timingを安定した速度比較、
+low-bit品質、別model/SKU/tupleへ一般化しない。KV providerはvirtual-contiguousのままで、Paged Attention、native append encode、
+MTP/multimodal/MoE low-bit、default FP8化は含まない。詳細は
+[Phase 31 summary](../../ci/matrix/phase31-chunked-prefill-summary-v1.json)を正とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

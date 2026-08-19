@@ -240,6 +240,23 @@ sLLM sourceへcode expression、control flow、kernel、testをcopy、adapt、po
 したがって新規import eventと`THIRD_PARTY_NOTICES.md` entryはない。llama.cpp build、model、raw trace DB、生成全文はrepositoryへ
 含めず、tracked summaryにはrevision、aggregate、digestとE1比較限界だけを記録する。
 
+## Phase 30 attention provider comparison record
+
+Phase 30はrepository内のllama.cpp `ggml/src/ggml-cuda/fattn-mma-f16.cuh`と`fattn-tile.cuh`を、RDNA向け
+FlashAttention tiling、mask、online-softmax、matrix-provider dependency surfaceの技術比較として読んだ。rocWMMA installed
+headersもprovider feasibilityの確認に使用した。既存sLLMのopaque KV layoutとN0/N1範囲へ直接取り込めるbounded kernelではないと判断し、
+llama.cpp/rocWMMAのsource expression、control flow、kernel、testをcopy、adapt、portしていない。採用したnative FP8 readと
+wave32 reductionはsLLM既存kernel、公開AMD compiler builtin、独立256-code oracleから実装した。したがって新規import eventと
+`THIRD_PARTY_NOTICES.md` entryはない。model、binary、raw trace、生成全文はrepositoryへ含めない。
+
+## Phase 31 chunked prefill implementation record
+
+Phase 31はSGLangの公開運用で見られる階層的chunk-sizeという概念だけをproduct policyの参考にし、512/2K/4K/8K/16Kの
+resource-based selector、Qwen chunk orchestration、completion-boundary liveness planner、CLI/server KV encoding設定を
+sLLM既存execution/KV contractから独立実装した。SGLang、vLLM、llama.cppその他のsource expression、control flow、kernel、testを
+copy、adapt、portしていない。従って新規import eventと`THIRD_PARTY_NOTICES.md` entryはない。model、binary、raw trace、
+生成全文はrepositoryへ含めず、bounded aggregateとidentityだけを追跡する。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

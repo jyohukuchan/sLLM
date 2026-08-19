@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase31-chunked-prefill-summary-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "state", "decision", "identity", "policy", "workspace", "full_model", "state_memory", "service", "numerical_policy", "limitations"],
+  "properties": {
+    "schema_version": {"const": "phase31-chunked-prefill-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "ADOPTED_CHUNKED_PREFILL_ARENA_AND_EXPLICIT_LOW_BIT_KV"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"type": "object", "required": ["source_base_commit", "phase31_source_diff_sha256", "gguf_sha256", "derived_lock_sha256", "model_fingerprint", "plan_digest", "rocm", "gfx1201_cli_binary_sha256", "gfx1030_cli_binary_sha256", "gfx1201_server_binary_sha256"]},
+    "policy": {"type": "object", "required": ["default_kv_cache_encoding", "explicit_kv_cache_encodings", "total_vram_at_most_16_gib_chunk_tokens", "total_vram_above_16_gib_candidates_descending", "selection_time", "runtime_oom_retry", "kv_memory_provider", "paged_attention_added", "native_append_encode_changed"]},
+    "workspace": {"type": "object", "required": ["allocation_model", "input_10001_separate_allocation_bytes", "input_10001_arena_high_water_bytes", "input_10001_reduction_percent", "input_16385_separate_allocation_bytes", "input_16385_arena_high_water_bytes", "input_16385_reduction_percent", "intermediate_chunk_terminal_fence", "intermediate_lm_head_or_argmax"]},
+    "full_model": {"type": "array", "minItems": 8, "items": {"type": "object", "required": ["target", "input_tokens", "kv_cache_encoding", "selected_chunk_tokens", "chunk_count", "required_bytes", "available_bytes", "timing_ns", "generated_token_ids", "decode_steps", "final_source_revalidated", "hip_only", "fallback", "cleanup_failures"]}},
+    "state_memory": {"type": "object", "required": ["input_tokens", "fp16_request_state_bytes", "fp8_request_state_bytes", "fp8_request_state_reduction_percent", "note"]},
+    "service": {"type": "object", "required": ["target", "kv_cache_encoding", "chat_prompt_tokens", "non_stream_completion_tokens", "non_stream_content", "sse_completion_tokens", "sse_done", "placement_full_required_bytes", "placement_incremental_required_bytes", "placement_available_memory_bytes", "request_cleanup_failures", "shutdown_current_request_and_workspace_bytes"]},
+    "numerical_policy": {"type": "object", "required": ["chunk_partition_and_arena", "real_number_equation_changed", "rounding_stage_changed", "repeated_token_pattern_matched", "static_fp8_scale", "static_fp8_default", "registry"]},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

@@ -494,7 +494,12 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         }
         self.last_target_hidden_bf16 = hidden[(input.len() - 1) * Self::HIDDEN_WIDTH..].to_vec();
-        Self::step_from_output(&output, input.len() - 1)
+        let final_row = output
+            .token_ids()
+            .len()
+            .checked_sub(1)
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+        Self::step_from_output(&output, final_row)
     }
 
     fn decode(

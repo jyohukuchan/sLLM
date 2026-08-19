@@ -4,20 +4,22 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sllm_core::{
-    Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
-    OsSamplingRandom, QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
-    QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
-    ReviewedModelLock, SamplingParametersV1, VerifiedCache, VerifiedGgufGemmaSource,
-    VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, WeightClassification,
-    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
-    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
+    ModelLock, OsSamplingRandom, QwenComponentSelection, QwenExecutionRequest,
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
+    QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock, SamplingParametersV1,
+    VerifiedCache, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
+    WeightClassification, assemble_gguf_qwen35_multimodal_prompt,
+    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_mtp_graph,
+    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
     build_verified_gguf_qwen35_vision_manifest, build_verified_qwen_component_weight_load_plan,
-    build_verified_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
+    build_verified_qwen35_vision_manifest, builtin_reviewed_model_lock, qwen_graph_memory_estimate,
+    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
+    verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -175,6 +177,7 @@ struct GenerateRequest {
     stop_strings: Vec<String>,
     device_index: u32,
     target: String,
+    kv_cache_encoding: KvCacheEncoding,
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<CliFp8Provider>,
@@ -1014,6 +1017,7 @@ impl ProductionBackend {
         token_count: u64,
         state_capacity: u64,
         target: &str,
+        kv_cache_encoding: KvCacheEncoding,
     ) -> Result<sllm_core::QwenGraph, sllm_core::QwenGraphError> {
         match &self.source {
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe() => {
@@ -1030,10 +1034,16 @@ impl ProductionBackend {
                     token_count,
                     state_capacity,
                     sllm_core::DType::F8E4M3Fn,
-                    sllm_core::KvCacheEncoding::Fp16,
+                    kv_cache_encoding,
                 )
             }
-            _ => build_qwen35_graph(&self.lock, plan, token_count, state_capacity),
+            _ => build_qwen35_graph_with_kv_cache_encoding(
+                &self.lock,
+                plan,
+                token_count,
+                state_capacity,
+                kv_cache_encoding,
+            ),
         }
     }
 }
@@ -1190,8 +1200,12 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 generation requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
-        if !processed_images.is_empty() && has_sidecar {
-            return Err("vision requests currently require the BF16 text artifact".to_owned());
+        if !processed_images.is_empty()
+            && (has_sidecar || request.kv_cache_encoding != KvCacheEncoding::Fp16)
+        {
+            return Err(
+                "vision requests currently require BF16 text weights and FP16 KV cache".to_owned(),
+            );
         }
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
@@ -1199,44 +1213,9 @@ impl ModelFrontendBackend for ProductionBackend {
             && !has_sidecar
             && !embedded_fp8
             && request.target == "gfx1201"
+            && request.kv_cache_encoding == KvCacheEncoding::Fp16
             && !request.sampling.requires_logits()
             && self.lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT;
-        let text_graph_rows = if mtp_candidate {
-            input_len.max(2)
-        } else {
-            input_len
-        };
-        let graph = if !processed_images.is_empty() {
-            build_qwen35_multimodal_graph(&self.lock, &plan, input_len, state_capacity)
-        } else if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
-            build_qwen35_nvfp4_graph(&self.lock, &plan, nvfp4_sidecar, input_len, state_capacity)
-        } else {
-            match (&sidecar, fp8_provider) {
-                (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                    build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                }
-                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => build_qwen35_fp8_fnuz_graph(
-                    &self.lock,
-                    &plan,
-                    sidecar,
-                    input_len,
-                    state_capacity,
-                ),
-                (Some(sidecar), Some(_)) => {
-                    build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
-                }
-                (None, None) => {
-                    self.build_plain_graph(&plan, text_graph_rows, state_capacity, &request.target)
-                }
-                _ => unreachable!("quantized provider selection validated sidecar state"),
-            }
-        }
-        .map_err(|error| {
-            format!("generation graph does not satisfy the fixed Qwen contract: {error}")
-        })?;
-        let plan_digest = plan.digest_hex();
-        let model_fingerprint = self.lock.fingerprint().to_owned();
-
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
         let session_request =
             ExecutionSessionRequest::new(request.device_index, request.target.clone())
@@ -1244,6 +1223,93 @@ impl ModelFrontendBackend for ProductionBackend {
         let session = backend
             .open_execution_session(session_request)
             .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let placement_total_memory_bytes = session
+            .total_memory_bytes()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "HIP backend omitted total device memory".to_owned())?;
+        let placement_available_memory_bytes = session
+            .available_memory_bytes()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "HIP backend omitted available device memory".to_owned())?;
+        let chunk_candidates = if processed_images.is_empty() {
+            qwen_prefill_chunk_candidates(placement_total_memory_bytes, input_len)
+                .map_err(|error| error.to_string())?
+        } else {
+            vec![input_len]
+        };
+        let build_graph = |chunk_rows: u64| {
+            let text_rows = if mtp_candidate {
+                chunk_rows.max(2)
+            } else {
+                chunk_rows
+            };
+            if !processed_images.is_empty() {
+                build_qwen35_multimodal_graph(&self.lock, &plan, input_len, state_capacity)
+            } else if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+                build_qwen35_nvfp4_graph(
+                    &self.lock,
+                    &plan,
+                    nvfp4_sidecar,
+                    chunk_rows,
+                    state_capacity,
+                )
+            } else {
+                match (&sidecar, fp8_provider) {
+                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                        build_qwen35_graph(&self.lock, &plan, text_rows, state_capacity)
+                    }
+                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                        build_qwen35_fp8_fnuz_graph(
+                            &self.lock,
+                            &plan,
+                            sidecar,
+                            chunk_rows,
+                            state_capacity,
+                        )
+                    }
+                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                        &self.lock,
+                        &plan,
+                        sidecar,
+                        chunk_rows,
+                        state_capacity,
+                    ),
+                    (None, None) => self.build_plain_graph(
+                        &plan,
+                        text_rows,
+                        state_capacity,
+                        &request.target,
+                        request.kv_cache_encoding,
+                    ),
+                    _ => unreachable!("quantized provider selection validated sidecar state"),
+                }
+            }
+        };
+        let mut rejected = Vec::new();
+        let mut selected = None;
+        for chunk_rows in chunk_candidates {
+            let graph = build_graph(chunk_rows).map_err(|error| {
+                format!("generation graph does not satisfy the fixed Qwen contract: {error}")
+            })?;
+            let estimate = qwen_graph_memory_estimate(&graph, &plan, placement_total_memory_bytes)
+                .map_err(|error| error.to_string())?;
+            if estimate.required_bytes() <= placement_available_memory_bytes {
+                selected = Some((graph, estimate));
+                break;
+            }
+            rejected.push(format!("{}:{}", chunk_rows, estimate.required_bytes()));
+        }
+        let (graph, placement) = selected.ok_or_else(|| {
+            format!(
+                "no prefill chunk fits available device memory {}; candidates chunk:required [{}]",
+                placement_available_memory_bytes,
+                rejected.join(",")
+            )
+        })?;
+        let request_graph = graph.clone();
+        let prefill_chunk_capacity_tokens = graph.token_count();
+        let plan_digest = plan.digest_hex();
+        let model_fingerprint = self.lock.fingerprint().to_owned();
 
         let execution = (|| -> Result<Value, String> {
             let (mut owner, _resident) = if let Some(sidecar) = nvfp4_sidecar {
@@ -1256,14 +1322,6 @@ impl ModelFrontendBackend for ProductionBackend {
                     COMPLETION_TIMEOUT,
                 )
                 .map_err(|error| format!("Qwen NVFP4 resident provisioning failed: {error}"))?;
-                let request_graph = build_qwen35_nvfp4_graph(
-                    &self.lock,
-                    &plan,
-                    &sidecar,
-                    input_len,
-                    state_capacity,
-                )
-                .map_err(|error| format!("Qwen NVFP4 request graph failed: {error}"))?;
                 let owner = resident
                     .new_request(request_graph)
                     .map_err(|error| format!("Qwen NVFP4 request provisioning failed: {error}"))?;
@@ -1301,29 +1359,6 @@ impl ModelFrontendBackend for ProductionBackend {
                     }
                 }
                 .map_err(|error| format!("Qwen FP8 resident provisioning failed: {error}"))?;
-                let request_graph = match fp8_provider {
-                    Some(CliFp8Provider::ConvertedBf16) => {
-                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    }
-                    Some(CliFp8Provider::NativeFnuz) => build_qwen35_fp8_fnuz_graph(
-                        &self.lock,
-                        &plan,
-                        &sidecar,
-                        input_len,
-                        state_capacity,
-                    ),
-                    Some(CliFp8Provider::Native) => build_qwen35_fp8_graph(
-                        &self.lock,
-                        &plan,
-                        &sidecar,
-                        input_len,
-                        state_capacity,
-                    ),
-                    Some(CliFp8Provider::Nvfp4PackedDequant) | None => {
-                        unreachable!("FP8 sidecar requires an FP8 provider")
-                    }
-                }
-                .map_err(|error| format!("Qwen FP8 request graph failed: {error}"))?;
                 let owner = resident
                     .new_request(request_graph)
                     .map_err(|error| format!("Qwen FP8 request provisioning failed: {error}"))?;
@@ -1342,22 +1377,6 @@ impl ModelFrontendBackend for ProductionBackend {
                         (owner, None)
                     }
                     QwenDenseSource::Gguf(source) => {
-                        let request_graph = if processed_images.is_empty() {
-                            self.build_plain_graph(
-                                &plan,
-                                input_len,
-                                state_capacity,
-                                &request.target,
-                            )
-                        } else {
-                            build_qwen35_multimodal_graph(
-                                &self.lock,
-                                &plan,
-                                input_len,
-                                state_capacity,
-                            )
-                        }
-                        .map_err(|error| format!("Qwen GGUF request graph failed: {error}"))?;
                         let resident = QwenResidentModel::new_gguf(
                             Arc::clone(&session),
                             graph,
@@ -1454,7 +1473,9 @@ impl ModelFrontendBackend for ProductionBackend {
             let mut random =
                 OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
                     .map_err(|error| format!("sampling random source failed: {error}"))?;
-            let (report, audit) = if let Some((_, prompt)) = vision_bundle.as_ref() {
+            let (report, audit, prefill_chunk_count) = if let Some((_, prompt)) =
+                vision_bundle.as_ref()
+            {
                 let mut executor = CliQwenMultimodalExecutor {
                     inner: &mut owner,
                     prompt,
@@ -1468,7 +1489,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     &mut random,
                 );
                 let audit = owner.audit_snapshot();
-                (report, audit)
+                let prefill_chunk_count = owner.prefill_chunk_count();
+                (report, audit, prefill_chunk_count)
             } else if mtp_candidate {
                 let mtp_plan = self.load_plan(QwenComponentSelection::MTP_ONLY)?;
                 let mtp_graph = build_qwen35_mtp_graph(&self.lock, &mtp_plan, state_capacity)
@@ -1505,9 +1527,10 @@ impl ModelFrontendBackend for ProductionBackend {
                     &mut random,
                 );
                 let audit = executor.inner().target().audit_snapshot();
+                let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
                 drop(executor);
                 drop(mtp_resident);
-                (report, audit)
+                (report, audit, prefill_chunk_count)
             } else {
                 let report = service.generate_tokens(
                     &mut owner,
@@ -1517,7 +1540,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     &mut random,
                 );
                 let audit = owner.audit_snapshot();
-                (report, audit)
+                let prefill_chunk_count = owner.prefill_chunk_count();
+                (report, audit, prefill_chunk_count)
             };
             let report = report.map_err(|error| format!("generation service failed: {error}"))?;
             let audit = audit.map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
@@ -1560,6 +1584,16 @@ impl ModelFrontendBackend for ProductionBackend {
                     "model_fingerprint": model_fingerprint,
                     "plan_digest": plan_digest,
                     "prefill_tokens": input.len(),
+                    "prefill_chunk_capacity_tokens": prefill_chunk_capacity_tokens,
+                    "prefill_chunk_count": prefill_chunk_count,
+                    "placement_total_memory_bytes": placement_total_memory_bytes,
+                    "placement_available_memory_bytes": placement_available_memory_bytes,
+                    "placement_required_bytes": placement.required_bytes(),
+                    "placement_model_resident_bytes": placement.model_resident_bytes(),
+                    "placement_request_state_bytes": placement.request_state_bytes(),
+                    "placement_safety_reserve_bytes": placement.safety_reserve_bytes(),
+                    "workspace_separate_allocation_bytes": placement.workspace_baseline_bytes(),
+                    "workspace_arena_bytes": placement.workspace_arena_bytes(),
                     "decode_steps": report.decode_steps(),
                     "fallback_used": audit.fallback_used(),
                     "submission_count": audit.submission_count(),
@@ -1568,6 +1602,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": audit.all_dispatches_hip(),
                     "weight_encoding": if embedded_fp8 { "ocp-e4m3fn-outer-f32" } else { match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" } },
+                    "kv_cache_encoding": match request.kv_cache_encoding { KvCacheEncoding::Fp16 => "fp16", KvCacheEncoding::Fp8E4M3Fn => "fp8", KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static", KvCacheEncoding::Nvfp4 => "nvfp4" },
                     "fp8_provider": if embedded_fp8 { Some("gguf-native") } else { fp8_provider.map(CliFp8Provider::label) },
                     "image_count": processed_images.len(),
                 },
@@ -1701,9 +1736,13 @@ impl ModelFrontendBackend for ProductionBackend {
                 (Some(sidecar), Some(_)) => {
                     build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
                 }
-                (None, None) => {
-                    self.build_plain_graph(&plan, input_len, state_capacity, &request.target)
-                }
+                (None, None) => self.build_plain_graph(
+                    &plan,
+                    input_len,
+                    state_capacity,
+                    &request.target,
+                    KvCacheEncoding::Fp16,
+                ),
                 _ => unreachable!("quantized provider selection validated sidecar state"),
             }
         }
@@ -1819,6 +1858,7 @@ impl ModelFrontendBackend for ProductionBackend {
                         input_len,
                         state_capacity,
                         &request.target,
+                        KvCacheEncoding::Fp16,
                     ),
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
@@ -2326,6 +2366,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut max_new_tokens = None;
     let mut device_index = None;
     let mut target = None;
+    let mut kv_cache_encoding = None;
     let mut greedy = false;
     let mut temperature = None;
     let mut top_p = None;
@@ -2417,6 +2458,22 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
                 }
                 set_once(&mut target, value, "--target")?;
+            }
+            "--kv-cache-encoding" if command == "generate" => {
+                let value = take_value(&mut arguments, "--kv-cache-encoding")?;
+                let parsed = match value.as_str() {
+                    "fp16" => KvCacheEncoding::Fp16,
+                    "fp8" => KvCacheEncoding::Fp8E4M3Fn,
+                    "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
+                    "nvfp4" => KvCacheEncoding::Nvfp4,
+                    _ => {
+                        return Err(
+                            "--kv-cache-encoding must be fp16, fp8, fp8-static, or nvfp4"
+                                .to_owned(),
+                        );
+                    }
+                };
+                set_once(&mut kv_cache_encoding, parsed, "--kv-cache-encoding")?;
             }
             "--greedy" if command == "generate" || command == "benchmark" => {
                 if greedy {
@@ -2624,6 +2681,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 device_index: device_index
                     .ok_or_else(|| "generate requires --device-index".to_owned())?,
                 target: target.ok_or_else(|| "generate requires --target".to_owned())?,
+                kv_cache_encoding: kv_cache_encoding.unwrap_or(KvCacheEncoding::Fp16),
                 fp8_manifest,
                 fp8_artifact,
                 fp8_provider,
@@ -3068,6 +3126,35 @@ mod tests {
                 max_new_tokens: 3,
                 seed: Some(u64::MAX),
                 device_index: 0,
+                kv_cache_encoding: KvCacheEncoding::Fp16,
+                ..
+            })
+        ));
+        let low_bit_kv = parse_args(
+            "generate",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--prompt",
+                "abc",
+                "--max-new-tokens",
+                "1",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1201",
+                "--kv-cache-encoding",
+                "fp8-static",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            low_bit_kv.operation,
+            Operation::Generate(GenerateRequest {
+                kv_cache_encoding: KvCacheEncoding::Fp8E4M3FnStatic,
                 ..
             })
         ));

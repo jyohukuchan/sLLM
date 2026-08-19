@@ -173,8 +173,11 @@ pub use quantized_model::{
     verify_unsloth_gemma4_nvfp4,
 };
 pub use qwen_execution::{
-    QwenExecutionAudit, QwenExecutionError, QwenExecutionOutput, QwenExecutionRequest,
-    QwenKvLayerMemoryAudit, QwenKvPayloadEvidence, QwenRequestMemoryAudit, QwenResidentModel,
+    QWEN_PREFILL_CHUNK_BUCKETS, QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS,
+    QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES, QwenExecutionAudit, QwenExecutionError,
+    QwenExecutionOutput, QwenExecutionRequest, QwenGraphMemoryEstimate, QwenKvLayerMemoryAudit,
+    QwenKvPayloadEvidence, QwenRequestMemoryAudit, QwenResidentModel, qwen_graph_memory_estimate,
+    qwen_prefill_chunk_candidates,
 };
 pub use qwen_graph::{
     QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
@@ -184,8 +187,9 @@ pub use qwen_graph::{
     QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
     build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
     build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,

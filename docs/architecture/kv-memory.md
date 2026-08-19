@@ -18,6 +18,11 @@ attention kernelには連続したvirtual addressを通常のK/V pointerとし�
 Paged Attentionは比較用model-free proxyだけを実装し、production backendとしては採用しない。
 prefix block sharing、copy-on-write、RadixAttention、continuous batchingはこの決定の範囲外である。
 
+Phase 31でもこの決定を維持する。chunked prefillは一requestのquery行と一時workspaceを分割する実行方式であり、
+KVのlogical capacity、token-major layout、virtual-contiguous providerを変更しない。最終KV stateは全prompt長について保持し、
+memory preflightから除外しない。従ってproduction Paged Attentionとは競合せず、将来必要になれば同じopaque KV contractの下へ
+別physical-layout providerとして追加する。
+
 ## 比較のidentityと範囲
 
 - local tuple: Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0。
@@ -97,6 +102,10 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
 - private evidence readbackもpublishedかつmappedな範囲だけを許可し、未map領域を成功扱いにしない。
 - actual public runtimeのfocused probeは両targetで1023/1024/1025 token、FP16全要素oracle、
   2/2/4 MiB per-plane commitment、未map readback拒否、fallbackなし、cleanupをPASSした。
+- Phase 31のQwen CLI/serverはKV encodingをweight encodingから独立して明示選択できる。既定はFP16のままで、dynamic/static
+  FP8とNVFP4は明示選択時だけ使う。10,001-token dynamic FP8はexact gfx1030/gfx1201の双方、16,385-token 2-chunk
+  dynamic FP8はgfx1201でHIP-only、fallbackなし、cleanup 0をPASSした。static FP8の固定scale 1.0は実験設定であり、
+  model由来calibrationやdefault policyではない。
 
 ## 再検討条件
 

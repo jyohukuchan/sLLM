@@ -7,20 +7,21 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sllm_core::{
     AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest,
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, ModelLock,
-    OsSamplingRandom, QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
+    ModelLock, OsSamplingRandom, QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection,
     QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
     QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
     VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
     VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
     assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
     build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
-    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
-    builtin_reviewed_model_lock, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    verify_derived_gguf, verify_gguf_qwen35_moe,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
+    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
+    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
+    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
@@ -49,6 +50,7 @@ pub struct QwenBackendConfigV1 {
     pub completion_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub context_length: u32,
+    pub kv_cache_encoding: KvCacheEncoding,
 }
 
 impl QwenBackendConfigV1 {
@@ -99,6 +101,7 @@ pub struct ProductionRequestAuditV1 {
     pub outcome: String,
     pub target: String,
     pub weight_encoding: String,
+    pub kv_cache_encoding: String,
     pub fp8_provider: Option<String>,
     pub prompt_tokens: u64,
     pub requested_max_completion_tokens: u32,
@@ -118,6 +121,14 @@ pub struct ProductionRequestAuditV1 {
     pub tokens_per_page: Option<u64>,
     pub mapped_kv_capacity_tokens: Option<u64>,
     pub committed_kv_bytes: Option<u64>,
+    pub prefill_chunk_capacity_tokens: Option<u64>,
+    pub prefill_chunk_count: Option<u64>,
+    pub placement_total_memory_bytes: Option<u64>,
+    pub placement_available_memory_bytes: Option<u64>,
+    pub placement_required_bytes: Option<u64>,
+    pub placement_incremental_required_bytes: Option<u64>,
+    pub workspace_separate_allocation_bytes: Option<u64>,
+    pub workspace_arena_bytes: Option<u64>,
     pub allocated_request_state_bytes: u64,
     pub allocated_workspace_bytes: u64,
     pub cleanup_request_state_bytes: u64,
@@ -168,6 +179,7 @@ struct QwenBackendStateV1 {
     vision_manifest: Option<QwenVisionManifest>,
     vision_resident: Option<QwenVisionResidentModel>,
     completion_timeout: Duration,
+    kv_cache_encoding: KvCacheEncoding,
 }
 
 pub struct Gemma4ChatBackendV1 {
@@ -207,6 +219,11 @@ impl QwenChatBackendV1 {
             BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
         })?;
         if derived.semantic_model_id.starts_with("qwen35moe:") {
+            if config.kv_cache_encoding != KvCacheEncoding::Fp16 {
+                return Err(BackendErrorV1::new(
+                    "Qwen MoE currently requires FP16 KV cache",
+                ));
+            }
             return Self::open_gguf_moe(config, derived);
         }
         let lock = match builtin_reviewed_model_lock(&derived.source_lock_fingerprints).map_err(
@@ -253,10 +270,10 @@ impl QwenChatBackendV1 {
                 1,
                 1,
                 sllm_core::DType::F8E4M3Fn,
-                sllm_core::KvCacheEncoding::Fp16,
+                config.kv_cache_encoding,
             )
         } else {
-            build_qwen35_graph(&lock, &plan, 1, 1)
+            build_qwen35_graph_with_kv_cache_encoding(&lock, &plan, 1, 1, config.kv_cache_encoding)
         }
         .map_err(|error| {
             BackendErrorV1::new(format!("resident seed graph construction failed: {error}"))
@@ -289,6 +306,7 @@ impl QwenChatBackendV1 {
         };
         let (mtp_resident, mtp_plan) = if !source.has_fp8_recipe()
             && config.target == "gfx1201"
+            && config.kv_cache_encoding == KvCacheEncoding::Fp16
             && lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT
         {
             let mtp_plan = source
@@ -353,6 +371,7 @@ impl QwenChatBackendV1 {
                 vision_manifest,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
+                kv_cache_encoding: config.kv_cache_encoding,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -437,6 +456,7 @@ impl QwenChatBackendV1 {
                 vision_manifest: None,
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
+                kv_cache_encoding: KvCacheEncoding::Fp16,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -849,78 +869,131 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 self.identity.context_length
             )));
         }
-        let target_graph_rows = if state.mtp_resident.is_some()
-            && !request.generation().sampling().requires_logits()
-            && multimodal_prompt.is_none()
-        {
-            prompt_tokens.max(2)
-        } else {
-            prompt_tokens
-        };
-        let graph = if let Some(artifact) = &state.moe_artifact {
-            build_qwen35_moe_execution_graph(artifact, &state.plan, prompt_tokens, state_capacity)
-        } else if let Some(source) = &state.gguf_moe {
-            build_qwen35_gguf_moe_execution_graph(
-                source,
-                &state.plan,
-                prompt_tokens,
-                state_capacity,
-            )
-        } else if multimodal_prompt.is_some() {
-            build_qwen35_multimodal_graph(
-                state.lock.as_ref().expect("dense Qwen lock"),
-                &state.plan,
-                prompt_tokens,
-                state_capacity,
-            )
-        } else if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
-            build_qwen35_nvfp4_graph(
-                state.lock.as_ref().expect("dense Qwen lock"),
-                &state.plan,
-                nvfp4_sidecar,
-                prompt_tokens,
-                state_capacity,
-            )
-        } else if let Some(source) = state
-            .gguf_source
-            .as_ref()
-            .filter(|source| source.has_fp8_recipe())
-        {
-            build_qwen35_gguf_fp8_graph(
-                state.lock.as_ref().expect("dense Qwen lock"),
-                &state.plan,
-                source,
-                prompt_tokens,
-                state_capacity,
-                sllm_core::DType::F8E4M3Fn,
-                sllm_core::KvCacheEncoding::Fp16,
-            )
-        } else {
-            match (&state.sidecar, state.fp8_provider.as_deref()) {
-                (Some(_), Some("converted-bf16")) | (None, None) => build_qwen35_graph(
-                    state.lock.as_ref().expect("dense Qwen lock"),
-                    &state.plan,
-                    target_graph_rows,
-                    state_capacity,
-                ),
-                (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
-                    state.lock.as_ref().expect("dense Qwen lock"),
-                    &state.plan,
-                    sidecar,
-                    prompt_tokens,
-                    state_capacity,
-                ),
-                (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                    state.lock.as_ref().expect("dense Qwen lock"),
-                    &state.plan,
-                    sidecar,
-                    prompt_tokens,
-                    state_capacity,
-                ),
-                _ => unreachable!("validated FP8 server state has a selected provider"),
-            }
+        if multimodal_prompt.is_some() && state.kv_cache_encoding != KvCacheEncoding::Fp16 {
+            return Err(BackendErrorV1::new(
+                "multimodal Qwen requests currently require FP16 KV cache",
+            ));
         }
-        .map_err(|error| BackendErrorV1::new(format!("request graph failed: {error}")))?;
+        let placement_total_memory_bytes = state
+            .session
+            .total_memory_bytes()
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?
+            .ok_or_else(|| BackendErrorV1::new("backend omitted total device memory"))?;
+        let placement_available_memory_bytes = state
+            .session
+            .available_memory_bytes()
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?
+            .ok_or_else(|| BackendErrorV1::new("backend omitted available device memory"))?;
+        let chunk_candidates = if multimodal_prompt.is_some() {
+            vec![prompt_tokens]
+        } else {
+            qwen_prefill_chunk_candidates(placement_total_memory_bytes, prompt_tokens)
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        };
+        let mtp_target = state.mtp_resident.is_some()
+            && !request.generation().sampling().requires_logits()
+            && multimodal_prompt.is_none();
+        let build_graph = |chunk_rows: u64| {
+            let target_rows = if mtp_target {
+                chunk_rows.max(2)
+            } else {
+                chunk_rows
+            };
+            if let Some(artifact) = &state.moe_artifact {
+                build_qwen35_moe_execution_graph(artifact, &state.plan, chunk_rows, state_capacity)
+            } else if let Some(source) = &state.gguf_moe {
+                build_qwen35_gguf_moe_execution_graph(
+                    source,
+                    &state.plan,
+                    chunk_rows,
+                    state_capacity,
+                )
+            } else if multimodal_prompt.is_some() {
+                build_qwen35_multimodal_graph(
+                    state.lock.as_ref().expect("dense Qwen lock"),
+                    &state.plan,
+                    prompt_tokens,
+                    state_capacity,
+                )
+            } else if let Some(nvfp4_sidecar) = &state.nvfp4_sidecar {
+                build_qwen35_nvfp4_graph(
+                    state.lock.as_ref().expect("dense Qwen lock"),
+                    &state.plan,
+                    nvfp4_sidecar,
+                    chunk_rows,
+                    state_capacity,
+                )
+            } else if let Some(source) = state
+                .gguf_source
+                .as_ref()
+                .filter(|source| source.has_fp8_recipe())
+            {
+                build_qwen35_gguf_fp8_graph(
+                    state.lock.as_ref().expect("dense Qwen lock"),
+                    &state.plan,
+                    source,
+                    chunk_rows,
+                    state_capacity,
+                    sllm_core::DType::F8E4M3Fn,
+                    state.kv_cache_encoding,
+                )
+            } else {
+                match (&state.sidecar, state.fp8_provider.as_deref()) {
+                    (Some(_), Some("converted-bf16")) | (None, None) => {
+                        build_qwen35_graph_with_kv_cache_encoding(
+                            state.lock.as_ref().expect("dense Qwen lock"),
+                            &state.plan,
+                            target_rows,
+                            state_capacity,
+                            state.kv_cache_encoding,
+                        )
+                    }
+                    (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
+                        state.lock.as_ref().expect("dense Qwen lock"),
+                        &state.plan,
+                        sidecar,
+                        chunk_rows,
+                        state_capacity,
+                    ),
+                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                        state.lock.as_ref().expect("dense Qwen lock"),
+                        &state.plan,
+                        sidecar,
+                        chunk_rows,
+                        state_capacity,
+                    ),
+                    _ => unreachable!("validated FP8 server state has a selected provider"),
+                }
+            }
+        };
+        let mut rejected = Vec::new();
+        let mut selected = None;
+        for chunk_rows in chunk_candidates {
+            let graph = build_graph(chunk_rows)
+                .map_err(|error| BackendErrorV1::new(format!("request graph failed: {error}")))?;
+            let estimate =
+                qwen_graph_memory_estimate(&graph, &state.plan, placement_total_memory_bytes)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+            let incremental_required = estimate
+                .required_bytes()
+                .checked_sub(estimate.model_resident_bytes())
+                .ok_or_else(|| {
+                    BackendErrorV1::new("request placement underflowed graph model-resident bytes")
+                })?;
+            if incremental_required <= placement_available_memory_bytes {
+                selected = Some((graph, estimate, incremental_required));
+                break;
+            }
+            rejected.push(format!("{chunk_rows}:{incremental_required}"));
+        }
+        let (graph, placement, placement_incremental_required_bytes) = selected.ok_or_else(|| {
+            BackendErrorV1::new(format!(
+                "no prefill chunk fits available device memory {}; candidates chunk:incremental-required [{}]",
+                placement_available_memory_bytes,
+                rejected.join(",")
+            ))
+        })?;
+        let prefill_chunk_capacity_tokens = graph.token_count();
         let mut owner = state
             .resident
             .new_request_for_session(Arc::clone(&state.session), graph)
@@ -934,7 +1007,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         )
         .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
-        let (outcome, dispatch, memory) = if let Some(multimodal_prompt) =
+        let (outcome, dispatch, memory, prefill_chunk_count) = if let Some(multimodal_prompt) =
             multimodal_prompt.as_ref()
         {
             let mut executor = QwenMultimodalExecutorV1 {
@@ -952,8 +1025,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             );
             let dispatch = owner.audit_snapshot().ok();
             let memory = owner.memory_audit_snapshot().ok();
+            let prefill_chunk_count = owner.prefill_chunk_count();
             drop(owner);
-            (outcome, dispatch, memory)
+            (outcome, dispatch, memory, Some(prefill_chunk_count))
         } else if !request.generation().sampling().requires_logits()
             && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
         {
@@ -983,8 +1057,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             );
             let dispatch = executor.inner().target().audit_snapshot().ok();
             let memory = executor.inner().target().memory_audit_snapshot().ok();
+            let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
             drop(executor);
-            (outcome, dispatch, memory)
+            (outcome, dispatch, memory, Some(prefill_chunk_count))
         } else {
             let outcome = service.generate_tokens_with_sink(
                 &mut owner,
@@ -996,8 +1071,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             );
             let dispatch = owner.audit_snapshot().ok();
             let memory = owner.memory_audit_snapshot().ok();
+            let prefill_chunk_count = owner.prefill_chunk_count();
             drop(owner);
-            (outcome, dispatch, memory)
+            (outcome, dispatch, memory, Some(prefill_chunk_count))
         };
         let cleanup = state.session.memory_snapshot();
         let cleanup_result =
@@ -1071,6 +1147,13 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("ocp-mxfp4-w4a4-mixed") => "ocp-mxfp4-e2m1-block32-e8m0-mixed".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
+            kv_cache_encoding: match state.kv_cache_encoding {
+                KvCacheEncoding::Fp16 => "fp16",
+                KvCacheEncoding::Fp8E4M3Fn => "fp8",
+                KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static",
+                KvCacheEncoding::Nvfp4 => "nvfp4",
+            }
+            .to_owned(),
             fp8_provider: state.fp8_provider.clone(),
             prompt_tokens,
             requested_max_completion_tokens: request.generation().max_new_tokens(),
@@ -1098,6 +1181,14 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             mapped_kv_capacity_tokens: first_kv
                 .map(|layer| layer.physical().mapped_token_capacity()),
             committed_kv_bytes,
+            prefill_chunk_capacity_tokens: Some(prefill_chunk_capacity_tokens),
+            prefill_chunk_count,
+            placement_total_memory_bytes: Some(placement_total_memory_bytes),
+            placement_available_memory_bytes: Some(placement_available_memory_bytes),
+            placement_required_bytes: Some(placement.required_bytes()),
+            placement_incremental_required_bytes: Some(placement_incremental_required_bytes),
+            workspace_separate_allocation_bytes: Some(placement.workspace_baseline_bytes()),
+            workspace_arena_bytes: Some(placement.workspace_arena_bytes()),
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
             allocated_workspace_bytes: allocated.workspace().current_bytes(),
             cleanup_request_state_bytes: cleanup.request_state().current_bytes(),
@@ -1230,6 +1321,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             },
             target: state.target.clone(),
             weight_encoding: state.weight_encoding.clone(),
+            kv_cache_encoding: "fp8-static".to_owned(),
             fp8_provider: None,
             prompt_tokens,
             requested_max_completion_tokens: request.generation().max_new_tokens(),
@@ -1249,6 +1341,14 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             tokens_per_page: None,
             mapped_kv_capacity_tokens: Some(state_capacity),
             committed_kv_bytes: observed_length.checked_mul(state.kv_bytes_per_token),
+            prefill_chunk_capacity_tokens: None,
+            prefill_chunk_count: None,
+            placement_total_memory_bytes: None,
+            placement_available_memory_bytes: None,
+            placement_required_bytes: None,
+            placement_incremental_required_bytes: None,
+            workspace_separate_allocation_bytes: None,
+            workspace_arena_bytes: None,
             allocated_request_state_bytes: allocated.request_state().current_bytes(),
             allocated_workspace_bytes: allocated.workspace().current_bytes(),
             cleanup_request_state_bytes: cleanup.request_state().current_bytes(),

@@ -546,6 +546,25 @@ pub fn build_qwen35_graph(
     token_count: u64,
     state_capacity: u64,
 ) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_graph_with_kv_cache_encoding(
+        lock,
+        plan,
+        token_count,
+        state_capacity,
+        crate::KvCacheEncoding::Fp16,
+    )
+}
+
+/// Builds the reviewed BF16-weight graph with an explicitly selected KV
+/// encoding. Production callers default to FP16; bounded evidence and later
+/// policy layers use this entry point without coupling KV storage to weights.
+pub fn build_qwen35_graph_with_kv_cache_encoding(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
     let spec = validate_reviewed_model(lock)?;
     let dimensions = QwenGraphDimensions::from_spec(spec)?;
     if token_count == 0 {
@@ -580,7 +599,7 @@ pub fn build_qwen35_graph(
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
         fp8_sidecar_fingerprint: None,
-        kv_cache_encoding: crate::KvCacheEncoding::Fp16,
+        kv_cache_encoding,
         mtp: false,
         multimodal: false,
         moe: false,
@@ -2041,6 +2060,21 @@ struct GraphBuilderConfig {
     moe: bool,
 }
 
+fn qwen_kv_state_descriptor(
+    layer: u32,
+    capacity: u64,
+    heads: usize,
+    head_dim: usize,
+    encoding: crate::KvCacheEncoding,
+) -> Result<KvStateDescriptor, QwenGraphError> {
+    let descriptor = if encoding == crate::KvCacheEncoding::Fp8E4M3FnStatic {
+        KvStateDescriptor::new_with_static_fp8(layer, capacity, heads, head_dim, 1.0, 1.0)
+    } else {
+        KvStateDescriptor::new_with_storage(layer, capacity, heads, head_dim, encoding)
+    };
+    descriptor.map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))
+}
+
 struct GraphBuilder {
     layer_types: Vec<LayerType>,
     dimensions: QwenGraphDimensions,
@@ -2156,7 +2190,7 @@ impl GraphBuilder {
             let layer = layer as u32;
             match layer_type {
                 LayerType::FullAttention => {
-                    let descriptor = KvStateDescriptor::new_with_storage(
+                    let descriptor = qwen_kv_state_descriptor(
                         layer,
                         self.state_capacity,
                         usize::try_from(self.dimensions.kv_heads)
@@ -2164,8 +2198,7 @@ impl GraphBuilder {
                         usize::try_from(self.dimensions.head_dim)
                             .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
                         self.kv_cache_encoding,
-                    )
-                    .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+                    )?;
                     self.add_state(
                         layer,
                         QwenGraphStateKind::FullKey,
@@ -2221,7 +2254,7 @@ impl GraphBuilder {
     }
 
     fn build_mtp_state(&mut self) -> Result<(), QwenGraphError> {
-        let descriptor = KvStateDescriptor::new_with_storage(
+        let descriptor = qwen_kv_state_descriptor(
             QWEN35_MTP_CONSUMER_LAYER as u32,
             self.state_capacity,
             usize::try_from(self.dimensions.kv_heads)
@@ -2229,8 +2262,7 @@ impl GraphBuilder {
             usize::try_from(self.dimensions.head_dim)
                 .map_err(|_| QwenGraphError::Overflow("MTP head dimension"))?,
             self.kv_cache_encoding,
-        )
-        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        )?;
         self.add_state(
             QWEN35_MTP_CONSUMER_LAYER as u32,
             QwenGraphStateKind::FullKey,
@@ -3295,7 +3327,7 @@ impl GraphBuilder {
             vec![],
             vec![],
         )?;
-        let kv = KvStateDescriptor::new_with_storage(
+        let kv = qwen_kv_state_descriptor(
             layer,
             self.state_capacity,
             usize::try_from(self.dimensions.kv_heads)
@@ -3303,8 +3335,7 @@ impl GraphBuilder {
             usize::try_from(self.dimensions.head_dim)
                 .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
             self.kv_cache_encoding,
-        )
-        .map_err(|error| QwenGraphError::InvalidPlan(error.to_string()))?;
+        )?;
         let kv_node = self.add_typed(
             &format!("layer.{layer}.kv_append"),
             QwenGraphNodeKind::FullKvAppend { layer, state: kv },
@@ -3833,6 +3864,13 @@ pub(crate) fn qwen35_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
 }
 
 #[cfg(test)]
+pub(crate) fn qwen35_execution_fixture_with_token_count(
+    token_count: u64,
+) -> (QwenGraph, WeightLoadPlan) {
+    tests::execution_fixture_with_token_count(token_count)
+}
+
+#[cfg(test)]
 pub(crate) fn qwen35_mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
     tests::mtp_execution_fixture()
 }
@@ -4029,9 +4067,17 @@ mod tests {
     }
 
     pub(super) fn execution_fixture() -> (QwenGraph, WeightLoadPlan) {
+        execution_fixture_with_token_count(3)
+    }
+
+    pub(super) fn execution_fixture_with_token_count(
+        token_count: u64,
+    ) -> (QwenGraph, WeightLoadPlan) {
         let lock = fixed_lock();
         let plan = synthetic_canonical_load_plan(&lock);
-        let graph = build_qwen35_graph(&lock, &plan, 3, 17).expect("fixture graph builds");
+        let state_capacity = token_count.max(17);
+        let graph = build_qwen35_graph(&lock, &plan, token_count, state_capacity)
+            .expect("fixture graph builds");
         (graph, plan)
     }
 
@@ -4178,6 +4224,51 @@ mod tests {
             assert_eq!(full.strides(), &[4 * 256, 256, 1]);
             assert!(graph.weight_binding("model.visual.synthetic_0").is_err());
             assert!(graph.weight_binding("not-a-weight").is_err());
+        }
+    }
+
+    #[test]
+    fn bf16_weights_do_not_constrain_the_selected_kv_encoding() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let fp16 = build_qwen35_graph_with_kv_cache_encoding(
+            &lock,
+            &plan,
+            17,
+            2_049,
+            crate::KvCacheEncoding::Fp16,
+        )
+        .unwrap();
+        for encoding in [
+            crate::KvCacheEncoding::Fp8E4M3Fn,
+            crate::KvCacheEncoding::Fp8E4M3FnStatic,
+            crate::KvCacheEncoding::Nvfp4,
+        ] {
+            let graph =
+                build_qwen35_graph_with_kv_cache_encoding(&lock, &plan, 17, 2_049, encoding)
+                    .unwrap();
+            let full_states = graph
+                .states()
+                .iter()
+                .filter_map(|state| match state.descriptor() {
+                    QwenGraphStateDescriptor::Kv(descriptor) => Some(descriptor),
+                    QwenGraphStateDescriptor::Linear(_) => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(full_states.len(), 16);
+            assert!(
+                full_states
+                    .iter()
+                    .all(|descriptor| descriptor.cache_encoding() == encoding)
+            );
+            if encoding == crate::KvCacheEncoding::Fp8E4M3FnStatic {
+                assert!(
+                    full_states
+                        .iter()
+                        .all(|descriptor| descriptor.static_fp8_scales() == Some((1.0, 1.0)))
+                );
+            }
+            assert!(graph.total_state_bytes() < fp16.total_state_bytes());
         }
     }
 

@@ -55,6 +55,40 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-19-P31: chunked prefillとworkspace arena
+
+- scope: Qwen3.5 dense BF16 weight graph、text prefill、FP16/dynamic FP8/static FP8/NVFP4 KV、gfx1030/gfx1201。
+- baseline: prompt全行を一graph実行し、request-owned dynamic tensorを個別bufferへ割り当てる。
+- candidate: promptを連続chunkへ分割し、absolute positionとKV/GDN stateを継続する。中間chunkの未使用LM head/Argmaxを省略し、
+  completion boundaryまで重なるtensorは別slotのまま、重ならないlifetimeだけを再利用する。
+- 分類: **N0**。terminal行のreal-number equation、dtype、演算順、量子化recipe、丸めstageを変更しない。chunk境界で既存KVを
+  再量子化せず、新規K/Vを一度だけappendする。static FP8のscale 1.0は明示設定のdescriptor完成でありdefault変更ではない。
+- correctness: 10,001 tokenをgfx1030/gfx1201、16,385 tokenをgfx1201でHIP-only、fallbackなし、cleanup 0で実行した。
+  16,385 tokenは16,384+1の2 chunkとなり、反復入力の生成tokenはone-chunk controlと同じ1228だった。dynamic FP8は両targetの
+  10,001 tokenとgfx1201の16,385 token、static FP8はgfx1201の10,001 token、NVFP4は513-token spotをPASSした。
+- output影響: 測定範囲でtoken差なし。chunk partition、arena reuse、intermediate terminal省略から説明できない差はN3 blockerとする。
+- resource: 10,001 tokenのworkspace high-waterは39,950,821,120から5,278,049,280 byte、16,385 tokenでは
+  65,448,547,584から8,646,688,768 byte相当となり、いずれも約86.79%削減した。
+- 決定: shared chunked prefill/arenaを採用し、明示low-bit KV選択をCLI/serverへ接続する。defaultはFP16を維持する。
+- rollback: source base commit `1def2b63cfb26cd71e7e1bf500235a6eb5c7ed9b`の一括prefill・個別allocation。
+- 詳細: [Phase 31履歴](../history/2026/08/11-20/phase31-chunked-prefill-memory-foundation.md)、
+  [bounded summary](../../ci/matrix/phase31-chunked-prefill-summary-v1.json)。
+
+### OUT-2026-08-19-P30: RDNA4 causal-attention wave reduction
+
+- scope: Qwen系generic causal/full attention、exact gfx1201、head dim 256、decode `M=1`とprefill `M>=32`、FP16/FP8/NVFP4 KV。
+- baseline: 256 threadのLDS treeでQKの256項FP32積を固定balanced reductionし、keyごとに約11回のblock同期を行う。
+- candidate: 8 wave × 32 laneの`__shfl_down` treeと8個のLDS partialを固定treeで合成する。online-softmaxのmax、denominator、V accumulation、FP32 accumulator、BF16 RNE output stageは維持する。
+- 分類: **N1**。real-number equation、入力集合、dtype、丸めstageは同じで、QKの加算依存深さはbaselineの8段からwave内5段+wave間3段の8段を超えない。native E4M3FN readは全256 code（NaN 2 codeを含む）がsoftware contractと一致するためN0である。
+- correctness: gfx1201/gfx1030 × FP16/FP8の各17 caseが全出力一致、fallback 0、cleanup failure 0。gfx1201 native decode probeは256/256 code PASS。full-model 29/267/4108 inputのbaseline/candidate token recordは一致した。
+- output影響: 測定範囲ではtoken差なし。演算順が変わるため将来のlogit/token差は生じ得るが、原因は固定balanced tree間の丸め差へ局所化できる。
+- 性能: gfx1201 operatorはFP16 decodeで6.12〜17.16%、FP8 decodeで0.64〜27.91%、prefill `M≈255`で約21.0%/31.5%短縮。Qwen3.5-4B BF16、4108 inputの3 process中央値はTTFT 9.60%、prefill 9.72%、E2E 9.16%、decode throughput 7.86%改善した。29 inputのTTFT -0.60%は1 processのsub-1% control noiseとして非悪化扱いとした。
+- 決定: exact gfx1201の`M=1`と`M>=32`へ限定採用し、`M=2..31`とgfx1030はbaselineを維持する。native append encodeはchunk 256で68.69%悪化したため棄却した。
+- candidate source SHA-256: closeout summaryの`kernel_source_sha256`を正とする。
+- rollback: source base commit `1def2b63cfb26cd71e7e1bf500235a6eb5c7ed9b`のscalar/vector provider。
+- 詳細: [Phase 30履歴](../history/2026/08/11-20/phase30-rdna4-native-attention-kv-optimization.md)、
+  [bounded summary](../../ci/matrix/phase30-rdna4-attention-kv-summary-v1.json)。
+
 ### OUT-2026-08-18-P29: GDN norm wave32 tree reduction
 
 - scope: Qwen3.5-4B dense BF16、通常target-only decode、GDN recurrent gated norm、gfx1030/gfx1201。

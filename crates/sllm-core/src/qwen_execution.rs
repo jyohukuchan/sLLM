@@ -59,6 +59,80 @@ pub struct QwenExecutionOutput {
 /// Evidence-only `(layer, key bytes, value bytes)` semantic KV payload.
 pub type QwenKvPayloadEvidence = (u32, Vec<u8>, Vec<u8>);
 
+pub const QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS: u64 = 512;
+pub const QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+pub const QWEN_PREFILL_CHUNK_BUCKETS: [u64; 4] = [16_384, 8_192, 4_096, 2_048];
+
+/// Deterministic placement estimate for one candidate Qwen graph capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QwenGraphMemoryEstimate {
+    model_resident_bytes: u64,
+    workspace_baseline_bytes: u64,
+    workspace_arena_bytes: u64,
+    request_state_bytes: u64,
+    safety_reserve_bytes: u64,
+    required_bytes: u64,
+}
+
+impl QwenGraphMemoryEstimate {
+    pub const fn model_resident_bytes(self) -> u64 {
+        self.model_resident_bytes
+    }
+
+    pub const fn workspace_baseline_bytes(self) -> u64 {
+        self.workspace_baseline_bytes
+    }
+
+    pub const fn workspace_arena_bytes(self) -> u64 {
+        self.workspace_arena_bytes
+    }
+
+    pub const fn request_state_bytes(self) -> u64 {
+        self.request_state_bytes
+    }
+
+    pub const fn safety_reserve_bytes(self) -> u64 {
+        self.safety_reserve_bytes
+    }
+
+    pub const fn required_bytes(self) -> u64 {
+        self.required_bytes
+    }
+}
+
+/// Returns the stable, descending candidate capacities for one prompt. Short
+/// prompts use their actual row count; a 512-row floor is evaluated before a
+/// fail-closed rejection on devices larger than 16 GiB.
+pub fn qwen_prefill_chunk_candidates(
+    total_memory_bytes: u64,
+    prompt_tokens: u64,
+) -> Result<Vec<u64>, QwenExecutionError> {
+    if total_memory_bytes == 0 || prompt_tokens == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "prefill chunk selection requires non-zero device memory and prompt tokens".to_owned(),
+        ));
+    }
+    let buckets: &[u64] = if total_memory_bytes <= QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES {
+        &[QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS]
+    } else {
+        &QWEN_PREFILL_CHUNK_BUCKETS
+    };
+    let mut candidates = Vec::with_capacity(buckets.len() + 1);
+    for bucket in buckets {
+        let rows = prompt_tokens.min(*bucket);
+        if candidates.last().copied() != Some(rows) {
+            candidates.push(rows);
+        }
+    }
+    if total_memory_bytes > QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES {
+        let floor = prompt_tokens.min(QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS);
+        if candidates.last().copied() != Some(floor) {
+            candidates.push(floor);
+        }
+    }
+    Ok(candidates)
+}
+
 struct AttentionPreprocessExecution {
     layer: u32,
     q_heads: u32,
@@ -258,6 +332,10 @@ pub enum QwenExecutionError {
     ArgmaxSentinel {
         index: usize,
     },
+    NodeExecution {
+        node: String,
+        error: Box<QwenExecutionError>,
+    },
     Execution(ExecutionError),
     WeightUpload(WeightUploadError),
     Tensor(TensorError),
@@ -299,6 +377,9 @@ impl fmt::Display for QwenExecutionError {
                     "argmax returned the NaN sentinel at output index {index}"
                 )
             }
+            Self::NodeExecution { node, error } => {
+                write!(formatter, "Qwen node {node} failed: {error}")
+            }
             Self::Execution(error) => error.fmt(formatter),
             Self::WeightUpload(error) => error.fmt(formatter),
             Self::Tensor(error) => error.fmt(formatter),
@@ -311,6 +392,7 @@ impl std::error::Error for QwenExecutionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Execution(error) => Some(error),
+            Self::NodeExecution { error, .. } => Some(error.as_ref()),
             Self::WeightUpload(error) => Some(error),
             Self::Tensor(error) => Some(error),
             Self::Operation(error) => Some(error),
@@ -846,6 +928,14 @@ impl QwenExecutionRequest {
         self.core.committed_length
     }
 
+    pub const fn prefill_chunk_capacity(&self) -> u64 {
+        self.core.graph.token_count()
+    }
+
+    pub const fn prefill_chunk_count(&self) -> u64 {
+        self.core.prefill_chunk_count
+    }
+
     pub fn last_output(&self) -> Option<&QwenExecutionOutput> {
         self.core.last_output.as_ref()
     }
@@ -973,6 +1063,7 @@ struct QwenExecutionCore {
     prepared_semantics: PreparedSemanticCache,
     lifecycle: ExecutionTransaction,
     committed_length: u64,
+    prefill_chunk_count: u64,
     rope_position_delta: i64,
     last_output: Option<QwenExecutionOutput>,
     pending_speculative: Option<PendingSpeculativeBlock>,
@@ -1017,6 +1108,30 @@ struct GraphLayout {
     _weight_tensor_ids: BTreeMap<String, usize>,
     dynamic_tensors: Vec<bool>,
     scales: Vec<ScaleMaterialization>,
+    workspace: WorkspaceArenaLayout,
+}
+
+#[derive(Clone, Debug)]
+struct WorkspaceArenaLayout {
+    tensor_offsets: Vec<Option<u64>>,
+    slot_sizes: BTreeMap<u64, u64>,
+    baseline_bytes: u64,
+    high_water_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceInterval {
+    tensor_id: usize,
+    first_node: usize,
+    last_node: usize,
+    size_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WorkspaceSlot {
+    offset_bytes: u64,
+    size_bytes: u64,
+    last_node: usize,
 }
 
 type StateMaps = (BTreeMap<u32, KvState>, BTreeMap<u32, LinearAttentionState>);
@@ -2060,7 +2175,7 @@ impl QwenResidentInner {
     ) -> Result<Self, QwenExecutionError> {
         let layout = validate_graph_plan(&graph, &plan)?;
         preflight_semantic_support(session.as_ref(), &graph)?;
-        preflight_device_memory(session.as_ref(), &graph, &plan)?;
+        preflight_device_memory(session.as_ref(), &graph, &layout, false)?;
         let queue = session.create_queue()?;
         let static_tensors = allocate_resident_tensors(&session, &graph, &layout)?;
 
@@ -2138,7 +2253,7 @@ impl QwenExecutionCore {
             ));
         }
         validate_resident_graph(&graph, &layout, &resident.static_tensors, &resident.scales)?;
-        preflight_device_memory(resident.session.as_ref(), &graph, &resident.plan)?;
+        preflight_device_memory(resident.session.as_ref(), &graph, &layout, true)?;
         let tensors =
             allocate_request_tensors(&resident.session, &graph, &layout, &resident.static_tensors)?;
         let scales = graph
@@ -2193,6 +2308,7 @@ impl QwenExecutionCore {
             prepared_semantics: PreparedSemanticCache::default(),
             lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
+            prefill_chunk_count: 0,
             rope_position_delta: 0,
             last_output: None,
             pending_speculative: None,
@@ -2210,7 +2326,7 @@ impl QwenExecutionCore {
         source: &S,
     ) -> Result<Self, QwenExecutionError> {
         let layout = validate_graph_plan(&graph, &plan)?;
-        preflight_device_memory(session.as_ref(), &graph, &plan)?;
+        preflight_device_memory(session.as_ref(), &graph, &layout, false)?;
         let queue = session.create_queue()?;
         let tensors = allocate_tensors(&session, &graph)?;
 
@@ -2282,6 +2398,7 @@ impl QwenExecutionCore {
             prepared_semantics: PreparedSemanticCache::default(),
             lifecycle: ExecutionTransaction::new(),
             committed_length: 0,
+            prefill_chunk_count: 0,
             rope_position_delta: 0,
             last_output: None,
             pending_speculative: None,
@@ -2347,24 +2464,86 @@ impl QwenExecutionCore {
                 "prefill is only valid before the first committed transition".to_owned(),
             ));
         }
-        let expected = usize::try_from(self.graph.token_count()).map_err(|_| {
+        let chunk_capacity = usize::try_from(self.graph.token_count()).map_err(|_| {
             QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
         })?;
-        if token_ids.len() > expected {
+        if token_ids.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefill requires at least one token".to_owned(),
+            ));
+        }
+        if u64::try_from(token_ids.len())
+            .ok()
+            .is_none_or(|tokens| tokens > self.graph.state_capacity())
+        {
             return Err(QwenExecutionError::InvalidRequest(format!(
-                "prefill token count is {}, graph capacity is {expected}",
-                token_ids.len()
+                "prefill token count {} exceeds request state capacity {}",
+                token_ids.len(),
+                self.graph.state_capacity()
             )));
         }
-        self.run_transition(
-            token_ids,
-            AttentionPreprocessPositionMode::Prefill,
-            include_last_logits,
-            false,
-            include_hidden_states,
-            target_hidden_bf16,
-            multimodal,
-        )
+        if token_ids.len() <= chunk_capacity {
+            let output = self.run_transition(
+                token_ids,
+                AttentionPreprocessPositionMode::Prefill,
+                include_last_logits,
+                false,
+                include_hidden_states,
+                target_hidden_bf16,
+                multimodal,
+                true,
+            )?;
+            self.prefill_chunk_count = 1;
+            return Ok(output);
+        }
+        if multimodal.is_some() || target_hidden_bf16.is_some() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "chunked prefill currently requires text input without an MTP component row"
+                    .to_owned(),
+            ));
+        }
+
+        validate_input_token_ids(token_ids)?;
+        let chunk_count = token_ids.len().div_ceil(chunk_capacity);
+        let mut hidden_states = include_hidden_states.then(Vec::new);
+        let mut final_output = None;
+        for (index, chunk) in token_ids.chunks(chunk_capacity).enumerate() {
+            let final_chunk = index + 1 == chunk_count;
+            let mut output = self.run_transition(
+                chunk,
+                if index == 0 {
+                    AttentionPreprocessPositionMode::Prefill
+                } else {
+                    AttentionPreprocessPositionMode::DecodeContinuation
+                },
+                final_chunk && include_last_logits,
+                false,
+                include_hidden_states,
+                None,
+                None,
+                final_chunk,
+            )?;
+            if let Some(all_hidden) = &mut hidden_states {
+                all_hidden.extend(output.hidden_states_bf16.take().ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "chunked prefill omitted requested hidden states".to_owned(),
+                    )
+                })?);
+            }
+            if final_chunk {
+                final_output = Some(output);
+            }
+        }
+        let mut output = final_output.ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "chunked prefill produced no final output".to_owned(),
+            )
+        })?;
+        output.hidden_states_bf16 = hidden_states;
+        self.prefill_chunk_count = u64::try_from(chunk_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest("prefill chunk count does not fit u64".to_owned())
+        })?;
+        Ok(output)
     }
 
     fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
@@ -2422,6 +2601,7 @@ impl QwenExecutionCore {
             true,
             None,
             None,
+            true,
         )?;
         self.pending_speculative = Some(PendingSpeculativeBlock {
             start_length,
@@ -2460,6 +2640,7 @@ impl QwenExecutionCore {
             true,
             None,
             None,
+            true,
         )?;
         self.pending_speculative = Some(PendingSpeculativeBlock {
             start_length,
@@ -2508,6 +2689,7 @@ impl QwenExecutionCore {
             true,
             None,
             None,
+            true,
         )
     }
 
@@ -2605,6 +2787,7 @@ impl QwenExecutionCore {
             include_hidden_states,
             target_hidden_bf16,
             None,
+            true,
         )
     }
 
@@ -2618,6 +2801,7 @@ impl QwenExecutionCore {
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
+        emit_terminal: bool,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
@@ -2704,9 +2888,8 @@ impl QwenExecutionCore {
             })
             .transpose()?;
 
-        let terminal_rows = if token_count < TERMINAL_ROW_MIN_TOKENS
+        let terminal_rows = if self.graph.token_count() < TERMINAL_ROW_MIN_TOKENS
             || include_all_logits_bf16
-            || include_hidden_states
             || self.graph.is_mtp()
         {
             TerminalOutputRows::All
@@ -2740,6 +2923,7 @@ impl QwenExecutionCore {
             expected_length,
             position_mode,
             terminal_rows,
+            emit_terminal,
         )?;
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count, terminal_rows))
@@ -2787,6 +2971,7 @@ impl QwenExecutionCore {
         self.ensure_state_lengths(rewind_length)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn lower_graph(
         &self,
         token_count: u64,
@@ -2795,6 +2980,7 @@ impl QwenExecutionCore {
         expected_length: u64,
         position_mode: AttentionPreprocessPositionMode,
         terminal_rows: TerminalOutputRows,
+        emit_terminal: bool,
     ) -> Result<Vec<i32>, QwenExecutionError> {
         let plan = self.execution_plan.clone();
         let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
@@ -2807,66 +2993,62 @@ impl QwenExecutionCore {
         let mut pending = ExecutionSegment::profiled(self.completion_timeout);
         plan.execute(transition, |planned, transition| {
             let node = planned.operation();
-            match node.kind() {
-                QwenGraphNodeKind::Semantic(_) => {
-                    let output = self.execute_semantic(
-                        node,
-                        transition.token_count(),
-                        planned.boundary_after(),
-                        terminal_rows,
-                        &mut pending,
-                    )?;
-                    if let Some(output) = output {
-                        if argmax.replace(output).is_some() {
-                            return Err(QwenExecutionError::InvalidGraph(
-                                "graph contains more than one argmax result".to_owned(),
-                            ));
+            (|| -> Result<(), QwenExecutionError> {
+                match node.kind() {
+                    QwenGraphNodeKind::Semantic(_) => {
+                        if !emit_terminal
+                            && (matches!(
+                                node.kind(),
+                                QwenGraphNodeKind::Semantic(SemanticOpKind::Argmax)
+                            ) || self.is_terminal_projection(node)?)
+                        {
+                            return Ok(());
+                        }
+                        let output = self.execute_semantic(
+                            node,
+                            transition.token_count(),
+                            planned.boundary_after(),
+                            terminal_rows,
+                            &mut pending,
+                        )?;
+                        if let Some(output) = output {
+                            if argmax.replace(output).is_some() {
+                                return Err(QwenExecutionError::InvalidGraph(
+                                    "graph contains more than one argmax result".to_owned(),
+                                ));
+                            }
                         }
                     }
-                }
-                QwenGraphNodeKind::AttentionScaleMaterialization {
-                    heads, head_dim, ..
-                } => self.validate_cached_scale(node, heads, head_dim)?,
-                QwenGraphNodeKind::AttentionPreprocess {
-                    layer,
-                    q_heads,
-                    kv_heads,
-                    head_dim,
-                    ..
-                } => self.execute_attention_preprocess(
-                    node,
-                    AttentionPreprocessExecution {
+                    QwenGraphNodeKind::AttentionScaleMaterialization {
+                        heads, head_dim, ..
+                    } => self.validate_cached_scale(node, heads, head_dim)?,
+                    QwenGraphNodeKind::AttentionPreprocess {
                         layer,
                         q_heads,
                         kv_heads,
                         head_dim,
-                        token_count: transition.token_count(),
-                        start_position: rope_start_position,
-                        position_mode,
-                    },
-                    &mut pending,
-                )?,
-                QwenGraphNodeKind::MultimodalEmbeddingSelect => self
-                    .execute_multimodal_embedding_select(
+                        ..
+                    } => self.execute_attention_preprocess(
                         node,
-                        transition.token_count(),
-                        position_mode,
+                        AttentionPreprocessExecution {
+                            layer,
+                            q_heads,
+                            kv_heads,
+                            head_dim,
+                            token_count: transition.token_count(),
+                            start_position: rope_start_position,
+                            position_mode,
+                        },
                         &mut pending,
                     )?,
-                QwenGraphNodeKind::FullKvAppend { layer, state } => self.execute_kv_append(
-                    node,
-                    layer,
-                    state,
-                    StatefulExecution {
-                        token_count: transition.token_count(),
-                        start_position: transition.start_position(),
-                        expected_length: transition.expected_length(),
-                    },
-                    planned.boundary_after(),
-                    &mut pending,
-                )?,
-                QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
-                    .execute_causal_attention(
+                    QwenGraphNodeKind::MultimodalEmbeddingSelect => self
+                        .execute_multimodal_embedding_select(
+                            node,
+                            transition.token_count(),
+                            position_mode,
+                            &mut pending,
+                        )?,
+                    QwenGraphNodeKind::FullKvAppend { layer, state } => self.execute_kv_append(
                         node,
                         layer,
                         state,
@@ -2875,23 +3057,63 @@ impl QwenExecutionCore {
                             start_position: transition.start_position(),
                             expected_length: transition.expected_length(),
                         },
+                        planned.boundary_after(),
                         &mut pending,
                     )?,
-                QwenGraphNodeKind::LinearAttentionState { layer, state, .. } => self
-                    .execute_linear_attention(
-                        node,
-                        layer,
-                        state,
-                        StatefulExecution {
-                            token_count: transition.token_count(),
-                            start_position: transition.start_position(),
-                            expected_length: transition.expected_length(),
-                        },
-                        &mut pending,
-                    )?,
-            }
-            Ok(())
+                    QwenGraphNodeKind::FullCausalAttention { layer, state, .. } => self
+                        .execute_causal_attention(
+                            node,
+                            layer,
+                            state,
+                            StatefulExecution {
+                                token_count: transition.token_count(),
+                                start_position: transition.start_position(),
+                                expected_length: transition.expected_length(),
+                            },
+                            &mut pending,
+                        )?,
+                    QwenGraphNodeKind::LinearAttentionState { layer, state, .. } => self
+                        .execute_linear_attention(
+                            node,
+                            layer,
+                            state,
+                            StatefulExecution {
+                                token_count: transition.token_count(),
+                                start_position: transition.start_position(),
+                                expected_length: transition.expected_length(),
+                            },
+                            &mut pending,
+                        )?,
+                }
+                Ok(())
+            })()
+            .map_err(|error| {
+                if matches!(
+                    &error,
+                    QwenExecutionError::Execution(
+                        ExecutionError::Busy
+                            | ExecutionError::BackendStatus { .. }
+                            | ExecutionError::AsyncFailure { .. }
+                    )
+                ) {
+                    QwenExecutionError::NodeExecution {
+                        node: node.label().to_owned(),
+                        error: Box::new(error),
+                    }
+                } else {
+                    error
+                }
+            })
         })?;
+        if !emit_terminal {
+            if pending.is_empty() {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "chunked prefill has no work before terminal projection".to_owned(),
+                ));
+            }
+            self.close_boundary(&mut pending, ExecutionBoundaryKind::PrefillChunkCompletion)?;
+            return Ok(Vec::new());
+        }
         if let Some(argmax) = argmax {
             return Ok(argmax);
         }
@@ -3565,6 +3787,13 @@ impl QwenExecutionCore {
         pending: &mut ExecutionSegment,
         boundary: ExecutionBoundaryKind,
     ) -> Result<(), QwenExecutionError> {
+        if boundary == ExecutionBoundaryKind::PrefillChunkCompletion && !pending.is_empty() {
+            let mut fence = self.session.create_queue_fence(&self.queue)?;
+            require_terminal_success(
+                "prefill chunk completion fence",
+                fence.wait(self.completion_timeout)?,
+            )?;
+        }
         let mut audit = self
             .audit
             .lock()
@@ -4004,51 +4233,119 @@ impl QwenExecutionCore {
     }
 }
 
-fn preflight_device_memory(
-    session: &ExecutionSession,
+fn model_resident_bytes(
     graph: &QwenGraph,
-    _plan: &WeightLoadPlan,
-) -> Result<(), QwenExecutionError> {
-    let owned_tensor_bytes = graph
+    layout: &GraphLayout,
+) -> Result<u64, QwenExecutionError> {
+    graph
         .tensor_metadata()
         .iter()
-        .try_fold(0_u64, |total, tensor| match tensor.backing() {
-            QwenGraphTensorBacking::Owned => total
-                .checked_add(
-                    tensor
-                        .view()
-                        .byte_offset()
-                        .checked_add(resident_weight_bytes(tensor.view())?)
-                        .ok_or_else(|| {
-                            QwenExecutionError::InvalidGraph(
-                                "owned tensor allocation byte count overflowed".to_owned(),
-                            )
-                        })?,
-                )
-                .ok_or_else(|| {
-                    QwenExecutionError::InvalidGraph(
-                        "owned tensor allocation byte count overflowed".to_owned(),
+        .try_fold(0_u64, |total, tensor| {
+            if tensor.backing() == QwenGraphTensorBacking::Owned
+                && !layout.dynamic_tensors[tensor.id()]
+            {
+                total
+                    .checked_add(
+                        tensor
+                            .view()
+                            .byte_offset()
+                            .checked_add(resident_weight_bytes(tensor.view())?)
+                            .ok_or_else(|| {
+                                QwenExecutionError::InvalidGraph(
+                                    "owned tensor allocation byte count overflowed".to_owned(),
+                                )
+                            })?,
                     )
-                }),
-            QwenGraphTensorBacking::Alias { .. } => Ok(total),
-        })?;
-    let required = owned_tensor_bytes
-        .checked_add(graph.total_state_bytes())
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(
+                            "model-resident byte count overflowed".to_owned(),
+                        )
+                    })
+            } else {
+                Ok(total)
+            }
+        })
+}
+
+fn memory_estimate_from_layout(
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+    total_memory_bytes: u64,
+) -> Result<QwenGraphMemoryEstimate, QwenExecutionError> {
+    if total_memory_bytes == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "device total memory is zero".to_owned(),
+        ));
+    }
+    let model_resident_bytes = model_resident_bytes(graph, layout)?;
+    let safety_reserve_bytes = (total_memory_bytes / 20).max(1024 * 1024 * 1024);
+    let required_bytes = model_resident_bytes
+        .checked_add(layout.workspace.high_water_bytes)
+        .and_then(|bytes| bytes.checked_add(graph.total_state_bytes()))
+        .and_then(|bytes| bytes.checked_add(safety_reserve_bytes))
         .ok_or_else(|| {
             QwenExecutionError::InvalidGraph(
                 "model, workspace, and request-state byte count overflowed".to_owned(),
             )
         })?;
+    Ok(QwenGraphMemoryEstimate {
+        model_resident_bytes,
+        workspace_baseline_bytes: layout.workspace.baseline_bytes,
+        workspace_arena_bytes: layout.workspace.high_water_bytes,
+        request_state_bytes: graph.total_state_bytes(),
+        safety_reserve_bytes,
+        required_bytes,
+    })
+}
+
+pub fn qwen_graph_memory_estimate(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    total_memory_bytes: u64,
+) -> Result<QwenGraphMemoryEstimate, QwenExecutionError> {
+    let layout = validate_graph_plan(graph, plan)?;
+    memory_estimate_from_layout(graph, &layout, total_memory_bytes)
+}
+
+fn preflight_device_memory(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    layout: &GraphLayout,
+    model_already_resident: bool,
+) -> Result<(), QwenExecutionError> {
     let available = session.available_memory_bytes()?.ok_or_else(|| {
         QwenExecutionError::InvalidRequest(
             "backend did not report available device memory for placement preflight".to_owned(),
         )
     })?;
-    if required > available {
+    let total = session.total_memory_bytes()?.unwrap_or(available);
+    let estimate = memory_estimate_from_layout(graph, layout, total)?;
+    let placement_required = if model_already_resident {
+        estimate
+            .required_bytes
+            .checked_sub(estimate.model_resident_bytes)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "request placement byte count underflowed model-resident bytes".to_owned(),
+                )
+            })?
+    } else {
+        estimate.required_bytes
+    };
+    if placement_required > available {
         return Err(QwenExecutionError::InvalidRequest(format!(
-            "device memory preflight requires {required} bytes (model-resident {}, owned tensor/workspace {owned_tensor_bytes}, request-state {}), but only {available} bytes are available",
-            owned_tensor_bytes,
-            graph.total_state_bytes()
+            "device memory preflight requires {placement_required} placement bytes (full layout {}, model-resident {}{}, workspace arena {} from separate-allocation baseline {}, request-state {}, safety-reserve {}), but only {available} bytes are available",
+            estimate.required_bytes,
+            estimate.model_resident_bytes,
+            if model_already_resident {
+                " already allocated"
+            } else {
+                ""
+            },
+            estimate.workspace_arena_bytes,
+            estimate.workspace_baseline_bytes,
+            estimate.request_state_bytes,
+            estimate.safety_reserve_bytes,
         )));
     }
     Ok(())
@@ -4091,6 +4388,235 @@ fn validate_upload_receipt(
         )));
     }
     Ok(())
+}
+
+const QWEN_WORKSPACE_ALIGNMENT: u64 = 256;
+
+fn align_workspace(value: u64) -> Result<u64, QwenExecutionError> {
+    value
+        .checked_add(QWEN_WORKSPACE_ALIGNMENT - 1)
+        .map(|value| value & !(QWEN_WORKSPACE_ALIGNMENT - 1))
+        .ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("workspace alignment overflowed".to_owned())
+        })
+}
+
+fn workspace_root(graph: &QwenGraph, tensor_id: usize) -> Result<usize, QwenExecutionError> {
+    let mut current = tensor_id;
+    let mut remaining = graph.tensor_metadata().len();
+    loop {
+        let tensor = graph.tensor_metadata().get(current).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("workspace tensor ID is out of range".to_owned())
+        })?;
+        match tensor.backing() {
+            QwenGraphTensorBacking::Owned => return Ok(current),
+            QwenGraphTensorBacking::Alias { tensor_id } => {
+                if tensor_id >= current || remaining == 0 {
+                    return Err(QwenExecutionError::InvalidGraph(format!(
+                        "alias tensor {} does not refer to a prior owned tensor",
+                        tensor.name()
+                    )));
+                }
+                current = tensor_id;
+                remaining -= 1;
+            }
+        }
+    }
+}
+
+fn workspace_allocation_bytes(
+    graph: &QwenGraph,
+    tensor_id: usize,
+    terminal_outputs: [usize; 2],
+) -> Result<u64, QwenExecutionError> {
+    let tensor = graph.tensor_metadata().get(tensor_id).ok_or_else(|| {
+        QwenExecutionError::InvalidGraph("workspace tensor ID is out of range".to_owned())
+    })?;
+    compact_terminal_allocation_end(
+        graph.token_count(),
+        graph.is_mtp(),
+        tensor_id,
+        terminal_outputs,
+        tensor.view(),
+    )
+    .map(|value| value.unwrap_or_else(|| tensor.view().end_offset()))
+}
+
+type WorkspaceAllocationPlan = (BTreeMap<usize, u64>, BTreeMap<u64, u64>, u64);
+
+fn allocate_workspace_intervals(
+    intervals: &mut [WorkspaceInterval],
+) -> Result<WorkspaceAllocationPlan, QwenExecutionError> {
+    intervals.sort_by_key(|interval| (interval.first_node, interval.tensor_id));
+    let mut slots: Vec<WorkspaceSlot> = Vec::new();
+    let mut offsets = BTreeMap::new();
+    let mut high_water_bytes = 0_u64;
+    for interval in intervals {
+        let reusable = slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| {
+                slot.last_node < interval.first_node && slot.size_bytes >= interval.size_bytes
+            })
+            .min_by_key(|(_, slot)| slot.size_bytes)
+            .map(|(index, _)| index);
+        let slot_index = if let Some(index) = reusable {
+            index
+        } else {
+            let offset_bytes = align_workspace(high_water_bytes)?;
+            high_water_bytes = offset_bytes
+                .checked_add(interval.size_bytes)
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(
+                        "workspace arena high-water overflowed".to_owned(),
+                    )
+                })?;
+            slots.push(WorkspaceSlot {
+                offset_bytes,
+                size_bytes: interval.size_bytes,
+                last_node: interval.last_node,
+            });
+            slots.len() - 1
+        };
+        slots[slot_index].last_node = interval.last_node;
+        if offsets
+            .insert(interval.tensor_id, slots[slot_index].offset_bytes)
+            .is_some()
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "workspace interval tensor ID is duplicated".to_owned(),
+            ));
+        }
+    }
+    let slot_sizes = slots
+        .into_iter()
+        .map(|slot| (slot.offset_bytes, slot.size_bytes))
+        .collect();
+    Ok((offsets, slot_sizes, high_water_bytes))
+}
+
+fn plan_workspace_arena(
+    graph: &QwenGraph,
+    dynamic_tensors: &[bool],
+) -> Result<WorkspaceArenaLayout, QwenExecutionError> {
+    if dynamic_tensors.len() != graph.tensor_metadata().len() {
+        return Err(QwenExecutionError::InvalidGraph(
+            "dynamic tensor table differs from graph metadata".to_owned(),
+        ));
+    }
+    let terminal_outputs = terminal_output_tensor_ids(graph)?;
+    let mut roots = Vec::with_capacity(graph.tensor_metadata().len());
+    for tensor_id in 0..graph.tensor_metadata().len() {
+        roots.push(workspace_root(graph, tensor_id)?);
+    }
+
+    for (tensor_id, tensor) in graph.tensor_metadata().iter().enumerate() {
+        let root = roots[tensor_id];
+        if dynamic_tensors[tensor_id]
+            && tensor.view().end_offset() > graph.tensor_metadata()[root].view().end_offset()
+        {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "dynamic alias tensor {} exceeds its owned workspace tensor",
+                tensor.name()
+            )));
+        }
+    }
+
+    let mut first_nodes = vec![usize::MAX; graph.tensor_metadata().len()];
+    let mut last_nodes = vec![0_usize; graph.tensor_metadata().len()];
+    for (node_index, node) in graph.nodes().iter().enumerate() {
+        for &tensor_id in node.inputs().iter().chain(node.outputs()) {
+            let root = roots[tensor_id];
+            if dynamic_tensors[root] {
+                first_nodes[root] = first_nodes[root].min(node_index);
+                last_nodes[root] = last_nodes[root].max(node_index);
+            }
+        }
+    }
+    let mut completion_boundaries = graph
+        .nodes()
+        .iter()
+        .enumerate()
+        .filter_map(|(node_index, node)| {
+            matches!(node.kind(), QwenGraphNodeKind::FullKvAppend { .. }).then_some(node_index)
+        })
+        .collect::<Vec<_>>();
+    let terminal_node = graph.nodes().len().checked_sub(1).ok_or_else(|| {
+        QwenExecutionError::InvalidGraph("workspace graph has no completion boundary".to_owned())
+    })?;
+    if completion_boundaries.last().copied() != Some(terminal_node) {
+        completion_boundaries.push(terminal_node);
+    }
+
+    let mut baseline_bytes = 0_u64;
+    let mut intervals = Vec::new();
+    for (tensor_id, tensor) in graph.tensor_metadata().iter().enumerate() {
+        if !dynamic_tensors[tensor_id] || tensor.backing() != QwenGraphTensorBacking::Owned {
+            continue;
+        }
+        let size_bytes = align_workspace(workspace_allocation_bytes(
+            graph,
+            tensor_id,
+            terminal_outputs,
+        )?)?;
+        baseline_bytes = baseline_bytes.checked_add(size_bytes).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("workspace baseline byte count overflowed".to_owned())
+        })?;
+        let first_node = if first_nodes[tensor_id] == usize::MAX {
+            0
+        } else {
+            first_nodes[tensor_id]
+        };
+        let logical_last = last_nodes[tensor_id].max(first_node);
+        let last_node = completion_boundaries
+            .iter()
+            .copied()
+            .find(|boundary| *boundary >= logical_last)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "workspace tensor lifetime exceeds the terminal completion boundary".to_owned(),
+                )
+            })?;
+        intervals.push(WorkspaceInterval {
+            tensor_id,
+            first_node,
+            // Submission owners retain every buffer until their segment's
+            // completion boundary. Reuse inside one still-pending segment
+            // would violate the backend's buffer-level busy contract even
+            // though the queued kernels are stream ordered.
+            last_node,
+            size_bytes,
+        });
+    }
+    let mut root_offsets = vec![None; graph.tensor_metadata().len()];
+    let (offsets, slot_sizes, high_water_bytes) = allocate_workspace_intervals(&mut intervals)?;
+    for (tensor_id, offset) in offsets {
+        root_offsets[tensor_id] = Some(offset);
+    }
+
+    let mut tensor_offsets = vec![None; graph.tensor_metadata().len()];
+    for tensor_id in 0..graph.tensor_metadata().len() {
+        if dynamic_tensors[tensor_id] {
+            tensor_offsets[tensor_id] = root_offsets[roots[tensor_id]];
+            if tensor_offsets[tensor_id].is_none() {
+                return Err(QwenExecutionError::InvalidGraph(format!(
+                    "dynamic tensor {} has no workspace arena slot",
+                    graph.tensor_metadata()[tensor_id].name()
+                )));
+            }
+        }
+    }
+    if high_water_bytes > baseline_bytes {
+        return Err(QwenExecutionError::InvalidGraph(
+            "workspace arena exceeds the separate-allocation baseline".to_owned(),
+        ));
+    }
+    Ok(WorkspaceArenaLayout {
+        tensor_offsets,
+        slot_sizes,
+        baseline_bytes,
+        high_water_bytes,
+    })
 }
 
 fn validate_graph_plan(
@@ -4291,11 +4817,13 @@ fn validate_graph_plan(
         }
     }
 
+    let workspace = plan_workspace_arena(graph, &dynamic_tensors)?;
     Ok(GraphLayout {
         tensor_ids,
         _weight_tensor_ids: weight_tensor_ids,
         dynamic_tensors,
         scales,
+        workspace,
     })
 }
 
@@ -4546,24 +5074,38 @@ fn allocate_request_tensors(
     layout: &GraphLayout,
     resident_tensors: &BTreeMap<String, TensorAllocation>,
 ) -> Result<Vec<TensorAllocation>, QwenExecutionError> {
-    let terminal_outputs = terminal_output_tensor_ids(graph)?;
+    let workspace = layout
+        .workspace
+        .slot_sizes
+        .iter()
+        .map(|(&offset, &size)| {
+            session
+                .allocate_with_category(size, crate::AllocationCategory::Workspace)
+                .map(|buffer| (offset, buffer))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
     let mut allocations: Vec<TensorAllocation> = Vec::with_capacity(graph.tensor_metadata().len());
     for tensor in graph.tensor_metadata() {
-        let buffer = match tensor.backing() {
+        let (buffer, graph_view) = match tensor.backing() {
             QwenGraphTensorBacking::Owned => {
                 if layout.dynamic_tensors[tensor.id()] {
-                    let allocation_end = compact_terminal_allocation_end(
-                        graph.token_count(),
-                        graph.is_mtp(),
-                        tensor.id(),
-                        terminal_outputs,
-                        tensor.view(),
-                    )?
-                    .unwrap_or_else(|| tensor.view().end_offset());
-                    session.allocate_with_category(
-                        allocation_end,
-                        crate::AllocationCategory::Workspace,
-                    )?
+                    let offset = layout.workspace.tensor_offsets[tensor.id()].ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "dynamic tensor {} has no workspace arena offset",
+                            tensor.name()
+                        ))
+                    })?;
+                    (
+                        workspace
+                            .get(&offset)
+                            .ok_or_else(|| {
+                                QwenExecutionError::InvalidGraph(
+                                    "dynamic tensor requires an absent workspace slot".to_owned(),
+                                )
+                            })?
+                            .clone(),
+                        tensor.view().clone(),
+                    )
                 } else {
                     let resident = resident_tensors.get(tensor.name()).ok_or_else(|| {
                         QwenExecutionError::InvalidGraph(format!(
@@ -4571,24 +5113,20 @@ fn allocate_request_tensors(
                             tensor.name()
                         ))
                     })?;
-                    resident.buffer.clone()
+                    (resident.buffer.clone(), tensor.view().clone())
                 }
             }
-            QwenGraphTensorBacking::Alias { tensor_id } => allocations
-                .get(tensor_id)
-                .ok_or_else(|| {
+            QwenGraphTensorBacking::Alias { tensor_id } => {
+                let source = allocations.get(tensor_id).ok_or_else(|| {
                     QwenExecutionError::InvalidGraph(format!(
                         "alias tensor {} precedes its backing tensor",
                         tensor.name()
                     ))
-                })?
-                .buffer
-                .clone(),
+                })?;
+                (source.buffer.clone(), tensor.view().clone())
+            }
         };
-        allocations.push(TensorAllocation {
-            buffer,
-            graph_view: tensor.view().clone(),
-        });
+        allocations.push(TensorAllocation { buffer, graph_view });
     }
     Ok(allocations)
 }
@@ -5487,6 +6025,7 @@ mod tests {
         failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         pending_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         shutdown_calls: Arc<AtomicUsize>,
+        total_memory_bytes: Arc<AtomicU64>,
         available_memory_bytes: Arc<AtomicU64>,
     }
 
@@ -5497,6 +6036,7 @@ mod tests {
                 failure_kind: Arc::new(Mutex::new(None)),
                 pending_kind: Arc::new(Mutex::new(None)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
+                total_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
                 available_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
             }
         }
@@ -5568,6 +6108,10 @@ mod tests {
             Some(self.available_memory_bytes.load(Ordering::Relaxed))
         }
 
+        fn total_memory_bytes(&self) -> Option<u64> {
+            Some(self.total_memory_bytes.load(Ordering::Relaxed))
+        }
+
         fn supports(&self, _descriptor: &SemanticOpDescriptor) -> PrepareSupport {
             PrepareSupport::Supported
         }
@@ -5578,6 +6122,15 @@ mod tests {
         ) -> Result<AdapterResource, ExecutionError> {
             self.event("queue");
             Ok(AdapterResource::new(()))
+        }
+
+        fn create_queue_fence(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+        ) -> Result<Box<dyn crate::execution::ExecutionQueueFenceAdapter>, ExecutionError> {
+            self.event("queue-fence");
+            Ok(Box::new(RecorderFence))
         }
 
         fn allocate(
@@ -5843,6 +6396,18 @@ mod tests {
         kind: SemanticOpKind,
     }
 
+    struct RecorderFence;
+
+    impl crate::execution::ExecutionQueueFenceAdapter for RecorderFence {
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn token(&self) -> Result<u64, ExecutionError> {
+            Ok(1)
+        }
+    }
+
     impl ExecutionSubmissionAdapter for RecorderSubmission {
         fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
             self.wait(Duration::ZERO)
@@ -6055,6 +6620,80 @@ mod tests {
     }
 
     #[test]
+    fn workspace_interval_allocator_respects_inclusive_lifetimes_and_alignment() {
+        assert_eq!(align_workspace(255).unwrap(), 256);
+        assert_eq!(align_workspace(256).unwrap(), 256);
+        assert_eq!(align_workspace(257).unwrap(), 512);
+        assert!(align_workspace(u64::MAX).is_err());
+
+        let mut intervals = [
+            WorkspaceInterval {
+                tensor_id: 0,
+                first_node: 0,
+                last_node: 2,
+                size_bytes: 256,
+            },
+            WorkspaceInterval {
+                tensor_id: 1,
+                first_node: 0,
+                last_node: 1,
+                size_bytes: 512,
+            },
+            WorkspaceInterval {
+                tensor_id: 2,
+                first_node: 1,
+                last_node: 3,
+                size_bytes: 256,
+            },
+            WorkspaceInterval {
+                tensor_id: 3,
+                first_node: 2,
+                last_node: 2,
+                size_bytes: 256,
+            },
+        ];
+        let (offsets, slots, high_water) = allocate_workspace_intervals(&mut intervals).unwrap();
+        assert_eq!(offsets[&0], 0);
+        assert_eq!(offsets[&1], 256);
+        assert_eq!(offsets[&2], 768);
+        assert_eq!(offsets[&3], 256);
+        assert_eq!(slots, BTreeMap::from([(0, 256), (256, 512), (768, 256)]));
+        assert_eq!(high_water, 1_024);
+
+        let mut duplicate = [
+            WorkspaceInterval {
+                tensor_id: 7,
+                first_node: 0,
+                last_node: 0,
+                size_bytes: 256,
+            },
+            WorkspaceInterval {
+                tensor_id: 7,
+                first_node: 1,
+                last_node: 1,
+                size_bytes: 256,
+            },
+        ];
+        assert!(allocate_workspace_intervals(&mut duplicate).is_err());
+
+        let mut overflow = [
+            WorkspaceInterval {
+                tensor_id: 0,
+                first_node: 0,
+                last_node: 1,
+                size_bytes: u64::MAX - 255,
+            },
+            WorkspaceInterval {
+                tensor_id: 1,
+                first_node: 0,
+                last_node: 1,
+                size_bytes: 256,
+            },
+        ];
+        assert!(allocate_workspace_intervals(&mut overflow).is_err());
+    }
+
+    #[test]
     fn terminal_allocation_compaction_starts_at_the_measured_crossover() {
         let view = TensorView::contiguous(DType::Bf16, &[257, 7]).unwrap();
         let outputs = [4, 5];
@@ -6074,6 +6713,81 @@ mod tests {
             compact_terminal_allocation_end(255, false, 3, outputs, &view).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn chunk_candidates_cover_the_16_gib_boundary_and_non_aligned_prompts() {
+        let threshold = QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES;
+        assert_eq!(
+            qwen_prefill_chunk_candidates(threshold - 1, 10_001).unwrap(),
+            [512]
+        );
+        assert_eq!(
+            qwen_prefill_chunk_candidates(threshold, 10_001).unwrap(),
+            [512]
+        );
+        assert_eq!(
+            qwen_prefill_chunk_candidates(threshold + 1, 10_001).unwrap(),
+            [10_001, 8_192, 4_096, 2_048, 512]
+        );
+        assert_eq!(
+            qwen_prefill_chunk_candidates(threshold + 1, 511).unwrap(),
+            [511]
+        );
+        for prompt in [
+            1_u64, 3, 511, 512, 513, 2_047, 2_048, 2_049, 4_095, 4_096, 4_097, 8_191, 8_192, 8_193,
+            16_383, 16_384, 16_385, 65_535, 65_536, 65_537,
+        ] {
+            let small = qwen_prefill_chunk_candidates(threshold, prompt).unwrap();
+            assert_eq!(small, [prompt.min(512)], "small-device prompt {prompt}");
+
+            let large = qwen_prefill_chunk_candidates(threshold + 1, prompt).unwrap();
+            assert_eq!(large.first().copied(), Some(prompt.min(16_384)));
+            assert_eq!(large.last().copied(), Some(prompt.min(512)));
+            assert!(large.windows(2).all(|pair| pair[0] > pair[1]));
+        }
+        assert!(qwen_prefill_chunk_candidates(0, 1).is_err());
+        assert!(qwen_prefill_chunk_candidates(threshold, 0).is_err());
+    }
+
+    #[test]
+    fn device_memory_preflight_accepts_exact_required_boundary() {
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let layout = validate_graph_plan(&graph, &plan).expect("fixture layout validates");
+        let total = 32 * 1024 * 1024 * 1024;
+        let required = memory_estimate_from_layout(&graph, &layout, total)
+            .expect("fixture estimate")
+            .required_bytes();
+        let recorder = Arc::new(ExecutionRecorder::default());
+        recorder.total_memory_bytes.store(total, Ordering::Relaxed);
+        let session = ExecutionSession::new("recorder", recorder.clone());
+
+        recorder
+            .available_memory_bytes
+            .store(required - 1, Ordering::Relaxed);
+        assert!(preflight_device_memory(&session, &graph, &layout, false).is_err());
+        recorder
+            .available_memory_bytes
+            .store(required, Ordering::Relaxed);
+        preflight_device_memory(&session, &graph, &layout, false)
+            .expect("exact required bytes fit");
+        recorder
+            .available_memory_bytes
+            .store(required + 1, Ordering::Relaxed);
+        preflight_device_memory(&session, &graph, &layout, false).expect("one byte over fits");
+
+        let incremental = required
+            .checked_sub(model_resident_bytes(&graph, &layout).unwrap())
+            .unwrap();
+        recorder
+            .available_memory_bytes
+            .store(incremental - 1, Ordering::Relaxed);
+        assert!(preflight_device_memory(&session, &graph, &layout, true).is_err());
+        recorder
+            .available_memory_bytes
+            .store(incremental, Ordering::Relaxed);
+        preflight_device_memory(&session, &graph, &layout, true)
+            .expect("exact incremental request bytes fit after resident allocation");
     }
 
     #[test]
@@ -6116,6 +6830,33 @@ mod tests {
                 .expect("MTP target hidden rows are published")
                 .len(),
             3 * 2_560
+        );
+    }
+
+    #[test]
+    fn large_mtp_target_prefill_compacts_argmax_and_preserves_hidden_rows() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![13]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(256);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("large structural fixture provisions");
+
+        let output = core
+            .prefill_with_mtp_state(&vec![1; 256])
+            .expect("large MTP target prefill succeeds");
+        assert_eq!(output.token_ids(), [13]);
+        assert_eq!(
+            output
+                .hidden_states_bf16()
+                .expect("all large MTP target hidden rows are published")
+                .len(),
+            256 * 2_560
         );
     }
 
@@ -6448,7 +7189,7 @@ mod tests {
             Err(QwenExecutionError::InvalidRequest(_))
         ));
         assert!(matches!(
-            core.prefill(&[1, 2, 3, 4]),
+            core.prefill(&[1; 18]),
             Err(QwenExecutionError::InvalidRequest(_))
         ));
         assert!(matches!(
@@ -6466,6 +7207,34 @@ mod tests {
 
         let (mut short, _) = provisioned_core(Arc::new(ExecutionRecorder::default()));
         assert_eq!(short.prefill(&[1]).unwrap().committed_length(), 1);
+    }
+
+    #[test]
+    fn chunked_prefill_preserves_absolute_positions_and_publishes_only_the_final_chunk() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (mut core, _) = provisioned_core(Arc::clone(&recorder));
+        let output = core
+            .prefill(&[1, 2, 3, 4])
+            .expect("chunked prefill succeeds");
+        assert_eq!(output.committed_length(), 4);
+        assert_eq!(output.token_ids(), [7]);
+        assert_eq!(core.prefill_chunk_count, 2);
+        assert_eq!(core.committed_length, 4);
+        let preprocess = recorder.preprocess();
+        assert!(
+            preprocess
+                .iter()
+                .any(|entry| { *entry == (AttentionPreprocessPositionMode::Prefill, 0, 3) })
+        );
+        assert!(preprocess.iter().any(|entry| {
+            *entry == (AttentionPreprocessPositionMode::DecodeContinuation, 3, 1)
+        }));
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "linear:0:3:1")
+        );
     }
 
     #[test]
@@ -6562,6 +7331,9 @@ mod tests {
     #[test]
     fn resident_uploads_once_and_request_state_returns_to_resident() {
         let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let layout = validate_graph_plan(&graph, &plan).expect("fixture layout validates");
+        assert!(layout.workspace.baseline_bytes >= layout.workspace.high_water_bytes);
+        assert!(layout.workspace.high_water_bytes > 0);
         let lock = crate::parse_model_lock(include_bytes!(
             "../../../docs/models/locks/qwen3.5-4b-bf16.json"
         ))
@@ -6575,7 +7347,7 @@ mod tests {
             QwenResidentInner::provision(
                 Arc::clone(&session),
                 graph.clone(),
-                plan,
+                plan.clone(),
                 Duration::from_millis(1),
                 &source,
             )
@@ -6591,7 +7363,10 @@ mod tests {
             .expect("first fresh request provisions");
         let request_memory = session.memory_snapshot();
         assert!(request_memory.request_state().current_bytes() > 0);
-        assert!(request_memory.workspace().current_bytes() > 0);
+        assert_eq!(
+            request_memory.workspace().current_bytes(),
+            layout.workspace.high_water_bytes
+        );
         drop(request);
         let returned = session.memory_snapshot();
         assert_eq!(

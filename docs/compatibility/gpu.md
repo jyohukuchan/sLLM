@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-16
+> 最終更新: 2026-08-19
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -154,6 +154,12 @@ Phase 20では同じcanonical 2 targetで単一GGUFのQwen BF16、Gemma mixed NV
 shutdownもPASSした。Qwen BF16固定laneのR9700/V620 median TTFTは46.653/184.143 ms、median TPOTは
 26.689/29.685 msである。この証拠は固定artifact、single request、実行済みtargetへ限定し、性能倍率、別artifact、multi-GPUを
 主張しない。
+
+Phase 30ではexact R9700 `gfx1201`へnative E4M3FN readとwave32 causal-attention providerを限定採用した。
+gfx1201/gfx1030 × FP16/FP8の各17 caseは全出力一致、fallbackなし、cleanup 0で、gfx1201の全256 E4M3FN codeも
+software contractと一致した。Qwen3.5-4B BF16、4108 inputの3 process中央値はgfx1201 baseline比でTTFT 9.60%、
+prefill 9.72%、E2E 9.16%、decode throughput 7.86%改善した。これは`M=1`/`M>=32`、固定model/tupleのevidenceであり、
+matrix instruction、別RDNA4 SKU、別model、10000+ inputのfull-model実行を証明しない。
 
 Phase Xでは同じV620 `gfx1030`とR9700 `gfx1201`を外部llama.cpp local-subagent runtimeの比較対象にし、
 Qwen3.8-27B Q5_K_XL、Q5_1 KV、context 262,144でHIP/Vulkanを実行した。HIP buildで

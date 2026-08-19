@@ -140,6 +140,19 @@ pending、timeout、query failure、partial mutation、guard dropではoutput/st
 Qwen3.5 adapterはgraph lowering、attention preprocess、GDN/KV descriptor、Argmax/logits解釈だけを所有し、独自のprepared
 cache、pending submission enum、flush loop、completion wait policyを持たない。
 
+Phase 31ではQwen text prefillをrequest-localな連続chunkへ分割できるようにした。device total VRAMが16 GiB以下では512、
+16 GiB超では16K/8K/4K/2K/512を大きい順に、model-resident bytes、全request終了時のKV/GDN state、candidate行数の
+workspace high-water、`max(total VRAMの5%, 1 GiB)` reserveからdispatch前に一度だけ選ぶ。promptがcandidateより短ければ
+actual prompt行数を使い、allocation失敗後の小bucket retryは行わない。absolute position、full-attention KV、GDN stateは
+chunk間で継続し、中間chunkではLM head/Argmax/visible outputを省略する。中間chunk末尾は同一queueのterminal fenceで
+submissionを完了させてから次chunkへstateとworkspace slotを渡し、最終chunkだけ通常decodeへ接続する。
+
+Qwen dynamic intermediateはtensor別allocationの総和ではなく、graph use intervalをsubmission completion boundaryまで延長した
+liveness slotへ配置する。同時liveまたは同じcompletion segmentのtensorは別slotとし、backendがbuffer handle単位で保持する
+in-flight leaseをaliasで破らない。selected capacityに対するslot群は全chunkで再利用し、model weight、KV/GDN state、terminal
+outputはarenaへ入れない。10,001行では従来39,950,821,120 byte相当の個別workspaceに対してhigh-water
+5,278,049,280 byte、16,385行では65,448,547,584 byteに対して8,646,688,768 byteとなった。
+
 Gemma 4 adapterも同じplan/transition/segment/transactionを使い、48 layer・958 nodeのtensor/buffer layoutだけを所有する。
 immutable weight/constant/ordered queueは`Gemma4ResidentModel`が保持し、request ownerはtoken/position、workspace、連続BF16
 K/Vだけを持つ。prefill allocationをrequest capacity ownerとし、decode viewが収まる同名・同backing workspaceを再bindする。
@@ -200,6 +213,11 @@ KV cache は通常の tensor descriptor に加え、layer、K/V の分離また�
 
 schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、value/scale pointer、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。appendは新規BF16 K/Vだけを一度量子化し、K/Vと全scale planeの完了後にlogical lengthをatomicに公開する。causal attentionはFP16、packed FP8、packed NVFP4をstateから直接読み、request全体のFP16/BF16 mirrorを作らない。legacy create/readback ABIはFP16のまま維持し、additive create v2で低bit recipeを指定する。旧evidence readbackへ低bit stateを渡した場合はpacked bytesをFP16と誤認せず`unsupported encoding`でfail-closedにする。Paged Attention production backendは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
 
+Phase 31はBF16 weight graphとKV encodingの選択を分離し、Qwen CLI/serverへ`fp16`、dynamic `fp8`、
+`fp8-static`、`nvfp4`の明示設定を通した。省略時は引き続きFP16である。static FP8は明示選択時の固定K/V scale 1.0を
+descriptorへ入れ、zero scaleをfail-closedする。low-bit選択時は未検証のMTP/multimodal/MoE組合せを拒否し、別encodingへの
+fallbackを行わない。この公開選択はlow-bit KVの長context検証を可能にするが、全modelのdefault昇格や品質保証を意味しない。
+
 Phase 11でVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
 contiguous attention pointerを保つ`contiguous-resident` providerを追加した。logical capacity分を通常のdevice
 allocationで確保する。Phase 12のHot Aisle MI300X VFはVMM capability=trueだったが、開始時に固定した比較条件を
@@ -211,6 +229,13 @@ Phase 8のproduction causal attentionは、Qwen3.5のhead dim 256を一workgroup
 再計算とthread-0 softmaxを一pass online softmaxへ置き換えたFA2-style pathである。opaque KV owner、
 virtual-contiguous FP16 K/V pointer、token-major layout、GQA mappingは変更しない。これはupstream
 FlashAttention-2そのもの、Paged Attention、RDNA4向けFA3-likeをclaimしない。FA3-likeは別の将来taskである。
+
+Phase 30は同じsemantic op、opaque KV layout、256-thread launch ABIの内側にexact gfx1201 providerを追加した。
+`query_count=1`または`query_count>=32`ではwave32 shuffleで8個のQK partialを固定tree合成し、key当たりのblock同期を
+約11回から3回へ減らす。FP8/NVFP4 scaleのE4M3FN readはgfx1201 native scalar conversionを使う。`query_count=2..31`、
+gfx1030、その他targetは従来providerを維持する。targetとquery-count境界はruntime dispatch metadataとactual kernel launchで
+同じ判定を使い、prompt/token/model固有値をrouting keyにしない。public API、KV encoding、state publication、softmax式、
+FP32 accumulator、BF16 RNE outputは変えない。これはmatrix instructionを使うFlashAttention providerのclaimではない。
 
 ## Generation service境界
 
@@ -259,6 +284,12 @@ Gemma raw-text transcript、weight plan、exact HIP sessionを一度loadする�
 監査値はlogical KV capacity、mapped token capacity、physical page bytes、K/V committed bytes、full/linear
 layer数、HIP submission、fallback、request/workspace allocationとcleanupを含む。成功responseはexact targetの
 HIP dispatchのみ、fallbackなし、整合したphysical metadataを満たさなければfail-closedにする。
+
+Phase 31以降のQwen監査値はこれにselected prefill chunk capacity/count、device total/available/required bytes、
+model-resident/request-state/safety-reserve bytes、workspace arena high-waterと旧個別allocation合計も加える。chunkはwire上の
+request、usage、SSE eventへ露出せず、OpenAI usageのprompt token数はrender後の全入力、completion token数は生成分だけを数える。
+CLIの初回placementはfull layout requiredを未確保のavailable bytesへ比較する。serverはmodel residentを起動時に確保済みなので、
+request admissionでは`full required - graph model resident`をcurrent availableへ比較し、full/incremental requiredの両方を監査する。
 
 初期serverは単一GPU runtimeである。mixed-GPU hostでは`ROCR_VISIBLE_DEVICES=<stable GPU UUID>`で対象を1台だけ
 可視化し、serverには論理device 0を渡す。HIP current deviceはthread-localなので、複数GPUを可視化したまま

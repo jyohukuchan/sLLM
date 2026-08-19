@@ -319,6 +319,23 @@ actual 491,520 context/slot、max output 8,192へ同期し、read-only/workspace
 compatibility/debug経路に限定する。このagent-layer変更はllama.cpp build、model、GPU/KV/MTP tupleを変更しない。
 運用と実測は[Local Qwen3.8 subagent](../development/local-qwen-subagent.md)を正とする。
 
+### 2026-08-19 Phase 30 RDNA4 attention/KV tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、LLVM 23、
+Code Object V6、wave32 tupleで、canonical R9700 exact `gfx1201`とV620 exact `gfx1030`をtarget別buildした。
+gfx1201ではnative E4M3FN readの`v_cvt_f32_fp8`とwave shuffle providerをactual dispatchし、gfx1030では
+software decode/scalar baselineを維持した。両targetのFP16/FP8各17 case、gfx1201全256-code probe、
+Qwen3.5-4B BF16 full modelをHIP-only、fallbackなし、cleanup 0で実行した。software lifecycleは`experimental`のままで、
+別ROCm/driver/kernel、別SKU、matrix attention、長時間運転へ一般化しない。
+
+### 2026-08-19 Phase 31 chunked prefill tuple
+
+Phase 30と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、
+LLVM 23、Code Object V6、wave32 tupleで、canonical R9700 exact `gfx1201`とV620 exact `gfx1030`をtarget別buildした。
+Qwen3.5-4B BF16 GGUFの10,001-token FP16/dynamic FP8を両target、16,385-token 2-chunk FP16/dynamic FP8を
+gfx1201でHIP-only、fallbackなし、cleanup 0として実行し、gfx1201 OpenAI non-stream/SSEも10k+ promptでPASSした。
+software lifecycleは`experimental`のままで、別runtime/driver/kernel、別artifact、品質、長時間運転へ一般化しない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報
