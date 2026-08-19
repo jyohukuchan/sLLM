@@ -241,17 +241,20 @@
   stable dispatch keyから定義する。
 - dispatch keyはexact target、dtype/encoding、semantic op、shape/layout/alignment、request mode、mechanism上意味のあるcontext境界等で
   構成する。benchmark case名、prompt内容、実測後の結果、個別token列をkeyにしたoverfit分岐は作らない。
-- candidateは次の全条件を満たすscope `S`へ採用できる。
-  1. `S`の代表full-model caseの少なくとも一つがbaseline比5%以上改善する。
-  2. `S`に属する全validation caseでstableな悪化を残さない。
-  3. `S`外はbaseline providerへrouteされ、provider identityとselection overhead込みの性能にstableな悪化がない。
-  4. correctness、fallback、resource、cleanup条件を全経路で満たす。
+- performance candidateに固定の改善率thresholdまたは全pattern一律非悪化条件を置かない。担当AIがscope `S`ごとに、
+  operator/full-modelの改善量と絶対時間、測定confidence、改善/悪化の一貫性、利用頻度と対象範囲、correctness、resource、
+  target分岐、実装・検証・将来保守費用、既存architectureとの整合、将来の再利用性とrevert容易性を総合し、採用が妥当かを決める。
+- 担当AIは採否理由、既知の改善と悪化、測定限界、採用scope、baseline complement、再検討条件をplan/history/bounded summaryへ
+  明記する。局所改善がfull-model noise未満でも、bit exact、全scope一貫改善、実装が単純、hardware-native化や将来利用価値が高い等の
+  理由があれば採用できる。反対に大きな局所改善でも、寄与が小さく保守費用や分岐が大きければ棄却できる。
+- correctness/security defect、原因不明の数値差、fallback/resource/cleanup破壊、unsupported targetへの誤routeは引き続きblockerとする。
+  performance上のstableな悪化は自動blockerではないが、隠さず定量化し、scope分離または利益とのtrade-offを説明する。
 - `shared adoption`は`S`が固定matrix全体の場合、`scoped adoption`は`S`がその真部分集合の場合とする。管理性のためsharedを優先するが、
-  scope外のcandidate単体悪化を理由に、安全に分離できる5%以上のscoped improvementを棄却しない。
+  scope外のcandidate単体悪化を理由に、安全に分離できて採用利益が保守費用を上回るscoped improvementを棄却しない。
 - 数値範囲やcontext閾値をkeyにする場合は境界`B-1/B/B+1`とscope内の複数代表値を検証する。単一benchmark点しか裏付けないscopeは
   production採用しない。scopeのkey、代表case、境界、baseline complementをfinal performance run前にmanifestへ固定する。
-- Phase 29だけは2026-08-18のユーザー明示決定により、上記1の5% thresholdをfull-modelではなくcommitted decode step内の
-  GDN recurrent family全kernelのdevice時間へ適用する。full-model値はdiagnosticとし、このPhase固有例外を他Phaseへ一般化しない。
+- 2026-08-19以前のPhaseで使った5% thresholdとPhase 29のGDN-only例外は当時のhistorical decisionとして維持するが、
+  新規採否およびユーザーが明示的に再評価を求めた候補へは上記の担当AI裁量規則を適用する。
 - 数値実装変更は[数値・出力影響変更台帳](../compatibility/numerical-output-changes.md)へ一元記録する。変更前とtoken列が異なっても、
   real-number semanticを維持し、差の原因が説明可能で、解析上の誤差boundまたは期待誤差が非増加となるN1変更は数値gateを自動承認する。
   既存tolerance内でも誤差が僅かに増加するN2変更は人間判断とし、原因不明・非有界・非決定のN3変更は採用しない。
@@ -989,6 +992,7 @@ candidateを再確認した。
 | 完了・採用 | Phase 29 | GDN useful-workgroup並列化 | 解析的誤差低減N1としてtoken差を記録し、GDN性能条件を満たすshared wave reductionを採用した |
 | 完了・限定採用 | Phase 30 | RDNA4 native attention/KV hardware-path最適化 | gfx1201 native FP8 readとwave providerをM=1/M>=32へ採用、append encodeとmatrix候補は不採用 |
 | 完了・採用 | Phase 31 | low-bit KV通常運用向けchunked prefill・workspace memory基盤 | arenaを約86.79%縮小し、両targetの10k+ FP16/FP8とgfx1201の16,385-token 2-chunkを成立させた |
+| 完了・限定採用 | Phase 32 | native FP8 KV append encode再検証 | 担当AI裁量で低保守費用のgfx1201 native scalarを採用。append 51.52%短縮、packedとgfx1030 native化は不採用 |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -1008,6 +1012,14 @@ FP16/dynamic FP8 2-chunkをHIP-onlyでPASSした。CLI/serverへ明示的なFP16
 defaultはFP16を維持する。Paged Attention、native FP8 append encode再検証、low-bit KVのdefault昇格は含めない。
 詳細なacceptanceと結果は[Phase 31 archive](archive/2026/08/11-20/phase31-chunked-prefill-memory-foundation.md)および
 [bounded summary](../../ci/matrix/phase31-chunked-prefill-summary-v1.json)を正とする。
+Phase 31後の実long-context通常経路でnative FP8 append encodeをPhase 32として再検証した。exact gfx1201の
+software/native scalar/native packedは全BF16 codeおよび19 token境界でbit exactとなった。固定5%規則の廃止後に担当AI裁量で再評価し、
+既存kernel/workgroup/symbol/ABIを維持してcompile-time helperだけを変えるC1 native scalarをdynamic/static FP8 appendへ採用した。
+C1はoperatorを19.40〜65.22%、production 10,001-token append familyを51.52%短縮した。full-model寄与はnoise以下で速度claimに使わないが、
+一貫改善、N0、低い保守費用、将来利用価値が採用を正当化すると判断した。C2 packedは追加workgroup/store/tail複雑性のため不採用、
+gfx1030 software route、default FP16、API/KV formatは維持した。low-bit KV default昇格、Paged Attention、TurboQuantは含めない。
+詳細は[Phase 32 archive](archive/2026/08/11-20/phase32-native-fp8-kv-append-revalidation.md)
+および[bounded summary](../../ci/matrix/phase32-native-fp8-append-summary-v1.json)を正とする。
 その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
 multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、

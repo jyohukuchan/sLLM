@@ -387,6 +387,20 @@ low-bit品質、別model/SKU/tupleへ一般化しない。KV providerはvirtual-
 MTP/multimodal/MoE low-bit、default FP8化は含まない。詳細は
 [Phase 31 summary](../../ci/matrix/phase31-chunked-prefill-summary-v1.json)を正とする。
 
+### 2026-08-19 Phase 32 native FP8 append evidence
+
+canonical R9700 UUID `GPU-a8e9ddefa2d60f55`のexact `gfx1201`で、dynamic/static FP8 KV appendの
+最終E4M3FN encodeをnative scalar conversionへlowerした。production code objectは`v_cvt_pk_fp8_f32`を2命令含み、
+canonical V620 UUID `GPU-76a08c022586fed6`のexact `gfx1030` code objectには同命令がない。kernel symbol、256-thread
+workgroup、grid、scale、store、KV layout/publication、public ABIは共通のままである。
+
+全BF16 codeをK/Vで一巡したprototypeと19 token境界はpayload/scale mismatch 0、production attention oracleは
+gfx1201/gfx1030 × dynamic/static FP8の68/68 caseをPASSした。gfx1201の10,001-token production append familyは
+4,520,428 nsから2,191,564 nsへ51.52%短縮したが、full-model寄与は通常のtiming noise以下なのでuser-visible speedupを
+claimしない。gfx1201 10,001/16,385、gfx1030 10,001 inputはtoken `[1228, 1228]`、HIP-only、fallbackなし、cleanup 0だった。
+native packed/128-thread候補、gfx1030 native化、default FP8化は採用していない。詳細は
+[Phase 32 summary](../../ci/matrix/phase32-native-fp8-append-summary-v1.json)を正とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

@@ -1,0 +1,175 @@
+{
+  "schema_version": "phase32-native-fp8-append-summary-v1",
+  "state": "COMPLETE",
+  "decision": "ADOPTED_GFX1201_NATIVE_SCALAR",
+  "recorded_at": "2026-08-19",
+  "identity": {
+    "source_base_commit": "3b38864d1c40ec54a1b1de5459cfdbc36dde44ae",
+    "rocm": "7.14.0",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "gfx1201_uuid": "GPU-a8e9ddefa2d60f55",
+    "gfx1030_uuid": "GPU-76a08c022586fed6",
+    "baseline_gfx1201_cli_sha256": "4d20eabf91e9c2c8e6c7117c04ccbb37dcce90e0e899ad078e7f983a72999156",
+    "adopted_gfx1201_cli_sha256": "532f98a8941e476dfc2e8558a49912bf5f059ba24f0f53bcea47677c18916169",
+    "adopted_gfx1030_cli_sha256": "b577069638625c6a38b88b051305ffcf13bc09bb1d4b052df49d6d00b806ed44",
+    "adopted_gfx1201_server_sha256": "94127af51acce0dee07ee9bc6934f8b41b4109f94429456a1ee166f99ffb4306",
+    "production_kernel_source_sha256": "3fd125dbe47d302b38f6fc5d0d669863df74b320328fe58cbacc107c52271de2",
+    "probe_source_sha256": "347a1b9ac953c674e182583c27b90dd5868ed6691dc0499801b56bc9d51675c7",
+    "gfx1201_probe_binary_sha256": "125de641a3ca333b965af7ce5cdeba930d00298c3976f370d688c81ddf8a459d",
+    "gfx1030_probe_binary_sha256": "a54d510ce06dd6f600524f1ffef98bd38adef66f0268bd77e3575d46d2cedad6",
+    "gfx1201_probe_raw_sha256": "ef2e53bfa68fa626e31cd2e6b2e20de379565d66624d4b5fc953ae49cfd01226",
+    "gfx1030_probe_raw_sha256": "abe4665e609081adbdcfc59621d70ddcbd9448c07b53c76c7d054ea28385fd14",
+    "gfx1201_device_code_sha256": "9d03fe6ef0bbe5e9c900fd0f572be998ae9325c1e8466d1f42a010e5b3ca7dec",
+    "f1_kernel_stats_sha256": "a8cf873189cb0695c79f40706fcb0f24fef79c5f77c4f9cfa6f543961314638e",
+    "f2_kernel_stats_sha256": "0556c50b14dd049a5ee9b6abd1d49fd41182fa40f0e5e8e5cf5362cb14a48eea",
+    "adopted_gfx1201_device_code_sha256": "472b8b8916ac75c8a5eb6b54cefdc79b03e65622c1e3aa5fa03010dcc597098f",
+    "adopted_gfx1030_device_code_sha256": "8913ea62f4b6a185c37a27b4b05c293e4683595b780f94f4a54a24999de8e67d",
+    "adopted_f1_kernel_stats_sha256": "3b7d933cecf9c6ba5f47e3825967134ecf1408617201d08a901c6cf878f9993e"
+  },
+  "policy": {
+    "decision_authority": "assigned-ai-contextual-judgment",
+    "fixed_performance_threshold": false,
+    "universal_non_regression_gate": false,
+    "production_candidate_integrated": true,
+    "production_source_changed": true,
+    "default_kv_cache_encoding": "fp16",
+    "gfx1201_provider": "native-scalar",
+    "gfx1030_provider": "software",
+    "adoption_rationale": [
+      "The native scalar path is bit exact across the exhaustive codec fixture and every measured append boundary.",
+      "Every gfx1201 operator row improved by at least 19.40 percent and the production 10001-token append family improved by 51.52 percent.",
+      "The implementation keeps the existing kernel, 256-thread workgroup, symbol, ABI, grid, scale recipe, and storage layout; only exact gfx1201 code generation selects the native conversion.",
+      "The full-model saving is currently below timing noise, but the implementation and maintenance cost are small and the hardware-native primitive remains useful as batching and low-bit KV use expand."
+    ]
+  },
+  "candidate_decisions": {
+    "native_scalar": "ADOPTED_EXACT_GFX1201_DYNAMIC_AND_STATIC_FP8_APPEND",
+    "native_packed": "REJECTED_ADDITIONAL_WORKGROUP_STORE_AND_TAIL_COMPLEXITY_NOT_JUSTIFIED",
+    "gfx1030": "RETAINED_SOFTWARE_BASELINE"
+  },
+  "build": {
+    "gfx1201_compile": true,
+    "gfx1030_compile": true,
+    "wrong_target_load_rejected": true,
+    "wrong_target_exit_code": 1,
+    "wrong_target_error": "device kernel image is invalid",
+    "production_gfx1201_native_instruction_occurrences": 2,
+    "production_gfx1030_native_instruction_occurrences": 0,
+    "production_oracle_rows": 4,
+    "production_oracle_cases_passed": 68,
+    "production_oracle_cases_total": 68
+  },
+  "operator": {
+    "gfx1201": {
+      "records": 120,
+      "mismatch_sum": 0,
+      "warmups": 5,
+      "measured": 31,
+      "native_instruction": "v_cvt_pk_fp8_f32",
+      "native_instruction_occurrences": 8,
+      "providers": ["software", "native-scalar", "native-packed"],
+      "encodings": ["fp8-dynamic", "fp8-static"],
+      "token_counts": [1, 31, 32, 33, 255, 256, 257, 511, 512, 513, 2047, 2048, 2049, 9999, 10000, 10001, 16383, 16384, 16385],
+      "exhaustive_bf16_codes_across_key_value": 65536,
+      "native_scalar_min_time_reduction_percent": 19.405195292424818,
+      "native_scalar_max_time_reduction_percent": 65.22445993729646,
+      "native_packed_min_time_reduction_percent": 19.588084041605573,
+      "native_packed_max_time_reduction_percent": 82.2630756176499
+    },
+    "gfx1030": {
+      "records": 38,
+      "mismatch_sum": 0,
+      "providers": ["software"],
+      "native_available": false,
+      "encodings": ["fp8-dynamic", "fp8-static"],
+      "token_counts": [1, 31, 32, 33, 255, 256, 257, 511, 512, 513, 2047, 2048, 2049, 9999, 10000, 10001, 16383, 16384, 16385]
+    },
+    "primary_rows": [
+      {"tokens": 256, "encoding": "fp8-dynamic", "software_median_ns": 34005.217, "native_scalar_median_ns": 27347.688, "time_reduction_percent": 19.577963581294007},
+      {"tokens": 256, "encoding": "fp8-static", "software_median_ns": 33430.655, "native_scalar_median_ns": 26866.438, "time_reduction_percent": 19.635322729991383},
+      {"tokens": 10001, "encoding": "fp8-dynamic", "software_median_ns": 519802.988, "native_scalar_median_ns": 191120.997, "time_reduction_percent": 63.23203186357983},
+      {"tokens": 10001, "encoding": "fp8-static", "software_median_ns": 488002.986, "native_scalar_median_ns": 174961.001, "time_reduction_percent": 64.14755523647554},
+      {"tokens": 16384, "encoding": "fp8-dynamic", "software_median_ns": 868165.970, "native_scalar_median_ns": 359963.000, "time_reduction_percent": 58.53753631923628},
+      {"tokens": 16384, "encoding": "fp8-static", "software_median_ns": 811886.013, "native_scalar_median_ns": 332643.002, "time_reduction_percent": 59.02836153429336},
+      {"tokens": 16385, "encoding": "fp8-dynamic", "software_median_ns": 863766.015, "native_scalar_median_ns": 358321.995, "time_reduction_percent": 58.516312429819315},
+      {"tokens": 16385, "encoding": "fp8-static", "software_median_ns": 808125.019, "native_scalar_median_ns": 332242.996, "time_reduction_percent": 58.88717856908722}
+    ]
+  },
+  "production_append": {
+    "target": "gfx1201",
+    "input_tokens": 10001,
+    "append_dispatches": 16,
+    "software_total_device_ns": 4520428,
+    "native_scalar_total_device_ns": 2191564,
+    "time_reduction_percent": 51.518661507,
+    "baseline_share_percent": 0.015226891,
+    "candidate_full_model_saving_is_below_timing_noise": true
+  },
+  "full_model": [
+    {
+      "case": "F1",
+      "target": "gfx1201",
+      "input_tokens": 10001,
+      "chunk_tokens": 10001,
+      "chunk_count": 1,
+      "timing_ns": 29687137652,
+      "append_dispatches": 16,
+      "append_total_device_ns": 4520428,
+      "append_share_percent": 0.015226891,
+      "perfect_elimination_ceiling_percent": 0.015226891,
+      "generated_token_ids": [1228, 1228],
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    {
+      "case": "F2",
+      "target": "gfx1201",
+      "input_tokens": 16385,
+      "chunk_tokens": 16384,
+      "chunk_count": 2,
+      "timing_ns": 64390874518,
+      "append_dispatches": 24,
+      "append_total_device_ns": 7446067,
+      "append_share_percent": 0.011563854,
+      "perfect_elimination_ceiling_percent": 0.011563854,
+      "generated_token_ids": [1228, 1228],
+      "fallback": false,
+      "cleanup_failures": 0
+    }
+  ],
+  "production_validation": [
+    {"target": "gfx1201", "input_tokens": 10001, "chunk_tokens": 10001, "chunk_count": 1, "timing_ns": 29438538893, "generated_token_ids": [1228, 1228], "fallback": false, "cleanup_failures": 0},
+    {"target": "gfx1201", "input_tokens": 16385, "chunk_tokens": 16384, "chunk_count": 2, "timing_ns": 64415333818, "generated_token_ids": [1228, 1228], "fallback": false, "cleanup_failures": 0},
+    {"target": "gfx1030", "input_tokens": 10001, "chunk_tokens": 10001, "chunk_count": 1, "timing_ns": 106513880962, "generated_token_ids": [1228, 1228], "fallback": false, "cleanup_failures": 0}
+  ],
+  "service": {
+    "target": "gfx1201",
+    "kv_cache_encoding": "fp8",
+    "prompt_tokens": 10013,
+    "non_stream_content": "It",
+    "non_stream_completion_tokens": 1,
+    "sse_content": "It",
+    "sse_completion_tokens": 1,
+    "sse_done": true,
+    "requests_completed": 2,
+    "fallbacks": 0,
+    "shutdown_current_bytes": 0,
+    "shutdown_request_state_bytes": 0,
+    "shutdown_workspace_bytes": 0,
+    "cleanup_failures": 0
+  },
+  "numerical_policy": {
+    "classification": "N0_ADOPTED_BIT_EXACT",
+    "payload_and_scale_mismatches": 0,
+    "production_output_changed": false,
+    "numerical_registry_update_required": true
+  },
+  "limitations": [
+    "The adopted scalar path shortens a small kernel family; the expected full-model saving is below ordinary end-to-end timing noise and is not claimed as a user-visible speedup.",
+    "Operator providers were timed in the same process in fixed software, native-scalar, native-packed order rather than sample-interleaved; every scalar row nevertheless improved by at least 19.40 percent.",
+    "Native packed remains prototype evidence only because its extra 128-thread workgroup, packed store, alignment, and odd-tail maintenance are not justified by the current end-to-end contribution.",
+    "The adopted path is limited to exact gfx1201 dynamic/static FP8 append; gfx1030, FP16, and NVFP4 behavior remain unchanged."
+  ]
+}

@@ -55,6 +55,20 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-19-P32: gfx1201 native FP8 KV append encode
+
+- scope: exact `gfx1201`のdynamic/static FP8 KV append。gfx1030、FP16、NVFP4は既存経路を維持する。
+- baseline: scale後のF32値をsoftware binary searchでOCP E4M3FNへRNE/saturation encodeする。
+- candidate: NaN、Inf、signed zero、448 saturationを同じcontractへ明示補正し、通常finite値を
+  `__builtin_amdgcn_cvt_pk_fp8_f32(value, value, 0, false)`でencodeする。kernel、workgroup、grid、scale、store、KV formatは不変。
+- 分類: **N0**。全65,536 BF16 codeをK/Vで一巡したdynamic/static fixtureと19 token境界でpayload byte／F32 scale bit mismatch 0。
+  production attention oracleもgfx1201/gfx1030 × dynamic/static FP8の68/68 caseをPASSした。
+- output影響: 測定上もcontract上も変更なし。生成tokenはgfx1201 10,001/16,385、gfx1030 10,001 inputですべて`[1228, 1228]`。
+- 決定: 担当AI裁量でC1 native scalarを限定採用。C2 packedはworkgroup/store/tail複雑性のため不採用。default KVはFP16のまま。
+- rollback: `float_to_e4m3fn_fp8_append` callをsoftware `float_to_e4m3fn`へ戻す。public ABI、state migration、artifact変換は不要。
+- 詳細: [Phase 32履歴](../history/2026/08/11-20/phase32-native-fp8-kv-append-revalidation.md)、
+  [bounded summary](../../ci/matrix/phase32-native-fp8-append-summary-v1.json)。
+
 ### OUT-2026-08-19-P31: chunked prefillとworkspace arena
 
 - scope: Qwen3.5 dense BF16 weight graph、text prefill、FP16/dynamic FP8/static FP8/NVFP4 KV、gfx1030/gfx1201。

@@ -336,6 +336,14 @@ Qwen3.5-4B BF16 GGUFの10,001-token FP16/dynamic FP8を両target、16,385-token 
 gfx1201でHIP-only、fallbackなし、cleanup 0として実行し、gfx1201 OpenAI non-stream/SSEも10k+ promptでPASSした。
 software lifecycleは`experimental`のままで、別runtime/driver/kernel、別artifact、品質、長時間運転へ一般化しない。
 
+### 2026-08-19 Phase 32 native FP8 append tuple
+
+Phase 31と同じOS/kernel/driver、ROCm 7.14.0、LLVM 23、Code Object V6、wave32 tupleでexact gfx1201/gfx1030を
+target別buildした。gfx1201 FP8 append code objectだけが`v_cvt_pk_fp8_f32`を含み、gfx1030はsoftware encodeを維持した。
+dynamic/static FP8 production oracle 68/68 caseと、Qwen3.5-4B BF16 GGUFのgfx1201 10,001/16,385、gfx1030
+10,001 inputをHIP-only、fallbackなし、cleanup 0で実行した。これは同じtupleの限定証拠であり、別ROCm/compiler、
+gfx1200、別RDNA4 SKUへnative instruction availabilityまたは性能を一般化しない。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

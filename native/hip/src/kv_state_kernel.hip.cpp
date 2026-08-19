@@ -111,6 +111,28 @@ __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) {
   return static_cast<uint8_t>(sign | (upper_selected ? upper : lower));
 }
 
+__device__ __forceinline__ uint8_t
+float_to_e4m3fn_fp8_append(const float value) {
+#if defined(__gfx1201__)
+  if (isnan(value)) {
+    return UINT8_C(0x7f);
+  }
+  const uint8_t sign = signbit(value) ? UINT8_C(0x80) : 0U;
+  const float magnitude = fabsf(value);
+  if (magnitude == 0.0F) {
+    return sign;
+  }
+  if (!isfinite(magnitude) || magnitude >= 448.0F) {
+    return static_cast<uint8_t>(sign | UINT8_C(0x7e));
+  }
+  const uint32_t packed = static_cast<uint32_t>(
+      __builtin_amdgcn_cvt_pk_fp8_f32(value, value, 0, false));
+  return static_cast<uint8_t>(packed & UINT32_C(0xff));
+#else
+  return float_to_e4m3fn(value);
+#endif
+}
+
 __device__ __forceinline__ uint8_t float_to_e2m1(float value) {
   constexpr float positive[8] = {0.0F, 0.5F, 1.0F, 1.5F,
                                  2.0F, 3.0F, 4.0F, 6.0F};
@@ -148,9 +170,12 @@ extern "C" __global__ __launch_bounds__(
                                                          start_position,
                                                      const uint32_t head_count,
                                                      const uint32_t head_dim,
-                                                     const float fixed_key_scale,
-                                                     const float fixed_value_scale,
-                                                     const uint32_t static_mode) {
+                                                     const float
+                                                         fixed_key_scale,
+                                                     const float
+                                                         fixed_value_scale,
+                                                     const uint32_t
+                                                         static_mode) {
   const uint64_t row = blockIdx.x;
   if (row >= static_cast<uint64_t>(token_count) * head_count) {
     return;
@@ -169,10 +194,10 @@ extern "C" __global__ __launch_bounds__(
        current += blockDim.x) {
     const float key_value = bf16_to_float(key_input[input_base + current]);
     const float value_value = bf16_to_float(value_input[input_base + current]);
-    key_maximum = fmaxf(key_maximum,
-                        isfinite(key_value) ? fabsf(key_value) : 0.0F);
-    value_maximum = fmaxf(value_maximum,
-                          isfinite(value_value) ? fabsf(value_value) : 0.0F);
+    key_maximum =
+        fmaxf(key_maximum, isfinite(key_value) ? fabsf(key_value) : 0.0F);
+    value_maximum =
+        fmaxf(value_maximum, isfinite(value_value) ? fabsf(value_value) : 0.0F);
   }
   key_maxima[dimension] = key_maximum;
   value_maxima[dimension] = value_maximum;
@@ -186,10 +211,10 @@ extern "C" __global__ __launch_bounds__(
     }
     __syncthreads();
   }
-  const float key_scale = static_mode != 0U
-                              ? fixed_key_scale
-                              : (key_maxima[0] == 0.0F ? 1.0F
-                                                       : key_maxima[0] / 448.0F);
+  const float key_scale =
+      static_mode != 0U
+          ? fixed_key_scale
+          : (key_maxima[0] == 0.0F ? 1.0F : key_maxima[0] / 448.0F);
   const float value_scale =
       static_mode != 0U
           ? fixed_value_scale
@@ -200,9 +225,9 @@ extern "C" __global__ __launch_bounds__(
   }
   for (uint32_t current = dimension; current < head_dim;
        current += blockDim.x) {
-    key_output[output_base + current] = float_to_e4m3fn(
+    key_output[output_base + current] = float_to_e4m3fn_fp8_append(
         bf16_to_float(key_input[input_base + current]) / key_scale);
-    value_output[output_base + current] = float_to_e4m3fn(
+    value_output[output_base + current] = float_to_e4m3fn_fp8_append(
         bf16_to_float(value_input[input_base + current]) / value_scale);
   }
 }

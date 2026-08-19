@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase32-native-fp8-append-summary-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "state", "decision", "recorded_at", "identity", "policy", "candidate_decisions", "build", "operator", "production_append", "full_model", "production_validation", "service", "numerical_policy", "limitations"],
+  "properties": {
+    "schema_version": {"const": "phase32-native-fp8-append-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "ADOPTED_GFX1201_NATIVE_SCALAR"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {
+      "type": "object",
+      "required": ["source_base_commit", "rocm", "gguf_sha256", "derived_lock_sha256", "model_fingerprint", "gfx1201_uuid", "gfx1030_uuid", "baseline_gfx1201_cli_sha256", "adopted_gfx1201_cli_sha256", "adopted_gfx1030_cli_sha256", "adopted_gfx1201_server_sha256", "production_kernel_source_sha256", "probe_source_sha256", "gfx1201_probe_binary_sha256", "gfx1030_probe_binary_sha256", "gfx1201_probe_raw_sha256", "gfx1030_probe_raw_sha256", "gfx1201_device_code_sha256", "f1_kernel_stats_sha256", "f2_kernel_stats_sha256", "adopted_gfx1201_device_code_sha256", "adopted_gfx1030_device_code_sha256", "adopted_f1_kernel_stats_sha256"]
+    },
+    "policy": {
+      "type": "object",
+      "required": ["decision_authority", "fixed_performance_threshold", "universal_non_regression_gate", "production_candidate_integrated", "production_source_changed", "default_kv_cache_encoding", "gfx1201_provider", "gfx1030_provider", "adoption_rationale"]
+    },
+    "candidate_decisions": {"type": "object", "required": ["native_scalar", "native_packed", "gfx1030"]},
+    "build": {"type": "object", "required": ["gfx1201_compile", "gfx1030_compile", "wrong_target_load_rejected", "wrong_target_exit_code", "wrong_target_error", "production_gfx1201_native_instruction_occurrences", "production_gfx1030_native_instruction_occurrences", "production_oracle_rows", "production_oracle_cases_passed", "production_oracle_cases_total"]},
+    "operator": {
+      "type": "object",
+      "required": ["gfx1201", "gfx1030", "primary_rows"],
+      "properties": {
+        "gfx1201": {"type": "object", "required": ["records", "mismatch_sum", "warmups", "measured", "native_instruction", "native_instruction_occurrences", "providers", "encodings", "token_counts", "exhaustive_bf16_codes_across_key_value", "native_scalar_min_time_reduction_percent", "native_scalar_max_time_reduction_percent", "native_packed_min_time_reduction_percent", "native_packed_max_time_reduction_percent"]},
+        "gfx1030": {"type": "object", "required": ["records", "mismatch_sum", "providers", "native_available", "encodings", "token_counts"]},
+        "primary_rows": {"type": "array", "minItems": 8, "items": {"type": "object", "required": ["tokens", "encoding", "software_median_ns", "native_scalar_median_ns", "time_reduction_percent"]}}
+      }
+    },
+    "production_append": {"type": "object", "required": ["target", "input_tokens", "append_dispatches", "software_total_device_ns", "native_scalar_total_device_ns", "time_reduction_percent", "baseline_share_percent", "candidate_full_model_saving_is_below_timing_noise"]},
+    "full_model": {"type": "array", "minItems": 2, "items": {"type": "object", "required": ["case", "target", "input_tokens", "chunk_tokens", "chunk_count", "timing_ns", "append_dispatches", "append_total_device_ns", "append_share_percent", "perfect_elimination_ceiling_percent", "generated_token_ids", "fallback", "cleanup_failures"]}},
+    "production_validation": {"type": "array", "minItems": 3, "items": {"type": "object", "required": ["target", "input_tokens", "chunk_tokens", "chunk_count", "timing_ns", "generated_token_ids", "fallback", "cleanup_failures"]}},
+    "service": {"type": "object", "required": ["target", "kv_cache_encoding", "prompt_tokens", "non_stream_content", "non_stream_completion_tokens", "sse_content", "sse_completion_tokens", "sse_done", "requests_completed", "fallbacks", "shutdown_current_bytes", "shutdown_request_state_bytes", "shutdown_workspace_bytes", "cleanup_failures"]},
+    "numerical_policy": {"type": "object", "required": ["classification", "payload_and_scale_mismatches", "production_output_changed", "numerical_registry_update_required"]},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

@@ -218,6 +218,11 @@ Phase 31はBF16 weight graphとKV encodingの選択を分離し、Qwen CLI/serve
 descriptorへ入れ、zero scaleをfail-closedする。low-bit選択時は未検証のMTP/multimodal/MoE組合せを拒否し、別encodingへの
 fallbackを行わない。この公開選択はlow-bit KVの長context検証を可能にするが、全modelのdefault昇格や品質保証を意味しない。
 
+Phase 32はFP8 appendのsemantic kernel、256-thread workgroup、grid、scale recipe、value/scale plane、publicationを維持し、
+最終F32→OCP E4M3FN encodeだけをexact `gfx1201` device compileでnative scalar conversionへlowerする。NaN、Inf、signed zero、
+448 saturationはsoftware contractへ明示補正する。exact `gfx1030`は同じsourceからsoftware helperを生成し、FP16/NVFP4、
+public ABI、KV format、default FP16は変えない。native packed pair/128-thread候補はproductionへ採用しない。
+
 Phase 11でVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
 contiguous attention pointerを保つ`contiguous-resident` providerを追加した。logical capacity分を通常のdevice
 allocationで確保する。Phase 12のHot Aisle MI300X VFはVMM capability=trueだったが、開始時に固定した比較条件を
