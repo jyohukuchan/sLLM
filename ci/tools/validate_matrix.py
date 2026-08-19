@@ -44,6 +44,7 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
     "p1.engine-performance.aggregate",
     "p23.performance-discovery.contract",
     "p29.gdn-device.contract",
+    "p30.rdna4-attention-kv.contract",
 ]
 EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
 EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
@@ -107,6 +108,10 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
     "ci/schema/phase29-gdn-device-summary-v1.schema.json",
     "ci/matrix/phase29-gdn-device-summary-v1.json",
     "ci/tests/test_phase29_gdn_device_summary.py",
+    "ci/tools/phase30_fp8_decode_probe.hip.cpp",
+    "ci/schema/phase30-rdna4-attention-kv-summary-v1.schema.json",
+    "ci/matrix/phase30-rdna4-attention-kv-summary-v1.json",
+    "ci/tests/test_phase30_rdna4_attention_kv_summary.py",
 }
 EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES = {
     "ci/matrix/engine-performance-render-v1.json",
@@ -744,6 +749,7 @@ def validate_phase5_suite_registration(
                 "{python}", "-m", "unittest", "ci.tests.test_engine_performance_schema",
                 "ci.tests.test_engine_performance_runner", "ci.tests.test_engine_performance_aggregate",
                 "ci.tests.test_phase23_discovery", "ci.tests.test_phase29_gdn_device_summary",
+                "ci.tests.test_phase30_rdna4_attention_kv_summary",
             ]},
             EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES,
         ),
@@ -923,8 +929,8 @@ def main() -> int:
             raise ContractError("suites-v1 identity is not revision 27")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 19:
             raise ContractError("host-v1 identity is not revision 19")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 41:
-            raise ContractError("path-to-suite-v1 identity is not revision 41")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 42:
+            raise ContractError("path-to-suite-v1 identity is not revision 42")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

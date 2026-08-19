@@ -41,6 +41,9 @@ __device__ float bf16_to_f32(const uint16_t raw) noexcept {
 }
 
 __device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
+#if defined(__gfx1201__)
+  return __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(bits), 0);
+#else
   const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
   const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
   const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
@@ -54,6 +57,7 @@ __device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
   }
   return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
          ldexpf(1.0F, static_cast<int>(exponent) - 7);
+#endif
 }
 
 __device__ float e2m1_to_f32(const uint8_t bits) noexcept {
@@ -113,6 +117,7 @@ __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
 }
 
 #pragma clang fp contract(off)
+template <bool UseWaveProvider>
 __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
     const uint16_t *const query, const void *const key, const void *const value,
     const void *const key_scales, const void *const value_scales,
@@ -155,32 +160,69 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
   for (uint64_t key_position = 0U; key_position <= query_position;
        ++key_position) {
     const uint64_t kv_row = key_position * kv_heads + kv_head;
-    reductions[dimension] = 0.0F;
-    for (uint32_t current = dimension; current < head_dim;
-         current += blockDim.x) {
-      reductions[dimension] +=
-          bf16_to_f32(query_row[current]) *
-          load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
-                  current, head_dim);
-    }
-    __syncthreads();
-    for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
-         stride != 0U; stride >>= 1U) {
-      if (dimension < stride) {
-        reductions[dimension] += reductions[dimension + stride];
+#if defined(__gfx1201__)
+    if constexpr (UseWaveProvider) {
+      float partial = 0.0F;
+      for (uint32_t current = dimension; current < head_dim;
+           current += blockDim.x) {
+        partial += bf16_to_f32(query_row[current]) *
+                   load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
+                           current, head_dim);
+      }
+      for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+        partial += __shfl_down(partial, offset, 32U);
+      }
+      const uint32_t lane = dimension & 31U;
+      const uint32_t wave = dimension >> 5U;
+      if (lane == 0U) {
+        reductions[wave] = partial;
+      }
+      __syncthreads();
+      if (wave == 0U) {
+        float block_sum = lane < 8U ? reductions[lane] : 0.0F;
+        for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+          block_sum += __shfl_down(block_sum, offset, 32U);
+        }
+        if (lane == 0U) {
+          const float current_score =
+              block_sum * rsqrtf(static_cast<float>(head_dim));
+          const float next_maximum = fmaxf(running_maximum, current_score);
+          rescale = expf(running_maximum - next_maximum);
+          contribution = expf(current_score - next_maximum);
+          running_denominator = running_denominator * rescale + contribution;
+          running_maximum = next_maximum;
+        }
+      }
+      __syncthreads();
+    } else
+#endif
+    {
+      reductions[dimension] = 0.0F;
+      for (uint32_t current = dimension; current < head_dim;
+           current += blockDim.x) {
+        reductions[dimension] += bf16_to_f32(query_row[current]) *
+                                 load_kv(key, key_scales, key_outer_scales,
+                                         encoding, kv_row, current, head_dim);
+      }
+      __syncthreads();
+      for (uint32_t stride = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE / 2U;
+           stride != 0U; stride >>= 1U) {
+        if (dimension < stride) {
+          reductions[dimension] += reductions[dimension + stride];
+        }
+        __syncthreads();
+      }
+      if (dimension == 0U) {
+        const float current_score =
+            reductions[0] * rsqrtf(static_cast<float>(head_dim));
+        const float next_maximum = fmaxf(running_maximum, current_score);
+        rescale = expf(running_maximum - next_maximum);
+        contribution = expf(current_score - next_maximum);
+        running_denominator = running_denominator * rescale + contribution;
+        running_maximum = next_maximum;
       }
       __syncthreads();
     }
-    if (dimension == 0U) {
-      const float current_score =
-          reductions[0] * rsqrtf(static_cast<float>(head_dim));
-      const float next_maximum = fmaxf(running_maximum, current_score);
-      rescale = expf(running_maximum - next_maximum);
-      contribution = expf(current_score - next_maximum);
-      running_denominator = running_denominator * rescale + contribution;
-      running_maximum = next_maximum;
-    }
-    __syncthreads();
     if (dimension < head_dim) {
       accumulation0 =
           accumulation0 * rescale +
@@ -202,8 +244,7 @@ __global__ __launch_bounds__(256, 1) void causal_attention_kernel(
   }
   const uint32_t second = dimension + blockDim.x;
   if (second < head_dim) {
-    output_row[second] =
-        f32_to_bf16_rne(accumulation1 / running_denominator);
+    output_row[second] = f32_to_bf16_rne(accumulation1 / running_denominator);
   }
 }
 
@@ -218,7 +259,8 @@ hipError_t launch(const uint16_t *const query, const void *const key,
                   const uint64_t start_position,
                   const uint64_t committed_kv_length, const uint32_t q_heads,
                   const uint32_t kv_heads, const uint32_t head_dim,
-                  const uint32_t encoding, const hipStream_t stream) noexcept {
+                  const uint32_t encoding, const bool use_gfx1201_wave_provider,
+                  const hipStream_t stream) noexcept {
   if (query == nullptr || key == nullptr || value == nullptr ||
       output == nullptr || query_count == 0U ||
       query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
@@ -235,12 +277,23 @@ hipError_t launch(const uint16_t *const query, const void *const key,
   if (block_count > std::numeric_limits<uint32_t>::max()) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(
-      causal_attention_kernel, dim3(static_cast<uint32_t>(block_count)),
-      dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
-      value, key_scales, value_scales, key_outer_scales, value_outer_scales,
-      output, query_count, capacity_tokens, start_position, committed_kv_length,
-      q_heads, kv_heads, head_dim, encoding);
+  if (use_gfx1201_wave_provider) {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_kernel<true>),
+        dim3(static_cast<uint32_t>(block_count)),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
+        value, key_scales, value_scales, key_outer_scales, value_outer_scales,
+        output, query_count, capacity_tokens, start_position,
+        committed_kv_length, q_heads, kv_heads, head_dim, encoding);
+  } else {
+    hipLaunchKernelGGL(
+        HIP_KERNEL_NAME(causal_attention_kernel<false>),
+        dim3(static_cast<uint32_t>(block_count)),
+        dim3(SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE), 0U, stream, query, key,
+        value, key_scales, value_scales, key_outer_scales, value_outer_scales,
+        output, query_count, capacity_tokens, start_position,
+        committed_kv_length, q_heads, kv_heads, head_dim, encoding);
+  }
   return hipGetLastError();
 }
 

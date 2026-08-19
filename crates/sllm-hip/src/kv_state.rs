@@ -1196,7 +1196,9 @@ fn validate_causal_attention_info(
         .checked_mul(u64::from(query_heads))
         .and_then(|value| u32::try_from(value).ok());
     let expected_target = context.expected_target();
-    let (expected_kernel_id, expected_kernel, expected_device) =
+    let use_gfx1201_wave_provider =
+        expected_target == Some("gfx1201") && (query_count == 1 || query_count >= 32);
+    let (expected_kernel_id, baseline_kernel, baseline_device) =
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
                 sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
@@ -1210,6 +1212,21 @@ fn validate_causal_attention_info(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
+    let (expected_kernel, expected_device) = if use_gfx1201_wave_provider {
+        if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
+            (
+                "causal_attention.online_softmax_gqa.gfx1201_wave.v4",
+                "sllm_causal_attention_gfx1201_wave_v4",
+            )
+        } else {
+            (
+                "causal_attention.online_softmax_gqa.packed_kv.gfx1201_wave.v4",
+                "sllm_causal_attention_packed_gfx1201_wave_v4",
+            )
+        }
+    } else {
+        (baseline_kernel, baseline_device)
+    };
     if info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
         || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION

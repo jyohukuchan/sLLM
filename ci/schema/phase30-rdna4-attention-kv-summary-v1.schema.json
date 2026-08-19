@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase30-rdna4-attention-kv-summary-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "state", "decision", "identity", "routing", "numerical_policy", "candidates", "operator_improvement_percent", "full_model", "correctness", "limitations"],
+  "properties": {
+    "schema_version": {"const": "phase30-rdna4-attention-kv-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "decision": {"const": "ADOPTED_GFX1201_NATIVE_READ_AND_WAVE_PROVIDER"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"type": "object", "required": ["source_base_commit", "kernel_source_sha256", "gguf_sha256", "derived_lock_sha256", "rocm", "baseline_full_model_binary_sha256", "candidate_full_model_binary_sha256", "final_gfx1201_attention_runner_sha256", "final_gfx1030_attention_runner_sha256"]},
+    "routing": {"type": "object", "required": ["target", "wave_query_count_ranges", "baseline_query_count_range", "control_target", "control_provider", "public_api_changed", "kv_format_changed"]},
+    "numerical_policy": {"type": "object", "required": ["native_fp8_read", "wave_reduction", "real_number_equation_changed", "rounding_stage_changed", "token_records_matched", "registry"]},
+    "candidates": {"type": "object", "required": ["native_fp8_append", "native_fp8_read", "wave_provider", "prefill_matrix_provider"]},
+    "operator_improvement_percent": {"type": "object", "required": ["fp16_decode", "fp8_decode", "prefill_m255"]},
+    "full_model": {"type": "array", "minItems": 3, "items": {"type": "object", "required": ["input_tokens", "processes", "ttft_improvement_percent", "prefill_improvement_percent", "e2e_improvement_percent", "decode_tps_improvement_percent", "classification"]}},
+    "correctness": {"type": "array", "minItems": 4, "items": {"type": "object", "required": ["target", "encoding", "cases", "passed", "max_abs_error", "fallbacks", "cleanup_failures"]}},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

@@ -603,18 +603,35 @@ fn metadata_matches(
     expected_target: &str,
     encoding: KvCacheEncoding,
 ) -> bool {
-    let (kernel_id, kernel_symbol, device_symbol) = if encoding == KvCacheEncoding::Fp16 {
-        (
-            sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
-            "causal_attention.online_softmax_gqa.v2",
-            "sllm_causal_attention_online_softmax_gqa_v2",
-        )
+    let use_gfx1201_wave_provider = expected_target == "gfx1201" && (case.m == 1 || case.m >= 32);
+    let (kernel_id, baseline_kernel_symbol, baseline_device_symbol) =
+        if encoding == KvCacheEncoding::Fp16 {
+            (
+                sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2,
+                "causal_attention.online_softmax_gqa.v2",
+                "sllm_causal_attention_online_softmax_gqa_v2",
+            )
+        } else {
+            (
+                sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
+                "causal_attention.online_softmax_gqa.packed_kv.v3",
+                "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
+            )
+        };
+    let (kernel_symbol, device_symbol) = if use_gfx1201_wave_provider {
+        if encoding == KvCacheEncoding::Fp16 {
+            (
+                "causal_attention.online_softmax_gqa.gfx1201_wave.v4",
+                "sllm_causal_attention_gfx1201_wave_v4",
+            )
+        } else {
+            (
+                "causal_attention.online_softmax_gqa.packed_kv.gfx1201_wave.v4",
+                "sllm_causal_attention_packed_gfx1201_wave_v4",
+            )
+        }
     } else {
-        (
-            sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3,
-            "causal_attention.online_softmax_gqa.packed_kv.v3",
-            "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
-        )
+        (baseline_kernel_symbol, baseline_device_symbol)
     };
     dispatch.abi_version == sllm_hip_sys::SLLM_HIP_ABI_VERSION
         && dispatch.info_version == sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION

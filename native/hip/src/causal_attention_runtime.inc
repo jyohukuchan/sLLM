@@ -108,6 +108,9 @@ void fill_causal_attention_dispatch_info(
     const sllm_causal_attention::DescriptorMetadata &metadata,
     const uint32_t kv_heads, const uint32_t encoding,
     const char *const arch_name) noexcept {
+  const bool use_gfx1201_wave_provider =
+      std::strcmp(arch_name, "gfx1201") == 0 &&
+      (metadata.query_count == 1U || metadata.query_count >= 32U);
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -134,14 +137,24 @@ void fill_causal_attention_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? ::sllm_causal_attention_kernel::kLogicalKernelId
-          : ::sllm_causal_attention_kernel::kPackedKvLogicalKernelId);
+      use_gfx1201_wave_provider
+          ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                 ? ::sllm_causal_attention_kernel::kGfx1201WaveLogicalKernelId
+                 : ::sllm_causal_attention_kernel::
+                       kGfx1201WavePackedKvLogicalKernelId)
+          : (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                 ? ::sllm_causal_attention_kernel::kLogicalKernelId
+                 : ::sllm_causal_attention_kernel::kPackedKvLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1
-          ? ::sllm_causal_attention_kernel::kDeviceSymbol
-          : ::sllm_causal_attention_kernel::kPackedKvDeviceSymbol);
+      use_gfx1201_wave_provider
+          ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                 ? ::sllm_causal_attention_kernel::kGfx1201WaveDeviceSymbol
+                 : ::sllm_causal_attention_kernel::
+                       kGfx1201WavePackedKvDeviceSymbol)
+          : (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+                 ? ::sllm_causal_attention_kernel::kDeviceSymbol
+                 : ::sllm_causal_attention_kernel::kPackedKvDeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -415,7 +428,10 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         output_pointer, static_cast<uint32_t>(metadata.query_count),
         state->capacity_tokens, metadata.start_position,
         metadata.expected_kv_length, metadata.query.q_heads, state->head_count,
-        state->head_dim, state->encoding, queue->stream);
+        state->head_dim, state->encoding,
+        std::strcmp(arch_name, "gfx1201") == 0 &&
+            (metadata.query_count == 1U || metadata.query_count >= 32U),
+        queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,

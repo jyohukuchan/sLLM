@@ -1,6 +1,6 @@
 # Phase 30: RDNA4 native attention/KV hardware-path最適化
 
-> 状態: 計画済み（未着手）
+> 状態: 完了（gfx1201 native FP8 read/wave providerを限定採用）
 > 作成日: 2026-08-19
 
 ## 目的
@@ -305,7 +305,9 @@ F3ではweight dtype/providerを比較途中で変えない。FP8 weightのnativ
 - 同じwork unitが2回reject、review時間が実装時間超、functional progressが1時間停止、verification/docsが30%超、
   見積り1.5倍超、acceptance変更時はvariant追加を止めて同じwork unitを再計画する。
 
-[Phase 16計画](../../../../archive/2026/08/11-20/phase16-kv-cache-fp8-nvfp4.md)
-[Phase 29計画](../../../../archive/2026/08/11-20/phase29-gdn-useful-workgroup-parallelization.md)
+[Phase 16計画](phase16-kv-cache-fp8-nvfp4.md)
+[Phase 29計画](phase29-gdn-useful-workgroup-parallelization.md)
 [数値・出力影響変更台帳](../../../../../compatibility/numerical-output-changes.md)
+[Phase 30履歴](../../../../../history/2026/08/11-20/phase30-rdna4-native-attention-kv-optimization.md)
+[Phase 30 bounded summary](../../../../../../ci/matrix/phase30-rdna4-attention-kv-summary-v1.json)
 [メイン計画](../../../../main-plan.md)

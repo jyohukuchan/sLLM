@@ -1,0 +1,80 @@
+{
+  "schema_version": "phase30-rdna4-attention-kv-summary-v1",
+  "state": "COMPLETE",
+  "decision": "ADOPTED_GFX1201_NATIVE_READ_AND_WAVE_PROVIDER",
+  "recorded_at": "2026-08-19",
+  "identity": {
+    "source_base_commit": "1def2b63cfb26cd71e7e1bf500235a6eb5c7ed9b",
+    "kernel_source_sha256": "fe5d2d5734901d47187276d829b1e1692f79ef2a8dca3ee3e60a853606364938",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "rocm": "7.14.0",
+    "baseline_full_model_binary_sha256": "b2dc35c3de13817c8dc273ecc10f3b6f5153b9ae52667abe18e4a0e83d45523f",
+    "candidate_full_model_binary_sha256": "1e240d8775ef2a716e3d835595f81a9c2589acf7a32ab05f1130046a91c88739",
+    "final_gfx1201_attention_runner_sha256": "3d006ab277960cc33fa47a378491782002525db8ffbfacac09fed4c505c9a00f",
+    "final_gfx1030_attention_runner_sha256": "9ed23ef3ffb77cf61f206fa3f14b5e23b1e11daeffa651b6192848ac3c8e8187"
+  },
+  "routing": {
+    "target": "gfx1201",
+    "wave_query_count_ranges": ["1", "32+"],
+    "baseline_query_count_range": "2-31",
+    "control_target": "gfx1030",
+    "control_provider": "baseline",
+    "public_api_changed": false,
+    "kv_format_changed": false
+  },
+  "numerical_policy": {
+    "native_fp8_read": "N0",
+    "wave_reduction": "N1",
+    "real_number_equation_changed": false,
+    "rounding_stage_changed": false,
+    "token_records_matched": true,
+    "registry": "docs/compatibility/numerical-output-changes.md#out-2026-08-19-p30-rdna4-attention-wave-reduction"
+  },
+  "candidates": {
+    "native_fp8_append": {
+      "decision": "REJECTED",
+      "reason": "chunk-256 device time regressed by 68.69%; software encoder retained"
+    },
+    "native_fp8_read": {
+      "decision": "ADOPTED_WITH_WAVE_PROVIDER",
+      "all_code_probe": {"codes": 256, "nan_codes": 2, "mismatches": 0, "fallback": false},
+      "long_context_improvement_percent_range": [13.45, 14.02],
+      "isa": "v_cvt_f32_fp8"
+    },
+    "wave_provider": {
+      "decision": "ADOPTED",
+      "mechanism": "wave32 shuffle reduction with eight LDS wave partials and three block barriers per key",
+      "baseline_barriers_per_key": 11,
+      "candidate_barriers_per_key": 3,
+      "isa": "ds_bpermute_b32"
+    },
+    "prefill_matrix_provider": {
+      "decision": "DEFERRED_NEGATIVE",
+      "reason": "llama.cpp and rocWMMA candidates require a separate tiled layout, mask, and online-softmax provider beyond the bounded N0/N1 work unit",
+      "matrix_isa_claimed": false,
+      "external_code_copied": false
+    }
+  },
+  "operator_improvement_percent": {
+    "fp16_decode": {"prefix_3": 6.12, "prefix_255": 13.86, "prefix_256": 16.36, "prefix_257": 7.22, "kv_1023": 16.75, "kv_1024": 17.16, "kv_1025": 16.99, "kv_8193": 11.91},
+    "fp8_decode": {"prefix_3": 0.64, "prefix_255": 24.92, "prefix_256": 26.94, "prefix_257": 26.67, "kv_1023": 27.46, "kv_1024": 25.95, "kv_1025": 27.43, "kv_8193": 27.91},
+    "prefill_m255": {"fp16": 21.0, "fp8": 31.5}
+  },
+  "full_model": [
+    {"input_tokens": 29, "processes": 1, "ttft_improvement_percent": -0.599, "prefill_improvement_percent": -0.463, "e2e_improvement_percent": 0.238, "decode_tps_improvement_percent": 0.351, "classification": "NOISE_CONTROL"},
+    {"input_tokens": 267, "processes": 1, "ttft_improvement_percent": 1.894, "prefill_improvement_percent": 2.097, "e2e_improvement_percent": 1.923, "decode_tps_improvement_percent": 1.718, "classification": "NON_REGRESSING_CONTROL"},
+    {"input_tokens": 4108, "processes": 3, "ttft_improvement_percent": 9.599335288292858, "prefill_improvement_percent": 9.723140929506641, "e2e_improvement_percent": 9.163701820190942, "decode_tps_improvement_percent": 7.8637163882968615, "classification": "ADOPTION_PATTERN"}
+  ],
+  "correctness": [
+    {"target": "gfx1201", "encoding": "fp16", "cases": 17, "passed": 17, "max_abs_error": 0.0, "fallbacks": 0, "cleanup_failures": 0},
+    {"target": "gfx1201", "encoding": "fp8", "cases": 17, "passed": 17, "max_abs_error": 0.0, "fallbacks": 0, "cleanup_failures": 0},
+    {"target": "gfx1030", "encoding": "fp16", "cases": 17, "passed": 17, "max_abs_error": 0.0, "fallbacks": 0, "cleanup_failures": 0},
+    {"target": "gfx1030", "encoding": "fp8", "cases": 17, "passed": 17, "max_abs_error": 0.0, "fallbacks": 0, "cleanup_failures": 0}
+  ],
+  "limitations": [
+    "Qwen3.5-4B BF16 10000+ input preflight required 53758880592 bytes while 34135343104 bytes were available, so the fresh full-model hard pattern is 4108 input tokens",
+    "FP8-KV full-model routing is not exposed by the unchanged production CLI; FP8 adoption evidence is operator-level and no user-facing API was added",
+    "Gemma and service-lifecycle expansion were not required to establish the Qwen gfx1201 provider scope"
+  ]
+}

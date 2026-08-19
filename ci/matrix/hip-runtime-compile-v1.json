@@ -157,15 +157,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "1c3f85ce85471e94192878705ab676c4f757d1c8a04af3afd05e08b9d2fe7374"
+        "sha256": "fe5d2d5734901d47187276d829b1e1692f79ef2a8dca3ee3e60a853606364938"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "fc25c9e407b1aaa41a7ae5a66d7e5afba855d609690aa56e25baca336c3b612e"
+        "sha256": "37142dbb58e0668533e1f8530ec71cf071583a85cc4cf2b89dcad2e84394dfb5"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "044279d6b493508d8e386125cebde0922182ff29454212299b6136fcfa13eff9"
+        "sha256": "53b5b2f155ef072458544adeacc4885e10b1ebcf21092fe8814b8d7934888559"
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
@@ -332,7 +332,7 @@
         "sha256": "ff5bcf9fefade967589953e04c23be441a7fc71e1a4ffb9dd981a2736cdea968"
       }
     ],
-    "source_set_sha256": "7169128c4937f2dc1bdcd34052754d07a971791a0a3affa017f40ae5cfdb0862"
+    "source_set_sha256": "6416823433d960511c9c512770f2a4bbfe4174d558d5023f4b987766051a26b7"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

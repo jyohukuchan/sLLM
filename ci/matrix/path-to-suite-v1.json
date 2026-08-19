@@ -1,6 +1,6 @@
 {
   "schema_version": "path-to-suite-v1",
-  "revision": 41,
+  "revision": 42,
   "default_suite_ids": ["h0-tracked-tree", "h0-suite-registration"],
   "rules": [
     {"pattern": ".github/workflows/phase7-lifecycle.yml", "suite_ids": ["h0-phase7-lifecycle-contract", "h0-json-schema-manifest-workflow"]},
@@ -61,6 +61,10 @@
     {"pattern": "ci/schema/phase29-gdn-device-summary-v1.schema.json", "suite_ids": ["h0-engine-performance-direct-contract", "h0-json-schema-manifest-workflow"]},
     {"pattern": "ci/matrix/phase29-gdn-device-summary-v1.json", "suite_ids": ["h0-engine-performance-direct-contract", "h0-json-schema-manifest-workflow"]},
     {"pattern": "ci/tests/test_phase29_gdn_device_summary.py", "suite_ids": ["h0-engine-performance-direct-contract"]},
+    {"pattern": "ci/tools/phase30_fp8_decode_probe.hip.cpp", "suite_ids": ["h0-engine-performance-direct-contract"]},
+    {"pattern": "ci/schema/phase30-rdna4-attention-kv-summary-v1.schema.json", "suite_ids": ["h0-engine-performance-direct-contract", "h0-json-schema-manifest-workflow"]},
+    {"pattern": "ci/matrix/phase30-rdna4-attention-kv-summary-v1.json", "suite_ids": ["h0-engine-performance-direct-contract", "h0-json-schema-manifest-workflow"]},
+    {"pattern": "ci/tests/test_phase30_rdna4_attention_kv_summary.py", "suite_ids": ["h0-engine-performance-direct-contract"]},
     {"pattern": "ci/matrix/engine-performance-render-v1.json", "suite_ids": ["h0-engine-performance-render-tokenize-contract"]},
     {"pattern": "ci/schema/engine-performance-render-v1.schema.json", "suite_ids": ["h0-engine-performance-render-tokenize-contract"]},
     {"pattern": "ci/tools/run_engine_performance_render.py", "suite_ids": ["h0-engine-performance-render-tokenize-contract"]},
