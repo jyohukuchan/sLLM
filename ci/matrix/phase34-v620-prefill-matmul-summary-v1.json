@@ -1,0 +1,203 @@
+{
+  "schema_version": "phase34-v620-prefill-matmul-summary-v1",
+  "state": "COMPLETE",
+  "recorded_at": "2026-08-20",
+  "identity": {
+    "source_base_commit": "7140c72591e4527ac0e37ffcf4d904d1a0f24172",
+    "selector_source_sha256": "c2930e6691ac83f31fe8204b720ef39b28ff0179bb2df91ea439c677548a6cbc",
+    "runtime_source_sha256": "e6bff1483d781b49bb4fff29b89b91a78ace869d4219f7afdcf6e67bed8a1cac",
+    "mtp_source_sha256": "b9a58a6ca1f441ea5378ba03f406aef4e61f84bc53bfe0de608d32f4ccd54e7f",
+    "comparison_source_sha256": "3ecf8ad0ea7c3c65ca7606186710793632be5cc2671ba9b67fbc156d71647d83",
+    "comparison_binary_sha256": "20bab4ef30cfbe59eefc85cb6f90601f253a7ffd1d75b8fc2695128d8abe3353",
+    "gfx1030_cli_sha256": "0956088a6703a904b88b1d6b06529095a34fd937aa2a5555c5d7305327f799c9",
+    "gfx1201_cli_sha256": "46ab3e580db420cf4db46de6b29782c4d532346d756307d98093fc7961a815c9",
+    "gfx1030_server_sha256": "4bad0625ed67537279dd2e7acbf8814bd3d5f1af3a452270d30f5472b35f7454",
+    "gfx1030_evidence_binary_sha256": "afc3dbeda9a6f67e0b263f7d0d54f4ad8471abd342ee21a878f0dae54302c91c",
+    "gfx1201_evidence_binary_sha256": "9a57272d659dbe8e166c7ddf0fc210783902b931615fa431f3568b56f4ce9999",
+    "gfx942_compile_binary_sha256": "85c89285701003163da836daebbbb89509bc2001ac5985b78dbe134a7b61d4a9",
+    "rocm": "7.14.0",
+    "llvm": "AMD clang 23.0.0git 46fcb339fb61119b337f973c7ca9e710a319fdd0",
+    "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "gfx1030_uuid": "GPU-76a08c022586fed6",
+    "gfx1201_uuid": "GPU-a8e9ddefa2d60f55"
+  },
+  "decisions": {
+    "gfx1030_long_prefill_hipblas": "ADOPTED_SHAPE_SCOPED",
+    "gfx1030_small_n32": "RETAIN_TILED16",
+    "gfx1030_unknown_and_all_logits": "RETAIN_EXISTING_PROVIDER",
+    "gfx1201_and_gfx942": "UNCHANGED",
+    "mtp_verify_row_fix": "ADOPTED_CORRECTNESS_PREREQUISITE",
+    "performance_authority": "assigned-ai-contextual-judgment",
+    "reason": "Five high-frequency long-row projection families show large stable device-time and full-model gains using the existing provider. The N=32 family is unstable and low-contribution, while exact shape and M thresholds isolate it and all unknown shapes without duplicating the graph or runtime path."
+  },
+  "routing": {
+    "target": "gfx1030",
+    "provider": "matmul.hipblas.gemm_ex.v2",
+    "main_min_m": 128,
+    "main_shapes": [
+      {"k": 2560, "n": 9216},
+      {"k": 9216, "n": 2560},
+      {"k": 2560, "n": 8192},
+      {"k": 2560, "n": 4096},
+      {"k": 4096, "n": 2560}
+    ],
+    "full_attention_kv_min_m": 1024,
+    "full_attention_kv_shape": {"k": 2560, "n": 1024},
+    "small_n32_provider": "matmul.bf16_fp32.tiled16.v2",
+    "unknown_shape_provider": "existing-selector-complement",
+    "all_logits_shape_provider": "existing-selector-complement",
+    "gfx1030_hipblaslt_created": false,
+    "runtime_failure_fallback": false
+  },
+  "numerical": {
+    "classification": "N1_SAME_TERMS_SAME_DTYPE_NONINCREASING_STANDARD_BOUND",
+    "equation": "C[row,column] = sum_k A[row,k] * W[column,k]",
+    "input_dtype": "BF16",
+    "compute_dtype": "FP32",
+    "output_dtype": "BF16_RNE",
+    "selected_solution_global_split_u": 1,
+    "selected_solution_uses_global_atomic_combine": false,
+    "provider_repeats_deterministic": true,
+    "stress_cases": [
+      {
+        "m": 128,
+        "k": 2560,
+        "n": 4096,
+        "provider_mismatch_count": 519,
+        "max_provider_abs_difference": 16.0,
+        "tiled_bound_violations": 0,
+        "hipblas_bound_violations": 0
+      },
+      {
+        "m": 10001,
+        "k": 2560,
+        "n": 9216,
+        "provider_mismatch_count": 84764,
+        "max_provider_abs_difference": 32.0,
+        "tiled_bound_violations": 0,
+        "hipblas_bound_violations": 0
+      }
+    ],
+    "g1_gfx1030_cases_passed": 18,
+    "g1_gfx1201_cases_passed": 18,
+    "fallbacks": 0,
+    "cleanup_failures": 0
+  },
+  "operator": {
+    "screen_shape_m_pairs": 28,
+    "timing": "HIP event device ns; screen warmup 2 measured 5, boundary warmup 3 measured 7",
+    "weighted_10001_projection": {
+      "call_count": 248,
+      "tiled16_ns": 62525958096,
+      "hipblas_ns": 11081424704,
+      "reduction_percent": 82.27708132518977
+    },
+    "profiled_final_route": {
+      "hipblas_calls": 200,
+      "hipblas_ns": 11683135000,
+      "tiled16_calls": 48,
+      "tiled16_ns": 76276000,
+      "projection_ns": 11759411000,
+      "baseline_projection_ns": 66560900000,
+      "reduction_percent": 82.3328545737813
+    },
+    "representative_stress": [
+      {"m": 128, "k": 2560, "n": 4096, "tiled16_ns": 2531797, "hipblas_ns": 516934, "reduction_percent": 79.58233783648529},
+      {"m": 10001, "k": 2560, "n": 9216, "tiled16_ns": 412646362, "hipblas_ns": 74120224, "reduction_percent": 82.03783581750202}
+    ],
+    "hipblas_handle_create_ns_range": [79223, 167048],
+    "hipblas_first_call_ns_range": [170762222, 257346344],
+    "selected_solution": "Cijk_Alik_Bljk_BBS_BH_MT64x32x8_SN_AMAS2_BL0_BS1_EPS0_GLVWA2_GLVWB1_GRVW2_GSU1_GSUASB_ISA000_IU1_K1_KLS_LDL1_LRVW2_MMFSC_NLCA1_NLCB1_PGR0_PLR1_SIA1_SU32_SUM0_SUS256_SVW4_TT4_2_USFGRO0_VAW1_VS1_VW2_VWB2_WS64_WG16_16_1_WGM8"
+  },
+  "full_model": {
+    "gfx1030_fp16_10001": {
+      "baseline_ns": 89248913792,
+      "final_ns": 34684350552,
+      "reduction_percent": 61.13750960282387,
+      "generated_token_ids": [2064, 5686],
+      "prefill_chunks": 1,
+      "workspace_arena_bytes": 5278049280,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    "gfx1030_fp16_32_control": {
+      "baseline_ns": 4473036290,
+      "final_ns": 4652108034,
+      "difference_percent": 4.003359963797656,
+      "route_changed": false,
+      "interpretation": "single-process model-load and DPM noise; no short-M provider change or short-lane improvement claim"
+    },
+    "gfx1201_fp16_10001_control": {
+      "phase33_final_ns": 75552626720,
+      "phase34_final_ns": 75316294123,
+      "difference_percent": -0.3128052686716701,
+      "generated_token_ids": [2064, 5686],
+      "route_changed": false,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    }
+  },
+  "mtp_fix": {
+    "symptom": "target verify row count differs from draft width",
+    "cause": "terminal-row compaction used the long target graph capacity when a speculative verify call contained only two actual rows",
+    "fix": "force all terminal rows only for MTP target decode-block execution and evidence paths",
+    "normal_prefill_compaction_changed": false,
+    "regression_test": "large_target_graph_preserves_every_speculative_verify_row",
+    "numerical_classification": "N0_CORRECTNESS_RESTORATION"
+  },
+  "resources": {
+    "gfx1030_context_hipblas_handles_added": 1,
+    "gfx1030_context_hipblaslt_handles_added": 0,
+    "explicit_hipblas_workspace_bytes": 0,
+    "additional_matmul_dispatches": 0,
+    "weight_repack": false,
+    "request_workspace_arena_bytes_before": 5278049280,
+    "request_workspace_arena_bytes_after": 5278049280
+  },
+  "service": {
+    "target": "gfx1030",
+    "kv_cache_encoding": "fp16",
+    "prompt_tokens": 10001,
+    "completion_tokens": 1,
+    "non_stream_content": "It",
+    "sse_content": "It",
+    "sse_done": true,
+    "usage_equal": true,
+    "disconnect_outcome": "cancelled",
+    "recovery_content": "Hello",
+    "all_dispatches_hip": true,
+    "fallbacks": 0,
+    "shutdown_current_bytes": 0,
+    "shutdown_request_state_bytes": 0,
+    "shutdown_workspace_bytes": 0,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0,
+    "client_artifact_sha256": "f68607bed3f0d6720f2253c31c6543de2d88cc665879d0a8f3fb5d358b3d70f8",
+    "shutdown_summary_sha256": "52719ce478b253654ba4f0e41aa11cac5a858287b7654f934d88ec5832e6688a"
+  },
+  "verification": {
+    "cargo_fmt_check": true,
+    "sllm_core_unit_tests_passed": 185,
+    "sllm_hip_unit_tests_passed": 95,
+    "package_test_commands_passed": true,
+    "gfx1030_release_build": true,
+    "gfx1201_release_build": true,
+    "gfx942_compile_only": true,
+    "gfx1030_openai_lifecycle": true,
+    "wrong_target_load_rejected": true,
+    "wrong_target_exit_code": 1,
+    "wrong_target_error": "requested device gcnArchName does not match exactly",
+    "integration_review": "PASS_NO_BLOCKING_FINDINGS"
+  },
+  "limitations": [
+    "Performance evidence is bounded to one Qwen3.5-4B BF16 model shape, one exact V620, one exact R9700 regression target, and ROCm 7.14.",
+    "The selected Tensile solution is library-version dependent; a ROCm update requires fresh operator and full-model evidence.",
+    "The 32-token single-process wall result is noisy and is not a regression claim because its provider route is unchanged.",
+    "N=32, unknown shapes, and all-logits vocabulary shapes retain the previous provider; Phase 34 does not claim a universal gfx1030 GEMM crossover.",
+    "Concurrent-throughput, dynamic FP8 KV full-model timing, new custom GEMM kernels, and other GPU SKUs remain out of scope."
+  ]
+}

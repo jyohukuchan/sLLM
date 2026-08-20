@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase33-full-attention-summary-v1.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "state",
+    "recorded_at",
+    "identity",
+    "decisions",
+    "routing",
+    "correctness",
+    "operator",
+    "full_model",
+    "resources",
+    "matrix_candidate",
+    "service",
+    "verification",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase33-full-attention-summary-v1"},
+    "state": {"enum": ["AWAITING_C1_N2_DECISION", "COMPLETE"]},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {
+      "type": "object",
+      "required": [
+        "source_base_commit",
+        "candidate_source_diff_sha256",
+        "kernel_source_sha256",
+        "runtime_source_sha256",
+        "evidence_source_sha256",
+        "rocm",
+        "llvm",
+        "model_fingerprint",
+        "gguf_sha256",
+        "derived_lock_sha256",
+        "gfx1201_uuid",
+        "gfx1030_uuid",
+        "gfx1201_cli_sha256",
+        "gfx1030_cli_sha256",
+        "gfx1201_server_sha256",
+        "gfx1201_evidence_binary_sha256",
+        "gfx1030_evidence_binary_sha256"
+      ]
+    },
+    "decisions": {
+      "type": "object",
+      "required": ["c1_decode_wave_split", "c2_prefill_gqa4", "c3_gfx1201_matrix", "performance_authority", "fixed_threshold"],
+      "properties": {
+        "c1_decode_wave_split": {"enum": ["PENDING_USER_N2_DECISION", "ADOPTED", "REJECTED"]},
+        "c2_prefill_gqa4": {"const": "ADOPTED"},
+        "c3_gfx1201_matrix": {"const": "REJECTED_TILE_SHAPE_SCOPE_MISMATCH"},
+        "performance_authority": {"const": "assigned-ai-contextual-judgment"},
+        "fixed_threshold": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "routing": {
+      "type": "object",
+      "required": ["targets", "encodings", "head_dim", "gqa_ratio", "c1_query_count", "c1_min_kv_length", "c2_min_query_count", "complement", "runtime_failure_fallback"]
+    },
+    "correctness": {
+      "type": "object",
+      "required": ["targets", "encodings", "cases_per_target_encoding", "cases_passed", "cases_total", "fp16_max_abs_error", "fp8_max_abs_error", "nvfp4_max_abs_error", "fallbacks", "cleanup_failures", "c1_numerical_class", "c2_gfx1201_numerical_class", "c2_gfx1030_numerical_class", "final_identity_revalidation_pending"]
+    },
+    "operator": {
+      "type": "object",
+      "required": ["warmups", "measured", "timing", "c1", "c2"]
+    },
+    "full_model": {
+      "type": "object",
+      "required": ["paired_r9700_fp16_10000_prompt", "profiled_r9700_fp16_10000_prompt", "paired_v620_fp16_4108_prompt", "paired_v620_fp8_4108_prompt", "diagnostic_r9700_fp16_16384_prompt"]
+    },
+    "resources": {
+      "type": "object",
+      "required": ["c1_lds_bytes", "c1_vgpr", "c1_scratch_bytes", "c2_lds_bytes", "c2_vgpr", "c2_scratch_bytes", "global_scratch_bytes", "additional_dispatches"]
+    },
+    "matrix_candidate": {
+      "type": "object",
+      "required": ["c2_rows_per_tile", "minimum_matrix_rows", "padding_rows_required", "actual_matrix_instruction_occurrences", "decision_reason", "external_code_reused"]
+    },
+    "service": {
+      "type": "object",
+      "required": ["target", "kv_cache_encoding", "prompt_tokens", "non_stream_content", "sse_content", "sse_done", "disconnect_outcome", "recovery_content", "fallbacks", "shutdown_current_bytes", "shutdown_request_state_bytes", "shutdown_workspace_bytes", "retryable_cleanup", "durable_quarantine"]
+    },
+    "verification": {
+      "type": "object",
+      "required": ["host_tests_passed", "gfx1201_build", "gfx1030_build", "wrong_target_load_rejected", "wrong_target_exit_code", "wrong_target_error", "git_diff_check", "final_release_rerun_complete"]
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

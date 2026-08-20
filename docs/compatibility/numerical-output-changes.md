@@ -55,6 +55,66 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-20-P34: gfx1030長行BF16 matmul hipBLAS route（N1・限定採用）
+
+- scope: exact `gfx1030`、Qwen3.5-4B内部BF16 projection。主要5 shapeは`M>=128`、`K=2560,N=1024`は
+  `M>=1024`。N=32、未知shape、all-logits、短M、gfx1201/gfx942は既存providerを維持する。
+- baseline: `matmul.bf16_fp32.tiled16.v2`が16x16 tile内でKをsource-level scalar FP32 accumulateし、BF16 RNE出力する。
+- candidate: existing `matmul.hipblas.gemm_ex.v2`/`hipblasGemmEx`を使う。BF16 input/weight、FP32 compute、BF16 RNE出力、
+  real-number equation、入力項集合、layout、publicationは同じ。観測Tensile solutionはGSU1でglobal split/atomic combineを使わない。
+- 分類: **N1**。providerの固定reduction順は異なるためbit exactのN0ではないが、同じK項を一度ずつ含む決定的な並べ替えであり、
+  Phase 8の保守的な`gamma_K * sum(abs(a_i*w_i)) + BF16 half-ULP` worst-case boundは非増加である。
+- correctness: signed/exponent-mixed stressはprovider間差を観測したが、repeatは決定的だった。`M=128,K=2560,N=4096`と
+  `M=10001,K=2560,N=9216`のsampled F64 bound違反は両provider 0、matmul G1は両target 18/18 PASS、fallback/cleanup 0。
+- output影響: final 10,001 prompt / 2 outputはbaseline/candidateともtoken `[2064,5686]`。別入力でtoken差が生じても、
+  同じ式・項・dtype・丸めstageと非増加boundへ局所化できる範囲はN1として扱う。説明不能な差はN3である。
+- 性能/resource: V620 248-call加重projectionを62.526秒から11.081秒へ82.28%、full modelを89.249秒から
+  34.684秒へ61.14%短縮。context-lifetime hipBLAS handle 1、hipBLASLt/workspace/weight repack/追加dispatch 0、arena不変。
+- 決定: 担当AI裁量でshape-aware限定採用。small-Nの不安定性と未知shapeは既存providerへ隔離し、固定改善率は使用しない。
+- rollback: `phase34_gfx1030_hipblas_shape` routeとgfx1030 contextのhipBLAS handle作成条件を除去してtiled16へ戻す。
+- 詳細: [Phase 34履歴](../history/2026/08/11-20/phase34-v620-long-prefill-bf16-matmul-provider-optimization.md)、
+  [bounded summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)。
+
+### OUT-2026-08-20-P33-C1: decode wave8 KV split（N2・ユーザー承認採用）
+
+- scope: exact `gfx1030`/`gfx1201`、Qwen系causal/full attention、`M=1`、KV長1,024以上、head dim 256、
+  FP16/dynamic FP8/static FP8/NVFP4 KV。2026-08-20のユーザー承認によりproductionへ限定採用する。
+- baseline: 256 dimensionのQK積を概ね8段のbalanced treeで加算し、key順に一つのonline-softmax stateとweighted Vを更新する。
+- candidate: 8 waveへ連続したKV区間を割り当て、waveごとのpartial online-softmaxを区間順にLDS上で固定mergeする。
+  各laneが8 dimensionを逐次加算してwave treeへ渡すためQK加算依存深さは概ね12段となる。real-number semantic、入力集合、
+  FP32 accumulator、softmax式、BF16 RNE、state publicationは維持する。
+- 分類: **N2**。QK sumの標準worst-case boundは概略`gamma_8`から`gamma_12`へ僅かに増える。weighted Vは短い
+  partialと固定mergeになるが、QK側のbound悪化を相殺したと証明しない。承認後もN1へ再分類せずN2として追跡する。
+- correctness: 4 KV encoding × 2 target × 29 caseを含むPhase 33 oracle 232/232 PASS。candidate範囲のKV=1,024
+  NaN query/+Inf value、KV=4,097 signed mixed、KV=8,193を含む。最大絶対誤差はFP16 `2.3841858e-7`、FP8
+  `4.7683716e-7`、NVFP4 `1.1641532e-9`。fallback/cleanup 0、測定範囲の生成token差なし。
+- 性能: KV=1,024〜8,193のdevice中央値をgfx1201で約53〜58%、gfx1030で約64〜65%短縮した。scratch、追加dispatchは0。
+- 決定: **ユーザー承認により採用**。大幅なdevice短縮、観測誤差、token一致、scratch/追加dispatch 0を確認したうえで、
+  N2の僅かなworst-case bound増加を受容した。C1 symbol/routingをproductionに維持する。
+- rollback: `use_decode_wave_split`をfalseとし、`causal_attention_decode_wave_split_kernel`とC1 metadata symbolを除去する。
+- 詳細: [Phase 33履歴](../history/2026/08/11-20/phase33-full-attention-structural-optimization.md)、
+  [bounded summary](../../ci/matrix/phase33-full-attention-summary-v1.json)。
+
+### OUT-2026-08-20-P33-C2: prefill GQA4 K/V共有
+
+- scope: exact `gfx1030`/`gfx1201`、Qwen系causal/full attention、`M>=64`、GQA ratio 4、head dim 256、
+  FP16/dynamic FP8/static FP8/NVFP4 KV。
+- baseline: query row/query headごとに1 blockを起動し、同じKV headへmapされる4 query headがK/Vを別々にdecode/readする。
+- candidate: 1 query row/KV headごとに1 blockを起動し、K/V elementを一度だけdecodeして4 query headで共有する。各headの
+  QK reduction、online maximum/denominator、weighted V、causal key順は独立に維持する。global scratch、追加launch、KV mirrorはない。
+- 分類: exact `gfx1201`は既存wave providerと同じ32-lane partial + 8 partial固定treeで**N0**。exact `gfx1030`は
+  256-thread LDS treeからwave32 + 8 partial treeへ順序が変わるが、加算依存深さは同じ8段で標準worst-case boundが
+  非増加のため**N1**。real-number equation、入力集合、dtype、丸めstageは維持する。
+- correctness: Phase 33 oracle 232/232 PASS。M=63/64/65、127/128/129、255/256/257、nonzero start、M=64の
+  NaN query/+Inf valueを含む。fallback/cleanup 0、測定範囲の生成token差なし。
+- 性能: M=64〜257のFP16 device中央値をgfx1201で約21〜47%、gfx1030で約38〜54%短縮した。M=37のgfx1201
+  prototypeは8.22%悪化したためM>=64だけへstable routeする。R9700 10,000-promptのC1+C2候補はB0比28.96%全体短縮。
+- 決定: 担当AI裁量でshared限定採用。全scoped patternの大幅改善、scratch 0、共通source、明示B0 complement、低い保守費用を
+  総合し、固定改善率gateは用いない。gfx1201 matrix innerは同じ4-row tileへ適合せず別candidateとして棄却する。
+- rollback: `use_prefill_gqa4`をfalseとし、M>=64をPhase 30 wave provider（gfx1201）またはB0（gfx1030）へ戻す。
+- 詳細: [Phase 33履歴](../history/2026/08/11-20/phase33-full-attention-structural-optimization.md)、
+  [bounded summary](../../ci/matrix/phase33-full-attention-summary-v1.json)。
+
 ### OUT-2026-08-19-P32: gfx1201 native FP8 KV append encode
 
 - scope: exact `gfx1201`のdynamic/static FP8 KV append。gfx1030、FP16、NVFP4は既存経路を維持する。

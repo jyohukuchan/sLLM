@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "e0c61e8a575bc187b67ec891c4bb8a80b1012f0669e6b845f6a98504591963fe"
+        "sha256": "e6bff1483d781b49bb4fff29b89b91a78ace869d4219f7afdcf6e67bed8a1cac"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "aad45681066f9e15d2fdbf104b9825e8003a707a3490af74142e10cf30aa0ca5"
       }
     ],
-    "source_set_sha256": "ec930f346addbfb15d1221ecaa15f556d416d66bb4fb0d8bef84199c1b1a100c"
+    "source_set_sha256": "71546d68288b20f2bcc0384d9d9e1caaf49cf651b3ded605ff1074a5b571f994"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -157,15 +157,15 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "fe5d2d5734901d47187276d829b1e1692f79ef2a8dca3ee3e60a853606364938"
+        "sha256": "2ab356747c5792a2fdfdb524d8951eeff504901a52e359bfe24091ce42a92af3"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "37142dbb58e0668533e1f8530ec71cf071583a85cc4cf2b89dcad2e84394dfb5"
+        "sha256": "2a3be1510beb4aa87d747ab2ed8152e2e48ea0b4947824ef0a964644b862ee2a"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "53b5b2f155ef072458544adeacc4885e10b1ebcf21092fe8814b8d7934888559"
+        "sha256": "02741f9ed92a11d2d2128adc38002224d80e4c0daa278bf207f7db1558807082"
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
@@ -229,7 +229,7 @@
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "9399e409da9a25cb7934738067df9985c17f6396e0eef1f7b109063e63c8bff7"
+        "sha256": "3fd125dbe47d302b38f6fc5d0d669863df74b320328fe58cbacc107c52271de2"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
@@ -269,7 +269,7 @@
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "8c6dedaf4da604628723cfad710ac337119cec5cee79ecc25a896744d5386701"
+        "sha256": "ffaef4495b04eb19f0c8cdc6790345c708632cbfb7755c1bccd3586d1794817e"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
@@ -277,7 +277,7 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "e0c61e8a575bc187b67ec891c4bb8a80b1012f0669e6b845f6a98504591963fe"
+        "sha256": "e6bff1483d781b49bb4fff29b89b91a78ace869d4219f7afdcf6e67bed8a1cac"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -332,7 +332,7 @@
         "sha256": "ff5bcf9fefade967589953e04c23be441a7fc71e1a4ffb9dd981a2736cdea968"
       }
     ],
-    "source_set_sha256": "6416823433d960511c9c512770f2a4bbfe4174d558d5023f4b987766051a26b7"
+    "source_set_sha256": "66cafc7bcff8d1023c65cfc883b60f3bd7edb2d594991a22c772986827ec0e3e"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

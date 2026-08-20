@@ -4575,20 +4575,29 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     }
     std::unique_ptr<Context> candidate(new Context(info->device_index));
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    if (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
-        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942")) {
+    const bool create_matmul_blas =
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") ||
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+    const bool create_matmul_lt =
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+    if (create_matmul_blas) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
-      const hipblasStatus_t lt_status =
-          blas_status == HIPBLAS_STATUS_SUCCESS
-              ? hipblasLtCreate(&candidate->matmul_lt_handle)
-              : HIPBLAS_STATUS_NOT_INITIALIZED;
-      if (blas_status != HIPBLAS_STATUS_SUCCESS ||
-          lt_status != HIPBLAS_STATUS_SUCCESS) {
+      if (blas_status != HIPBLAS_STATUS_SUCCESS) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
-            "hipBLAS/hipBLASLt handle creation failed for the native matmul "
-            "registry");
+            "hipBLAS handle creation failed for the native matmul registry");
+      }
+    }
+    if (create_matmul_lt) {
+      const hipblasStatus_t lt_status =
+          hipblasLtCreate(&candidate->matmul_lt_handle);
+      if (lt_status != HIPBLAS_STATUS_SUCCESS) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "hipBLASLt handle creation failed for the native matmul registry");
       }
     }
 #endif

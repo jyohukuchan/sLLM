@@ -102,15 +102,41 @@ sllm_status_t validate_causal_attention_dispatch_info(
   return SLLM_STATUS_OK;
 }
 
+struct CausalAttentionProviderSelection final {
+  bool use_gfx1201_wave_provider;
+  bool use_decode_wave_split;
+  bool use_prefill_gqa4;
+};
+
+CausalAttentionProviderSelection select_causal_attention_provider(
+    const sllm_causal_attention::DescriptorMetadata &metadata,
+    const uint32_t kv_heads, const char *const arch_name) noexcept {
+  const bool use_phase33_common_provider =
+      std::strcmp(arch_name, "gfx1030") == 0 ||
+      std::strcmp(arch_name, "gfx1201") == 0;
+  return {
+      std::strcmp(arch_name, "gfx1201") == 0 &&
+          (metadata.query_count == 1U || metadata.query_count >= 32U),
+      use_phase33_common_provider && metadata.query_count == 1U &&
+          metadata.expected_kv_length >= 1024U &&
+          metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM,
+      use_phase33_common_provider && metadata.query_count >= 64U &&
+          metadata.query.q_heads / kv_heads == 4U &&
+          metadata.query.head_dim == SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM,
+  };
+}
+
 void fill_causal_attention_dispatch_info(
     sllm_causal_attention_dispatch_info_t *const info,
     const uint64_t dispatch_id,
     const sllm_causal_attention::DescriptorMetadata &metadata,
     const uint32_t kv_heads, const uint32_t encoding,
     const char *const arch_name) noexcept {
-  const bool use_gfx1201_wave_provider =
-      std::strcmp(arch_name, "gfx1201") == 0 &&
-      (metadata.query_count == 1U || metadata.query_count >= 32U);
+  const CausalAttentionProviderSelection selection =
+      select_causal_attention_provider(metadata, kv_heads, arch_name);
+  const bool use_gfx1201_wave_provider = selection.use_gfx1201_wave_provider;
+  const bool use_decode_wave_split = selection.use_decode_wave_split;
+  const bool use_prefill_gqa4 = selection.use_prefill_gqa4;
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -124,8 +150,9 @@ void fill_causal_attention_dispatch_info(
                         ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2
                         : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3;
   info->workgroup_size_x = SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
-  info->grid_size_x =
-      static_cast<uint32_t>(metadata.query_count * metadata.query.q_heads);
+  info->grid_size_x = static_cast<uint32_t>(
+      metadata.query_count *
+      (use_prefill_gqa4 ? kv_heads : metadata.query.q_heads));
   info->query_count = metadata.query_count;
   info->start_position = metadata.start_position;
   info->committed_kv_length = metadata.expected_kv_length;
@@ -137,7 +164,11 @@ void fill_causal_attention_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
-      use_gfx1201_wave_provider
+      use_decode_wave_split
+          ? ::sllm_causal_attention_kernel::kDecodeWaveSplitLogicalKernelId
+      : use_prefill_gqa4
+          ? ::sllm_causal_attention_kernel::kPrefillGqa4LogicalKernelId
+      : use_gfx1201_wave_provider
           ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
                  ? ::sllm_causal_attention_kernel::kGfx1201WaveLogicalKernelId
                  : ::sllm_causal_attention_kernel::
@@ -147,7 +178,11 @@ void fill_causal_attention_dispatch_info(
                  : ::sllm_causal_attention_kernel::kPackedKvLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
-      use_gfx1201_wave_provider
+      use_decode_wave_split
+          ? ::sllm_causal_attention_kernel::kDecodeWaveSplitDeviceSymbol
+      : use_prefill_gqa4
+          ? ::sllm_causal_attention_kernel::kPrefillGqa4DeviceSymbol
+      : use_gfx1201_wave_provider
           ? (encoding == SLLM_HIP_KV_ENCODING_FP16_V1
                  ? ::sllm_causal_attention_kernel::kGfx1201WaveDeviceSymbol
                  : ::sllm_causal_attention_kernel::
@@ -419,6 +454,9 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         byte_pointer(query, metadata.query.byte_offset));
     uint16_t *const output_pointer = static_cast<uint16_t *>(
         byte_pointer(output, metadata.output.byte_offset));
+    const CausalAttentionProviderSelection selection =
+        select_causal_attention_provider(metadata, state->head_count,
+                                         arch_name);
     const hipError_t launch_status = ::sllm_causal_attention_kernel::launch(
         query_pointer, state->key_buffer->device_pointer,
         state->value_buffer->device_pointer, state->key_scale_plane.address,
@@ -428,9 +466,8 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         output_pointer, static_cast<uint32_t>(metadata.query_count),
         state->capacity_tokens, metadata.start_position,
         metadata.expected_kv_length, metadata.query.q_heads, state->head_count,
-        state->head_dim, state->encoding,
-        std::strcmp(arch_name, "gfx1201") == 0 &&
-            (metadata.query_count == 1U || metadata.query_count >= 32U),
+        state->head_dim, state->encoding, selection.use_gfx1201_wave_provider,
+        selection.use_decode_wave_split, selection.use_prefill_gqa4,
         queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();

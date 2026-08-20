@@ -1356,6 +1356,13 @@ impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission 
             .map(map_completion_state)
             .map_err(map_async_error)
     }
+
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        self.completion
+            .kernel_elapsed_ns()
+            .map(Some)
+            .map_err(map_async_error)
+    }
 }
 
 impl ExecutionKvStateSubmissionAdapter for HipKvSubmission {

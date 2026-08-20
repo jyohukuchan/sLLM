@@ -401,6 +401,28 @@ claimしない。gfx1201 10,001/16,385、gfx1030 10,001 inputはtoken `[1228, 12
 native packed/128-thread候補、gfx1030 native化、default FP8化は採用していない。詳細は
 [Phase 32 summary](../../ci/matrix/phase32-native-fp8-append-summary-v1.json)を正とする。
 
+### 2026-08-20 Phase 33 Full Attention evidence
+
+canonical R9700 exact `gfx1201`とV620 exact `gfx1030`へ、scratch-freeな共通Full Attention providerを限定採用した。
+C1は`M=1`/KV>=1,024を8 waveの連続KV区間へ分割し、QK依存深さ8→12のN2を明記したうえでユーザー承認を得た。
+C2は`M>=64`/GQA4/head dim 256で4 query headのK/V decodeを共有する。両者ともglobal scratchと追加dispatchは0で、
+scope外はPhase 30/B0へ事前routeする。FP16/dynamic FP8/static FP8/NVFP4の232/232 oracle、representative full-model、
+dynamic FP8 API lifecycle、wrong-target拒否を最終binaryでPASSし、fallback/cleanupは0だった。C3 matrix innerは採用C2の
+4-row tileが16×16×16 WMMAへ合わないため棄却した。詳細は
+[Phase 33 summary](../../ci/matrix/phase33-full-attention-summary-v1.json)を正とする。
+
+### 2026-08-20 Phase 34 V620 long-prefill BF16 matmul evidence
+
+canonical V620 UUID `GPU-76a08c022586fed6`のexact gfx1030でcurrent tiled16とexisting hipBLASを同一buffer/stream比較した。
+10,001行の248 projection加重値は62.526秒から11.081秒へ82.28%、Qwen3.5-4B FP16 KV full modelは
+89.249秒から34.684秒へ61.14%短縮した。主要5 shapeを`M>=128`、K/V shapeを`M>=1024`でrouteし、N=32と
+scope外shapeは旧providerへ残す。canonical R9700 UUID `GPU-a8e9ddefa2d60f55`の10,001-token controlは75.316秒、
+既存hipBLAS route不変で、両targetとも同token、HIP-only、fallbackなし、cleanup 0だった。
+
+selected solutionはGSU1、global atomic combineなしで、stress oracleのbound違反は0だった。gfx942はcompile-only、gfx1201 binaryの
+V620 loadはexact target mismatchで拒否された。この証拠を別V620/RDNA2 SKU、別model shape、ROCm version、N=32やunknown shapeへ
+一般化しない。[Phase 34 summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

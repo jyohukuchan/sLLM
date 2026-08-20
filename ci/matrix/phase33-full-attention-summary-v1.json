@@ -1,0 +1,188 @@
+{
+  "schema_version": "phase33-full-attention-summary-v1",
+  "state": "COMPLETE",
+  "recorded_at": "2026-08-20",
+  "identity": {
+    "source_base_commit": "7140c72591e4527ac0e37ffcf4d904d1a0f24172",
+    "candidate_source_diff_sha256": "6ec3295bc733dd827f82450c6bad9a6d8d3b3dea6951dfa17ab7832504ea3d60",
+    "kernel_source_sha256": "80d8e1e2a1fb199301400c8896afbcfeca82b2b009a85e4927e290bbac355d65",
+    "runtime_source_sha256": "fde86608bff20b4cef83a85e83bccd0b5a66735d5d04501d1a08d0be9f236af2",
+    "evidence_source_sha256": "40e0f2a5e1f5b2b601e8a649e712948134aa6c15a464bc1f0b8fc9b6dc2cba9a",
+    "rocm": "7.14.0",
+    "llvm": "AMD clang 23.0.0git 46fcb339fb61119b337f973c7ca9e710a319fdd0",
+    "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "gfx1201_uuid": "GPU-a8e9ddefa2d60f55",
+    "gfx1030_uuid": "GPU-76a08c022586fed6",
+    "gfx1201_cli_sha256": "835a3265190670eb70aabe81c4d996b9fc7d03933cba275f4d61a7812d3c3d7c",
+    "gfx1030_cli_sha256": "7d281c12e93503662711fd8ca7b9329681f3b148e95b72454e245351e4f1229f",
+    "gfx1201_server_sha256": "a7e55fd78aee8648f49fa90b09772613bbd74a60436eb1bb2d075a4f1087a3b2",
+    "gfx1201_evidence_binary_sha256": "f88ccd5e0f056bcba579cac4f6bd43b3fff895ce5219209f243dd4b2df5f9ac6",
+    "gfx1030_evidence_binary_sha256": "56069aff814743fa737e73d1b4325644fed6cf694468d259d2f69ef510cc1619"
+  },
+  "decisions": {
+    "c1_decode_wave_split": "ADOPTED",
+    "c2_prefill_gqa4": "ADOPTED",
+    "c3_gfx1201_matrix": "REJECTED_TILE_SHAPE_SCOPE_MISMATCH",
+    "performance_authority": "assigned-ai-contextual-judgment",
+    "fixed_threshold": false
+  },
+  "routing": {
+    "targets": ["gfx1030", "gfx1201"],
+    "encodings": ["fp16", "fp8", "fp8-static", "nvfp4"],
+    "head_dim": 256,
+    "gqa_ratio": 4,
+    "c1_query_count": 1,
+    "c1_min_kv_length": 1024,
+    "c2_min_query_count": 64,
+    "complement": "phase30-or-baseline-online-softmax",
+    "runtime_failure_fallback": false
+  },
+  "correctness": {
+    "targets": 2,
+    "encodings": 4,
+    "cases_per_target_encoding": 29,
+    "cases_passed": 232,
+    "cases_total": 232,
+    "fp16_max_abs_error": 2.384185791015625e-7,
+    "fp8_max_abs_error": 4.76837158203125e-7,
+    "nvfp4_max_abs_error": 1.1641532182693481e-9,
+    "fallbacks": 0,
+    "cleanup_failures": 0,
+    "c1_numerical_class": "N2_QK_DEPENDENCY_DEPTH_8_TO_12",
+    "c2_gfx1201_numerical_class": "N0_BIT_EXACT_REDUCTION_ORDER",
+    "c2_gfx1030_numerical_class": "N1_FIXED_TREE_SAME_DEPTH_BOUND",
+    "final_identity_revalidation_pending": false
+  },
+  "operator": {
+    "warmups": 5,
+    "measured": 21,
+    "timing": "HIP event device ns, median rows shown",
+    "c1": {
+      "gfx1201": [
+        {"case": "kv1024", "baseline_ns": 880170, "candidate_ns": 374364, "reduction_percent": 57.46685299430792},
+        {"case": "kv1025", "baseline_ns": 883010, "candidate_ns": 376283, "reduction_percent": 57.38632631567027},
+        {"case": "kv4097-mixed", "baseline_ns": 3074314, "candidate_ns": 1446250, "reduction_percent": 52.956984875325034},
+        {"case": "kv8193", "baseline_ns": 6101628, "candidate_ns": 2549697, "reduction_percent": 58.21284090082188}
+      ],
+      "gfx1030": [
+        {"case": "kv1024", "baseline_ns": 1107134, "candidate_ns": 401244, "reduction_percent": 63.75831651814505},
+        {"case": "kv1025", "baseline_ns": 1105534, "candidate_ns": 401844, "reduction_percent": 63.65159280492504},
+        {"case": "kv4097-mixed", "baseline_ns": 4394055, "candidate_ns": 1575814, "reduction_percent": 64.13759044891336},
+        {"case": "kv8193", "baseline_ns": 8783950, "candidate_ns": 3067107, "reduction_percent": 65.08282720188525}
+      ]
+    },
+    "c2": {
+      "gfx1201_reduction_percent_m64_to_m257": [21.197911493877783, 47.42941834339439],
+      "gfx1030_reduction_percent_m64_to_m257": [38.2862805282697, 53.655995943395375],
+      "m63_complement": "B0",
+      "prototype_m37_gfx1201_regression_percent": 8.22
+    }
+  },
+  "full_model": {
+    "paired_r9700_fp16_10000_prompt": {
+      "baseline_ns": 105800223720,
+      "candidate_ns": 75162268705,
+      "reduction_percent": 28.958,
+      "generated_token_id": 1228,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    "profiled_r9700_fp16_10000_prompt": {
+      "baseline_attention_ns": 53922434000,
+      "candidate_attention_ns": 23100678000,
+      "attention_reduction_percent": 57.161,
+      "baseline_all_kernel_ns": 88676681000,
+      "candidate_all_kernel_ns": 57713242000
+    },
+    "paired_v620_fp16_4108_prompt": {
+      "baseline_ns": 39096917771,
+      "candidate_ns": 36499894988,
+      "reduction_percent": 6.643,
+      "generated_token_id": 1228,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    "paired_v620_fp8_4108_prompt": {
+      "baseline_ns": 39304003302,
+      "candidate_ns": 36668566707,
+      "reduction_percent": 6.705,
+      "generated_token_id": 1228,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    "diagnostic_r9700_fp16_16384_prompt": {
+      "baseline_ns": 230207045950,
+      "pre_resource_trim_candidate_ns": 150900130058,
+      "reduction_percent": 34.45,
+      "generated_token_id": 1228,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    },
+    "final_identity_smoke": {
+      "gfx1201_fp16_10000_prompt_ns": 75552626720,
+      "gfx1201_generated_token_id": 1228,
+      "gfx1030_fp16_4108_prompt_ns": 36432156837,
+      "gfx1030_generated_token_id": 1228,
+      "hip_only": true,
+      "fallback": false,
+      "cleanup_failures": 0
+    }
+  },
+  "resources": {
+    "c1_lds_bytes": 8256,
+    "c1_vgpr": 104,
+    "c1_scratch_bytes": 0,
+    "c2_lds_bytes": 192,
+    "c2_vgpr": 48,
+    "c2_scratch_bytes": 0,
+    "global_scratch_bytes": 0,
+    "additional_dispatches": 0
+  },
+  "matrix_candidate": {
+    "c2_rows_per_tile": 4,
+    "minimum_matrix_rows": 16,
+    "padding_rows_required": 12,
+    "actual_matrix_instruction_occurrences": 0,
+    "decision_reason": "The accepted Q_TILE=1 plus four GQA heads has only four rows. WMMA requires a 16-row shape; padding 12 rows or changing to Q_TILE=4 would create a different layout/provider outside the C3 same-tile-inner-only scope.",
+    "external_code_reused": false
+  },
+  "service": {
+    "target": "gfx1201",
+    "kv_cache_encoding": "fp8",
+    "prompt_tokens": 10012,
+    "non_stream_content": "It",
+    "sse_content": "It",
+    "sse_done": true,
+    "disconnect_outcome": "cancelled",
+    "recovery_content": "Hello",
+    "fallbacks": 0,
+    "shutdown_current_bytes": 0,
+    "shutdown_request_state_bytes": 0,
+    "shutdown_workspace_bytes": 0,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  },
+  "verification": {
+    "host_tests_passed": 284,
+    "gfx1201_build": true,
+    "gfx1030_build": true,
+    "gfx942_compile_only": true,
+    "wrong_target_load_rejected": true,
+    "wrong_target_exit_code": 1,
+    "wrong_target_error": "requested device gcnArchName does not match exactly",
+    "git_diff_check": true,
+    "final_release_rerun_complete": true
+  },
+  "limitations": [
+    "C1 remains classified N2: user approval adopts the measured reduction-order tradeoff but does not reclassify it as N1.",
+    "The 16384-prompt diagnostic predates the final C1 LDS trim; it is directional evidence and not the final release identity.",
+    "V620 full-model transfer is smaller than operator gain because projection and other non-attention work remains dominant.",
+    "Paged Attention, prefix sharing, continuous batching, KV-format changes, low-bit default promotion, and separate Q_TILE=4 matrix layouts remain out of scope."
+  ]
+}

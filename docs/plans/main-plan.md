@@ -993,6 +993,8 @@ candidateを再確認した。
 | 完了・限定採用 | Phase 30 | RDNA4 native attention/KV hardware-path最適化 | gfx1201 native FP8 readとwave providerをM=1/M>=32へ採用、append encodeとmatrix候補は不採用 |
 | 完了・採用 | Phase 31 | low-bit KV通常運用向けchunked prefill・workspace memory基盤 | arenaを約86.79%縮小し、両targetの10k+ FP16/FP8とgfx1201の16,385-token 2-chunkを成立させた |
 | 完了・限定採用 | Phase 32 | native FP8 KV append encode再検証 | 担当AI裁量で低保守費用のgfx1201 native scalarを採用。append 51.52%短縮、packedとgfx1030 native化は不採用 |
+| 完了・限定採用 | Phase 33 | Full Attention構造最適化 | C1 decode wave8 splitとC2 GQA4 K/V共有を共通限定採用。C1はN2としてユーザー承認、C3 matrixは棄却 |
+| 完了・限定採用 | Phase 34 | V620長行prefill BF16 matmul provider比較・最適化 | exact gfx1030の長行6 shapeをexisting hipBLASへ限定routeし、10,001-token full modelを61.14%短縮。MTP verify row不具合も限定修正 |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -1020,6 +1022,35 @@ C1はoperatorを19.40〜65.22%、production 10,001-token append familyを51.52%�
 gfx1030 software route、default FP16、API/KV formatは維持した。low-bit KV default昇格、Paged Attention、TurboQuantは含めない。
 詳細は[Phase 32 archive](archive/2026/08/11-20/phase32-native-fp8-kv-append-revalidation.md)
 および[bounded summary](../../ci/matrix/phase32-native-fp8-append-summary-v1.json)を正とする。
+Phase 32の10,001/16,385-token diagnostic traceでcausal attentionがGPU kernel時間の72.65%/82.11%、
+full-model timingの59.46%/75.23%相当となり、Phase 23の短contextで7%未満だった前提が変わった。このため
+Full Attention構造最適化をPhase 33へ割り当てる。両targetで共通化するdecode split-KVとprefill tiled online softmaxを
+先に比較し、同じtile contract上のgfx1201 matrix innerを追加候補とする。vAttention、KV format、default FP16、public APIは維持し、
+各candidateを独立scopeとして担当AI裁量で採否する。詳細は
+[Phase 33 archive](archive/2026/08/11-20/phase33-full-attention-structural-optimization.md)を正とする。
+Phase 33のfresh traceは、Phase 32集計でnative append中の`M=1` attentionがattention aggregateから漏れていたことを示した。
+10,000 promptのB0 Full Attentionはprefill 18.648秒に加えて`M=1` 35.275秒、計53.922秒だった。scratch-free C1は
+1 workgroupを8 waveの連続KV区間へ分け、KV長1,024以上のdecodeをgfx1201で約53〜58%、gfx1030で約64〜65%短縮した。
+QK加算依存深さが概ね8段から12段へ増えるN2であることを維持し、2026-08-20のユーザー承認によりproductionへ限定採用した。C2は1 query rowと
+GQA 4 headでK/V decodeを共有し、`M>=64`をgfx1201で約21〜47%、gfx1030で約38〜54%短縮した。gfx1201はN0、
+gfx1030は同じ8段boundのN1として担当AI裁量で共通限定採用する。C3は採用C2の4 row tileが16×16×16 WMMAへ合わず、
+同じtileのinner replacementでは12 row paddingまたは別Q_TILE layoutが必要なため棄却した。候補全体は4 KV encoding ×
+2 target × 29 caseの232/232 oracleをPASSし、R9700 10,000-prompt paired CLIを105.800秒から75.162秒へ28.96%短縮した。
+承認後のfinal identityでは両target・4 encoding・29 caseの232/232 oracle、R9700 10,000-prompt、V620 4,108-prompt、
+R9700 dynamic FP8 API lifecycle、wrong-target拒否を再確認し、fallback/cleanup 0で完了した。最終結果は
+[Phase 33 bounded summary](../../ci/matrix/phase33-full-attention-summary-v1.json)へ記録する。
+Phase 33後のdynamic FP8 KV 10,001-input診断では、V620の内部BF16 prefill projection 248回がtiled16で66.561秒、R9700は
+existing hipBLASで0.642秒となり、両targetの同じ`M=1` projectionは22.42/17.29 msに留まった。V620 selectorが
+`K/N`を使わず、Phase 9の`M=17`判断を10,001行にも適用していることから、provider/solution差を主要因とする強い仮説として、
+Phase 23 `P23-O5`のV620長行GEMM部分を
+Phase 34へ割り当てた。旧P23-O5の10〜40% estimateとresidual 10%条件は前提変更前の探索値であり採用gateにしていない。
+Phase 34は同一V620上でtiled16とexisting hipBLASを比較し、主要5 familyを`M>=128`、Full Attention K/V shapeを`M>=1024`で
+hipBLASへ送る限定routeを採用した。10,001行の248-call加重projectionは62.526秒から11.081秒へ82.28%、full modelは
+89.249秒から34.684秒へ61.14%短縮した。N=32、未知shape、all-logits vocabulary path、短Mは旧providerを維持し、
+gfx1030 hipBLASLtとgfx1201/gfx942 routeは変更していない。R9700 long controlで発見したMTP verify row compaction不具合も、
+MTP decode blockだけ全terminal rowを保持するcorrectness修正として併合した。詳細は
+[Phase 34 archive](archive/2026/08/11-20/phase34-v620-long-prefill-bf16-matmul-provider-optimization.md)および
+[bounded summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
 その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
 multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
@@ -1032,7 +1063,8 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   この節で管理する。dense BF16 `M=1` matvecの最初のwork unitをPhase 22へ割り当て、Phase 23でinventoryを
   cross-engine差分、critical-path share、Amdahl上限から再分類した。prefill last-row projectionをPhase 24、
   batch-compatible projection-family optimizationをPhase 25、continuous request batchingをPhase 26、
-  exact decode weight-stream/provider optimizationをPhase 27、projection外device短縮をPhase 28へ割り当て、
+  exact decode weight-stream/provider optimizationをPhase 27、projection外device短縮をPhase 28、post-Phase-33の
+  V620長行BF16 prefill providerをPhase 34へ割り当て、
   cold loaderは未割当のまま維持する。
   このinventoryは完了Phaseのscopeを拡張せず、個別taskの受入条件、
   実装順、対象targetは着手時のfresh profileで固定する。
@@ -1054,14 +1086,21 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   - Phase 30でgfx1201 native FP8 codec、decode wave tile、prefill matrix attentionを別work unitとして比較した。native FP8 readと
     wave32 reductionは採用し、gfx1030と`M=2..31`はbaseline controlを維持する。native append encodeとmatrix providerは不採用である。
     10000+ full-model prefillは現行workspaceが利用可能VRAMを超えるため、chunked-prefill/resource workをPhase 31へ割り当てた。
+  - Phase 31後の10k+/16,385-token通常経路ではcausal attentionが支配的になったため、decodeのKV方向parallel blockとfixed combine、
+    prefillのQ/K tile・GQA K/V共有、同じtile上のgfx1201 matrix innerをPhase 33へ割り当てた。共通dispatch/scratch/softmaxを優先し、
+    target/encoding/M/KV長scopeは独立採否する。
   - Q/PのFP16/FP8化、softmax順序、accumulator変更は数値台帳のN0〜N3へ分類し、N2を性能だけで自動採用しない。
 - Dense BF16 execution:
   - Phase 27のfresh E1比較では、V620 projectionはpeerより6.76%速く、R9700だけ12.53%遅かった。両target共通の
     projection provider gapではなく、全target非悪化かつ任意pattern 5%改善へ届くwork unitを固定できなかった。
   - Phase 27のprojection除外coarse residualはprefill非projection workとR9700 MTP内部stepを含んでいたため、peerに対する
     3.80倍/3.54倍claimを撤回した。Phase 28でcommitted output step単位にfamilyを分解し、device処理だけを短縮する。
-  - production graph/command-list、gate/up+SiLU等のfamily fusion、R9700限定projection providerは未割当backlogとして維持する。
-    後者はR9700のstable adoption scopeで5%以上改善し、gfx1030等をbaselineへ確実にrouteできる共通registry keyがあれば再検討できる。
+  - Phase 33後の10,001-input profileではV620 `M>1` projection 248回のtiled16が66.561秒、R9700 hipBLASが0.642秒で、
+    V620全体の73.89%を占めた。short `M=17`を根拠に全gfx1030 `M>8`へ適用したshape-insensitive selectorという前提変化を
+    Phase 34で再評価し、長行6 shapeだけexisting hipBLASへrouteしてP23-O5のV620部分を完了した。
+  - production graph/command-list、gate/up+SiLU等のfamily fusion、R9700限定decode projection providerは未割当backlogとして維持する。
+    後者はstable adoption scopeの絶対/相対利益、confidence、数値/resource、分岐/保守費用を担当AIが総合して採用が妥当と判断でき、
+    gfx1030等をbaselineへ確実にrouteできる共通registry keyがある場合に再検討する。
 - FP8、NVFP4、MXFP4 model path:
   - Q/K/Vやgate/up等、同じBF16 activationを消費する複数linear間でdynamic FP8/NVFP4/MXFP4 activationとscaleを
     共有する。RMSNorm等のproducerからの直接量子化、quantize+matmul融合、M=1専用quantizerも比較する。
@@ -1125,13 +1164,20 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   - multi-GPU、expert/tensor/pipeline parallel、Infinity Fabric/RCCL/RDMAはcapacity・batch throughput候補とし、
     単一requestやPCIe構成では通信費を含む実測後に採否を決める。
 - 現時点でそのまま再提案しない候補:
-  - V620の一般的なM>1 hipBLAS切替、R9700のtransposed GDN state、既存weight-only NVFP4 decodeの複数N列・
-    scale broadcast、V620で現状のままMTP幅2を有効化する案は既存実測で改善しなかったため再採用しない。
+  - V620の全M/shapeを無条件にhipBLASへ切り替える案は、Phase 9とPhase 34の短M/small-N実測により再採用しない。
+    Phase 34で採用したexact production shapeとM thresholdだけを維持し、未知shapeへ一般化しない。
+    R9700のtransposed GDN state、既存weight-only NVFP4 decodeの複数N列・scale broadcast、V620で現状のままMTP幅2を
+    有効化する案は既存実測で改善しなかったため再採用しない。
   - 短contextでのfull attention/FA3-like最優先化とrequestごとのproduction HIP Graph instantiateも再採用しない。
     前提となるprofileまたは実装構造が変わった場合だけ、新しいcandidateとして別に測定する。
 
 ## 現在の状態と次の作業
 
+- Phase 34は限定採用で完了した。exact gfx1030の長行production shapeだけexisting hipBLASへ送り、N=32、未知shape、all-logits、
+  短Mは旧providerへ残した。10,001-token full modelは61.14%短縮し、数値は同じ項・dtype・丸めstageと非増加boundを持つN1、
+  R9700 route不変、fallback/cleanup 0だった。MTP verify row不具合も専用回帰テスト付きで修正した。詳細は
+  [Phase 34 archive](archive/2026/08/11-20/phase34-v620-long-prefill-bf16-matmul-provider-optimization.md)と
+  [bounded summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
 - Phase 29はGDN-only採用指標で性能条件を満たすwave reductionを得た。長生成token差は非負二乗和の固定tree化による説明可能な
   解析的誤差低減N1として台帳へ記録し、数値gateを自動承認してshared production pathへ採用した。target splitはない。詳細は
   [Phase 29 archive](archive/2026/08/11-20/phase29-gdn-useful-workgroup-parallelization.md)と

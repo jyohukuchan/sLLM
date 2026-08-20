@@ -24,6 +24,8 @@ const Q_HEADS: usize = 16;
 const KV_HEADS: usize = 4;
 const HEAD_DIM: usize = 256;
 const WORKGROUP_SIZE: u32 = 256;
+const TIMING_WARMUPS: usize = 5;
+const TIMING_MEASURED: usize = 21;
 
 #[derive(Clone, Copy, Debug)]
 struct Case {
@@ -34,7 +36,7 @@ struct Case {
 
 // Non-Cartesian coverage: prefill M boundaries plus decode prefixes. The
 // prefill M=1/start=0 case is also the decode-prefix-zero boundary.
-const CASES: [Case; 17] = [
+const CASES: [Case; 29] = [
     Case {
         id: "prefill-m1",
         m: 1,
@@ -53,6 +55,41 @@ const CASES: [Case; 17] = [
     Case {
         id: "prefill-m37",
         m: 37,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m63",
+        m: 63,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m64",
+        m: 64,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m65",
+        m: 65,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m64-start3",
+        m: 64,
+        start_position: 3,
+    },
+    Case {
+        id: "prefill-m127",
+        m: 127,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m128",
+        m: 128,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m129",
+        m: 129,
         start_position: 0,
     },
     Case {
@@ -111,6 +148,11 @@ const CASES: [Case; 17] = [
         start_position: 8192,
     },
     Case {
+        id: "decode-mixed-kv4097",
+        m: 1,
+        start_position: 4096,
+    },
+    Case {
         id: "special-query-nan",
         m: 1,
         start_position: 0,
@@ -118,6 +160,26 @@ const CASES: [Case; 17] = [
     Case {
         id: "special-value-pos-inf",
         m: 1,
+        start_position: 0,
+    },
+    Case {
+        id: "special-decode1024-query-nan",
+        m: 1,
+        start_position: 1023,
+    },
+    Case {
+        id: "special-decode1024-value-pos-inf",
+        m: 1,
+        start_position: 1023,
+    },
+    Case {
+        id: "special-prefill64-query-nan",
+        m: 64,
+        start_position: 0,
+    },
+    Case {
+        id: "special-prefill64-value-pos-inf",
+        m: 64,
         start_position: 0,
     },
 ];
@@ -152,6 +214,8 @@ struct CaseEvidence {
     gqa_mapping_match: bool,
     metadata_match: bool,
     no_fallback: bool,
+    timing_warmups: usize,
+    timing_samples_ns: Vec<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -385,6 +449,52 @@ fn input_v_words(token_count: usize, seed: u64) -> Vec<u16> {
     words
 }
 
+fn input_mixed_q_words(m: usize) -> Vec<u16> {
+    let mut words = vec![0_u16; m * Q_HEADS * HEAD_DIM];
+    for row in 0..m {
+        for head in 0..Q_HEADS {
+            for dimension in 0..HEAD_DIM {
+                let code = ((row * 19 + head * 11 + dimension * 7) % 31) as i32 - 15;
+                words[(row * Q_HEADS + head) * HEAD_DIM + dimension] =
+                    float_to_bf16_rne(code as f32 / 16.0);
+            }
+        }
+    }
+    words
+}
+
+fn input_mixed_k_words(token_count: usize, start_position: u64) -> Vec<u16> {
+    let mut words = vec![0_u16; token_count * KV_HEADS * HEAD_DIM];
+    for token in 0..token_count {
+        let absolute = start_position + token as u64;
+        for head in 0..KV_HEADS {
+            for dimension in 0..HEAD_DIM {
+                let code =
+                    ((absolute * 13 + head as u64 * 17 + dimension as u64 * 5) % 37) as i32 - 18;
+                words[(token * KV_HEADS + head) * HEAD_DIM + dimension] =
+                    float_to_bf16_rne(code as f32 / 32.0);
+            }
+        }
+    }
+    words
+}
+
+fn input_mixed_v_words(token_count: usize, start_position: u64) -> Vec<u16> {
+    let mut words = vec![0_u16; token_count * KV_HEADS * HEAD_DIM];
+    for token in 0..token_count {
+        let absolute = start_position + token as u64;
+        for head in 0..KV_HEADS {
+            for dimension in 0..HEAD_DIM {
+                let code =
+                    ((absolute * 29 + head as u64 * 23 + dimension as u64 * 3) % 127) as i32 - 63;
+                words[(token * KV_HEADS + head) * HEAD_DIM + dimension] =
+                    float_to_bf16_rne(code as f32 / 32.0);
+            }
+        }
+    }
+    words
+}
+
 fn make_binding(
     session: &ExecutionSession,
     buffer: &sllm_core::ExecutionBuffer,
@@ -604,6 +714,8 @@ fn metadata_matches(
     encoding: KvCacheEncoding,
 ) -> bool {
     let use_gfx1201_wave_provider = expected_target == "gfx1201" && (case.m == 1 || case.m >= 32);
+    let use_decode_wave_split = case.m == 1 && case.start_position + 1 >= 1024;
+    let use_prefill_gqa4 = case.m >= 64;
     let (kernel_id, baseline_kernel_symbol, baseline_device_symbol) =
         if encoding == KvCacheEncoding::Fp16 {
             (
@@ -618,7 +730,17 @@ fn metadata_matches(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
-    let (kernel_symbol, device_symbol) = if use_gfx1201_wave_provider {
+    let (kernel_symbol, device_symbol) = if use_decode_wave_split {
+        (
+            "causal_attention.decode.wave8_split.v5",
+            "sllm_causal_attention_decode_wave8_split_v5",
+        )
+    } else if use_prefill_gqa4 {
+        (
+            "causal_attention.prefill.gqa4_shared.v6",
+            "sllm_causal_attention_prefill_gqa4_shared_v6",
+        )
+    } else if use_gfx1201_wave_provider {
         if encoding == KvCacheEncoding::Fp16 {
             (
                 "causal_attention.online_softmax_gqa.gfx1201_wave.v4",
@@ -639,7 +761,12 @@ fn metadata_matches(
         && dispatch.dispatch_count == 1
         && dispatch.kernel_id == kernel_id
         && dispatch.workgroup_size_x == WORKGROUP_SIZE
-        && dispatch.grid_size_x == (case.m * Q_HEADS) as u32
+        && dispatch.grid_size_x
+            == if use_prefill_gqa4 {
+                (case.m * KV_HEADS) as u32
+            } else {
+                (case.m * Q_HEADS) as u32
+            }
         && dispatch.row_count == case.m as u64
         && dispatch.normalized_size == HEAD_DIM as u64
         && dispatch.backend == sllm_hip_sys::SLLM_BACKEND_HIP
@@ -677,14 +804,31 @@ fn run_case(
     let state = session
         .create_kv_state(descriptor)
         .map_err(|error| format!("KV state creation failed: {error}"))?;
-    let prefix_key = input_k_words(case.start_position as usize, 0);
-    let prefix_value = input_v_words(case.start_position as usize, seed + 1);
+    let mixed = case.id == "decode-mixed-kv4097";
+    let prefix_key = if mixed {
+        input_mixed_k_words(case.start_position as usize, 0)
+    } else {
+        input_k_words(case.start_position as usize, 0)
+    };
+    let prefix_value = if mixed {
+        input_mixed_v_words(case.start_position as usize, 0)
+    } else {
+        input_v_words(case.start_position as usize, seed + 1)
+    };
     if case.start_position != 0 {
         append_tokens(session, queue, &state, &prefix_key, &prefix_value, 0)?;
     }
-    let key_words = input_k_words(case.m, case.start_position);
-    let mut value_words = input_v_words(case.m, seed + 2);
-    if case.id == "special-value-pos-inf" {
+    let key_words = if mixed {
+        input_mixed_k_words(case.m, case.start_position)
+    } else {
+        input_k_words(case.m, case.start_position)
+    };
+    let mut value_words = if mixed {
+        input_mixed_v_words(case.m, case.start_position)
+    } else {
+        input_v_words(case.m, seed + 2)
+    };
+    if case.id.contains("value-pos-inf") {
         value_words.fill(0x7f80);
     }
     append_tokens(
@@ -726,10 +870,16 @@ fn run_case(
     };
     let committed_byte_reduction_fraction =
         1.0 - physical.committed_bytes_per_plane() as f64 / fp16_committed_bytes_per_plane as f64;
-    let mut query_words = input_q_words(case.m);
-    if case.id == "special-query-nan" {
-        for head in 0..Q_HEADS {
-            query_words[head * HEAD_DIM] = 0x7fc1;
+    let mut query_words = if mixed {
+        input_mixed_q_words(case.m)
+    } else {
+        input_q_words(case.m)
+    };
+    if case.id.contains("query-nan") {
+        for row in 0..case.m {
+            for head in 0..Q_HEADS {
+                query_words[(row * Q_HEADS + head) * HEAD_DIM] = 0x7fc1;
+            }
         }
     }
     let query_bytes = words_to_bytes(&query_words);
@@ -761,7 +911,40 @@ fn run_case(
     {
         return Err("causal attention did not reach success".to_owned());
     }
+    let first_elapsed = attention
+        .kernel_elapsed_ns()
+        .map_err(|error| format!("causal attention timing failed: {error}"))?
+        .ok_or_else(|| "HIP causal attention omitted device timing".to_owned())?;
+    if first_elapsed == 0 {
+        return Err("HIP causal attention returned zero device time".to_owned());
+    }
     drop(attention);
+
+    let mut timing_samples_ns = Vec::with_capacity(TIMING_MEASURED);
+    for repetition in 0..(TIMING_WARMUPS + TIMING_MEASURED) {
+        let timing_query = make_binding(session, &query_buffer, &shape, AccessMode::Read)?;
+        let timing_output = make_binding(session, &output_buffer, &shape, AccessMode::Write)?;
+        let mut measured = session
+            .causal_attention(&state, queue, timing_query, timing_output, descriptor)
+            .map_err(|error| format!("timed causal attention submission failed: {error}"))?;
+        if measured
+            .wait(WAIT_TIMEOUT)
+            .map_err(|error| format!("timed causal attention wait failed: {error}"))?
+            != ExecutionState::Success
+        {
+            return Err("timed causal attention did not reach success".to_owned());
+        }
+        let elapsed = measured
+            .kernel_elapsed_ns()
+            .map_err(|error| format!("timed causal attention timing failed: {error}"))?
+            .ok_or_else(|| "timed HIP causal attention omitted device timing".to_owned())?;
+        if elapsed == 0 {
+            return Err("timed HIP causal attention returned zero device time".to_owned());
+        }
+        if repetition >= TIMING_WARMUPS {
+            timing_samples_ns.push(elapsed);
+        }
+    }
 
     let (expected, nonuniform_softmax_checked, subnormal_score_contribution_checked) =
         scalar_oracle(
@@ -855,6 +1038,8 @@ fn run_case(
         gqa_mapping_match,
         metadata_match,
         no_fallback: !dispatch.fallback_allowed && !dispatch.fallback_used,
+        timing_warmups: TIMING_WARMUPS,
+        timing_samples_ns,
     })
 }
 
@@ -1036,8 +1221,11 @@ mod tests {
 
     #[test]
     fn boundary_case_set_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 17);
+        assert_eq!(CASES.len(), 29);
         assert!(CASES.iter().any(|case| case.m == 37));
+        for query_count in [63, 64, 65, 127, 128, 129] {
+            assert!(CASES.iter().any(|case| case.m == query_count));
+        }
         assert!(CASES.iter().any(|case| case.m == 257));
         assert!(CASES.iter().any(|case| case.start_position == 257));
         for committed_length in [1023, 1024, 1025] {
@@ -1052,6 +1240,26 @@ mod tests {
         );
         assert!(CASES.iter().any(|case| case.id == "special-query-nan"));
         assert!(CASES.iter().any(|case| case.id == "special-value-pos-inf"));
+        assert!(
+            CASES
+                .iter()
+                .any(|case| case.id == "special-decode1024-query-nan")
+        );
+        assert!(
+            CASES
+                .iter()
+                .any(|case| case.id == "special-decode1024-value-pos-inf")
+        );
+        assert!(
+            CASES
+                .iter()
+                .any(|case| case.id == "special-prefill64-query-nan")
+        );
+        assert!(
+            CASES
+                .iter()
+                .any(|case| case.id == "special-prefill64-value-pos-inf")
+        );
         assert!(CASES.iter().all(|case| case.m > 0));
     }
 

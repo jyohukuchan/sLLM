@@ -2488,6 +2488,7 @@ impl QwenExecutionCore {
                 AttentionPreprocessPositionMode::Prefill,
                 include_last_logits,
                 false,
+                false,
                 include_hidden_states,
                 target_hidden_bf16,
                 multimodal,
@@ -2517,6 +2518,7 @@ impl QwenExecutionCore {
                     AttentionPreprocessPositionMode::DecodeContinuation
                 },
                 final_chunk && include_last_logits,
+                false,
                 false,
                 include_hidden_states,
                 None,
@@ -2599,6 +2601,7 @@ impl QwenExecutionCore {
             false,
             false,
             true,
+            true,
             None,
             None,
             true,
@@ -2636,6 +2639,7 @@ impl QwenExecutionCore {
             token_ids,
             AttentionPreprocessPositionMode::DecodeContinuation,
             false,
+            true,
             true,
             true,
             None,
@@ -2684,6 +2688,7 @@ impl QwenExecutionCore {
         self.run_transition(
             &pending.token_ids[..committed_input_rows],
             AttentionPreprocessPositionMode::DecodeContinuation,
+            false,
             false,
             false,
             true,
@@ -2784,6 +2789,7 @@ impl QwenExecutionCore {
             AttentionPreprocessPositionMode::DecodeContinuation,
             include_last_logits,
             include_all_logits_bf16,
+            false,
             include_hidden_states,
             target_hidden_bf16,
             None,
@@ -2798,6 +2804,7 @@ impl QwenExecutionCore {
         position_mode: AttentionPreprocessPositionMode,
         include_last_logits: bool,
         include_all_logits_bf16: bool,
+        force_all_terminal_rows: bool,
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
@@ -2890,6 +2897,7 @@ impl QwenExecutionCore {
 
         let terminal_rows = if self.graph.token_count() < TERMINAL_ROW_MIN_TOKENS
             || include_all_logits_bf16
+            || force_all_terminal_rows
             || self.graph.is_mtp()
         {
             TerminalOutputRows::All
@@ -6858,6 +6866,42 @@ mod tests {
                 .len(),
             256 * 2_560
         );
+    }
+
+    #[test]
+    fn large_target_graph_preserves_every_speculative_verify_row() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![13],
+            vec![21, 22],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(256);
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("large structural fixture provisions");
+
+        let prefill = core
+            .prefill_with_mtp_state(&vec![1; 254])
+            .expect("large MTP target prefill succeeds");
+        assert_eq!(prefill.token_ids(), [13]);
+        let block = core
+            .decode_block_with_mtp_state(&[2, 3])
+            .expect("large target verify block succeeds");
+        assert_eq!(block.token_ids(), [21, 22]);
+        assert_eq!(
+            block
+                .hidden_states_bf16()
+                .expect("target verify hidden rows are published")
+                .len(),
+            2 * 2_560
+        );
+        core.resolve_decode_block(2)
+            .expect("complete target verify block resolves");
     }
 
     #[test]

@@ -849,6 +849,9 @@ pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
                 .to_owned(),
         })
     }
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        Ok(None)
+    }
 }
 
 /// Adapter-owned completion for one transactional linear-attention state
@@ -2459,6 +2462,18 @@ impl CausalAttentionSubmission {
             .finalize_after_fence(fence.token()?)?;
         self.completion_state = state;
         Ok(state)
+    }
+
+    /// Backend event timing for the causal-attention kernel. The submission
+    /// must have reached success; host-only adapters may return `None`.
+    pub fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        if self.completion_state != ExecutionState::Success {
+            return Err(ExecutionError::NotReady);
+        }
+        self.inner
+            .as_mut()
+            .expect("attention submission adapter remains owned until drop")
+            .kernel_elapsed_ns()
     }
 }
 

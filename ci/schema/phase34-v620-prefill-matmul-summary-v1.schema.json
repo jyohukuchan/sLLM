@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase34-v620-prefill-matmul-summary-v1.schema.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "state",
+    "recorded_at",
+    "identity",
+    "decisions",
+    "routing",
+    "numerical",
+    "operator",
+    "full_model",
+    "mtp_fix",
+    "resources",
+    "service",
+    "verification",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {"const": "phase34-v620-prefill-matmul-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"type": "object"},
+    "decisions": {
+      "type": "object",
+      "required": ["gfx1030_long_prefill_hipblas", "gfx1030_small_n32", "gfx1030_unknown_and_all_logits", "gfx1201_and_gfx942", "mtp_verify_row_fix", "performance_authority", "reason"]
+    },
+    "routing": {
+      "type": "object",
+      "required": ["target", "provider", "main_min_m", "main_shapes", "full_attention_kv_min_m", "full_attention_kv_shape", "small_n32_provider", "unknown_shape_provider", "all_logits_shape_provider", "gfx1030_hipblaslt_created", "runtime_failure_fallback"]
+    },
+    "numerical": {
+      "type": "object",
+      "required": ["classification", "equation", "input_dtype", "compute_dtype", "output_dtype", "selected_solution_global_split_u", "selected_solution_uses_global_atomic_combine", "provider_repeats_deterministic", "stress_cases", "g1_gfx1030_cases_passed", "g1_gfx1201_cases_passed", "fallbacks", "cleanup_failures"]
+    },
+    "operator": {
+      "type": "object",
+      "required": ["screen_shape_m_pairs", "timing", "weighted_10001_projection", "profiled_final_route", "representative_stress", "hipblas_handle_create_ns_range", "hipblas_first_call_ns_range", "selected_solution"]
+    },
+    "full_model": {
+      "type": "object",
+      "required": ["gfx1030_fp16_10001", "gfx1030_fp16_32_control", "gfx1201_fp16_10001_control"]
+    },
+    "mtp_fix": {
+      "type": "object",
+      "required": ["symptom", "cause", "fix", "normal_prefill_compaction_changed", "regression_test", "numerical_classification"]
+    },
+    "resources": {
+      "type": "object",
+      "required": ["gfx1030_context_hipblas_handles_added", "gfx1030_context_hipblaslt_handles_added", "explicit_hipblas_workspace_bytes", "additional_matmul_dispatches", "weight_repack", "request_workspace_arena_bytes_before", "request_workspace_arena_bytes_after"]
+    },
+    "service": {
+      "type": "object",
+      "required": ["target", "kv_cache_encoding", "prompt_tokens", "completion_tokens", "non_stream_content", "sse_content", "sse_done", "usage_equal", "disconnect_outcome", "recovery_content", "all_dispatches_hip", "fallbacks", "shutdown_current_bytes", "shutdown_request_state_bytes", "shutdown_workspace_bytes", "retryable_cleanup", "durable_quarantine", "client_artifact_sha256", "shutdown_summary_sha256"]
+    },
+    "verification": {
+      "type": "object",
+      "required": ["cargo_fmt_check", "sllm_core_unit_tests_passed", "sllm_hip_unit_tests_passed", "package_test_commands_passed", "gfx1030_release_build", "gfx1201_release_build", "gfx942_compile_only", "gfx1030_openai_lifecycle", "wrong_target_load_rejected", "wrong_target_exit_code", "wrong_target_error", "integration_review"]
+    },
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

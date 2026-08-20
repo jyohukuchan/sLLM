@@ -106,6 +106,28 @@ inline bool target_is(const char *const target,
          std::strcmp(target, "gfx942:sramecc+:xnack-") == 0;
 }
 
+constexpr bool phase34_gfx1030_hipblas_shape(const uint64_t m, const uint64_t k,
+                                             const uint64_t n) noexcept {
+  const bool main_projection =
+      (k == 2560U && (n == 9216U || n == 8192U || n == 4096U)) ||
+      (k == 9216U && n == 2560U) || (k == 4096U && n == 2560U);
+  if (main_projection) {
+    return m >= 128U;
+  }
+  // full-attention K/V is too small to amortize the provider until a larger
+  // row block. The GDN b/a N=32 projection remains on tiled16: its measured
+  // crossover was unstable and its weighted absolute contribution is small.
+  return k == 2560U && n == 1024U && m >= 1024U;
+}
+
+static_assert(!phase34_gfx1030_hipblas_shape(127U, 2560U, 9216U));
+static_assert(phase34_gfx1030_hipblas_shape(128U, 2560U, 9216U));
+static_assert(phase34_gfx1030_hipblas_shape(129U, 4096U, 2560U));
+static_assert(!phase34_gfx1030_hipblas_shape(1023U, 2560U, 1024U));
+static_assert(phase34_gfx1030_hipblas_shape(1024U, 2560U, 1024U));
+static_assert(!phase34_gfx1030_hipblas_shape(10001U, 2560U, 32U));
+static_assert(!phase34_gfx1030_hipblas_shape(10001U, 2560U, 248320U));
+
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
                                     const uint64_t n,
                                     const char *const target) noexcept {
@@ -113,8 +135,6 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
   if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
     return KernelVariant::Baseline;
   }
-  (void)k;
-  (void)n;
   // Speculative target verification uses a small logical row block. Keep each
   // row's dot-product arithmetic identical to canonical M=1 decode; only the
   // independent row/column workgroups are grouped into one submission.
@@ -124,6 +144,9 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
                : KernelVariant::SerialRowsReduction;
   }
   if (m > 1U && (target_is(target, "gfx1201") || target_is(target, "gfx942"))) {
+    return KernelVariant::HipBlas;
+  }
+  if (target_is(target, "gfx1030") && phase34_gfx1030_hipblas_shape(m, k, n)) {
     return KernelVariant::HipBlas;
   }
   return m == 1U ? (target_is(target, "gfx942")

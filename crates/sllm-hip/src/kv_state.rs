@@ -677,6 +677,30 @@ impl CausalAttentionCompletion {
         Ok(state)
     }
 
+    pub(crate) fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
+        let raw = self.raw_handle()?;
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut timing = sys::sllm_completion_timing_t {
+            struct_size: size_of::<sys::sllm_completion_timing_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            valid: 0,
+            reserved0: 0,
+            elapsed_ns: 0,
+            reserved: [0; 4],
+        };
+        let status =
+            unsafe { sys::sllm_completion_timing(raw.as_ptr(), &mut timing, &mut error_sink) };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        if timing.valid != 1 || timing.elapsed_ns == 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::HipRuntimeError,
+                "causal attention completion timing was not positive",
+            ));
+        }
+        Ok(timing.elapsed_ns)
+    }
+
     fn raw_handle(&self) -> Result<NonNull<sys::sllm_completion_t>, RuntimeError> {
         let raw = self.raw.ok_or_else(|| {
             RuntimeError::local(
@@ -1198,6 +1222,15 @@ fn validate_causal_attention_info(
     let expected_target = context.expected_target();
     let use_gfx1201_wave_provider =
         expected_target == Some("gfx1201") && (query_count == 1 || query_count >= 32);
+    let use_phase33_common_provider = matches!(expected_target, Some("gfx1030" | "gfx1201"));
+    let use_decode_wave_split = use_phase33_common_provider
+        && query_count == 1
+        && committed_kv_length >= 1024
+        && descriptor.layout().head_dim() == 256;
+    let use_prefill_gqa4 = use_phase33_common_provider
+        && query_count >= 64
+        && query_heads as usize / descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256;
     let (expected_kernel_id, baseline_kernel, baseline_device) =
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
@@ -1212,7 +1245,17 @@ fn validate_causal_attention_info(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
-    let (expected_kernel, expected_device) = if use_gfx1201_wave_provider {
+    let (expected_kernel, expected_device) = if use_decode_wave_split {
+        (
+            "causal_attention.decode.wave8_split.v5",
+            "sllm_causal_attention_decode_wave8_split_v5",
+        )
+    } else if use_prefill_gqa4 {
+        (
+            "causal_attention.prefill.gqa4_shared.v6",
+            "sllm_causal_attention_prefill_gqa4_shared_v6",
+        )
+    } else if use_gfx1201_wave_provider {
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
                 "causal_attention.online_softmax_gqa.gfx1201_wave.v4",
@@ -1235,7 +1278,14 @@ fn validate_causal_attention_info(
         || info.dispatch_count != 1
         || info.kernel_id != expected_kernel_id
         || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
-        || Some(info.grid_size_x) != expected_grid
+        || Some(info.grid_size_x)
+            != if use_prefill_gqa4 {
+                query_count
+                    .checked_mul(descriptor.layout().heads() as u64)
+                    .and_then(|value| u32::try_from(value).ok())
+            } else {
+                expected_grid
+            }
         || info.query_count != query_count
         || info.start_position != start_position
         || info.committed_kv_length != committed_kv_length

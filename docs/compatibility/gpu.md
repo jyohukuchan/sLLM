@@ -161,6 +161,17 @@ software contractと一致した。Qwen3.5-4B BF16、4108 inputの3 process中�
 prefill 9.72%、E2E 9.16%、decode throughput 7.86%改善した。これは`M=1`/`M>=32`、固定model/tupleのevidenceであり、
 matrix instruction、別RDNA4 SKU、別model、10000+ inputのfull-model実行を証明しない。
 
+Phase 33ではexact gfx1030/gfx1201へFull Attentionの二つの共通限定providerを追加した。decode C1は`M=1`、
+KV長1,024以上を8 waveへ分割し、N2分類を維持したユーザー承認のもと採用した。prefill C2は`M>=64`でGQA 4 headの
+K/V decodeを共有し、gfx1201 N0、gfx1030 N1として採用した。4 encoding × 2 target × 29 caseは232/232 PASS、
+R9700 10,000-promptとV620 4,108-promptはHIP-only、fallbackなし、cleanup 0だった。C3 matrix innerは4-row tileと
+16-row WMMA shapeが合わず棄却した。この証拠を別target、別head shape、別modelへ一般化しない。
+
+Phase 34ではexact gfx1030のQwen3.5-4B内部BF16 long-prefill projectionだけexisting hipBLASへ限定routeした。
+主要5 shapeは`M>=128`、Full Attention K/V shapeは`M>=1024`で、N=32、未知shape、all-logits、短Mは旧providerを維持する。
+V620 10,001-token full modelは89.249秒から34.684秒へ61.14%短縮し、R9700既存routeは不変だった。gfx1030 hipBLASLt、
+別model/SKU/ROCm tuple、universal GEMM crossoverへ一般化しない。
+
 Phase Xでは同じV620 `gfx1030`とR9700 `gfx1201`を外部llama.cpp local-subagent runtimeの比較対象にし、
 Qwen3.8-27B Q5_K_XL、Q5_1 KV、context 262,144でHIP/Vulkanを実行した。HIP buildで
 `GGML_CUDA_FA_ALL_QUANTS=ON`にすると、Q5_1 Flash Attention exact Qwen shapeが両target各18/18でCPU oracleへ一致し、

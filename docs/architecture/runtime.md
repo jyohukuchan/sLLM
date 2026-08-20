@@ -110,6 +110,14 @@ reductionを区別する。canonical `gfx1201`だけはM=1、K/Nとも1024以上
 native context lifetimeで一度だけ作り、workspaceは0 bytes、provider error後のbaseline fallbackはない。
 dispatch evidenceはprovider別kernel ID/symbol、shape、exact target、fallback flag、GPU event時間を保持する。
 
+Phase 34は同じregistryと`hipblasGemmEx`実装をexact `gfx1030`の長行projectionへ限定して再利用する。主要5 internal shapeは
+`M>=128`、Full Attention K/Vの`K=2560,N=1024`は`M>=1024`でHipBlasを返す。`N=32`、未知shape、
+all-logits vocabulary shape、短Mは従来providerを維持し、gfx1201/gfx942 ruleは変えない。gfx1030 contextへhipBLAS handleを
+一つ追加するがhipBLASLtは作らず、graph、tensor layout、weight、public ABI、retry fallbackを複製しない。
+
+MTP target verifyは実際のdecode block rowをすべてterminal outputとして保持する。long-prefill graph capacityを理由に
+speculative verify blockをlast-rowへ圧縮しない。通常prefill、通常decode、partial replayのterminal-row compactionは維持する。
+
 ### Model-neutral prepared execution制御
 
 model adapterはimmutableなnode列を`PreparedExecutionPlan<N>`へlowerし、requestごとのtoken数、開始position、
@@ -241,6 +249,18 @@ Phase 30は同じsemantic op、opaque KV layout、256-thread launch ABIの内側
 gfx1030、その他targetは従来providerを維持する。targetとquery-count境界はruntime dispatch metadataとactual kernel launchで
 同じ判定を使い、prompt/token/model固有値をrouting keyにしない。public API、KV encoding、state publication、softmax式、
 FP32 accumulator、BF16 RNE outputは変えない。これはmatrix instructionを使うFlashAttention providerのclaimではない。
+
+Phase 33はexact gfx1030/gfx1201、head dim 256、GQA ratio 4のprefill `query_count>=64`へ、1 query rowと同じKV headを
+使う4 query headを一workgroupで処理するGQA4共有providerを追加する。K/V elementは既存token-major planeから一度だけ
+direct decodeし、4 headのQK、online maximum/denominator、weighted Vを独立に更新する。gridは`M × kv_heads`、
+global scratchと追加dispatchは0である。`M<=63`、別head shape/ratio/targetはPhase 30またはbaseline providerを選ぶ。
+runtime error後のfallbackは行わない。gfx1201は既存wave reduction順を維持し、gfx1030は同じ8段boundの固定wave treeを使う。
+採用tileは4 rowしかなく16×16×16 WMMAへ同じlayoutのまま写せないため、Phase 33ではmatrix providerを追加しない。
+
+同Phaseの`M=1`、KV長1,024以上を8 waveの連続KV区間へ分けるdecode providerは、scratch 0で大幅に高速化する一方、
+QK reductionの依存深さが概ね8段から12段へ増えるN2である。独立oracle、token一致、両targetのdevice短縮を確認し、
+2026-08-20のユーザー承認によりN2分類を維持したままproductionへ限定採用した。KV長1,023以下とscope外target/head shapeは
+Phase 30またはbaseline providerを選ぶ。
 
 ## Generation service境界
 

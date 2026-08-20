@@ -344,6 +344,23 @@ dynamic/static FP8 production oracle 68/68 caseと、Qwen3.5-4B BF16 GGUFのgfx1
 10,001 inputをHIP-only、fallbackなし、cleanup 0で実行した。これは同じtupleの限定証拠であり、別ROCm/compiler、
 gfx1200、別RDNA4 SKUへnative instruction availabilityまたは性能を一般化しない。
 
+### 2026-08-20 Phase 33 Full Attention tuple
+
+Phase 32と同じOS/kernel/driver、ROCm 7.14.0、LLVM 23、Code Object V6、wave32 tupleでcanonical exact
+gfx1201/gfx1030をtarget別release buildした。FP16/dynamic FP8/static FP8/NVFP4 × 2 target × 29 caseの
+232/232 oracle、R9700 FP16 10,000-prompt、V620 FP16 4,108-prompt、R9700 dynamic FP8 OpenAI lifecycle、
+wrong-target拒否を最終identityでPASSした。採用scopeはC1 `M=1`/KV>=1,024とC2 `M>=64`/GQA4/head dim 256に
+限定し、software lifecycleは`experimental`のままである。別ROCm/compiler、別SKU/head shape/model、matrix provider、
+長時間運転へ一般化しない。[Phase 33 summary](../../ci/matrix/phase33-full-attention-summary-v1.json)を正とする。
+
+### 2026-08-20 Phase 34 V620 long-prefill BF16 matmul tuple
+
+Phase 33と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、
+LLVM 23、Code Object V6 tupleでcanonical exact gfx1030/gfx1201をtarget別release buildした。gfx1030の限定6 shapeに
+existing hipBLAS routeを追加し、10,001-token FP16 KV full model、両targetの18-case matmul oracle、gfx942 compile-only、
+wrong-target拒否をPASSした。software lifecycleは`experimental`のままで、別ROCm/compiler/driver、別SKU/model shape、
+library solutionの安定性へ一般化しない。[Phase 34 summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報
