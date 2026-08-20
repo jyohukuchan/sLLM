@@ -995,6 +995,7 @@ candidateを再確認した。
 | 完了・限定採用 | Phase 32 | native FP8 KV append encode再検証 | 担当AI裁量で低保守費用のgfx1201 native scalarを採用。append 51.52%短縮、packedとgfx1030 native化は不採用 |
 | 完了・限定採用 | Phase 33 | Full Attention構造最適化 | C1 decode wave8 splitとC2 GQA4 K/V共有を共通限定採用。C1はN2としてユーザー承認、C3 matrixは棄却 |
 | 完了・限定採用 | Phase 34 | V620長行prefill BF16 matmul provider比較・最適化 | exact gfx1030の長行6 shapeをexisting hipBLASへ限定routeし、10,001-token full modelを61.14%短縮。MTP verify row不具合も限定修正 |
+| 計画済み | Phase 35 | long-context Full Attention・GDN構造最適化 | peer差の約85%を占める二familyを独立trackで改善し、common query tileとcolumn-parallel recurrent stateを比較する |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -1051,6 +1052,13 @@ gfx1030 hipBLASLtとgfx1201/gfx942 routeは変更していない。R9700 long co
 MTP decode blockだけ全terminal rowを保持するcorrectness修正として併合した。詳細は
 [Phase 34 archive](archive/2026/08/11-20/phase34-v620-long-prefill-bf16-matmul-provider-optimization.md)および
 [bounded summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
+Phase 34後のexact 10,001 input / 2 output、FP16 KV profileをfixed llama.cppとfamily別に比較すると、sLLMのprojectionは
+11.781秒対12.772秒で既にpeerより短い一方、Full Attentionは10.857秒対0.462秒、GDNは7.694秒対0.622秒だった。
+profiled E2E差に対する寄与は約50.6%/34.4%で、残るdevice差の大半をこの二familyが説明する。このため、複数query rowが
+K/V tileを共有するFull Attentionと、state columnを1,024 workgroup相当へ並列化するGDNをPhase 35へ割り当てた。
+projectionはfull-M hipBLASを維持し、二trackは独立採否とする。common upper pathを優先し、gfx1201 matrix innerはstableな
+common query tile上で実利益を示す場合だけ限定候補とする。詳細は
+[Phase 35 active plan](active/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)を正とする。
 その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
 multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
@@ -1064,7 +1072,7 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   cross-engine差分、critical-path share、Amdahl上限から再分類した。prefill last-row projectionをPhase 24、
   batch-compatible projection-family optimizationをPhase 25、continuous request batchingをPhase 26、
   exact decode weight-stream/provider optimizationをPhase 27、projection外device短縮をPhase 28、post-Phase-33の
-  V620長行BF16 prefill providerをPhase 34へ割り当て、
+  V620長行BF16 prefill providerをPhase 34、post-Phase-34のFull Attention/GDN gap closureをPhase 35へ割り当て、
   cold loaderは未割当のまま維持する。
   このinventoryは完了Phaseのscopeを拡張せず、個別taskの受入条件、
   実装順、対象targetは着手時のfresh profileで固定する。
@@ -1089,7 +1097,18 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   - Phase 31後の10k+/16,385-token通常経路ではcausal attentionが支配的になったため、decodeのKV方向parallel blockとfixed combine、
     prefillのQ/K tile・GQA K/V共有、同じtile上のgfx1201 matrix innerをPhase 33へ割り当てた。共通dispatch/scratch/softmaxを優先し、
     target/encoding/M/KV長scopeは独立採否する。
+  - Phase 33 C2はGQA 4 head間でK/Vを共有したがquery row間では共有せず、Phase 34後の10,001-input profileでもFull Attentionは
+    10.857秒、fixed llama.cppは0.462秒だった。Phase 35は`Q_TILE>=2`のcommon multi-query-row K/V tile、barrier-reduced
+    online-softmax partial、stable tile上のgfx1201 matrix innerを独立scopeとして比較する。vAttentionとKV formatは維持する。
   - Q/PのFP16/FP8化、softmax順序、accumulator変更は数値台帳のN0〜N3へ分類し、N2を性能だけで自動採用しない。
+- GDN recurrent path:
+  - Phase 28/29後のcurrent kernelはvalue head当たり1 workgroup、合計32 workgroupで全tokenを直列に進め、threadごとに128 state
+    elementを二回走査する。10,001-inputでは7.694秒、fixed llama.cppのGDN semantic familyは0.622秒だった。
+  - Phase 35はQwen shapeのstate columnをwave32 x 4のworkgroupで所有し、`32 heads × 32 column groups=1,024 workgroups`へ
+    広げる。state shardをregisterに保持し、Q/K・beta/decay preprocess、column-parallel recurrent、output norm/z postprocessへ
+    bounded分割する。Phase 28/29の演算stage、transaction、MTP rewind/replay、short/decode baseline complementを維持する。
+  - token recurrence自体のsequence-parallel scanはPhase 35へ含めない。512-token span等はlong-running blockまたはstate trafficに
+    実測上の問題がある場合だけ比較し、projectionをchunkごとに再実行しない。
 - Dense BF16 execution:
   - Phase 27のfresh E1比較では、V620 projectionはpeerより6.76%速く、R9700だけ12.53%遅かった。両target共通の
     projection provider gapではなく、全target非悪化かつ任意pattern 5%改善へ届くwork unitを固定できなかった。
@@ -1173,6 +1192,11 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
 
 ## 現在の状態と次の作業
 
+- Phase 35を計画済みとした。Phase 34後の同token profileではFull Attention 10.857秒対peer 0.462秒、GDN 7.694秒対
+  0.622秒で、この二familyがprofiled E2E差の約85%を説明する。Full Attentionのmulti-query-row K/V tileとGDNの
+  column-parallel recurrent stateを独立採否し、合成candidateで10,001-token TTFTとfixed llama.cpp差を再測定する。
+  projection、vAttention、KV format、public APIは維持する。詳細は
+  [Phase 35 active plan](active/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)を正とする。
 - Phase 34は限定採用で完了した。exact gfx1030の長行production shapeだけexisting hipBLASへ送り、N=32、未知shape、all-logits、
   短Mは旧providerへ残した。10,001-token full modelは61.14%短縮し、数値は同じ項・dtype・丸めstageと非増加boundを持つN1、
   R9700 route不変、fallback/cleanup 0だった。MTP verify row不具合も専用回帰テスト付きで修正した。詳細は
