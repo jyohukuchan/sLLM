@@ -292,7 +292,11 @@
   missing/prunable registration、clean・unlocked・非mainで14日超の候補は整理を促す警告とし、自動削除しない。
 - 無人での進行を優先しつつsecret exposureを最小化する。専用local hostでは`homelab1`への`NOPASSWD: ALL`を意図的なtrade-offとして受容し、main agentがtask scope内で`sudo -n`を使う。恒久方針は[credential方針](../security/credentials.md)を正本とする。
 - 現在の既定profileは`trusted-solo-development`とし、外部contribution実行時とrelease時の要件を分離する。使っていないprofileの要件は現在の開発をblockしない。
-- main agentは調査・実装を直接行える。subagentは並列化、分離、専門的contextに効果がある場合だけ任意に使い、subagent利用や特定の`codex exec`実行方式を完了条件にしない。
+- main agentは調査・実装を直接行える。独立して進められるboundedなコーディング、調査、focused test、要約、反復作業は
+  subagentへ積極的に委譲し、resourceまたは依存上の理由がなければ利用可能な並列枠で同時実行する。通常のnative coding workerは
+  速度に優れるxhighのLunaを優先する。Terra/SolはLunaとmain agentで効率的に扱えない横断調査、反復失敗後のescalation、
+  または特に深い専門推論が必要な場合だけ使う。main agentは編集確認、共有workspaceの競合解消、関連checkに責任を持ち、
+  subagent利用や特定の`codex exec`実行方式を完了条件にしない。
 - 各Phaseは受入条件、検証、plan/history closeout後に、そのPhaseだけを必要最小限のcommitへ整理してcurrent GitHub branchへ
   pushする。次Phaseの変更を同じcommitへ混ぜず、共有済み履歴の書換えやforce pushを行わない。
 - 作業単位は独立してreview・rollbackしやすい範囲とするが、細分化、immutable identity、独立review、全matrix実行を各draft checkpointの完了条件にしない。draft、integration、release/push、docs-onlyのlaneと実行手順は`AGENTS.md`を正本とする。
@@ -957,10 +961,11 @@ candidateを再確認した。
   [Local Qwen3.8 subagent](../development/local-qwen-subagent.md)を正とする。2026-08-17の追加決定により、現行運用は
   V620×2 tensor split `1,1`、parallel 2、non-unified KV、actual context 491,520/slot、983,040 total、全model layer
   GPU offload、Q5_1 target/draft KV、MTP幅3である。単一V620構成へfallbackしない。
-- boundedな委譲ではlocal Qwen subagentを優先し、Piまたは互換Harness processを合計2つまで同時実行する。Qwenが利用不能・不適切、2 slotが
-  使用中、または追加並列性が有用なら、Qwen待ちで直列化せずnative Codex subagentを使用する。subagent利用自体は従来どおり
-  完了条件ではない。main taskがsLLM GPU作業でいずれかのV620を必要とする間はQwenを利用不能として扱い、idle serviceを
-  停止してpairを解放し、Codex subagentを使用する。
+- local/offlineの長context second opinionまたはQwen/Pi環境が有用なbounded taskではlocal Qwen subagentを使用し、Piまたは
+  互換Harness processを合計2つまで同時実行できる。通常のbounded codingは速度に優れるnative Lunaを既定とし、独立taskは
+  利用可能な並列枠へ積極的に割り当てる。Qwenが利用不能・不適切、2 slotが使用中、または追加並列性が有用なら、Qwen待ちで
+  直列化せずnative Codex subagentを使用する。subagent利用自体は従来どおり完了条件ではない。main taskがsLLM GPU作業で
+  いずれかのV620を必要とする間はQwenを利用不能として扱い、idle serviceを停止してpairを解放し、Codex subagentを使用する。
 - post-closeout multi-GPU比較では独立V620 server 2基が最大aggregate throughputだったが、単一endpointで2 subagentと
   約0.5M context/slotを両立する運用要件を優先し、V620×2 tensorを524,288から491,520/slotへ縮小して通常起動へ昇格した。
   R9700+V620×2 layer split `5,2,2`はR9700を占有するため非運用のままとする。比較詳細は [multi-GPU selection

@@ -23,18 +23,42 @@
   their origin, scope, cost, and expiry when they matter.
 - The default mode is trusted-solo-development. External-contribution and
   release policies are separate lanes; inactive rules do not block work.
-- The main agent may investigate and implement directly. Delegate only when
-  parallelism, isolation, or specialist context is useful; neither delegation
-  nor a particular Codex invocation method is a completion gate.
+- The main agent may investigate and implement directly. It should also use
+  bounded subagents proactively when delegation can shorten implementation or
+  verification. Neither delegation nor a particular Codex invocation method
+  is a completion gate.
 - Future changes to `AGENTS.md` or `sLLM.md` still require explicit user
   confirmation.
 
+## Native Codex subagents
+
+- Proactively delegate bounded coding, repository inspection, focused tests,
+  summaries, and repetitive work when the task can proceed independently.
+  Launch independent subtasks in parallel up to the available concurrency
+  instead of serializing them without a resource or dependency reason. This
+  standing authorization applies within the current user-approved task and
+  does not expand its scope or authorize external writes, commits, or pushes.
+- Prefer the `luna` subagent with its fixed xhigh reasoning profile for ordinary
+  bounded coding and verification because its lower latency makes it the most
+  useful native coding worker. Give each editing agent explicit, non-overlapping
+  file ownership and tell it that other agents share the workspace and that it
+  must preserve their changes.
+- Do not select `terra` or `sol` by default for routine work; their additional
+  overhead usually provides little benefit here. Use `terra` only for a broad
+  cross-cutting investigation or integration task that the main agent and Luna
+  cannot handle efficiently, and use `sol` only as an escalation after repeated
+  failure or when unusually deep specialist reasoning is demonstrably needed.
+- The main agent remains responsible for inspecting subagent edits, reconciling
+  shared-workspace changes, and running relevant checks. Subagents must not
+  commit or push unless the user explicitly requests publication.
+
 ## Local Qwen subagent
 
-- When delegation is useful for a bounded repository inspection, coding, test,
-  or summary task, prefer the `qwen38-subagent` skill. This is a command-backed
-  Pi/Qwen agent, not a native Codex subagent and not a replacement for
-  the main agent.
+- Use the `qwen38-subagent` skill when a task materially benefits from a local,
+  offline, long-context second opinion or the Qwen/Pi environment. Ordinary
+  bounded coding defaults to native Luna because it is faster. Qwen is a
+  command-backed Pi agent, not a native Codex subagent and not a replacement
+  for the main agent.
 - Check it with `/home/homelab1/.local/bin/qwen38-subagent-server status`, then
   delegate one bounded task from its target workspace with
   `/home/homelab1/.local/bin/qwen38-pi --profile standard --read-only "<task>"`.
