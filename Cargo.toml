@@ -22,6 +22,7 @@ base64 = { version = "=0.22.1" }
 futures-util = { version = "=0.3.33", default-features = false, features = ["std"] }
 image = { version = "=0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = { version = "=0.2.186" }
+minijinja = { version = "=2.24.0", default-features = false, features = ["builtins", "fuel", "json", "macros", "multi_template", "serde"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["preserve_order"] }
 serde_path_to_error = { version = "=0.1.20" }

@@ -9,6 +9,8 @@ description = "Dependency-locked frontend boundary for the sLLM text stack"
 [dependencies]
 base64.workspace = true
 image.workspace = true
+minijinja.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 sllm-core.workspace = true

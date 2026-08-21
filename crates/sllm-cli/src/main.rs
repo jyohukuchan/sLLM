@@ -2,7 +2,11 @@ use std::env;
 use std::process::ExitCode;
 
 mod benchmark;
+mod chat;
+mod interactive;
 mod model;
+mod production_chat;
+mod template_file;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1)) {
@@ -22,6 +26,7 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
+        Some("chat") => production_chat::run(arguments),
         // `benchmark` is an internal evidence command. Keep it accepted for the
         // repository-owned harnesses without advertising it as a product CLI.
         Some(
@@ -56,6 +61,7 @@ fn print_help() {
     println!("  embeddings    Produce final-normalized hidden embeddings");
     println!("  rerank        Rank documents with cosine-embedding-v1");
     println!("  infill        FIM/infill (fails closed without a verified capability)");
+    println!("  chat          Interactive typed conversation (JSONL events)");
     println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
     println!();
     println!("model source: --gguf PATH --derived-lock PATH");
@@ -69,6 +75,10 @@ fn print_help() {
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");
+    println!(
+        "  apply-template/input-tokens custom: --chat-template-file PATH --chat-template-digest sha256:<64 lowercase hex>"
+    );
+    println!("  [--template-kwargs-json OBJECT] (custom template only; bounded JSON)");
 }
 
 fn print_version() -> Result<(), String> {

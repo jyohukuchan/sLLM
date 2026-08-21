@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase44-template-reasoning-cli-v1.schema.json",
+  "title": "sLLM Phase 44 template, reasoning, and interactive CLI contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "profile_version", "recorded_at", "spec_pins", "template_profile", "reasoning_control", "interactive_cli", "cases"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase44-template-reasoning-cli-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase44-template-reasoning-cli-v1"},
+    "profile_version": {"const": "sllm-phase44-template-reasoning-cli-v1"},
+    "recorded_at": {"type": "string", "const": "2026-08-22"},
+    "spec_pins": {"$ref": "#/$defs/spec_pins"},
+    "template_profile": {"$ref": "#/$defs/template_profile"},
+    "reasoning_control": {"$ref": "#/$defs/reasoning_control"},
+    "interactive_cli": {"$ref": "#/$defs/interactive_cli"},
+    "cases": {"$ref": "#/$defs/cases"}
+  },
+  "$defs": {
+    "nonempty_string": {"type": "string", "minLength": 1},
+    "string_list": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/nonempty_string"}},
+    "bounded_int": {"type": "integer", "minimum": 0},
+    "spec_pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["llama_cpp", "minijinja"],
+      "properties": {
+        "llama_cpp": {
+          "type": "object", "additionalProperties": false,
+          "required": ["release", "commit", "use"],
+          "properties": {
+            "release": {"const": "b10453"},
+            "commit": {"const": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"},
+            "use": {"const": "behavior-reference-only"}
+          }
+        },
+        "minijinja": {
+          "type": "object", "additionalProperties": false,
+          "required": ["version", "default_features", "features", "api_guarantees", "disabled_integrations"],
+          "properties": {
+            "version": {"const": "2.24.0"},
+            "default_features": {"const": false},
+            "features": {"const": ["builtins", "fuel", "json", "macros", "multi_template", "serde"]},
+            "api_guarantees": {"const": ["per-render-fuel", "runtime-recursion-limit", "strict-undefined"]},
+            "disabled_integrations": {"const": ["dynamic-loader", "stack-growth", "custom-syntax", "url", "process", "filesystem"]}
+          }
+        }
+      }
+    },
+    "template_profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "provider", "reviewed_default", "custom_opt_in", "custom_template_digest", "source_limits", "context_fields", "allowed_constructs", "allowed_filters", "allowed_tests", "forbidden_constructs", "forbidden_capabilities", "admission", "identity", "file_boundary"],
+      "properties": {
+        "id": {"const": "sllm-generic-jinja-v1"},
+        "provider": {"const": "minijinja-2.24.0"},
+        "reviewed_default": {"const": "qwen-reviewed-v1"},
+        "custom_opt_in": {"const": true},
+        "custom_template_digest": {
+          "type": "object", "additionalProperties": false,
+          "required": ["required", "format", "algorithm", "source_encoding"],
+          "properties": {
+            "required": {"const": true},
+            "format": {"const": "sha256:<64 lowercase hex>"},
+            "algorithm": {"const": "sha256"},
+            "source_encoding": {"const": "utf-8"}
+          }
+        },
+        "source_limits": {
+          "type": "object", "additionalProperties": false,
+          "required": ["template_source_bytes", "rendered_output_bytes", "messages", "kwargs_keys", "kwargs_total_bytes", "kwargs_depth", "recursion", "fuel_instructions"],
+          "properties": {
+            "template_source_bytes": {"type": "integer", "const": 65536},
+            "rendered_output_bytes": {"type": "integer", "const": 16777216},
+            "messages": {"type": "integer", "const": 1024},
+            "kwargs_keys": {"type": "integer", "const": 64},
+            "kwargs_total_bytes": {"type": "integer", "const": 1048576},
+            "kwargs_depth": {"type": "integer", "const": 32},
+            "recursion": {"type": "integer", "const": 32},
+            "fuel_instructions": {"type": "integer", "const": 1000000}
+          }
+        },
+        "context_fields": {"const": ["messages", "tools", "special_tokens", "add_generation_prompt", "enable_thinking", "reasoning_effort", "custom_kwargs"]},
+        "allowed_constructs": {"const": ["interpolation", "if", "elif", "else", "for", "set", "macro"]},
+        "allowed_filters": {"const": ["default", "first", "join", "last", "length", "list", "lower", "replace", "sort", "trim", "unique", "upper", "tojson"]},
+        "allowed_tests": {"const": ["defined", "undefined", "none", "boolean", "integer", "float", "string", "sequence", "mapping", "iterable", "number"]},
+        "forbidden_constructs": {"const": ["include", "import", "extends", "dynamic-loader", "custom-syntax", "unrestricted-method", "unrestricted-attribute", "dunder-access", "host-callback"]},
+        "forbidden_capabilities": {"const": ["filesystem", "environment", "network", "process", "secret", "credential", "path", "clock", "host-object", "method-callback", "url-integration", "stack-growth", "dynamic-loader", "tool-execution", "mcp-request"]},
+        "admission": {"const": "compile-render-tokenize-before-scheduler-gpu"},
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["required_fields", "checkpoint_binds", "reviewed_default_state_isolation"],
+          "properties": {
+            "required_fields": {"const": ["profile_version", "template_digest", "source_bytes", "kwargs_digest", "rendered_bytes_digest"]},
+            "checkpoint_binds": {"const": ["template_digest", "profile_version"]},
+            "reviewed_default_state_isolation": {"const": true}
+          }
+        },
+        "file_boundary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["reader", "regular_file_only", "read_once", "reject_symlink", "reject_special_file", "reject_size_race", "reject_invalid_utf8", "reject_nul"],
+          "properties": {
+            "reader": {"const": "cli-only"}, "regular_file_only": {"const": true}, "read_once": {"const": true},
+            "reject_symlink": {"const": true}, "reject_special_file": {"const": true}, "reject_size_race": {"const": true},
+            "reject_invalid_utf8": {"const": true}, "reject_nul": {"const": true}
+          }
+        }
+      }
+    },
+    "reasoning_control": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "modes", "mode_mapping", "budget", "control", "transition", "admission", "wire_mapping"],
+      "properties": {
+        "id": {"const": "sllm-reasoning-control-v1"},
+        "modes": {"const": ["disabled", "enabled", "template-default"]},
+        "mode_mapping": {
+          "type": "object", "additionalProperties": false, "required": ["disabled", "enabled", "template-default"],
+          "properties": {
+            "disabled": {"const": "ThinkingModeV1::Disabled"}, "enabled": {"const": "ThinkingModeV1::Enabled"}, "template-default": {"const": "ThinkingModeV1::TemplateDefault"}
+          }
+        },
+        "budget": {
+          "type": "object", "additionalProperties": false,
+          "required": ["optional", "unit", "min", "max", "non_aligned_examples", "disabled_with_budget"],
+          "properties": {
+            "optional": {"const": true}, "unit": {"const": "generated_reasoning_tokens"}, "min": {"const": 1}, "max": {"const": 4096},
+            "non_aligned_examples": {"const": [3, 127, 2049]}, "disabled_with_budget": {"const": "reject"}
+          }
+        },
+        "control": {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "in_generation", "forced_close_uses_selector_mask", "forced_close_counts_as_generated", "host_token_fallback", "post_decode_token_rewrite", "separate_decode_loop"],
+          "properties": {
+            "owner": {"const": "frontend-token-selector"}, "in_generation": {"const": ["cancel", "force-close"]},
+            "forced_close_uses_selector_mask": {"const": true}, "forced_close_counts_as_generated": {"const": true},
+            "host_token_fallback": {"const": false}, "post_decode_token_rewrite": {"const": false}, "separate_decode_loop": {"const": false}
+          }
+        },
+        "transition": {
+          "type": "object", "additionalProperties": false,
+          "required": ["assistant_generation_prefix", "early_close", "budget_exhausted", "closing_marker", "max_output_includes_closing_sequence", "all_candidates_forbidden"],
+          "properties": {
+            "assistant_generation_prefix": {"const": "starts-reasoning-active"}, "early_close": {"const": "normal-generation-after-closing-marker"},
+            "budget_exhausted": {"const": "force-bounded-closing-sequence"}, "closing_marker": {"const": "</think>"},
+            "max_output_includes_closing_sequence": {"const": true}, "all_candidates_forbidden": {"const": "reject"}
+          }
+        },
+        "admission": {
+          "type": "object", "additionalProperties": false,
+          "required": ["before_gpu_admission", "requires_closing_sequence_fit", "intersects", "raw_prompt", "gemma_raw_text", "missing_reasoning_marker", "anthropic_thinking"],
+          "properties": {
+            "before_gpu_admission": {"const": true}, "requires_closing_sequence_fit": {"const": true},
+            "intersects": {"const": ["grammar", "stop", "device-selector", "sampling", "cancellation"]},
+            "raw_prompt": {"const": "reject"}, "gemma_raw_text": {"const": "reject"}, "missing_reasoning_marker": {"const": "reject"}, "anthropic_thinking": {"const": "reject"}
+          }
+        },
+        "wire_mapping": {
+          "type": "object", "additionalProperties": false,
+          "required": ["responses_reasoning_effort", "chat_thinking", "anthropic_thinking", "stream_splitter", "non_stream_and_stream"],
+          "properties": {
+            "responses_reasoning_effort": {
+              "type": "object", "additionalProperties": false, "required": ["low", "medium", "high"],
+              "properties": {"low": {"const": 1024}, "medium": {"const": 2048}, "high": {"const": 4096}}
+            },
+            "chat_thinking": {"const": "shared-frontend-controller"}, "anthropic_thinking": {"const": "unsupported"},
+            "stream_splitter": {"const": "existing-reasoning-splitter"}, "non_stream_and_stream": {"const": "same-generation-result"}
+          }
+        }
+      }
+    },
+    "interactive_cli": {
+      "type": "object", "additionalProperties": false,
+      "required": ["command", "existing_generate_unchanged", "input_mode", "output_mode", "prompt_sources", "prompt_source_conflicts", "stdin_rule", "prompt_file", "turn_limits", "reverse_prompt", "typed_transcript", "checkpoint", "checkpoint_limits", "resume_identity", "security"],
+      "properties": {
+        "command": {"const": "chat"}, "existing_generate_unchanged": {"const": true}, "input_mode": {"const": "line-oriented-utf8-no-tty-raw-mode"}, "output_mode": {"const": "versioned-json-lines-v1"},
+        "prompt_sources": {"const": ["--prompt", "--message", "--prompt-file", "interactive-stdin"]},
+        "prompt_source_conflicts": {
+          "type": "array", "minItems": 6, "maxItems": 6,
+          "items": {"type": "array", "prefixItems": [{"type": "string"}, {"type": "string"}], "items": false, "minItems": 2, "maxItems": 2}
+        },
+        "stdin_rule": {"const": "interactive-stdin-only-when-no-explicit-prompt-source"},
+        "prompt_file": {
+          "type": "object", "additionalProperties": false,
+          "required": ["max_bytes", "read_once", "regular_file_only", "reject_symlink", "reject_special_file", "reject_size_race", "reject_invalid_utf8", "reject_nul"],
+          "properties": {
+            "max_bytes": {"const": 16777216}, "read_once": {"const": true}, "regular_file_only": {"const": true}, "reject_symlink": {"const": true},
+            "reject_special_file": {"const": true}, "reject_size_race": {"const": true}, "reject_invalid_utf8": {"const": true}, "reject_nul": {"const": true}
+          }
+        },
+        "turn_limits": {
+          "type": "object", "additionalProperties": false, "required": ["messages", "message_bytes", "transcript_bytes", "max_stop_sequences"],
+          "properties": {"messages": {"const": 1024}, "message_bytes": {"const": 16777216}, "transcript_bytes": {"const": 16777216}, "max_stop_sequences": {"const": 4}}
+        },
+        "reverse_prompt": {
+          "type": "object", "additionalProperties": false,
+          "required": ["max_count", "total_bytes", "match_area", "boundary", "matched_text_in_next_input", "distinct_from_stop", "stop_semantics"],
+          "properties": {
+            "max_count": {"const": 4}, "total_bytes": {"const": 1048576}, "match_area": {"const": "visible-output"}, "boundary": {"const": "turn-return"},
+            "matched_text_in_next_input": {"const": false}, "distinct_from_stop": {"const": true}, "stop_semantics": {"const": "generation-finish"}
+          }
+        },
+        "typed_transcript": {
+          "type": "object", "additionalProperties": false,
+          "required": ["encoding", "roles", "max_messages", "max_bytes", "unknown_roles", "successful_turn_only", "diagnostic_payload_logging"],
+          "properties": {
+            "encoding": {"const": "canonical-json-utf8"}, "roles": {"const": ["system", "user", "assistant"]}, "max_messages": {"const": 1024}, "max_bytes": {"const": 16777216},
+            "unknown_roles": {"const": "reject"}, "successful_turn_only": {"const": true}, "diagnostic_payload_logging": {"const": false}
+          }
+        },
+        "checkpoint": {
+          "type": "object", "additionalProperties": false,
+          "required": ["owner", "schema_id", "atomic_write", "directory_mode", "file_mode", "checksum", "quota", "implicit_global_session", "mid_generation_resume", "identity_fields", "conversation_and_opaque_state", "restore_mismatch"],
+          "properties": {
+            "owner": {"const": "sllm-core-SessionCheckpoint-CheckpointStore"}, "schema_id": {"const": "sllm-session-checkpoint-v1"}, "atomic_write": {"const": true},
+            "directory_mode": {"const": "0700"}, "file_mode": {"const": "0600"}, "checksum": {"const": true}, "quota": {"const": true},
+            "implicit_global_session": {"const": false}, "mid_generation_resume": {"const": false},
+            "identity_fields": {"const": ["model_lock_fingerprint", "derived_artifact_identity", "adapter_identity", "renderer_identity", "tokenizer_identity", "target_semantics", "plan_digest", "token_sequence_digest", "kv_encoding", "kv_descriptor_digest", "context_policy_digest"]},
+            "conversation_and_opaque_state": {"const": "owner-defined"}, "restore_mismatch": {"const": "reject"}
+          }
+        },
+        "checkpoint_limits": {
+          "type": "object", "additionalProperties": false,
+          "required": ["checkpoint_bytes", "header_bytes", "sections", "identity_field_bytes", "token_history", "conversation_bytes"],
+          "properties": {"checkpoint_bytes": {"const": 68719476736}, "header_bytes": {"const": 4096}, "sections": {"const": 4096}, "identity_field_bytes": {"const": 1024}, "token_history": {"const": 1048576}, "conversation_bytes": {"const": 16777216}}
+        },
+        "resume_identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["fresh_and_resume_token_sequence", "wrong_model", "wrong_renderer", "wrong_tokenizer", "wrong_target", "wrong_plan", "wrong_kv", "corrupt_or_truncated", "quota_exceeded", "cancelled_turn_published"],
+          "properties": {
+            "fresh_and_resume_token_sequence": {"const": "exact-transcript-template-options"}, "wrong_model": {"const": "reject"}, "wrong_renderer": {"const": "reject"},
+            "wrong_tokenizer": {"const": "reject"}, "wrong_target": {"const": "reject"}, "wrong_plan": {"const": "reject"}, "wrong_kv": {"const": "reject"},
+            "corrupt_or_truncated": {"const": "reject"}, "quota_exceeded": {"const": "reject"}, "cancelled_turn_published": {"const": false}
+          }
+        },
+        "security": {
+          "type": "object", "additionalProperties": false, "required": ["prompt_token_secret_metrics", "prompt_token_secret_normal_logs", "tool_execution", "mcp_execution"],
+          "properties": {"prompt_token_secret_metrics": {"const": false}, "prompt_token_secret_normal_logs": {"const": false}, "tool_execution": {"const": false}, "mcp_execution": {"const": false}}
+        }
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "surface", "input", "expected"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "surface": {"enum": ["template", "reasoning", "cli", "checkpoint", "security"]},
+        "input": {"type": "object"}, "expected": {"type": "object"}
+      }
+    },
+    "cases": {
+      "type": "object", "additionalProperties": false, "required": ["positive", "rejection"],
+      "properties": {
+        "positive": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
+        "rejection": {"type": "array", "minItems": 1, "items": {"allOf": [{"$ref": "#/$defs/case"}, {"required": ["expected"]}]}}
+      }
+    }
+  }
+}

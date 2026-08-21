@@ -42,7 +42,7 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 41 | complete | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
 | 42 | complete | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
 | 43 | complete | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
-| 44 | planned | generic template、reasoning control、interactive CLI | Phase 41・43 message/state |
+| 44 | complete | generic template、reasoning control、interactive CLI | Phase 41・43 message/state。MI300X実機はdeferred |
 | 45 | planned | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
 | 46 | planned | conversion、quantization、benchmark、quality/debug tools | stable GGUF/model identities |
 | 47 | approval-required | 組込みtool/MCP実行 | Phase 39 security・Phase 43 tool protocol |
@@ -278,6 +278,10 @@ Resumable requestは40 output token以下だけをadmitし、成功event batch�
 
 ## Phase 44: template・reasoning control・interactive UX
 
+> 状態: complete（2026-08-22、host/frontend/CLI）。MI300X real executionはVM削除済みのためdeferredであり、gfx942
+> compile/host evidenceをruntime PASSへ昇格しない。詳細は[Phase 44 archive plan](../../../../archive/2026/08/21-31/phase44-template-reasoning-interactive-ux.md)と
+> [Phase 44 history](../../../../../history/2026/08/21-31/phase44-template-reasoning-interactive-ux.md)を正とする。
+
 ### Scope
 
 - arbitrary Jinja互換templateとbounded kwargsをsandboxed rendererへ追加する。filesystem、environment、network、process、
@@ -292,6 +296,21 @@ Resumable requestは40 output token以下だけをadmitし、成功event batch�
 - llama.cpp互換fixtureとsLLM canonical templateでrole、special token、tool/reasoning block、Unicode、kwargs、malformed templateを検証する。
 - template resource上限、recursion、oversized output、unknown filter/functionをfail closedにする。
 - interactive/non-interactive、resume/freshで同じtoken列を生成し、terminal inputとprompt fileを混同しない。
+
+### Closeout
+
+- MiniJinja 2.24.0 exact-pinned generic provider、typed template adapter、digest-bound CLI file reader、bounded kwargs、data-only
+  identity reportを実装した。reviewed Qwen default rendererとGemma raw-text pathは暗黙置換せず、raw/Gemma generic inputと未対応backendは
+  fail closedとした。
+- Reasoning mode/budgetは既存selector・grammar・stop・cancelと同じfrontend controllerへ統合し、1〜4,096 tokenとmulti-token close markerを
+  admission前に検証する。Chat/Responses/CLIは同じloweringを使い、Anthropic thinkingはunsupportedのまま残した。
+- `chat`はprompt/message/prompt-file/interactive stdinのclosed matrix、regular bounded prompt file、typed transcript、reverse prompt、
+  JSONL event、successful-turn-only commitをPhase 41 opaque checkpoint callbackへ接続した。Persistent Qwen chatはhidden reasoning、selected stop、
+  matched reverse markerを除外したcanonical history prefixをfresh resident ownerへre-prefillしてopaque captureし、next-turn/fresh-resume exact prefixを維持する。
+  load時のexact model/renderer/tokenizer/target/plan/KV identity、conversation+KV pending/current rollback、CLI preflight-before-model-open、
+  SIGINT in-flight cancellation laneを実装した。既存`generate`のreport/semanticsは変更していない。
+- Phase 44の実装・focused host testsは完了した。MI300X実機correctness/performance、GPU provider/kernel、WebUI、mid-generation/wire session
+  resume、Phase 47 tool/MCP executionは本Phaseの完了へ含めず、後続計画またはdeferred laneに残す。
 
 ## Phase 45: adapter・control vector・dynamic model lifecycle
 

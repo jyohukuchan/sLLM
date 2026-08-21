@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
     ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenComponentSelection,
@@ -25,7 +25,8 @@ use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
     GenerationExecutorV1, GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopControllerV1,
-    GenerationStopPolicyV1, InputTokenCountInputV1, ProcessedVisionInputV1, Qwen35ChatMessageV1,
+    GenerationStopPolicyV1, GenericTemplateInputV1, GenericTemplateMessagesInputV1,
+    GenericTemplateProviderV1, InputTokenCountInputV1, ProcessedVisionInputV1, Qwen35ChatMessageV1,
     Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, Qwen35VisionProcessorV1,
     QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1, ThinkingModeV1, TokenIdsV1,
     TokenPieceV1, TokenizerFrontendV1, TokenizerUtilityServiceV1, gemma4_generation_stop_policy,
@@ -458,11 +459,13 @@ enum Operation {
     ApplyTemplate {
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
+        custom_template: Option<CustomTemplateSpec>,
     },
     InputTokens {
         text: Option<String>,
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
+        custom_template: Option<CustomTemplateSpec>,
     },
     Embeddings {
         texts: Vec<String>,
@@ -483,6 +486,41 @@ enum Operation {
     },
     Generate(GenerateRequest),
     Benchmark(BenchmarkRequest),
+}
+
+#[derive(Clone)]
+struct CustomTemplateSpec {
+    path: PathBuf,
+    digest: String,
+    kwargs: Map<String, Value>,
+    provider: Option<GenericTemplateProviderV1>,
+}
+
+impl std::fmt::Debug for CustomTemplateSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CustomTemplateSpec")
+            .field("digest", &self.digest)
+            .field("kwargs", &self.kwargs)
+            .field("loaded", &self.provider.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for CustomTemplateSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.digest == other.digest
+            && self.kwargs == other.kwargs
+            && self
+                .provider
+                .as_ref()
+                .map(GenericTemplateProviderV1::digest)
+                == other
+                    .provider
+                    .as_ref()
+                    .map(GenericTemplateProviderV1::digest)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -573,6 +611,128 @@ fn utility_apply_template(
             "digest": identity.digest(),
             "size_bytes": identity.size_bytes(),
         }
+    }))
+}
+
+fn generic_message_values(messages: &[Qwen35ChatMessageV1]) -> Vec<Value> {
+    messages
+        .iter()
+        .map(|message| match message {
+            Qwen35ChatMessageV1::System { content } => {
+                json!({"role":"system", "content": content})
+            }
+            Qwen35ChatMessageV1::User { content } => {
+                json!({"role":"user", "content": content})
+            }
+            Qwen35ChatMessageV1::Assistant {
+                content,
+                reasoning_content,
+            } => {
+                let mut value = json!({"role":"assistant", "content": content});
+                if let Some(reasoning_content) = reasoning_content {
+                    value["reasoning_content"] = Value::String(reasoning_content.clone());
+                }
+                value
+            }
+        })
+        .collect()
+}
+
+fn generic_special_tokens(tokenizer: &TokenizerFrontendV1) -> Map<String, Value> {
+    let snapshot = tokenizer.snapshot();
+    let mut tokens = Map::new();
+    for role in snapshot.special_roles() {
+        tokens.insert(
+            role.role().to_owned(),
+            Value::String(role.content().to_owned()),
+        );
+    }
+    tokens.insert(
+        "eos_token".to_owned(),
+        Value::String(snapshot.tokenizer_eos().token().to_owned()),
+    );
+    tokens
+}
+
+fn generic_template_input(
+    tokenizer: &TokenizerFrontendV1,
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    kwargs: Map<String, Value>,
+) -> Result<GenericTemplateInputV1, String> {
+    let input = GenericTemplateMessagesInputV1::from_parts(
+        generic_message_values(messages),
+        kwargs,
+        generic_special_tokens(tokenizer),
+        options.add_generation_prompt,
+        matches!(options.thinking, ThinkingModeV1::Enabled),
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(GenericTemplateInputV1::messages(input))
+}
+
+fn custom_template_identity_json(result: &sllm_frontend::ApplyTemplateResultV1) -> Value {
+    let identity = result.identity();
+    let generic = result.generic_identity();
+    json!({
+        "kind": identity.kind(),
+        "version": identity.version(),
+        "consistency_label": identity.consistency_label(),
+        "digest": identity.digest(),
+        "size_bytes": identity.size_bytes(),
+        "template_digest": generic.map(|value| value.template_digest()),
+        "source_size_bytes": generic.map(|value| value.source_size_bytes()),
+        "kwargs_digest": generic.map(|value| value.kwargs_digest()),
+        "rendered_digest": generic.map(|value| value.rendered_digest()),
+        "rendered_bytes_digest": generic.map(|value| value.rendered_digest()),
+        "rendered_size_bytes": generic.map(|value| value.rendered_size_bytes()),
+        "profile_version": generic.map(|value| value.profile_version()),
+    })
+}
+
+fn utility_apply_custom_template(
+    tokenizer: &TokenizerFrontendV1,
+    provider: &GenericTemplateProviderV1,
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    kwargs: Map<String, Value>,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, None);
+    let input = generic_template_input(tokenizer, messages, options, kwargs)?;
+    let result = utility
+        .apply_generic_template(provider, input)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "kind": "apply-template",
+        "version": result.version(),
+        "text": result.rendered(),
+        "prompt": result.rendered(),
+        "count": result.count(),
+        "token_ids": result.token_ids().as_slice(),
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+        "template": custom_template_identity_json(&result),
+    }))
+}
+
+fn utility_input_tokens_custom(
+    tokenizer: &TokenizerFrontendV1,
+    provider: &GenericTemplateProviderV1,
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+    kwargs: Map<String, Value>,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, None);
+    let input = generic_template_input(tokenizer, messages, options, kwargs)?;
+    let result = utility
+        .apply_generic_template(provider, input)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "kind": "input-tokens",
+        "count": result.count(),
+        "input_kind": "custom-messages",
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+        "template": custom_template_identity_json(&result),
     }))
 }
 
@@ -798,6 +958,15 @@ trait ModelFrontendBackend {
     ) -> Result<Value, String> {
         self.render(messages, options)
     }
+    fn apply_template_custom(
+        &self,
+        _messages: &[Qwen35ChatMessageV1],
+        _options: Qwen35RenderOptionsV1,
+        _provider: &GenericTemplateProviderV1,
+        _kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        Err("custom template is unsupported for this model backend".to_owned())
+    }
     fn input_tokens(
         &self,
         text: Option<&str>,
@@ -823,6 +992,15 @@ trait ModelFrontendBackend {
             .and_then(Value::as_u64)
             .ok_or_else(|| "tokenizer result omitted count".to_owned())?;
         Ok(json!({"kind":"input-tokens", "count":count}))
+    }
+    fn input_tokens_custom(
+        &self,
+        _messages: &[Qwen35ChatMessageV1],
+        _options: Qwen35RenderOptionsV1,
+        _provider: &GenericTemplateProviderV1,
+        _kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        Err("custom template is unsupported for this model backend".to_owned())
     }
     fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
         self.decode(ids, mode)
@@ -1333,6 +1511,17 @@ impl ModelFrontendBackend for MoeProductionBackend {
         utility_apply_template(&tokenizer, &renderer, messages, options)
     }
 
+    fn apply_template_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_apply_custom_template(&tokenizer, provider, messages, options, kwargs)
+    }
+
     fn input_tokens(
         &self,
         text: Option<&str>,
@@ -1342,6 +1531,17 @@ impl ModelFrontendBackend for MoeProductionBackend {
         let tokenizer = self.tokenizer()?;
         let renderer = self.renderer().ok();
         utility_input_tokens(&tokenizer, renderer.as_ref(), text, messages, options)
+    }
+
+    fn input_tokens_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_input_tokens_custom(&tokenizer, provider, messages, options, kwargs)
     }
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
@@ -1776,6 +1976,17 @@ impl ModelFrontendBackend for ProductionBackend {
         utility_apply_template(&tokenizer, &renderer, messages, options)
     }
 
+    fn apply_template_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_apply_custom_template(&tokenizer, provider, messages, options, kwargs)
+    }
+
     fn input_tokens(
         &self,
         text: Option<&str>,
@@ -1785,6 +1996,17 @@ impl ModelFrontendBackend for ProductionBackend {
         let tokenizer = self.tokenizer()?;
         let renderer = self.renderer().ok();
         utility_input_tokens(&tokenizer, renderer.as_ref(), text, messages, options)
+    }
+
+    fn input_tokens_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_input_tokens_custom(&tokenizer, provider, messages, options, kwargs)
     }
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
@@ -3236,7 +3458,8 @@ pub(crate) fn run(
     command: &str,
     arguments: impl Iterator<Item = String>,
 ) -> Result<String, String> {
-    let request = parse(command, arguments)?;
+    let mut request = parse(command, arguments)?;
+    load_custom_template(&mut request)?;
     let benchmark_timing = (command == "benchmark").then(BenchmarkTiming::start);
     let backend = open_production_backend(&request)?;
     match benchmark_timing {
@@ -3245,6 +3468,29 @@ pub(crate) fn run(
         }
         None => execute(command, request.operation, backend.as_ref()),
     }
+}
+
+fn load_custom_template(request: &mut Request) -> Result<(), String> {
+    let custom_template = match &mut request.operation {
+        Operation::ApplyTemplate {
+            custom_template: Some(spec),
+            ..
+        }
+        | Operation::InputTokens {
+            custom_template: Some(spec),
+            ..
+        } => Some(spec),
+        _ => None,
+    };
+    if let Some(spec) = custom_template {
+        if spec.provider.is_none() {
+            spec.provider = Some(crate::template_file::read_verified_template(
+                &spec.path,
+                &spec.digest,
+            )?);
+        }
+    }
+    Ok(())
 }
 
 fn execute(
@@ -3278,14 +3524,43 @@ fn execute_with_timing(
                 backend.decode(&ids, mode)?
             }
         }
-        Operation::ApplyTemplate { messages, options } => {
-            backend.apply_template(&messages, options)?
-        }
+        Operation::ApplyTemplate {
+            messages,
+            options,
+            custom_template,
+        } => match custom_template {
+            Some(spec) => {
+                let CustomTemplateSpec {
+                    kwargs,
+                    provider: Some(provider),
+                    ..
+                } = spec
+                else {
+                    return Err("custom template was not prepared".to_owned());
+                };
+                backend.apply_template_custom(&messages, options, &provider, kwargs)?
+            }
+            None => backend.apply_template(&messages, options)?,
+        },
         Operation::InputTokens {
             text,
             messages,
             options,
-        } => backend.input_tokens(text.as_deref(), &messages, options)?,
+            custom_template,
+        } => match custom_template {
+            Some(spec) => {
+                let CustomTemplateSpec {
+                    kwargs,
+                    provider: Some(provider),
+                    ..
+                } = spec
+                else {
+                    return Err("custom template was not prepared".to_owned());
+                };
+                backend.input_tokens_custom(&messages, options, &provider, kwargs)?
+            }
+            None => backend.input_tokens(text.as_deref(), &messages, options)?,
+        },
         Operation::Embeddings {
             texts,
             token_inputs,
@@ -3352,6 +3627,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     };
     let mut gguf = None;
     let mut derived_lock = None;
+    let mut chat_template_file: Option<PathBuf> = None;
+    let mut chat_template_digest: Option<String> = None;
+    let mut template_kwargs: Option<Map<String, Value>> = None;
     let mut text = None;
     let mut embedding_texts = Vec::new();
     let mut token_ids = None;
@@ -3403,6 +3681,33 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 take_value(&mut arguments, "--derived-lock")?,
                 "--derived-lock",
             )?,
+            "--chat-template-file" if command == "apply-template" || command == "input-tokens" => {
+                let value = take_value(&mut arguments, "--chat-template-file")?;
+                if value.is_empty() {
+                    return Err("--chat-template-file must not be empty".to_owned());
+                }
+                set_once(
+                    &mut chat_template_file,
+                    PathBuf::from(value),
+                    "--chat-template-file",
+                )?;
+            }
+            "--chat-template-digest"
+                if command == "apply-template" || command == "input-tokens" =>
+            {
+                let value = take_value(&mut arguments, "--chat-template-digest")?;
+                set_once(&mut chat_template_digest, value, "--chat-template-digest")?;
+            }
+            "--template-kwargs-json"
+                if command == "apply-template" || command == "input-tokens" =>
+            {
+                let value = take_value(&mut arguments, "--template-kwargs-json")?;
+                set_once(
+                    &mut template_kwargs,
+                    crate::template_file::parse_kwargs_json(&value)?,
+                    "--template-kwargs-json",
+                )?;
+            }
             "--text"
                 if command == "tokenize"
                     || command == "input-tokens"
@@ -3771,6 +4076,29 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         Some(PathBuf::from(derived_lock.ok_or_else(|| {
             "missing required --derived-lock PATH".to_owned()
         })?));
+    let custom_template = match (chat_template_file, chat_template_digest) {
+        (Some(path), Some(digest)) => Some(CustomTemplateSpec {
+            path,
+            digest,
+            kwargs: template_kwargs.unwrap_or_default(),
+            provider: None,
+        }),
+        (None, None) => {
+            if template_kwargs.is_some() {
+                return Err(
+                    "--template-kwargs-json requires both custom template file and digest"
+                        .to_owned(),
+                );
+            }
+            None
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "custom template requires both --chat-template-file and --chat-template-digest"
+                    .to_owned(),
+            );
+        }
+    };
     let operation = match command {
         "verify-model" => Operation::Verify,
         "tokenize" => Operation::Tokenize {
@@ -3801,6 +4129,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     add_generation_prompt: !no_generation_prompt,
                     thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
                 },
+                custom_template,
             }
         }
         "input-tokens" => {
@@ -3809,6 +4138,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "input-tokens requires exactly one --text or at least one --message".to_owned(),
                 );
             }
+            if text.is_some() && custom_template.is_some() {
+                return Err("custom template requires --message input".to_owned());
+            }
             Operation::InputTokens {
                 text,
                 messages,
@@ -3816,6 +4148,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     add_generation_prompt: !no_generation_prompt,
                     thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
                 },
+                custom_template,
             }
         }
         "decode" | "detokenize" => Operation::Decode {
@@ -4698,6 +5031,92 @@ mod tests {
             Operation::Generate(GenerateRequest { ref image_paths, .. })
                 if image_paths == &[PathBuf::from("fixture.png")]
         ));
+    }
+
+    #[test]
+    fn custom_template_flags_are_explicitly_bound_to_message_operations() {
+        let request = parse_args(
+            "apply-template",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--message",
+                "user:hello",
+                "--chat-template-file",
+                "template.jinja",
+                "--chat-template-digest",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "--template-kwargs-json",
+                r#"{"temperature":0.5}"#,
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::ApplyTemplate {
+                custom_template: Some(CustomTemplateSpec {
+                    path,
+                    digest,
+                    kwargs,
+                    ..
+                }),
+                ..
+            } if path == std::path::Path::new("template.jinja")
+                && digest.starts_with("sha256:")
+                && kwargs.get("temperature") == Some(&Value::from(0.5))
+        ));
+
+        let missing_digest = parse_args(
+            "apply-template",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--message",
+                "user:hello",
+                "--chat-template-file",
+                "template.jinja",
+            ],
+        )
+        .unwrap_err();
+        assert!(missing_digest.contains("requires both"));
+
+        let raw_text = parse_args(
+            "input-tokens",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--text",
+                "hello",
+                "--chat-template-file",
+                "template.jinja",
+                "--chat-template-digest",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ],
+        )
+        .unwrap_err();
+        assert!(raw_text.contains("requires --message"));
+
+        let unsupported = parse_args(
+            "tokenize",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--text",
+                "hello",
+                "--chat-template-file",
+                "secret-template.jinja",
+            ],
+        )
+        .unwrap_err();
+        assert!(!unsupported.contains("secret-template.jinja"));
     }
 
     #[test]

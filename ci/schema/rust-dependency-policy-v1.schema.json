@@ -18,11 +18,11 @@
       "items": {"$ref": "#/$defs/workspace_member"}
     },
     "packages": {
-      "type": "array", "minItems": 132, "maxItems": 132,
+      "type": "array", "minItems": 190, "maxItems": 190,
       "items": {"$ref": "#/$defs/package"}
     },
     "edges": {
-      "type": "array", "minItems": 309, "maxItems": 309,
+      "type": "array", "minItems": 447, "maxItems": 447,
       "items": {"$ref": "#/$defs/edge"}
     },
     "counts": {"$ref": "#/$defs/counts"},
@@ -112,27 +112,38 @@
       "type": "object", "additionalProperties": false,
       "required": ["packages", "registry_packages", "workspace_packages", "edges", "edge_kinds", "target_specific_edges", "target_expressions"],
       "properties": {
-        "packages": {"const": 132}, "registry_packages": {"const": 126}, "workspace_packages": {"const": 6}, "edges": {"const": 309},
+        "packages": {"const": 190}, "registry_packages": {"const": 184}, "workspace_packages": {"const": 6}, "edges": {"const": 447},
         "edge_kinds": {
           "type": "object", "additionalProperties": false, "required": ["build", "dev", "normal"],
-          "properties": {"build": {"const": 6}, "dev": {"const": 1}, "normal": {"const": 302}}
+          "properties": {"build": {"const": 14}, "dev": {"const": 1}, "normal": {"const": 432}}
         },
-        "target_specific_edges": {"const": 38}, "target_expressions": {"const": 25}
+        "target_specific_edges": {"const": 66}, "target_expressions": {"const": 37}
       }
     },
     "feature_assertions": {
-      "type": "object", "additionalProperties": false, "required": ["server_runtime", "tokenizers"],
+      "type": "object", "additionalProperties": false, "required": ["minijinja", "server_runtime", "tokenizers"],
       "properties": {
+        "minijinja": {
+          "const": {
+            "package": "registry:minijinja@2.24.0",
+            "requested": ["builtins", "fuel", "json", "macros", "multi_template", "serde"],
+            "resolved": ["builtins", "fuel", "json", "macros", "multi_template", "serde", "serde_json"],
+            "forbidden": ["custom_syntax", "debug", "default", "deserialization", "loader", "stacker", "urlencode"],
+            "required_packages": ["registry:memo-map@0.3.3"],
+            "uses_default_features": false
+          }
+        },
         "server_runtime": {
           "const": {
             "workspace_package": "workspace:sllm-server@0.1.0",
             "dependencies": [
+              {"package": "registry:axum-server@0.8.0", "requested": ["tls-rustls"], "resolved": ["arc-swap", "rustls", "rustls-pki-types", "tls-rustls", "tls-rustls-no-provider", "tokio-rustls"], "uses_default_features": false},
               {"package": "registry:axum@0.8.9", "requested": ["http1", "json", "tokio"], "resolved": ["http1", "json", "tokio"], "uses_default_features": false},
               {"package": "registry:futures-util@0.3.33", "requested": ["std"], "resolved": ["alloc", "slab", "std"], "uses_default_features": false},
               {"package": "registry:serde_path_to_error@0.1.20", "requested": [], "resolved": [], "uses_default_features": true},
               {"package": "registry:tokio-stream@0.1.19", "requested": ["sync"], "resolved": ["sync", "tokio-util"], "uses_default_features": false},
-              {"package": "registry:tokio@1.53.1", "requested": ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], "resolved": ["default", "libc", "macros", "mio", "net", "rt", "rt-multi-thread", "signal", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "windows-sys"], "uses_default_features": false},
-              {"package": "registry:tower-http@0.7.0", "requested": ["limit", "trace"], "resolved": ["limit", "trace", "tracing"], "uses_default_features": false}
+              {"package": "registry:tokio@1.53.1", "requested": ["macros", "net", "rt-multi-thread", "signal", "sync", "time"], "resolved": ["bytes", "default", "fs", "io-util", "libc", "macros", "mio", "net", "rt", "rt-multi-thread", "signal", "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "windows-sys"], "uses_default_features": false},
+              {"package": "registry:tower-http@0.7.0", "requested": ["cors", "limit", "trace"], "resolved": ["cors", "limit", "trace", "tracing"], "uses_default_features": false}
             ]
           }
         },

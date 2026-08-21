@@ -34,8 +34,8 @@ use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1};
 use crate::phase43_api::{
     AnthropicContentBlockV1, AnthropicMessagesRequestV1, AnthropicRoleV1, AnthropicSystemV1,
     Phase43ApiErrorV1, Phase43ErrorCodeV1, ResponsesInputItemV1, ResponsesInputV1,
-    ResponsesMessageRoleV1, ResponsesRequestV1, ToolChoiceV1 as WireToolChoiceV1,
-    parse_anthropic_request_v1, parse_responses_request_v1,
+    ResponsesMessageRoleV1, ResponsesReasoningEffortV1, ResponsesRequestV1,
+    ToolChoiceV1 as WireToolChoiceV1, parse_anthropic_request_v1, parse_responses_request_v1,
 };
 use crate::phase43_transport::{
     AnthropicStreamBuilderV1, Phase43CompletedOutputV1, Phase43FinishReasonV1, Phase43SseEventV1,
@@ -201,6 +201,17 @@ fn prepare_responses(
         .get(request.model())
         .ok_or_else(|| ApiErrorV1::model_not_found(request.model()))?;
     let reasoning = request.reasoning_effort().is_some();
+    let reasoning_budget = request
+        .reasoning_effort()
+        .map(ResponsesReasoningEffortV1::max_reasoning_tokens);
+    if let Some(budget) = reasoning_budget {
+        if u64::from(budget) + 1 > u64::from(request.max_output_tokens()) {
+            return Err(ApiErrorV1::invalid_value(
+                "max_output_tokens",
+                "max_output_tokens must leave at least one token for the reasoning close marker",
+            ));
+        }
+    }
     let (history, simple_messages, assistant_prefill, has_tool_history) =
         lower_responses_history(&request)?;
     let tools = lower_tools(request.tools())?;
@@ -243,6 +254,7 @@ fn prepare_responses(
             request.stream(),
             request.sllm().resumable(),
             reasoning,
+            reasoning_budget,
             Some(schema),
         )?;
         (
@@ -266,6 +278,7 @@ fn prepare_responses(
             request.stream(),
             request.sllm().resumable(),
             reasoning,
+            reasoning_budget,
         )?;
         (generation_request, None)
     };
@@ -325,6 +338,7 @@ fn prepare_anthropic(
             request.stream(),
             request.sllm().resumable(),
             false,
+            None,
             Some(schema),
         )?;
         (
@@ -348,6 +362,7 @@ fn prepare_anthropic(
             request.stream(),
             request.sllm().resumable(),
             false,
+            None,
         )?;
         (generation_request, None)
     };

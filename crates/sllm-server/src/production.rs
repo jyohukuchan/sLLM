@@ -39,9 +39,10 @@ use sllm_core::{
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, GenerationCancellationV1, GenerationExecutorV1,
     GenerationInputV1, GenerationOutputSinkV1, GenerationResultV1, GenerationServiceError,
-    GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1, PreparedGenerationInputV1,
-    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1,
-    SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenizeOptionsV1,
+    GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1, GenerationTextFrontendV1,
+    PreparedGenerationInputV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1,
+    QwenMtpGenerationExecutorV1, ReasoningPolicyV1, SpeculativeGenerationAdapterV1,
+    SpeculativeGenerationExecutorV1, ThinkingModeV1, TokenIdsV1, TokenizeOptionsV1,
     TokenizeResultV1, TokenizerFrontendV1, TokenizerUtilityServiceV1,
     gemma4_generation_stop_policy,
 };
@@ -441,6 +442,7 @@ fn gemma_embed_one(
 fn generation_config_for_request(
     request: &ChatCompletionRequestV1,
     tokenizer: &TokenizerFrontendV1,
+    reasoning_close_token_ids: Option<&[u32]>,
 ) -> Result<sllm_frontend::GenerationConfigV1, BackendErrorV1> {
     let mut generation = request.generation().clone();
     let mut chain = SamplerChainConfigV1::new(generation.sampling());
@@ -574,7 +576,78 @@ fn generation_config_for_request(
             generation = generation.with_grammar(grammar);
         }
     }
+    if request.reasoning().enabled() {
+        let close_token_ids = reasoning_close_token_ids
+            .ok_or_else(|| BackendErrorV1::new("Qwen reasoning close marker is unavailable"))?;
+        let policy = qwen_reasoning_policy_for_request(request, close_token_ids)?;
+        generation = generation
+            .with_reasoning(policy)
+            .map_err(|error| BackendErrorV1::new(format!("reasoning policy failed: {error}")))?;
+    } else if request.reasoning().max_reasoning_tokens().is_some() {
+        return Err(BackendErrorV1::new(
+            "reasoning budget requires an enabled reasoning mode",
+        ));
+    }
     Ok(generation)
+}
+
+/// Resolves and validates the reviewed Qwen close marker once while opening
+/// the model.  Request admission only reuses this immutable token sequence,
+/// so a missing or non-round-tripping marker cannot reach scheduler/GPU work.
+fn validate_qwen_reasoning_close_marker(
+    tokenizer: &TokenizerFrontendV1,
+) -> Result<Vec<u32>, BackendErrorV1> {
+    let close = tokenizer
+        .encode_without_special_tokens("</think>")
+        .map_err(|_| BackendErrorV1::new("Qwen reasoning close marker is unavailable"))?;
+    if close.is_empty() {
+        return Err(BackendErrorV1::new(
+            "Qwen reasoning close marker is unavailable",
+        ));
+    }
+    let close_ids = close.as_slice().to_vec();
+    let decoded = tokenizer
+        .decode(
+            &TokenIdsV1::from_slice(&close_ids),
+            DecodeModeV1::PreserveSpecialTokens,
+        )
+        .map_err(|_| BackendErrorV1::new("Qwen reasoning close marker is unavailable"))?;
+    if decoded != "</think>" {
+        return Err(BackendErrorV1::new(
+            "Qwen reasoning close marker is unavailable",
+        ));
+    }
+    Ok(close_ids)
+}
+
+fn qwen_reasoning_policy_for_request(
+    request: &ChatCompletionRequestV1,
+    close_token_ids: &[u32],
+) -> Result<ReasoningPolicyV1, BackendErrorV1> {
+    // Raw completion prompts never receive the reasoning policy from the
+    // public wire adapter.  The sole non-chat exception is the internal
+    // `protocol` bit set by Phase 43 after it has rendered a reviewed,
+    // bounded protocol/tool envelope through `from_protocol_text`.
+    let chat_input = matches!(
+        request.input(),
+        GenerationRequestInputV1::Chat | GenerationRequestInputV1::ChatWithAssistantPrefill(_)
+    );
+    if !chat_input && !request.reasoning().protocol() {
+        return Err(BackendErrorV1::new(
+            "reasoning mode requires a chat input with the reviewed Qwen template",
+        ));
+    }
+    if close_token_ids.is_empty() {
+        return Err(BackendErrorV1::new(
+            "Qwen reasoning close marker is unavailable",
+        ));
+    }
+    ReasoningPolicyV1::from_thinking(
+        request.reasoning().thinking(),
+        request.reasoning().max_reasoning_tokens(),
+        close_token_ids.to_vec(),
+    )
+    .map_err(|error| BackendErrorV1::new(format!("reasoning policy is invalid: {error}")))
 }
 
 fn publish_generation_logprobs(
@@ -968,6 +1041,52 @@ pub struct QwenBackendConfigV1 {
     pub phase41: Phase41ProductionConfigV1,
 }
 
+/// Configuration for one persistent dense-BF16 Qwen chat owner.  The owner
+/// creates one resident HIP model/session and keeps the current opaque
+/// checkpoint between turns; checkpoint files remain managed by the core
+/// `CheckpointStore` rather than by the CLI.
+#[derive(Clone, Debug)]
+pub struct QwenPersistentChatSessionConfigV1 {
+    pub backend: QwenBackendConfigV1,
+    pub checkpoint_directory: PathBuf,
+    pub checkpoint_quota_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenPersistentChatTurnRequestV1 {
+    pub messages: Vec<Qwen35ChatMessageV1>,
+    pub max_new_tokens: u32,
+    pub stop_sequences: Vec<String>,
+    pub reverse_prompts: Vec<String>,
+    pub thinking: ThinkingModeV1,
+    pub reasoning_budget: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QwenPersistentChatFinishReasonV1 {
+    Stop,
+    ReversePrompt,
+    Length,
+}
+
+impl QwenPersistentChatFinishReasonV1 {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::ReversePrompt => "reverse_prompt",
+            Self::Length => "length",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenPersistentChatTurnResultV1 {
+    pub text: String,
+    pub reasoning: Option<String>,
+    pub finish_reason: QwenPersistentChatFinishReasonV1,
+    pub usage: TokenUsageV1,
+}
+
 impl QwenBackendConfigV1 {
     pub fn validate(&self) -> Result<(), BackendErrorV1> {
         if self.target.is_empty()
@@ -1151,6 +1270,13 @@ struct QwenCheckpointRuntimeV1 {
     store: Arc<CheckpointStore>,
     loaded: Option<Arc<SessionCheckpoint>>,
     save_name: Option<String>,
+}
+
+struct QwenCapturedChatCheckpointV1 {
+    checkpoint: SessionCheckpoint,
+    text: String,
+    reasoning: Option<String>,
+    prompt_tokens: u64,
 }
 
 struct QwenCheckpointSaveV1 {
@@ -1389,6 +1515,7 @@ struct QwenBackendStateV1 {
     lock: Option<ModelLock>,
     moe_artifact: Option<Arc<VerifiedQwen35Moe>>,
     gguf_moe: Option<Arc<VerifiedGgufQwen35Moe>>,
+    reasoning_close_token_ids: Vec<u32>,
     stop_policy: GenerationStopPolicyV1,
     tokenizer: TokenizerFrontendV1,
     renderer: Qwen35ChatTemplateV1,
@@ -1411,6 +1538,12 @@ struct QwenBackendStateV1 {
     phase41: Phase41ProductionConfigV1,
     prefix_cache: QwenPrefixCacheRuntimeV1,
     checkpoint: Option<QwenCheckpointRuntimeV1>,
+    // Dense BF16 checkpoint identities use the stable KV descriptor from the
+    // resident seed graph.  Request graphs may vary their token row count,
+    // but keep the same state capacity and descriptor semantics.
+    persistent_checkpoint_descriptor_digest: Option<[u8; 32]>,
+    persistent_capture_requested: bool,
+    persistent_capture: Option<QwenCapturedChatCheckpointV1>,
 }
 
 pub struct Gemma4ChatBackendV1 {
@@ -1704,6 +1837,31 @@ fn qwen_checkpoint_identity(
     kv_cache_encoding: KvCacheEncoding,
     tokens: &[u32],
 ) -> Result<CheckpointIdentity, BackendErrorV1> {
+    qwen_checkpoint_identity_with_descriptor_digest(
+        graph.model_fingerprint(),
+        plan,
+        tokenizer,
+        renderer,
+        target,
+        fp8_provider,
+        kv_cache_encoding,
+        qwen_checkpoint_kv_descriptor_digest(graph),
+        tokens,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen_checkpoint_identity_with_descriptor_digest(
+    model_fingerprint: &str,
+    plan: &WeightLoadPlan,
+    tokenizer: &TokenizerFrontendV1,
+    renderer: &Qwen35ChatTemplateV1,
+    target: &str,
+    fp8_provider: Option<&str>,
+    kv_cache_encoding: KvCacheEncoding,
+    descriptor_digest: [u8; 32],
+    tokens: &[u32],
+) -> Result<CheckpointIdentity, BackendErrorV1> {
     let renderer_identity = format!(
         "qwen35-chat-v{}:{}",
         renderer.version(),
@@ -1711,7 +1869,7 @@ fn qwen_checkpoint_identity(
     );
     let target_semantics = format!("{}:{}", target, fp8_provider.unwrap_or("bf16"));
     CheckpointIdentity::for_tokens(
-        graph.model_fingerprint().to_owned(),
+        model_fingerprint.to_owned(),
         format!("derived-artifact:{}", plan.digest_hex()),
         "adapter:none-v1",
         renderer_identity,
@@ -1720,7 +1878,7 @@ fn qwen_checkpoint_identity(
         plan.digest_hex(),
         tokens,
         kv_cache_encoding,
-        qwen_checkpoint_kv_descriptor_digest(graph),
+        descriptor_digest,
         qwen_checkpoint_context_policy_digest(),
     )
     .map_err(|_| BackendErrorV1::new("Qwen checkpoint identity construction failed"))
@@ -1898,6 +2056,7 @@ impl QwenChatBackendV1 {
             TokenizerFrontendV1::from_qwen35_gguf(&lock, source.gguf()).map_err(|error| {
                 BackendErrorV1::new(format!("verified tokenizer construction failed: {error}"))
             })?;
+        let reasoning_close_token_ids = validate_qwen_reasoning_close_marker(&tokenizer)?;
         let renderer =
             Qwen35ChatTemplateV1::from_qwen35_gguf(&lock, source.gguf()).map_err(|error| {
                 BackendErrorV1::new(format!(
@@ -2015,6 +2174,7 @@ impl QwenChatBackendV1 {
         )?;
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
+                reasoning_close_token_ids,
                 stop_policy: lock.generation_stop_policy().clone(),
                 lock: Some(lock),
                 moe_artifact: None,
@@ -2040,6 +2200,11 @@ impl QwenChatBackendV1 {
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint,
+                persistent_checkpoint_descriptor_digest: Some(
+                    qwen_checkpoint_kv_descriptor_digest(&checkpoint_graph),
+                ),
+                persistent_capture_requested: false,
+                persistent_capture: None,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -2060,6 +2225,7 @@ impl QwenChatBackendV1 {
         let tokenizer = TokenizerFrontendV1::from_qwen35_moe_gguf(&source).map_err(|error| {
             BackendErrorV1::new(format!("MoE tokenizer construction failed: {error}"))
         })?;
+        let reasoning_close_token_ids = validate_qwen_reasoning_close_marker(&tokenizer)?;
         let renderer = Qwen35ChatTemplateV1::from_qwen35_moe_gguf(&source)
             .map_err(|error| BackendErrorV1::new(format!("MoE chat renderer failed: {error}")))?;
         let plan = build_gguf_qwen35_moe_weight_load_plan(&source).map_err(|error| {
@@ -2105,6 +2271,7 @@ impl QwenChatBackendV1 {
         let prefix_cache = QwenPrefixCacheRuntimeV1::new(&config.phase41.prefix_cache)?;
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
+                reasoning_close_token_ids,
                 lock: None,
                 moe_artifact: None,
                 gguf_moe: Some(source),
@@ -2130,11 +2297,142 @@ impl QwenChatBackendV1 {
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint: None,
+                persistent_checkpoint_descriptor_digest: None,
+                persistent_capture_requested: false,
+                persistent_capture: None,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
             identity,
         })
+    }
+
+    fn validate_persistent_chat_state(state: &QwenBackendStateV1) -> Result<(), BackendErrorV1> {
+        if state.lock.is_none()
+            || state.moe_artifact.is_some()
+            || state.gguf_moe.is_some()
+            || state.mtp_resident.is_some()
+            || state.mtp_plan.is_some()
+            || state.sidecar.is_some()
+            || state.nvfp4_sidecar.is_some()
+            || state.fp8_provider.is_some()
+            || state
+                .gguf_source
+                .as_ref()
+                .is_none_or(|source| source.has_fp8_recipe())
+            || state.kv_cache_encoding != KvCacheEncoding::Fp16
+            || !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            )
+            || !matches!(
+                state.phase41.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+            || !matches!(
+                state.phase41.checkpoint,
+                CheckpointStartupConfigV1::Disabled
+            )
+            || !matches!(state.phase41.draft, DraftStartupConfigV1::Disabled)
+        {
+            return Err(BackendErrorV1::new(
+                "persistent chat requires a dense BF16 Qwen text runtime with Phase 41 disabled",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_persistent_checkpoint_identity(
+        state: &QwenBackendStateV1,
+        checkpoint: &SessionCheckpoint,
+    ) -> Result<(), BackendErrorV1> {
+        let descriptor_digest = state
+            .persistent_checkpoint_descriptor_digest
+            .ok_or_else(|| {
+                BackendErrorV1::new(
+                    "persistent chat checkpoint identity requires the dense BF16 graph",
+                )
+            })?;
+        let expected = qwen_checkpoint_identity_with_descriptor_digest(
+            state
+                .lock
+                .as_ref()
+                .expect("validated dense Qwen lock")
+                .fingerprint(),
+            &state.plan,
+            &state.tokenizer,
+            &state.renderer,
+            &state.target,
+            state.fp8_provider.as_deref(),
+            state.kv_cache_encoding,
+            descriptor_digest,
+            &checkpoint.payload.token_history,
+        )?;
+        if checkpoint.header.identity != expected {
+            return Err(BackendErrorV1::new(
+                "Qwen checkpoint identity differs from the running model",
+            ));
+        }
+        Ok(())
+    }
+
+    fn install_persistent_checkpoint(
+        &self,
+        store: Arc<CheckpointStore>,
+        loaded: Option<&SessionCheckpoint>,
+    ) -> Result<(), BackendErrorV1> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        Self::validate_persistent_chat_state(state)?;
+        if let Some(checkpoint) = loaded {
+            Self::validate_persistent_checkpoint_identity(state, checkpoint)?;
+        }
+        state.checkpoint = Some(QwenCheckpointRuntimeV1 {
+            store,
+            loaded: loaded.map(|checkpoint| Arc::new(checkpoint.clone())),
+            save_name: None,
+        });
+        state.persistent_capture_requested = false;
+        state.persistent_capture = None;
+        Ok(())
+    }
+
+    fn arm_persistent_checkpoint_capture(&self) -> Result<(), BackendErrorV1> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        Self::validate_persistent_chat_state(state)?;
+        if state.checkpoint.is_none() {
+            return Err(BackendErrorV1::new(
+                "persistent chat checkpoint store is not installed",
+            ));
+        }
+        state.persistent_capture_requested = true;
+        state.persistent_capture = None;
+        Ok(())
+    }
+
+    fn take_persistent_checkpoint_capture(
+        &self,
+    ) -> Result<Option<QwenCapturedChatCheckpointV1>, BackendErrorV1> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        state.persistent_capture_requested = false;
+        Ok(state.persistent_capture.take())
     }
 
     pub fn request_audits(&self) -> Vec<ProductionRequestAuditV1> {
@@ -2654,13 +2952,23 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             &state.stop_policy,
         )
         .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
-        let mut generation = generation_config_for_request(request, &state.tokenizer)?;
+        let mut generation = generation_config_for_request(
+            request,
+            &state.tokenizer,
+            Some(&state.reasoning_close_token_ids),
+        )?;
         let requires_logits = generation
             .sampler_chain()
             .map_or(generation.sampling().requires_logits(), |chain| {
                 chain.requires_logits()
             })
-            || generation.grammar().is_some();
+            || generation.grammar().is_some()
+            // Reasoning policies intersect the candidate set and may force a
+            // marker token, so the device path must expose logits even when
+            // the user selected greedy legacy sampling.
+            || generation
+                .reasoning()
+                .is_some_and(ReasoningPolicyV1::is_enabled);
         let requires_randomness = generation.sampler_chain().map_or(
             generation.sampling().requires_logits(),
             SamplerChainConfigV1::requires_randomness,
@@ -3133,6 +3441,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             None
         };
         let checkpoint_save_requested = checkpoint_save.is_some();
+        let persistent_capture_graph = state.persistent_capture_requested.then(|| graph.clone());
         let (owner, prefix_hit) = if let (Some(checkpoint), Some(identity)) =
             (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
         {
@@ -3188,8 +3497,8 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 let prefill_chunk_count = owner.prefill_chunk_count();
                 drop(owner);
                 (outcome, dispatch, memory, Some(prefill_chunk_count), None)
-            } else if mtp_target
-                && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
+            } else if let (true, Some(mtp_resident), Some(mtp_plan)) =
+                (mtp_target, &state.mtp_resident, &state.mtp_plan)
             {
                 let mtp_graph = build_qwen35_mtp_graph(
                     state.lock.as_ref().expect("MTP requires dense Qwen lock"),
@@ -3317,7 +3626,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         state_capacity,
                     );
                 }
-                let outcome = generate_with_optional_assistant_prefill(
+                let mut outcome = generate_with_optional_assistant_prefill(
                     &service,
                     &mut executor,
                     execution_prompt,
@@ -3327,9 +3636,48 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     &mut random,
                     &mut output_sink,
                 );
-                let dispatch = executor.inner().audit_snapshot().ok();
-                let memory = executor.inner().memory_audit_snapshot().ok();
-                let prefill_chunk_count = executor.inner().prefill_chunk_count();
+                // Capture request observability before canonical rebase.  The
+                // rebase owner is a bookkeeping prefix for the next turn;
+                // publishing its empty-generation audit would hide the actual
+                // user request's dispatch and memory work.
+                let generation_dispatch = executor.inner().audit_snapshot().ok();
+                let generation_memory = executor.inner().memory_audit_snapshot().ok();
+                let generation_prefill_chunk_count = executor.inner().prefill_chunk_count();
+                if state.persistent_capture_requested {
+                    if let Ok(result) = outcome.as_ref() {
+                        let graph = persistent_capture_graph
+                            .as_ref()
+                            .expect("persistent capture graph was cloned before ownership");
+                        let token_history = qwen_persistent_history_tokens(state, request, result)
+                            .and_then(|token_history| {
+                                executor
+                                    .rebase_persistent_owner(
+                                        &state.resident,
+                                        Arc::clone(&state.session),
+                                        graph.clone(),
+                                        &token_history,
+                                    )
+                                    .map(|()| token_history)
+                            });
+                        match token_history.and_then(|token_history| {
+                            capture_qwen_persistent_checkpoint(
+                                state,
+                                graph,
+                                &executor,
+                                &token_history,
+                                prompt.len(),
+                                result,
+                            )
+                        }) {
+                            Ok(captured) => state.persistent_capture = Some(captured),
+                            Err(error) => outcome = Err(error),
+                        }
+                    }
+                    state.persistent_capture_requested = false;
+                }
+                let dispatch = generation_dispatch;
+                let memory = generation_memory;
+                let prefill_chunk_count = generation_prefill_chunk_count;
                 phase41_audit.context_shift_count = executor.context_shift_count();
                 if prefix_continuation {
                     match executor.refresh_prefix_fork_audit() {
@@ -3499,6 +3847,234 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             phase41: phase41_audit,
         });
         result
+    }
+}
+
+struct PersistentChatSinkV1;
+
+impl GenerationDeltaSinkV1 for PersistentChatSinkV1 {
+    fn publish(&mut self, _delta: &str) -> Result<(), BackendErrorV1> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct PersistentCheckpointStateV1 {
+    current: Option<SessionCheckpoint>,
+    pending: Option<SessionCheckpoint>,
+}
+
+impl PersistentCheckpointStateV1 {
+    fn stage(&mut self, checkpoint: SessionCheckpoint) -> Result<(), BackendErrorV1> {
+        if self.pending.is_some() {
+            return Err(BackendErrorV1::new(
+                "persistent chat has an uncommitted turn",
+            ));
+        }
+        self.pending = Some(checkpoint);
+        Ok(())
+    }
+
+    fn candidate_with_conversation(
+        &self,
+        conversation: &[u8],
+    ) -> Result<SessionCheckpoint, BackendErrorV1> {
+        let mut candidate = self.pending.clone().ok_or_else(|| {
+            BackendErrorV1::new("persistent chat has no pending turn to checkpoint")
+        })?;
+        candidate.payload.conversation = conversation.to_vec();
+        candidate
+            .validate()
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        Ok(candidate)
+    }
+
+    fn promote(&mut self, checkpoint: SessionCheckpoint) {
+        self.current = Some(checkpoint);
+        self.pending = None;
+    }
+}
+
+fn persistent_chat_finish_reason(
+    completion: &BackendCompletionV1,
+    reverse_prompts: &[String],
+) -> QwenPersistentChatFinishReasonV1 {
+    if completion
+        .matched_stop
+        .as_deref()
+        .is_some_and(|stop| reverse_prompts.iter().any(|reverse| reverse == stop))
+    {
+        QwenPersistentChatFinishReasonV1::ReversePrompt
+    } else {
+        match completion.finish_reason {
+            FinishReasonV1::Stop => QwenPersistentChatFinishReasonV1::Stop,
+            FinishReasonV1::Length => QwenPersistentChatFinishReasonV1::Length,
+        }
+    }
+}
+
+/// Persistent multi-turn owner for the dense BF16 Qwen text path.
+pub struct QwenPersistentChatSessionV1 {
+    backend: QwenChatBackendV1,
+    store: Arc<CheckpointStore>,
+    checkpoints: PersistentCheckpointStateV1,
+}
+
+impl QwenPersistentChatSessionV1 {
+    pub fn open(config: QwenPersistentChatSessionConfigV1) -> Result<Self, BackendErrorV1> {
+        if config.checkpoint_directory.as_os_str().is_empty()
+            || config.checkpoint_quota_bytes == 0
+            || !matches!(
+                config.backend.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            )
+            || !matches!(
+                config.backend.phase41.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+            || !matches!(
+                config.backend.phase41.checkpoint,
+                CheckpointStartupConfigV1::Disabled
+            )
+            || !matches!(config.backend.phase41.draft, DraftStartupConfigV1::Disabled)
+        {
+            return Err(BackendErrorV1::new(
+                "persistent chat requires a nonempty checkpoint store and all Phase 41 features disabled",
+            ));
+        }
+        let store = Arc::new(
+            CheckpointStore::new(&config.checkpoint_directory, config.checkpoint_quota_bytes)
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+        );
+        let backend = QwenChatBackendV1::open(config.backend)?;
+        if let Err(error) = backend.install_persistent_checkpoint(Arc::clone(&store), None) {
+            let _ = backend.shutdown();
+            return Err(error);
+        }
+        Ok(Self {
+            backend,
+            store,
+            checkpoints: PersistentCheckpointStateV1::default(),
+        })
+    }
+
+    pub fn turn(
+        &mut self,
+        request: QwenPersistentChatTurnRequestV1,
+    ) -> Result<QwenPersistentChatTurnResultV1, BackendErrorV1> {
+        let cancellation = GenerationCancellationV1::new();
+        self.turn_with_cancellation(request, &cancellation)
+    }
+
+    pub fn turn_with_cancellation(
+        &mut self,
+        request: QwenPersistentChatTurnRequestV1,
+        cancellation: &GenerationCancellationV1,
+    ) -> Result<QwenPersistentChatTurnResultV1, BackendErrorV1> {
+        if self.checkpoints.pending.is_some() {
+            return Err(BackendErrorV1::new(
+                "persistent chat has an uncommitted turn; call commit_turn or save_checkpoint",
+            ));
+        }
+        let reverse_prompts = request.reverse_prompts.clone();
+        let api_request = ChatCompletionRequestV1::from_persistent_chat(
+            "sllm-qwen35".to_owned(),
+            request.messages,
+            request.max_new_tokens,
+            request.stop_sequences,
+            reverse_prompts.clone(),
+            request.thinking,
+            request.reasoning_budget,
+        )
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        self.backend.install_persistent_checkpoint(
+            Arc::clone(&self.store),
+            self.checkpoints.current.as_ref(),
+        )?;
+        self.backend.arm_persistent_checkpoint_capture()?;
+        let mut sink = PersistentChatSinkV1;
+        let completion = self.backend.generate(&api_request, cancellation, &mut sink);
+        let captured = self.backend.take_persistent_checkpoint_capture()?;
+        let completion = completion?;
+        let captured = captured.ok_or_else(|| {
+            BackendErrorV1::new("persistent chat generation completed without a checkpoint")
+        })?;
+        let finish_reason = persistent_chat_finish_reason(&completion, &reverse_prompts);
+        self.checkpoints.stage(captured.checkpoint)?;
+        let usage = TokenUsageV1::new(captured.prompt_tokens, completion.usage.completion_tokens)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        Ok(QwenPersistentChatTurnResultV1 {
+            text: captured.text,
+            reasoning: captured.reasoning,
+            finish_reason,
+            usage,
+        })
+    }
+
+    pub fn load_checkpoint(&mut self, name: &str) -> Result<Vec<u8>, BackendErrorV1> {
+        if self.checkpoints.pending.is_some() {
+            return Err(BackendErrorV1::new(
+                "cannot load a checkpoint while a turn is pending commit",
+            ));
+        }
+        let checkpoint = self
+            .store
+            .load_validated(name)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        self.backend
+            .install_persistent_checkpoint(Arc::clone(&self.store), Some(&checkpoint))?;
+        let conversation = checkpoint.payload.conversation.clone();
+        self.checkpoints.current = Some(checkpoint);
+        Ok(conversation)
+    }
+
+    /// Commits the most recent successful turn for ordinary interactive use
+    /// when no named checkpoint save was requested.  The caller supplies the
+    /// canonical transcript bytes so the checkpoint conversation and KV/token
+    /// history advance atomically.  A successful named save already promotes
+    /// the same pending checkpoint, so this is idempotent.
+    pub fn commit_turn(&mut self, conversation: &[u8]) -> Result<(), BackendErrorV1> {
+        if self.checkpoints.pending.is_none() {
+            return Ok(());
+        }
+        let candidate = self.checkpoints.candidate_with_conversation(conversation)?;
+        self.backend
+            .install_persistent_checkpoint(Arc::clone(&self.store), Some(&candidate))?;
+        self.checkpoints.promote(candidate);
+        Ok(())
+    }
+
+    /// Discards a failed/unwanted turn and reinstalls the last committed
+    /// checkpoint, leaving the persistent owner ready for another turn.
+    pub fn discard_pending_turn(&mut self) -> Result<(), BackendErrorV1> {
+        self.checkpoints.pending = None;
+        self.backend.install_persistent_checkpoint(
+            Arc::clone(&self.store),
+            self.checkpoints.current.as_ref(),
+        )
+    }
+
+    pub fn save_checkpoint(
+        &mut self,
+        name: &str,
+        conversation: &[u8],
+    ) -> Result<(), BackendErrorV1> {
+        let previous = self.checkpoints.current.clone();
+        let candidate = self.checkpoints.candidate_with_conversation(conversation)?;
+        self.backend
+            .install_persistent_checkpoint(Arc::clone(&self.store), Some(&candidate))?;
+        if let Err(error) = self.store.save(name, &candidate) {
+            let _ = self
+                .backend
+                .install_persistent_checkpoint(Arc::clone(&self.store), previous.as_ref());
+            return Err(BackendErrorV1::new(error.to_string()));
+        }
+        self.checkpoints.promote(candidate);
+        Ok(())
+    }
+
+    pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
+        self.backend.shutdown()
     }
 }
 
@@ -3705,7 +4281,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
 
         let service = GenerationServiceV1::new(&state.tokenizer, None, &state.stop_policy)
             .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
-        let mut generation = generation_config_for_request(request, &state.tokenizer)?;
+        let mut generation = generation_config_for_request(request, &state.tokenizer, None)?;
         let requires_logits = generation
             .sampler_chain()
             .map_or(generation.sampling().requires_logits(), |chain| {
@@ -4164,6 +4740,115 @@ struct QwenContextShiftRuntimeV1 {
     capacity: u64,
 }
 
+fn capture_qwen_persistent_checkpoint(
+    state: &QwenBackendStateV1,
+    graph: &QwenGraph,
+    executor: &QwenPrefixGenerationExecutorV1,
+    token_history: &[u32],
+    prompt_tokens: usize,
+    result: &GenerationResultV1,
+) -> Result<QwenCapturedChatCheckpointV1, GenerationServiceError> {
+    // The persistent owner was rebased to the renderer's completed-history
+    // token sequence.  Selected stop/reverse markers and hidden reasoning are
+    // therefore absent, while usage still counts every selected token.
+    let committed = executor.inner().committed_length();
+    if token_history.len() as u64 != committed {
+        return Err(GenerationServiceError::Execution(
+            "persistent checkpoint token history does not match committed KV length".to_owned(),
+        ));
+    }
+    let identity = qwen_checkpoint_identity(
+        graph,
+        &state.plan,
+        &state.tokenizer,
+        &state.renderer,
+        &state.target,
+        state.fp8_provider.as_deref(),
+        state.kv_cache_encoding,
+        token_history,
+    )
+    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+    let conversation = state
+        .checkpoint
+        .as_ref()
+        .and_then(|runtime| runtime.loaded.as_ref())
+        .map_or_else(Vec::new, |checkpoint| {
+            checkpoint.payload.conversation.clone()
+        });
+    let token_count =
+        u64::try_from(token_history.len()).map_err(|_| GenerationServiceError::CountOverflow)?;
+    let checkpoint = executor
+        .inner()
+        .checkpoint(
+            identity,
+            token_history,
+            &conversation,
+            &[],
+            &[],
+            &[],
+            token_count,
+            token_count,
+            1,
+        )
+        .map_err(|_| {
+            GenerationServiceError::Execution("persistent checkpoint capture failed".to_owned())
+        })?;
+    let reasoning = persistent_reasoning_text(state, result)?;
+    Ok(QwenCapturedChatCheckpointV1 {
+        checkpoint,
+        text: result.output_text().to_owned(),
+        reasoning,
+        prompt_tokens: u64::try_from(prompt_tokens)
+            .map_err(|_| GenerationServiceError::CountOverflow)?,
+    })
+}
+
+fn qwen_persistent_history_tokens(
+    state: &QwenBackendStateV1,
+    request: &ChatCompletionRequestV1,
+    result: &GenerationResultV1,
+) -> Result<Vec<u32>, GenerationServiceError> {
+    let mut messages = request
+        .messages()
+        .iter()
+        .map(|message| message.inner().clone())
+        .collect::<Vec<_>>();
+    messages.push(Qwen35ChatMessageV1::assistant(
+        result.output_text().to_owned(),
+        None,
+    ));
+    let rendered = state
+        .renderer
+        .render_history_prefix(&messages)
+        .map_err(|_| GenerationServiceError::Render)?;
+    state
+        .tokenizer
+        .encode_generation(&rendered)
+        .map_err(|_| GenerationServiceError::Tokenize)
+}
+
+fn persistent_reasoning_text(
+    state: &QwenBackendStateV1,
+    result: &GenerationResultV1,
+) -> Result<Option<String>, GenerationServiceError> {
+    let reasoning_ids = result.reasoning_token_ids();
+    let reasoning_ids = if state.reasoning_close_token_ids.is_empty() {
+        reasoning_ids
+    } else {
+        reasoning_ids
+            .strip_suffix(state.reasoning_close_token_ids.as_slice())
+            .unwrap_or(reasoning_ids)
+    };
+    if reasoning_ids.is_empty() {
+        return Ok(None);
+    }
+    let text = state
+        .tokenizer
+        .decode_generation(reasoning_ids)
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+    Ok((!text.is_empty()).then_some(text))
+}
+
 impl QwenPrefixGenerationExecutorV1 {
     fn fresh(inner: QwenExecutionRequest, draft_width: usize, publish_prefix: bool) -> Self {
         Self {
@@ -4276,6 +4961,40 @@ impl QwenPrefixGenerationExecutorV1 {
 
     fn inner(&self) -> &QwenExecutionRequest {
         &self.inner
+    }
+
+    fn rebase_persistent_owner(
+        &mut self,
+        resident: &QwenResidentModel,
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        token_ids: &[u32],
+    ) -> Result<(), GenerationServiceError> {
+        if self.matched_tokens.is_some()
+            || self.context_shift.is_some()
+            || self.speculative_block_pending
+        {
+            return Err(GenerationServiceError::Execution(
+                "persistent rebase requires a plain Qwen request owner".to_owned(),
+            ));
+        }
+        if token_ids.is_empty() {
+            return Err(GenerationServiceError::EmptyPromptTokens);
+        }
+        let mut owner = resident
+            .new_request_for_session(session, graph)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let token_ids = token_ids
+            .iter()
+            .map(|&token_id| {
+                i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        owner
+            .prefill(&token_ids)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.inner = owner;
+        Ok(())
     }
 
     fn context_shift_count(&self) -> u64 {
@@ -5024,6 +5743,15 @@ impl GenerationOutputSinkV1 for OutputSinkAdapterV1<'_> {
             .publish(delta)
             .map_err(|error| GenerationServiceError::Output(error.to_string()))
     }
+
+    fn publish_reasoning(&mut self, delta: &str) -> Result<(), GenerationServiceError> {
+        // The runtime's existing response splitter consumes the raw stream
+        // and routes this channel into reasoning_content.  Keep visible
+        // output on `publish` so generic frontend sinks remain fail-closed.
+        self.inner
+            .publish(delta)
+            .map_err(|error| GenerationServiceError::Output(error.to_string()))
+    }
 }
 
 fn require_clean_request_memory(
@@ -5045,6 +5773,7 @@ fn require_clean_request_memory(
 mod tests {
     use super::*;
     use crate::ChatMessageV1;
+    use sllm_core::CheckpointPayload;
 
     fn checkpoint_test_directory(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -5055,6 +5784,36 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    fn lifecycle_checkpoint(tokens: &[u32], conversation: &[u8]) -> SessionCheckpoint {
+        let identity = CheckpointIdentity::for_tokens(
+            format!("sha256:{}", "0".repeat(64)),
+            "artifact",
+            "adapter",
+            "renderer",
+            "tokenizer",
+            "gfx1201",
+            "plan",
+            tokens,
+            KvCacheEncoding::Fp16,
+            [0; 32],
+            [0; 32],
+        )
+        .unwrap();
+        let payload = CheckpointPayload {
+            token_history: tokens.to_vec(),
+            conversation: conversation.to_vec(),
+            ..CheckpointPayload::default()
+        };
+        SessionCheckpoint::new(
+            identity,
+            tokens.len() as u64,
+            tokens.len() as u64,
+            1,
+            payload,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -5084,6 +5843,93 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn persistent_checkpoint_lifecycle_supports_fresh_promote_and_pending_rollback() {
+        let mut state = PersistentCheckpointStateV1::default();
+        let first = lifecycle_checkpoint(&[1, 2], b"first");
+        state.stage(first.clone()).unwrap();
+        assert!(state.current.is_none());
+        let saved = state.candidate_with_conversation(b"saved").unwrap();
+        assert_eq!(saved.payload.conversation, b"saved");
+        assert!(state.current.is_none());
+        state.promote(saved.clone());
+        assert_eq!(state.current, Some(saved));
+        assert!(state.pending.is_none());
+
+        let second = lifecycle_checkpoint(&[1, 2, 3], b"second");
+        state.stage(second).unwrap();
+        let previous = state.current.clone();
+        state.pending = None;
+        assert_eq!(state.current, previous);
+    }
+
+    #[test]
+    fn persistent_checkpoint_candidate_failure_keeps_current_and_pending() {
+        let mut state = PersistentCheckpointStateV1::default();
+        let current = lifecycle_checkpoint(&[1], b"current");
+        let pending = lifecycle_checkpoint(&[1, 2], b"pending");
+        state.current = Some(current.clone());
+        state.stage(pending.clone()).unwrap();
+        let oversized = vec![0_u8; 16 * 1024 * 1024 + 1];
+        assert!(state.candidate_with_conversation(&oversized).is_err());
+        assert_eq!(state.current, Some(current));
+        assert_eq!(state.pending, Some(pending));
+        assert!(state.stage(lifecycle_checkpoint(&[3], b"blocked")).is_err());
+    }
+
+    #[test]
+    fn persistent_reverse_prompt_finish_reason_is_distinct_from_stop() {
+        let usage = TokenUsageV1::new(4, 3).unwrap();
+        let completion = BackendCompletionV1 {
+            finish_reason: FinishReasonV1::Stop,
+            usage,
+            matched_stop: Some("User:".to_owned()),
+        };
+        assert_eq!(
+            persistent_chat_finish_reason(&completion, &["User:".to_owned()]),
+            QwenPersistentChatFinishReasonV1::ReversePrompt
+        );
+        assert_eq!(
+            persistent_chat_finish_reason(&completion, &["Other:".to_owned()]),
+            QwenPersistentChatFinishReasonV1::Stop
+        );
+        assert_eq!(
+            QwenPersistentChatFinishReasonV1::ReversePrompt.as_str(),
+            "reverse_prompt"
+        );
+    }
+
+    #[test]
+    fn qwen_reasoning_policy_allows_only_reviewed_protocol_raw_text() {
+        let completion = crate::phase42_api::parse_completion_request(
+            br#"{"model":"qwen","prompt":"ordinary raw"}"#,
+        )
+        .unwrap();
+        let ordinary = ChatCompletionRequestV1::from_completion(
+            &completion,
+            GenerationRequestInputV1::RawText("ordinary raw".to_owned()),
+        )
+        .unwrap();
+        assert!(qwen_reasoning_policy_for_request(&ordinary, &[7]).is_err());
+
+        let reviewed = ChatCompletionRequestV1::from_protocol_text(
+            "qwen".to_owned(),
+            "reviewed protocol envelope".to_owned(),
+            None,
+            8,
+            0.0,
+            1.0,
+            Vec::new(),
+            false,
+            false,
+            true,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(qwen_reasoning_policy_for_request(&reviewed, &[7]).is_ok());
     }
 
     #[test]

@@ -1187,12 +1187,12 @@ fn validate_gemma_state_image(
             }
         }
     }
-    if let Some(output) = image.cached_terminal_output.as_ref()
-        && output.state().committed_length != image.committed_length
-    {
-        return Err(Gemma4ExecutionLayoutError::invalid(
-            "Gemma cached terminal output length differs from state image",
-        ));
+    if let Some(output) = image.cached_terminal_output.as_ref() {
+        if output.state().committed_length != image.committed_length {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma cached terminal output length differs from state image",
+            ));
+        }
     }
     if require_terminal_output && image.cached_terminal_output.is_none() {
         return Err(Gemma4ExecutionLayoutError::invalid(
@@ -3793,10 +3793,10 @@ impl Gemma4ProvisionedBuffers {
                     Gemma4GraphNodeKind::CausalAttention(contract)
                         if contract.sliding_window.is_none()
                 );
-                if let Some(states) = opaque_kv_states
-                    && node.descriptor.kind() == SemanticOpKind::CausalAttention
-                    && full_attention
-                {
+                if let (true, Some(states)) = (
+                    node.descriptor.kind() == SemanticOpKind::CausalAttention && full_attention,
+                    opaque_kv_states,
+                ) {
                     if planned.boundary_after().is_some()
                         || node.kv_appends.len() != 2
                         || node.inputs.is_empty()

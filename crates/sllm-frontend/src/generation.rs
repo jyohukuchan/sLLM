@@ -13,9 +13,11 @@ use sllm_core::{
     SpeculativeError, TokenTrie, verify_target_selected,
 };
 
+use crate::reasoning::{ReasoningControllerV1, ReasoningErrorV1, ReasoningPolicyV1};
 use crate::{
-    DecodeModeV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, TokenByteTableV1, TokenIdsV1, TokenizerFrontendV1,
+    DecodeModeV1, GenerationStopPolicyV1, GenericTemplateIdentityV1, GenericTemplateInputV1,
+    GenericTemplateProviderV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1,
+    TokenByteTableV1, TokenIdsV1, TokenizerFrontendV1, TokenizerUtilityErrorV1,
     validate_generation_stop_policy,
 };
 
@@ -71,6 +73,95 @@ pub enum GenerationInputV1 {
         options: Qwen35RenderOptionsV1,
         assistant_prefill: String,
     },
+    /// A capability-gated generic template input.  The provider renders this
+    /// before tokenization; raw and Gemma text variants remain rejected by the
+    /// generic utility contract.
+    GenericTemplate(Box<GenericGenerationInputV1>),
+}
+
+/// A generic template request whose bounded render is completed before model
+/// execution.  The rendered bytes and complete source/profile/kwargs/render
+/// identity are retained so cache and checkpoint adapters can bind exact
+/// prompt provenance without re-rendering on a GPU path.
+#[derive(Clone, Debug)]
+pub struct GenericGenerationInputV1 {
+    provider: GenericTemplateProviderV1,
+    input: GenericTemplateInputV1,
+    rendered: String,
+    identity: GenericTemplateIdentityV1,
+}
+
+impl GenericGenerationInputV1 {
+    pub fn new(
+        provider: GenericTemplateProviderV1,
+        input: GenericTemplateInputV1,
+    ) -> Result<Self, GenerationServiceError> {
+        let render: Result<_, TokenizerUtilityErrorV1> = match &input {
+            GenericTemplateInputV1::Json(context) => provider
+                .render_context(context)
+                .map_err(TokenizerUtilityErrorV1::GenericTemplate),
+            GenericTemplateInputV1::Messages(messages) => provider
+                .render_context(messages.context())
+                .map_err(TokenizerUtilityErrorV1::GenericTemplate),
+            GenericTemplateInputV1::RawText(_) => {
+                Err(TokenizerUtilityErrorV1::UnsupportedGenericTemplateInput {
+                    kind: crate::GenericTemplateInputKindV1::RawText,
+                })
+            }
+            GenericTemplateInputV1::GemmaRawText(_) => {
+                Err(TokenizerUtilityErrorV1::UnsupportedGenericTemplateInput {
+                    kind: crate::GenericTemplateInputKindV1::GemmaRawText,
+                })
+            }
+        };
+        let render = render.map_err(generic_template_error)?;
+        if render.rendered().is_empty() {
+            return Err(GenerationServiceError::GenericTemplate(
+                TokenizerUtilityErrorV1::InvalidTemplateResult,
+            ));
+        }
+        Ok(Self {
+            provider,
+            input,
+            rendered: render.rendered().to_owned(),
+            identity: render.identity().clone(),
+        })
+    }
+
+    pub fn provider(&self) -> &GenericTemplateProviderV1 {
+        &self.provider
+    }
+
+    pub fn input(&self) -> &GenericTemplateInputV1 {
+        &self.input
+    }
+
+    pub fn rendered(&self) -> &str {
+        &self.rendered
+    }
+
+    pub fn rendered_bytes(&self) -> &[u8] {
+        self.rendered.as_bytes()
+    }
+
+    pub fn identity(&self) -> &GenericTemplateIdentityV1 {
+        &self.identity
+    }
+}
+
+impl PartialEq for GenericGenerationInputV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.provider.digest() == other.provider.digest()
+            && self.input == other.input
+            && self.rendered == other.rendered
+            && self.identity == other.identity
+    }
+}
+
+impl Eq for GenericGenerationInputV1 {}
+
+fn generic_template_error(error: TokenizerUtilityErrorV1) -> GenerationServiceError {
+    GenerationServiceError::GenericTemplate(error)
 }
 
 /// Tokenized generation input with an explicit assistant continuation
@@ -81,6 +172,7 @@ pub enum GenerationInputV1 {
 pub struct PreparedGenerationInputV1 {
     assistant_prefill_start: usize,
     token_ids: Vec<u32>,
+    generic_template_identity: Option<GenericTemplateIdentityV1>,
 }
 
 impl PreparedGenerationInputV1 {
@@ -101,7 +193,13 @@ impl PreparedGenerationInputV1 {
         Ok(Self {
             assistant_prefill_start: base_token_ids.len(),
             token_ids,
+            generic_template_identity: None,
         })
+    }
+
+    fn with_generic_template_identity(mut self, identity: GenericTemplateIdentityV1) -> Self {
+        self.generic_template_identity = Some(identity);
+        self
     }
 
     pub fn base_token_ids(&self) -> &[u32] {
@@ -115,6 +213,10 @@ impl PreparedGenerationInputV1 {
     pub fn token_ids(&self) -> &[u32] {
         &self.token_ids
     }
+
+    pub fn generic_template_identity(&self) -> Option<&GenericTemplateIdentityV1> {
+        self.generic_template_identity.as_ref()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -126,6 +228,7 @@ pub struct GenerationConfigV1 {
     grammar: Option<CompiledGrammar>,
     ignore_stop_tokens: bool,
     device_selector_seed: Option<u64>,
+    reasoning: Option<ReasoningPolicyV1>,
 }
 
 impl PartialEq for GenerationConfigV1 {
@@ -136,6 +239,7 @@ impl PartialEq for GenerationConfigV1 {
             && self.sampler_chain == other.sampler_chain
             && self.ignore_stop_tokens == other.ignore_stop_tokens
             && self.device_selector_seed == other.device_selector_seed
+            && self.reasoning == other.reasoning
             // Compiled grammars intentionally do not expose structural
             // equality; state-count equality keeps this compatibility trait
             // useful for error assertions without comparing private NFAs.
@@ -179,6 +283,7 @@ impl GenerationConfigV1 {
             grammar: None,
             ignore_stop_tokens: false,
             device_selector_seed: None,
+            reasoning: None,
         })
     }
 
@@ -246,6 +351,21 @@ impl GenerationConfigV1 {
     pub const fn device_selector_seed(&self) -> Option<u64> {
         self.device_selector_seed
     }
+
+    /// Installs the additive reasoning policy.  Callers that do not install a
+    /// policy retain the exact legacy generation path.
+    pub fn with_reasoning(
+        mut self,
+        policy: ReasoningPolicyV1,
+    ) -> Result<Self, GenerationServiceError> {
+        policy.validate_max_new_tokens(self.max_new_tokens)?;
+        self.reasoning = Some(policy);
+        Ok(self)
+    }
+
+    pub fn reasoning(&self) -> Option<&ReasoningPolicyV1> {
+        self.reasoning.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,6 +388,7 @@ pub struct TokenUsageV1 {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
+    reasoning_tokens: u64,
 }
 
 impl TokenUsageV1 {
@@ -281,6 +402,10 @@ impl TokenUsageV1 {
 
     pub const fn total_tokens(self) -> u64 {
         self.total_tokens
+    }
+
+    pub const fn reasoning_tokens(self) -> u64 {
+        self.reasoning_tokens
     }
 }
 
@@ -297,6 +422,7 @@ pub struct GenerationResultV1 {
     usage: TokenUsageV1,
     decode_steps: u32,
     selections: Vec<SamplingSelectionV1>,
+    reasoning_token_ids: Vec<u32>,
 }
 
 impl GenerationResultV1 {
@@ -345,6 +471,17 @@ impl GenerationResultV1 {
     pub fn selections(&self) -> &[SamplingSelectionV1] {
         &self.selections
     }
+
+    /// Generated token history consumed while the reasoning controller was
+    /// active. Closing-marker tokens are included because they are real model
+    /// selections, while the visible token history excludes them.
+    pub fn reasoning_token_ids(&self) -> &[u32] {
+        &self.reasoning_token_ids
+    }
+
+    pub const fn reasoning_tokens(&self) -> u64 {
+        self.usage.reasoning_tokens()
+    }
 }
 
 /// One independently generated choice. The index is stable across buffered
@@ -392,6 +529,11 @@ impl GenerationChoicesResultV1 {
                 .checked_add(result.usage().completion_tokens())
                 .ok_or(GenerationServiceError::CountOverflow)
         })?;
+        let reasoning_tokens = results.iter().try_fold(0_u64, |total, result| {
+            total
+                .checked_add(result.usage().reasoning_tokens())
+                .ok_or(GenerationServiceError::CountOverflow)
+        })?;
         let total_tokens = prompt_tokens
             .checked_add(completion_tokens)
             .ok_or(GenerationServiceError::CountOverflow)?;
@@ -412,6 +554,7 @@ impl GenerationChoicesResultV1 {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                reasoning_tokens,
             },
         })
     }
@@ -1395,6 +1538,14 @@ pub trait GenerationTextFrontendV1 {
 /// apply their own bounded backpressure and return promptly after cancellation.
 pub trait GenerationOutputSinkV1 {
     fn publish(&mut self, delta: &str) -> Result<(), GenerationServiceError>;
+
+    /// Receives hidden reasoning deltas.  The default intentionally drops
+    /// them so callers that only consume visible answer text cannot
+    /// accidentally expose private reasoning content.  A protocol adapter
+    /// may opt in when it has a dedicated reasoning transport channel.
+    fn publish_reasoning(&mut self, _delta: &str) -> Result<(), GenerationServiceError> {
+        Ok(())
+    }
 }
 
 struct IgnoreGenerationOutput;
@@ -1637,7 +1788,9 @@ pub enum GenerationServiceError {
     InconsistentChoicePrompt,
     SamplingConfigurationMismatch,
     TokenBytesUnsupported,
+    GenericTemplate(TokenizerUtilityErrorV1),
     Speculative(String),
+    Reasoning(ReasoningErrorV1),
     Grammar(GrammarError),
     Sampling(SamplingError),
     Execution(String),
@@ -1698,6 +1851,8 @@ impl fmt::Display for GenerationServiceError {
             Self::SamplingConfigurationMismatch => formatter.write_str(
                 "sampler-chain parameters must match the generation sampling parameters",
             ),
+            Self::GenericTemplate(error) => error.fmt(formatter),
+            Self::Reasoning(error) => error.fmt(formatter),
             Self::TokenBytesUnsupported => {
                 formatter.write_str("generation frontend does not expose raw token bytes")
             }
@@ -1730,6 +1885,12 @@ impl From<GrammarError> for GenerationServiceError {
 impl From<SpeculativeError> for GenerationServiceError {
     fn from(error: SpeculativeError) -> Self {
         Self::Speculative(error.to_string())
+    }
+}
+
+impl From<ReasoningErrorV1> for GenerationServiceError {
+    fn from(error: ReasoningErrorV1) -> Self {
+        Self::Reasoning(error)
     }
 }
 
@@ -1796,19 +1957,20 @@ impl<'a> GenerationServiceV1<'a> {
         &self,
         input: &GenerationInputV1,
     ) -> Result<PreparedGenerationInputV1, GenerationServiceError> {
-        let (rendered, assistant_prefill) = match input {
-            GenerationInputV1::Prompt(prompt) => (prompt.clone(), None),
+        let (rendered, assistant_prefill, generic_identity) = match input {
+            GenerationInputV1::Prompt(prompt) => (prompt.clone(), None, None),
             GenerationInputV1::Messages { messages, options } => (
                 self.renderer
                     .ok_or(GenerationServiceError::MissingRenderer)?
                     .render(messages, *options)
                     .map_err(|_| GenerationServiceError::Render)?,
                 None,
+                None,
             ),
             GenerationInputV1::PromptWithAssistantPrefill {
                 prompt,
                 assistant_prefill,
-            } => (prompt.clone(), Some(assistant_prefill.as_str())),
+            } => (prompt.clone(), Some(assistant_prefill.as_str()), None),
             GenerationInputV1::MessagesWithAssistantPrefill {
                 messages,
                 options,
@@ -1819,6 +1981,12 @@ impl<'a> GenerationServiceV1<'a> {
                     .render_with_assistant_prefill(messages, *options, "")
                     .map_err(|_| GenerationServiceError::Render)?,
                 Some(assistant_prefill.as_str()),
+                None,
+            ),
+            GenerationInputV1::GenericTemplate(generic) => (
+                generic.rendered().to_owned(),
+                None,
+                Some(generic.identity().clone()),
             ),
         };
         let base_token_ids = self.tokenizer.encode_generation(&rendered)?;
@@ -1826,7 +1994,13 @@ impl<'a> GenerationServiceV1<'a> {
             .map(|prefill| self.tokenizer.encode_assistant_prefill(prefill))
             .transpose()?
             .unwrap_or_default();
-        PreparedGenerationInputV1::from_token_ids(base_token_ids, assistant_prefill_token_ids)
+        let prepared =
+            PreparedGenerationInputV1::from_token_ids(base_token_ids, assistant_prefill_token_ids)?;
+        if let Some(identity) = generic_identity {
+            Ok(prepared.with_generic_template_identity(identity))
+        } else {
+            Ok(prepared)
+        }
     }
 
     pub fn generate_prepared(
@@ -1959,13 +2133,23 @@ impl<'a> GenerationServiceV1<'a> {
         sink: &mut impl GenerationOutputSinkV1,
     ) -> Result<GenerationResultV1, GenerationServiceError> {
         check_cancelled(cancellation)?;
+        if let Some(policy) = config.reasoning() {
+            policy.validate_max_new_tokens(config.max_new_tokens())?;
+        }
+        let mut reasoning_controller = config.reasoning().cloned().map(ReasoningControllerV1::new);
         let sampler_config = config
             .sampler_chain
             .clone()
             .unwrap_or_else(|| SamplerChainConfigV1::legacy(config.sampling));
         let include_logits = sampler_config.requires_logits()
             || config.grammar.is_some()
-            || config.ignore_stop_tokens;
+            || config.ignore_stop_tokens
+            // A bounded reasoning policy may need to intersect a singleton
+            // forced-close mask with host logits.  Request logits up front so
+            // the controller never falls back to host-side token insertion.
+            || reasoning_controller
+                .as_ref()
+                .is_some_and(ReasoningControllerV1::is_enabled);
         let mut sampler = SamplerChainV1::new(sampler_config, input_token_ids)?;
         let (mut grammar_state, grammar_trie) = if let Some(grammar) = config.grammar.as_ref() {
             let table = self.tokenizer.token_byte_table()?;
@@ -1989,18 +2173,18 @@ impl<'a> GenerationServiceV1<'a> {
         // context.  Prime the grammar with its exact raw token bytes before
         // constructing the first candidate mask; invalid prefixes therefore
         // fail closed before any executor work is submitted.
-        if let Some(state) = grammar_state.as_mut()
-            && !assistant_prefill_token_ids.is_empty()
-        {
-            let table = self.tokenizer.token_byte_table()?;
-            for &token in assistant_prefill_token_ids {
-                let entry = table
-                    .entry(token)
-                    .ok_or(GenerationServiceError::TokenIdOverflow)?;
-                let bytes = entry
-                    .bytes()
-                    .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
-                state.accept(bytes)?;
+        if !assistant_prefill_token_ids.is_empty() {
+            if let Some(state) = grammar_state.as_mut() {
+                let table = self.tokenizer.token_byte_table()?;
+                for &token in assistant_prefill_token_ids {
+                    let entry = table
+                        .entry(token)
+                        .ok_or(GenerationServiceError::TokenIdOverflow)?;
+                    let bytes = entry
+                        .bytes()
+                        .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
+                    state.accept(bytes)?;
+                }
             }
         }
         let use_device_selector = config.device_selector_seed.is_some()
@@ -2012,13 +2196,19 @@ impl<'a> GenerationServiceV1<'a> {
             None
         };
         let mut device_mask = if use_device_selector {
-            build_valid_token_mask(
+            let base_mask = build_valid_token_mask(
                 grammar_state.as_ref(),
                 grammar_trie.as_ref(),
                 config.ignore_stop_tokens,
                 &self.stop_policy.stop_token_ids,
                 selector_vocab_size,
-            )?
+            )?;
+            reasoning_controller
+                .as_ref()
+                .map(|controller| controller.apply_mask(base_mask.as_deref(), selector_vocab_size))
+                .transpose()?
+                .flatten()
+                .or(base_mask)
         } else {
             None
         };
@@ -2039,6 +2229,8 @@ impl<'a> GenerationServiceV1<'a> {
         let mut generated = Vec::new();
         let mut selections = Vec::new();
         let mut normal_tokens = Vec::<u32>::new();
+        let mut visible_token_ids = Vec::<u32>::new();
+        let mut reasoning_token_ids = Vec::<u32>::new();
         let mut decoded_snapshots = Vec::<String>::new();
         let mut decode_inputs = Vec::new();
         let mut decode_context_tokens = assistant_prefill_token_ids.to_vec();
@@ -2063,7 +2255,7 @@ impl<'a> GenerationServiceV1<'a> {
 
         for index in 0..config.max_new_tokens {
             check_cancelled(cancellation)?;
-            let valid_mask = if use_device_selector {
+            let base_mask = if use_device_selector {
                 device_mask.take()
             } else {
                 build_valid_token_mask(
@@ -2074,6 +2266,21 @@ impl<'a> GenerationServiceV1<'a> {
                     step.last_logits.as_ref().map(Vec::len),
                 )?
             };
+            let valid_mask = reasoning_controller
+                .as_ref()
+                .map(|controller| {
+                    controller.apply_mask(
+                        base_mask.as_deref(),
+                        if use_device_selector {
+                            selector_vocab_size
+                        } else {
+                            step.last_logits.as_ref().map(Vec::len)
+                        },
+                    )
+                })
+                .transpose()?
+                .flatten()
+                .or(base_mask);
             let selection = if use_device_selector {
                 step.device_selection
                     .clone()
@@ -2087,18 +2294,53 @@ impl<'a> GenerationServiceV1<'a> {
                 )?
             };
             let token = selection.token_id;
-            let is_stop_token = self.stop_policy.stop_token_ids.contains(&token);
-            if let Some(state) = grammar_state.as_mut()
-                && !is_stop_token
+            if valid_mask
+                .as_ref()
+                .is_some_and(|mask| !mask.get(token as usize).copied().unwrap_or(false))
             {
-                let table = self.tokenizer.token_byte_table()?;
-                let entry = table
-                    .entry(token)
-                    .ok_or(GenerationServiceError::TokenIdOverflow)?;
-                let bytes = entry
-                    .bytes()
-                    .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
-                state.accept(bytes)?;
+                return Err(GenerationServiceError::Reasoning(
+                    ReasoningErrorV1::ForcedTokenMismatch,
+                ));
+            }
+            let is_stop_token = self.stop_policy.stop_token_ids.contains(&token);
+            let reasoning_observation = reasoning_controller
+                .as_mut()
+                .filter(|_| !is_stop_token)
+                .map(|controller| controller.observe(token))
+                .transpose()?;
+            let token_visible = reasoning_observation
+                .as_ref()
+                .is_none_or(|observation| observation.visible())
+                && !is_stop_token;
+            if !is_stop_token {
+                if let Some(observation) = reasoning_observation {
+                    if !observation.visible() {
+                        reasoning_token_ids.push(token);
+                    } else {
+                        visible_token_ids.push(token);
+                    }
+                    if observation.entered_answer() {
+                        // Any stop prefix held while reasoning is hidden must
+                        // not join the visible answer across the closing marker.
+                        matcher = IncrementalStopMatcher::new(config.stop_strings.clone());
+                        generated_decoded.clear();
+                        decoded_snapshots.clear();
+                    }
+                } else {
+                    visible_token_ids.push(token);
+                }
+            }
+            if !is_stop_token {
+                if let Some(state) = grammar_state.as_mut() {
+                    let table = self.tokenizer.token_byte_table()?;
+                    let entry = table
+                        .entry(token)
+                        .ok_or(GenerationServiceError::TokenIdOverflow)?;
+                    let bytes = entry
+                        .bytes()
+                        .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
+                    state.accept(bytes)?;
+                }
             }
             sampler.accept(token)?;
             generated.push(token);
@@ -2107,7 +2349,7 @@ impl<'a> GenerationServiceV1<'a> {
             if self.stop_policy.stop_token_ids.contains(&token) {
                 finish_reason = Some(FinishReasonV1::Stop);
                 stop_token_id = Some(token);
-                if !normal_tokens.is_empty() && !unstable_utf8_tail.is_empty() {
+                if token_visible && !normal_tokens.is_empty() && !unstable_utf8_tail.is_empty() {
                     let tail = matcher.push(&unstable_utf8_tail);
                     publish_visible(&mut output_text, &tail.visible, sink)?;
                 }
@@ -2127,13 +2369,31 @@ impl<'a> GenerationServiceV1<'a> {
             let delta = stable_candidate
                 .strip_prefix(&decoded)
                 .ok_or(GenerationServiceError::NonPrefixDecode)?;
-            let match_result = matcher.push(delta);
-            publish_visible(&mut output_text, &match_result.visible, sink)?;
-            generated_decoded.push_str(delta);
+            let match_result = if token_visible {
+                matcher.push(delta)
+            } else {
+                StopMatch {
+                    visible: String::new(),
+                    matched: None,
+                }
+            };
+            if token_visible {
+                publish_visible(&mut output_text, &match_result.visible, sink)?;
+            } else if !delta.is_empty() {
+                // Reasoning content is excluded from `output_text` and
+                // visible token accounting.  Only a protocol adapter that
+                // explicitly implements the reasoning channel receives it.
+                sink.publish_reasoning(delta)?;
+            }
+            if token_visible {
+                generated_decoded.push_str(delta);
+            }
             decoded = stable_candidate.to_owned();
             unstable_utf8_tail = candidate[stable_end..].to_owned();
             normal_tokens.push(token);
-            decoded_snapshots.push(format!("{generated_decoded}{unstable_utf8_tail}"));
+            if token_visible {
+                decoded_snapshots.push(format!("{generated_decoded}{unstable_utf8_tail}"));
+            }
             if let Some(stop) = match_result.matched {
                 finish_reason = Some(FinishReasonV1::Stop);
                 matched_stop = Some(stop);
@@ -2141,7 +2401,10 @@ impl<'a> GenerationServiceV1<'a> {
             }
 
             if index + 1 == config.max_new_tokens {
-                if !unstable_utf8_tail.is_empty() {
+                let reasoning_output_open = reasoning_controller
+                    .as_ref()
+                    .is_some_and(ReasoningControllerV1::is_reasoning);
+                if !reasoning_output_open && !unstable_utf8_tail.is_empty() {
                     let tail = matcher.push(&unstable_utf8_tail);
                     publish_visible(&mut output_text, &tail.visible, sink)?;
                     if let Some(stop) = tail.matched {
@@ -2158,13 +2421,21 @@ impl<'a> GenerationServiceV1<'a> {
             check_cancelled(cancellation)?;
             step = if use_device_selector {
                 executor.before_decode(token)?;
-                device_mask = build_valid_token_mask(
+                let base_mask = build_valid_token_mask(
                     grammar_state.as_ref(),
                     grammar_trie.as_ref(),
                     config.ignore_stop_tokens,
                     &self.stop_policy.stop_token_ids,
                     selector_vocab_size,
                 )?;
+                device_mask = reasoning_controller
+                    .as_ref()
+                    .map(|controller| {
+                        controller.apply_mask(base_mask.as_deref(), selector_vocab_size)
+                    })
+                    .transpose()?
+                    .flatten()
+                    .or(base_mask);
                 let selector = sampler.prepare_device_selector(
                     selector_vocab_size.expect("device selector vocabulary was resolved"),
                     device_mask.as_deref(),
@@ -2194,7 +2465,11 @@ impl<'a> GenerationServiceV1<'a> {
             .map(|(index, _)| index + 1)
             .max()
             .unwrap_or(0);
-        let visible_token_ids = normal_tokens[..visible_count].to_vec();
+        let visible_token_ids = if reasoning_controller.is_some() {
+            visible_token_ids[..visible_count.min(visible_token_ids.len())].to_vec()
+        } else {
+            normal_tokens[..visible_count].to_vec()
+        };
         let prompt_tokens = u64::try_from(input_token_ids.len())
             .map_err(|_| GenerationServiceError::CountOverflow)?;
         let completion_tokens =
@@ -2202,6 +2477,10 @@ impl<'a> GenerationServiceV1<'a> {
         let total_tokens = prompt_tokens
             .checked_add(completion_tokens)
             .ok_or(GenerationServiceError::CountOverflow)?;
+        let reasoning_tokens = reasoning_controller
+            .as_ref()
+            .map(ReasoningControllerV1::reasoning_tokens)
+            .unwrap_or(0);
         Ok(GenerationResultV1 {
             input_token_ids: input_token_ids.to_vec(),
             generated_token_ids: generated,
@@ -2215,9 +2494,11 @@ impl<'a> GenerationServiceV1<'a> {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens,
+                reasoning_tokens: u64::from(reasoning_tokens),
             },
             decode_steps,
             selections,
+            reasoning_token_ids,
         })
     }
 }
@@ -2243,10 +2524,10 @@ fn build_valid_token_mask(
         // They become eligible only after a complete UTF-8 accept state.
         if state.is_finished() && state.is_utf8_boundary() {
             for &stop in stop_token_ids {
-                if let Ok(index) = usize::try_from(stop)
-                    && let Some(value) = mask.get_mut(index)
-                {
-                    *value = true;
+                if let Ok(index) = usize::try_from(stop) {
+                    if let Some(value) = mask.get_mut(index) {
+                        *value = true;
+                    }
                 }
             }
         }
@@ -2258,12 +2539,14 @@ fn build_valid_token_mask(
         None
     };
 
-    if ignore_stop_tokens && let Some(mask) = mask.as_mut() {
-        for &stop in stop_token_ids {
-            if let Ok(index) = usize::try_from(stop)
-                && let Some(value) = mask.get_mut(index)
-            {
-                *value = false;
+    if ignore_stop_tokens {
+        if let Some(mask) = mask.as_mut() {
+            for &stop in stop_token_ids {
+                if let Ok(index) = usize::try_from(stop) {
+                    if let Some(value) = mask.get_mut(index) {
+                        *value = false;
+                    }
+                }
             }
         }
     }
@@ -2896,6 +3179,7 @@ mod tests {
         let mut executor = TinyExecutor::argmax([5]);
         let mut sink = RecordingSink {
             deltas: Vec::new(),
+            reasoning_deltas: Vec::new(),
             fail_after: None,
         };
         let result = service
@@ -2975,6 +3259,7 @@ mod tests {
         };
         let mut sink = RecordingSink {
             deltas: Vec::new(),
+            reasoning_deltas: Vec::new(),
             fail_after: None,
         };
         let result = service
@@ -3488,6 +3773,7 @@ mod tests {
 
     struct RecordingSink {
         deltas: Vec<String>,
+        reasoning_deltas: Vec<String>,
         fail_after: Option<usize>,
     }
 
@@ -3501,6 +3787,11 @@ mod tests {
             self.deltas.push(delta.to_owned());
             Ok(())
         }
+
+        fn publish_reasoning(&mut self, delta: &str) -> Result<(), GenerationServiceError> {
+            self.reasoning_deltas.push(delta.to_owned());
+            Ok(())
+        }
     }
 
     #[test]
@@ -3512,6 +3803,7 @@ mod tests {
         let mut executor = TinyExecutor::argmax([5, 6, 7]);
         let mut sink = RecordingSink {
             deltas: Vec::new(),
+            reasoning_deltas: Vec::new(),
             fail_after: None,
         };
         let result = service
@@ -3530,6 +3822,7 @@ mod tests {
         let mut executor = TinyExecutor::argmax([5, 6, 7]);
         let mut sink = RecordingSink {
             deltas: Vec::new(),
+            reasoning_deltas: Vec::new(),
             fail_after: Some(1),
         };
         assert_eq!(
@@ -3547,6 +3840,56 @@ mod tests {
         );
         assert_eq!(sink.deltas, ["A"]);
         assert_eq!(executor.cancel_count, 1);
+    }
+
+    #[test]
+    fn reasoning_stop_boundary_trims_visible_token_history_after_marker() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let reasoning = ReasoningPolicyV1::enabled(Some(1), [13, 14]).unwrap();
+        let config =
+            GenerationConfigV1::new(4, SamplingParametersV1::greedy(), vec!["bc".to_owned()])
+                .unwrap()
+                .with_reasoning(reasoning)
+                .unwrap();
+        let logits = |token: usize| {
+            let mut values = vec![0.0_f32; 32];
+            values[token] = 10.0;
+            values
+        };
+        let mut executor = TinyExecutor {
+            steps: VecDeque::from([
+                GenerationStepV1::new(5, Some(logits(5))),
+                GenerationStepV1::new(13, Some(logits(13))),
+                GenerationStepV1::new(14, Some(logits(14))),
+                GenerationStepV1::new(10, Some(logits(10))),
+            ]),
+            ..TinyExecutor::default()
+        };
+        let mut sink = RecordingSink {
+            deltas: Vec::new(),
+            reasoning_deltas: Vec::new(),
+            fail_after: None,
+        };
+        let result = service
+            .generate_tokens_with_sink(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(result.generated_token_ids(), [5, 13, 14, 10]);
+        assert_eq!(result.reasoning_token_ids(), [5, 13, 14]);
+        assert_eq!(result.reasoning_tokens(), 1);
+        assert_eq!(result.output_text(), "a");
+        assert!(result.visible_token_ids().is_empty());
+        assert_eq!(result.matched_stop(), Some("bc"));
+        assert_eq!(sink.deltas, ["a"]);
+        assert_eq!(sink.reasoning_deltas, ["A", "ab", "c"]);
     }
 
     #[test]

@@ -1378,10 +1378,10 @@ impl SamplerChainV1 {
         valid_mask: Option<&[bool]>,
         random: &mut impl SamplingRandomSource,
     ) -> Result<SamplingSelectionV1, SamplingError> {
-        if let (Some(values), Some(mask)) = (logits, valid_mask)
-            && values.len() != mask.len()
-        {
-            return Err(SamplingError::InvalidMaskLength);
+        if let (Some(values), Some(mask)) = (logits, valid_mask) {
+            if values.len() != mask.len() {
+                return Err(SamplingError::InvalidMaskLength);
+            }
         }
         if !self.config.has_extensions() && valid_mask.is_none() {
             let legacy = ProfileSamplerV1 {

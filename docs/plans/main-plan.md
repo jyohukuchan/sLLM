@@ -1010,7 +1010,7 @@ candidateを再確認した。
 | 完了 | Phase 41 | prefix/KV・session state・speculation | identity-safe prefix fork/COW、stateless prompt checkpoint、context shift、assistant prefill、model-neutral draftをQwen/Gemmaへ統合し、両RDNA実機state matrixをPASSした |
 | 完了 | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、capability-gated infillを共通frontend/runtime/HTTP/CLIへ実装。V620/R9700のQwen/Gemma embeddingをPASSし、MI300X実機のみdeferred |
 | 完了 | Phase 43 | Responses・Anthropic・function/tool protocol | 別仕様pin、共通internal item、strict API/SSE/tool call/resultを実装し、tool実行をPhase 47境界へ分離した |
-| planned | Phase 44 | template・reasoning・interactive UX | sandboxed generic template、reasoning control、interactive/reverse prompt/prompt fileを実装する |
+| 完了 | Phase 44 | template・reasoning・interactive UX | MiniJinja 2.24.0 sandboxed generic template、reasoning controller、interactive/reverse prompt/prompt file、Phase 41 opaque checkpoint integrationをhost/frontend/CLIへ実装。MI300X実機はdeferred |
 | planned | Phase 45 | adapter・dynamic model lifecycle | LoRA/control vector、multi-model registry、router load/unload/cacheをmodel identityへ結合する |
 | planned | Phase 46 | conversion・benchmark・quality tool | supported dtypeのconverter/quantize/imatrix、split/merge、LoRA変換、bench/eval/debugを整備する |
 | approval-required | Phase 47 | 組込みtool・MCP実行 | tool protocol後に別worker/sandboxで実装する。trust modelの明示承認前は開始しない |
@@ -1207,6 +1207,30 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
   [history](../history/2026/08/21-31/phase43-responses-anthropic-tool-protocol.md)、
   [machine profile](../../tests/fixtures/phase43_protocol_profiles_v1.json)を正とする。
 
+### Phase 44: template・reasoning・interactive UX（完了）
+
+- 2026-08-22にhost/frontend/CLIのP44-A0〜C2を完了した。MiniJinja `2.24.0` exact pinのgeneric providerはUTF-8/digest-bound source、
+  JSON-only context、strict undefined、closed builtin surface、include/import/extends拒否、64 KiB source、16 MiB output、1,024 message、
+  64-key/1 MiB/深さ32 kwargs、recursion 32、fuel 1,000,000を持つ。Qwen reviewed rendererのdefault byte/token identityとGemma raw-text pathは
+  暗黙置換しない。
+- typed generic adapterはmessages、special tokens、generation prompt、thinking、reasoning effort、kwargsを共通frontend serviceへlowerし、
+  `apply-template`/`input-tokens` CLIへ明示opt-in接続した。regular non-symlink template fileを`O_CLOEXEC|O_NOFOLLOW`で一度だけbounded readし、
+  size race、UTF-8/NUL、lowercase SHA-256、duplicate/non-finite/non-object kwargsをGPU/backend初期化前に拒否する。identity reportはtemplate、
+  kwargs、rendered digest/size/profileだけのdata-only payloadであり、path/promptを含めない。raw/Gemma generic inputと未対応backendはfail closedである。
+- reasoning mode/budgetは既存generation selector、grammar、stop、sampling、cancelと同じcontrollerへ統合した。budget 1〜4,096、early close、
+  multi-token forced close、max-output不足、grammar mask conflict、forced token mismatchをadmission前に扱い、usage/historyへ通常tokenとして記録する。
+  Chat/Responses/CLIは同じloweringを共有し、Anthropic thinkingとGemma/raw-textはunsupportedのまま維持した。
+- `chat` CLIはprompt/message/prompt-file/interactive stdinのclosed source matrix、regular bounded prompt file、1,024 message/16 MiB typed transcript、
+  reverse prompt（最大4件/1 MiB）、JSONL event、成功turnだけのtransactional publishを追加した。Persistent Qwen chatはhidden reasoning、selected stop、
+  matched reverse markerを除外したreviewed canonical history prefixをfresh resident ownerへre-prefillしてopaque checkpoint captureし、next-turn/fresh-resume
+  exact prefixを維持する。load時のexact model/renderer/tokenizer/target/plan/KV identity、conversation+KV pending/current commit rollback、
+  CLI preflight-before-model-open、SIGINT in-flight cancellation laneを固定した。CLIはKV/state planeを解釈しない。既存one-shot `generate`
+  report/semantics、Phase 41 checkpoint identityは維持する。
+- focused Phase 44 frontend/CLI testsをPASSした。MI300X VMは削除済みのためreal correctness/performanceはdeferredであり、feature-pinned gfx942
+  compile/host evidenceをruntime PASSへ昇格しない。WebUIはPhase 48、mid-generation/wire session resumeは後続、組込みtool/MCP実行はPhase 47の
+  approval-required境界に残る。詳細は[Phase 44 archive plan](archive/2026/08/21-31/phase44-template-reasoning-interactive-ux.md)と
+  [Phase 44 history](../history/2026/08/21-31/phase44-template-reasoning-interactive-ux.md)を正とする。
+
 ### llama.cppとの差分（機能・運用の未割当棚卸し）
 
 - 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
@@ -1226,7 +1250,7 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 | sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | Phase 40でversioned ordered sampler chainと追加samplerを実装済み。GPU TokenSelectは対応subsetだけを明示routeし、高度な全候補filterはhost pathへ残す。既存performance backlogのGPU sampling移行とは分ける |
 | prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | Phase 41でidentity-safe prefix/KV reuse、stateless prompt checkpoint、keep-prefix/recent context shift、assistant prefill、MTP/external/ngram共通contractを実装した。Phase 42でverified capability限定FIM/infill modeを追加した。mid-generation/wire session resumeとexternal executor provisioningは残る |
 | adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
-| template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
+| template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | Phase 44でMiniJinja 2.24.0 sandboxed generic template、bounded kwargs/digest identity、reasoning controller、`chat`のtyped transcript/reverse prompt/prompt fileを実装。Phase 41 opaque checkpointへ接続し、既存reviewed Qwen/Gemma semanticsとone-shot `generate`を維持。WebUIはPhase 48、mid-generation/wire session resumeは後続 |
 | service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | Phase 39でhealth/readiness、bounded metrics/runtime memory、redacted props/slots・admin cancel、opt-in resumable SSE、exact CORS、Rustls、複数user/admin keyとrotationを実装済み。server UIだけをPhase 48に残す |
 | 周辺tool・品質評価 | general HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task eval、debug dump | fixed converter、model lock、bounded benchmark/evidenceは実装済み。汎用変換・評価toolは未割当。ただし未対応量子化形式を自動的に製品scopeへ追加しない |
 

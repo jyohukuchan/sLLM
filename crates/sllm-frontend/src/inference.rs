@@ -7,12 +7,15 @@
 //! use exactly the same special-token, byte-piece, and template semantics.
 
 use core::fmt;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    ChatRenderError, DecodeModeV1, QWEN35_CHAT_RENDERER_VERSION, QWEN35_CHAT_TEMPLATE_SHA256,
-    QWEN35_CHAT_TEMPLATE_SIZE_BYTES, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, TokenIdsV1, TokenizerError, TokenizerFrontendV1,
+    ChatRenderError, DecodeModeV1, GENERIC_TEMPLATE_PROFILE_VERSION_V1, GenericTemplateContextV1,
+    GenericTemplateErrorV1, GenericTemplateIdentityV1, GenericTemplateProviderV1,
+    QWEN35_CHAT_RENDERER_VERSION, QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
+    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, TokenIdsV1, TokenizerError,
+    TokenizerFrontendV1,
 };
 
 /// Version of the transport-independent tokenizer utility contract.
@@ -332,6 +335,7 @@ pub struct ApplyTemplateResultV1 {
     rendered: String,
     token_ids: TokenIdsV1,
     identity: TemplateIdentityV1,
+    generic_identity: Option<GenericTemplateIdentityV1>,
 }
 
 impl ApplyTemplateResultV1 {
@@ -341,6 +345,22 @@ impl ApplyTemplateResultV1 {
             rendered,
             token_ids,
             identity,
+            generic_identity: None,
+        }
+    }
+
+    fn new_generic(
+        rendered: String,
+        token_ids: TokenIdsV1,
+        identity: TemplateIdentityV1,
+        generic_identity: GenericTemplateIdentityV1,
+    ) -> Self {
+        Self {
+            version: TOKENIZER_UTILITY_VERSION_V1,
+            rendered,
+            token_ids,
+            identity,
+            generic_identity: Some(generic_identity),
         }
     }
 
@@ -388,7 +408,133 @@ impl ApplyTemplateResultV1 {
     pub fn identity(&self) -> &TemplateIdentityV1 {
         &self.identity
     }
+
+    /// Returns the generic provider's full source/kwargs/render identity when
+    /// this result was produced through the explicit generic adapter.
+    pub fn generic_identity(&self) -> Option<&GenericTemplateIdentityV1> {
+        self.generic_identity.as_ref()
+    }
+
+    pub fn kwargs_digest(&self) -> Option<&str> {
+        self.generic_identity
+            .as_ref()
+            .map(GenericTemplateIdentityV1::kwargs_digest)
+    }
 }
+
+/// Typed generic-template message context.  The provider receives only this
+/// JSON-like context; raw prompts are intentionally a different rejected
+/// input variant below.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GenericTemplateMessagesInputV1 {
+    context: GenericTemplateContextV1,
+}
+
+impl GenericTemplateMessagesInputV1 {
+    pub fn new(messages: Vec<Value>) -> Result<Self, TokenizerUtilityErrorV1> {
+        Self::from_parts(messages, Map::new(), Map::new(), true, false, None)
+    }
+
+    pub fn from_parts(
+        messages: Vec<Value>,
+        kwargs: Map<String, Value>,
+        special_tokens: Map<String, Value>,
+        add_generation_prompt: bool,
+        enable_thinking: bool,
+        reasoning_effort: Option<String>,
+    ) -> Result<Self, TokenizerUtilityErrorV1> {
+        validate_generic_messages(&messages)?;
+        validate_special_tokens(&special_tokens)?;
+        validate_reasoning_effort(reasoning_effort.as_deref())?;
+        let mut object = Map::new();
+        object.insert("messages".to_owned(), Value::Array(messages));
+        let kwargs = Value::Object(kwargs);
+        object.insert("custom_kwargs".to_owned(), kwargs.clone());
+        object.insert("kwargs".to_owned(), kwargs);
+        object.insert("special_tokens".to_owned(), Value::Object(special_tokens));
+        object.insert(
+            "add_generation_prompt".to_owned(),
+            Value::Bool(add_generation_prompt),
+        );
+        object.insert("enable_thinking".to_owned(), Value::Bool(enable_thinking));
+        if let Some(reasoning_effort) = reasoning_effort {
+            object.insert(
+                "reasoning_effort".to_owned(),
+                Value::String(reasoning_effort),
+            );
+        }
+        let context = GenericTemplateContextV1::new(Value::Object(object))
+            .map_err(TokenizerUtilityErrorV1::GenericTemplate)?;
+        Ok(Self { context })
+    }
+
+    pub fn from_context(
+        context: GenericTemplateContextV1,
+    ) -> Result<Self, TokenizerUtilityErrorV1> {
+        let object =
+            context
+                .value()
+                .as_object()
+                .ok_or(TokenizerUtilityErrorV1::GenericTemplate(
+                    GenericTemplateErrorV1::ContextNotObject,
+                ))?;
+        let messages = object.get("messages").and_then(Value::as_array).ok_or(
+            TokenizerUtilityErrorV1::GenericTemplate(GenericTemplateErrorV1::MessagesNotArray),
+        )?;
+        validate_generic_messages(messages)?;
+        if let Some(special_tokens) = object.get("special_tokens") {
+            let special_tokens =
+                special_tokens
+                    .as_object()
+                    .ok_or(TokenizerUtilityErrorV1::GenericTemplate(
+                        GenericTemplateErrorV1::InvalidContext,
+                    ))?;
+            validate_special_tokens(special_tokens)?;
+        }
+        if let Some(reasoning_effort) = object.get("reasoning_effort").and_then(Value::as_str) {
+            validate_reasoning_effort(Some(reasoning_effort))?;
+        }
+        Ok(Self { context })
+    }
+
+    pub fn context(&self) -> &GenericTemplateContextV1 {
+        &self.context
+    }
+}
+
+/// Explicit input mode for generic template application.  `RawText` and
+/// `GemmaRawText` are represented so adapters can reject them before calling
+/// the tokenizer, rather than silently changing prompt semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GenericTemplateInputV1 {
+    Json(GenericTemplateContextV1),
+    Messages(GenericTemplateMessagesInputV1),
+    RawText(String),
+    GemmaRawText(String),
+}
+
+impl GenericTemplateInputV1 {
+    pub fn json(value: Value) -> Result<Self, TokenizerUtilityErrorV1> {
+        let context = GenericTemplateContextV1::new(value)
+            .map_err(TokenizerUtilityErrorV1::GenericTemplate)?;
+        Ok(Self::Json(context))
+    }
+
+    pub fn messages(input: GenericTemplateMessagesInputV1) -> Self {
+        Self::Messages(input)
+    }
+
+    pub fn raw_text(text: impl Into<String>) -> Self {
+        Self::RawText(text.into())
+    }
+
+    pub fn gemma_raw_text(text: impl Into<String>) -> Self {
+        Self::GemmaRawText(text.into())
+    }
+}
+
+pub type GenericTemplateApplyInputV1 = GenericTemplateInputV1;
+pub type GenericTemplateMessagesV1 = GenericTemplateMessagesInputV1;
 
 /// Input accepted by the shared input-token-count operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -411,6 +557,14 @@ pub enum TokenizerUtilityErrorV1 {
     TokenPieceUnavailable { id: u32 },
     InvalidTemplateIdentity,
     InvalidTemplateResult,
+    GenericTemplate(GenericTemplateErrorV1),
+    UnsupportedGenericTemplateInput { kind: GenericTemplateInputKindV1 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GenericTemplateInputKindV1 {
+    RawText,
+    GemmaRawText,
 }
 
 impl fmt::Display for TokenizerUtilityErrorV1 {
@@ -435,6 +589,15 @@ impl fmt::Display for TokenizerUtilityErrorV1 {
                 formatter.write_str("verified template identity is malformed")
             }
             Self::InvalidTemplateResult => formatter.write_str("verified template result is empty"),
+            Self::GenericTemplate(error) => write!(formatter, "generic template failed: {error}"),
+            Self::UnsupportedGenericTemplateInput { kind } => match kind {
+                GenericTemplateInputKindV1::RawText => {
+                    formatter.write_str("generic template does not accept raw-text input")
+                }
+                GenericTemplateInputKindV1::GemmaRawText => {
+                    formatter.write_str("generic template is unsupported for Gemma raw-text input")
+                }
+            },
         }
     }
 }
@@ -577,6 +740,69 @@ impl<'a> TokenizerUtilityServiceV1<'a> {
         self.input_token_count(InputTokenCountInputV1::Messages { messages, options })
     }
 
+    /// Applies an explicitly opted-in generic provider.  The reviewed Qwen
+    /// path above remains the default and retains its byte/token identity.
+    pub fn apply_generic_template(
+        &self,
+        provider: &GenericTemplateProviderV1,
+        input: GenericTemplateInputV1,
+    ) -> Result<ApplyTemplateResultV1, TokenizerUtilityErrorV1> {
+        let context = match input {
+            GenericTemplateInputV1::Json(context) => context,
+            GenericTemplateInputV1::Messages(messages) => messages.context.clone(),
+            GenericTemplateInputV1::RawText(_) => {
+                return Err(TokenizerUtilityErrorV1::UnsupportedGenericTemplateInput {
+                    kind: GenericTemplateInputKindV1::RawText,
+                });
+            }
+            GenericTemplateInputV1::GemmaRawText(_) => {
+                return Err(TokenizerUtilityErrorV1::UnsupportedGenericTemplateInput {
+                    kind: GenericTemplateInputKindV1::GemmaRawText,
+                });
+            }
+        };
+        let rendered = provider
+            .render_context(&context)
+            .map_err(TokenizerUtilityErrorV1::GenericTemplate)?;
+        ensure_input_size(rendered.rendered())?;
+        let token_ids = self
+            .tokenizer
+            .encode(rendered.rendered())
+            .map_err(TokenizerUtilityErrorV1::Tokenize)?;
+        if rendered.rendered().is_empty() || token_ids.is_empty() {
+            return Err(TokenizerUtilityErrorV1::InvalidTemplateResult);
+        }
+        let identity = TemplateIdentityV1::from_verified_parts(
+            "generic-jinja-v1",
+            GENERIC_TEMPLATE_PROFILE_VERSION_V1,
+            "minijinja-2.24.0",
+            provider.digest().to_owned(),
+            provider.source_size_bytes() as u64,
+        )?;
+        Ok(ApplyTemplateResultV1::new_generic(
+            rendered.rendered().to_owned(),
+            token_ids,
+            identity,
+            rendered.identity().clone(),
+        ))
+    }
+
+    pub fn apply_template_generic(
+        &self,
+        provider: &GenericTemplateProviderV1,
+        input: GenericTemplateInputV1,
+    ) -> Result<ApplyTemplateResultV1, TokenizerUtilityErrorV1> {
+        self.apply_generic_template(provider, input)
+    }
+
+    pub fn input_token_count_generic(
+        &self,
+        provider: &GenericTemplateProviderV1,
+        input: GenericTemplateInputV1,
+    ) -> Result<usize, TokenizerUtilityErrorV1> {
+        Ok(self.apply_generic_template(provider, input)?.count())
+    }
+
     fn decoder_pieces(
         &self,
         token_ids: &TokenIdsV1,
@@ -604,6 +830,53 @@ impl<'a> TokenizerUtilityServiceV1<'a> {
             })
             .collect()
     }
+}
+
+fn validate_generic_messages(messages: &[Value]) -> Result<(), TokenizerUtilityErrorV1> {
+    if messages.len() > crate::GENERIC_TEMPLATE_MAX_MESSAGES_V1 {
+        return Err(TokenizerUtilityErrorV1::GenericTemplate(
+            GenericTemplateErrorV1::TooManyMessages {
+                count: messages.len(),
+                max_messages: crate::GENERIC_TEMPLATE_MAX_MESSAGES_V1,
+            },
+        ));
+    }
+    for message in messages {
+        let Some(message) = message.as_object() else {
+            return Err(TokenizerUtilityErrorV1::GenericTemplate(
+                GenericTemplateErrorV1::InvalidContext,
+            ));
+        };
+        if message.get("role").and_then(Value::as_str).is_none() || !message.contains_key("content")
+        {
+            return Err(TokenizerUtilityErrorV1::GenericTemplate(
+                GenericTemplateErrorV1::InvalidContext,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_special_tokens(tokens: &Map<String, Value>) -> Result<(), TokenizerUtilityErrorV1> {
+    for value in tokens.values() {
+        if !value.is_string() {
+            return Err(TokenizerUtilityErrorV1::GenericTemplate(
+                GenericTemplateErrorV1::InvalidContext,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_reasoning_effort(value: Option<&str>) -> Result<(), TokenizerUtilityErrorV1> {
+    if let Some(value) = value {
+        if value.is_empty() || value.len() > 32 || !value.is_ascii() {
+            return Err(TokenizerUtilityErrorV1::GenericTemplate(
+                GenericTemplateErrorV1::InvalidContext,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn ensure_input_size(text: &str) -> Result<(), TokenizerUtilityErrorV1> {

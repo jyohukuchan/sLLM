@@ -58,6 +58,20 @@
           "test": true,
           "doc": true,
           "doctest": false
+        },
+        {
+          "name": "sllm-convert-gguf",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
         }
       ]
     },
@@ -69,6 +83,62 @@
       },
       "manifest": "crates/sllm-core/Cargo.toml",
       "targets": [
+        {
+          "name": "context_window_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "gguf_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "grammar_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "inference_embedding_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
         {
           "name": "model_contract",
           "kind": [
@@ -84,7 +154,35 @@
           "doctest": false
         },
         {
+          "name": "prefix_cache_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sampling_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "session_checkpoint_contract",
           "kind": [
             "test"
           ],
@@ -168,6 +266,34 @@
           "doctest": false
         },
         {
+          "name": "verify_quantized_model",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "verify_qwen35_mtp",
+          "kind": [
+            "example"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "weight_contract",
           "kind": [
             "test"
@@ -206,6 +332,90 @@
           "doctest": false
         },
         {
+          "name": "inference_utility_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase43_tool_protocol",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase44_generic_generation",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase44_reasoning",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase44_template",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase44_template_adapters",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm_frontend",
           "kind": [
             "lib"
@@ -218,6 +428,20 @@
           "test": true,
           "doc": true,
           "doctest": true
+        },
+        {
+          "name": "token_bytes_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
         },
         {
           "name": "tokenizer_contract",
@@ -478,6 +702,20 @@
           "doctest": false
         },
         {
+          "name": "sllm-mxfp4-w4a4-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-nvfp4-matmul-evidence",
           "kind": [
             "bin"
@@ -493,6 +731,20 @@
         },
         {
           "name": "sllm-nvfp4-qwen-accuracy-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-nvfp4-w4a4-evidence",
           "kind": [
             "bin"
           ],
@@ -534,7 +786,105 @@
           "doctest": false
         },
         {
+          "name": "sllm-phase22-matvec-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-phase24-terminal-row-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-qwen-d2-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen-mtp-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen-mtp-generation-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen-vision-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-moe-admission",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-moe-execution-evidence",
           "kind": [
             "bin"
           ],
@@ -642,6 +992,76 @@
           "doctest": false
         },
         {
+          "name": "phase39_operability",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase42_api_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase42_http_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase43_api_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase43_http_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "profile_v1_fixture_server",
           "kind": [
             "example"
@@ -689,6 +1109,17 @@
   "packages": [
     {
       "identity": {
+        "name": "adler2",
+        "version": "2.0.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "0BSD OR MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+    },
+    {
+      "identity": {
         "name": "ahash",
         "version": "0.8.12",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -721,6 +1152,17 @@
     },
     {
       "identity": {
+        "name": "arc-swap",
+        "version": "1.9.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "c049c0be4daef0b145cb3555416b3b8ef5b7888a38aea1a3a155801fe7b0810b"
+    },
+    {
+      "identity": {
         "name": "atomic-waker",
         "version": "1.1.2",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -732,6 +1174,44 @@
     },
     {
       "identity": {
+        "name": "autocfg",
+        "version": "1.5.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.0",
+      "features": [],
+      "checksum": "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+    },
+    {
+      "identity": {
+        "name": "aws-lc-rs",
+        "version": "1.18.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "ISC AND (Apache-2.0 OR ISC)",
+      "rust_version": "1.71.0",
+      "features": [
+        "aws-lc-sys",
+        "prebuilt-nasm"
+      ],
+      "checksum": "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
+    },
+    {
+      "identity": {
+        "name": "aws-lc-sys",
+        "version": "0.44.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)",
+      "rust_version": "1.71.0",
+      "features": [
+        "prebuilt-nasm"
+      ],
+      "checksum": "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
+    },
+    {
+      "identity": {
         "name": "axum-core",
         "version": "0.5.6",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -740,6 +1220,24 @@
       "rust_version": "1.78",
       "features": [],
       "checksum": "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+    },
+    {
+      "identity": {
+        "name": "axum-server",
+        "version": "0.8.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.82",
+      "features": [
+        "arc-swap",
+        "rustls",
+        "rustls-pki-types",
+        "tls-rustls",
+        "tls-rustls-no-provider",
+        "tokio-rustls"
+      ],
+      "checksum": "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
     },
     {
       "identity": {
@@ -772,6 +1270,21 @@
     },
     {
       "identity": {
+        "name": "base64",
+        "version": "0.22.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.48.0",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+    },
+    {
+      "identity": {
         "name": "bitflags",
         "version": "2.13.0",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -791,6 +1304,33 @@
       "rust_version": null,
       "features": [],
       "checksum": "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+    },
+    {
+      "identity": {
+        "name": "bytemuck",
+        "version": "1.25.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Zlib OR Apache-2.0 OR MIT",
+      "rust_version": null,
+      "features": [
+        "extern_crate_alloc"
+      ],
+      "checksum": "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
+    },
+    {
+      "identity": {
+        "name": "byteorder-lite",
+        "version": "0.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Unlicense OR MIT",
+      "rust_version": "1.60",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
     },
     {
       "identity": {
@@ -827,7 +1367,9 @@
       },
       "license": "MIT OR Apache-2.0",
       "rust_version": "1.63",
-      "features": [],
+      "features": [
+        "parallel"
+      ],
       "checksum": "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
     },
     {
@@ -840,6 +1382,28 @@
       "rust_version": "1.32",
       "features": [],
       "checksum": "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+    },
+    {
+      "identity": {
+        "name": "cmake",
+        "version": "0.1.58",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.65",
+      "features": [],
+      "checksum": "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
+    },
+    {
+      "identity": {
+        "name": "color_quant",
+        "version": "1.1.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [],
+      "checksum": "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
     },
     {
       "identity": {
@@ -866,6 +1430,20 @@
       "rust_version": null,
       "features": [],
       "checksum": "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
+    },
+    {
+      "identity": {
+        "name": "crc32fast",
+        "version": "1.5.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.63",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
     },
     {
       "identity": {
@@ -1033,6 +1611,17 @@
     },
     {
       "identity": {
+        "name": "dunce",
+        "version": "1.0.5",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "CC0-1.0 OR MIT-0 OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
+    },
+    {
+      "identity": {
         "name": "either",
         "version": "1.16.0",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1045,6 +1634,17 @@
         "use_std"
       ],
       "checksum": "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+    },
+    {
+      "identity": {
+        "name": "equivalent",
+        "version": "1.0.2",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.6",
+      "features": [],
+      "checksum": "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
     },
     {
       "identity": {
@@ -1073,6 +1673,17 @@
     },
     {
       "identity": {
+        "name": "fdeflate",
+        "version": "0.3.7",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.67.0",
+      "features": [],
+      "checksum": "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
+    },
+    {
+      "identity": {
         "name": "find-msvc-tools",
         "version": "0.1.9",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1081,6 +1692,22 @@
       "rust_version": "1.63",
       "features": [],
       "checksum": "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+    },
+    {
+      "identity": {
+        "name": "flate2",
+        "version": "1.1.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.67.0",
+      "features": [
+        "any_impl",
+        "default",
+        "miniz_oxide",
+        "rust_backend"
+      ],
+      "checksum": "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
     },
     {
       "identity": {
@@ -1095,6 +1722,30 @@
         "std"
       ],
       "checksum": "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
+    },
+    {
+      "identity": {
+        "name": "fs-err",
+        "version": "3.3.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "tokio"
+      ],
+      "checksum": "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+    },
+    {
+      "identity": {
+        "name": "fs_extra",
+        "version": "1.3.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [],
+      "checksum": "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
     },
     {
       "identity": {
@@ -1186,6 +1837,17 @@
     {
       "identity": {
         "name": "getrandom",
+        "version": "0.2.17",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
+    },
+    {
+      "identity": {
+        "name": "getrandom",
         "version": "0.3.4",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
       },
@@ -1195,6 +1857,57 @@
         "std"
       ],
       "checksum": "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+    },
+    {
+      "identity": {
+        "name": "getrandom",
+        "version": "0.4.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85",
+      "features": [
+        "std"
+      ],
+      "checksum": "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+    },
+    {
+      "identity": {
+        "name": "gif",
+        "version": "0.13.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.62",
+      "features": [
+        "color_quant",
+        "default",
+        "raii_no_panic",
+        "std"
+      ],
+      "checksum": "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
+    },
+    {
+      "identity": {
+        "name": "h2",
+        "version": "0.4.18",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": "1.63",
+      "features": [],
+      "checksum": "839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228"
+    },
+    {
+      "identity": {
+        "name": "hashbrown",
+        "version": "0.17.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
     },
     {
       "identity": {
@@ -1270,7 +1983,9 @@
       "features": [
         "default",
         "http1",
+        "http2",
         "server",
+        "server-auto",
         "service",
         "tokio"
       ],
@@ -1287,6 +2002,7 @@
       "features": [
         "default",
         "http1",
+        "http2",
         "server"
       ],
       "checksum": "d22053281f852e11534f5198498373cbb59295120a20771d90f7ed1897490a72"
@@ -1301,6 +2017,47 @@
       "rust_version": null,
       "features": [],
       "checksum": "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
+    },
+    {
+      "identity": {
+        "name": "image-webp",
+        "version": "0.2.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.80.1",
+      "features": [],
+      "checksum": "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
+    },
+    {
+      "identity": {
+        "name": "image",
+        "version": "0.25.8",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85.0",
+      "features": [
+        "gif",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "checksum": "529feb3e6769d234375c4cf1ee2ce713682b8e76538cb13f9fc23e1400a591e7"
+    },
+    {
+      "identity": {
+        "name": "indexmap",
+        "version": "2.14.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.85",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
     },
     {
       "identity": {
@@ -1327,6 +2084,17 @@
       "rust_version": "1.68",
       "features": [],
       "checksum": "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
+    },
+    {
+      "identity": {
+        "name": "jobserver",
+        "version": "0.1.35",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.85",
+      "features": [],
+      "checksum": "1c00acbd29eabad4a2392fa0e921c874934dbbf4194312ad20f04a0ed67a3cb3"
     },
     {
       "identity": {
@@ -1407,6 +2175,17 @@
     },
     {
       "identity": {
+        "name": "memo-map",
+        "version": "0.3.3",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": "1.43",
+      "features": [],
+      "checksum": "38d1115007560874e373613744c6fba374c17688327a71c1476d1a5954cc857b"
+    },
+    {
+      "identity": {
         "name": "mime",
         "version": "0.3.17",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1415,6 +2194,25 @@
       "rust_version": null,
       "features": [],
       "checksum": "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
+    },
+    {
+      "identity": {
+        "name": "minijinja",
+        "version": "2.24.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0",
+      "rust_version": "1.70",
+      "features": [
+        "builtins",
+        "fuel",
+        "json",
+        "macros",
+        "multi_template",
+        "serde",
+        "serde_json"
+      ],
+      "checksum": "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
     },
     {
       "identity": {
@@ -1428,6 +2226,22 @@
         "std"
       ],
       "checksum": "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
+    },
+    {
+      "identity": {
+        "name": "miniz_oxide",
+        "version": "0.8.9",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Zlib OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "default",
+        "simd",
+        "simd-adler32",
+        "with-alloc"
+      ],
+      "checksum": "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
     },
     {
       "identity": {
@@ -1468,6 +2282,22 @@
     },
     {
       "identity": {
+        "name": "moxcms",
+        "version": "0.7.11",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "rust_version": "1.85.0",
+      "features": [
+        "avx",
+        "default",
+        "neon",
+        "sse"
+      ],
+      "checksum": "ac9557c559cd6fc9867e122e20d2cbefc9ca29d80d027a8e39310920ed2f0a97"
+    },
+    {
+      "identity": {
         "name": "nom",
         "version": "7.1.3",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1480,6 +2310,20 @@
         "std"
       ],
       "checksum": "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
+    },
+    {
+      "identity": {
+        "name": "num-traits",
+        "version": "0.2.19",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.60",
+      "features": [
+        "default",
+        "std"
+      ],
+      "checksum": "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
     },
     {
       "identity": {
@@ -1569,6 +2413,17 @@
     },
     {
       "identity": {
+        "name": "png",
+        "version": "0.18.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.73",
+      "features": [],
+      "checksum": "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
+    },
+    {
+      "identity": {
         "name": "ppv-lite86",
         "version": "0.2.21",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1597,6 +2452,28 @@
     },
     {
       "identity": {
+        "name": "pxfm",
+        "version": "0.1.30",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "BSD-3-Clause OR Apache-2.0",
+      "rust_version": "1.85",
+      "features": [],
+      "checksum": "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+    },
+    {
+      "identity": {
+        "name": "quick-error",
+        "version": "2.0.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT/Apache-2.0",
+      "rust_version": null,
+      "features": [],
+      "checksum": "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
+    },
+    {
+      "identity": {
         "name": "quote",
         "version": "1.0.47",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1619,6 +2496,17 @@
       "rust_version": "1.68",
       "features": [],
       "checksum": "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+    },
+    {
+      "identity": {
+        "name": "r-efi",
+        "version": "6.0.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0 OR LGPL-2.1-or-later",
+      "rust_version": "1.68",
+      "features": [],
+      "checksum": "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
     },
     {
       "identity": {
@@ -1786,6 +2674,64 @@
     },
     {
       "identity": {
+        "name": "ring",
+        "version": "0.17.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 AND ISC",
+      "rust_version": "1.66.0",
+      "features": [
+        "alloc"
+      ],
+      "checksum": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7"
+    },
+    {
+      "identity": {
+        "name": "rustls-pki-types",
+        "version": "1.15.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.60",
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "2f4925028c7eb5d1fcdaf196971378ed9d2c1c4efc7dc5d011256f76c99c0a96"
+    },
+    {
+      "identity": {
+        "name": "rustls-webpki",
+        "version": "0.103.14",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "ISC",
+      "rust_version": "1.71",
+      "features": [
+        "alloc",
+        "aws-lc-rs",
+        "std"
+      ],
+      "checksum": "0527518605e68109d875e248ea259b6758801cf165e4b2c2733ae3b51f12535a"
+    },
+    {
+      "identity": {
+        "name": "rustls",
+        "version": "0.23.43",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR ISC OR MIT",
+      "rust_version": "1.71",
+      "features": [
+        "aws-lc-rs",
+        "aws_lc_rs",
+        "std"
+      ],
+      "checksum": "0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06"
+    },
+    {
+      "identity": {
         "name": "rustversion",
         "version": "1.0.22",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1862,6 +2808,8 @@
       "rust_version": "1.71",
       "features": [
         "default",
+        "indexmap",
+        "preserve_order",
         "raw_value",
         "std"
       ],
@@ -1919,6 +2867,21 @@
     },
     {
       "identity": {
+        "name": "simd-adler32",
+        "version": "0.3.10",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT",
+      "rust_version": null,
+      "features": [
+        "const-generics",
+        "default",
+        "std"
+      ],
+      "checksum": "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+    },
+    {
+      "identity": {
         "name": "slab",
         "version": "0.4.12",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -1926,6 +2889,7 @@
       "license": "MIT",
       "rust_version": "1.51",
       "features": [
+        "default",
         "std"
       ],
       "checksum": "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
@@ -1989,6 +2953,17 @@
       "rust_version": "1.56",
       "features": [],
       "checksum": "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+    },
+    {
+      "identity": {
+        "name": "subtle",
+        "version": "2.6.1",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "BSD-3-Clause",
+      "rust_version": null,
+      "features": [],
+      "checksum": "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
     },
     {
       "identity": {
@@ -2091,6 +3066,17 @@
     },
     {
       "identity": {
+        "name": "tokio-rustls",
+        "version": "0.26.4",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.71",
+      "features": [],
+      "checksum": "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
+    },
+    {
+      "identity": {
         "name": "tokio-stream",
         "version": "0.1.19",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -2112,7 +3098,10 @@
       "license": "MIT",
       "rust_version": "1.71",
       "features": [
-        "default"
+        "codec",
+        "default",
+        "io",
+        "libc"
       ],
       "checksum": "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
     },
@@ -2125,7 +3114,10 @@
       "license": "MIT",
       "rust_version": "1.71",
       "features": [
+        "bytes",
         "default",
+        "fs",
+        "io-util",
         "libc",
         "macros",
         "mio",
@@ -2151,6 +3143,7 @@
       "license": "MIT",
       "rust_version": "1.65",
       "features": [
+        "cors",
         "limit",
         "trace",
         "tracing"
@@ -2206,7 +3199,10 @@
       },
       "license": "MIT",
       "rust_version": "1.65.0",
-      "features": [],
+      "features": [
+        "once_cell",
+        "std"
+      ],
       "checksum": "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
     },
     {
@@ -2217,7 +3213,9 @@
       },
       "license": "MIT",
       "rust_version": "1.65.0",
-      "features": [],
+      "features": [
+        "std"
+      ],
       "checksum": "63e71662fa4b2a2c3a26f570f037eb95bb1f85397f3cd8076caed2f026a6d100"
     },
     {
@@ -2277,6 +3275,17 @@
     },
     {
       "identity": {
+        "name": "untrusted",
+        "version": "0.9.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "ISC",
+      "rust_version": null,
+      "features": [],
+      "checksum": "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
+    },
+    {
+      "identity": {
         "name": "version_check",
         "version": "0.9.5",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -2313,6 +3322,21 @@
     },
     {
       "identity": {
+        "name": "weezl",
+        "version": "0.1.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": null,
+      "features": [
+        "alloc",
+        "default",
+        "std"
+      ],
+      "checksum": "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
+    },
+    {
+      "identity": {
         "name": "windows-link",
         "version": "0.2.1",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -2321,6 +3345,23 @@
       "rust_version": "1.71",
       "features": [],
       "checksum": "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+    },
+    {
+      "identity": {
+        "name": "windows-sys",
+        "version": "0.52.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [
+        "Win32",
+        "Win32_Foundation",
+        "Win32_System",
+        "Win32_System_Threading",
+        "default"
+      ],
+      "checksum": "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
     },
     {
       "identity": {
@@ -2359,6 +3400,105 @@
     },
     {
       "identity": {
+        "name": "windows-targets",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
+    },
+    {
+      "identity": {
+        "name": "windows_aarch64_gnullvm",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+    },
+    {
+      "identity": {
+        "name": "windows_aarch64_msvc",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+    },
+    {
+      "identity": {
+        "name": "windows_i686_gnu",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
+    },
+    {
+      "identity": {
+        "name": "windows_i686_gnullvm",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+    },
+    {
+      "identity": {
+        "name": "windows_i686_msvc",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+    },
+    {
+      "identity": {
+        "name": "windows_x86_64_gnu",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+    },
+    {
+      "identity": {
+        "name": "windows_x86_64_gnullvm",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+    },
+    {
+      "identity": {
+        "name": "windows_x86_64_msvc",
+        "version": "0.52.6",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0",
+      "rust_version": "1.56",
+      "features": [],
+      "checksum": "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+    },
+    {
+      "identity": {
         "name": "wit-bindgen",
         "version": "0.57.1",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -2394,6 +3534,20 @@
     },
     {
       "identity": {
+        "name": "zeroize",
+        "version": "1.9.0",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "Apache-2.0 OR MIT",
+      "rust_version": "1.85",
+      "features": [
+        "alloc",
+        "default"
+      ],
+      "checksum": "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+    },
+    {
+      "identity": {
         "name": "zmij",
         "version": "1.0.23",
         "source": "registry+https://github.com/rust-lang/crates.io-index"
@@ -2402,6 +3556,35 @@
       "rust_version": "1.71",
       "features": [],
       "checksum": "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+    },
+    {
+      "identity": {
+        "name": "zune-core",
+        "version": "0.4.12",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "rust_version": null,
+      "features": [
+        "std"
+      ],
+      "checksum": "3f423a2c17029964870cfaabb1f13dfab7d092a62a29a89264f4d36990ca414a"
+    },
+    {
+      "identity": {
+        "name": "zune-jpeg",
+        "version": "0.4.21",
+        "source": "registry+https://github.com/rust-lang/crates.io-index"
+      },
+      "license": "MIT OR Apache-2.0 OR Zlib",
+      "rust_version": null,
+      "features": [
+        "default",
+        "neon",
+        "std",
+        "x86"
+      ],
+      "checksum": "29ce2c8a9384ad323cf564b67da86e21d3cfdff87908bc1223ed5c99bc792713"
     },
     {
       "identity": {
@@ -2560,6 +3743,104 @@
       "rename": null
     },
     {
+      "from": "registry:arc-swap@1.9.2",
+      "to": "registry:rustversion@1.0.22",
+      "name": "rustversion",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-rs@1.18.0",
+      "to": "registry:aws-lc-sys@0.44.0",
+      "name": "aws-lc-sys",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.44.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-rs@1.18.0",
+      "to": "registry:zeroize@1.9.0",
+      "name": "zeroize",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.8.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-sys@0.44.0",
+      "to": "registry:cc@1.4.0",
+      "name": "cc",
+      "kind": "build",
+      "target": null,
+      "req": "^1.2.26",
+      "requested_features": [
+        "parallel"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-sys@0.44.0",
+      "to": "registry:cmake@0.1.58",
+      "name": "cmake",
+      "kind": "build",
+      "target": null,
+      "req": "^0.1.54",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-sys@0.44.0",
+      "to": "registry:dunce@1.0.5",
+      "name": "dunce",
+      "kind": "build",
+      "target": null,
+      "req": "^1.0.5",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-sys@0.44.0",
+      "to": "registry:fs_extra@1.3.0",
+      "name": "fs_extra",
+      "kind": "build",
+      "target": null,
+      "req": "^1.3.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:aws-lc-sys@0.44.0",
+      "to": "registry:pkg-config@0.3.33",
+      "name": "pkg-config",
+      "kind": "build",
+      "target": "cfg(unix)",
+      "req": "^0.3.31",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:axum-core@0.5.6",
       "to": "registry:bytes@1.12.1",
       "name": "bytes",
@@ -2669,6 +3950,190 @@
     },
     {
       "from": "registry:axum-core@0.5.6",
+      "to": "registry:tower-service@0.3.3",
+      "name": "tower-service",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:arc-swap@1.9.2",
+      "name": "arc-swap",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:either@1.16.0",
+      "name": "either",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.13",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:fs-err@3.3.1",
+      "name": "fs-err",
+      "kind": "normal",
+      "target": null,
+      "req": "^3",
+      "requested_features": [
+        "tokio"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:http-body@1.1.0",
+      "name": "http-body",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:hyper-util@0.1.20",
+      "name": "hyper-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.18",
+      "requested_features": [
+        "server-auto",
+        "service",
+        "tokio"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:hyper@1.11.0",
+      "name": "hyper",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.4",
+      "requested_features": [
+        "http1",
+        "http2",
+        "server"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:pin-project-lite@0.2.17",
+      "name": "pin-project-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:rustls-pki-types@1.15.1",
+      "name": "rustls-pki-types",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.9",
+      "requested_features": [
+        "std"
+      ],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:rustls@0.23.43",
+      "name": "rustls",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.23",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:tokio-rustls@0.26.4",
+      "name": "tokio-rustls",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.26",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": ">=1.41",
+      "requested_features": [
+        "macros",
+        "net",
+        "sync"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:axum-server@0.8.0",
       "to": "registry:tower-service@0.3.3",
       "name": "tower-service",
       "kind": "normal",
@@ -2993,11 +4458,47 @@
     },
     {
       "from": "registry:cc@1.4.0",
+      "to": "registry:jobserver@0.1.35",
+      "name": "jobserver",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.30",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:cc@1.4.0",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2.62",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:cc@1.4.0",
       "to": "registry:shlex@2.0.1",
       "name": "shlex",
       "kind": "normal",
       "target": null,
       "req": "^2.0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:cmake@0.1.58",
+      "to": "registry:cc@1.4.0",
+      "name": "cc",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2.46",
       "requested_features": [],
       "uses_default_features": true,
       "optional": false,
@@ -3137,6 +4638,18 @@
       "req": "^0.2.155",
       "requested_features": [],
       "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:crc32fast@1.5.0",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
       "optional": false,
       "rename": null
     },
@@ -3517,6 +5030,86 @@
       "rename": null
     },
     {
+      "from": "registry:fdeflate@0.3.7",
+      "to": "registry:simd-adler32@0.3.10",
+      "name": "simd-adler32",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:flate2@1.1.9",
+      "to": "registry:crc32fast@1.5.0",
+      "name": "crc32fast",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:flate2@1.1.9",
+      "to": "registry:miniz_oxide@0.8.9",
+      "name": "miniz_oxide",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8.5",
+      "requested_features": [
+        "simd",
+        "with-alloc"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:flate2@1.1.9",
+      "to": "registry:miniz_oxide@0.8.9",
+      "name": "miniz_oxide",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"wasm32\", not(target_os = \"emscripten\")))",
+      "req": "^0.8.5",
+      "requested_features": [
+        "simd",
+        "with-alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:fs-err@3.3.1",
+      "to": "registry:autocfg@1.5.1",
+      "name": "autocfg",
+      "kind": "build",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:fs-err@3.3.1",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.21",
+      "requested_features": [
+        "fs"
+      ],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
       "from": "registry:futures-channel@0.3.34",
       "to": "registry:futures-core@0.3.34",
       "name": "futures-core",
@@ -3597,6 +5190,42 @@
       "req": "^0.9",
       "requested_features": [],
       "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.2.17",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.2.17",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.2.17",
+      "to": "registry:wasi@0.11.1+wasi-snapshot-preview1",
+      "name": "wasi",
+      "kind": "normal",
+      "target": "cfg(target_os = \"wasi\")",
+      "req": "^0.11",
+      "requested_features": [],
+      "uses_default_features": false,
       "optional": false,
       "rename": null
     },
@@ -3728,6 +5357,291 @@
       "target": "cfg(all(target_arch = \"wasm32\", target_os = \"wasi\", target_env = \"p2\"))",
       "req": "^1",
       "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(any(target_os = \"linux\", target_os = \"android\"), not(any(all(target_os = \"linux\", target_env = \"\"), getrandom_backend = \"custom\", getrandom_backend = \"linux_raw\", getrandom_backend = \"rdrand\", getrandom_backend = \"rndr\"))))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"dragonfly\", target_os = \"freebsd\", target_os = \"hurd\", target_os = \"illumos\", target_os = \"cygwin\", all(target_os = \"horizon\", target_arch = \"arm\")))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"haiku\", target_os = \"redox\", target_os = \"nto\", target_os = \"aix\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"ios\", target_os = \"visionos\", target_os = \"watchos\", target_os = \"tvos\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(any(target_os = \"macos\", target_os = \"openbsd\", target_os = \"vita\", target_os = \"emscripten\"))",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"netbsd\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"solaris\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(target_os = \"vxworks\")",
+      "req": "^0.2.154",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:getrandom@0.4.3",
+      "to": "registry:r-efi@6.0.0",
+      "name": "r-efi",
+      "kind": "normal",
+      "target": "cfg(all(target_os = \"uefi\", getrandom_backend = \"efi_rng\"))",
+      "req": "^6",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:gif@0.13.3",
+      "to": "registry:color_quant@1.1.0",
+      "name": "color_quant",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:gif@0.13.3",
+      "to": "registry:weezl@0.1.12",
+      "name": "weezl",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:atomic-waker@1.1.2",
+      "name": "atomic-waker",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:fnv@1.0.7",
+      "name": "fnv",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.5",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:futures-core@0.3.34",
+      "name": "futures-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:futures-sink@0.3.34",
+      "name": "futures-sink",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:http@1.5.0",
+      "name": "http",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:indexmap@2.14.0",
+      "name": "indexmap",
+      "kind": "normal",
+      "target": null,
+      "req": "^2",
+      "requested_features": [
+        "std"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:slab@0.4.12",
+      "name": "slab",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:tokio-util@0.7.19",
+      "name": "tokio-util",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.7.1",
+      "requested_features": [
+        "codec",
+        "io"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [
+        "io-util"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:h2@0.4.18",
+      "to": "registry:tracing@0.1.44",
+      "name": "tracing",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.35",
+      "requested_features": [
+        "std"
+      ],
       "uses_default_features": false,
       "optional": false,
       "rename": null
@@ -3974,6 +5888,18 @@
     },
     {
       "from": "registry:hyper@1.11.0",
+      "to": "registry:h2@0.4.18",
+      "name": "h2",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.14",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:hyper@1.11.0",
       "to": "registry:http-body@1.1.0",
       "name": "http-body",
       "kind": "normal",
@@ -4074,6 +6000,176 @@
       "rename": null
     },
     {
+      "from": "registry:image-webp@0.2.4",
+      "to": "registry:byteorder-lite@0.1.0",
+      "name": "byteorder-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image-webp@0.2.4",
+      "to": "registry:quick-error@2.0.1",
+      "name": "quick-error",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:bytemuck@1.25.2",
+      "name": "bytemuck",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.8.0",
+      "requested_features": [
+        "extern_crate_alloc"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:byteorder-lite@0.1.0",
+      "name": "byteorder-lite",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:color_quant@1.1.0",
+      "name": "color_quant",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:gif@0.13.3",
+      "name": "gif",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.13.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:image-webp@0.2.4",
+      "name": "image-webp",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:moxcms@0.7.11",
+      "name": "moxcms",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.7.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:num-traits@0.2.19",
+      "name": "num-traits",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:png@0.18.1",
+      "name": "png",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.18.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:zune-core@0.4.12",
+      "name": "zune-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.12",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:image@0.25.8",
+      "to": "registry:zune-jpeg@0.4.21",
+      "name": "zune-jpeg",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4.13",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:indexmap@2.14.0",
+      "to": "registry:equivalent@1.0.2",
+      "name": "equivalent",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:indexmap@2.14.0",
+      "to": "registry:hashbrown@0.17.1",
+      "name": "hashbrown",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.17",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:itertools@0.14.0",
       "to": "registry:either@1.16.0",
       "name": "either",
@@ -4082,6 +6178,32 @@
       "req": "^1.0",
       "requested_features": [],
       "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:jobserver@0.1.35",
+      "to": "registry:getrandom@0.4.3",
+      "name": "getrandom",
+      "kind": "normal",
+      "target": "cfg(windows)",
+      "req": "^0.4",
+      "requested_features": [
+        "std"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:jobserver@0.1.35",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2.171",
+      "requested_features": [],
+      "uses_default_features": true,
       "optional": false,
       "rename": null
     },
@@ -4107,6 +6229,66 @@
       "requested_features": [],
       "uses_default_features": true,
       "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:minijinja@2.24.0",
+      "to": "registry:memo-map@0.3.3",
+      "name": "memo-map",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:minijinja@2.24.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.130",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:minijinja@2.24.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.68",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:miniz_oxide@0.8.9",
+      "to": "registry:adler2@2.0.1",
+      "name": "adler2",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:miniz_oxide@0.8.9",
+      "to": "registry:simd-adler32@0.3.10",
+      "name": "simd-adler32",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.3",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
       "rename": null
     },
     {
@@ -4231,6 +6413,30 @@
       "rename": null
     },
     {
+      "from": "registry:moxcms@0.7.11",
+      "to": "registry:num-traits@0.2.19",
+      "name": "num-traits",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:moxcms@0.7.11",
+      "to": "registry:pxfm@0.1.30",
+      "name": "pxfm",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.1.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:nom@7.1.3",
       "to": "registry:memchr@2.8.3",
       "name": "memchr",
@@ -4251,6 +6457,18 @@
       "req": "^0.2.0",
       "requested_features": [],
       "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:num-traits@0.2.19",
+      "to": "registry:autocfg@1.5.1",
+      "name": "autocfg",
+      "kind": "build",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
       "optional": false,
       "rename": null
     },
@@ -4322,6 +6540,68 @@
       "target": null,
       "req": "^0.3.16",
       "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:png@0.18.1",
+      "to": "registry:bitflags@2.13.0",
+      "name": "bitflags",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:png@0.18.1",
+      "to": "registry:crc32fast@1.5.0",
+      "name": "crc32fast",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:png@0.18.1",
+      "to": "registry:fdeflate@0.3.7",
+      "name": "fdeflate",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.3.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:png@0.18.1",
+      "to": "registry:flate2@1.1.9",
+      "name": "flate2",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.35",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:png@0.18.1",
+      "to": "registry:miniz_oxide@0.8.9",
+      "name": "miniz_oxide",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.8",
+      "requested_features": [
+        "simd"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -4600,6 +6880,232 @@
       "rename": null
     },
     {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:cc@1.4.0",
+      "name": "cc",
+      "kind": "build",
+      "target": null,
+      "req": "^1.2.8",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:cfg-if@1.0.4",
+      "name": "cfg-if",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:getrandom@0.2.17",
+      "name": "getrandom",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.2.10",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(all(target_arch = \"aarch64\", target_endian = \"little\"), target_vendor = \"apple\", any(target_os = \"ios\", target_os = \"macos\", target_os = \"tvos\", target_os = \"visionos\", target_os = \"watchos\")))",
+      "req": "^0.2.155",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(all(any(all(target_arch = \"aarch64\", target_endian = \"little\"), all(target_arch = \"arm\", target_endian = \"little\")), any(target_os = \"android\", target_os = \"linux\")))",
+      "req": "^0.2.148",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:untrusted@0.9.0",
+      "name": "untrusted",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:ring@0.17.14",
+      "to": "registry:windows-sys@0.52.0",
+      "name": "windows-sys",
+      "kind": "normal",
+      "target": "cfg(all(all(target_arch = \"aarch64\", target_endian = \"little\"), target_os = \"windows\"))",
+      "req": "^0.52",
+      "requested_features": [
+        "Win32_Foundation",
+        "Win32_System_Threading"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls-pki-types@1.15.1",
+      "to": "registry:zeroize@1.9.0",
+      "name": "zeroize",
+      "kind": "normal",
+      "target": null,
+      "req": "^1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls-webpki@0.103.14",
+      "to": "registry:aws-lc-rs@1.18.0",
+      "name": "aws-lc-rs",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.18",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls-webpki@0.103.14",
+      "to": "registry:ring@0.17.14",
+      "name": "ring",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.17",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls-webpki@0.103.14",
+      "to": "registry:rustls-pki-types@1.15.1",
+      "name": "rustls-pki-types",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.12",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": "pki-types"
+    },
+    {
+      "from": "registry:rustls-webpki@0.103.14",
+      "to": "registry:untrusted@0.9.0",
+      "name": "untrusted",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:aws-lc-rs@1.18.0",
+      "name": "aws-lc-rs",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.14",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:once_cell@1.21.4",
+      "name": "once_cell",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.16",
+      "requested_features": [
+        "alloc",
+        "race"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:rustls-pki-types@1.15.1",
+      "name": "rustls-pki-types",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.12",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": "pki-types"
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:rustls-webpki@0.103.14",
+      "name": "rustls-webpki",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.103.5",
+      "requested_features": [
+        "alloc"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": "webpki"
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:subtle@2.6.1",
+      "name": "subtle",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.5.0",
+      "requested_features": [],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:rustls@0.23.43",
+      "to": "registry:zeroize@1.9.0",
+      "name": "zeroize",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.8",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:serde@1.0.228",
       "to": "registry:serde_core@1.0.228",
       "name": "serde_core",
@@ -4681,6 +7187,18 @@
       ],
       "uses_default_features": false,
       "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:serde_json@1.0.150",
+      "to": "registry:indexmap@2.14.0",
+      "name": "indexmap",
+      "kind": "normal",
+      "target": null,
+      "req": "^2.2.3",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
       "rename": null
     },
     {
@@ -5388,6 +7906,32 @@
       "rename": null
     },
     {
+      "from": "registry:tokio-rustls@0.26.4",
+      "to": "registry:rustls@0.23.43",
+      "name": "rustls",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.23.27",
+      "requested_features": [
+        "std"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-rustls@0.26.4",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:tokio-stream@0.1.19",
       "to": "registry:futures-core@0.3.34",
       "name": "futures-core",
@@ -5475,6 +8019,18 @@
     },
     {
       "from": "registry:tokio-util@0.7.19",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": "cfg(unix)",
+      "req": "^0.2.168",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio-util@0.7.19",
       "to": "registry:pin-project-lite@0.2.17",
       "name": "pin-project-lite",
       "kind": "normal",
@@ -5497,6 +8053,18 @@
       ],
       "uses_default_features": true,
       "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:tokio@1.53.1",
+      "to": "registry:bytes@1.12.1",
+      "name": "bytes",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.2.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
       "rename": null
     },
     {
@@ -5831,6 +8399,18 @@
       "rename": null
     },
     {
+      "from": "registry:tracing-core@0.1.36",
+      "to": "registry:once_cell@1.21.4",
+      "name": "once_cell",
+      "kind": "normal",
+      "target": null,
+      "req": "^1.13.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": true,
+      "rename": null
+    },
+    {
       "from": "registry:tracing@0.1.44",
       "to": "registry:pin-project-lite@0.2.17",
       "name": "pin-project-lite",
@@ -5879,6 +8459,18 @@
       "rename": null
     },
     {
+      "from": "registry:windows-sys@0.52.0",
+      "to": "registry:windows-targets@0.52.6",
+      "name": "windows-targets",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.52.0",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "registry:windows-sys@0.61.2",
       "to": "registry:windows-link@0.2.1",
       "name": "windows-link",
@@ -5887,6 +8479,102 @@
       "req": "^0.2.1",
       "requested_features": [],
       "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_aarch64_gnullvm@0.52.6",
+      "name": "windows_aarch64_gnullvm",
+      "kind": "normal",
+      "target": "aarch64-pc-windows-gnullvm",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_aarch64_msvc@0.52.6",
+      "name": "windows_aarch64_msvc",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"aarch64\", target_env = \"msvc\", not(windows_raw_dylib)))",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_i686_gnu@0.52.6",
+      "name": "windows_i686_gnu",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"x86\", target_env = \"gnu\", not(target_abi = \"llvm\"), not(windows_raw_dylib)))",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_i686_gnullvm@0.52.6",
+      "name": "windows_i686_gnullvm",
+      "kind": "normal",
+      "target": "i686-pc-windows-gnullvm",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_i686_msvc@0.52.6",
+      "name": "windows_i686_msvc",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"x86\", target_env = \"msvc\", not(windows_raw_dylib)))",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_x86_64_gnu@0.52.6",
+      "name": "windows_x86_64_gnu",
+      "kind": "normal",
+      "target": "cfg(all(target_arch = \"x86_64\", target_env = \"gnu\", not(target_abi = \"llvm\"), not(windows_raw_dylib)))",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_x86_64_gnullvm@0.52.6",
+      "name": "windows_x86_64_gnullvm",
+      "kind": "normal",
+      "target": "x86_64-pc-windows-gnullvm",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "registry:windows-targets@0.52.6",
+      "to": "registry:windows_x86_64_msvc@0.52.6",
+      "name": "windows_x86_64_msvc",
+      "kind": "normal",
+      "target": "cfg(all(any(target_arch = \"x86_64\", target_arch = \"arm64ec\"), target_env = \"msvc\", not(windows_raw_dylib)))",
+      "req": "^0.52.6",
+      "requested_features": [],
+      "uses_default_features": true,
       "optional": false,
       "rename": null
     },
@@ -5941,14 +8629,85 @@
       "rename": null
     },
     {
+      "from": "registry:zune-jpeg@0.4.21",
+      "to": "registry:zune-core@0.4.12",
+      "name": "zune-core",
+      "kind": "normal",
+      "target": null,
+      "req": "^0.4",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.2.186",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "workspace:sllm-cli@0.1.0",
       "to": "registry:serde_json@1.0.150",
       "name": "serde_json",
       "kind": "normal",
       "target": null,
       "req": "=1.0.150",
+      "requested_features": [
+        "preserve_order"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
       "requested_features": [],
       "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "registry:tokio@1.53.1",
+      "name": "tokio",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.53.1",
+      "requested_features": [
+        "macros",
+        "net",
+        "rt-multi-thread",
+        "signal",
+        "sync",
+        "time"
+      ],
+      "uses_default_features": false,
       "optional": false,
       "rename": null
     },
@@ -5989,6 +8748,30 @@
       "rename": null
     },
     {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "workspace:sllm-server@0.1.0",
+      "name": "sllm-server",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-core@0.1.0",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.2.186",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "workspace:sllm-core@0.1.0",
       "to": "registry:serde@1.0.228",
       "name": "serde",
@@ -6009,7 +8792,9 @@
       "kind": "normal",
       "target": null,
       "req": "=1.0.150",
-      "requested_features": [],
+      "requested_features": [
+        "preserve_order"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -6022,6 +8807,82 @@
       "target": null,
       "req": "=0.10.9",
       "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:base64@0.22.1",
+      "name": "base64",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.22.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:image@0.25.8",
+      "name": "image",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.25.8",
+      "requested_features": [
+        "gif",
+        "jpeg",
+        "png",
+        "webp"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:minijinja@2.24.0",
+      "name": "minijinja",
+      "kind": "normal",
+      "target": null,
+      "req": "=2.24.0",
+      "requested_features": [
+        "builtins",
+        "fuel",
+        "json",
+        "macros",
+        "multi_template",
+        "serde"
+      ],
+      "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-frontend@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [
+        "preserve_order"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -6071,7 +8932,9 @@
       "kind": "build",
       "target": null,
       "req": "=1.0.150",
-      "requested_features": [],
+      "requested_features": [
+        "preserve_order"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -6109,7 +8972,9 @@
       "kind": "normal",
       "target": null,
       "req": "=1.0.150",
-      "requested_features": [],
+      "requested_features": [
+        "preserve_order"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -6152,6 +9017,18 @@
     },
     {
       "from": "workspace:sllm-hip@0.1.0",
+      "to": "workspace:sllm-frontend@0.1.0",
+      "name": "sllm-frontend",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-hip@0.1.0",
       "to": "workspace:sllm-hip-sys@0.1.0",
       "name": "sllm-hip-sys",
       "kind": "normal",
@@ -6159,6 +9036,20 @@
       "req": "*",
       "requested_features": [],
       "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:axum-server@0.8.0",
+      "name": "axum-server",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.8.0",
+      "requested_features": [
+        "tls-rustls"
+      ],
+      "uses_default_features": false,
       "optional": false,
       "rename": null
     },
@@ -6180,6 +9071,18 @@
     },
     {
       "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:base64@0.22.1",
+      "name": "base64",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.22.1",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
       "to": "registry:futures-util@0.3.33",
       "name": "futures-util",
       "kind": "normal",
@@ -6189,6 +9092,18 @@
         "std"
       ],
       "uses_default_features": false,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.2.186",
+      "requested_features": [],
+      "uses_default_features": true,
       "optional": false,
       "rename": null
     },
@@ -6213,7 +9128,9 @@
       "kind": "normal",
       "target": null,
       "req": "=1.0.150",
-      "requested_features": [],
+      "requested_features": [
+        "preserve_order"
+      ],
       "uses_default_features": true,
       "optional": false,
       "rename": null
@@ -6225,6 +9142,18 @@
       "kind": "normal",
       "target": null,
       "req": "=0.1.20",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-server@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
       "requested_features": [],
       "uses_default_features": true,
       "optional": false,
@@ -6271,6 +9200,7 @@
       "target": null,
       "req": "=0.7.0",
       "requested_features": [
+        "cors",
         "limit",
         "trace"
       ],
@@ -6316,17 +9246,17 @@
     }
   ],
   "counts": {
-    "packages": 132,
-    "registry_packages": 126,
+    "packages": 190,
+    "registry_packages": 184,
     "workspace_packages": 6,
-    "edges": 309,
+    "edges": 447,
     "edge_kinds": {
-      "build": 6,
+      "build": 14,
       "dev": 1,
-      "normal": 302
+      "normal": 432
     },
-    "target_specific_edges": 38,
-    "target_expressions": 25
+    "target_specific_edges": 66,
+    "target_expressions": 37
   },
   "feature_assertions": {
     "tokenizers": {
@@ -6350,6 +9280,21 @@
     "server_runtime": {
       "workspace_package": "workspace:sllm-server@0.1.0",
       "dependencies": [
+        {
+          "package": "registry:axum-server@0.8.0",
+          "requested": [
+            "tls-rustls"
+          ],
+          "resolved": [
+            "arc-swap",
+            "rustls",
+            "rustls-pki-types",
+            "tls-rustls",
+            "tls-rustls-no-provider",
+            "tokio-rustls"
+          ],
+          "uses_default_features": false
+        },
         {
           "package": "registry:axum@0.8.9",
           "requested": [
@@ -6404,7 +9349,10 @@
             "time"
           ],
           "resolved": [
+            "bytes",
             "default",
+            "fs",
+            "io-util",
             "libc",
             "macros",
             "mio",
@@ -6424,10 +9372,12 @@
         {
           "package": "registry:tower-http@0.7.0",
           "requested": [
+            "cors",
             "limit",
             "trace"
           ],
           "resolved": [
+            "cors",
             "limit",
             "trace",
             "tracing"
@@ -6435,6 +9385,39 @@
           "uses_default_features": false
         }
       ]
+    },
+    "minijinja": {
+      "package": "registry:minijinja@2.24.0",
+      "requested": [
+        "builtins",
+        "fuel",
+        "json",
+        "macros",
+        "multi_template",
+        "serde"
+      ],
+      "resolved": [
+        "builtins",
+        "fuel",
+        "json",
+        "macros",
+        "multi_template",
+        "serde",
+        "serde_json"
+      ],
+      "forbidden": [
+        "custom_syntax",
+        "debug",
+        "default",
+        "deserialization",
+        "loader",
+        "stacker",
+        "urlencode"
+      ],
+      "required_packages": [
+        "registry:memo-map@0.3.3"
+      ],
+      "uses_default_features": false
     }
   },
   "msrv_policy": {

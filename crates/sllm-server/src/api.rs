@@ -9,8 +9,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
 use sllm_core::{CompiledGrammar, SamplingParametersV1};
 use sllm_frontend::{
-    BoundedImageBytesV1, GenerationConfigV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,
-    Qwen35ChatMessageV1, Qwen35VisionProcessorV1, ThinkingModeV1,
+    BoundedImageBytesV1, GenerationConfigV1, MAX_REASONING_TOKENS_V1, MAX_TOTAL_VISUAL_TOKENS_V1,
+    ProcessedVisionInputV1, Qwen35ChatMessageV1, Qwen35VisionProcessorV1, ThinkingModeV1,
 };
 
 use crate::phase42_api::{CompletionRequestV1, InfillRequestV1};
@@ -78,6 +78,8 @@ pub enum ChatCompatibilityProfileV1 {
 pub struct ReasoningOptionsV1 {
     thinking: ThinkingModeV1,
     separate_reasoning: bool,
+    max_reasoning_tokens: Option<u32>,
+    protocol: bool,
 }
 
 impl ReasoningOptionsV1 {
@@ -85,13 +87,17 @@ impl ReasoningOptionsV1 {
         Self {
             thinking: ThinkingModeV1::Disabled,
             separate_reasoning: false,
+            max_reasoning_tokens: None,
+            protocol: false,
         }
     }
 
-    pub(crate) const fn protocol_enabled() -> Self {
+    pub(crate) const fn protocol_enabled_with_budget(max_reasoning_tokens: Option<u32>) -> Self {
         Self {
             thinking: ThinkingModeV1::Enabled,
             separate_reasoning: true,
+            max_reasoning_tokens,
+            protocol: true,
         }
     }
 
@@ -101,6 +107,14 @@ impl ReasoningOptionsV1 {
 
     pub const fn separate_reasoning(self) -> bool {
         self.separate_reasoning
+    }
+
+    pub const fn max_reasoning_tokens(self) -> Option<u32> {
+        self.max_reasoning_tokens
+    }
+
+    pub(crate) const fn protocol(self) -> bool {
+        self.protocol
     }
 
     pub const fn enabled(self) -> bool {
@@ -808,6 +822,7 @@ impl ChatCompletionRequestV1 {
         stream: bool,
         resumable: bool,
         reasoning: bool,
+        reasoning_budget: Option<u32>,
         response_schema: Option<Value>,
     ) -> Result<Self, ApiErrorV1> {
         if model.is_empty() || model.len() > MAX_MODEL_ALIAS_BYTES {
@@ -861,7 +876,7 @@ impl ChatCompletionRequestV1 {
             seed: None,
             stream,
             reasoning: if reasoning {
-                ReasoningOptionsV1::protocol_enabled()
+                ReasoningOptionsV1::protocol_enabled_with_budget(reasoning_budget)
             } else {
                 ReasoningOptionsV1::disabled()
             },
@@ -886,6 +901,7 @@ impl ChatCompletionRequestV1 {
         stream: bool,
         resumable: bool,
         reasoning: bool,
+        reasoning_budget: Option<u32>,
     ) -> Result<Self, ApiErrorV1> {
         if model.is_empty() || model.len() > MAX_MODEL_ALIAS_BYTES {
             return Err(ApiErrorV1::invalid_value(
@@ -935,7 +951,7 @@ impl ChatCompletionRequestV1 {
             seed: None,
             stream,
             reasoning: if reasoning {
-                ReasoningOptionsV1::protocol_enabled()
+                ReasoningOptionsV1::protocol_enabled_with_budget(reasoning_budget)
             } else {
                 ReasoningOptionsV1::disabled()
             },
@@ -946,6 +962,62 @@ impl ChatCompletionRequestV1 {
             response_format: None,
             sampler: None,
         })
+    }
+
+    /// Builds the narrow, model-facing request used by the persistent Phase
+    /// 44 chat owner.  Reverse prompts are lowered into the same incremental
+    /// stop matcher as ordinary stop strings; the production adapter retains
+    /// their identity to report a distinct finish reason.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_persistent_chat(
+        model: String,
+        messages: Vec<Qwen35ChatMessageV1>,
+        max_tokens: u32,
+        stop: Vec<String>,
+        reverse_prompts: Vec<String>,
+        thinking: ThinkingModeV1,
+        reasoning_budget: Option<u32>,
+    ) -> Result<Self, ApiErrorV1> {
+        if reasoning_budget.is_some_and(|budget| budget == 0 || budget > MAX_REASONING_TOKENS_V1) {
+            return Err(ApiErrorV1::invalid_value(
+                "reasoning_budget",
+                "reasoning budget must be in 1..=4096",
+            ));
+        }
+        if !matches!(thinking, ThinkingModeV1::Enabled) && reasoning_budget.is_some() {
+            return Err(ApiErrorV1::invalid_value(
+                "reasoning_budget",
+                "reasoning budget requires thinking=enabled",
+            ));
+        }
+        let mut all_stops = stop;
+        all_stops.extend(reverse_prompts);
+        let mut request = Self::from_protocol_messages(
+            model,
+            messages,
+            None,
+            max_tokens,
+            0.0,
+            1.0,
+            all_stops,
+            false,
+            false,
+            matches!(thinking, ThinkingModeV1::Enabled),
+            reasoning_budget,
+        )?;
+        request.reasoning = match thinking {
+            ThinkingModeV1::Disabled => ReasoningOptionsV1::disabled(),
+            ThinkingModeV1::Enabled => {
+                ReasoningOptionsV1::protocol_enabled_with_budget(reasoning_budget)
+            }
+            ThinkingModeV1::TemplateDefault => ReasoningOptionsV1 {
+                thinking,
+                separate_reasoning: false,
+                max_reasoning_tokens: None,
+                protocol: false,
+            },
+        };
+        Ok(request)
     }
 }
 
@@ -1021,6 +1093,7 @@ struct WireChatCompletionRequest {
 struct WireSllmOptions {
     thinking: Option<WireThinkingMode>,
     separate_reasoning: Option<bool>,
+    max_reasoning_tokens: Option<u32>,
     resumable: Option<bool>,
     sampling: Option<WireSamplerExtensionOptions>,
 }
@@ -1841,10 +1914,36 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     "separate_reasoning requires sllm.thinking=enabled",
                 ));
             }
+            if let Some(budget) = options.max_reasoning_tokens {
+                if !(1..=MAX_REASONING_TOKENS_V1).contains(&budget) {
+                    return Err(ApiErrorV1::invalid_value(
+                        "sllm.max_reasoning_tokens",
+                        "max_reasoning_tokens must be in [1,4096]",
+                    ));
+                }
+            }
+            if let Some(budget) = options.max_reasoning_tokens {
+                if u64::from(budget) + 1 > u64::from(max_completion_tokens) {
+                    return Err(ApiErrorV1::invalid_value(
+                        "sllm.max_reasoning_tokens",
+                        "max_reasoning_tokens must leave at least one token for the close marker",
+                    ));
+                }
+            }
+            if options.max_reasoning_tokens.is_some()
+                && !matches!(thinking, ThinkingModeV1::Enabled)
+            {
+                return Err(ApiErrorV1::invalid_value(
+                    "sllm.max_reasoning_tokens",
+                    "max_reasoning_tokens requires sllm.thinking=enabled",
+                ));
+            }
             (
                 ReasoningOptionsV1 {
                     thinking,
                     separate_reasoning,
+                    max_reasoning_tokens: options.max_reasoning_tokens,
+                    protocol: false,
                 },
                 options.resumable.unwrap_or(false),
                 parse_sampler_extension(options.sampling)?,
@@ -2465,6 +2564,25 @@ mod tests {
         assert!(request.reasoning().enabled());
         assert!(request.reasoning().separate_reasoning());
 
+        let request = parse_chat_completion_request(&valid(
+            r#", "max_completion_tokens":4096, "sllm":{"thinking":"enabled","separate_reasoning":true,"max_reasoning_tokens":1024}"#,
+        ))
+        .unwrap();
+        assert_eq!(request.reasoning().max_reasoning_tokens(), Some(1024));
+
+        for value in [0_u32, 4097_u32] {
+            let body = valid(&format!(
+                r#", "sllm":{{"thinking":"enabled","max_reasoning_tokens":{value}}}"#
+            ));
+            let error = parse_chat_completion_request(&body).unwrap_err();
+            assert_eq!(error.param(), Some("sllm.max_reasoning_tokens"));
+        }
+        let error = parse_chat_completion_request(&valid(
+            r#", "sllm":{"thinking":"disabled","max_reasoning_tokens":1}"#,
+        ))
+        .unwrap_err();
+        assert_eq!(error.param(), Some("sllm.max_reasoning_tokens"));
+
         let error = parse_chat_completion_request(&valid(
             r#", "sllm":{"thinking":"disabled","separate_reasoning":true}"#,
         ))
@@ -2531,5 +2649,49 @@ mod tests {
             assert_eq!(error.param(), Some("messages[0].reasoning_content"));
             assert_eq!(error.code(), ErrorCodeV1::UnsupportedParameter);
         }
+    }
+
+    #[test]
+    fn persistent_chat_lowers_reverse_prompts_into_typed_stop_strings() {
+        let request = ChatCompletionRequestV1::from_persistent_chat(
+            "qwen".to_owned(),
+            vec![Qwen35ChatMessageV1::user("hello")],
+            32,
+            vec!["<stop>".to_owned()],
+            vec!["User:".to_owned()],
+            ThinkingModeV1::Enabled,
+            Some(8),
+        )
+        .unwrap();
+        assert_eq!(request.generation().stop_strings(), ["<stop>", "User:"]);
+        assert!(request.reasoning().enabled());
+        assert_eq!(request.reasoning().max_reasoning_tokens(), Some(8));
+
+        let error = ChatCompletionRequestV1::from_persistent_chat(
+            "qwen".to_owned(),
+            vec![Qwen35ChatMessageV1::user("hello")],
+            32,
+            Vec::new(),
+            vec!["same".to_owned(), "same".to_owned()],
+            ThinkingModeV1::Disabled,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.param(), Some("stop"));
+    }
+
+    #[test]
+    fn persistent_chat_rejects_reasoning_budget_without_enabled_mode() {
+        let error = ChatCompletionRequestV1::from_persistent_chat(
+            "qwen".to_owned(),
+            vec![Qwen35ChatMessageV1::user("hello")],
+            32,
+            Vec::new(),
+            Vec::new(),
+            ThinkingModeV1::TemplateDefault,
+            Some(1),
+        )
+        .unwrap_err();
+        assert_eq!(error.param(), Some("reasoning_budget"));
     }
 }

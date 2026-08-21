@@ -510,6 +510,41 @@ impl Qwen35ChatTemplateV1 {
         Ok(output)
     }
 
+    /// Renders a completed conversation as the exact prefix used before the
+    /// next generation prompt. Every assistant message is treated as
+    /// historical (visible answer plus the closing `<|im_end|>\n` boundary),
+    /// so hidden reasoning is never reintroduced into a persistent KV prefix.
+    /// No generation marker is appended.
+    pub fn render_history_prefix(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+    ) -> Result<String, ChatRenderError> {
+        self.render_history_prefix_with_output_limit(messages, QWEN35_CHAT_MAX_OUTPUT_BYTES)
+    }
+
+    pub fn render_history_prefix_with_output_limit(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        output_limit_bytes: usize,
+    ) -> Result<String, ChatRenderError> {
+        if output_limit_bytes > QWEN35_CHAT_MAX_OUTPUT_BYTES {
+            return Err(ChatRenderError::OutputLimitExceedsHostCap);
+        }
+        validate_typed_messages(messages)?;
+        let mut planned = 0usize;
+        let mut result = Ok(());
+        visit_history_fragments(messages, |fragment| {
+            if result.is_ok() {
+                result = checked_fragment(&mut planned, fragment, output_limit_bytes);
+            }
+        });
+        result?;
+        let mut output = String::with_capacity(planned);
+        visit_history_fragments(messages, |fragment| output.push_str(fragment));
+        debug_assert_eq!(output.len(), planned);
+        Ok(output)
+    }
+
     /// Renders an explicit assistant continuation.  Historical messages are
     /// closed exactly as in the reviewed template, while the final assistant
     /// generation marker and prefill remain open: no `<|im_end|>` is emitted
@@ -859,6 +894,31 @@ fn visit_fragments(
                 visit(GENERATION_DISABLED)
             }
         }
+    }
+}
+
+fn visit_history_fragments(messages: &[Qwen35ChatMessageV1], mut visit: impl FnMut(&str)) {
+    for message in messages {
+        visit(IM_START);
+        match message {
+            Qwen35ChatMessageV1::System { content } => {
+                visit("system\n");
+                visit(trim_qwen(content));
+            }
+            Qwen35ChatMessageV1::User { content } => {
+                visit("user\n");
+                visit(trim_qwen(content));
+            }
+            Qwen35ChatMessageV1::Assistant {
+                content,
+                reasoning_content,
+            } => {
+                visit("assistant\n");
+                let (_, answer) = assistant_parts(content, reasoning_content.as_deref());
+                visit(answer);
+            }
+        }
+        visit(IM_END_LINE);
     }
 }
 
@@ -1310,6 +1370,39 @@ mod tests {
         );
         assert!(!output.ends_with("<|im_end|>\n"));
         assert!(!output.contains("partial answer<|im_end|>"));
+    }
+
+    #[test]
+    fn history_prefix_omits_reasoning_and_generation_marker() {
+        let fixture = synthetic_verified_fixture();
+        let renderer = {
+            let template =
+                fs::read(fixture.directory.0.join(QWEN35_CHAT_TEMPLATE_FILENAME)).unwrap();
+            Qwen35ChatTemplateV1::from_verified_cache_with_test_digest(
+                &fixture.lock,
+                &fixture.cache,
+                &sha256_hex(&template),
+            )
+            .unwrap()
+        };
+        let messages = [
+            Qwen35ChatMessageV1::user("Q"),
+            Qwen35ChatMessageV1::assistant("visible", Some("hidden".to_owned())),
+        ];
+        assert_eq!(
+            renderer.render_history_prefix(&messages).unwrap(),
+            "<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\nvisible<|im_end|>\n"
+        );
+        let next = [
+            messages[0].clone(),
+            messages[1].clone(),
+            Qwen35ChatMessageV1::user("next"),
+        ];
+        let history = renderer.render_history_prefix(&messages).unwrap();
+        let next_prompt = renderer
+            .render(&next, Qwen35RenderOptionsV1::default())
+            .unwrap();
+        assert!(next_prompt.starts_with(&history));
     }
 
     #[test]

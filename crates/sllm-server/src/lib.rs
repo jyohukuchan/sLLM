@@ -57,6 +57,8 @@ pub use production::{
     PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1, ProductionCheckpointResultV1,
     ProductionDraftProviderV1, ProductionPhase41AuditV1, ProductionPrefixCacheResultV1,
     ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
+    QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
+    QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1, QwenPersistentChatTurnResultV1,
 };
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{

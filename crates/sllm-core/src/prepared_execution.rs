@@ -464,7 +464,7 @@ impl ExecutionSegment {
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
         let had_work = !self.pending.is_empty();
-        if had_work && let Some((session, queue, timeout)) = &self.deferred {
+        if let Some((session, queue, timeout)) = self.deferred.as_ref().filter(|_| had_work) {
             let mut fence = session.create_queue_fence(queue)?;
             require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
             for mut retained in self.pending.drain(..) {

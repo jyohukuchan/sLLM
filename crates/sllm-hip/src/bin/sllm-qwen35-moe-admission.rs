@@ -116,12 +116,11 @@ fn coalesced_spans(planes: &[Qwen35MoeTensorPlane]) -> Result<Vec<SourceSpan>, S
         if end <= begin {
             return Err(format!("empty source plane: {}", plane.source_name));
         }
-        if let Some(previous) = spans.last_mut()
-            && previous.file == plane.source_file
-            && previous.end == begin
-        {
-            previous.end = end;
-            continue;
+        if let Some(previous) = spans.last_mut() {
+            if previous.file == plane.source_file && previous.end == begin {
+                previous.end = end;
+                continue;
+            }
         }
         spans.push(SourceSpan {
             file: plane.source_file.clone(),

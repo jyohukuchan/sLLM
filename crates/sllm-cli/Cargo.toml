@@ -7,10 +7,15 @@ license.workspace = true
 description = "sLLM command-line entry point"
 
 [dependencies]
+libc.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sllm-core.workspace = true
 sllm-frontend.workspace = true
 sllm-hip.workspace = true
+sllm-server.workspace = true
+tokio.workspace = true
 
 [[bin]]
 name = "sllm"

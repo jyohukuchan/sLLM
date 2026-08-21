@@ -346,6 +346,35 @@ assistant prefillはrender/tokenize後のprepared prompt stateとしてdecoder�
 再公開しない。MTP、external、ngramはmodel-neutralなbounded proposal/verification/publication/accountingを共有し、target samplerだけが
 visible tokenとRNGを所有する。external executorがprovisionされていないproduction configは実行可能providerへfallbackせず拒否する。
 
+### Phase 44 template・reasoning・interactive boundary
+
+Generic templateはreviewed rendererの代替ではなく、callerがsource bytesとlowercase SHA-256を提示した明示opt-in providerである。
+MiniJinja `2.24.0`をexact pinし、rendererへ渡す値はJSON-onlyのmessages、tools、special-token strings、generation/thinking flags、
+reasoning effort、bounded kwargsに限定する。filesystem、environment、network、process、host object/method callback、credential/secret、
+dynamic loader、include/import/extends、private attributeへ到達する経路はない。source、rendered output、messages、kwargs、recursion、fuelの
+上限はcompile/render/tokenizeとscheduler/GPU admissionより前に適用する。
+
+Generic adapterは`GenericTemplateMessagesInputV1`を`TokenizerUtilityServiceV1`へlowerし、rendered bytesを一度tokenizeする。result identityは
+profile/template digest/source size、kwargs digest、rendered digest/sizeを含み、checkpoint/prefix keyへexact renderer/template identityを
+結合する。raw textとGemma raw-textはgeneric inputへ暗黙変換せず、capabilityなしbackendはGPU work前にrejectする。
+
+Reasoningは別generation loopを作らず、既存selector、grammar、stop、sampling、cancellationのcandidate maskと同じownerで制御する。
+budgetは1〜4,096 generated reasoning token、closing marker列を含むmax-output admission、early close、forced close、grammar/stop conflictを
+checked stateへlowerし、forced tokenもusage/generated historyへ通常tokenとして記録する。CLI/Chat/Responsesは同じfrontend controllerを使い、
+transport wireのreasoning/visible splitだけをadapterが表現する。
+
+Interactive `chat`はprompt/message/prompt-file/interactive stdinのsourceを混同しないclosed matrix、bounded regular-file reader、typed
+conversation、reverse-prompt boundary、JSONL eventsを所有する。turn commitはgeneration成功後だけで、save/resume時のPhase 41
+checkpoint bytes/KV/GDN stateはopaque runtime ownerへ渡し、CLI state machineはGPU planeを解釈・複製しない。Persistent chatのsuccessful turnは、
+reviewed Qwen history semanticsでhidden reasoning、selected stop token、matched reverse markerを除外したcanonical history prefixへrebaseし、
+fresh resident ownerへre-prefillしてからopaque checkpointをcaptureする。これによりnext turnとfresh resumeのprompt token prefixが一致する。
+checkpoint loadはmodel、renderer、tokenizer、target、weight-plan、KV encoding/descriptorのexact identityをtransactionalに検証し、失敗時は
+current ownerを公開しない。conversation bytesとKV pending/currentは同じcommit boundaryでpromoteし、generation/capture/save/commit失敗やcancelは
+pendingを破棄してcurrent conversation+KVへrollbackする。CLI production adapterはprompt/source/reasoning/limitsをpreflightしてからmodel/backendをopenし、
+prompt fileは一度だけ読む。SIGINTは専用listenerからcurrent turnの`GenerationCancellationV1`だけをcancelし、次turnへtokenやpending stateを持ち越さない。
+mid-generation/wire session resume、WebUI、tool/MCP executionはこのboundaryの外である。MI300X real executionはVM再確保までdeferredであり、
+gfx942 compile/host evidenceをruntime capabilityやGPU PASSへ昇格しない。
+
 ### OpenAI serverのadmissionとstreaming境界
 
 Phase 6 A4/A5の初期serverは一つのworkerだけがgeneration backendを呼び、bounded FIFOを超えるrequestを

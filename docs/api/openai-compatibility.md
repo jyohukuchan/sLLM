@@ -453,6 +453,25 @@ Authentication is deployment policy: an open server accepts no Authorization
 header; a protected server requires its standard bearer header. Other OpenAI
 endpoints remain unsupported unless a later compatibility document adds them.
 
+## Phase 44 template・reasoning・interactive extensions
+
+Phase 44 does not turn arbitrary client template source into an OpenAI wire field. The reviewed Qwen renderer remains the default for Chat
+Completions/Responses, and the explicit generic provider is currently a transport-independent/frontend and CLI opt-in. Its source must be a bounded
+regular non-symlink file with caller-supplied lowercase SHA-256; JSON-only messages/special tokens/flags/kwargs are rendered by the exact MiniJinja
+`2.24.0` sandbox. Paths, prompt payloads, filesystem/environment/network/process access, and unbounded object callbacks are never exposed. Generic
+raw-text and Gemma input are rejected rather than silently converted or routed to a reviewed template.
+
+Reasoning remains a typed sLLM extension lowered through the same frontend controller used by Chat/Responses/CLI. `disabled`, `enabled`, and
+`template-default` map to the existing thinking modes; an optional budget is 1..=4,096 generated reasoning tokens and includes any forced close
+marker sequence. Admission accounts for `max_output_tokens`, grammar/stop/sampling/cancellation masks, and rejects an empty candidate or forced-token
+mismatch before generation. Non-stream and SSE adapters expose reasoning/visible content split from the same generated token history; usage counts
+forced and visible tokens normally and does not claim a separate reasoning-token counter. Anthropic thinking remains unsupported in its profile.
+
+The new `chat` CLI is not an HTTP session API. It owns a closed prompt source matrix (`--prompt`, `--message`, `--prompt-file`, or interactive stdin),
+bounded typed transcript, reverse-prompt turn boundary, and versioned JSONL events. Successful turns alone are published to the conversation. Save/resume
+uses Phase 41's opaque stateless prompt checkpoint owner and exact model/template/tokenizer/target/KV identity; mid-generation HTTP/SSE resume and WebUI
+remain outside this profile. MI300X real correctness/performance is deferred until a fresh exact runtime is available.
+
 ## Phase 42 inference profiles
 
 Phase 42 adds separate, versioned wire contracts for inference modes. The

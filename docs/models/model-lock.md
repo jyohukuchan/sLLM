@@ -387,3 +387,22 @@ claim that a model has passed production inference. A lock may advertise a
 Phase 42 capability only after the corresponding verified tokenizer/template,
 model execution path, numerical oracle, and exact target evidence are all
 bound to the same immutable identity.
+
+## Phase 44 template・reasoning・interactive identity
+
+Phase 44 generic templates are request-level verified providers, not floating model-lock defaults. A custom source is admitted only after its
+regular-file bytes, UTF-8 validity, bounded size, and lowercase `sha256:<64 hex>` digest are checked. The generic renderer profile is
+`generic-jinja-v1` with exact MiniJinja `2.24.0`; its identity includes profile version, template/source digest and size, canonical kwargs digest,
+and rendered bytes digest/size. A reviewed Qwen renderer remains the model-lock default, while current Gemma raw-text capability is not silently
+replaced by generic messages.
+
+Prefix/cache/checkpoint identity must include the exact renderer/template identity and tokenizer fingerprint in addition to the Phase 41 model,
+plan, target, KV/layout, and token identity. Generic and reviewed-template state therefore never share a cache entry merely because the model alias
+matches. Reports expose only bounded identity values; local template paths, source prompt, kwargs payload, and checkpoint locations are not identity
+or error fields.
+
+Reasoning mode and budget are frontend generation semantics, not a model-family claim. The checked controller uses existing selector/grammar/stop/
+cancellation ownership, admits 1..=4,096 reasoning tokens including any forced close sequence, and preserves token history/usage accounting. A lock may
+advertise a reasoning capability only when its reviewed template/markers and closing-token identity are verified; absent capability, Gemma/raw-text and
+unsupported backends reject before tokenizer/GPU work. The Phase 44 `chat` CLI stores typed conversation through the Phase 41 opaque checkpoint
+boundary; it does not add a new model-lock state plane or a mid-generation session identity. MI300X `gfx942` runtime evidence remains deferred.

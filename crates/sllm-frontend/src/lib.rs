@@ -6,6 +6,8 @@ use std::borrow::Borrow;
 mod chat;
 mod generation;
 mod inference;
+mod reasoning;
+mod template;
 mod tokenizer;
 mod tool_protocol;
 mod vision;
@@ -20,16 +22,31 @@ pub use generation::{
     FinishReasonV1, GenerationCancellationV1, GenerationChoiceResultV1, GenerationChoicesResultV1,
     GenerationConfigV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
     GenerationResultV1, GenerationServiceError, GenerationServiceV1, GenerationStepV1,
-    GenerationTextFrontendV1, MAX_GENERATION_CHOICES_V1, MAX_STOP_STRING_BYTES_V1,
-    MAX_STOP_STRINGS_V1, PreparedGenerationInputV1, QwenMtpGenerationExecutorV1,
-    SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenUsageV1,
-    derive_choice_seed_v1, gemma4_generation_stop_policy,
+    GenerationTextFrontendV1, GenericGenerationInputV1, MAX_GENERATION_CHOICES_V1,
+    MAX_STOP_STRING_BYTES_V1, MAX_STOP_STRINGS_V1, PreparedGenerationInputV1,
+    QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1,
+    TokenUsageV1, derive_choice_seed_v1, gemma4_generation_stop_policy,
 };
 pub use inference::{
     ApplyTemplateResultV1, FIM_TEMPLATE_VERSION_V1, FimTemplateErrorV1, FimTemplateV1,
-    InputTokenCountInputV1, MAX_TOKENIZER_UTILITY_INPUT_BYTES_V1, TOKENIZER_UTILITY_VERSION_V1,
-    TemplateIdentityV1, TokenPieceV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerUtilityErrorV1,
+    GenericTemplateApplyInputV1, GenericTemplateInputKindV1, GenericTemplateInputV1,
+    GenericTemplateMessagesInputV1, GenericTemplateMessagesV1, InputTokenCountInputV1,
+    MAX_TOKENIZER_UTILITY_INPUT_BYTES_V1, TOKENIZER_UTILITY_VERSION_V1, TemplateIdentityV1,
+    TokenPieceV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerUtilityErrorV1,
     TokenizerUtilityServiceV1,
+};
+pub use reasoning::{
+    MAX_REASONING_CLOSE_TOKENS_V1, MAX_REASONING_TOKENS_V1, ReasoningControllerV1,
+    ReasoningErrorV1, ReasoningModeV1, ReasoningObservationV1, ReasoningPolicyV1,
+};
+pub use template::{
+    GENERIC_TEMPLATE_MAX_FUEL_V1, GENERIC_TEMPLATE_MAX_KWARGS_BYTES_V1,
+    GENERIC_TEMPLATE_MAX_KWARGS_DEPTH_V1, GENERIC_TEMPLATE_MAX_KWARGS_V1,
+    GENERIC_TEMPLATE_MAX_MESSAGES_V1, GENERIC_TEMPLATE_MAX_OUTPUT_BYTES_V1,
+    GENERIC_TEMPLATE_MAX_RECURSION_V1, GENERIC_TEMPLATE_MAX_SOURCE_BYTES_V1,
+    GENERIC_TEMPLATE_PROFILE_VERSION_V1, GenericTemplateContextV1, GenericTemplateErrorV1,
+    GenericTemplateIdentityV1, GenericTemplateProviderV1, GenericTemplateRenderResultV1,
+    GenericTemplateRendererV1, GenericTemplateSourceV1,
 };
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, MAX_TOKEN_PIECE_BYTES_V1,

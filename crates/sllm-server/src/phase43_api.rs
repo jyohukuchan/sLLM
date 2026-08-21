@@ -278,6 +278,17 @@ pub enum ResponsesReasoningEffortV1 {
     High,
 }
 
+impl ResponsesReasoningEffortV1 {
+    /// Phase 44's profile-defined lowering into the shared frontend budget.
+    pub const fn max_reasoning_tokens(self) -> u32 {
+        match self {
+            Self::Low => 1_024,
+            Self::Medium => 2_048,
+            Self::High => 4_096,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResponsesRequestV1 {
     model: String,

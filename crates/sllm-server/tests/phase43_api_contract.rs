@@ -41,6 +41,25 @@ fn responses_accepts_string_and_ordered_typed_history() {
     assert_eq!(request.tool_choice().specific_name(), Some("lookup"));
     assert!(!request.parallel_tool_calls());
     assert!(request.sllm().resumable());
+    assert_eq!(
+        request
+            .reasoning_effort()
+            .expect("reasoning effort")
+            .max_reasoning_tokens(),
+        1_024
+    );
+    for (effort, expected) in [("low", 1_024), ("medium", 2_048), ("high", 4_096)] {
+        let mut value = basic_responses();
+        value["reasoning"] = serde_json::json!({"effort": effort});
+        let request = parse_responses_request_v1(&json(value)).unwrap();
+        assert_eq!(
+            request
+                .reasoning_effort()
+                .expect("reasoning effort")
+                .max_reasoning_tokens(),
+            expected
+        );
+    }
 
     let request = parse_responses_request_v1(&json(basic_responses())).unwrap();
     assert!(matches!(request.input(), ResponsesInputV1::Text(text) if text == "hello"));

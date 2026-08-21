@@ -107,6 +107,18 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         self.assert_policy_rejected(mutate)
 
+    def test_minijinja_loader_or_default_feature_drift_is_rejected(self) -> None:
+        def mutate(document):
+            document["feature_assertions"]["minijinja"]["resolved"].append("loader")
+
+        self.assert_policy_rejected(mutate)
+
+    def test_minijinja_requested_feature_drift_is_rejected(self) -> None:
+        def mutate(document):
+            document["feature_assertions"]["minijinja"]["requested"].remove("fuel")
+
+        self.assert_policy_rejected(mutate)
+
     def test_server_runtime_requested_feature_drift_is_rejected(self) -> None:
         def mutate(document):
             document["feature_assertions"]["server_runtime"]["dependencies"][0]["requested"] = ["json"]

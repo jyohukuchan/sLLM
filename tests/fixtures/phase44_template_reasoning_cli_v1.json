@@ -1,0 +1,270 @@
+{
+  "$schema": "https://sllm.dev/schema/phase44-template-reasoning-cli-v1.schema.json",
+  "schema_version": "sllm-phase44-template-reasoning-cli-v1",
+  "profile_version": "sllm-phase44-template-reasoning-cli-v1",
+  "recorded_at": "2026-08-22",
+  "spec_pins": {
+    "llama_cpp": {
+      "release": "b10453",
+      "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+      "use": "behavior-reference-only"
+    },
+    "minijinja": {
+      "version": "2.24.0",
+      "default_features": false,
+      "features": ["builtins", "fuel", "json", "macros", "multi_template", "serde"],
+      "api_guarantees": ["per-render-fuel", "runtime-recursion-limit", "strict-undefined"],
+      "disabled_integrations": ["dynamic-loader", "stack-growth", "custom-syntax", "url", "process", "filesystem"]
+    }
+  },
+  "template_profile": {
+    "id": "sllm-generic-jinja-v1",
+    "provider": "minijinja-2.24.0",
+    "reviewed_default": "qwen-reviewed-v1",
+    "custom_opt_in": true,
+    "custom_template_digest": {
+      "required": true,
+      "format": "sha256:<64 lowercase hex>",
+      "algorithm": "sha256",
+      "source_encoding": "utf-8"
+    },
+    "source_limits": {
+      "template_source_bytes": 65536,
+      "rendered_output_bytes": 16777216,
+      "messages": 1024,
+      "kwargs_keys": 64,
+      "kwargs_total_bytes": 1048576,
+      "kwargs_depth": 32,
+      "recursion": 32,
+      "fuel_instructions": 1000000
+    },
+    "context_fields": [
+      "messages",
+      "tools",
+      "special_tokens",
+      "add_generation_prompt",
+      "enable_thinking",
+      "reasoning_effort",
+      "custom_kwargs"
+    ],
+    "allowed_constructs": ["interpolation", "if", "elif", "else", "for", "set", "macro"],
+    "allowed_filters": ["default", "first", "join", "last", "length", "list", "lower", "replace", "sort", "trim", "unique", "upper", "tojson"],
+    "allowed_tests": ["defined", "undefined", "none", "boolean", "integer", "float", "string", "sequence", "mapping", "iterable", "number"],
+    "forbidden_constructs": ["include", "import", "extends", "dynamic-loader", "custom-syntax", "unrestricted-method", "unrestricted-attribute", "dunder-access", "host-callback"],
+    "forbidden_capabilities": ["filesystem", "environment", "network", "process", "secret", "credential", "path", "clock", "host-object", "method-callback", "url-integration", "stack-growth", "dynamic-loader", "tool-execution", "mcp-request"],
+    "admission": "compile-render-tokenize-before-scheduler-gpu",
+    "identity": {
+      "required_fields": ["profile_version", "template_digest", "source_bytes", "kwargs_digest", "rendered_bytes_digest"],
+      "checkpoint_binds": ["template_digest", "profile_version"],
+      "reviewed_default_state_isolation": true
+    },
+    "file_boundary": {
+      "reader": "cli-only",
+      "regular_file_only": true,
+      "read_once": true,
+      "reject_symlink": true,
+      "reject_special_file": true,
+      "reject_size_race": true,
+      "reject_invalid_utf8": true,
+      "reject_nul": true
+    }
+  },
+  "reasoning_control": {
+    "id": "sllm-reasoning-control-v1",
+    "modes": ["disabled", "enabled", "template-default"],
+    "mode_mapping": {
+      "disabled": "ThinkingModeV1::Disabled",
+      "enabled": "ThinkingModeV1::Enabled",
+      "template-default": "ThinkingModeV1::TemplateDefault"
+    },
+    "budget": {
+      "optional": true,
+      "unit": "generated_reasoning_tokens",
+      "min": 1,
+      "max": 4096,
+      "non_aligned_examples": [3, 127, 2049],
+      "disabled_with_budget": "reject"
+    },
+    "control": {
+      "owner": "frontend-token-selector",
+      "in_generation": ["cancel", "force-close"],
+      "forced_close_uses_selector_mask": true,
+      "forced_close_counts_as_generated": true,
+      "host_token_fallback": false,
+      "post_decode_token_rewrite": false,
+      "separate_decode_loop": false
+    },
+    "transition": {
+      "assistant_generation_prefix": "starts-reasoning-active",
+      "early_close": "normal-generation-after-closing-marker",
+      "budget_exhausted": "force-bounded-closing-sequence",
+      "closing_marker": "</think>",
+      "max_output_includes_closing_sequence": true,
+      "all_candidates_forbidden": "reject"
+    },
+    "admission": {
+      "before_gpu_admission": true,
+      "requires_closing_sequence_fit": true,
+      "intersects": ["grammar", "stop", "device-selector", "sampling", "cancellation"],
+      "raw_prompt": "reject",
+      "gemma_raw_text": "reject",
+      "missing_reasoning_marker": "reject",
+      "anthropic_thinking": "reject"
+    },
+    "wire_mapping": {
+      "responses_reasoning_effort": {"low": 1024, "medium": 2048, "high": 4096},
+      "chat_thinking": "shared-frontend-controller",
+      "anthropic_thinking": "unsupported",
+      "stream_splitter": "existing-reasoning-splitter",
+      "non_stream_and_stream": "same-generation-result"
+    }
+  },
+  "interactive_cli": {
+    "command": "chat",
+    "existing_generate_unchanged": true,
+    "input_mode": "line-oriented-utf8-no-tty-raw-mode",
+    "output_mode": "versioned-json-lines-v1",
+    "prompt_sources": ["--prompt", "--message", "--prompt-file", "interactive-stdin"],
+    "prompt_source_conflicts": [
+      ["--prompt", "--message"],
+      ["--prompt", "--prompt-file"],
+      ["--prompt", "interactive-stdin"],
+      ["--message", "--prompt-file"],
+      ["--message", "interactive-stdin"],
+      ["--prompt-file", "interactive-stdin"]
+    ],
+    "stdin_rule": "interactive-stdin-only-when-no-explicit-prompt-source",
+    "prompt_file": {
+      "max_bytes": 16777216,
+      "read_once": true,
+      "regular_file_only": true,
+      "reject_symlink": true,
+      "reject_special_file": true,
+      "reject_size_race": true,
+      "reject_invalid_utf8": true,
+      "reject_nul": true
+    },
+    "turn_limits": {
+      "messages": 1024,
+      "message_bytes": 16777216,
+      "transcript_bytes": 16777216,
+      "max_stop_sequences": 4
+    },
+    "reverse_prompt": {
+      "max_count": 4,
+      "total_bytes": 1048576,
+      "match_area": "visible-output",
+      "boundary": "turn-return",
+      "matched_text_in_next_input": false,
+      "distinct_from_stop": true,
+      "stop_semantics": "generation-finish"
+    },
+    "typed_transcript": {
+      "encoding": "canonical-json-utf8",
+      "roles": ["system", "user", "assistant"],
+      "max_messages": 1024,
+      "max_bytes": 16777216,
+      "unknown_roles": "reject",
+      "successful_turn_only": true,
+      "diagnostic_payload_logging": false
+    },
+    "checkpoint": {
+      "owner": "sllm-core-SessionCheckpoint-CheckpointStore",
+      "schema_id": "sllm-session-checkpoint-v1",
+      "atomic_write": true,
+      "directory_mode": "0700",
+      "file_mode": "0600",
+      "checksum": true,
+      "quota": true,
+      "implicit_global_session": false,
+      "mid_generation_resume": false,
+      "identity_fields": ["model_lock_fingerprint", "derived_artifact_identity", "adapter_identity", "renderer_identity", "tokenizer_identity", "target_semantics", "plan_digest", "token_sequence_digest", "kv_encoding", "kv_descriptor_digest", "context_policy_digest"],
+      "conversation_and_opaque_state": "owner-defined",
+      "restore_mismatch": "reject"
+    },
+    "checkpoint_limits": {
+      "checkpoint_bytes": 68719476736,
+      "header_bytes": 4096,
+      "sections": 4096,
+      "identity_field_bytes": 1024,
+      "token_history": 1048576,
+      "conversation_bytes": 16777216
+    },
+    "resume_identity": {
+      "fresh_and_resume_token_sequence": "exact-transcript-template-options",
+      "wrong_model": "reject",
+      "wrong_renderer": "reject",
+      "wrong_tokenizer": "reject",
+      "wrong_target": "reject",
+      "wrong_plan": "reject",
+      "wrong_kv": "reject",
+      "corrupt_or_truncated": "reject",
+      "quota_exceeded": "reject",
+      "cancelled_turn_published": false
+    },
+    "security": {
+      "prompt_token_secret_metrics": false,
+      "prompt_token_secret_normal_logs": false,
+      "tool_execution": false,
+      "mcp_execution": false
+    }
+  },
+  "cases": {
+    "positive": [
+      {"id": "template-canonical-roles-special-unicode", "surface": "template", "input": {"messages": "system,user,assistant", "special_tokens": true, "unicode": true, "custom_kwargs": {"locale": "ja"}}, "expected": {"result": "accepted", "identity": "digest-bound", "admission": "before_gpu_admission"}},
+      {"id": "template-tool-reasoning-block", "surface": "template", "input": {"tools": "bounded-json", "enable_thinking": true, "reasoning_effort": "medium"}, "expected": {"result": "accepted", "admission": "before_gpu_admission"}},
+      {"id": "template-add-generation-prompt", "surface": "template", "input": {"add_generation_prompt": true}, "expected": {"result": "accepted", "admission": "before_gpu_admission"}},
+      {"id": "template-source-limit-exact", "surface": "template", "input": {"template_source_bytes": 65536}, "expected": {"result": "accepted", "admission": "before_gpu_admission"}},
+      {"id": "template-kwargs-depth-exact", "surface": "template", "input": {"kwargs_keys": 64, "kwargs_total_bytes": 1048576, "kwargs_depth": 32}, "expected": {"result": "accepted", "admission": "before_gpu_admission"}},
+      {"id": "reviewed-qwen-default-identity", "surface": "template", "input": {"provider": "qwen-reviewed-v1", "custom_opt_in": false}, "expected": {"result": "accepted", "byte_token_identity": "unchanged"}},
+      {"id": "reasoning-disabled", "surface": "reasoning", "input": {"mode": "disabled"}, "expected": {"result": "accepted", "budget": null}},
+      {"id": "reasoning-enabled-budget-one", "surface": "reasoning", "input": {"mode": "enabled", "budget": 1}, "expected": {"result": "accepted", "selector_mask": true}},
+      {"id": "reasoning-template-default-budget-4096", "surface": "reasoning", "input": {"mode": "template-default", "budget": 4096}, "expected": {"result": "accepted", "selector_mask": true}},
+      {"id": "reasoning-nonaligned-budget", "surface": "reasoning", "input": {"mode": "enabled", "budget": 2049}, "expected": {"result": "accepted", "selector_mask": true}},
+      {"id": "reasoning-early-close", "surface": "reasoning", "input": {"mode": "enabled", "budget": 128, "model_closes_early": true}, "expected": {"result": "accepted", "transition": "normal-generation"}},
+      {"id": "responses-effort-mapping", "surface": "reasoning", "input": {"reasoning_effort": "high"}, "expected": {"result": "accepted", "budget": 4096}},
+      {"id": "cli-prompt-file-source", "surface": "cli", "input": {"source": "--prompt-file", "stdin": false, "prompt_file_regular": true}, "expected": {"result": "accepted", "stdin_consumed": false}},
+      {"id": "cli-interactive-stdin-source", "surface": "cli", "input": {"source": "interactive-stdin", "explicit_source": false}, "expected": {"result": "accepted", "line_oriented": true}},
+      {"id": "cli-reverse-prompt-boundary", "surface": "cli", "input": {"reverse_prompt_count": 4, "reverse_prompt_bytes": 1048576}, "expected": {"result": "accepted", "boundary": "turn-return", "distinct_from_stop": true}},
+      {"id": "cli-typed-transcript-boundary", "surface": "cli", "input": {"messages": 1024, "transcript_bytes": 16777216, "roles": ["system", "user", "assistant"]}, "expected": {"result": "accepted", "canonical": true}},
+      {"id": "checkpoint-fresh-resume-same-identity", "surface": "checkpoint", "input": {"identity_fields": "all", "token_sequence": "exact"}, "expected": {"result": "accepted", "same_token_sequence": true, "atomic": true}},
+      {"id": "checkpoint-opaque-state-owner", "surface": "checkpoint", "input": {"owner": "sllm-core", "opaque_state": true}, "expected": {"result": "accepted", "cli_interprets_state": false}}
+    ],
+    "rejection": [
+      {"id": "template-source-over-limit", "surface": "template", "input": {"template_source_bytes": 65537}, "expected": {"status": 413, "code": "template_too_large", "admission": "before_gpu_admission"}},
+      {"id": "template-output-over-limit", "surface": "template", "input": {"rendered_output_bytes": 16777217}, "expected": {"status": 413, "code": "rendered_output_too_large", "admission": "before_gpu_admission"}},
+      {"id": "template-message-count-over-limit", "surface": "template", "input": {"messages": 1025}, "expected": {"status": 400, "code": "message_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-kwargs-key-over-limit", "surface": "template", "input": {"kwargs_keys": 65}, "expected": {"status": 400, "code": "kwargs_key_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-kwargs-bytes-over-limit", "surface": "template", "input": {"kwargs_total_bytes": 1048577}, "expected": {"status": 413, "code": "kwargs_bytes_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-kwargs-depth-over-limit", "surface": "template", "input": {"kwargs_depth": 33}, "expected": {"status": 400, "code": "kwargs_depth_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-recursion-over-limit", "surface": "template", "input": {"recursion": 33}, "expected": {"status": 400, "code": "recursion_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-fuel-over-limit", "surface": "template", "input": {"fuel_instructions": 1000001}, "expected": {"status": 400, "code": "fuel_limit", "admission": "before_gpu_admission"}},
+      {"id": "template-unknown-variable", "surface": "template", "input": {"construct": "unknown-variable"}, "expected": {"status": 400, "code": "unknown_variable", "admission": "before_gpu_admission"}},
+      {"id": "template-unknown-filter-function", "surface": "template", "input": {"construct": "unknown-filter-or-function"}, "expected": {"status": 400, "code": "unknown_filter_or_function", "admission": "before_gpu_admission"}},
+      {"id": "template-forbidden-include-import", "surface": "template", "input": {"construct": "include-import-extends"}, "expected": {"status": 400, "code": "forbidden_construct", "admission": "before_gpu_admission"}},
+      {"id": "template-digest-missing-or-wrong", "surface": "template", "input": {"digest": "missing-or-wrong"}, "expected": {"status": 400, "code": "template_digest_mismatch", "admission": "before_gpu_admission"}},
+      {"id": "template-file-symlink-special-race", "surface": "template", "input": {"file": "symlink-special-or-size-race"}, "expected": {"status": 400, "code": "template_file_boundary", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-budget-zero", "surface": "reasoning", "input": {"mode": "enabled", "budget": 0}, "expected": {"status": 400, "code": "reasoning_budget", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-budget-over-limit", "surface": "reasoning", "input": {"mode": "enabled", "budget": 4097}, "expected": {"status": 400, "code": "reasoning_budget", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-disabled-with-budget", "surface": "reasoning", "input": {"mode": "disabled", "budget": 1}, "expected": {"status": 400, "code": "reasoning_disabled_budget", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-closing-sequence-max-output-insufficient", "surface": "reasoning", "input": {"max_new_tokens": 1, "closing_sequence": 2}, "expected": {"status": 400, "code": "max_output_closing_sequence", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-grammar-all-candidates-forbidden", "surface": "reasoning", "input": {"grammar": "all-masked"}, "expected": {"status": 400, "code": "reasoning_selector_conflict", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-unsupported-gemma-raw-text", "surface": "reasoning", "input": {"model": "gemma-raw-text"}, "expected": {"status": 400, "code": "unsupported_reasoning", "admission": "before_gpu_admission"}},
+      {"id": "reasoning-anthropic-thinking-unsupported", "surface": "reasoning", "input": {"protocol": "anthropic", "thinking": true}, "expected": {"status": 400, "code": "unsupported_reasoning", "admission": "before_gpu_admission"}},
+      {"id": "cli-prompt-source-conflict", "surface": "cli", "input": {"sources": ["--prompt", "--prompt-file"]}, "expected": {"status": 400, "code": "prompt_source_conflict", "admission": "before_gpu_admission"}},
+      {"id": "cli-prompt-file-stdin-conflict", "surface": "cli", "input": {"sources": ["--prompt-file", "interactive-stdin"]}, "expected": {"status": 400, "code": "prompt_source_conflict", "admission": "before_gpu_admission"}},
+      {"id": "cli-prompt-file-invalid", "surface": "cli", "input": {"file": "nul-invalid-utf8-special"}, "expected": {"status": 400, "code": "prompt_file_boundary", "admission": "before_gpu_admission"}},
+      {"id": "cli-prompt-file-over-limit", "surface": "cli", "input": {"prompt_file_bytes": 16777217}, "expected": {"status": 413, "code": "prompt_file_too_large", "admission": "before_gpu_admission"}},
+      {"id": "cli-reverse-prompt-count-over-limit", "surface": "cli", "input": {"reverse_prompt_count": 5}, "expected": {"status": 400, "code": "reverse_prompt_limit", "admission": "before_gpu_admission"}},
+      {"id": "cli-reverse-prompt-bytes-over-limit", "surface": "cli", "input": {"reverse_prompt_bytes": 1048577}, "expected": {"status": 413, "code": "reverse_prompt_limit", "admission": "before_gpu_admission"}},
+      {"id": "cli-reverse-prompt-not-stop", "surface": "cli", "input": {"reverse_prompt": "used-as-stop"}, "expected": {"status": 400, "code": "reverse_prompt_semantics", "admission": "before_gpu_admission"}},
+      {"id": "cli-transcript-message-over-limit", "surface": "cli", "input": {"messages": 1025}, "expected": {"status": 400, "code": "transcript_message_limit", "admission": "before_gpu_admission"}},
+      {"id": "cli-transcript-bytes-over-limit", "surface": "cli", "input": {"transcript_bytes": 16777217}, "expected": {"status": 413, "code": "transcript_bytes_limit", "admission": "before_gpu_admission"}},
+      {"id": "cli-transcript-unknown-role", "surface": "cli", "input": {"role": "tool"}, "expected": {"status": 400, "code": "transcript_role", "admission": "before_gpu_admission"}},
+      {"id": "checkpoint-identity-mismatch", "surface": "checkpoint", "input": {"identity": "wrong-model-renderer-tokenizer-target-plan-kv"}, "expected": {"status": 400, "code": "checkpoint_identity_mismatch", "admission": "before_gpu_admission"}},
+      {"id": "checkpoint-corrupt-truncated", "surface": "checkpoint", "input": {"payload": "corrupt-or-truncated"}, "expected": {"status": 400, "code": "checkpoint_corrupt", "admission": "before_gpu_admission"}},
+      {"id": "checkpoint-quota-over-limit", "surface": "checkpoint", "input": {"checkpoint_bytes": 68719476737}, "expected": {"status": 413, "code": "checkpoint_quota", "admission": "before_gpu_admission"}},
+      {"id": "forbidden-template-process-network", "surface": "security", "input": {"capability": "process-network-filesystem-secret"}, "expected": {"status": 400, "code": "forbidden_capability", "admission": "before_gpu_admission"}}
+    ]
+  }
+}

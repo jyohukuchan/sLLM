@@ -157,10 +157,10 @@ impl ResumableStoreV1 {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let session = inner.sessions.get(id).ok_or(ReplayErrorV1::NotFound)?;
-        if let Some(first) = session.events.front()
-            && ((cursor == 0 && first.id > 1) || cursor.saturating_add(1) < first.id)
-        {
-            return Err(ReplayErrorV1::CursorOutOfRange);
+        if let Some(first) = session.events.front() {
+            if (cursor == 0 && first.id > 1) || cursor.saturating_add(1) < first.id {
+                return Err(ReplayErrorV1::CursorOutOfRange);
+            }
         }
         Ok(ReplayReadV1 {
             events: session

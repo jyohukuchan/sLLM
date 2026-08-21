@@ -38,14 +38,34 @@ TOKENIZERS_ALLOWED_FEATURES = ["onig"]
 TOKENIZERS_FORBIDDEN_FEATURES = ["default", "http", "progressbar", "esaxx_fast"]
 TOKENIZERS_PACKAGE = "registry:tokenizers@0.21.4"
 ESAXX_PACKAGE = "registry:esaxx-rs@0.1.10"
+MINIJINJA_PACKAGE = "registry:minijinja@2.24.0"
+MINIJINJA_REQUIRED_PACKAGES = ["registry:memo-map@0.3.3"]
+MINIJINJA_REQUESTED_FEATURES = [
+    "builtins", "fuel", "json", "macros", "multi_template", "serde",
+]
+MINIJINJA_RESOLVED_FEATURES = [
+    "builtins", "fuel", "json", "macros", "multi_template", "serde", "serde_json",
+]
+MINIJINJA_FORBIDDEN_FEATURES = [
+    "custom_syntax", "debug", "default", "deserialization", "loader", "stacker", "urlencode",
+]
 WASIP2_PACKAGE = "registry:wasip2@1.0.4+wasi-0.2.12"
 WASIP2_TARGET = 'cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))'
-EXPECTED_PACKAGE_COUNT = 132
-EXPECTED_REGISTRY_PACKAGE_COUNT = 126
+EXPECTED_PACKAGE_COUNT = 190
+EXPECTED_REGISTRY_PACKAGE_COUNT = 184
 EXPECTED_WORKSPACE_PACKAGE_COUNT = 6
-EXPECTED_EDGE_COUNT = 309
+EXPECTED_EDGE_COUNT = 447
 SERVER_PACKAGE = "workspace:sllm-server@0.1.0"
 SERVER_RUNTIME_DEPENDENCIES = [
+    {
+        "package": "registry:axum-server@0.8.0",
+        "requested": ["tls-rustls"],
+        "resolved": [
+            "arc-swap", "rustls", "rustls-pki-types", "tls-rustls",
+            "tls-rustls-no-provider", "tokio-rustls",
+        ],
+        "uses_default_features": False,
+    },
     {
         "package": "registry:axum@0.8.9",
         "requested": ["http1", "json", "tokio"],
@@ -74,15 +94,16 @@ SERVER_RUNTIME_DEPENDENCIES = [
         "package": "registry:tokio@1.53.1",
         "requested": ["macros", "net", "rt-multi-thread", "signal", "sync", "time"],
         "resolved": [
-            "default", "libc", "macros", "mio", "net", "rt", "rt-multi-thread", "signal",
-            "signal-hook-registry", "socket2", "sync", "time", "tokio-macros", "windows-sys",
+            "bytes", "default", "fs", "io-util", "libc", "macros", "mio", "net", "rt",
+            "rt-multi-thread", "signal", "signal-hook-registry", "socket2", "sync", "time",
+            "tokio-macros", "windows-sys",
         ],
         "uses_default_features": False,
     },
     {
         "package": "registry:tower-http@0.7.0",
-        "requested": ["limit", "trace"],
-        "resolved": ["limit", "trace", "tracing"],
+        "requested": ["cors", "limit", "trace"],
+        "resolved": ["cors", "limit", "trace", "tracing"],
         "uses_default_features": False,
     },
 ]
@@ -663,7 +684,9 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError(f"policy counts are inconsistent: {counts!r} != {expected_counts!r}")
 
     assertions = manifest.get("feature_assertions")
-    if not isinstance(assertions, dict) or set(assertions) != {"server_runtime", "tokenizers"}:
+    if not isinstance(assertions, dict) or set(assertions) != {
+        "minijinja", "server_runtime", "tokenizers",
+    }:
         raise ContractError("feature assertions are not closed")
     tokenizers = assertions["tokenizers"]
     expected_assertion_keys = {"package", "allowed", "resolved", "forbidden", "required_packages"}
@@ -683,6 +706,46 @@ def _validate_policy_semantics(manifest: dict[str, Any]) -> None:
         raise ContractError("tokenizers has a forbidden resolved feature")
     if ESAXX_PACKAGE not in package_map or package_map[ESAXX_PACKAGE]["features"]:
         raise ContractError("esaxx-rs must remain present with no enabled features")
+
+    minijinja = assertions["minijinja"]
+    expected_minijinja_keys = {
+        "package", "requested", "resolved", "forbidden", "required_packages",
+        "uses_default_features",
+    }
+    if not isinstance(minijinja, dict) or set(minijinja) != expected_minijinja_keys:
+        raise ContractError("MiniJinja feature assertion is not closed")
+    if minijinja != {
+        "package": MINIJINJA_PACKAGE,
+        "requested": MINIJINJA_REQUESTED_FEATURES,
+        "resolved": MINIJINJA_RESOLVED_FEATURES,
+        "forbidden": MINIJINJA_FORBIDDEN_FEATURES,
+        "required_packages": MINIJINJA_REQUIRED_PACKAGES,
+        "uses_default_features": False,
+    }:
+        raise ContractError("MiniJinja feature allow/deny policy drifted")
+    if package_map.get(MINIJINJA_PACKAGE, {}).get("features") != MINIJINJA_RESOLVED_FEATURES:
+        raise ContractError("MiniJinja resolved features drifted")
+    if any(
+        feature in package_map[MINIJINJA_PACKAGE]["features"]
+        for feature in MINIJINJA_FORBIDDEN_FEATURES
+    ):
+        raise ContractError("MiniJinja has a forbidden resolved feature")
+    for package in MINIJINJA_REQUIRED_PACKAGES:
+        if package not in package_map:
+            raise ContractError(f"MiniJinja required package is missing: {package}")
+    frontend_edges = [
+        edge for edge in edges
+        if edge["from"] == "workspace:sllm-frontend@0.1.0"
+        and edge["to"] == MINIJINJA_PACKAGE
+        and edge["kind"] == "normal"
+    ]
+    if len(frontend_edges) != 1:
+        raise ContractError("MiniJinja frontend dependency edge drifted")
+    if (
+        frontend_edges[0]["requested_features"] != MINIJINJA_REQUESTED_FEATURES
+        or frontend_edges[0]["uses_default_features"]
+    ):
+        raise ContractError("MiniJinja requested feature edge drifted")
 
     server_runtime = assertions["server_runtime"]
     if server_runtime != {
