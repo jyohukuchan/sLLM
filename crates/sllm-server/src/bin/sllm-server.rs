@@ -1,19 +1,24 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const MAX_TLS_PEM_BYTES: usize = 1024 * 1024;
 
 use sllm_core::{
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
     ReviewedModelLock, builtin_reviewed_model_lock, read_derived_gguf_lock,
 };
 use sllm_server::{
-    ChatGenerationBackendV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1, ModelRegistryEntryV1,
-    ModelRegistryV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
-    SchedulerConfigV1, SchedulerV1, ServerConfigV1, build_router_v1,
+    ChatGenerationBackendV1, CredentialStoreV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
+    ModelRegistryEntryV1, ModelRegistryV1, ProductionShutdownAuditV1, QwenBackendConfigV1,
+    QwenChatBackendV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1, ServerConfigV1,
+    ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1, build_router_v1,
 };
 
 fn main() -> ExitCode {
@@ -35,6 +40,14 @@ struct Config {
     listen: SocketAddr,
     model: String,
     api_key_env: Option<String>,
+    api_key_file: Option<PathBuf>,
+    cors_origins: Vec<String>,
+    metrics: bool,
+    resumable_sse: bool,
+    replay_sessions: usize,
+    replay_events: usize,
+    tls_cert: Option<PathBuf>,
+    tls_key: Option<PathBuf>,
     openwebui_compatibility: bool,
     queue_capacity: usize,
     event_capacity: usize,
@@ -77,6 +90,26 @@ fn parse_args() -> Result<Config, String> {
         .remove("--model")
         .unwrap_or_else(|| "qwen3.5-4b".to_owned());
     let api_key_env = values.remove("--api-key-env");
+    let api_key_file = values.remove("--api-key-file").map(PathBuf::from);
+    if api_key_env.is_some() && api_key_file.is_some() {
+        return Err("--api-key-env and --api-key-file are mutually exclusive".to_owned());
+    }
+    let cors_origins = values
+        .remove("--cors-origins")
+        .map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if cors_origins.iter().any(String::is_empty) {
+        return Err("--cors-origins must be a comma-separated list of exact origins".to_owned());
+    }
+    let metrics = parse_default(&mut values, "--metrics", false)?;
+    let resumable_sse = parse_default(&mut values, "--resumable-sse", false)?;
+    let replay_sessions = parse_default(&mut values, "--replay-sessions", 64_usize)?;
+    let replay_events = parse_default(&mut values, "--replay-events", 256_usize)?;
+    let tls_cert = values.remove("--tls-cert").map(PathBuf::from);
+    let tls_key = values.remove("--tls-key").map(PathBuf::from);
+    if tls_cert.is_some() != tls_key.is_some() {
+        return Err("--tls-cert and --tls-key must be configured together".to_owned());
+    }
     let compatibility_profile = values
         .remove("--compatibility-profile")
         .unwrap_or_else(|| "strict".to_owned());
@@ -139,6 +172,14 @@ fn parse_args() -> Result<Config, String> {
         listen,
         model,
         api_key_env,
+        api_key_file,
+        cors_origins,
+        metrics,
+        resumable_sse,
+        replay_sessions,
+        replay_events,
+        tls_cert,
+        tls_key,
         openwebui_compatibility,
         queue_capacity,
         event_capacity,
@@ -156,6 +197,31 @@ fn run(config: Config) -> Result<(), String> {
         .build()
         .map_err(|error| format!("Tokio runtime construction failed: {error}"))?;
     runtime.block_on(async move {
+        let credentials = if let Some(path) = config.api_key_file.as_deref() {
+            CredentialStoreV1::from_key_file(path)
+                .map_err(|error| format!("API key file validation failed: {error}"))?
+        } else if let Some(name) = config.api_key_env.as_deref() {
+            let token = env::var(name)
+                .map_err(|_| format!("API key environment variable {name} is absent"))?;
+            CredentialStoreV1::from_user_key(token)
+                .map_err(|error| format!("API key validation failed: {error}"))?
+        } else {
+            CredentialStoreV1::open()
+        };
+        let tls = match (config.tls_cert.as_deref(), config.tls_key.as_deref()) {
+            (Some(cert), Some(key)) => {
+                let cert = read_tls_cert_file(cert)?;
+                let key = read_private_key_file(key)?;
+                Some(
+                    axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
+                        .await
+                        .map_err(|error| format!("TLS certificate/key validation failed: {error}"))?,
+                )
+            }
+            (None, None) => None,
+            _ => unreachable!("TLS certificate/key pairing was checked during parsing"),
+        };
+        let lifecycle = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
         let derived = read_derived_gguf_lock(&config.derived_lock)
             .map_err(|error| format!("derived GGUF lock validation failed: {error}"))?;
         let gguf_moe = derived.semantic_model_id.starts_with("qwen35moe:");
@@ -224,6 +290,7 @@ fn run(config: Config) -> Result<(), String> {
                 }
             }
         };
+        let shutdown_guard = BackendShutdownGuard::new(&backend);
         if let Some(warning) = context_length_warning(
             backend.context_length(),
             backend.recommended_context_tokens(),
@@ -244,6 +311,11 @@ fn run(config: Config) -> Result<(), String> {
         )
         .map_err(|error| error.to_string())?;
         let registry = ModelRegistryV1::new(vec![entry]).map_err(|error| error.to_string())?;
+        let model_aliases = registry
+            .entries()
+            .iter()
+            .map(|entry| entry.alias().to_owned())
+            .collect::<Vec<_>>();
         let scheduler = SchedulerV1::new(
             SchedulerConfigV1::new(
                 config.queue_capacity,
@@ -252,30 +324,37 @@ fn run(config: Config) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?,
         );
-        let bearer = config
-            .api_key_env
-            .as_deref()
-            .map(|name| {
-                env::var(name).map_err(|_| format!("API key environment variable {name} is absent"))
-            })
-            .transpose()?;
-        let server_config = if config.openwebui_compatibility {
-            ServerConfigV1::openwebui_compatible(bearer)
+        let mut server_config = if config.openwebui_compatibility {
+            ServerConfigV1::openwebui_compatible(None)
         } else {
-            ServerConfigV1::new(bearer)
+            ServerConfigV1::new(None)
         }
+        .map_err(|error| error.to_string())?
+        .with_credentials(credentials)
+        .with_lifecycle(lifecycle.clone())
+        .with_cors_origins(&config.cors_origins)
         .map_err(|error| error.to_string())?;
-        let router = build_router_v1(
-            registry,
-            scheduler.clone(),
-            server_config,
-        );
-        let listener = tokio::net::TcpListener::bind(config.listen)
-            .await
+        if config.metrics {
+            server_config = server_config.with_metrics(
+                ServerMetricsV1::new(model_aliases).map_err(|error| error.to_string())?,
+            );
+        }
+        if config.resumable_sse {
+            server_config = server_config.with_resumable_store(
+                ResumableStoreV1::new(config.replay_sessions, config.replay_events)
+                    .map_err(|error| format!("resumable SSE configuration failed: {error}"))?,
+            );
+        }
+        let router = build_router_v1(registry, scheduler.clone(), server_config);
+        let listener = std::net::TcpListener::bind(config.listen)
             .map_err(|error| format!("listen failed: {error}"))?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|error| format!("listen socket setup failed: {error}"))?;
         let address = listener
             .local_addr()
             .map_err(|error| format!("local address query failed: {error}"))?;
+        lifecycle.transition(ServerLifecycleStateV1::Ready);
         println!(
             "{}",
             serde_json::json!({
@@ -286,22 +365,122 @@ fn run(config: Config) -> Result<(), String> {
                 "compatibility_profile": if config.openwebui_compatibility { "openwebui" } else { "strict" },
                 "context_length": backend.context_length(),
                 "official_recommended_context_tokens": backend.recommended_context_tokens(),
+                "tls": tls.is_some(),
+                "authentication": config.api_key_env.is_some() || config.api_key_file.is_some(),
+                "metrics": config.metrics,
+                "resumable_sse": config.resumable_sse,
+                "cors": !config.cors_origins.is_empty(),
             })
         );
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await
-            .map_err(|error| format!("HTTP server failed: {error}"))?;
+        let handle = axum_server::Handle::new();
+        let signal_handle = handle.clone();
+        let signal_scheduler = scheduler.clone();
+        let signal_lifecycle = lifecycle.clone();
+        let shutdown_timeout = config.shutdown_timeout;
+        let signal_task = tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                signal_lifecycle.transition(ServerLifecycleStateV1::Draining);
+                signal_scheduler.shutdown();
+                signal_handle.graceful_shutdown(Some(shutdown_timeout));
+            }
+        });
+        let serve_result = if let Some(tls) = tls {
+            match axum_server::from_tcp_rustls(listener, tls) {
+                Ok(server) => {
+                    server
+                        .handle(handle)
+                        .serve(router.into_make_service())
+                        .await
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            match axum_server::from_tcp(listener) {
+                Ok(server) => {
+                    server
+                        .handle(handle)
+                        .serve(router.into_make_service())
+                        .await
+                }
+                Err(error) => Err(error),
+            }
+        };
+        signal_task.abort();
+        lifecycle.transition(ServerLifecycleStateV1::Draining);
         scheduler.shutdown();
-        let report = backend.shutdown().map_err(|error| error.to_string())?;
+        if let Err(error) = serve_result {
+            lifecycle.transition(ServerLifecycleStateV1::Failed);
+            return Err(format!("HTTP server failed: {error}"));
+        }
+        let report = shutdown_guard
+            .shutdown()
+            .map_err(|error| error.to_string())?;
+        lifecycle.transition(ServerLifecycleStateV1::Shutdown);
         println!(
             "{}",
             serde_json::json!({"event": "shutdown_audit", "report": report})
         );
         Ok(())
     })
+}
+
+fn read_tls_cert_file(path: &Path) -> Result<Vec<u8>, String> {
+    read_tls_file(path, false)
+}
+
+fn read_private_key_file(path: &Path) -> Result<Vec<u8>, String> {
+    read_tls_file(path, true)
+}
+
+fn read_tls_file(path: &Path, private: bool) -> Result<Vec<u8>, String> {
+    let kind = if private {
+        "private key"
+    } else {
+        "certificate"
+    };
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| format!("TLS {kind} file could not be inspected"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!("TLS {kind} must be a regular, non-symlink file"));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+        if private && metadata.permissions().mode() & 0o077 != 0 {
+            return Err("TLS private key permissions are too broad".to_owned());
+        }
+    }
+    let file: File = options
+        .open(path)
+        .map_err(|_| format!("TLS {kind} file could not be opened"))?;
+    let opened = file
+        .metadata()
+        .map_err(|_| format!("TLS {kind} file could not be inspected"))?;
+    if !opened.is_file() {
+        return Err(format!("TLS {kind} must be a regular, non-symlink file"));
+    }
+    #[cfg(unix)]
+    if private {
+        use std::os::unix::fs::PermissionsExt;
+        if opened.permissions().mode() & 0o077 != 0 {
+            return Err("TLS private key permissions are too broad".to_owned());
+        }
+    }
+    if opened.len() > MAX_TLS_PEM_BYTES as u64 {
+        return Err(format!("TLS {kind} file is too large"));
+    }
+    let mut bytes = Vec::with_capacity(opened.len() as usize);
+    file.take((MAX_TLS_PEM_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| format!("TLS {kind} file could not be read"))?;
+    if bytes.len() > MAX_TLS_PEM_BYTES {
+        return Err(format!("TLS {kind} file is too large"));
+    }
+    Ok(bytes)
 }
 
 fn context_length_warning(
@@ -370,6 +549,33 @@ impl ActiveBackend {
     }
 }
 
+struct BackendShutdownGuard<'a> {
+    backend: &'a ActiveBackend,
+    active: bool,
+}
+
+impl<'a> BackendShutdownGuard<'a> {
+    fn new(backend: &'a ActiveBackend) -> Self {
+        Self {
+            backend,
+            active: true,
+        }
+    }
+
+    fn shutdown(mut self) -> Result<ProductionShutdownAuditV1, sllm_server::BackendErrorV1> {
+        self.active = false;
+        self.backend.shutdown()
+    }
+}
+
+impl Drop for BackendShutdownGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = self.backend.shutdown();
+        }
+    }
+}
+
 fn take_required(values: &mut BTreeMap<String, String>, flag: &str) -> Result<String, String> {
     values
         .remove(flag)
@@ -394,12 +600,15 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
 }
 
 #[cfg(test)]
 mod tests {
-    use super::context_length_warning;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{context_length_warning, read_private_key_file, read_tls_cert_file};
 
     #[test]
     fn context_warning_is_advisory_only_above_the_model_recommendation() {
@@ -410,5 +619,41 @@ mod tests {
         assert_eq!(warning["kind"], "context_length_exceeds_recommended");
         assert_eq!(warning["context_length"], 1_000_000);
         assert_eq!(warning["official_recommended_context_tokens"], 262_144);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tls_files_require_regular_inputs_and_private_key_permissions() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory =
+            std::env::temp_dir().join(format!("sllm-phase39-tls-{}-{nonce}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        let cert = directory.join("server.crt");
+        let cert_link = directory.join("server-link.crt");
+        let key = directory.join("server.key");
+        fs::write(&cert, b"test certificate").unwrap();
+        symlink(&cert, &cert_link).unwrap();
+        fs::write(&key, b"test key").unwrap();
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_tls_cert_file(&cert).unwrap(), b"test certificate");
+        assert_eq!(read_private_key_file(&key).unwrap(), b"test key");
+        assert!(read_tls_cert_file(&cert_link).is_err());
+
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(
+            read_private_key_file(&key).unwrap_err(),
+            "TLS private key permissions are too broad"
+        );
+        assert!(read_tls_cert_file(&directory).is_err());
+
+        fs::remove_file(cert).unwrap();
+        fs::remove_file(cert_link).unwrap();
+        fs::remove_file(key).unwrap();
+        fs::remove_dir(directory).unwrap();
     }
 }

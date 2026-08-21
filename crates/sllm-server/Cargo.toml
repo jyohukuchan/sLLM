@@ -7,10 +7,13 @@ license.workspace = true
 
 [dependencies]
 axum.workspace = true
+axum-server.workspace = true
 futures-util.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
+sha2.workspace = true
 sllm-core.workspace = true
 sllm-frontend.workspace = true
 sllm-hip.workspace = true

@@ -33,13 +33,43 @@ use sllm_hip::HipBackend;
 
 use crate::api::ChatContentPartV1;
 use crate::{
-    BackendCompletionV1, BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
+    BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
+    BackendObservabilitySnapshotV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
     FinishReasonV1, GenerationDeltaSinkV1, TokenUsageV1,
 };
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
+
+fn observability_snapshot_from_allocation(
+    snapshot: AllocationSnapshot,
+) -> BackendObservabilitySnapshotV1 {
+    if snapshot.poisoned() {
+        return BackendObservabilitySnapshotV1::default();
+    }
+    let model_resident = snapshot.model_resident();
+    let request_kv = snapshot.request_state();
+    let workspace_arena = snapshot.workspace();
+    BackendObservabilitySnapshotV1 {
+        model_resident: BackendMemoryCategorySnapshotV1 {
+            current_bytes: model_resident.current_bytes(),
+            high_water_bytes: model_resident.high_water_bytes(),
+        },
+        request_kv: BackendMemoryCategorySnapshotV1 {
+            current_bytes: request_kv.current_bytes(),
+            high_water_bytes: request_kv.high_water_bytes(),
+        },
+        workspace_arena: BackendMemoryCategorySnapshotV1 {
+            current_bytes: workspace_arena.current_bytes(),
+            high_water_bytes: workspace_arena.high_water_bytes(),
+        },
+        total: BackendMemoryCategorySnapshotV1 {
+            current_bytes: snapshot.current_bytes(),
+            high_water_bytes: snapshot.high_water_bytes(),
+        },
+    }
+}
 
 fn select_gguf_fp8_provider(target: &str) -> Result<&'static str, String> {
     match target {
@@ -505,6 +535,17 @@ impl QwenChatBackendV1 {
         &self.identity.target
     }
 
+    /// Returns nonblocking redacted memory accounting for operational metrics.
+    /// A busy or already-shut-down backend reports the safe all-zero default.
+    pub fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| state.as_ref().map(|state| state.session.memory_snapshot()))
+            .map(observability_snapshot_from_allocation)
+            .unwrap_or_default()
+    }
+
     pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
         let state = self
             .state
@@ -676,6 +717,17 @@ impl Gemma4ChatBackendV1 {
         &self.identity.target
     }
 
+    /// Returns nonblocking redacted memory accounting for operational metrics.
+    /// A busy or already-shut-down backend reports the safe all-zero default.
+    pub fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| state.as_ref().map(|state| state.session.memory_snapshot()))
+            .map(observability_snapshot_from_allocation)
+            .unwrap_or_default()
+    }
+
     pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
         let state = self
             .state
@@ -734,6 +786,10 @@ impl Gemma4ChatBackendV1 {
 }
 
 impl ChatGenerationBackendV1 for QwenChatBackendV1 {
+    fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
+        QwenChatBackendV1::observability_snapshot(self)
+    }
+
     fn generate(
         &self,
         request: &ChatCompletionRequestV1,
@@ -1222,6 +1278,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
 }
 
 impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
+    fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
+        Gemma4ChatBackendV1::observability_snapshot(self)
+    }
+
     fn generate(
         &self,
         request: &ChatCompletionRequestV1,

@@ -101,6 +101,10 @@ pub enum ErrorCodeV1 {
     RequestTooLarge,
     RateLimitExceeded,
     UnsupportedMediaType,
+    ReplayNotFound,
+    ReplayOutOfRange,
+    SlotNotFound,
+    RequestCancelled,
     GenerationFailed,
     ServerShutdown,
 }
@@ -116,6 +120,10 @@ impl ErrorCodeV1 {
             Self::RequestTooLarge => "request_too_large",
             Self::RateLimitExceeded => "rate_limit_exceeded",
             Self::UnsupportedMediaType => "unsupported_media_type",
+            Self::ReplayNotFound => "replay_not_found",
+            Self::ReplayOutOfRange => "replay_out_of_range",
+            Self::SlotNotFound => "slot_not_found",
+            Self::RequestCancelled => "request_cancelled",
             Self::GenerationFailed => "generation_failed",
             Self::ServerShutdown => "server_shutdown",
         }
@@ -206,6 +214,46 @@ impl ApiErrorV1 {
             "server_error",
             None,
             ErrorCodeV1::GenerationFailed,
+        )
+    }
+
+    pub fn request_cancelled() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            "the generation request was cancelled",
+            "server_error",
+            None,
+            ErrorCodeV1::RequestCancelled,
+        )
+    }
+
+    pub fn replay_not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "the resumable stream does not exist",
+            "invalid_request_error",
+            None,
+            ErrorCodeV1::ReplayNotFound,
+        )
+    }
+
+    pub fn replay_out_of_range() -> Self {
+        Self::new(
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            "the requested event cursor is older than the replay window",
+            "invalid_request_error",
+            None,
+            ErrorCodeV1::ReplayOutOfRange,
+        )
+    }
+
+    pub fn slot_not_found() -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "the scheduler slot does not exist",
+            "invalid_request_error",
+            None,
+            ErrorCodeV1::SlotNotFound,
         )
     }
 
@@ -301,6 +349,7 @@ pub struct ChatCompletionRequestV1 {
     seed: Option<i64>,
     stream: bool,
     reasoning: ReasoningOptionsV1,
+    resumable: bool,
 }
 
 impl ChatCompletionRequestV1 {
@@ -333,6 +382,10 @@ impl ChatCompletionRequestV1 {
 
     pub const fn reasoning(&self) -> ReasoningOptionsV1 {
         self.reasoning
+    }
+
+    pub const fn resumable(&self) -> bool {
+        self.resumable
     }
 }
 
@@ -386,6 +439,7 @@ struct WireChatCompletionRequest {
 struct WireSllmOptions {
     thinking: Option<WireThinkingMode>,
     separate_reasoning: Option<bool>,
+    resumable: Option<bool>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -736,8 +790,8 @@ pub(crate) fn parse_chat_completion_request_for_profile(
     };
     let generation = GenerationConfigV1::new(max_completion_tokens, sampling, stop_strings)
         .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
-    let reasoning = match wire.sllm {
-        None => ReasoningOptionsV1::disabled(),
+    let (reasoning, resumable) = match wire.sllm {
+        None => (ReasoningOptionsV1::disabled(), false),
         Some(options) => {
             let thinking = match options.thinking.unwrap_or(WireThinkingMode::Disabled) {
                 WireThinkingMode::Enabled => ThinkingModeV1::Enabled,
@@ -750,20 +804,31 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     "separate_reasoning requires sllm.thinking=enabled",
                 ));
             }
-            ReasoningOptionsV1 {
-                thinking,
-                separate_reasoning,
-            }
+            (
+                ReasoningOptionsV1 {
+                    thinking,
+                    separate_reasoning,
+                },
+                options.resumable.unwrap_or(false),
+            )
         }
     };
+    let stream = wire.stream.unwrap_or(false);
+    if resumable && !stream {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.resumable",
+            "resumable requires stream=true",
+        ));
+    }
 
     Ok(ChatCompletionRequestV1 {
         model: wire.model,
         messages,
         generation,
         seed: wire.seed,
-        stream: wire.stream.unwrap_or(false),
+        stream,
         reasoning,
+        resumable,
     })
 }
 
@@ -1108,6 +1173,17 @@ mod tests {
         ))
         .unwrap_err();
         assert_eq!(error.param(), Some("sllm.separate_reasoning"));
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+
+        let request =
+            parse_chat_completion_request(&valid(r#", "stream":true, "sllm":{"resumable":true}"#))
+                .unwrap();
+        assert!(request.stream());
+        assert!(request.resumable());
+
+        let error =
+            parse_chat_completion_request(&valid(r#", "sllm":{"resumable":true}"#)).unwrap_err();
+        assert_eq!(error.param(), Some("sllm.resumable"));
         assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
     }
 

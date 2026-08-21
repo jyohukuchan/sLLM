@@ -1005,7 +1005,7 @@ candidateを再確認した。
 | 完了 | Phase 36 | MI300X latest-main実機再検証 | Sessions A〜DをPASS。feature-pinned gfx942、99 operator、4B BF16/FNUZ FP8、low-bit KV、10,001/2、MTP/vision/OpenAI、反復性能、fixed llama.cpp、rocprofv3を実機確認し、ユーザー決定で当初のconditional extensionをscopeから削除してclose |
 | ready-host-prep | Phase 37 | gfx942 GDN・Full Attention provider parity | Phase 36でdevice timeの73.95%/25.12%を占めた二familyのgfx942 baseline routeをwave64最適化providerへ置換する。実機baseline/perfはVM再確保までdeferred |
 | planned | Phase 38 | MI300X residual closure・peer比較 | Phase 37後のfresh profileからFNUZ/GEMM、execution replay、KV provider等をAmdahl順に限定評価する |
-| planned | Phase 39 | service operability・認証・observability | health/readiness、metrics、slots、resumable stream、TLS/CORS、複数keyを先に固定する |
+| 完了 | Phase 39 | service operability・認証・observability | health/readiness、bounded metrics・memory、redacted slots、opt-in resumable SSE、TLS/CORS、複数user/admin keyをhost integrationで固定した |
 | planned | Phase 40 | token selection・grammar・structured generation | sampler chain、GPU sampling、logit bias/logprobs、GBNF/JSON Schema、`n>1`を共通化する |
 | planned | Phase 41 | prefix/KV・session state・speculation | prefix reuse、checkpoint、context shift、assistant prefill、external draft/ngramをidentity-safeに実装する |
 | planned | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、infillを公開する |
@@ -1156,7 +1156,7 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 | prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | stateはrequest-localで、cross-request prefix/session reuseはない。prefix/KV cacheと簡易永続化のbacklog、将来RoPE scalingへ接続するが、追加runtime controlは未割当。model固有MTPはこの比較から除外する |
 | adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
 | template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
-| service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | 起動時ready/shutdown audit、単一Bearer key、SSE disconnect cancellationはあるが、公開health/metrics/slot操作等はない。deployment surfaceごと未割当とする |
+| service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | Phase 39でhealth/readiness、bounded metrics/runtime memory、redacted props/slots・admin cancel、opt-in resumable SSE、exact CORS、Rustls、複数user/admin keyとrotationを実装済み。server UIだけをPhase 48に残す |
 | 周辺tool・品質評価 | general HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task eval、debug dump | fixed converter、model lock、bounded benchmark/evidenceは実装済み。汎用変換・評価toolは未割当。ただし未対応量子化形式を自動的に製品scopeへ追加しない |
 
 - この棚卸しは機能差の事実を残し、後続Phaseへの割当は上記active planで管理する。割当はPhase 36のscope変更、
@@ -1304,10 +1304,16 @@ LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り�
   3+10反復性能、fixed llama.cpp E1比較、10,001/2 rocprofv3、VM外raw退避を確認した。ユーザー決定で当初のconditional
   extensionをscopeから削除し、9B、Gemma/MoE、長時間安定性をPASS claimへ含めずcloseした。
   詳細は[Phase 36 archive](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
-- 次の番号付き作業はPhase 37とする。MI300X VMは削除済みなので、再確保前はgfx942 compile/selector/oracle準備までを
-  draftとし、GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、
-  Phase 38でfresh residualを閉じる。llama.cpp比機能差はPhase 39〜48へ割り当て、MI300X VM待ちの間もhost側を独立して
-  進める。Phase 37/38のGPU完了はPhase 39以降の開始・merge gateにしない。詳細、依存、受入条件、
+- Phase 39はhost-onlyで完了した。既存profileを維持し、health/readiness、bounded Prometheus metrics、nonblocking
+  runtime-memory snapshot、redacted props/slotsとadmin cancel、digest-only複数user/admin keyとatomic reload、exact CORS、
+  Rustls、明示opt-in bounded resumable SSEを追加した。server全all-target testは62件PASS、clippyはwarning 0であり、
+  GPU correctness/performanceは主張しない。詳細は
+  [Phase 39 archive](archive/2026/08/21-31/phase39-service-operability.md)と
+  [history](../history/2026/08/21-31/phase39-service-operability.md)を正とする。
+- MI300X性能laneの次はPhase 37だが、VMは削除済みなので再確保前はgfx942 compile/selector/oracle準備までをdraftとし、
+  GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、Phase 38で
+  fresh residualを閉じる。機能laneの次はPhase 40とし、MI300X待ちの間もhost側を独立して進める。Phase 37/38のGPU完了は
+  Phase 40以降の開始・merge gateにしない。詳細、依存、受入条件、
   intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
 - Phase 36完了後のcanonical R9700 direct 10,001/2 E1比較はsLLM `3.936429665`秒、fixed llama.cpp
   `2.063845785`秒、比`1.90733x`でPASSした。同一token IDs/生成、BF16/FP16 KV、3+10の独立比較であり、

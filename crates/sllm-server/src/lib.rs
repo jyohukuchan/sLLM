@@ -6,22 +6,35 @@
 
 mod api;
 mod batching;
+mod lifecycle;
+mod metrics;
 mod production;
+mod resume;
 mod runtime;
+mod security;
 mod service;
 
 pub use api::{
     ApiErrorV1, ChatCompatibilityProfileV1, ChatCompletionRequestV1, ChatMessageV1, ErrorCodeV1,
     FinishReasonV1, ReasoningOptionsV1, TokenUsageV1,
 };
+pub use lifecycle::{ServerLifecycleStateV1, ServerLifecycleV1};
+pub use metrics::{
+    CancellationReasonV1, HttpEndpointV1, MetricsConfigError, MetricsRequestHandleV1,
+    RequestOutcomeV1, ServerMetricsV1,
+};
 pub use production::{
     Gemma4BackendConfigV1, Gemma4ChatBackendV1, ProductionRequestAuditV1,
     ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
 };
+pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{
-    BackendCompletionV1, BackendErrorV1, ChatGenerationBackendV1, GenerationDeltaSinkV1,
-    ModelRegistryEntryV1, ModelRegistryV1, SchedulerConfigV1, SchedulerV1,
+    BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
+    BackendObservabilitySnapshotV1, ChatGenerationBackendV1, GenerationDeltaSinkV1,
+    ModelRegistryEntryV1, ModelRegistryV1, SchedulerConfigV1, SchedulerSlotSnapshotV1,
+    SchedulerSlotStateV1, SchedulerSnapshotV1, SchedulerV1,
 };
+pub use security::{CredentialErrorV1, CredentialRoleV1, CredentialStoreV1};
 pub use service::{ServerConfigV1, build_router_v1};
 
 /// Version of the server dependency and ownership boundary fixed in Phase 6.

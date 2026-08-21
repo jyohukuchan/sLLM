@@ -37,7 +37,7 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | --- | --- | --- | --- |
 | 37 | ready-host-prep | gfx942 GDN・Full Attention provider parity | Phase 36 profile。実機baseline/perfはVM再確保待ち |
 | 38 | planned | MI300X residual、FNUZ/GEMM、execution replay、最終peer比較 | Phase 37 fresh profile |
-| 39 | planned | service operability・認証・observability基盤 | 現行profile v1 |
+| 39 | complete | service operability・認証・observability基盤 | 現行profile v1 |
 | 40 | planned | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
 | 41 | planned | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
 | 42 | planned | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
@@ -146,6 +146,8 @@ Phase 37後のfresh profileだけを根拠に、E2E差へ寄与するcandidate�
 
 ## Phase 39: service operability・認証・observability
 
+> 状態: complete（2026-08-21、host-only。GPU PASS claimなし）
+
 ### Scope
 
 - `/healthz`はprocess liveness、`/readyz`はmodel resident・backend受付可否を分離する。
@@ -161,6 +163,14 @@ Phase 37後のfresh profileだけを根拠に、E2E差へ寄与するcandidate�
 - health endpointはGPU処理を起動せず、readinessはfallbackで成功扱いにしない。metric scrapeはgenerationをblockせず、
   label数とmemory上限をtestで固定する。
 - TLS/CORS/auth無効時の既存local profileを維持し、有効化時だけ対応surfaceを公開する。
+
+### Closeout
+
+atomic lifecycle、bounded/redacted slot registry、admin cancel、digest-only user/admin key storeとatomic reload、exact CORS、
+Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、明示opt-in resumable SSEを実装した。
+既存HTTP contract 10件を含むserver all-target 62件をhostでPASSし、clippy warning 0を確認した。詳細は
+[archived Phase plan](../../../../archive/2026/08/21-31/phase39-service-operability.md)と
+[history](../../../../../history/2026/08/21-31/phase39-service-operability.md)を正とする。
 
 ## Phase 40: token selection・grammar・structured generation
 

@@ -306,6 +306,25 @@ standard error envelopeを一つのSSE data eventとして送り、finish chunk�
 request cancellationを発火し、scheduler timeoutとgraceful shutdownも同じflagへ伝播する。backendはbounded sink
 へのpublish前後とlong-running operationの境界でcancellationを観測し、request-local stateを解放する。
 
+Phase 39はこの単一worker境界を維持したままoperability stateを追加する。server lifecycleは
+`loading/ready/draining/failed/shutdown`をatomicに共有し、readinessは`ready`かつscheduler acceptingの場合だけ成功する。
+schedulerは非ゼロ単調slot IDとboundedな`queued/active/cancelled` registryを持つ。公開snapshotはID、model alias、stateだけで、
+prompt、token、credential、backend内部stateを所有しない。queued cancelはdequeue時にterminal cancellationとなり、active cancelは
+既存のgeneration cancellation tokenへ伝播する。
+
+通常SSEは従来どおりreceiver dropでgenerationをcancelする。明示opt-inのresumable SSEだけはgeneration receiverをbounded
+process-local replay producerへ移し、transport disconnectとgeneration lifetimeを分離する。replay event IDはsession内で単調、
+session/event数は起動時上限、active sessionはcapacity evictionしない。cursorが保持windowより古い場合は再開をfail closedにする。
+
+metrics registryは起動時の最大16 model aliasとcompile-time固定enumだけからseriesを作る。production backendのmemory観測は
+既存`ExecutionSession::memory_snapshot()`を`try_lock()`で読み、model-resident、request/KV、workspace/arena、totalの
+current/high-waterだけへlowerする。scrapeはgeneration mutexを待たず、busy/shutdown/poison時はzero snapshotとする。
+これはsLLM allocatorのdevice accountingであり、driver全体のVRAM telemetryではない。
+
+listenerはTLS無効時もTLS有効時も同じrouterとgraceful drainを使う。certificate/keyのpairとPEM、private keyのfile type・権限は
+model backendをopenする前に検証する。CORSは完全一致originのbounded allowlistだけをrouter layerへ渡し、disabled defaultでは
+layer自体を追加しない。credential storeとrole境界は[credentials](../security/credentials.md)を正とする。
+
 Phase 26ではwaiting/decode-ready、compatibility class、checked row map、round-robin、bounded prefill挿入、backpressureを
 model/device非依存に検証するhost plannerを追加したが、production schedulerへは接続していない。現行Qwen ownerの
 `committed_length`、KV state、linear/GDN stateはrequestごとのscalar contractであり、既存`M>1` decodeは一request内の

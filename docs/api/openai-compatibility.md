@@ -256,6 +256,58 @@ names is an error. All other strict field, role, content, sampling, error, and S
 rules remain unchanged. The ready event reports the selected compatibility
 profile so deployments can audit which behavior is active.
 
+## Phase 39 service operations extension
+
+Phase 39 leaves Chat Completions profile v1 unchanged when its new deployment
+features are disabled. `GET /healthz` is unauthenticated process liveness and
+does not invoke generation. `GET /readyz` is unauthenticated readiness and
+returns success only when the explicit server lifecycle is `ready` and the
+scheduler still accepts work. It never substitutes CPU execution or another
+backend for an unavailable model.
+
+The following operational endpoints are sLLM extensions, not OpenAI API
+compatibility claims:
+
+| endpoint | authorization | contract |
+| --- | --- | --- |
+| `GET /metrics` | user or admin key | opt-in bounded Prometheus exposition; absent deployments return 404 |
+| `GET /props` | user or admin key | model identity, fixed runtime-memory categories, lifecycle, scheduler and enabled features |
+| `GET /slots` | admin key | redacted bounded queued/active slot snapshot |
+| `POST /admin/slots/{id}/cancel` | admin key | cancel one known queued or active slot |
+| `POST /admin/keys/reload` | admin key | atomically reload the configured key file |
+| `GET /v1/chat/completions/{id}/events` | user or admin key | resume an explicitly resumable SSE response |
+
+`props`, slots and metrics contain no prompt text, token IDs, credential,
+request ID or backend error strings. Metric labels use only the startup model
+aliases and fixed enums. Runtime memory values are sLLM-tracked device
+allocation current/high-water values; they are not a claim about all
+driver-visible VRAM. A busy backend returns a nonblocking zero snapshot rather
+than delaying generation for a scrape.
+
+Resumable streaming is a closed opt-in request extension:
+
+```json
+{
+  "stream": true,
+  "sllm": {
+    "resumable": true
+  }
+}
+```
+
+It is rejected when `stream` is false or the server was not started with the
+feature enabled. Each buffered SSE event has a monotonic event ID. A reconnect
+supplies one decimal `Last-Event-ID`; the server emits only later events.
+Unknown streams return 404 and cursors older than the bounded replay window
+return 416. Replay is process-local and bounded by configured event count plus
+64 KiB/event and 256 KiB/session. Ordinary SSE remains
+non-resumable and keeps its existing disconnect-cancels-generation behavior.
+
+CORS is disabled by default and, when enabled, accepts only configured exact
+HTTP(S) origins—never `*`, paths, queries or userinfo. TLS is disabled by
+default; certificate and private-key paths must be configured together and are
+validated before model/backend startup.
+
 ## Deferred API surface
 
 The Responses API (`POST /v1/responses`) is planned for a future profile. It is not

@@ -2,48 +2,59 @@ use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::State;
-use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::extract::{Path, State};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderName};
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::stream::{self, Stream};
 use serde::Serialize;
+use tower_http::cors::CorsLayer;
 
 use crate::api::{
     ApiErrorV1, ChatCompatibilityProfileV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES,
     ReasoningOptionsV1, TokenUsageV1, parse_chat_completion_request_for_profile,
 };
+use crate::lifecycle::ServerLifecycleV1;
+use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1, ServerMetricsV1};
+use crate::resume::{ReplayErrorV1, ResumableStoreV1};
 use crate::runtime::{GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1};
+use crate::security::CredentialStoreV1;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, Default)]
+const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
+const MAX_CORS_ORIGINS: usize = 32;
+
+#[derive(Clone)]
 pub struct ServerConfigV1 {
-    bearer_token: Option<String>,
+    credentials: CredentialStoreV1,
     compatibility_profile: ChatCompatibilityProfileV1,
+    lifecycle: ServerLifecycleV1,
+    metrics: Option<ServerMetricsV1>,
+    replay: Option<ResumableStoreV1>,
+    cors_origins: Vec<HeaderValue>,
 }
 
 impl ServerConfigV1 {
     pub fn new(bearer_token: Option<String>) -> Result<Self, ApiErrorV1> {
-        if bearer_token.as_ref().is_some_and(|token| {
-            token.is_empty()
-                || token
-                    .bytes()
-                    .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
-        }) {
-            return Err(ApiErrorV1::generation_failed(
-                "bearer token configuration is invalid",
-            ));
-        }
+        let credentials = bearer_token
+            .map(CredentialStoreV1::from_user_key)
+            .transpose()
+            .map_err(|_| ApiErrorV1::generation_failed("bearer token configuration is invalid"))?
+            .unwrap_or_else(CredentialStoreV1::open);
         Ok(Self {
-            bearer_token,
+            credentials,
             compatibility_profile: ChatCompatibilityProfileV1::Strict,
+            lifecycle: ServerLifecycleV1::default(),
+            metrics: None,
+            replay: None,
+            cors_origins: Vec::new(),
         })
     }
 
@@ -51,6 +62,71 @@ impl ServerConfigV1 {
         let mut config = Self::new(bearer_token)?;
         config.compatibility_profile = ChatCompatibilityProfileV1::OpenWebUi;
         Ok(config)
+    }
+
+    pub fn with_credentials(mut self, credentials: CredentialStoreV1) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    pub fn with_lifecycle(mut self, lifecycle: ServerLifecycleV1) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
+    pub fn with_metrics(mut self, metrics: ServerMetricsV1) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub fn with_resumable_store(mut self, replay: ResumableStoreV1) -> Self {
+        self.replay = Some(replay);
+        self
+    }
+
+    pub fn with_cors_origins<I, S>(mut self, origins: I) -> Result<Self, ApiErrorV1>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut parsed = Vec::new();
+        for origin in origins {
+            if parsed.len() == MAX_CORS_ORIGINS {
+                return Err(ApiErrorV1::generation_failed(
+                    "CORS origin count exceeds the bounded limit",
+                ));
+            }
+            let origin = origin.as_ref();
+            let uri = origin
+                .parse::<axum::http::Uri>()
+                .map_err(|_| ApiErrorV1::generation_failed("CORS origin is invalid"))?;
+            let scheme = uri.scheme_str();
+            let authority = uri.authority();
+            let exact = scheme.zip(authority).is_some_and(|(scheme, authority)| {
+                matches!(scheme, "http" | "https")
+                    && !authority.as_str().contains('@')
+                    && origin == format!("{scheme}://{authority}")
+            });
+            if !exact {
+                return Err(ApiErrorV1::generation_failed(
+                    "CORS origins must be exact HTTP(S) origins",
+                ));
+            }
+            let value = HeaderValue::from_str(origin)
+                .map_err(|_| ApiErrorV1::generation_failed("CORS origin is invalid"))?;
+            if parsed.contains(&value) {
+                return Err(ApiErrorV1::generation_failed("CORS origins must be unique"));
+            }
+            parsed.push(value);
+        }
+        self.cors_origins = parsed;
+        Ok(self)
+    }
+}
+
+impl Default for ServerConfigV1 {
+    fn default() -> Self {
+        Self::new(None).expect("open server configuration is valid")
     }
 }
 
@@ -66,48 +142,219 @@ pub fn build_router_v1(
     scheduler: SchedulerV1,
     config: ServerConfigV1,
 ) -> Router {
+    if let Some(metrics) = &config.metrics {
+        let ready = config.lifecycle.is_ready() && scheduler.is_accepting();
+        for entry in registry.entries() {
+            metrics.set_model_ready(entry.alias(), ready);
+        }
+    }
+    let cors_origins = config.cors_origins.clone();
     let state = Arc::new(AppStateV1 {
         registry,
         scheduler,
         config,
     });
-    Router::new()
+    let router = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/props", get(props))
+        .route("/slots", get(slots))
+        .route("/admin/slots/{id}/cancel", post(cancel_slot))
+        .route("/admin/keys/reload", post(reload_keys))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(create_chat_completion))
-        .with_state(state)
+        .route(
+            "/v1/chat/completions/{id}/events",
+            get(resume_chat_completion),
+        )
+        .with_state(state);
+    if cors_origins.is_empty() {
+        router
+    } else {
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(cors_origins)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([AUTHORIZATION, CONTENT_TYPE, LAST_EVENT_ID]),
+        )
+    }
+}
+
+async fn healthz(State(state): State<Arc<AppStateV1>>) -> Response {
+    let response = axum::Json(serde_json::json!({
+        "status": "ok",
+        "state": state.config.lifecycle.state(),
+    }))
+    .into_response();
+    record_http(&state, HttpEndpointV1::Healthz, &response);
+    response
+}
+
+async fn readyz(State(state): State<Arc<AppStateV1>>) -> Response {
+    let ready = state.config.lifecycle.is_ready() && state.scheduler.is_accepting();
+    if let Some(metrics) = &state.config.metrics {
+        for entry in state.registry.entries() {
+            metrics.set_model_ready(entry.alias(), ready);
+        }
+    }
+    let status = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let response = (
+        status,
+        axum::Json(serde_json::json!({
+            "status": if ready { "ready" } else { "not_ready" },
+            "state": state.config.lifecycle.state(),
+            "scheduler_accepting": state.scheduler.is_accepting(),
+        })),
+    )
+        .into_response();
+    record_http(&state, HttpEndpointV1::Readyz, &response);
+    response
+}
+
+async fn metrics(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
+    let response = if let Err(error) = authorize_user(&headers, &state.config) {
+        error.into_response()
+    } else if let Some(metrics) = &state.config.metrics {
+        let ready = state.config.lifecycle.is_ready() && state.scheduler.is_accepting();
+        for entry in state.registry.entries() {
+            metrics.set_model_ready(entry.alias(), ready);
+        }
+        let memory = state
+            .registry
+            .entries()
+            .iter()
+            .map(|entry| (entry.alias(), entry.observability_snapshot()))
+            .collect::<Vec<_>>();
+        (
+            StatusCode::OK,
+            [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+            metrics.render_with_memory(&state.scheduler.snapshot(), &memory),
+        )
+            .into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    };
+    record_http(&state, HttpEndpointV1::Metrics, &response);
+    response
+}
+
+async fn props(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
+    let response = if let Err(error) = authorize_user(&headers, &state.config) {
+        error.into_response()
+    } else {
+        let models = state
+            .registry
+            .entries()
+            .iter()
+            .map(|entry| {
+                serde_json::json!({
+                    "alias": entry.alias(),
+                    "lock_fingerprint": entry.lock_fingerprint(),
+                    "runtime_memory": entry.observability_snapshot(),
+                })
+            })
+            .collect::<Vec<_>>();
+        axum::Json(serde_json::json!({
+            "schema_version": "sllm-server-props-v1",
+            "state": state.config.lifecycle.state(),
+            "models": models,
+            "scheduler": state.scheduler.snapshot(),
+            "features": {
+                "metrics": state.config.metrics.is_some(),
+                "resumable_sse": state.config.replay.is_some(),
+                "cors": !state.config.cors_origins.is_empty(),
+                "authentication": !state.config.credentials.is_open(),
+                "admin": state.config.credentials.has_admin_credentials(),
+            }
+        }))
+        .into_response()
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn slots(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        axum::Json(state.scheduler.snapshot()).into_response()
+    };
+    record_http(&state, HttpEndpointV1::Slots, &response);
+    response
+}
+
+async fn cancel_slot(
+    State(state): State<Arc<AppStateV1>>,
+    Path(id): Path<u64>,
+    headers: HeaderMap,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else if state.scheduler.cancel_slot(id) {
+        axum::Json(serde_json::json!({"id": id, "state": "cancelled"})).into_response()
+    } else {
+        ApiErrorV1::slot_not_found().into_response()
+    };
+    record_http(&state, HttpEndpointV1::SlotCancel, &response);
+    response
+}
+
+async fn reload_keys(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.credentials.reload() {
+            Ok(()) => axum::Json(serde_json::json!({"state": "reloaded"})).into_response(),
+            Err(_) => ApiErrorV1::generation_failed("credential reload failed").into_response(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::KeysReload, &response);
+    response
 }
 
 async fn list_models(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
-    if let Err(error) = authorize(&headers, &state.config) {
-        return error.into_response();
-    }
-    let data = state
-        .registry
-        .entries()
-        .iter()
-        .map(|entry| ModelObjectV1 {
-            id: entry.alias(),
-            object: "model",
-            created: entry.created(),
-            owned_by: entry.owned_by(),
+    let response = if let Err(error) = authorize_user(&headers, &state.config) {
+        error.into_response()
+    } else {
+        let data = state
+            .registry
+            .entries()
+            .iter()
+            .map(|entry| ModelObjectV1 {
+                id: entry.alias(),
+                object: "model",
+                created: entry.created(),
+                owned_by: entry.owned_by(),
+            })
+            .collect();
+        axum::Json(ModelListV1 {
+            object: "list",
+            data,
         })
-        .collect();
-    axum::Json(ModelListV1 {
-        object: "list",
-        data,
-    })
-    .into_response()
+        .into_response()
+    };
+    record_http(&state, HttpEndpointV1::Models, &response);
+    response
 }
 
 async fn create_chat_completion(
     State(state): State<Arc<AppStateV1>>,
     request: Request<Body>,
 ) -> Response {
-    if let Err(error) = authorize(request.headers(), &state.config) {
-        return error.into_response();
+    if let Err(error) = authorize_user(request.headers(), &state.config) {
+        let response = error.into_response();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
     }
     if let Err(error) = validate_content_type(request.headers()) {
-        return error.into_response();
+        let response = error.into_response();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
     }
     if request
         .headers()
@@ -116,34 +363,98 @@ async fn create_chat_completion(
         .and_then(|value| value.parse::<u64>().ok())
         .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES as u64)
     {
-        return request_too_large();
+        let response = request_too_large();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
     }
     let body = match to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
-        Err(_) => return request_too_large(),
+        Err(_) => {
+            let response = request_too_large();
+            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+            return response;
+        }
     };
     let request = match parse_chat_completion_request_for_profile(
         &body,
         state.config.compatibility_profile,
     ) {
         Ok(request) => request,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            let response = error.into_response();
+            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+            return response;
+        }
     };
+    if request.resumable() && state.config.replay.is_none() {
+        let response = ApiErrorV1::invalid_value(
+            "sllm.resumable",
+            "resumable streaming is not enabled on this server",
+        )
+        .into_response();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
+    }
     let model = match state.registry.get(request.model()) {
         Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+        None => {
+            let response = ApiErrorV1::model_not_found(request.model()).into_response();
+            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+            return response;
+        }
     };
     let context = ResponseContextV1::new(model.alias(), request.reasoning());
     let stream_response = request.stream();
+    let resumable = request.resumable();
+    let reserved_replay = if stream_response && resumable {
+        let replay = state
+            .config
+            .replay
+            .clone()
+            .expect("resumable feature availability was validated before admission");
+        if replay.create(&context.id).is_err() {
+            if let Some(metrics) = &state.config.metrics {
+                metrics.record_rejected(&context.model, stream_response);
+            }
+            let response = ApiErrorV1::rate_limited().into_response();
+            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+            return response;
+        }
+        Some(replay)
+    } else {
+        None
+    };
     let receiver = match state.scheduler.submit(model, request) {
         Ok(receiver) => receiver,
-        Err(error) => return error.into_response(),
+        Err(error) => {
+            if let Some(replay) = &reserved_replay {
+                replay.discard(&context.id);
+            }
+            if let Some(metrics) = &state.config.metrics {
+                metrics.record_rejected(&context.model, stream_response);
+            }
+            let response = error.into_response();
+            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+            return response;
+        }
     };
-    if stream_response {
-        stream_chat_completion(receiver, context).into_response()
+    let request_metrics = state
+        .config
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.admit(&context.model, stream_response));
+    let response = if stream_response && resumable {
+        let replay =
+            reserved_replay.expect("resumable replay was reserved before scheduler admission");
+        spawn_resumable_producer(receiver, context.clone(), replay.clone(), request_metrics);
+        replay_stream(replay, context.id.clone(), 0).into_response()
+    } else if stream_response {
+        stream_chat_completion(receiver, context, request_metrics).into_response()
     } else {
-        non_stream_chat_completion(receiver, context).await
-    }
+        non_stream_chat_completion(receiver, context, request_metrics).await
+    };
+    record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+    response
 }
 
 fn request_too_large() -> Response {
@@ -157,14 +468,24 @@ fn request_too_large() -> Response {
     .into_response()
 }
 
-fn authorize(headers: &HeaderMap, config: &ServerConfigV1) -> Result<(), ApiErrorV1> {
-    let Some(expected) = config.bearer_token.as_deref() else {
-        return Ok(());
-    };
-    let accepted = headers
-        .get(AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value == format!("Bearer {expected}"));
+fn authorize_user(headers: &HeaderMap, config: &ServerConfigV1) -> Result<(), ApiErrorV1> {
+    authorize(headers, config, false)
+}
+
+fn authorize_admin(headers: &HeaderMap, config: &ServerConfigV1) -> Result<(), ApiErrorV1> {
+    authorize(headers, config, true)
+}
+
+fn authorize(headers: &HeaderMap, config: &ServerConfigV1, admin: bool) -> Result<(), ApiErrorV1> {
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let first = values.next().and_then(|value| value.to_str().ok());
+    let unique = values.next().is_none();
+    let accepted = unique
+        && if admin {
+            config.credentials.authorize_admin(first)
+        } else {
+            config.credentials.authorize_user(first)
+        };
     if accepted {
         Ok(())
     } else {
@@ -175,6 +496,12 @@ fn authorize(headers: &HeaderMap, config: &ServerConfigV1) -> Result<(), ApiErro
             None,
             ErrorCodeV1::InvalidApiKey,
         ))
+    }
+}
+
+fn record_http(state: &AppStateV1, endpoint: HttpEndpointV1, response: &Response) {
+    if let Some(metrics) = &state.config.metrics {
+        metrics.record_http(endpoint, response.status().as_u16());
     }
 }
 
@@ -200,6 +527,7 @@ fn validate_content_type(headers: &HeaderMap) -> Result<(), ApiErrorV1> {
 async fn non_stream_chat_completion(
     mut receiver: GenerationReceiverV1,
     context: ResponseContextV1,
+    mut metrics: Option<MetricsRequestHandleV1>,
 ) -> Response {
     let mut splitter = ReasoningSplitterV1::new(context.reasoning);
     let mut content = String::new();
@@ -207,9 +535,20 @@ async fn non_stream_chat_completion(
     while let Some(event) = receiver.recv().await {
         match event {
             SchedulerEventV1::Delta(delta) => {
+                if let Some(metrics) = &mut metrics {
+                    metrics.observe_ttft_since_start();
+                }
                 append_split_parts(splitter.feed(&delta), &mut content, &mut reasoning_content);
             }
             SchedulerEventV1::Finished(completion) => {
+                if let Some(metrics) = &mut metrics {
+                    metrics.observe_ttft_since_start();
+                    metrics.record_tokens(
+                        completion.usage.prompt_tokens,
+                        completion.usage.completion_tokens,
+                    );
+                    metrics.finish(RequestOutcomeV1::Success);
+                }
                 append_split_parts(splitter.finish(), &mut content, &mut reasoning_content);
                 return axum::Json(ChatCompletionResponseV1 {
                     id: &context.id,
@@ -233,8 +572,16 @@ async fn non_stream_chat_completion(
                 })
                 .into_response();
             }
-            SchedulerEventV1::Failed(error) => return error.into_response(),
+            SchedulerEventV1::Failed(error) => {
+                if let Some(metrics) = &mut metrics {
+                    metrics.finish(RequestOutcomeV1::Error);
+                }
+                return error.into_response();
+            }
         }
+    }
+    if let Some(metrics) = &mut metrics {
+        metrics.finish(RequestOutcomeV1::Error);
     }
     ApiErrorV1::generation_failed("generation ended without a terminal event").into_response()
 }
@@ -242,6 +589,7 @@ async fn non_stream_chat_completion(
 fn stream_chat_completion(
     receiver: GenerationReceiverV1,
     context: ResponseContextV1,
+    metrics: Option<MetricsRequestHandleV1>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let reasoning = context.reasoning;
     let state = StreamStateV1 {
@@ -251,6 +599,7 @@ fn stream_chat_completion(
         queued: VecDeque::new(),
         terminal: false,
         splitter: ReasoningSplitterV1::new(reasoning),
+        metrics,
     };
     Sse::new(stream::unfold(state, |mut state| async move {
         loop {
@@ -267,12 +616,23 @@ fn stream_chat_completion(
             }
             match state.receiver.recv().await {
                 Some(SchedulerEventV1::Delta(delta)) => {
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.observe_ttft_since_start();
+                    }
                     for part in state.splitter.feed(&delta) {
                         let chunk = StreamChunkV1::delta(&state.context, &part);
                         state.queued.push_back(json_event(&chunk));
                     }
                 }
                 Some(SchedulerEventV1::Finished(completion)) => {
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.observe_ttft_since_start();
+                        metrics.record_tokens(
+                            completion.usage.prompt_tokens,
+                            completion.usage.completion_tokens,
+                        );
+                        metrics.finish(RequestOutcomeV1::Success);
+                    }
                     for part in state.splitter.finish() {
                         let chunk = StreamChunkV1::delta(&state.context, &part);
                         state.queued.push_back(json_event(&chunk));
@@ -287,15 +647,252 @@ fn stream_chat_completion(
                     state.terminal = true;
                 }
                 Some(SchedulerEventV1::Failed(error)) => {
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
                     state.terminal = true;
                     return Some((Ok(json_event(&error.envelope())), state));
                 }
                 None => {
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
                     state.terminal = true;
                     let error =
                         ApiErrorV1::generation_failed("generation ended without a terminal event");
                     return Some((Ok(json_event(&error.envelope())), state));
                 }
+            }
+        }
+    }))
+}
+
+async fn resume_chat_completion(
+    State(state): State<Arc<AppStateV1>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let response = if let Err(error) = authorize_user(&headers, &state.config) {
+        error.into_response()
+    } else if let Some(replay) = state.config.replay.clone() {
+        match parse_last_event_id(&headers) {
+            Ok(cursor) => match replay.read_after(&id, cursor) {
+                Ok(_) => replay_stream(replay, id, cursor).into_response(),
+                Err(ReplayErrorV1::NotFound) => ApiErrorV1::replay_not_found().into_response(),
+                Err(ReplayErrorV1::CursorOutOfRange) => {
+                    ApiErrorV1::replay_out_of_range().into_response()
+                }
+                Err(
+                    ReplayErrorV1::Capacity
+                    | ReplayErrorV1::EventTooLarge
+                    | ReplayErrorV1::IdentifierExhausted
+                    | ReplayErrorV1::Terminal,
+                ) => {
+                    ApiErrorV1::generation_failed("resumable stream is unavailable").into_response()
+                }
+            },
+            Err(error) => error.into_response(),
+        }
+    } else {
+        ApiErrorV1::replay_not_found().into_response()
+    };
+    record_http(&state, HttpEndpointV1::ChatReplay, &response);
+    response
+}
+
+fn parse_last_event_id(headers: &HeaderMap) -> Result<u64, ApiErrorV1> {
+    let mut values = headers.get_all(&LAST_EVENT_ID).iter();
+    let Some(first) = values.next() else {
+        return Ok(0);
+    };
+    if values.next().is_some() {
+        return Err(ApiErrorV1::invalid_value(
+            "Last-Event-ID",
+            "Last-Event-ID must occur at most once",
+        ));
+    }
+    let value = first
+        .to_str()
+        .ok()
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .ok_or_else(|| {
+            ApiErrorV1::invalid_value(
+                "Last-Event-ID",
+                "Last-Event-ID must be an unsigned decimal integer",
+            )
+        })?;
+    value.parse::<u64>().map_err(|_| {
+        ApiErrorV1::invalid_value(
+            "Last-Event-ID",
+            "Last-Event-ID is outside the supported range",
+        )
+    })
+}
+
+fn spawn_resumable_producer(
+    mut receiver: GenerationReceiverV1,
+    context: ResponseContextV1,
+    replay: ResumableStoreV1,
+    mut metrics: Option<MetricsRequestHandleV1>,
+) {
+    tokio::spawn(async move {
+        let role = StreamChunkV1::role(&context);
+        if append_replay_json(&replay, &context.id, &role, false).is_err() {
+            if let Some(metrics) = &mut metrics {
+                metrics.finish(RequestOutcomeV1::Error);
+            }
+            terminate_replay_with_error(&replay, &context.id);
+            return;
+        }
+        let mut splitter = ReasoningSplitterV1::new(context.reasoning);
+        while let Some(event) = receiver.recv().await {
+            match event {
+                SchedulerEventV1::Delta(delta) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.observe_ttft_since_start();
+                    }
+                    for part in splitter.feed(&delta) {
+                        let chunk = StreamChunkV1::delta(&context, &part);
+                        if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                            if let Some(metrics) = &mut metrics {
+                                metrics.finish(RequestOutcomeV1::Error);
+                            }
+                            terminate_replay_with_error(&replay, &context.id);
+                            return;
+                        }
+                    }
+                }
+                SchedulerEventV1::Finished(completion) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.observe_ttft_since_start();
+                        metrics.record_tokens(
+                            completion.usage.prompt_tokens,
+                            completion.usage.completion_tokens,
+                        );
+                    }
+                    for part in splitter.finish() {
+                        let chunk = StreamChunkV1::delta(&context, &part);
+                        if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                            if let Some(metrics) = &mut metrics {
+                                metrics.finish(RequestOutcomeV1::Error);
+                            }
+                            terminate_replay_with_error(&replay, &context.id);
+                            return;
+                        }
+                    }
+                    let chunk = StreamChunkV1::finished(
+                        &context,
+                        completion.finish_reason,
+                        completion.usage,
+                    );
+                    if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        terminate_replay_with_error(&replay, &context.id);
+                        return;
+                    }
+                    if replay
+                        .append(&context.id, "[DONE]".to_owned(), true)
+                        .is_err()
+                    {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        terminate_replay_with_error(&replay, &context.id);
+                        return;
+                    }
+                    if let Some(metrics) = &mut metrics {
+                        metrics.finish(RequestOutcomeV1::Success);
+                    }
+                    return;
+                }
+                SchedulerEventV1::Failed(error) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
+                    let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| {
+                        r#"{"error":{"message":"response serialization failed","type":"server_error","param":null,"code":"generation_failed"}}"#.to_owned()
+                    });
+                    if replay.append(&context.id, data, true).is_err() {
+                        replay.terminate(&context.id);
+                    }
+                    return;
+                }
+            }
+        }
+        if let Some(metrics) = &mut metrics {
+            metrics.finish(RequestOutcomeV1::Error);
+        }
+        let error = ApiErrorV1::generation_failed("generation ended without a terminal event");
+        let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| "{}".to_owned());
+        if replay.append(&context.id, data, true).is_err() {
+            replay.terminate(&context.id);
+        }
+    });
+}
+
+fn terminate_replay_with_error(replay: &ResumableStoreV1, id: &str) {
+    let error = ApiErrorV1::generation_failed("resumable replay limit exceeded");
+    let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| {
+        r#"{"error":{"message":"resumable replay failed","type":"server_error","param":null,"code":"generation_failed"}}"#.to_owned()
+    });
+    if replay.append(id, data, true).is_err() {
+        replay.terminate(id);
+    }
+}
+
+fn append_replay_json(
+    replay: &ResumableStoreV1,
+    id: &str,
+    value: &impl Serialize,
+    terminal: bool,
+) -> Result<u64, ReplayErrorV1> {
+    let data = serde_json::to_string(value).map_err(|_| ReplayErrorV1::Terminal)?;
+    replay.append(id, data, terminal)
+}
+
+struct ReplayStreamStateV1 {
+    replay: ResumableStoreV1,
+    id: String,
+    cursor: u64,
+    queued: VecDeque<crate::resume::ReplayEventV1>,
+    terminal: bool,
+}
+
+fn replay_stream(
+    replay: ResumableStoreV1,
+    id: String,
+    cursor: u64,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let state = ReplayStreamStateV1 {
+        replay,
+        id,
+        cursor,
+        queued: VecDeque::new(),
+        terminal: false,
+    };
+    Sse::new(stream::unfold(state, |mut state| async move {
+        loop {
+            if let Some(event) = state.queued.pop_front() {
+                state.cursor = event.id;
+                return Some((
+                    Ok(Event::default().id(event.id.to_string()).data(event.data)),
+                    state,
+                ));
+            }
+            if state.terminal {
+                return None;
+            }
+            match state.replay.read_after(&state.id, state.cursor) {
+                Ok(read) => {
+                    state.terminal = read.terminal;
+                    state.queued.extend(read.events);
+                    if state.queued.is_empty() && !state.terminal {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }
+                Err(_) => return None,
             }
         }
     }))
@@ -467,6 +1064,7 @@ struct StreamStateV1 {
     queued: VecDeque<Event>,
     terminal: bool,
     splitter: ReasoningSplitterV1,
+    metrics: Option<MetricsRequestHandleV1>,
 }
 
 #[derive(Clone, Debug)]
