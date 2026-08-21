@@ -77,6 +77,45 @@ import:
   commit: 6444555cc2dab919bd98994c1e2cfb3941969ed1
 ```
 
+## llama-cpp-phase35-gdn-column-state-001
+
+The Phase 35 long-prefill GDN provider adapts llama.cpp's column-owned
+recurrent-state organization. sLLM retains its own Qwen graph, BF16 and FP32
+contracts, transactional state publication, target dispatch, and host runtime.
+
+```yaml
+schema_version: 1
+id: llama-cpp-phase35-gdn-column-state-001
+component: sLLM Qwen3.5 long-prefill GDN column-state provider
+upstream:
+  repository: https://github.com/ggml-org/llama.cpp
+  commit: f5919bf458ef190468b5c329bb293f8a54a1e69c
+  sources:
+    - path: ggml/src/ggml-cuda/gated_delta_net.cu
+      git_blob: 1b431a724d7237121dea29ca9c82bcd4817337a7
+      sha256: fe5cfe4a35195fac999e8bd93d3ed18c68830096d4019bafa60e5da91d6ef4bf
+      url: https://github.com/ggml-org/llama.cpp/blob/f5919bf458ef190468b5c329bb293f8a54a1e69c/ggml/src/ggml-cuda/gated_delta_net.cu
+local:
+  files:
+    - path: native/hip/src/linear_attention_kernel.hip.cpp
+      imported_sha256: cf8e8aafa5e7e64c8fe5bc082912b5b8a328d0a9ed407965d6782cad72b3bc4a
+copyright:
+  - Copyright (c) 2023-2026 The ggml authors
+license:
+  spdx: MIT
+  file: docs/provenance/licenses/llama.cpp-MIT-f5919bf4.txt
+  upstream_blob: e7dca554bcb802f98408383a864404e3aa4eacca
+  sha256: 94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d
+reuse:
+  mode: adapted
+  modifications:
+    - Adapted state-column ownership to a fixed wave32 x 4 HIP workgroup and sLLM's existing exact-target physical state mapping.
+    - Split normalization, recurrent update, and output postprocessing into sLLM-owned kernels with BF16 RNE boundaries and FP32 state.
+    - Preserved transactional next-state publication, existing short/decode routing, public ABI, cleanup contract, and gfx1030/gfx1201 common source path.
+import:
+  commit: bca482251bd21b144d950956af39a769c4211417
+```
+
 ## llama-cpp-profile-v1-sampling-001
 
 Portions of the profile-v1 sampler were ported from llama.cpp.

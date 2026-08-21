@@ -257,6 +257,18 @@ sLLM既存execution/KV contractから独立実装した。SGLang、vLLM、llama.
 copy、adapt、portしていない。従って新規import eventと`THIRD_PARTY_NOTICES.md` entryはない。model、binary、raw trace、
 生成全文はrepositoryへ含めず、bounded aggregateとidentityだけを追跡する。
 
+## Phase 35 Full Attention and GDN implementation record
+
+Phase 35のFull Attention Q_TILE=4 providerはsLLM既存Phase 33 kernel、opaque KV contract、独立scalar oracleを基に実装し、
+新しい外部source expressionをcopy、adapt、portしていない。GDN column-state providerはllama.cpp commit
+`f5919bf458ef190468b5c329bb293f8a54a1e69c`の`ggml/src/ggml-cuda/gated_delta_net.cu`にあるcolumn ownership、
+register state shard、wave reductionの近接構造をbounded adaptationしたため、新規notice
+`llama-cpp-phase35-gdn-column-state-001`へ記録した。既存`llama-cpp-phase9-gdn-layout-001`のlayout-only eventは上書きしない。
+sLLMのBF16/FP32 round stage、exact-target state mapping、transaction、runtime、short/decode complementへ合わせて変更し、
+ggml tensor/runtimeやgeneric CUDA dispatchは移植していない。import commitは
+`bca482251bd21b144d950956af39a769c4211417`、導入時local file SHA-256は
+`cf8e8aafa5e7e64c8fe5bc082912b5b8a328d0a9ed407965d6782cad72b3bc4a`へ固定した。model、binary、raw trace、生成全文はrepositoryへ含めない。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

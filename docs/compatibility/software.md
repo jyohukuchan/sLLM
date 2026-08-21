@@ -361,6 +361,14 @@ existing hipBLAS routeを追加し、10,001-token FP16 KV full model、両target
 wrong-target拒否をPASSした。software lifecycleは`experimental`のままで、別ROCm/compiler/driver、別SKU/model shape、
 library solutionの安定性へ一般化しない。[Phase 34 summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
 
+### 2026-08-20 Phase 35 long-context Full Attention/GDN tuple
+
+Phase 34と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、
+LLVM 23、Code Object V6、wave32 tupleでcanonical exact gfx1030/gfx1201をtarget別release buildした。
+Full Attention 232 case、GDN 12 case、10,001-input combined full model、wrong-target拒否をfinal sourceでPASSし、
+gfx942 wave64はcompile-onlyを通した。software lifecycleは`experimental`のままで、別ROCm/compiler/driver、別SKU/model shape、
+長時間運転、gfx942実行へ一般化しない。[Phase 35 summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

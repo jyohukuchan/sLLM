@@ -55,6 +55,53 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-20-P35-A: Full Attention Q_TILE=4 query-row共有（N1・限定採用）
+
+- scope: exact `gfx1030`/`gfx1201`、Qwen系causal/full attention、`M>=128`、Q heads 16、KV heads 4、
+  head dim 256、FP16/dynamic FP8/static FP8/NVFP4 KV。短M、decode、別shape/targetは既存providerを維持する。
+- baseline: Phase 33 C2が1 query row × 1 KV head/workgroupでK/VをGQA 4 headへ共有する。
+- candidate: 1 workgroupが4 query row × GQA 4 headを所有し、K/Vを16 logical queryへ共有する。各logical queryの
+  causal key集合、key順online softmax、FP32 maximum/denominator/weighted V、BF16 RNE出力は独立に維持する。
+- 分類: **N1**。QKは同じ256項を8 value/laneの固定treeとwave32 treeで加算し、Phase 33 C2の概ね8段を超えない。
+  real-number式、入力集合、dtype、丸めstageは同じで、標準worst-case boundは非増加である。
+- correctness: 2 target × 4 KV encoding × 29 caseの232/232 PASS。M=127/128/129、255/256/257、nonzero start、
+  long-prefix decode、NaN/+Inf/subnormalを含み、最大絶対誤差はFP16 `2.3841858e-7`、FP8 `4.7683716e-7`、
+  NVFP4 `1.1641532e-9`、fallback/cleanup 0だった。
+- output影響: fixed 10,001 input / 2 outputはbaseline/candidateとも`[2064,5686]`。将来の差は同じ項の固定tree順へ
+  局所化できる範囲だけN1とし、説明不能・非決定差はN3とする。
+- 性能/resource: V620 profileのFull Attentionは10.820秒から4.110秒へ62.02%短縮し、Attention-only E2Eは
+  V620 19.31%、R9700 8.59%短縮。global scratch、追加dispatch、KV mirrorは0、arena high-waterは不変。
+- 決定: 担当AI裁量で両target共通のshape限定採用。M=64/65のV620候補悪化を避けるため境界を128とし、
+  Phase 33 providerを明示complementにする。固定改善率は使用しない。
+- rollback: `SLLM_CAUSAL_ATTENTION_FORCE_BASELINE=1`相当のselectionへ戻し、Q_TILE=4 symbol/launchを除去する。
+- 詳細: [Phase 35履歴](../history/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)、
+  [bounded summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)。
+
+### OUT-2026-08-20-P35-G: GDN column-owned recurrent state（N1・限定採用）
+
+- scope: exact `gfx1030`/`gfx1201`、Qwen3.5 GDN、token count 128以上、Q/K heads 16、value heads 32、
+  head/state dim 128、BF16 activation、FP32 recurrent state。短prefill/decodeはPhase 28/29 providerを維持する。
+- baseline: value head当たり1 workgroupで、threadが1 output columnを所有し、128 state rowを逐次走査する。
+- candidate: preprocessでQ/K normとbeta/decayを一度生成し、1,024 workgroup相当のcolumn-owned recurrent kernelで
+  lane当たり4 state rowをregisterに保持し、postprocessで既存output RMSNorm/z SiLUを適用する。targetごとの既存物理state
+  index mappingとtransactional previous/next publicationは変えない。
+- 分類: **N1**。state transpose/migrationや項の欠落はない。`S^T k`/`S^T q`の同じ128 FP32項を逐次依存127から
+  4項local + wave32 treeの概ね8段へ短縮し、標準worst-case boundは非増加である。Q/K、beta、raw output、normalized outputの
+  BF16 round stage、decay/state update式は維持する。
+- correctness: 両targetでtoken 1/3/17/127/128/129を独立oracleへ照合し12/12 PASS。最大絶対/相対誤差は
+  `0.00390625`/`0.014705882`、next-state publication一致、fallback/cleanup 0だった。
+- output影響: fixed 10,001 input / 2 outputは`[2064,5686]`を維持した。将来の差はrecurrent projectionの固定tree順へ
+  局所化できる範囲だけN1とし、state/publication差はcorrectness blockerとする。
+- 性能/resource: V620 GDN familyは約7.672秒から0.618秒へ91.95%短縮しfixed llama.cpp 0.622秒と概ね同等になった。
+  GDN-only E2EはV620 19.84%、R9700 7.17%短縮。10,001 tokenでbeta/decay FP32 planeを2,560,256 byte/layer、
+  24 layer合計61,446,144 byte追加し、
+  1 layer当たりdispatchは2から4、full-modelは984から1,032へ増えたがarena high-waterは不変だった。
+- 決定: 担当AI裁量で両target共通のshape限定採用。絶対短縮、N1、peer parity、既存state layout再利用、短経路complementを
+  総合し、追加2 dispatchの費用を上回ると判断した。
+- rollback: `SLLM_GDN_FORCE_BASELINE=1`相当のselectionへ戻し、preprocess/recurrent/postprocessの3 candidate kernelを除去する。
+- 詳細: [Phase 35履歴](../history/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)、
+  [bounded summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)。
+
 ### OUT-2026-08-20-P34: gfx1030長行BF16 matmul hipBLAS route（N1・限定採用）
 
 - scope: exact `gfx1030`、Qwen3.5-4B内部BF16 projection。主要5 shapeは`M>=128`、`K=2560,N=1024`は

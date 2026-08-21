@@ -262,6 +262,17 @@ QK reductionの依存深さが概ね8段から12段へ増えるN2である。独
 2026-08-20のユーザー承認によりN2分類を維持したままproductionへ限定採用した。KV長1,023以下とscope外target/head shapeは
 Phase 30またはbaseline providerを選ぶ。
 
+Phase 35は同じopaque KV stateとsemantic opの内側で、exact gfx1030/gfx1201の`query_count>=128`を
+4 query row × 1 KV head/workgroupへrouteする。8 waveが16 logical `(row,GQA head)`を分担し、各K/V elementを一度だけ
+decodeして共有する。causal key集合、logical queryごとのonline softmax、FP32 accumulator、BF16 RNE outputは維持し、
+global scratch、追加dispatch、KV layout変更はない。`query_count<=127`、decode、別shape/targetはPhase 33以前のproviderを選ぶ。
+
+同PhaseのGDN long-prefill providerはtoken count 128以上でQ/K normalizationとbeta/decay、column-owned recurrent state、
+output RMSNorm/z gateを4 dispatch familyへ分ける。recurrent gridはQwen shapeで1,024 workgroup、各waveが1 state columnの
+128行をlane当たり4 FP32 registerへ保持してtoken順に更新する。既存のtarget別物理state index、previous/next transaction、
+conv state、short/decode providerを維持し、10,001 tokenで追加するrequest scratchはbeta/decayの2 FP32 planeだけである。
+診断用baseline overrideはpublic APIや実行失敗後fallbackではない。
+
 ## Generation service境界
 
 Phase 6ではrender/tokenize/prefill/decode/sampling/stop/usageを`GenerationServiceV1`へ集約する。CLIとHTTP

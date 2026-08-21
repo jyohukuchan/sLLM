@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-16
+> 最終更新: 2026-08-20
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
 
@@ -422,6 +422,20 @@ scope外shapeは旧providerへ残す。canonical R9700 UUID `GPU-a8e9ddefa2d60f5
 selected solutionはGSU1、global atomic combineなしで、stress oracleのbound違反は0だった。gfx942はcompile-only、gfx1201 binaryの
 V620 loadはexact target mismatchで拒否された。この証拠を別V620/RDNA2 SKU、別model shape、ROCm version、N=32やunknown shapeへ
 一般化しない。[Phase 34 summary](../../ci/matrix/phase34-v620-prefill-matmul-summary-v1.json)を正とする。
+
+### 2026-08-20 Phase 35 long-context Full Attention/GDN evidence
+
+canonical V620 exact `gfx1030`とR9700 exact `gfx1201`へ同じupper sourceの二providerを限定採用した。Full Attentionは
+GQA4/head dim 256の`M>=128`をQ_TILE=4へ送り、4 query rowがK/V decodeを共有する。GDNはQ/K 16、value 32、
+head dim 128のtoken count 128以上を1,024-workgroup column-state pipelineへ送る。短M/decode、別shape/targetは既存routeを
+維持し、runtime error後fallback、KV/state layout migration、global attention scratch、weight repackは追加していない。
+
+両target・4 KV encoding・各29 caseのFull Attention 232/232と、両target・token 1/3/17/127/128/129のGDN 12/12を
+独立oracleでPASSした。final 10,001 input / 2 outputのcombined E2EはV620 34.861秒から22.683秒へ34.93%、
+R9700 75.349秒から65.214秒へ13.45%短縮し、token `[2064,5686]`、HIP-only、fallback false、cleanup 0、arena不変だった。
+V620 profileではFull Attentionが10.820秒から4.110秒、GDN familyが約7.672秒から0.618秒となった。これはexact tupleと
+Qwen3.5-4B固定shapeの証拠であり、別SKU/model/ROCmやFull Attention peer parityへ一般化しない。
+[Phase 35 summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
 
 ## 将来AMD候補
 

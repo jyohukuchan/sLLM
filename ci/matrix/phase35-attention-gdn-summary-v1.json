@@ -164,8 +164,8 @@
     "attention": "sLLM existing Phase 33 provider structure; no new external source expression",
     "gdn_notice": "llama-cpp-phase35-gdn-column-state-001",
     "upstream_commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
-    "import_identity": "pending-phase35-import-commit",
-    "release_action": "replace pending import commit and imported SHA-256 before release or distribution"
+    "import_identity": "bca482251bd21b144d950956af39a769c4211417",
+    "release_action": "resolved against the Phase 35 implementation import commit and imported SHA-256"
   },
   "limitations": [
     "Performance evidence is bounded to ROCm 7.14, one exact V620, one exact R9700, and the fixed Qwen3.5-4B BF16 long-context shape.",

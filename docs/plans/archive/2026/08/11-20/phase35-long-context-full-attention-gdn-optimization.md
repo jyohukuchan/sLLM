@@ -1,7 +1,8 @@
 # Phase 35: long-context Full Attention・GDN構造最適化
 
-> 状態: 計画済み・未着手
+> 状態: 完了（Full Attention/GDN両trackを共通shape限定採用）
 > 作成日: 2026-08-20
+> 完了日: 2026-08-20
 
 ## 目的
 
@@ -17,6 +18,24 @@ long-context TTFTを短縮する。
 
 Phase 35の目的はllama.cpp sourceを一括移植することではない。既存sLLMのsemantic op、transaction、vAttention、
 chunked-prefill arena、数値分類を維持し、peer profileから確認できたprovider topologyの差をbounded candidateとして扱う。
+
+## 完了結果
+
+- Full Attentionはexact gfx1030/gfx1201、GQA4/head dim 256、`M>=128`へQ_TILE=4 providerを共通限定採用した。
+  M=64/65のV620悪化を避け、`M<=127`とdecodeはPhase 33以前のproviderへ残した。
+- GDNは両target、Q/K 16・value 32・head dim 128、token count 128以上へ、preprocess、1,024-workgroup
+  column-owned recurrent state、postprocessを共通限定採用した。短prefill/decodeはPhase 28/29を維持する。
+- final 10,001 input / 2 output combined E2EはV620 `34.861→22.683 s`（34.93%）、R9700
+  `75.349→65.214 s`（13.45%）短縮し、token `[2064,5686]`、HIP-only、fallback false、cleanup 0だった。
+- V620 device profileはFull Attention `10.820→4.110 s`（62.02%）、GDN family `7.672→0.618 s`
+  （91.95%）。projectionは11.627秒、arena high-waterは5,278,049,280 byteで維持した。
+- GDNのbeta/decay scratchは10,001 tokenで2,560,256 byte/layer、24 layer合計61,446,144 byteを既存のchecked
+  request-owned linear-attention state scratchへ追加した。Phase 31 arena自体のhigh-waterは増えていない。
+- 両変更は同じ項・dtype・丸めstageを保ち、reduction depthが非増加または短縮するN1とした。Full Attention 232 case、
+  GDN 12 caseを両GPU実機でPASSし、gfx942 compile-onlyとwrong-target拒否も確認した。
+- final gfx1030 serverの10,001-token OpenAI non-stream/SSE、`[DONE]`、usage、graceful shutdown/cleanup zeroを確認した。
+- GDNはllama.cppのcolumn ownership/register state構造をbounded adaptationしたため、新規provenance eventを追加した。
+  import identityは実装commit `bca482251bd21b144d950956af39a769c4211417`へ解決した。
 
 ## 開始根拠
 
@@ -424,3 +443,5 @@ AttentionとGDNのcombined candidateが単独利益の和より小さい場合�
 [数値・出力影響変更台帳](../../../../../compatibility/numerical-output-changes.md)
 [provenance](../../../../../provenance/README.md)
 [メイン計画](../../../../main-plan.md)
+[Phase 35履歴](../../../../../history/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)
+[bounded summary](../../../../../../ci/matrix/phase35-attention-gdn-summary-v1.json)
