@@ -995,7 +995,8 @@ candidateを再確認した。
 | 完了・限定採用 | Phase 32 | native FP8 KV append encode再検証 | 担当AI裁量で低保守費用のgfx1201 native scalarを採用。append 51.52%短縮、packedとgfx1030 native化は不採用 |
 | 完了・限定採用 | Phase 33 | Full Attention構造最適化 | C1 decode wave8 splitとC2 GQA4 K/V共有を共通限定採用。C1はN2としてユーザー承認、C3 matrixは棄却 |
 | 完了・限定採用 | Phase 34 | V620長行prefill BF16 matmul provider比較・最適化 | exact gfx1030の長行6 shapeをexisting hipBLASへ限定routeし、10,001-token full modelを61.14%短縮。MTP verify row不具合も限定修正 |
-| 計画済み | Phase 35 | long-context Full Attention・GDN構造最適化 | peer差の約85%を占める二familyを独立trackで改善し、common query tileとcolumn-parallel recurrent stateを比較する |
+| 完了・限定採用 | Phase 35 | long-context Full Attention・GDN構造最適化 | Q_TILE=4 attentionと1,024-workgroup GDNを両targetへ限定採用し、10,001-token E2EをV620 34.93%、R9700 13.45%短縮 |
+| 計画済み | Phase 36 | MI300X latest-main実機再検証 | Session Aでidentity、exact gfx942、99 operator、Qwen 4B短生成を固定し、B以降でlow-bit KV、long context、MTP/vision/API、performance/peer、conditional Gemma/MoEを段階実行する |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -1057,8 +1058,51 @@ Phase 34後のexact 10,001 input / 2 output、FP16 KV profileをfixed llama.cpp�
 profiled E2E差に対する寄与は約50.6%/34.4%で、残るdevice差の大半をこの二familyが説明する。このため、複数query rowが
 K/V tileを共有するFull Attentionと、state columnを1,024 workgroup相当へ並列化するGDNをPhase 35へ割り当てた。
 projectionはfull-M hipBLASを維持し、二trackは独立採否とする。common upper pathを優先し、gfx1201 matrix innerはstableな
-common query tile上で実利益を示す場合だけ限定候補とする。詳細は
-[Phase 35 active plan](active/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)を正とする。
+common query tile上で実利益を示す場合だけ限定候補とした。Phase 35は`M>=128`のQ_TILE=4 Full Attentionと、token count
+128以上の1,024-workgroup GDN column-state pipelineを両target共通のshape限定routeへ採用した。final sourceの10,001 input /
+2 outputはV620 34.861秒から22.683秒へ34.93%、R9700 75.349秒から65.214秒へ13.45%短縮した。V620 profileでは
+Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 11.627秒とarena 5.278 GBは維持した。
+詳細は[Phase 35 archive](archive/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)および
+[bounded summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
+
+### Phase 36: MI300X latest-main実機再検証（計画済み）
+
+- Phase 12でproject-verifiedとなったHot Aisle MI300X VF x1、exact `gfx942`経路を、Phase 35後のlatest mainで再検証する。
+- GPU sessionをA〜Eへ分ける。Session Aはidentity、ROCm/artifact、Phase 12相当99 operator、Qwen3.5-4B
+  BF16/FNUZ FP8短生成を2〜3時間、上限4時間でfail-closedに実行する。
+- Session BはFP8/NVFP4 KV、chunked prefill、10k+ context、CはMTP、vision、OpenAI service、Dはrepeated performance、
+  fixed llama.cpp、rocprofv3を扱う。Session EはGemma mixed NVFP4、Qwen MoE MXFP4、長時間安定性のconditional extensionとする。
+- correctness、target routing、resource、cleanup defectはPhase内で修正し、影響sessionだけfocused rerunする。新規性能provider探索、
+  multi-GPU/Infinity Fabric/RCCL/RDMA、別CDNA SKUへの一般化は含めない。
+- 現時点は計画のみで、VM作成、GPU実行、source修正は開始していない。詳細は
+  [Phase 36 active plan](active/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
+
+### llama.cppとの差分（機能・運用の未割当棚卸し）
+
+- 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
+  現行sLLMを、公開CLI/HTTP surfaceとruntime上の意味で比較した。llama.cpp serverは実装参考・peerであり、
+  sLLMのAPI仕様は引き続き[OpenAI compatibility profile](../api/openai-compatibility.md)を正とする。
+- model architecture/family、hardware/backend/precision/codegen、parallel/multi-user/continuous batching、
+  multi-GPU/Infinity Fabric/RCCL/RDMA、性能provider探索はこの棚卸しから除外した。Vulkanと一般的なllama.cpp
+  INT4/INT8+scale量子化は既存方針上の意図的除外であり、機能不足として未割当backlogへ加えない。
+- 次の差分にはPhase番号、実装順、採用決定を割り当てない。着手する場合はcurrent requirements、security、
+  compatibility、再利用可能なllama.cpp sourceとprovenance、受入条件を個別に固定する。
+
+| 分類 | 固定llama.cppにある主な機能 | 現行sLLMの状態と未割当範囲 |
+| --- | --- | --- |
+| 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | HTTPは`/v1/models`と`/v1/chat/completions`だけを公開し、`n>1`の複数choicesも拒否する。Responsesは既存deferred、その他のHTTP endpoint/runtime modeは未割当。CLIのtokenize/render/decodeとinternal embedding opを、対応するHTTP APIのsupportとは数えない |
+| 制約生成・tool | GBNF/JSON Schema constrained decoding、structured output、function/tool calling、組込みtool/MCP実行、logit bias、logprobs | `response_format`、tools/function、logprobs等をprofile v1で明示拒否する。grammar engine、tool result parser、確率出力を未割当とし、tool/MCP実行権限は別のsecurity判断とする |
+| sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | temperature、top-p、presence/frequency penalty、seed、greedyを実装済み。sampler追加と順序指定は未割当。既存performance backlogのGPU sampling移行とは分ける |
+| prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | stateはrequest-localで、cross-request prefix/session reuseはない。prefix/KV cacheと簡易永続化のbacklog、将来RoPE scalingへ接続するが、追加runtime controlは未割当。model固有MTPはこの比較から除外する |
+| adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
+| template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
+| service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | 起動時ready/shutdown audit、単一Bearer key、SSE disconnect cancellationはあるが、公開health/metrics/slot操作等はない。deployment surfaceごと未割当とする |
+| 周辺tool・品質評価 | general HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task eval、debug dump | fixed converter、model lock、bounded benchmark/evidenceは実装済み。汎用変換・評価toolは未割当。ただし未対応量子化形式を自動的に製品scopeへ追加しない |
+
+- この棚卸しは機能差の事実を残すものであり、優先順位、採用、実装開始、Phase 36のscope変更を意味しない。
+  Phase 36 Session Cはactive planに固定した現行profile v1のservice、reasoning、stop/sampling、連続・二並行request、
+  lifecycle matrixをそのまま実行し、上表の未実装機能を未実行FAIL、追加受入条件、またはPhase 36 blockerとして扱わない。
+
 その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
 multi-GPU/Infinity Fabric/RDMA、README整備、
 人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
@@ -1097,18 +1141,17 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
   - Phase 31後の10k+/16,385-token通常経路ではcausal attentionが支配的になったため、decodeのKV方向parallel blockとfixed combine、
     prefillのQ/K tile・GQA K/V共有、同じtile上のgfx1201 matrix innerをPhase 33へ割り当てた。共通dispatch/scratch/softmaxを優先し、
     target/encoding/M/KV長scopeは独立採否する。
-  - Phase 33 C2はGQA 4 head間でK/Vを共有したがquery row間では共有せず、Phase 34後の10,001-input profileでもFull Attentionは
-    10.857秒、fixed llama.cppは0.462秒だった。Phase 35は`Q_TILE>=2`のcommon multi-query-row K/V tile、barrier-reduced
-    online-softmax partial、stable tile上のgfx1201 matrix innerを独立scopeとして比較する。vAttentionとKV formatは維持する。
+  - Phase 35は`M>=128`のcommon Q_TILE=4で4 query row × GQA 4 headへK/Vを共有し、V620 Full Attentionを
+    10.820秒から4.110秒へ62.02%短縮した。scratch/追加dispatch 0、4 KV encoding共通で採用し、`M<=127`はPhase 33へ残す。
+    fixed llama.cpp 0.462秒に対してなお約8.9倍であり、次のattention workは残差4.11秒のbarrier、vector FP32 QK/PV、
+    query/K tile organizationを新しいprofileから再分類する。vAttentionとKV formatは維持する。
   - Q/PのFP16/FP8化、softmax順序、accumulator変更は数値台帳のN0〜N3へ分類し、N2を性能だけで自動採用しない。
 - GDN recurrent path:
-  - Phase 28/29後のcurrent kernelはvalue head当たり1 workgroup、合計32 workgroupで全tokenを直列に進め、threadごとに128 state
-    elementを二回走査する。10,001-inputでは7.694秒、fixed llama.cppのGDN semantic familyは0.622秒だった。
   - Phase 35はQwen shapeのstate columnをwave32 x 4のworkgroupで所有し、`32 heads × 32 column groups=1,024 workgroups`へ
-    広げる。state shardをregisterに保持し、Q/K・beta/decay preprocess、column-parallel recurrent、output norm/z postprocessへ
-    bounded分割する。Phase 28/29の演算stage、transaction、MTP rewind/replay、short/decode baseline complementを維持する。
-  - token recurrence自体のsequence-parallel scanはPhase 35へ含めない。512-token span等はlong-running blockまたはstate trafficに
-    実測上の問題がある場合だけ比較し、projectionをchunkごとに再実行しない。
+    広げた。V620 GDN familyは7.672秒から0.618秒となりfixed llama.cpp 0.622秒と概ね同等、R9700 GDN-only E2Eも7.17%短縮した。
+    token count 128未満はPhase 28/29、state物理layoutとtransactionは既存のまま維持する。
+  - token recurrenceのsequence-parallel scan、追加span分割、GDN layout再設計はpeer parity後の優先候補にしない。新しいprofileで
+    GDNが再びcritical pathになった場合だけ別work unitとして再検討する。
 - Dense BF16 execution:
   - Phase 27のfresh E1比較では、V620 projectionはpeerより6.76%速く、R9700だけ12.53%遅かった。両target共通の
     projection provider gapではなく、全target非悪化かつ任意pattern 5%改善へ届くwork unitを固定できなかった。
@@ -1192,11 +1235,15 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
 
 ## 現在の状態と次の作業
 
-- Phase 35を計画済みとした。Phase 34後の同token profileではFull Attention 10.857秒対peer 0.462秒、GDN 7.694秒対
-  0.622秒で、この二familyがprofiled E2E差の約85%を説明する。Full Attentionのmulti-query-row K/V tileとGDNの
-  column-parallel recurrent stateを独立採否し、合成candidateで10,001-token TTFTとfixed llama.cpp差を再測定する。
-  projection、vAttention、KV format、public APIは維持する。詳細は
-  [Phase 35 active plan](active/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)を正とする。
+- Phase 36を計画済みとした。次の実装・検証作業は、ユーザーの開始指示後にSession AのMI300X identity、exact gfx942 build/load、
+  99 operator、Qwen3.5-4B BF16/FNUZ FP8短生成を実行する。Session AがPASSするまでlong-context、service、性能を混ぜない。
+  詳細は[Phase 36 active plan](active/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
+- Phase 35は両trackの限定採用で完了した。Full Attention Q_TILE=4は`M>=128`、GDN column-stateはtoken count 128以上へ
+  gfx1030/gfx1201共通routeし、10,001-token combined E2EをV620 34.93%、R9700 13.45%短縮した。Full Attention/GDNの
+  V620 device familyは62.02%/91.95%短縮し、projection、vAttention、KV format、public API、arena high-waterを維持した。
+  GDNはfixed peerと概ね同等になり、Full Attentionはなお約8.9倍なので次の性能探索の主対象である。詳細は
+  [Phase 35 archive](archive/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)と
+  [bounded summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
 - Phase 34は限定採用で完了した。exact gfx1030の長行production shapeだけexisting hipBLASへ送り、N=32、未知shape、all-logits、
   短Mは旧providerへ残した。10,001-token full modelは61.14%短縮し、数値は同じ項・dtype・丸めstageと非増加boundを持つN1、
   R9700 route不変、fallback/cleanup 0だった。MTP verify row不具合も専用回帰テスト付きで修正した。詳細は
