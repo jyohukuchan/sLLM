@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase45-adapter-lifecycle-gpu-summary-v1.schema.json",
+  "title": "sLLM Phase 45 adapter and lifecycle GPU summary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "recorded_at", "profile", "identity_prefixes", "cases", "case_target_coverage", "repeatability", "targets", "gfx942", "raw_artifacts_tracked"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase45-adapter-lifecycle-gpu-summary-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase45-adapter-lifecycle-gpu-summary-v1"},
+    "recorded_at": {"const": "2026-08-22"},
+    "profile": {"const": "sllm-phase45-adapter-lifecycle-v1"},
+    "identity_prefixes": {"$ref": "#/$defs/identity_prefixes"},
+    "cases": {"$ref": "#/$defs/cases"},
+    "case_target_coverage": {"const": "disabled-lora-control-combined-each-target"},
+    "repeatability": {"const": "each-case-bitwise-identical-two-runs"},
+    "targets": {"type": "array", "prefixItems": [{"$ref": "#/$defs/target"}, {"$ref": "#/$defs/target"}], "items": false, "minItems": 2, "maxItems": 2},
+    "gfx942": {"const": "compile-only-or-deferred-no-runtime-pass"},
+    "raw_artifacts_tracked": {"const": false}
+  },
+  "$defs": {
+    "prefix": {"type": "string", "pattern": "^[0-9a-f]{6,64}$"},
+    "identity_prefixes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_lock", "gguf", "derived_plan", "prompt"],
+      "properties": {
+        "model_lock": {"const": "f143d7"},
+        "gguf": {"const": "c571c5"},
+        "derived_plan": {"const": "a3b79a"},
+        "prompt": {"const": "8c0b75"}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["logits_prefix", "dispatches"],
+      "properties": {"logits_prefix": {"$ref": "#/$defs/prefix"}, "dispatches": {"type": "integer", "minimum": 1}}
+    },
+    "cases": {
+      "type": "object", "additionalProperties": false,
+      "required": ["disabled", "lora", "control", "combined"],
+      "properties": {
+        "disabled": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"logits_prefix": {"const": "d76c95"}, "dispatches": {"const": 492}}}]},
+        "lora": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"logits_prefix": {"const": "ad5b9f"}, "dispatches": {"const": 497}}}]},
+        "control": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"logits_prefix": {"const": "a06a90"}, "dispatches": {"const": 495}}}]},
+        "combined": {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"logits_prefix": {"const": "5c777f"}, "dispatches": {"const": 500}}}]}
+      }
+    },
+    "broadcast_add": {
+      "type": "object", "additionalProperties": false,
+      "required": ["m_values", "h", "mismatch", "cleanup"],
+      "properties": {"m_values": {"const": [1, 3]}, "h": {"const": 17}, "mismatch": {"const": 0}, "cleanup": {"const": "pass"}}
+    },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "device", "release_build", "elapsed_ms", "hip_only", "fallback", "resident_bytes", "request_workspace_baseline_restored", "pre_allocations", "final_allocations", "retryable", "quarantine", "broadcast_add"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "device": {"enum": ["V620", "R9700"]},
+        "release_build": {"const": true},
+        "elapsed_ms": {"type": "integer", "minimum": 1},
+        "hip_only": {"const": true},
+        "fallback": {"const": false},
+        "resident_bytes": {"const": 8411592192},
+        "request_workspace_baseline_restored": {"const": true},
+        "pre_allocations": {"const": 0},
+        "final_allocations": {"const": 0},
+        "retryable": {"const": 0},
+        "quarantine": {"const": 0},
+        "broadcast_add": {"$ref": "#/$defs/broadcast_add"}
+      },
+      "oneOf": [
+        {"properties": {"target": {"const": "gfx1030"}, "device": {"const": "V620"}, "elapsed_ms": {"const": 16588}}},
+        {"properties": {"target": {"const": "gfx1201"}, "device": {"const": "R9700"}, "elapsed_ms": {"const": 18001}}}
+      ]
+    }
+  }
+}

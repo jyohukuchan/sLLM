@@ -5,6 +5,7 @@ mod benchmark;
 mod chat;
 mod interactive;
 mod model;
+mod model_admin;
 mod production_chat;
 mod template_file;
 
@@ -27,6 +28,7 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
         Some("chat") => production_chat::run(arguments),
+        Some("models") => model_admin::run(arguments),
         // `benchmark` is an internal evidence command. Keep it accepted for the
         // repository-owned harnesses without advertising it as a product CLI.
         Some(
@@ -62,6 +64,7 @@ fn print_help() {
     println!("  rerank        Rank documents with cosine-embedding-v1");
     println!("  infill        FIM/infill (fails closed without a verified capability)");
     println!("  chat          Interactive typed conversation (JSONL events)");
+    println!("  models        Load, unload, and administer model aliases (loopback only)");
     println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
     println!();
     println!("model source: --gguf PATH --derived-lock PATH");

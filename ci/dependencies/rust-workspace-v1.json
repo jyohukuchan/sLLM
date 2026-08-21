@@ -84,6 +84,20 @@
       "manifest": "crates/sllm-core/Cargo.toml",
       "targets": [
         {
+          "name": "broadcast_add_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "context_window_contract",
           "kind": [
             "test"
@@ -141,6 +155,20 @@
         },
         {
           "name": "model_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase45_adapter_contract",
           "kind": [
             "test"
           ],
@@ -870,6 +898,20 @@
           "doctest": false
         },
         {
+          "name": "sllm-qwen35-adapter-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-qwen35-moe-admission",
           "kind": [
             "bin"
@@ -1049,6 +1091,48 @@
         },
         {
           "name": "phase43_http_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase45_dynamic_router",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase45_model_lifecycle",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "phase45_model_manifest",
           "kind": [
             "test"
           ],

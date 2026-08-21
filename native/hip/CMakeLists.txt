@@ -60,6 +60,11 @@ option(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST
+    "Build the focused real-GPU public-ABI BroadcastAdd numerical runner"
+    OFF
+)
+
 option(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST
     "Build the focused real-GPU Gemma sliding/full attention runner"
     OFF
@@ -122,7 +127,8 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
        SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
        SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST OR
        SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST OR
-       SLLM_ENABLE_PHASE41_STATE_GPU_TEST)
+       SLLM_ENABLE_PHASE41_STATE_GPU_TEST OR
+       SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST)
         message(FATAL_ERROR
             "semantic G1 discovery test requires only public HIP runtime authority")
     endif()
@@ -1076,6 +1082,28 @@ if(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_rotary_public_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "public BroadcastAdd GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_broadcast_add_public_gpu_test
+        tests/phase45_broadcast_add_gpu_test.cpp
+    )
+    target_compile_features(sllm_broadcast_add_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_broadcast_add_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_broadcast_add_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_include_directories(sllm_broadcast_add_public_gpu_test PRIVATE
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_broadcast_add_public_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
 if(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST)

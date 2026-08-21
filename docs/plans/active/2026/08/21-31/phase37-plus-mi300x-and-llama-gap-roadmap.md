@@ -43,7 +43,7 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 42 | complete | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
 | 43 | complete | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
 | 44 | complete | generic template、reasoning control、interactive CLI | Phase 41・43 message/state。MI300X実機はdeferred |
-| 45 | planned | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
+| 45 | complete (host + RDNA GPU; MI300X deferred) | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
 | 46 | planned | conversion、quantization、benchmark、quality/debug tools | stable GGUF/model identities |
 | 47 | approval-required | 組込みtool/MCP実行 | Phase 39 security・Phase 43 tool protocol |
 | 48 | planned | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
@@ -314,18 +314,29 @@ Resumable requestは40 output token以下だけをadmitし、成功event batch�
 
 ## Phase 45: adapter・control vector・dynamic model lifecycle
 
+Phase 45のhost/API/CLIとRDNA GPU evidenceは完了した。strict `sllm-model-manifest-v1`、offline regular-file/digest preflight、LoRA/control-vector
+identity、alias-only lifecycle admin、coalesced registry lease、draining/quarantine/LRU、requestの
+`sllm.adapters`/`sllm.control_vectors` extension、CLI `sllm models`を実装し、既存Chat/Completions/Responses/Anthropic semanticsを維持した。
+machine profile/schema/validatorとhost contract testsに加え、compact GPU summary/schema/validator/testをCIへ登録済みである。exact
+`gfx1030`/`gfx1201` release buildでQwen BF16 disabled/LoRA/control/combinedを各2回bitwise一致でPASSし、HIP-only、fallback=false、resident
+`8,411,592,192` bytes、request/workspace baseline復帰、pre/final allocation 0、retryable/quarantine 0を確認した。BroadcastAdd standalone
+(`M=1/3`, `H=17`, mismatch 0, cleanup PASS)も両targetでPASSした。gfx942/MI300X runtimeだけをdeferredとし、VM再確保後の別lane入力にする。
+詳細は[Phase 45 archive plan](../../../../archive/2026/08/21-31/phase45-adapter-dynamic-model-lifecycle.md)と
+[history](../../../../../history/2026/08/21-31/phase45-adapter-dynamic-model-lifecycle.md)を正とする。
+
 ### Work units
 
-1. preloaded LoRAをverified base model/target tensor/shapeへ結合し、requestごとのadapter setとscaleを指定可能にする。
-2. control vectorをlayer/range/dtype/scale付きderived artifactとしてlockし、request stateへ適用する。
-3. model registryを複数alias、lazy load、preload、unload、LRU/cache quota、offline-onlyへ拡張する。
-4. routerはrequest aliasをimmutable model+adapter identityへ解決し、load中/draining/cancel/failureをPhase 39 readiness/metricへ反映する。
-5. load/unload中のGPU allocation、in-flight request、shared tokenizer/template、failed model quarantineを所有権contractへ固定する。
+1. **complete** — preloaded LoRAをverified base model/target tensor/shapeへ結合し、requestごとのadapter setとscaleを指定可能にした。
+2. **complete** — control vectorをlayer/range/dtype/scale付きderived artifactとしてlockし、request stateへ適用した。
+3. **complete** — model registryを複数alias、lazy load、preload、unload、LRU/cache quota、offline-onlyへ拡張した。
+4. **complete** — routerはrequest aliasをimmutable model+adapter identityへ解決し、load中/draining/cancel/failureをPhase 39 readiness/errorへ反映する。
+5. **complete** — load/unload中のGPU allocation、in-flight request、shared tokenizer/template、failed model quarantineを所有権contractへ固定した。
+6. **complete** — exact RDNA full-model GPU smokeとBroadcastAdd standalone oracleをV620 `gfx1030`/R9700 `gfx1201`でPASS。gfx942/MI300X real executionはdeferred。
 
 ### Acceptance
 
 - wrong base、missing tensor、shape/dtype mismatch、duplicate adapter、scale boundary、adapter orderを拒否する。
-- adapter/control disabled時はbase logits/tokenを維持し、有効時はbounded slice oracleとfull-model smokeをPASSする。
+- adapter/control disabled時はbase logits/tokenを維持し、有効時はbounded slice oracleと両RDNA full-model smokeへ一致する。compact summaryはraw artifactを追跡しない。
 - unloadはin-flight ownerを早期解放せず、新規requestを止め、最後のowner後にVRAM/file handleをbaselineへ戻す。
 
 ## Phase 46: conversion・quantization・benchmark・品質評価tool

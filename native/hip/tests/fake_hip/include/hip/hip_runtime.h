@@ -125,6 +125,10 @@ hipError_t elementwise_add_launch(const uint16_t *input0,
                                   const uint16_t *input1, uint16_t *output,
                                   uint64_t element_count,
                                   hipStream_t stream) noexcept;
+hipError_t
+elementwise_broadcast_add_launch(const uint16_t *input, const uint16_t *vector,
+                                 uint16_t *output, uint64_t element_count,
+                                 uint64_t width, hipStream_t stream) noexcept;
 hipError_t elementwise_silu_mul_launch(const uint16_t *gate, const uint16_t *up,
                                        uint16_t *output, uint64_t element_count,
                                        hipStream_t stream) noexcept;
@@ -209,6 +213,7 @@ uint64_t matmul_last_output_elements() noexcept;
 void set_elementwise_launch_status(hipError_t status) noexcept;
 std::size_t elementwise_copy_launch_calls() noexcept;
 std::size_t elementwise_add_launch_calls() noexcept;
+std::size_t elementwise_broadcast_add_launch_calls() noexcept;
 std::size_t elementwise_silu_mul_launch_calls() noexcept;
 std::size_t elementwise_sigmoid_mul_launch_calls() noexcept;
 std::size_t elementwise_scalar_mul_launch_calls() noexcept;

@@ -354,6 +354,7 @@ fn open_backend(
         context_length: config.context_length,
         kv_cache_encoding: KvCacheEncoding::Fp16,
         phase41: phase41_disabled(),
+        adapter_catalog: None,
     };
     let session = QwenPersistentChatSessionV1::open(QwenPersistentChatSessionConfigV1 {
         backend,

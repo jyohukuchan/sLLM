@@ -33,6 +33,16 @@
   Unixでは`O_NOFOLLOW`で開いた同じdescriptorから各1 MiBを上限に読み、PEM parseをmodel/GPU load前に完了する。
   ready/shutdown logへpathや内容を出力しない。
 
+## Phase 45 model lifecycle admin
+
+- `sllm models` and `/admin/models/*` use the existing `admin:<token>` role; inference requests continue to use the user role. Lifecycle
+  arguments are aliases only (`load`, `preload`, `unload`, `clear-quarantine`, `evict-idle`), so model paths, URLs, artifact bytes, and credentials
+  never enter an admin request body or path.
+- The CLI accepts a loopback cleartext HTTP endpoint only and reads the bearer token from the approved environment/file policy. Remote or HTTPS
+  endpoints and direct token command-line arguments are rejected. Tokens are not printed, logged, or included in model lifecycle reports.
+- The strict `--models` manifest is offline and regular-file/no-symlink checked before backend or GPU allocation. Failure publishes no partial model
+  state and moves the alias to quarantine until an explicit admin clear action.
+
 ## Untrusted CIとGPU job
 
 - fork、外部PR、未検証branch等のuntrusted codeへsecretを注入せず、secretを保持するself-hosted runnerで実行しない。

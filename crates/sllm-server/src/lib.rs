@@ -8,6 +8,8 @@ mod api;
 mod batching;
 mod lifecycle;
 mod metrics;
+mod model_lifecycle;
+mod model_manifest;
 mod phase42_api;
 mod phase43_api;
 mod phase43_service;
@@ -29,6 +31,20 @@ pub use lifecycle::{ServerLifecycleStateV1, ServerLifecycleV1};
 pub use metrics::{
     CancellationReasonV1, HttpEndpointV1, MetricsConfigError, MetricsRequestHandleV1,
     RequestOutcomeV1, ServerMetricsV1,
+};
+pub use model_lifecycle::{
+    MAX_CONFIGURED_ALIASES_V1, MAX_IDENTITY_BYTES_V1, MAX_LOADED_MODELS_V1, ModelLifecycleConfigV1,
+    ModelLifecycleDescriptorV1, ModelLifecycleErrorV1, ModelLifecycleIdentityV1,
+    ModelLifecycleLeaseV1, ModelLifecycleLoadedV1, ModelLifecycleLoaderErrorV1,
+    ModelLifecycleLoaderFnsV1, ModelLifecycleLoaderV1, ModelLifecycleRegistryV1,
+    ModelLifecycleSnapshotV1, ModelLifecycleStateV1, model_lifecycle_loader_from_fns,
+};
+pub use model_manifest::{
+    MAX_MODEL_MANIFEST_ADAPTERS_V1, MAX_MODEL_MANIFEST_ALIAS_BYTES_V1,
+    MAX_MODEL_MANIFEST_ARTIFACTS_V1, MAX_MODEL_MANIFEST_BYTES_V1,
+    MAX_MODEL_MANIFEST_CONTROL_VECTORS_V1, MAX_MODEL_MANIFEST_MODELS_V1,
+    MODEL_MANIFEST_SCHEMA_VERSION_V1, ModelArtifactManifestV1, ModelManifestEntryV1,
+    ModelManifestErrorV1, ModelManifestV1, parse_model_manifest_v1, read_model_manifest_v1,
 };
 pub use phase42_api::{
     ApplyTemplateRequestV1, CompletionRequestV1, DetokenizeRequestV1, EmbeddingEncodingFormatV1,
@@ -56,9 +72,11 @@ pub use production::{
     Gemma4BackendConfigV1, Gemma4ChatBackendV1, Phase41ProductionConfigV1,
     PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1, ProductionCheckpointResultV1,
     ProductionDraftProviderV1, ProductionPhase41AuditV1, ProductionPrefixCacheResultV1,
-    ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
+    ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1,
+    QwenAdapterCatalogConfigV1, QwenBackendConfigV1, QwenChatBackendV1,
     QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
     QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1, QwenPersistentChatTurnResultV1,
+    dynamic_model_plan_digest_preflight, qwen_adapter_catalog_identity_preflight,
 };
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{
@@ -70,7 +88,7 @@ pub use runtime::{
     SchedulerSnapshotV1, SchedulerV1,
 };
 pub use security::{CredentialErrorV1, CredentialRoleV1, CredentialStoreV1};
-pub use service::{ServerConfigV1, build_router_v1};
+pub use service::{ServerConfigV1, build_dynamic_router_v1, build_router_v1};
 
 /// Version of the server dependency and ownership boundary fixed in Phase 6.
 pub const SERVER_RUNTIME_CONTRACT_VERSION: u32 = 1;

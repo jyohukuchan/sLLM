@@ -12,6 +12,7 @@ use sllm_frontend::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiErrorV1, ChatCompletionRequestV1, FinishReasonV1, TokenUsageV1};
+use crate::model_lifecycle::ModelLifecycleLeaseV1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendErrorV1 {
@@ -483,6 +484,12 @@ pub struct ModelRegistryV1 {
 }
 
 impl ModelRegistryV1 {
+    pub(crate) fn empty_for_dynamic() -> Self {
+        Self {
+            entries: Arc::new(Vec::new()),
+        }
+    }
+
     pub fn new(entries: Vec<ModelRegistryEntryV1>) -> Result<Self, ApiErrorV1> {
         if entries.is_empty() {
             return Err(ApiErrorV1::generation_failed(
@@ -594,6 +601,7 @@ struct GenerationJobV1 {
     request: ChatCompletionRequestV1,
     events: mpsc::Sender<SchedulerEventV1>,
     cancellation: GenerationCancellationV1,
+    _lifecycle_lease: Option<ModelLifecycleLeaseV1>,
 }
 
 struct EmbeddingJobV1 {
@@ -602,6 +610,7 @@ struct EmbeddingJobV1 {
     request: BackendEmbeddingRequestV1,
     result: oneshot::Sender<Result<BackendEmbeddingBatchV1, ApiErrorV1>>,
     cancellation: GenerationCancellationV1,
+    _lifecycle_lease: Option<ModelLifecycleLeaseV1>,
 }
 
 impl JobV1 {
@@ -722,10 +731,20 @@ impl SchedulerV1 {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn submit(
         &self,
         model: Arc<ModelRegistryEntryV1>,
         request: ChatCompletionRequestV1,
+    ) -> Result<GenerationReceiverV1, ApiErrorV1> {
+        self.submit_with_lease(model, request, None)
+    }
+
+    pub(crate) fn submit_with_lease(
+        &self,
+        model: Arc<ModelRegistryEntryV1>,
+        request: ChatCompletionRequestV1,
+        lifecycle_lease: Option<ModelLifecycleLeaseV1>,
     ) -> Result<GenerationReceiverV1, ApiErrorV1> {
         let slot_id = self.allocate_slot_id();
         let cancellation = GenerationCancellationV1::new();
@@ -757,6 +776,7 @@ impl SchedulerV1 {
             request,
             events,
             cancellation: cancellation.clone(),
+            _lifecycle_lease: lifecycle_lease,
         }));
         if let Err(error) = self.sender.try_send(job) {
             slots.records.remove(&slot_id);
@@ -773,10 +793,20 @@ impl SchedulerV1 {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn submit_embedding(
         &self,
         model: Arc<ModelRegistryEntryV1>,
         request: BackendEmbeddingRequestV1,
+    ) -> Result<EmbeddingReceiverV1, ApiErrorV1> {
+        self.submit_embedding_with_lease(model, request, None)
+    }
+
+    pub(crate) fn submit_embedding_with_lease(
+        &self,
+        model: Arc<ModelRegistryEntryV1>,
+        request: BackendEmbeddingRequestV1,
+        lifecycle_lease: Option<ModelLifecycleLeaseV1>,
     ) -> Result<EmbeddingReceiverV1, ApiErrorV1> {
         let slot_id = self.allocate_slot_id();
         let cancellation = GenerationCancellationV1::new();
@@ -808,6 +838,7 @@ impl SchedulerV1 {
             request,
             result,
             cancellation: cancellation.clone(),
+            _lifecycle_lease: lifecycle_lease,
         });
         if let Err(error) = self.sender.try_send(job) {
             slots.records.remove(&slot_id);
@@ -988,6 +1019,7 @@ async fn run_generation_job(
         request,
         events,
         cancellation,
+        _lifecycle_lease,
     } = job;
     let timeout_cancellation = cancellation.clone();
     let fallback_events = events.clone();
@@ -1066,6 +1098,7 @@ async fn run_embedding_job(
         request,
         result,
         cancellation,
+        _lifecycle_lease,
     } = job;
     let timeout_cancellation = cancellation.clone();
     let backend = Arc::clone(&model.backend);

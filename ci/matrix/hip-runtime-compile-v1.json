@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
   "schema_version": "hip-runtime-compile-v1",
   "matrix_id": "hip-runtime-compile-v1",
-  "revision": 6,
+  "revision": 7,
   "toolchain_id": "rocm-7.14.0",
   "container": {
     "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "44a5401f3d74500ec35f5dc22a13b06fc17782a29209b49a11e96e6776ada1bd"
+        "sha256": "8bc3c74ae87b83ea4dd5f62b0a49467689f6f71303e8e41813527852079d255b"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "e576d89dec3b18e34786ad2f5a3a71e2c9bc2be3140b232357289fe25d1f6db1"
+        "sha256": "5ac0a24baf22551b8a3bcf369ea4231d85d706a4064246bb27ff6dc2020989ee"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "aad45681066f9e15d2fdbf104b9825e8003a707a3490af74142e10cf30aa0ca5"
+        "sha256": "b4db8b948c8b0277a3d11b54f5a60a20b14ac7b60ce293e653985960bbce7367"
       }
     ],
-    "source_set_sha256": "7c88b96503f5b6545249016a13f55bfa80f7c3959aa9949993b916e4275f4ee5"
+    "source_set_sha256": "b19470bbafd3381456e930c8bf4e4bef0e4a6e5b4c84e3997a0f4abf4dd25906"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -105,7 +105,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "44a5401f3d74500ec35f5dc22a13b06fc17782a29209b49a11e96e6776ada1bd"
+        "sha256": "8bc3c74ae87b83ea4dd5f62b0a49467689f6f71303e8e41813527852079d255b"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -129,11 +129,11 @@
       },
       {
         "path": "native/hip/src/attention_preprocess_api.cpp",
-        "sha256": "b42b06f9ed5017285aa27d69fa1c6836321e3ff9e7f683dc1147a444fa0a86cf"
+        "sha256": "6c00d2edb72cc7d0c87dc2b85a3c1258a89d025401ec883ea5fe940bb326e05d"
       },
       {
         "path": "native/hip/src/attention_preprocess_api.hpp",
-        "sha256": "de03d6112f483aeb7f5f16290f40d9b06fb116bb0ef19959c4b1bff679180b2b"
+        "sha256": "c816cae807ad67c74f5538097dac3f27f7cddeafac3856eb55a33d2c39b21cfc"
       },
       {
         "path": "native/hip/src/attention_preprocess_kernel.hip.cpp",
@@ -145,7 +145,7 @@
       },
       {
         "path": "native/hip/src/attention_preprocess_runtime.inc",
-        "sha256": "86d255102a259b83dcce47926e4295300b288255dffdd36537622193511ab1f3"
+        "sha256": "986a6fae549c306c6b2072263b85e49ab85c0dc42ffce82c28085a06326d753a"
       },
       {
         "path": "native/hip/src/causal_attention_api.cpp",
@@ -157,19 +157,19 @@
       },
       {
         "path": "native/hip/src/causal_attention_kernel.hip.cpp",
-        "sha256": "3eb692e5950044d31011f0ffd64b44dc8561d96ca59ef8d305e0614e58790938"
+        "sha256": "a4c479b6ff3c6443c3026ddebdccbe9c7aacfc2a96672a007a7fb867ebb614d2"
       },
       {
         "path": "native/hip/src/causal_attention_kernel_internal.hpp",
-        "sha256": "d61fe99aefa01e5dd2e77f99930790a8ff881954f99ec1441db3cf9a21936925"
+        "sha256": "40d6c8aaed5f5cf19b96403b764d238082df58a72964115b9e5361d91817e348"
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "151f0c0b5411ff181b5d2c7ba4a953e228b636f1fff032447290a9f85b33d734"
+        "sha256": "e70407b67ca3f59f81e93ace684af5ac7684e087033f48051a4efba68f09a4cb"
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
-        "sha256": "b7885cddbe93a4f539acd5e3b8dedd701bbbb1048d61226fc3f96518fc456145"
+        "sha256": "409be23f0c24746dd5b55393b1fb72e74f6b380f97fa1dc8e9eaf2bda7e23b92"
       },
       {
         "path": "native/hip/src/elementwise_api.hpp",
@@ -177,11 +177,11 @@
       },
       {
         "path": "native/hip/src/elementwise_kernel.hip.cpp",
-        "sha256": "2db1bfcba0b7e4a725cc9c6b78a5c53b23517dad9760ad8a1eb0f3acb2972b50"
+        "sha256": "1a0ce0d1b328675b61dce4bcacf610e638727bf557b0fa77cacff11479aa7b1e"
       },
       {
         "path": "native/hip/src/elementwise_kernel_internal.hpp",
-        "sha256": "aca6a4efc6caebb8684c8ffb1184a2259c2c6c377f0e644855f07644cd77b24d"
+        "sha256": "3143fcf88c4c3ccc10f3cd73221bce144c8a700d9db67ba0c8e5533b034577b9"
       },
       {
         "path": "native/hip/src/embedding_api.cpp",
@@ -229,7 +229,7 @@
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "3fd125dbe47d302b38f6fc5d0d669863df74b320328fe58cbacc107c52271de2"
+        "sha256": "d008275593d19d71643e7530619b7b1a97c0591f2eca11668d6175818e12f92f"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
@@ -245,7 +245,7 @@
       },
       {
         "path": "native/hip/src/linear_attention_kernel.hip.cpp",
-        "sha256": "cf8e8aafa5e7e64c8fe5bc082912b5b8a328d0a9ed407965d6782cad72b3bc4a"
+        "sha256": "360a9e3330104bae4bed7164f105c8c51ea644a1ad779a7a03746f59669623ef"
       },
       {
         "path": "native/hip/src/linear_attention_kernel_internal.hpp",
@@ -277,11 +277,11 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "e576d89dec3b18e34786ad2f5a3a71e2c9bc2be3140b232357289fe25d1f6db1"
+        "sha256": "5ac0a24baf22551b8a3bcf369ea4231d85d706a4064246bb27ff6dc2020989ee"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
-        "sha256": "aad45681066f9e15d2fdbf104b9825e8003a707a3490af74142e10cf30aa0ca5"
+        "sha256": "b4db8b948c8b0277a3d11b54f5a60a20b14ac7b60ce293e653985960bbce7367"
       },
       {
         "path": "native/hip/src/rmsnorm_api.cpp",
@@ -301,11 +301,11 @@
       },
       {
         "path": "native/hip/src/rotary_api.cpp",
-        "sha256": "4ae08b34ede057b8336a2557d46deebc0b4de4d753983d2a7f2a5d843a0b0d50"
+        "sha256": "e6d4dd6cc56de26a3435506392ef9901c6c2c52e67e29d60217ea744d4572034"
       },
       {
         "path": "native/hip/src/rotary_api.hpp",
-        "sha256": "94e9001f6961bf54d69754c689c54d099c16df8a16f6d4a6d99dccf52c889ada"
+        "sha256": "995d02a01ee2647b69a82f80c91084fc7101975efb2c919aaa90cf9458fe2426"
       },
       {
         "path": "native/hip/src/rotary_kernel.hip.cpp",
@@ -317,7 +317,7 @@
       },
       {
         "path": "native/hip/src/rotary_runtime.inc",
-        "sha256": "7da5e39b3c15fb09fed8dc395bff177195cf415652288056dbbdcb063f21f9d0"
+        "sha256": "3a4808c6bc199c9017cbae6df17703f7607726b676ec9f8f3f4ef3972a702903"
       },
       {
         "path": "native/hip/src/windowed_attention_api.cpp",
@@ -332,7 +332,7 @@
         "sha256": "ff5bcf9fefade967589953e04c23be441a7fc71e1a4ffb9dd981a2736cdea968"
       }
     ],
-    "source_set_sha256": "1e6dd4e99b6fa517d960e0de6648e1e947a4424d6f89f3ee0661d6958485452a"
+    "source_set_sha256": "07d6e41ad25eff71c87e365cf74774754a3eb38d267aced6867ac66e23ced4a0"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

@@ -406,3 +406,22 @@ cancellation ownership, admits 1..=4,096 reasoning tokens including any forced c
 advertise a reasoning capability only when its reviewed template/markers and closing-token identity are verified; absent capability, Gemma/raw-text and
 unsupported backends reject before tokenizer/GPU work. The Phase 44 `chat` CLI stores typed conversation through the Phase 41 opaque checkpoint
 boundary; it does not add a new model-lock state plane or a mid-generation session identity. MI300X `gfx942` runtime evidence remains deferred.
+
+## Phase 45 adapter・dynamic lifecycle identity
+
+The `sllm-model-manifest-v1` is an offline, strict input to model admission. Manifest paths must resolve to absolute regular files opened with
+no-symlink semantics; bounded size, file digest, model-lock fingerprint, and derived-artifact source/recipe/output digest are checked before any
+backend or GPU allocation is published. Network URLs, downloads, unverified cache entries, and request-supplied paths or credentials are rejected.
+The manifest's alias is a routing label, not part of model identity.
+
+The derived lock for a Phase 45 adapter/control binding records the immutable base model fingerprint, derived plan digest, artifact digest, target
+tensor catalog and shape, dtype, LoRA rank/orientation or control-vector half-open layer range, and canonical ordered scales. The production catalog
+identity is checked both before backend open and against the loaded resident owner; a path or cache-directory change cannot create a new identity or
+permit silent cross-identity reuse. Disabled adapters use `adapter:none-v1` and retain base prefix/checkpoint/logit/token identity.
+
+Prefix and checkpoint keys bind the ordered adapter/control artifact IDs and scales together with target semantics, renderer, and tokenizer identity.
+Admin lifecycle actions are alias-only (`load`, `preload`, `unload`, `clear-quarantine`, `evict-idle`) and do not alter the lock. The profile/schema
+fixture records the host contract and rejection matrix. Exact RDNA `gfx1030`/`gfx1201` release-build full-model smoke and BroadcastAdd standalone
+evidence pass with bitwise two-run repeatability, HIP-only dispatch, fallback false, resident/request-workspace baseline restoration, and zero
+pre/final allocations; the compact [GPU summary](../../ci/matrix/phase45-adapter-lifecycle-gpu-summary-v1.json) records bounded identity prefixes and
+dispatch counts without tracking raw artifacts. `gfx942`/MI300X runtime remains deferred.

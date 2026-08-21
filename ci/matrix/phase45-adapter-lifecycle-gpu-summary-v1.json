@@ -1,0 +1,54 @@
+{
+  "$schema": "https://sllm.dev/schema/phase45-adapter-lifecycle-gpu-summary-v1.schema.json",
+  "schema_version": "sllm-phase45-adapter-lifecycle-gpu-summary-v1",
+  "recorded_at": "2026-08-22",
+  "profile": "sllm-phase45-adapter-lifecycle-v1",
+  "identity_prefixes": {
+    "model_lock": "f143d7",
+    "gguf": "c571c5",
+    "derived_plan": "a3b79a",
+    "prompt": "8c0b75"
+  },
+  "cases": {
+    "disabled": {"logits_prefix": "d76c95", "dispatches": 492},
+    "lora": {"logits_prefix": "ad5b9f", "dispatches": 497},
+    "control": {"logits_prefix": "a06a90", "dispatches": 495},
+    "combined": {"logits_prefix": "5c777f", "dispatches": 500}
+  },
+  "case_target_coverage": "disabled-lora-control-combined-each-target",
+  "repeatability": "each-case-bitwise-identical-two-runs",
+  "targets": [
+    {
+      "target": "gfx1030",
+      "device": "V620",
+      "release_build": true,
+      "elapsed_ms": 16588,
+      "hip_only": true,
+      "fallback": false,
+      "resident_bytes": 8411592192,
+      "request_workspace_baseline_restored": true,
+      "pre_allocations": 0,
+      "final_allocations": 0,
+      "retryable": 0,
+      "quarantine": 0,
+      "broadcast_add": {"m_values": [1, 3], "h": 17, "mismatch": 0, "cleanup": "pass"}
+    },
+    {
+      "target": "gfx1201",
+      "device": "R9700",
+      "release_build": true,
+      "elapsed_ms": 18001,
+      "hip_only": true,
+      "fallback": false,
+      "resident_bytes": 8411592192,
+      "request_workspace_baseline_restored": true,
+      "pre_allocations": 0,
+      "final_allocations": 0,
+      "retryable": 0,
+      "quarantine": 0,
+      "broadcast_add": {"m_values": [1, 3], "h": 17, "mismatch": 0, "cleanup": "pass"}
+    }
+  ],
+  "gfx942": "compile-only-or-deferred-no-runtime-pass",
+  "raw_artifacts_tracked": false
+}

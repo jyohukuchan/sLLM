@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase45-adapter-lifecycle-v1.schema.json",
+  "title": "sLLM Phase 45 adapter and dynamic model lifecycle contract v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "profile_version", "recorded_at", "spec_pins", "scope", "non_goals", "lora", "control_vectors", "identity", "registry", "router", "manifest", "cli_server", "verification", "work_units", "acceptance", "cases"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase45-adapter-lifecycle-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase45-adapter-lifecycle-v1"},
+    "profile_version": {"const": "sllm-phase45-adapter-lifecycle-v1"},
+    "recorded_at": {"const": "2026-08-22"},
+    "spec_pins": {"$ref": "#/$defs/spec_pins"},
+    "scope": {"$ref": "#/$defs/scope"},
+    "non_goals": {"const": ["phase46-conversion-quantization-benchmark-quality-tools", "phase47-tool-mcp-execution", "phase48-webui", "mi300x-real-execution", "model-architecture-additions", "new-hardware-backends", "parallel-multi-gpu"]},
+    "lora": {"$ref": "#/$defs/lora"},
+    "control_vectors": {"$ref": "#/$defs/control_vectors"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "registry": {"$ref": "#/$defs/registry"},
+    "router": {"$ref": "#/$defs/router"},
+    "manifest": {"$ref": "#/$defs/manifest"},
+    "cli_server": {"$ref": "#/$defs/cli_server"},
+    "verification": {"$ref": "#/$defs/verification"},
+    "work_units": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/work_unit"}},
+    "acceptance": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "cases": {"$ref": "#/$defs/cases"}
+  },
+  "$defs": {
+    "nonempty_string": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "spec_pins": {
+      "type": "object", "additionalProperties": false,
+      "required": ["llama_cpp", "artifact_source", "execution_capability"],
+      "properties": {
+        "llama_cpp": {
+          "type": "object", "additionalProperties": false,
+          "required": ["release", "commit", "use"],
+          "properties": {
+            "release": {"const": "b10453"},
+            "commit": {"const": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"},
+            "use": {"const": "behavior-reference-only"}
+          }
+        },
+        "artifact_source": {"const": "verified-offline-derived-artifacts-only"},
+        "execution_capability": {"const": "reviewed-dense-bf16-qwen-v1"}
+      }
+    },
+    "scope": {
+      "type": "object", "additionalProperties": false,
+      "required": ["execution", "adapter_formats", "base_artifact", "offline_only", "fallback", "gpu_provider_changes"],
+      "properties": {
+        "execution": {"const": "reviewed-dense-bf16-qwen-only"},
+        "adapter_formats": {"const": ["preloaded-lora-v1", "control-vector-v1"]},
+        "base_artifact": {"const": "verified-gguf-derived-lock"},
+        "offline_only": {"const": true},
+        "fallback": {"const": false},
+        "gpu_provider_changes": {"const": "additive-broadcast-add-existing-elementwise-family"}
+      }
+    },
+    "scale": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "min", "max", "default"],
+      "properties": {
+        "type": {"const": "finite-f32"},
+        "min": {"const": -16.0},
+        "max": {"const": 16.0},
+        "default": {"const": 1.0}
+      }
+    },
+    "lora": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "execution", "source", "target_dtype", "adapter_dtype", "max_preloaded_per_model", "max_request_adapters", "rank", "scale", "order", "disabled_identity", "admission", "unsupported"],
+      "properties": {
+        "id": {"const": "preloaded-lora-v1"},
+        "execution": {"const": "reviewed-dense-bf16-qwen-v1"},
+        "source": {"const": "verified-offline-derived-artifact"},
+        "target_dtype": {"const": "bf16"},
+        "adapter_dtype": {"const": "bf16"},
+        "max_preloaded_per_model": {"const": 8},
+        "max_request_adapters": {"const": 4},
+        "rank": {"type": "object", "additionalProperties": false, "required": ["min", "max", "non_aligned_examples"], "properties": {"min": {"const": 1}, "max": {"const": 256}, "non_aligned_examples": {"const": [1, 3, 17, 255, 256]}}},
+        "scale": {"$ref": "#/$defs/scale"},
+        "order": {"const": "canonical-sorted-unique"},
+        "disabled_identity": {"const": "adapter:none-v1"},
+        "admission": {"const": "verify-lock-artifact-target-shapes-before-gpu"},
+        "unsupported": {"const": "reject"}
+      }
+    },
+    "control_vectors": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "execution", "source", "dtype", "max_request_vectors", "layer_range", "overlap", "scale", "order", "admission", "unsupported"],
+      "properties": {
+        "id": {"const": "control-vector-v1"},
+        "execution": {"const": "reviewed-dense-bf16-qwen-v1"},
+        "source": {"const": "verified-offline-derived-artifact"},
+        "dtype": {"const": "bf16"},
+        "max_request_vectors": {"const": 4},
+        "layer_range": {"const": "half-open"},
+        "overlap": {"const": "reject"},
+        "scale": {"$ref": "#/$defs/scale"},
+        "order": {"const": "canonical-sorted-unique"},
+        "admission": {"const": "verify-lock-artifact-layer-range-shape-before-gpu"},
+        "unsupported": {"const": "reject"}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["canonical_encoding", "fields", "alias_is_identity", "path_is_identity", "disabled_adapter_identity", "prefix_checkpoint_binds", "silent_cross_identity_reuse"],
+      "properties": {
+        "canonical_encoding": {"const": "sllm-phase45-identity-v1"},
+        "fields": {"const": ["base_model_lock_fingerprint", "derived_plan_digest", "ordered_adapter_artifact_ids", "ordered_adapter_scales", "ordered_control_vector_artifact_ids", "ordered_control_vector_scales", "target_semantics", "renderer_identity", "tokenizer_identity"]},
+        "alias_is_identity": {"const": false},
+        "path_is_identity": {"const": false},
+        "disabled_adapter_identity": {"const": "adapter:none-v1"},
+        "prefix_checkpoint_binds": {"const": true},
+        "silent_cross_identity_reuse": {"const": false}
+      }
+    },
+    "registry": {
+      "type": "object", "additionalProperties": false,
+      "required": ["states", "max_loaded_models", "max_configured_aliases", "lease", "load", "drain", "lru", "resident_quota", "failure", "offline", "shared_assets"],
+      "properties": {
+        "states": {"const": ["unloaded", "loading", "ready", "draining", "failed", "quarantined"]},
+        "max_loaded_models": {"const": 16},
+        "max_configured_aliases": {"const": 64},
+        "lease": {"const": "linearizable"},
+        "load": {"const": "coalesced-by-immutable-identity"},
+        "drain": {"const": "reject-new-then-shutdown-after-last-owner"},
+        "lru": {"const": "idle-only-active-never-evict"},
+        "resident_quota": {"const": "bounded-by-configured-bytes"},
+        "failure": {"const": "publish-nothing-and-quarantine-until-explicit-clear"},
+        "offline": {"const": true},
+        "shared_assets": {"const": "tokenizer-template-shared-by-base-owner"}
+      }
+    },
+    "router": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest", "admin_action", "request_extension", "loading_status", "draining_status", "unknown_alias_status", "queue_full_status", "auth", "paths_or_credentials_in_request", "openai_profiles_unchanged"],
+      "properties": {
+        "manifest": {"const": "alias-to-verified-model-and-artifact-identities"},
+        "admin_action": {"const": "alias-only"},
+        "request_extension": {"const": "sllm-ordered-adapter-control-selection-v1"},
+        "loading_status": {"const": 503},
+        "draining_status": {"const": 503},
+        "unknown_alias_status": {"const": 404},
+        "queue_full_status": {"const": 429},
+        "auth": {"const": "admin-for-lifecycle-user-for-inference"},
+        "paths_or_credentials_in_request": {"const": false},
+        "openai_profiles_unchanged": {"const": true}
+      }
+    },
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "paths", "verified_before_publish", "network", "symlink", "special_file", "path_race", "model_lock", "derived_artifact"],
+      "properties": {
+        "id": {"const": "sllm-model-lifecycle-manifest-v1"},
+        "paths": {"const": "manifest-defined-regular-files"},
+        "verified_before_publish": {"const": true},
+        "network": {"const": false},
+        "symlink": {"const": "reject"},
+        "special_file": {"const": "reject"},
+        "path_race": {"const": "reject"},
+        "model_lock": {"const": "exact-fingerprint-and-file-digest"},
+        "derived_artifact": {"const": "exact-source-lock-tool-recipe-output-digest"}
+      }
+    },
+    "cli_server": {
+      "type": "object", "additionalProperties": false,
+      "required": ["manifest_option", "management_surface", "admin_actions", "admin_arguments", "request_fields", "request_order", "gpu_admission"],
+      "properties": {
+        "manifest_option": {"const": "--models"},
+        "management_surface": {"const": "cli-and-admin-server"},
+        "admin_actions": {"const": ["load", "preload", "unload", "clear-quarantine", "evict-idle"]},
+        "admin_arguments": {"const": "alias-only"},
+        "request_fields": {"const": ["sllm.adapters", "sllm.control_vectors"]},
+        "request_order": {"const": "preserve-then-canonical-validate"},
+        "gpu_admission": {"const": "after-preflight-and-registry-lease"}
+      }
+    },
+    "verification": {
+      "type": "object", "additionalProperties": false,
+      "required": ["synthetic_oracle", "gpu_models", "gpu_targets", "gpu_requirements", "gfx942", "full_model_smoke", "mi300x_real"],
+      "properties": {
+        "synthetic_oracle": {"const": ["slice-logit-delta", "disabled-bit-and-token-identity", "identity-digest"]},
+        "gpu_models": {"const": ["qwen3.5-4b-bf16"]},
+        "gpu_targets": {"const": ["gfx1030", "gfx1201"]},
+        "gpu_requirements": {"const": ["exact-target", "hip-only", "fallback-false", "cleanup-zero", "resident-baseline-restored"]},
+        "gfx942": {"const": "compile-only-or-deferred-no-runtime-pass"},
+        "full_model_smoke": {"const": true},
+        "mi300x_real": {"const": "deferred"}
+      }
+    },
+    "work_unit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "scope", "owner"],
+      "properties": {"id": {"type": "string", "pattern": "^P45-[A-Z][0-9]$"}, "scope": {"type": "string", "minLength": 1}, "owner": {"type": "string", "minLength": 1}}
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "surface", "input", "expected"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "surface": {"type": "string", "minLength": 1},
+        "input": {"type": "object"},
+        "expected": {"$ref": "#/$defs/expected"}
+      }
+    },
+    "expected": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "result": {"const": "accepted"},
+        "admission": {"const": "before_gpu_admission"},
+        "status": {"type": "integer", "enum": [400, 404, 409, 413, 429, 503]},
+        "code": {"type": "string", "minLength": 1}
+      },
+      "anyOf": [{"required": ["result"]}, {"required": ["admission", "status", "code"]}]
+    },
+    "cases": {
+      "type": "object", "additionalProperties": false,
+      "required": ["positive", "rejection"],
+      "properties": {
+        "positive": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
+        "rejection": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}}
+      }
+    }
+  }
+}

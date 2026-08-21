@@ -387,6 +387,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             descriptor.kind(),
             sllm_core::SemanticOpKind::Copy
                 | sllm_core::SemanticOpKind::Add
+                | sllm_core::SemanticOpKind::BroadcastAdd
                 | sllm_core::SemanticOpKind::ScalarMul
                 | sllm_core::SemanticOpKind::SiluMul
                 | sllm_core::SemanticOpKind::GeluTanhMul
@@ -1031,6 +1032,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             }
             sllm_core::SemanticOpKind::Copy
             | sllm_core::SemanticOpKind::Add
+            | sllm_core::SemanticOpKind::BroadcastAdd
             | sllm_core::SemanticOpKind::ScalarMul
             | sllm_core::SemanticOpKind::SiluMul
             | sllm_core::SemanticOpKind::GeluTanhMul

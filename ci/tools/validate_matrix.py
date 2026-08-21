@@ -299,6 +299,13 @@ EXPECTED_FIXTURE_SUITES = {
     },
     "tests/fixtures/profile_sampling_cases.json": {"h0-python", "h2-tiny-oracle"},
     "tests/fixtures/sampling_cases.json": {"h0-python", "h2-tiny-oracle"},
+    "tests/fixtures/phase42_profiles_v1.json": {"h0-python"},
+    "tests/fixtures/phase43_protocol_profiles_v1.json": {"h0-python"},
+    "tests/fixtures/phase44_template_reasoning_cli_v1.json": {"h0-python"},
+    "tests/fixtures/phase45_adapter_lifecycle_v1.json": {
+        "h0-phase45-adapter-lifecycle-contract",
+        "h0-json-schema-manifest-workflow",
+    },
 }
 EXPECTED_H3_STATIC_PATH_RULES = {
     "ci/tests/test_h3_workflow_identity.py",
@@ -444,14 +451,15 @@ def pytest_markers() -> tuple[set[str], dict[str, set[str]]]:
 
 
 def fixture_consumers() -> dict[str, set[str]]:
-    """Return every literal ``load_json_fixture`` consumer by fixture path."""
+    """Return literal loader and named profile-fixture consumers by path."""
 
     consumers: dict[str, set[str]] = {path: set() for path in EXPECTED_FIXTURE_SUITES}
-    tests_root = ROOT / "tests"
-    if not tests_root.is_dir():
-        raise ContractError("tests directory is missing")
     known_names = {Path(path).name: path for path in EXPECTED_FIXTURE_SUITES}
-    for path in sorted(tests_root.rglob("*.py")):
+    known_literals = {path: path for path in EXPECTED_FIXTURE_SUITES}
+    roots = (ROOT / "tests", ROOT / "ci/tools", ROOT / "ci/tests")
+    if any(not root.is_dir() for root in roots):
+        raise ContractError("fixture consumer directories are missing")
+    for path in sorted(candidate for root in roots for candidate in root.rglob("*.py")):
         relative = path.relative_to(ROOT).as_posix()
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
@@ -459,17 +467,31 @@ def fixture_consumers() -> dict[str, set[str]]:
             raise ContractError(f"cannot parse fixture consumer {relative}: {exc}") from exc
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
+                targets: list[ast.expr] = []
+                value: ast.expr | None = None
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                    value = node.value
+                elif isinstance(node, ast.AnnAssign):
+                    targets = [node.target]
+                    value = node.value
+                if value is not None and any(isinstance(target, ast.Name) and target.id == "FIXTURE" for target in targets):
+                    for literal in ast.walk(value):
+                        if not isinstance(literal, ast.Constant) or not isinstance(literal.value, str):
+                            continue
+                        fixture_path = known_literals.get(literal.value)
+                        if fixture_path is not None:
+                            consumers[fixture_path].add(relative)
                 continue
             function = node.func
-            if not isinstance(function, ast.Name) or function.id != "load_json_fixture":
-                continue
-            if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
-                raise ContractError(f"fixture consumer must name a literal JSON fixture: {relative}")
-            name = node.args[0].value
-            fixture_path = known_names.get(name)
-            if fixture_path is None:
-                raise ContractError(f"fixture consumer references an unregistered fixture: {relative}: {name}")
-            consumers[fixture_path].add(relative)
+            if isinstance(function, ast.Name) and function.id == "load_json_fixture":
+                if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                    raise ContractError(f"fixture consumer must name a literal JSON fixture: {relative}")
+                name = node.args[0].value
+                fixture_path = known_names.get(name)
+                if fixture_path is None:
+                    raise ContractError(f"fixture consumer references an unregistered fixture: {relative}: {name}")
+                consumers[fixture_path].add(relative)
     return consumers
 
 
@@ -925,12 +947,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 27:
-            raise ContractError("suites-v1 identity is not revision 27")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 28:
+            raise ContractError("suites-v1 identity is not revision 28")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 19:
             raise ContractError("host-v1 identity is not revision 19")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 42:
-            raise ContractError("path-to-suite-v1 identity is not revision 42")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 43:
+            raise ContractError("path-to-suite-v1 identity is not revision 43")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

@@ -29,6 +29,9 @@ use crate::api::{
 };
 use crate::lifecycle::ServerLifecycleV1;
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1, ServerMetricsV1};
+use crate::model_lifecycle::{
+    ModelLifecycleErrorV1, ModelLifecycleLeaseV1, ModelLifecycleRegistryV1,
+};
 use crate::phase42_api::{
     self as phase42, ApplyTemplateRequestV1, CompletionRequestV1, DetokenizeRequestV1,
     EmbeddingEncodingFormatV1, EmbeddingRequestV1, InfillRequestV1, InputTokensInputV1,
@@ -38,7 +41,7 @@ use crate::phase42_api::{
 use crate::resume::{ReplayErrorV1, ResumableStoreV1};
 use crate::runtime::{
     BackendEmbeddingInputV1, BackendEmbeddingRequestV1, BackendTokenLogprobV1,
-    GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1,
+    GenerationReceiverV1, ModelRegistryEntryV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1,
 };
 use crate::security::CredentialStoreV1;
 
@@ -149,6 +152,7 @@ impl Default for ServerConfigV1 {
 #[derive(Clone)]
 pub(crate) struct AppStateV1 {
     pub(crate) registry: ModelRegistryV1,
+    pub(crate) lifecycle: Option<Arc<ModelLifecycleRegistryV1>>,
     pub(crate) scheduler: SchedulerV1,
     pub(crate) config: ServerConfigV1,
 }
@@ -167,6 +171,7 @@ pub fn build_router_v1(
     let cors_origins = config.cors_origins.clone();
     let state = Arc::new(AppStateV1 {
         registry,
+        lifecycle: None,
         scheduler,
         config,
     });
@@ -178,6 +183,86 @@ pub fn build_router_v1(
         .route("/slots", get(slots))
         .route("/admin/slots/{id}/cancel", post(cancel_slot))
         .route("/admin/keys/reload", post(reload_keys))
+        .route("/v1/models", get(list_models))
+        .route("/v1/chat/completions", post(create_chat_completion))
+        .route("/v1/completions", post(create_completion))
+        .route("/v1/embeddings", post(create_embeddings))
+        .route("/v1/rerank", post(create_rerank))
+        .route("/v1/tokenize", post(tokenize))
+        .route("/v1/detokenize", post(detokenize))
+        .route("/v1/apply-template", post(apply_template))
+        .route("/v1/input-tokens", post(input_tokens))
+        .route("/v1/infill", post(create_infill))
+        .route(
+            "/v1/responses",
+            post(crate::phase43_service::create_response),
+        )
+        .route(
+            "/v1/responses/{id}/events",
+            get(crate::phase43_service::resume_response),
+        )
+        .route(
+            "/v1/messages",
+            post(crate::phase43_service::create_anthropic_message),
+        )
+        .route(
+            "/v1/messages/{id}/events",
+            get(crate::phase43_service::resume_anthropic_message),
+        )
+        .route(
+            "/v1/chat/completions/{id}/events",
+            get(resume_chat_completion),
+        )
+        .with_state(state);
+    if cors_origins.is_empty() {
+        router
+    } else {
+        router.layer(
+            CorsLayer::new()
+                .allow_origin(cors_origins)
+                .allow_methods([Method::GET, Method::POST])
+                .allow_headers([
+                    AUTHORIZATION,
+                    CONTENT_TYPE,
+                    LAST_EVENT_ID,
+                    HeaderName::from_static("anthropic-version"),
+                ]),
+        )
+    }
+}
+
+/// Builds the API router with the bounded dynamic model lifecycle registry.
+/// The static registry remains available for compatibility and metadata, while
+/// every model execution path resolves through `lifecycle`.
+pub fn build_dynamic_router_v1(
+    lifecycle: ModelLifecycleRegistryV1,
+    scheduler: SchedulerV1,
+    config: ServerConfigV1,
+) -> Router {
+    let lifecycle = Arc::new(lifecycle);
+    let cors_origins = config.cors_origins.clone();
+    let state = Arc::new(AppStateV1 {
+        registry: ModelRegistryV1::empty_for_dynamic(),
+        lifecycle: Some(Arc::clone(&lifecycle)),
+        scheduler,
+        config,
+    });
+    let router = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/metrics", get(metrics))
+        .route("/props", get(props))
+        .route("/slots", get(slots))
+        .route("/admin/slots/{id}/cancel", post(cancel_slot))
+        .route("/admin/keys/reload", post(reload_keys))
+        .route("/admin/models/{alias}/load", post(admin_model_load))
+        .route("/admin/models/{alias}/preload", post(admin_model_load))
+        .route("/admin/models/{alias}/unload", post(admin_model_unload))
+        .route(
+            "/admin/models/{alias}/clear-quarantine",
+            post(admin_model_clear_quarantine),
+        )
+        .route("/admin/models/evict-idle", post(admin_model_evict_idle))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(create_chat_completion))
         .route("/v1/completions", post(create_completion))
@@ -239,8 +324,14 @@ async fn healthz(State(state): State<Arc<AppStateV1>>) -> Response {
 async fn readyz(State(state): State<Arc<AppStateV1>>) -> Response {
     let ready = state.config.lifecycle.is_ready() && state.scheduler.is_accepting();
     if let Some(metrics) = &state.config.metrics {
-        for entry in state.registry.entries() {
-            metrics.set_model_ready(entry.alias(), ready);
+        if let Some(lifecycle) = state.lifecycle.as_ref() {
+            for alias in lifecycle.configured_aliases() {
+                metrics.set_model_ready(&alias, ready);
+            }
+        } else {
+            for entry in state.registry.entries() {
+                metrics.set_model_ready(entry.alias(), ready);
+            }
         }
     }
     let status = if ready {
@@ -266,8 +357,14 @@ async fn metrics(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Re
         error.into_response()
     } else if let Some(metrics) = &state.config.metrics {
         let ready = state.config.lifecycle.is_ready() && state.scheduler.is_accepting();
-        for entry in state.registry.entries() {
-            metrics.set_model_ready(entry.alias(), ready);
+        if let Some(lifecycle) = state.lifecycle.as_ref() {
+            for alias in lifecycle.configured_aliases() {
+                metrics.set_model_ready(&alias, ready);
+            }
+        } else {
+            for entry in state.registry.entries() {
+                metrics.set_model_ready(entry.alias(), ready);
+            }
         }
         let memory = state
             .registry
@@ -292,18 +389,34 @@ async fn props(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Resp
     let response = if let Err(error) = authorize_user(&headers, &state.config) {
         error.into_response()
     } else {
-        let models = state
-            .registry
-            .entries()
-            .iter()
-            .map(|entry| {
-                serde_json::json!({
-                    "alias": entry.alias(),
-                    "lock_fingerprint": entry.lock_fingerprint(),
-                    "runtime_memory": entry.observability_snapshot(),
+        let models = if let Some(lifecycle) = state.lifecycle.as_ref() {
+            lifecycle
+                .snapshots()
+                .into_iter()
+                .map(|snapshot| {
+                    serde_json::json!({
+                        "alias": snapshot.alias,
+                        "lifecycle": snapshot.state,
+                        "active_leases": snapshot.active_leases,
+                        "resident_bytes": snapshot.resident_bytes,
+                        "last_used": snapshot.last_used,
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        } else {
+            state
+                .registry
+                .entries()
+                .iter()
+                .map(|entry| {
+                    serde_json::json!({
+                        "alias": entry.alias(),
+                        "lock_fingerprint": entry.lock_fingerprint(),
+                        "runtime_memory": entry.observability_snapshot(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
         axum::Json(serde_json::json!({
             "schema_version": "sllm-server-props-v1",
             "state": state.config.lifecycle.state(),
@@ -362,21 +475,181 @@ async fn reload_keys(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -
     response
 }
 
+async fn admin_model_load(
+    State(state): State<Arc<AppStateV1>>,
+    Path(alias): Path<String>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match reject_admin_body(request).await {
+            Err(response) => response,
+            Ok(()) => match state.lifecycle.as_ref() {
+                Some(lifecycle) => match tokio::task::spawn_blocking({
+                    let lifecycle = Arc::clone(lifecycle);
+                    let alias = alias.clone();
+                    move || lifecycle.preload(&alias)
+                })
+                .await
+                {
+                    Ok(Ok(())) => axum::Json(serde_json::json!({"alias": alias, "state": "ready"}))
+                        .into_response(),
+                    Ok(Err(error)) => lifecycle_error_response(&alias, error),
+                    Err(_) => ApiErrorV1::generation_failed("dynamic model load worker failed")
+                        .into_response(),
+                },
+                None => ApiErrorV1::model_not_found(&alias).into_response(),
+            },
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_unload(
+    State(state): State<Arc<AppStateV1>>,
+    Path(alias): Path<String>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match reject_admin_body(request).await {
+            Err(response) => response,
+            Ok(()) => match state.lifecycle.as_ref() {
+                Some(lifecycle) => match tokio::task::spawn_blocking({
+                    let lifecycle = Arc::clone(lifecycle);
+                    let alias = alias.clone();
+                    move || lifecycle.unload(&alias)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {
+                        axum::Json(serde_json::json!({"alias": alias, "state": "unloaded"}))
+                            .into_response()
+                    }
+                    Ok(Err(error)) => lifecycle_error_response(&alias, error),
+                    Err(_) => ApiErrorV1::generation_failed("dynamic model unload worker failed")
+                        .into_response(),
+                },
+                None => ApiErrorV1::model_not_found(&alias).into_response(),
+            },
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_clear_quarantine(
+    State(state): State<Arc<AppStateV1>>,
+    Path(alias): Path<String>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match reject_admin_body(request).await {
+            Err(response) => response,
+            Ok(()) => match state.lifecycle.as_ref() {
+                Some(lifecycle) => match tokio::task::spawn_blocking({
+                    let lifecycle = Arc::clone(lifecycle);
+                    let alias = alias.clone();
+                    move || lifecycle.clear_quarantine(&alias)
+                })
+                .await
+                {
+                    Ok(Ok(())) => {
+                        axum::Json(serde_json::json!({"alias": alias, "state": "unloaded"}))
+                            .into_response()
+                    }
+                    Ok(Err(error)) => lifecycle_error_response(&alias, error),
+                    Err(_) => ApiErrorV1::generation_failed("dynamic model cleanup worker failed")
+                        .into_response(),
+                },
+                None => ApiErrorV1::model_not_found(&alias).into_response(),
+            },
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_evict_idle(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match reject_admin_body(request).await {
+            Err(response) => response,
+            Ok(()) => match state.lifecycle.as_ref() {
+                Some(lifecycle) => match tokio::task::spawn_blocking({
+                    let lifecycle = Arc::clone(lifecycle);
+                    move || lifecycle.evict_idle()
+                })
+                .await
+                {
+                    Ok(Ok(count)) => {
+                        axum::Json(serde_json::json!({"evicted": count})).into_response()
+                    }
+                    Ok(Err(error)) => lifecycle_error_response("*", error),
+                    Err(_) => ApiErrorV1::generation_failed("dynamic model eviction worker failed")
+                        .into_response(),
+                },
+                None => ApiErrorV1::generation_failed("dynamic model lifecycle is not configured")
+                    .into_response(),
+            },
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn reject_admin_body(request: Request<Body>) -> Result<(), Response> {
+    match to_bytes(request.into_body(), 1).await {
+        Ok(body) if body.is_empty() => Ok(()),
+        _ => Err(ApiErrorV1::invalid_value(
+            "body",
+            "dynamic model actions do not accept a request body",
+        )
+        .into_response()),
+    }
+}
+
 async fn list_models(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
     let response = if let Err(error) = authorize_user(&headers, &state.config) {
         error.into_response()
     } else {
-        let data = state
-            .registry
-            .entries()
-            .iter()
-            .map(|entry| ModelObjectV1 {
-                id: entry.alias(),
-                object: "model",
-                created: entry.created(),
-                owned_by: entry.owned_by(),
-            })
-            .collect();
+        let data = if let Some(lifecycle) = state.lifecycle.as_ref() {
+            lifecycle
+                .configured_aliases()
+                .iter()
+                .map(|alias| ModelObjectV1 {
+                    id: alias.clone(),
+                    object: "model",
+                    created: 0,
+                    owned_by: "sllm".to_owned(),
+                })
+                .collect()
+        } else {
+            state
+                .registry
+                .entries()
+                .iter()
+                .map(|entry| ModelObjectV1 {
+                    id: entry.alias().to_owned(),
+                    object: "model",
+                    created: entry.created(),
+                    owned_by: entry.owned_by().to_owned(),
+                })
+                .collect()
+        };
         axum::Json(ModelListV1 {
             object: "list",
             data,
@@ -440,12 +713,11 @@ async fn create_chat_completion(
         record_http(&state, HttpEndpointV1::ChatCompletions, &response);
         return response;
     }
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => {
-            let response = ApiErrorV1::model_not_found(request.model()).into_response();
+    let (model, mut initial_lease) = match resolve_model(&state, request.model()) {
+        Ok(value) => value,
+        Err(response) => {
             record_http(&state, HttpEndpointV1::ChatCompletions, &response);
-            return response;
+            return *response;
         }
     };
     let context = ResponseContextV1::new(model.alias(), request.reasoning());
@@ -471,19 +743,36 @@ async fn create_chat_completion(
     };
     let choice_count = request.choice_count();
     let mut receivers = Vec::with_capacity(choice_count as usize);
-    let mut admission_error = None;
+    let mut admission_error: Option<Response> = None;
     for index in 0..choice_count {
         let choice_request = match request.for_choice(index) {
             Ok(request) => request,
             Err(error) => {
-                admission_error = Some(error);
+                admission_error = Some(error.into_response());
                 break;
             }
         };
-        match state.scheduler.submit(Arc::clone(&model), choice_request) {
+        let (choice_model, lease) = if index == 0 {
+            (Arc::clone(&model), initial_lease.take())
+        } else {
+            match state.lifecycle.as_ref() {
+                Some(_) => match resolve_model(&state, request.model()) {
+                    Ok((choice_model, lease)) => (choice_model, lease),
+                    Err(error) => {
+                        admission_error = Some(*error);
+                        break;
+                    }
+                },
+                None => (Arc::clone(&model), None),
+            }
+        };
+        match state
+            .scheduler
+            .submit_with_lease(choice_model, choice_request, lease)
+        {
             Ok(receiver) => receivers.push(IndexedGenerationReceiverV1 { index, receiver }),
             Err(error) => {
-                admission_error = Some(error);
+                admission_error = Some(error.into_response());
                 break;
             }
         }
@@ -498,7 +787,7 @@ async fn create_chat_completion(
         if let Some(metrics) = &state.config.metrics {
             metrics.record_rejected(&context.model, stream_response);
         }
-        let response = error.into_response();
+        let response = error;
         record_http(&state, HttpEndpointV1::ChatCompletions, &response);
         return response;
     }
@@ -585,9 +874,9 @@ async fn create_completion(
 }
 
 async fn handle_completion(state: &AppStateV1, request: CompletionRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, mut initial_lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let inputs = match completion_inputs(request.prompt()) {
         Ok(inputs) => inputs,
@@ -611,7 +900,21 @@ async fn handle_completion(state: &AppStateV1, request: CompletionRequestV1) -> 
                 Ok(request) => request,
                 Err(error) => return error.into_response(),
             };
-            match state.scheduler.submit(Arc::clone(&model), generated) {
+            let (choice_model, lease) = if index == 0 {
+                (Arc::clone(&model), initial_lease.take())
+            } else {
+                match state.lifecycle.as_ref() {
+                    Some(_) => match resolve_model(state, request.model()) {
+                        Ok((choice_model, lease)) => (choice_model, lease),
+                        Err(response) => return *response,
+                    },
+                    None => (Arc::clone(&model), None),
+                }
+            };
+            match state
+                .scheduler
+                .submit_with_lease(choice_model, generated, lease)
+            {
                 Ok(receiver) => receivers.push(IndexedTextGenerationReceiverV1 {
                     index,
                     prompt_index,
@@ -672,9 +975,9 @@ async fn create_embeddings(
 }
 
 async fn handle_embeddings(state: Arc<AppStateV1>, request: EmbeddingRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, lease) = match resolve_model(&state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let Some(model_dimension) = model.embedding_dimension() else {
         return ApiErrorV1::new(
@@ -717,13 +1020,14 @@ async fn handle_embeddings(state: Arc<AppStateV1>, request: EmbeddingRequestV1) 
         )
         .into_response();
     }
-    let receiver = match state
-        .scheduler
-        .submit_embedding(model.clone(), backend_request)
-    {
-        Ok(receiver) => receiver,
-        Err(error) => return error.into_response(),
-    };
+    let receiver =
+        match state
+            .scheduler
+            .submit_embedding_with_lease(model.clone(), backend_request, lease)
+        {
+            Ok(receiver) => receiver,
+            Err(error) => return error.into_response(),
+        };
     let batch = match receiver.recv().await {
         Ok(batch) => batch,
         Err(error) => return error.into_response(),
@@ -820,9 +1124,9 @@ async fn create_rerank(State(state): State<Arc<AppStateV1>>, request: Request<Bo
 }
 
 async fn handle_rerank(state: Arc<AppStateV1>, request: RerankRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, lease) = match resolve_model(&state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     if model.embedding_dimension().is_none() {
         return ApiErrorV1::new(
@@ -861,13 +1165,14 @@ async fn handle_rerank(state: Arc<AppStateV1>, request: RerankRequestV1) -> Resp
         Ok(counts) => counts,
         Err(error) => return error.into_response(),
     };
-    let receiver = match state
-        .scheduler
-        .submit_embedding(model.clone(), request_input)
-    {
-        Ok(receiver) => receiver,
-        Err(error) => return error.into_response(),
-    };
+    let receiver =
+        match state
+            .scheduler
+            .submit_embedding_with_lease(model.clone(), request_input, lease)
+        {
+            Ok(receiver) => receiver,
+            Err(error) => return error.into_response(),
+        };
     let batch = match receiver.recv().await {
         Ok(batch) => batch,
         Err(error) => return error.into_response(),
@@ -944,9 +1249,9 @@ async fn tokenize(State(state): State<Arc<AppStateV1>>, request: Request<Body>) 
 }
 
 fn handle_tokenize(state: &AppStateV1, request: TokenizeRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, _lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let options = if request.with_pieces() {
         TokenizeOptionsV1::with_pieces()
@@ -993,9 +1298,9 @@ async fn detokenize(State(state): State<Arc<AppStateV1>>, request: Request<Body>
 }
 
 fn handle_detokenize(state: &AppStateV1, request: DetokenizeRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, _lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let mode = if request.skip_special_tokens() {
         DecodeModeV1::SkipSpecialTokens
@@ -1029,9 +1334,9 @@ async fn apply_template(State(state): State<Arc<AppStateV1>>, request: Request<B
 }
 
 fn handle_apply_template(state: &AppStateV1, request: ApplyTemplateRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, _lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     if !model.reviewed_chat_template_available() {
         return ApiErrorV1::new(
@@ -1083,9 +1388,9 @@ async fn input_tokens(State(state): State<Arc<AppStateV1>>, request: Request<Bod
 }
 
 fn handle_input_tokens(state: &AppStateV1, request: InputTokensRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, _lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let tokens = match request.input() {
         InputTokensInputV1::Text(text) => {
@@ -1141,9 +1446,9 @@ async fn create_infill(State(state): State<Arc<AppStateV1>>, request: Request<Bo
 }
 
 async fn handle_infill(state: &AppStateV1, request: InfillRequestV1) -> Response {
-    let model = match state.registry.get(request.model()) {
-        Some(model) => model,
-        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    let (model, mut initial_lease) = match resolve_model(state, request.model()) {
+        Ok(value) => value,
+        Err(response) => return *response,
     };
     let Some(capability) = model.infill_capability() else {
         return ApiErrorV1::new(
@@ -1224,7 +1529,21 @@ async fn handle_infill(state: &AppStateV1, request: InfillRequestV1) -> Response
             Ok(request) => request,
             Err(error) => return error.into_response(),
         };
-        match state.scheduler.submit(Arc::clone(&model), choice) {
+        let (choice_model, lease) = if index == 0 {
+            (Arc::clone(&model), initial_lease.take())
+        } else {
+            match state.lifecycle.as_ref() {
+                Some(_) => match resolve_model(state, request.model()) {
+                    Ok((choice_model, lease)) => (choice_model, lease),
+                    Err(response) => return *response,
+                },
+                None => (Arc::clone(&model), None),
+            }
+        };
+        match state
+            .scheduler
+            .submit_with_lease(choice_model, choice, lease)
+        {
             Ok(receiver) => receivers.push(IndexedTextGenerationReceiverV1 {
                 index,
                 prompt_index: 0,
@@ -1292,6 +1611,62 @@ fn utility_error(param: &str, message: String) -> Response {
         code,
     )
     .into_response()
+}
+
+pub(crate) fn resolve_model(
+    state: &AppStateV1,
+    alias: &str,
+) -> Result<(Arc<ModelRegistryEntryV1>, Option<ModelLifecycleLeaseV1>), Box<Response>> {
+    resolve_model_for_request(state, alias).map_err(|error| Box::new(error.into_response()))
+}
+
+pub(crate) fn resolve_model_for_request(
+    state: &AppStateV1,
+    alias: &str,
+) -> Result<(Arc<ModelRegistryEntryV1>, Option<ModelLifecycleLeaseV1>), ApiErrorV1> {
+    let Some(lifecycle) = state.lifecycle.as_ref() else {
+        return state
+            .registry
+            .get(alias)
+            .map(|model| (model, None))
+            .ok_or_else(|| ApiErrorV1::model_not_found(alias));
+    };
+    match lifecycle.resolve(alias) {
+        Ok(lease) => {
+            let model = lease.owner();
+            Ok((model, Some(lease)))
+        }
+        Err(error) => Err(lifecycle_api_error(alias, error)),
+    }
+}
+
+pub(crate) fn lifecycle_error_response(alias: &str, error: ModelLifecycleErrorV1) -> Response {
+    lifecycle_api_error(alias, error).into_response()
+}
+
+pub(crate) fn lifecycle_api_error(alias: &str, error: ModelLifecycleErrorV1) -> ApiErrorV1 {
+    match error {
+        ModelLifecycleErrorV1::AliasNotFound => ApiErrorV1::model_not_found(alias),
+        ModelLifecycleErrorV1::ModelLoading
+        | ModelLifecycleErrorV1::ModelDraining
+        | ModelLifecycleErrorV1::Quarantined
+        | ModelLifecycleErrorV1::LoadingTimeout
+        | ModelLifecycleErrorV1::DrainTimeout
+        | ModelLifecycleErrorV1::CapacityExceeded
+        | ModelLifecycleErrorV1::QuotaExceeded
+        | ModelLifecycleErrorV1::ShutdownFailed
+        | ModelLifecycleErrorV1::StaleCompletion
+        | ModelLifecycleErrorV1::LoaderFailed
+        | ModelLifecycleErrorV1::QuarantineNeedsClear
+        | ModelLifecycleErrorV1::AliasBusy => ApiErrorV1::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("model {alias} is temporarily unavailable"),
+            "server_error",
+            Some("model".to_owned()),
+            ErrorCodeV1::GenerationFailed,
+        ),
+        _ => ApiErrorV1::generation_failed("dynamic model lifecycle operation failed"),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2448,17 +2823,17 @@ impl ResponseContextV1 {
 }
 
 #[derive(Serialize)]
-struct ModelListV1<'a> {
+struct ModelListV1 {
     object: &'static str,
-    data: Vec<ModelObjectV1<'a>>,
+    data: Vec<ModelObjectV1>,
 }
 
 #[derive(Serialize)]
-struct ModelObjectV1<'a> {
-    id: &'a str,
+struct ModelObjectV1 {
+    id: String,
     object: &'static str,
     created: u64,
-    owned_by: &'a str,
+    owned_by: String,
 }
 
 #[derive(Serialize)]

@@ -5,6 +5,7 @@
 #include "sllm/hip.h"
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -766,6 +767,12 @@ elementwise_descriptor(const sllm_elementwise_operation_t operation,
       result.stride_elements[0] = 4096U;
       result.stride_elements[1] = 256U;
       result.stride_elements[2] = 1U;
+    } else if (operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD) {
+      result.rank = 2U;
+      result.shape[0] = 1U;
+      result.shape[1] = logical_size;
+      result.stride_elements[0] = logical_size;
+      result.stride_elements[1] = 1U;
     }
     return result;
   };
@@ -775,9 +782,27 @@ elementwise_descriptor(const sllm_elementwise_operation_t operation,
         operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||
                 operation == SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP
             ? rmsnorm_binding(input1, 0U, 1U, 1U)
+        : operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD
+            ? rmsnorm_binding(input1, 0U, 1U, size)
             : binding(input1, size);
   }
   descriptor.output = binding(output, size);
+  return descriptor;
+}
+
+sllm_elementwise_desc_t
+broadcast_elementwise_descriptor(const sllm_buffer_t *const input,
+                                 const sllm_buffer_t *const vector,
+                                 const sllm_buffer_t *const output,
+                                 const uint64_t rows, const uint64_t columns) {
+  sllm_elementwise_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_ELEMENTWISE_VERSION;
+  descriptor.operation = SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD;
+  descriptor.input0 = rmsnorm_binding(input, 0U, rows, columns);
+  descriptor.input1 = rmsnorm_binding(vector, 0U, 1U, columns);
+  descriptor.output = rmsnorm_binding(output, 0U, rows, columns);
   return descriptor;
 }
 
@@ -865,6 +890,9 @@ bool elementwise_prepare_execute_and_negative_contract() {
       !run(SLLM_ELEMENTWISE_OPERATION_ADD, 17U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_ADD_V1,
            "elementwise.add.bf16_fp32.v1") ||
+      !run(SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD, 17U,
+           SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1,
+           "elementwise.broadcast_add.bf16_fp32.v1") ||
       !run(SLLM_ELEMENTWISE_OPERATION_SILU_MUL, 255U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1,
            "elementwise.silu_mul.bf16_fp32.v1") ||
@@ -882,6 +910,7 @@ bool elementwise_prepare_execute_and_negative_contract() {
            "elementwise.sigmoid_mul.bf16_fp32.v1") ||
       fake_hip::elementwise_copy_launch_calls() != 1U ||
       fake_hip::elementwise_add_launch_calls() != 1U ||
+      fake_hip::elementwise_broadcast_add_launch_calls() != 1U ||
       fake_hip::elementwise_silu_mul_launch_calls() != 1U ||
       fake_hip::elementwise_sigmoid_mul_launch_calls() != 1U ||
       fake_hip::elementwise_scalar_mul_launch_calls() != 1U ||
@@ -912,6 +941,60 @@ bool elementwise_prepare_execute_and_negative_contract() {
       sigmoid_output.front() != expected_sigmoid ||
       sigmoid_output.front() == forbidden_silu ||
       !release_completion(&readback)) {
+    return false;
+  }
+
+  auto broadcast_descriptor =
+      broadcast_elementwise_descriptor(input0, input1, output, 3U, 17U);
+  sllm_elementwise_plan_t *broadcast_plan = nullptr;
+  if (!expect_status(sllm_elementwise_prepare(context, &broadcast_descriptor,
+                                              &broadcast_plan, &error.sink),
+                     SLLM_STATUS_OK, "broadcast add M=3 prepare", error) ||
+      broadcast_plan == nullptr) {
+    return false;
+  }
+  sllm_completion_t *broadcast_completion = nullptr;
+  auto broadcast_info = elementwise_dispatch_info();
+  if (!expect_status(sllm_elementwise_execute(broadcast_plan, queue,
+                                              &broadcast_completion,
+                                              &broadcast_info, &error.sink),
+                     SLLM_STATUS_OK, "broadcast add M=3 execute", error) ||
+      broadcast_completion == nullptr ||
+      broadcast_info.operation != SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD ||
+      broadcast_info.element_count != 3U * 17U ||
+      broadcast_info.fallback_allowed != 0U ||
+      broadcast_info.fallback_used != 0U ||
+      !query_completion(broadcast_completion, SLLM_STATUS_OK)) {
+    return false;
+  }
+  if (!release_completion(&broadcast_completion) ||
+      !expect_status(
+          sllm_elementwise_plan_release(&broadcast_plan, &error.sink),
+          SLLM_STATUS_OK, "broadcast add M=3 release", error)) {
+    return false;
+  }
+  if (fake_hip::elementwise_broadcast_add_launch_calls() != 2U) {
+    return false;
+  }
+  sllm_completion_t *broadcast_readback = nullptr;
+  const std::size_t broadcast_bytes = 3U * 17U * sizeof(uint16_t);
+  if (!submit_d2h(queue, output, broadcast_bytes, &broadcast_readback) ||
+      !query_completion(broadcast_readback, SLLM_STATUS_OK)) {
+    return false;
+  }
+  std::vector<uint16_t> broadcast_output(3U * 17U);
+  uint64_t broadcast_written = 0U;
+  const uint16_t expected_broadcast = UINT16_C(0x4040);
+  if (!expect_status(sllm_completion_read(
+                         broadcast_readback, broadcast_output.data(),
+                         broadcast_bytes, &broadcast_written, &error.sink),
+                     SLLM_STATUS_OK, "broadcast add M=3 read", error) ||
+      broadcast_written != broadcast_bytes ||
+      std::any_of(broadcast_output.begin(), broadcast_output.end(),
+                  [expected_broadcast](const uint16_t value) {
+                    return value != expected_broadcast;
+                  }) ||
+      !release_completion(&broadcast_readback)) {
     return false;
   }
 

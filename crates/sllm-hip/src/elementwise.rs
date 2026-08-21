@@ -17,6 +17,7 @@ use crate::{HipBackend, TensorBinding};
 pub enum ElementwiseOperation {
     Copy,
     Add,
+    BroadcastAdd,
     ScalarMul,
     SiluMul,
     GeluTanhMul,
@@ -29,6 +30,7 @@ impl ElementwiseOperation {
         match self {
             Self::Copy => sys::SLLM_ELEMENTWISE_OPERATION_COPY,
             Self::Add => sys::SLLM_ELEMENTWISE_OPERATION_ADD,
+            Self::BroadcastAdd => sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD,
             Self::ScalarMul => sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL,
             Self::SiluMul => sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL,
             Self::GeluTanhMul => sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL,
@@ -41,6 +43,7 @@ impl ElementwiseOperation {
         match kind {
             SemanticOpKind::Copy => Ok(Self::Copy),
             SemanticOpKind::Add => Ok(Self::Add),
+            SemanticOpKind::BroadcastAdd => Ok(Self::BroadcastAdd),
             SemanticOpKind::ScalarMul => Ok(Self::ScalarMul),
             SemanticOpKind::SiluMul => Ok(Self::SiluMul),
             SemanticOpKind::GeluTanhMul => Ok(Self::GeluTanhMul),
@@ -93,6 +96,25 @@ impl ElementwiseDescriptor {
             operation: ElementwiseOperation::Add,
             input0,
             input1: Some(input1),
+            output,
+            semantic,
+        })
+    }
+
+    pub fn broadcast_add(
+        input: TensorBinding,
+        vector: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, sllm_core::OpError> {
+        let semantic = Arc::new(SemanticOpDescriptor::new(
+            SemanticOpKind::BroadcastAdd,
+            vec![input.view().clone(), vector.view().clone()],
+            vec![output.view().clone()],
+        )?);
+        Ok(Self {
+            operation: ElementwiseOperation::BroadcastAdd,
+            input0: input,
+            input1: Some(vector),
             output,
             semantic,
         })
@@ -221,6 +243,7 @@ impl ElementwiseDescriptor {
         let expected_inputs = match operation {
             ElementwiseOperation::Copy => 1,
             ElementwiseOperation::Add => 2,
+            ElementwiseOperation::BroadcastAdd => 2,
             ElementwiseOperation::ScalarMul => 2,
             ElementwiseOperation::SiluMul => 2,
             ElementwiseOperation::GeluTanhMul => 2,
@@ -376,6 +399,7 @@ fn dispatch_info_from_raw(
     let operation = match info.operation {
         sys::SLLM_ELEMENTWISE_OPERATION_COPY => ElementwiseOperation::Copy,
         sys::SLLM_ELEMENTWISE_OPERATION_ADD => ElementwiseOperation::Add,
+        sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD => ElementwiseOperation::BroadcastAdd,
         sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL => ElementwiseOperation::ScalarMul,
         sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL => ElementwiseOperation::SiluMul,
         sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL => ElementwiseOperation::GeluTanhMul,
@@ -578,6 +602,18 @@ mod tests {
         assert_eq!(add.operation, ElementwiseOperation::Add);
         assert_eq!(add.semantic().kind(), SemanticOpKind::Add);
         assert!(add.input1.is_some());
+
+        let broadcast_add = ElementwiseDescriptor::broadcast_add(
+            input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            input1.binding(TensorView::contiguous(DType::Bf16, &[5]).unwrap()),
+            output.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(broadcast_add.operation, ElementwiseOperation::BroadcastAdd);
+        assert_eq!(
+            broadcast_add.semantic().kind(),
+            SemanticOpKind::BroadcastAdd
+        );
 
         let silu_mul = ElementwiseDescriptor::silu_mul(
             input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),

@@ -37,6 +37,7 @@ struct State final {
   std::size_t rmsnorm_launch_calls = 0U;
   std::size_t elementwise_copy_launch_calls = 0U;
   std::size_t elementwise_add_launch_calls = 0U;
+  std::size_t elementwise_broadcast_add_launch_calls = 0U;
   std::size_t elementwise_silu_mul_launch_calls = 0U;
   std::size_t elementwise_sigmoid_mul_launch_calls = 0U;
   std::size_t elementwise_scalar_mul_launch_calls = 0U;
@@ -198,6 +199,7 @@ void reset() noexcept {
   state.rmsnorm_launch_calls = 0U;
   state.elementwise_copy_launch_calls = 0U;
   state.elementwise_add_launch_calls = 0U;
+  state.elementwise_broadcast_add_launch_calls = 0U;
   state.elementwise_silu_mul_launch_calls = 0U;
   state.elementwise_sigmoid_mul_launch_calls = 0U;
   state.elementwise_scalar_mul_launch_calls = 0U;
@@ -295,6 +297,22 @@ hipError_t elementwise_add_launch(const uint16_t *const /*input0*/,
   std::lock_guard<std::mutex> lock(state.mutex);
   ++state.elementwise_add_launch_calls;
   state.elementwise_last_element_count = element_count;
+  return state.elementwise_launch_status;
+}
+
+hipError_t elementwise_broadcast_add_launch(
+    const uint16_t *const input, const uint16_t *const vector,
+    uint16_t *const output, const uint64_t element_count, const uint64_t width,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.elementwise_broadcast_add_launch_calls;
+  state.elementwise_last_element_count = element_count;
+  if (state.elementwise_launch_status == hipSuccess && width != 0U) {
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      output[index] = f32_to_bf16_rne(bf16_to_f32(input[index]) +
+                                      bf16_to_f32(vector[index % width]));
+    }
+  }
   return state.elementwise_launch_status;
 }
 
@@ -796,6 +814,11 @@ std::size_t elementwise_copy_launch_calls() noexcept {
 std::size_t elementwise_add_launch_calls() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.elementwise_add_launch_calls;
+}
+
+std::size_t elementwise_broadcast_add_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.elementwise_broadcast_add_launch_calls;
 }
 
 std::size_t elementwise_silu_mul_launch_calls() noexcept {

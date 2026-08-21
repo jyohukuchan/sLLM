@@ -3,6 +3,7 @@
 //! Phase 1 deliberately contains descriptors and control-plane behavior only.
 //! It does not allocate model data, emulate a GPU, or execute numerical work.
 
+mod adapter;
 mod backend;
 mod context_window;
 mod dtype;
@@ -44,6 +45,12 @@ mod speculative;
 mod tensor;
 mod weights;
 
+pub use adapter::{
+    AdapterArtifactIdentityV1, AdapterErrorV1, AdapterModelDimsV1, AdapterRequestSetV1,
+    ControlVectorLockV1, ControlVectorSelectionV1, LoraAdapterLockV1, LoraAdapterSelectionV1,
+    LoraTargetLockV1, VerifiedControlVectorPayloadV1, VerifiedLoraPayloadV1, VerifiedLoraTargetV1,
+    apply_control_vector_bf16, apply_lora_bf16, parse_control_vector_lock_v1, parse_lora_lock_v1,
+};
 pub use backend::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
     MaterializedTensor,

@@ -11,16 +11,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_TLS_PEM_BYTES: usize = 1024 * 1024;
 
 use sllm_core::{
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    ReviewedModelLock, builtin_reviewed_model_lock, read_derived_gguf_lock,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, QWEN35_MOE_MODEL_FINGERPRINT,
+    QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock, builtin_reviewed_model_lock,
+    read_derived_gguf_lock,
 };
 use sllm_server::{
     ChatGenerationBackendV1, CheckpointStartupConfigV1, ContextWindowStartupConfigV1,
     CredentialStoreV1, DraftStartupConfigV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
-    ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
-    ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1,
+    ModelLifecycleConfigV1, ModelLifecycleDescriptorV1, ModelLifecycleLoadedV1,
+    ModelLifecycleRegistryV1, ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1,
+    PrefixCacheStartupConfigV1, ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1,
+    QwenAdapterCatalogConfigV1, QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1,
     SchedulerConfigV1, SchedulerV1, ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1,
-    ServerMetricsV1, build_router_v1,
+    ServerMetricsV1, build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
+    qwen_adapter_catalog_identity_preflight, read_model_manifest_v1,
 };
 
 fn main() -> ExitCode {
@@ -35,6 +39,7 @@ fn main() -> ExitCode {
 
 #[derive(Debug)]
 struct Config {
+    models: Option<PathBuf>,
     gguf: PathBuf,
     derived_lock: PathBuf,
     device_index: u32,
@@ -84,22 +89,61 @@ where
             .ok_or_else(|| format!("missing value for {flag}"))?;
         values.insert(flag, value);
     }
-    let gguf = PathBuf::from(take_required(&mut values, "--gguf")?);
-    let derived_lock = PathBuf::from(take_required(&mut values, "--derived-lock")?);
-    let device_index = parse_value(
-        &take_required(&mut values, "--device-index")?,
-        "device index",
-    )?;
-    let target = take_required(&mut values, "--target")?;
+    let models = values.remove("--models").map(PathBuf::from);
+    if models.as_ref().is_some_and(|path| !path.is_absolute()) {
+        return Err("--models manifest path must be absolute".to_owned());
+    }
+    let legacy_gguf = values.remove("--gguf");
+    let legacy_derived_lock = values.remove("--derived-lock");
+    let legacy_device_index = values.remove("--device-index");
+    let legacy_target = values.remove("--target");
+    let requested_model = values.remove("--model");
+    let (gguf, derived_lock, device_index, target, model) = if models.is_some() {
+        if legacy_gguf.is_some()
+            || legacy_derived_lock.is_some()
+            || legacy_device_index.is_some()
+            || legacy_target.is_some()
+            || requested_model.is_some()
+        {
+            return Err(
+                "--models is mutually exclusive with --gguf, --derived-lock, --device-index, --target, and --model"
+                    .to_owned(),
+            );
+        }
+        // Dynamic manifests supply these values per alias.  Keep the legacy
+        // fields populated for the shared Config shape; the dynamic startup
+        // branch must never consume them.
+        (
+            PathBuf::new(),
+            PathBuf::new(),
+            0,
+            String::new(),
+            "dynamic".to_owned(),
+        )
+    } else {
+        let gguf = PathBuf::from(
+            legacy_gguf.ok_or_else(|| "missing required argument --gguf".to_owned())?,
+        );
+        let derived_lock = PathBuf::from(
+            legacy_derived_lock
+                .ok_or_else(|| "missing required argument --derived-lock".to_owned())?,
+        );
+        let device_index = parse_value(
+            &legacy_device_index
+                .ok_or_else(|| "missing required argument --device-index".to_owned())?,
+            "device index",
+        )?;
+        let target =
+            legacy_target.ok_or_else(|| "missing required argument --target".to_owned())?;
+        let model = requested_model.unwrap_or_else(|| "qwen3.5-4b".to_owned());
+        (gguf, derived_lock, device_index, target, model)
+    };
     let listen = parse_value(
         &values
             .remove("--listen")
             .unwrap_or_else(|| "127.0.0.1:8080".to_owned()),
         "listen address",
     )?;
-    let model = values
-        .remove("--model")
-        .unwrap_or_else(|| "qwen3.5-4b".to_owned());
     let api_key_env = values.remove("--api-key-env");
     let api_key_file = values.remove("--api-key-file").map(PathBuf::from);
     if api_key_env.is_some() && api_key_file.is_some() {
@@ -322,6 +366,7 @@ where
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
     Ok(Config {
+        models,
         gguf,
         derived_lock,
         device_index,
@@ -383,6 +428,9 @@ fn run(config: Config) -> Result<(), String> {
             (None, None) => None,
             _ => unreachable!("TLS certificate/key pairing was checked during parsing"),
         };
+        if let Some(manifest_path) = config.models.clone() {
+            return run_dynamic_manifest(config, manifest_path, credentials, tls).await;
+        }
         let lifecycle = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
         let derived = read_derived_gguf_lock(&config.derived_lock)
             .map_err(|error| format!("derived GGUF lock validation failed: {error}"))?;
@@ -409,6 +457,7 @@ fn run(config: Config) -> Result<(), String> {
                         .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                     kv_cache_encoding: config.kv_cache_encoding,
                     phase41: config.phase41.clone(),
+                    adapter_catalog: None,
                 })
                 .map_err(|error| error.to_string())?,
             ))
@@ -427,6 +476,7 @@ fn run(config: Config) -> Result<(), String> {
                             .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                         kv_cache_encoding: config.kv_cache_encoding,
                         phase41: config.phase41.clone(),
+                        adapter_catalog: None,
                     })
                     .map_err(|error| error.to_string())?,
                 )),
@@ -665,9 +715,479 @@ fn context_length_warning(
     })
 }
 
+/// Start the manifest-backed dynamic model registry.  All locks and identities
+/// are admitted before the first backend is opened; the loader then repeats the
+/// lock admission immediately before each GPU load.
+async fn run_dynamic_manifest(
+    config: Config,
+    manifest_path: PathBuf,
+    credentials: CredentialStoreV1,
+    tls: Option<axum_server::tls_rustls::RustlsConfig>,
+) -> Result<(), String> {
+    let manifest = read_model_manifest_v1(&manifest_path)
+        .map_err(|error| format!("model manifest validation failed: {error}"))?;
+    let mut descriptors = Vec::with_capacity(manifest.models().len());
+    let mut entries = BTreeMap::new();
+    let mut resident_quota = 0_u64;
+    for entry in manifest.models() {
+        let derived = read_derived_gguf_lock(entry.derived_lock()).map_err(|error| {
+            format!(
+                "model {} derived lock validation failed: {error}",
+                entry.alias()
+            )
+        })?;
+        let model_identity = dynamic_model_identity(&derived)?;
+        let adapter_identity = dynamic_adapter_identity(entry)?;
+        let plan_identity =
+            dynamic_model_plan_digest_preflight(entry.gguf(), &derived).map_err(|error| {
+                format!(
+                    "model {} verified weight-plan preflight failed: {error}",
+                    entry.alias()
+                )
+            })?;
+        resident_quota = resident_quota
+            .checked_add(entry.declared_resident_bytes())
+            .ok_or_else(|| "model manifest resident-byte quota overflowed".to_owned())?;
+        descriptors.push(
+            ModelLifecycleDescriptorV1::new(
+                entry.alias(),
+                model_identity,
+                plan_identity,
+                adapter_identity,
+                entry.declared_resident_bytes(),
+            )
+            .map_err(|error| {
+                format!(
+                    "model {} lifecycle descriptor invalid: {error:?}",
+                    entry.alias()
+                )
+            })?,
+        );
+        entries.insert(entry.alias().to_owned(), entry.clone());
+    }
+    let lifecycle_config = ModelLifecycleConfigV1::new(resident_quota)
+        .and_then(|value| value.with_timeouts(config.completion_timeout, config.shutdown_timeout))
+        .map_err(|error| format!("dynamic lifecycle configuration invalid: {error:?}"))?;
+    let entries = Arc::new(entries);
+    let active = Arc::new(std::sync::Mutex::new(
+        BTreeMap::<String, Arc<ActiveBackend>>::new(),
+    ));
+    let load_entries = Arc::clone(&entries);
+    let load_active = Arc::clone(&active);
+    let load_phase41 = config.phase41.clone();
+    let load_kv = config.kv_cache_encoding;
+    let load_context_length = config.context_length;
+    let load_completion_timeout = config.completion_timeout;
+    let load_shutdown_timeout = config.shutdown_timeout;
+    let loader = move |descriptor: &ModelLifecycleDescriptorV1| {
+        let entry = load_entries
+            .get(descriptor.alias())
+            .ok_or_else(|| "manifest alias disappeared".to_owned())?;
+        let derived = read_derived_gguf_lock(entry.derived_lock())
+            .map_err(|error| format!("derived lock validation failed: {error}"))?;
+        let model_identity = dynamic_model_identity(&derived)?;
+        let plan_identity_before = dynamic_model_plan_digest_preflight(entry.gguf(), &derived)
+            .map_err(|error| format!("verified weight-plan preflight failed: {error}"))?;
+        if model_identity != descriptor.identity().model_identity()
+            || plan_identity_before != descriptor.identity().plan_identity()
+        {
+            return Err("model identity changed since manifest preflight".to_owned());
+        }
+        let is_moe = derived.semantic_model_id.starts_with("qwen35moe:");
+        let adapter_identity_before = dynamic_adapter_identity(entry)?;
+        if adapter_identity_before != descriptor.identity().adapter_identity() {
+            return Err("adapter catalog identity changed since manifest preflight".to_owned());
+        }
+        let adapter_catalog = dynamic_adapter_catalog(entry)?;
+        let backend = if is_moe {
+            if adapter_catalog.is_some() {
+                return Err("MoE models do not support adapter catalogs".to_owned());
+            }
+            ActiveBackend::Qwen(Arc::new(
+                QwenChatBackendV1::open(QwenBackendConfigV1 {
+                    gguf_path: entry.gguf().to_owned(),
+                    derived_lock_path: entry.derived_lock().to_owned(),
+                    device_index: entry.device_index(),
+                    target: entry.target().to_owned(),
+                    completion_timeout: load_completion_timeout,
+                    shutdown_timeout: load_shutdown_timeout,
+                    context_length: load_context_length
+                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                    kv_cache_encoding: load_kv,
+                    phase41: load_phase41.clone(),
+                    adapter_catalog: None,
+                })
+                .map_err(|error| error.to_string())?,
+            ))
+        } else {
+            match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+                .map_err(|error| format!("reviewed model lock resolution failed: {error}"))?
+            {
+                ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
+                    QwenChatBackendV1::open(QwenBackendConfigV1 {
+                        gguf_path: entry.gguf().to_owned(),
+                        derived_lock_path: entry.derived_lock().to_owned(),
+                        device_index: entry.device_index(),
+                        target: entry.target().to_owned(),
+                        completion_timeout: load_completion_timeout,
+                        shutdown_timeout: load_shutdown_timeout,
+                        context_length: load_context_length
+                            .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                        kv_cache_encoding: load_kv,
+                        phase41: load_phase41.clone(),
+                        adapter_catalog,
+                    })
+                    .map_err(|error| error.to_string())?,
+                )),
+                ReviewedModelLock::Gemma4(_) => {
+                    if adapter_catalog.is_some() {
+                        return Err("Gemma models do not support adapter catalogs".to_owned());
+                    }
+                    if load_kv != KvCacheEncoding::Fp16 {
+                        return Err(
+                            "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
+                                .to_owned(),
+                        );
+                    }
+                    ActiveBackend::Gemma(Arc::new(
+                        Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
+                            gguf_path: entry.gguf().to_owned(),
+                            derived_lock_path: entry.derived_lock().to_owned(),
+                            device_index: entry.device_index(),
+                            target: entry.target().to_owned(),
+                            completion_timeout: load_completion_timeout,
+                            shutdown_timeout: load_shutdown_timeout,
+                            context_length: load_context_length
+                                .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
+                            phase41: load_phase41.clone(),
+                        })
+                        .map_err(|error| error.to_string())?,
+                    ))
+                }
+            }
+        };
+        let backend = Arc::new(backend);
+        if backend.plan_digest() != descriptor.identity().plan_identity() {
+            return Err(fail_after_backend_open(
+                &backend,
+                "loaded backend weight-plan identity differs",
+            ));
+        }
+        let backend_adapter_identity = backend
+            .adapter_catalog_identity()
+            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+        if backend_adapter_identity != descriptor.identity().adapter_identity() {
+            return Err(fail_after_backend_open(
+                &backend,
+                "loaded backend adapter catalog identity differs",
+            ));
+        }
+        let derived_after = read_derived_gguf_lock(entry.derived_lock())
+            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+        let model_identity_after = dynamic_model_identity(&derived_after)
+            .map_err(|error| fail_after_backend_open(&backend, error))?;
+        let plan_identity_after = dynamic_model_plan_digest_preflight(entry.gguf(), &derived_after)
+            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+        let adapter_identity_after = dynamic_adapter_identity(entry)
+            .map_err(|error| fail_after_backend_open(&backend, error))?;
+        if model_identity_after != descriptor.identity().model_identity()
+            || plan_identity_after != descriptor.identity().plan_identity()
+            || adapter_identity_after != descriptor.identity().adapter_identity()
+        {
+            return Err(fail_after_backend_open(
+                &backend,
+                "model, weight-plan, or adapter identity changed during backend load",
+            ));
+        }
+        let resident_bytes = backend.resident_bytes();
+        if resident_bytes != descriptor.declared_resident_bytes() {
+            return Err(fail_after_backend_open(
+                &backend,
+                format!(
+                    "model {} resident bytes differ from manifest declaration",
+                    descriptor.alias()
+                ),
+            ));
+        }
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| fail_after_backend_open(&backend, "system clock is before UNIX epoch"))?
+            .as_secs();
+        let owner = Arc::new(
+            ModelRegistryEntryV1::new(
+                descriptor.alias(),
+                created,
+                "sllm-dynamic",
+                backend.model_fingerprint(),
+                backend.as_trait(),
+            )
+            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?,
+        );
+        let loaded = ModelLifecycleLoadedV1::new(
+            owner,
+            resident_bytes,
+            descriptor.identity().model_identity().to_owned(),
+            descriptor.identity().plan_identity().to_owned(),
+            descriptor.identity().adapter_identity().to_owned(),
+        )
+        .map_err(|error| {
+            fail_after_backend_open(
+                &backend,
+                format!("dynamic loaded identity invalid: {error:?}"),
+            )
+        })?;
+        load_active
+            .lock()
+            .map_err(|_| {
+                fail_after_backend_open(&backend, "dynamic active backend map is poisoned")
+            })?
+            .insert(descriptor.alias().to_owned(), backend);
+        Ok(loaded)
+    };
+    let shutdown_active = Arc::clone(&active);
+    let shutdown = move |loaded: ModelLifecycleLoadedV1| {
+        let alias = loaded.owner().alias().to_owned();
+        let backend = shutdown_active
+            .lock()
+            .map_err(|_| "dynamic active backend map is poisoned".to_owned())?
+            .remove(&alias)
+            .ok_or_else(|| "active backend owner is missing".to_owned())?;
+        let report = match backend.shutdown() {
+            Ok(report) => report,
+            Err(error) => {
+                shutdown_active
+                    .lock()
+                    .map_err(|_| "dynamic active backend map is poisoned".to_owned())?
+                    .insert(alias, backend);
+                return Err(error.to_string());
+            }
+        };
+        if report.final_current_bytes != 0
+            || report.retryable_cleanup != 0
+            || report.durable_quarantine != 0
+        {
+            return Err("backend shutdown audit was not clean".to_owned());
+        }
+        Ok::<(), String>(())
+    };
+    let lifecycle =
+        ModelLifecycleRegistryV1::new_with_fns(descriptors, loader, shutdown, lifecycle_config)
+            .map_err(|error| format!("dynamic lifecycle registry invalid: {error:?}"))?;
+    let lifecycle_state = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
+    for entry in manifest.models().iter().filter(|entry| entry.preload()) {
+        if let Err(error) = lifecycle.preload(entry.alias()) {
+            let cleanup = unload_dynamic_registry(&lifecycle);
+            lifecycle_state.transition(ServerLifecycleStateV1::Failed);
+            return Err(match cleanup {
+                Some(cleanup) => format!(
+                    "preload of model {} failed: {error:?}; cleanup failed: {cleanup}",
+                    entry.alias()
+                ),
+                None => format!("preload of model {} failed: {error:?}", entry.alias()),
+            });
+        }
+    }
+    let aliases = lifecycle.configured_aliases();
+    let scheduler = SchedulerV1::new(
+        SchedulerConfigV1::new(
+            config.queue_capacity,
+            config.event_capacity,
+            config.request_timeout,
+        )
+        .map_err(|error| error.to_string())?,
+    );
+    let mut server_config = if config.openwebui_compatibility {
+        ServerConfigV1::openwebui_compatible(None)
+    } else {
+        ServerConfigV1::new(None)
+    }
+    .map_err(|error| error.to_string())?
+    .with_credentials(credentials)
+    .with_lifecycle(lifecycle_state.clone())
+    .with_cors_origins(&config.cors_origins)
+    .map_err(|error| error.to_string())?;
+    if config.metrics {
+        server_config = server_config.with_metrics(
+            ServerMetricsV1::new(aliases.clone()).map_err(|error| error.to_string())?,
+        );
+    }
+    if config.resumable_sse {
+        server_config = server_config.with_resumable_store(
+            ResumableStoreV1::new(config.replay_sessions, config.replay_events)
+                .map_err(|error| format!("resumable SSE configuration failed: {error}"))?,
+        );
+    }
+    let router = build_dynamic_router_v1(lifecycle.clone(), scheduler.clone(), server_config);
+    let listener = std::net::TcpListener::bind(config.listen)
+        .map_err(|error| format!("listen failed: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| format!("listen socket setup failed: {error}"))?;
+    let address = listener
+        .local_addr()
+        .map_err(|error| format!("local address query failed: {error}"))?;
+    lifecycle_state.transition(ServerLifecycleStateV1::Ready);
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "ready",
+            "listen": address.to_string(),
+            "dynamic_models": aliases,
+            "compatibility_profile": if config.openwebui_compatibility { "openwebui" } else { "strict" },
+            "tls": tls.is_some(),
+            "authentication": config.api_key_env.is_some() || config.api_key_file.is_some(),
+            "metrics": config.metrics,
+            "resumable_sse": config.resumable_sse,
+            "cors": !config.cors_origins.is_empty(),
+        })
+    );
+    let handle = axum_server::Handle::new();
+    let signal_handle = handle.clone();
+    let signal_scheduler = scheduler.clone();
+    let signal_lifecycle = lifecycle_state.clone();
+    let shutdown_timeout = config.shutdown_timeout;
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal_lifecycle.transition(ServerLifecycleStateV1::Draining);
+            signal_scheduler.shutdown();
+            signal_handle.graceful_shutdown(Some(shutdown_timeout));
+        }
+    });
+    let serve_result = if let Some(tls) = tls {
+        match axum_server::from_tcp_rustls(listener, tls) {
+            Ok(server) => {
+                server
+                    .handle(handle)
+                    .serve(router.into_make_service())
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    } else {
+        match axum_server::from_tcp(listener) {
+            Ok(server) => {
+                server
+                    .handle(handle)
+                    .serve(router.into_make_service())
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    };
+    signal_task.abort();
+    lifecycle_state.transition(ServerLifecycleStateV1::Draining);
+    scheduler.shutdown();
+    let shutdown_aliases = lifecycle.configured_aliases();
+    let shutdown_error = unload_dynamic_registry(&lifecycle);
+    let clean = shutdown_error.is_none()
+        && lifecycle.loaded_count() == 0
+        && active
+            .lock()
+            .map(|backends| backends.is_empty())
+            .unwrap_or(false);
+    println!(
+        "{}",
+        serde_json::json!({
+            "event": "shutdown_audit",
+            "dynamic": true,
+            "aliases": shutdown_aliases,
+            "count": manifest.models().len(),
+            "clean": clean,
+        })
+    );
+    if let Some(error) = shutdown_error {
+        lifecycle_state.transition(ServerLifecycleStateV1::Failed);
+        return Err(error);
+    }
+    if let Err(error) = serve_result {
+        lifecycle_state.transition(ServerLifecycleStateV1::Failed);
+        return Err(format!("HTTP server failed: {error}"));
+    }
+    lifecycle_state.transition(ServerLifecycleStateV1::Shutdown);
+    Ok(())
+}
+
+fn unload_dynamic_registry(lifecycle: &ModelLifecycleRegistryV1) -> Option<String> {
+    let mut error = None;
+    for alias in lifecycle.configured_aliases() {
+        if let Err(failure) = lifecycle.unload(&alias) {
+            error = Some(format!(
+                "dynamic model {alias} shutdown failed: {failure:?}"
+            ));
+        }
+    }
+    error
+}
+
+fn dynamic_model_identity(derived: &sllm_core::DerivedGgufLock) -> Result<String, String> {
+    if derived.semantic_model_id.starts_with("qwen35moe:") {
+        Ok(QWEN35_MOE_MODEL_FINGERPRINT.to_owned())
+    } else {
+        Ok(
+            builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+                .map_err(|error| format!("built-in model lock resolution failed: {error}"))?
+                .fingerprint()
+                .to_owned(),
+        )
+    }
+}
+
+fn dynamic_adapter_identity(entry: &sllm_server::ModelManifestEntryV1) -> Result<String, String> {
+    let catalog = dynamic_adapter_catalog(entry)?;
+    let empty = QwenAdapterCatalogConfigV1::default();
+    qwen_adapter_catalog_identity_preflight(catalog.as_ref().unwrap_or(&empty))
+        .map_err(|error| error.to_string())
+}
+
+fn dynamic_adapter_catalog(
+    entry: &sllm_server::ModelManifestEntryV1,
+) -> Result<Option<QwenAdapterCatalogConfigV1>, String> {
+    if entry.adapters().is_empty() && entry.control_vectors().is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(QwenAdapterCatalogConfigV1 {
+        lora: entry
+            .adapters()
+            .iter()
+            .map(|artifact| QwenAdapterArtifactConfigV1 {
+                alias: artifact.alias().to_owned(),
+                lock_path: artifact.lock().to_owned(),
+                payload_path: artifact.payload().to_owned(),
+            })
+            .collect(),
+        control_vectors: entry
+            .control_vectors()
+            .iter()
+            .map(|artifact| QwenAdapterArtifactConfigV1 {
+                alias: artifact.alias().to_owned(),
+                lock_path: artifact.lock().to_owned(),
+                payload_path: artifact.payload().to_owned(),
+            })
+            .collect(),
+    }))
+}
+
 enum ActiveBackend {
     Qwen(Arc<QwenChatBackendV1>),
     Gemma(Arc<Gemma4ChatBackendV1>),
+}
+
+fn fail_after_backend_open(backend: &Arc<ActiveBackend>, reason: impl Into<String>) -> String {
+    let reason = reason.into();
+    match backend.shutdown() {
+        Ok(report)
+            if report.final_current_bytes == 0
+                && report.retryable_cleanup == 0
+                && report.durable_quarantine == 0 =>
+        {
+            reason
+        }
+        Ok(report) => format!(
+            "{reason}; backend cleanup audit was not clean (current={}, retryable={}, quarantine={})",
+            report.final_current_bytes, report.retryable_cleanup, report.durable_quarantine
+        ),
+        Err(error) => format!("{reason}; backend cleanup failed: {error}"),
+    }
 }
 
 impl ActiveBackend {
@@ -682,6 +1202,13 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.model_fingerprint(),
             Self::Gemma(backend) => backend.model_fingerprint(),
+        }
+    }
+
+    fn plan_digest(&self) -> &str {
+        match self {
+            Self::Qwen(backend) => backend.plan_digest(),
+            Self::Gemma(backend) => backend.plan_digest(),
         }
     }
 
@@ -703,6 +1230,22 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.recommended_context_tokens(),
             Self::Gemma(backend) => backend.recommended_context_tokens(),
+        }
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        self.as_trait()
+            .observability_snapshot()
+            .model_resident
+            .current_bytes
+    }
+
+    fn adapter_catalog_identity(&self) -> Result<String, String> {
+        match self {
+            Self::Qwen(backend) => backend
+                .adapter_catalog_identity()
+                .map_err(|error| error.to_string()),
+            Self::Gemma(_) => Ok("adapter:none-v1".to_owned()),
         }
     }
 
@@ -776,7 +1319,7 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server (--models PATH | --gguf PATH --derived-lock PATH --device-index N --target GFX) [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -837,6 +1380,30 @@ mod tests {
             config.phase41.draft,
             DraftStartupConfigV1::Disabled
         ));
+    }
+
+    #[test]
+    fn models_manifest_is_an_alternative_to_legacy_source_flags() {
+        let config = parse_args_from(["--models", "/etc/sllm/models.json", "--target", "gfx1201"]);
+        assert!(
+            config.is_err(),
+            "manifest and legacy target must be exclusive"
+        );
+
+        let config = parse_args_from(["--models", "/etc/sllm/models.json"])
+            .expect("manifest-only startup flags should parse");
+        assert_eq!(
+            config.models.as_deref(),
+            Some(std::path::Path::new("/etc/sllm/models.json"))
+        );
+        assert_eq!(config.model, "dynamic");
+    }
+
+    #[test]
+    fn models_manifest_rejects_legacy_model_alias() {
+        let error = parse_args_from(["--models", "/etc/sllm/models.json", "--model", "qwen"])
+            .expect_err("legacy --model must not be accepted with --models");
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]

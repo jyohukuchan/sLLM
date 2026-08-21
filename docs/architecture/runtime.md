@@ -375,6 +375,34 @@ prompt fileは一度だけ読む。SIGINTは専用listenerからcurrent turnの`
 mid-generation/wire session resume、WebUI、tool/MCP executionはこのboundaryの外である。MI300X real executionはVM再確保までdeferredであり、
 gfx942 compile/host evidenceをruntime capabilityやGPU PASSへ昇格しない。
 
+### Phase 45 adapter・dynamic model lifecycle boundary
+
+Phase 45はPhase 39 registry/leaseとPhase 41 identityを拡張し、モデル管理とrequest-local adapter bindingを同じruntime owner境界へ
+接続する。起動時の`sllm-model-manifest-v1`はstrict offline入力であり、各model/derived/artifact pathをabsolute regular file・no-symlink・
+bounded size/digest race checkedとしてbackend open前に検証する。network URL、download、未検証cache、path/credentialをrequest surfaceへ渡さない。
+
+registry stateは`unloaded`、`loading`、`ready`、`draining`、`failed`、`quarantined`で、configured aliasは64、resident modelは16、resident
+bytesはquota内に固定する。同じimmutable identityのloadはcoalesceし、loading/drainingは503、unknown aliasは404、queue fullは429へlowerする。
+drainingは新規leaseを拒否してin-flight ownerを保持し、最後のowner解放後だけshutdownする。active leaseのLRU evictionを許さず、partial
+backend/GPU allocation/tokenizer/templateをpublishしないload failureはquarantineへ遷移し、明示clear後だけretryする。base tokenizer/templateは
+owner間で共有し、request-local adapter/control bindingはresident artifactを変更せずtransactionalに破棄する。
+
+adapter profileはreviewed dense BF16 Qwenだけを対象とする。LoRAはverified base lock、target tensor、A/B shape/orientation、rank、dtype、artifact
+digestをpreflightし、control vectorはbase/derived identity、half-open layer range、shape、overlap、dtypeをpreflightする。request extensionは
+ordered `sllm.adapters`/`sllm.control_vectors`（各最大4、finite scale [-16,16]）だけで、canonical sorted-uniqueに違反する順序・重複・未知artifact・
+unsupported model/dtypeはGPU work前にrejectする。disabled bindingは`adapter:none-v1`とbase logits/token identityを維持する。
+
+resolved identityはbase model lock、derived plan、ordered artifact IDs/scales、target semantics、renderer、tokenizerを含み、alias/path/cache directory
+だけでは構成しない。prefix/checkpoint keyはこのidentityをbindし、異identityのsilent reuseを禁止する。adminはalias-onlyの`load`、`preload`、
+`unload`、`clear-quarantine`、`evict-idle`だけを許し、CLI `sllm models`とserver `--models`は同じmanifest/parserを使用する。既存Chat/
+Completions/Responses/Anthropic generation loopやPhase 39 schedulerを複製せず、resolved ownerを既存queueへ渡す。
+
+Phase 45のmachine profile/schema/validator、host lifecycle/API/CLI tests、compact GPU summary/schema/validator/testは登録済みである。exact
+`gfx1030`/`gfx1201` release buildでQwen BF16 disabled/LoRA/control/combinedを各2回bitwise一致でPASSし、HIP-only、fallback=false、resident
+`8,411,592,192` bytes、request/workspace baseline復帰、pre/final allocation 0、retryable/quarantine 0を確認した。BroadcastAdd standalone
+(`M=1/3`, `H=17`, mismatch 0, cleanup PASS)もPASSした。詳細は[Phase 45 GPU summary](../../ci/matrix/phase45-adapter-lifecycle-gpu-summary-v1.json)を正とし、
+gfx942/MI300X real executionだけをVM再確保後の別laneへdeferredとする。
+
 ### OpenAI serverのadmissionとstreaming境界
 
 Phase 6 A4/A5の初期serverは一つのworkerだけがgeneration backendを呼び、bounded FIFOを超えるrequestを

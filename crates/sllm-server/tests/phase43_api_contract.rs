@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+#[path = "../src/api.rs"]
+mod api;
+#[path = "../src/phase42_api.rs"]
+mod phase42_api;
 #[path = "../src/phase43_api.rs"]
 mod phase43_api;
 
@@ -15,6 +19,170 @@ fn basic_responses() -> serde_json::Value {
         "input": "hello",
         "store": false,
     })
+}
+
+fn variant_entries(prefix: &str, count: usize) -> serde_json::Value {
+    serde_json::Value::Array(
+        (0..count)
+            .map(|index| {
+                serde_json::json!({
+                    "name": format!("{prefix}{index}"),
+                    "scale": if index == 0 { serde_json::json!(-16.0) } else { serde_json::json!(16.0) },
+                })
+            })
+            .collect(),
+    )
+}
+
+fn basic_anthropic() -> serde_json::Value {
+    serde_json::json!({
+        "model": "m",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+}
+
+#[test]
+fn model_variant_boundaries_and_transport_parity() {
+    for count in [0, 1, 4] {
+        let adapters = variant_entries("adapter", count);
+        let control_vectors = variant_entries("control", count);
+
+        let mut chat = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+        });
+        chat["sllm"] = serde_json::json!({
+            "adapters": adapters.clone(),
+            "control_vectors": control_vectors.clone(),
+        });
+        let chat_request = api::parse_chat_completion_request(&json(chat)).unwrap();
+
+        let mut responses = basic_responses();
+        responses["sllm"] = serde_json::json!({
+            "adapters": adapters.clone(),
+            "control_vectors": control_vectors.clone(),
+        });
+        let responses_request = parse_responses_request_v1(&json(responses)).unwrap();
+
+        let mut anthropic = basic_anthropic();
+        anthropic["sllm"] = serde_json::json!({
+            "adapters": adapters,
+            "control_vectors": control_vectors,
+        });
+        let anthropic_request =
+            parse_anthropic_request_v1(&json(anthropic), Some(ANTHROPIC_API_VERSION_V1)).unwrap();
+
+        assert_eq!(chat_request.model_variant().adapters().len(), count);
+        assert_eq!(chat_request.model_variant().control_vectors().len(), count);
+        assert_eq!(
+            responses_request.sllm().model_variant().adapters(),
+            chat_request.model_variant().adapters()
+        );
+        assert_eq!(
+            responses_request.sllm().model_variant().control_vectors(),
+            chat_request.model_variant().control_vectors()
+        );
+        assert_eq!(
+            anthropic_request.sllm().model_variant(),
+            responses_request.sllm().model_variant()
+        );
+    }
+
+    for field in ["adapters", "control_vectors"] {
+        let mut chat = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "sllm": {}
+        });
+        chat["sllm"][field] = variant_entries("x", 5);
+        let error = api::parse_chat_completion_request(&json(chat)).unwrap_err();
+        assert_eq!(error.param(), Some(format!("sllm.{field}").as_str()));
+
+        let mut responses = basic_responses();
+        responses["sllm"] = serde_json::json!({field: variant_entries("x", 5)});
+        assert_eq!(
+            parse_responses_request_v1(&json(responses))
+                .unwrap_err()
+                .param(),
+            Some(format!("sllm.{field}").as_str())
+        );
+
+        let mut anthropic = basic_anthropic();
+        anthropic["sllm"] = serde_json::json!({field: variant_entries("x", 5)});
+        assert_eq!(
+            parse_anthropic_request_v1(&json(anthropic), Some(ANTHROPIC_API_VERSION_V1))
+                .unwrap_err()
+                .param(),
+            Some(format!("sllm.{field}").as_str())
+        );
+    }
+}
+
+#[test]
+fn model_variant_rejects_same_name_across_adapter_kinds_on_all_transports() {
+    let adapters = serde_json::json!([{"name": "shared", "scale": 1.0}]);
+    let controls = serde_json::json!([{"name": "shared", "scale": 1.0}]);
+
+    let mut chat = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hello"}],
+        "sllm": {"adapters": adapters.clone(), "control_vectors": controls.clone()},
+    });
+    assert!(api::parse_chat_completion_request(&json(chat.take())).is_err());
+
+    let mut responses = basic_responses();
+    responses["sllm"] = serde_json::json!({
+        "adapters": adapters.clone(),
+        "control_vectors": controls.clone(),
+    });
+    assert!(parse_responses_request_v1(&json(responses)).is_err());
+
+    let mut anthropic = basic_anthropic();
+    anthropic["sllm"] = serde_json::json!({
+        "adapters": adapters,
+        "control_vectors": controls,
+    });
+    assert!(parse_anthropic_request_v1(&json(anthropic), Some(ANTHROPIC_API_VERSION_V1)).is_err());
+}
+
+#[test]
+fn model_variant_rejects_noncanonical_names_scales_and_payloads() {
+    let base = || {
+        serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hello"}],
+            "sllm": {}
+        })
+    };
+    let invalid_values = [
+        serde_json::json!([{"name": ""}]),
+        serde_json::json!([{"name": "bad/name"}]),
+        serde_json::json!([{"name": "é"}]),
+        serde_json::json!([{"name": "a", "scale": 16.0000001}]),
+        serde_json::json!([{"name": "a", "scale": -16.0000001}]),
+        serde_json::json!([{"name": "a", "scale": null}]),
+        serde_json::json!([{"name": "a", "scale": "nan"}]),
+        serde_json::json!([{"name": "a", "path": "/tmp/model"}]),
+        serde_json::json!([{"name": "b"}, {"name": "a"}]),
+        serde_json::json!([{"name": "a"}, {"name": "a"}]),
+    ];
+    for entries in invalid_values {
+        let mut body = base();
+        body["sllm"]["adapters"] = entries;
+        assert!(api::parse_chat_completion_request(&json(body)).is_err());
+    }
+
+    let mut long_name = base();
+    long_name["sllm"]["adapters"] = serde_json::json!([{"name": "a".repeat(129)}]);
+    assert!(api::parse_chat_completion_request(&json(long_name)).is_err());
+
+    for scale in [-16.0, 16.0] {
+        let mut body = base();
+        body["sllm"]["adapters"] = serde_json::json!([{"name": "a", "scale": scale}]);
+        let request = api::parse_chat_completion_request(&json(body)).unwrap();
+        assert_eq!(request.model_variant().adapters()[0].scale(), scale);
+    }
 }
 
 #[test]

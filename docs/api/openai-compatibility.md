@@ -472,6 +472,26 @@ bounded typed transcript, reverse-prompt turn boundary, and versioned JSONL even
 uses Phase 41's opaque stateless prompt checkpoint owner and exact model/template/tokenizer/target/KV identity; mid-generation HTTP/SSE resume and WebUI
 remain outside this profile. MI300X real correctness/performance is deferred until a fresh exact runtime is available.
 
+## Phase 45 adapter・dynamic model lifecycle extensions
+
+Phase 45 keeps the existing Chat Completions, Completions, Responses, and Anthropic wire profiles unchanged. The only inference request extension is
+the sLLM namespace: `sllm.adapters` and `sllm.control_vectors` are ordered selections of preloaded, verified artifact names. Each list is bounded to
+four entries; an optional finite f32 scale is bounded to `[-16,16]`; duplicate names, non-canonical order, unknown artifacts, wrong base lock,
+shape/dtype/rank/range mismatch, and cross-list duplicate names are rejected before model or GPU work.
+
+Lifecycle management is an admin surface, not an OpenAI request field. With the same strict offline `--models` manifest used by the server, alias-only
+actions are `load`, `preload`, `unload`, `clear-quarantine`, and `evict-idle` under the admin role. HTTP admin routes are
+`/admin/models/{alias}/load`, `/preload`, `/unload`, `/clear-quarantine`, and `/admin/models/evict-idle`; no model path, URL, artifact payload, or
+credential is accepted in a path or JSON body. Unknown aliases return 404, loading/draining models return 503, and a bounded queue returns 429.
+The `sllm models` CLI uses loopback cleartext HTTP only and reads credentials from its environment/file policy; remote/HTTPS targets and direct token
+arguments are rejected.
+
+The machine-readable contract is [`phase45_adapter_lifecycle_v1.json`](../../tests/fixtures/phase45_adapter_lifecycle_v1.json), with the closed schema
+[`phase45-adapter-lifecycle-v1.schema.json`](../../ci/schema/phase45-adapter-lifecycle-v1.schema.json) and dependency-free validator
+[`validate_phase45_profiles.py`](../../ci/tools/validate_phase45_profiles.py). The compact [GPU summary](../../ci/matrix/phase45-adapter-lifecycle-gpu-summary-v1.json), schema,
+validator, and mutation tests record the bounded V620 `gfx1030`/R9700 `gfx1201` release-build evidence: disabled/LoRA/control/combined cases are
+bitwise-identical across two runs, HIP-only with fallback false, and cleanup/baseline restored. `gfx942`/MI300X runtime remains deferred.
+
 ## Phase 42 inference profiles
 
 Phase 42 adds separate, versioned wire contracts for inference modes. The

@@ -13,6 +13,8 @@ use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
 
+use crate::api::{ModelVariantRequestV1, parse_model_variant_value};
+
 pub const PHASE43_RESPONSES_PROFILE_VERSION: &str = "openai-responses-v1";
 pub const PHASE43_ANTHROPIC_PROFILE_VERSION: &str = "anthropic-messages-v1";
 pub const ANTHROPIC_API_VERSION_V1: &str = "2023-06-01";
@@ -260,14 +262,19 @@ impl ToolChoiceV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SllmExtensionsV1 {
     resumable: bool,
+    model_variant: ModelVariantRequestV1,
 }
 
 impl SllmExtensionsV1 {
-    pub const fn resumable(self) -> bool {
+    pub const fn resumable(&self) -> bool {
         self.resumable
+    }
+
+    pub fn model_variant(&self) -> &ModelVariantRequestV1 {
+        &self.model_variant
     }
 }
 
@@ -347,8 +354,8 @@ impl ResponsesRequestV1 {
     pub const fn store(&self) -> bool {
         self.store
     }
-    pub const fn sllm(&self) -> SllmExtensionsV1 {
-        self.sllm
+    pub fn sllm(&self) -> &SllmExtensionsV1 {
+        &self.sllm
     }
 }
 
@@ -432,8 +439,8 @@ impl AnthropicMessagesRequestV1 {
     pub const fn tool_choice(&self) -> &ToolChoiceV1 {
         &self.tool_choice
     }
-    pub const fn sllm(&self) -> SllmExtensionsV1 {
-        self.sllm
+    pub fn sllm(&self) -> &SllmExtensionsV1 {
+        &self.sllm
     }
 }
 
@@ -1083,9 +1090,22 @@ fn parse_sllm(value: Option<&Value>) -> Result<SllmExtensionsV1, Phase43ApiError
     let object = value
         .as_object()
         .ok_or_else(|| invalid("sllm", "must be an object"))?;
-    check_fields(object, &["resumable"], &[], "sllm")?;
+    check_fields(
+        object,
+        &["resumable", "adapters", "control_vectors"],
+        &[],
+        "sllm",
+    )?;
+    let adapters = parse_model_variant_value(object.get("adapters"), "sllm.adapters")
+        .map_err(|error| invalid("sllm.adapters", error))?;
+    let control_vectors =
+        parse_model_variant_value(object.get("control_vectors"), "sllm.control_vectors")
+            .map_err(|error| invalid("sllm.control_vectors", error))?;
+    let model_variant = ModelVariantRequestV1::from_parts(adapters, control_vectors)
+        .map_err(|error| invalid("sllm", error))?;
     Ok(SllmExtensionsV1 {
         resumable: opt_bool_object(object, "resumable")?.unwrap_or(false),
+        model_variant,
     })
 }
 

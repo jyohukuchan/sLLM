@@ -3243,6 +3243,7 @@ impl BoundSemanticOp {
             descriptor.kind(),
             SemanticOpKind::Copy
                 | SemanticOpKind::Add
+                | SemanticOpKind::BroadcastAdd
                 | SemanticOpKind::ScalarMul
                 | SemanticOpKind::SiluMul
                 | SemanticOpKind::GeluTanhMul
@@ -3339,6 +3340,8 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Copy, 0) => "copy input",
         (SemanticOpKind::Add, 0) => "add input 0",
         (SemanticOpKind::Add, 1) => "add input 1",
+        (SemanticOpKind::BroadcastAdd, 0) => "broadcast_add input",
+        (SemanticOpKind::BroadcastAdd, 1) => "broadcast_add vector",
         (SemanticOpKind::ScalarMul, 0) => "scalar_mul input",
         (SemanticOpKind::ScalarMul, 1) => "scalar_mul scalar",
         (SemanticOpKind::Embedding, 0) => "embedding weight",
@@ -3378,6 +3381,7 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
     match (kind, index) {
         (SemanticOpKind::Copy, 0) => "copy output",
         (SemanticOpKind::Add, 0) => "add output",
+        (SemanticOpKind::BroadcastAdd, 0) => "broadcast_add output",
         (SemanticOpKind::ScalarMul, 0) => "scalar_mul output",
         (SemanticOpKind::Embedding, 0) => "embedding output",
         (SemanticOpKind::Matmul, 0) => "matmul output",
@@ -3467,6 +3471,11 @@ fn validate_elementwise_nonoverlap(
             ("add input 0", &inputs[0]),
             ("add input 1", &inputs[1]),
             ("add output", &outputs[0]),
+        ],
+        SemanticOpKind::BroadcastAdd => vec![
+            ("broadcast_add input", &inputs[0]),
+            ("broadcast_add vector", &inputs[1]),
+            ("broadcast_add output", &outputs[0]),
         ],
         SemanticOpKind::ScalarMul => vec![
             ("scalar_mul input", &inputs[0]),

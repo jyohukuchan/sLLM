@@ -1,7 +1,9 @@
 //! Production model backends for the profile-v1 transport.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -9,32 +11,35 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sllm_core::{
-    AllocationSnapshot, Backend, CheckpointIdentity, CheckpointStore, CompiledGrammar,
-    ContextPositionPolicyV1, ContextWindowStateV1, DraftProposalV1,
+    AdapterModelDimsV1, AdapterRequestSetV1, AllocationSnapshot, Backend, CheckpointIdentity,
+    CheckpointStore, CompiledGrammar, ContextPositionPolicyV1, ContextWindowStateV1,
+    ControlVectorLockV1, ControlVectorSelectionV1, DerivedGgufLock, DraftProposalV1,
     DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, EmbeddingPoolV1,
     ExecutionSession, ExecutionSessionRequest, GEMMA4_HIDDEN_SIZE,
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4PrefixForkAuditV1,
     Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding, LogitBiasV1 as CoreLogitBiasV1,
-    MirostatModeV1, MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock,
-    NgramDraftProviderV1, OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1,
-    PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
-    PrefixStateIdentityV1, QWEN35_HIDDEN_SIZE, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
-    QwenComponentSelection, QwenExecutionRequest, QwenGraph, QwenGraphStateDescriptor,
-    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenPrefixForkAuditV1, QwenPrefixStateV1,
-    QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel,
-    ReviewedModelLock, SamplerChainConfigV1, SessionCheckpoint, VerifiedCache, VerifiedFp8Sidecar,
-    VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedNvfp4Sidecar,
-    VerifiedQwen35Moe, WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
-    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
-    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
-    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
-    builtin_reviewed_model_lock, qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gguf_qwen35_moe,
+    LoraAdapterLockV1, LoraAdapterSelectionV1, MirostatModeV1,
+    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, NgramDraftProviderV1,
+    OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1, PrefixCacheValueV1,
+    PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind, PrefixStateIdentityV1,
+    QWEN35_HIDDEN_SIZE, QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection,
+    QwenExecutionRequest, QwenGraph, QwenGraphStateDescriptor, QwenMultimodalImageEmbedding,
+    QwenMultimodalPrompt, QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel,
+    QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
+    SamplerChainConfigV1, SessionCheckpoint, VerifiedCache, VerifiedControlVectorPayloadV1,
+    VerifiedFp8Sidecar, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
+    VerifiedLoraPayloadV1, VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
+    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
+    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
+    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
+    parse_control_vector_lock_v1, parse_lora_lock_v1, qwen_graph_memory_estimate,
+    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
+    verify_derived_gguf, verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, GenerationCancellationV1, GenerationExecutorV1,
@@ -1029,6 +1034,19 @@ fn validate_gemma_phase41_operational_config(
 }
 
 #[derive(Clone, Debug)]
+pub struct QwenAdapterArtifactConfigV1 {
+    pub alias: String,
+    pub lock_path: PathBuf,
+    pub payload_path: PathBuf,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct QwenAdapterCatalogConfigV1 {
+    pub lora: Vec<QwenAdapterArtifactConfigV1>,
+    pub control_vectors: Vec<QwenAdapterArtifactConfigV1>,
+}
+
+#[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
     pub gguf_path: PathBuf,
     pub derived_lock_path: PathBuf,
@@ -1039,6 +1057,7 @@ pub struct QwenBackendConfigV1 {
     pub context_length: u32,
     pub kv_cache_encoding: KvCacheEncoding,
     pub phase41: Phase41ProductionConfigV1,
+    pub adapter_catalog: Option<QwenAdapterCatalogConfigV1>,
 }
 
 /// Configuration for one persistent dense-BF16 Qwen chat owner.  The owner
@@ -1099,9 +1118,448 @@ impl QwenBackendConfigV1 {
                 "Qwen backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
+        if let Some(catalog) = &self.adapter_catalog {
+            validate_qwen_adapter_catalog_config(catalog)?;
+        }
         self.phase41.validate()?;
         Ok(())
     }
+}
+
+fn validate_qwen_adapter_catalog_config(
+    catalog: &QwenAdapterCatalogConfigV1,
+) -> Result<(), BackendErrorV1> {
+    if catalog.lora.len() > 8 || catalog.control_vectors.len() > 8 {
+        return Err(BackendErrorV1::new(
+            "Qwen adapter catalog supports at most 8 LoRA and 8 control artifacts",
+        ));
+    }
+    let mut aliases = BTreeSet::new();
+    for list in [&catalog.lora, &catalog.control_vectors] {
+        for pair in list.windows(2) {
+            if pair[0].alias >= pair[1].alias {
+                return Err(BackendErrorV1::new(
+                    "Qwen adapter catalog aliases must be strictly sorted and unique",
+                ));
+            }
+        }
+    }
+    for artifact in catalog.lora.iter().chain(catalog.control_vectors.iter()) {
+        if artifact.alias.is_empty()
+            || artifact.alias.len() > 128
+            || !artifact
+                .alias
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            return Err(BackendErrorV1::new(format!(
+                "Qwen adapter alias {} must match [A-Za-z0-9._-]",
+                artifact.alias
+            )));
+        }
+        if !aliases.insert(artifact.alias.as_str()) {
+            return Err(BackendErrorV1::new(format!(
+                "Qwen adapter alias {} is duplicated",
+                artifact.alias
+            )));
+        }
+        if artifact.lock_path.as_os_str().is_empty() || artifact.payload_path.as_os_str().is_empty()
+        {
+            return Err(BackendErrorV1::new(format!(
+                "Qwen adapter {} requires lock and payload paths",
+                artifact.alias
+            )));
+        }
+    }
+    Ok(())
+}
+
+const MAX_QWEN_ADAPTER_LOCK_BYTES: u64 = 1 << 20;
+const MAX_QWEN_ADAPTER_PAYLOAD_BYTES: u64 = 1 << 30;
+
+fn adapter_file_identity(metadata: &std::fs::Metadata) -> (u64, u64, u64) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino(), metadata.len())
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0, metadata.len())
+    }
+}
+
+fn read_qwen_adapter_file(path: &std::path::Path, maximum: u64) -> Result<Vec<u8>, BackendErrorV1> {
+    let before = fs::symlink_metadata(path)
+        .map_err(|error| BackendErrorV1::new(format!("adapter file metadata failed: {error}")))?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > maximum {
+        return Err(BackendErrorV1::new(
+            "adapter file is not a bounded regular file",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file: File = options
+        .open(path)
+        .map_err(|error| BackendErrorV1::new(format!("adapter file open failed: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| BackendErrorV1::new(format!("adapter file metadata failed: {error}")))?;
+    if !opened.is_file()
+        || adapter_file_identity(&before) != adapter_file_identity(&opened)
+        || opened.len() > maximum
+    {
+        return Err(BackendErrorV1::new(
+            "adapter file changed before bounded read",
+        ));
+    }
+    let read_limit = maximum
+        .checked_add(1)
+        .ok_or_else(|| BackendErrorV1::new("adapter file bound overflowed"))?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| BackendErrorV1::new(format!("adapter file read failed: {error}")))?;
+    let after = file
+        .metadata()
+        .map_err(|error| BackendErrorV1::new(format!("adapter file metadata failed: {error}")))?;
+    if adapter_file_identity(&opened) != adapter_file_identity(&after)
+        || bytes.len() as u64 != after.len()
+        || bytes.len() as u64 > maximum
+    {
+        return Err(BackendErrorV1::new(
+            "adapter file changed during bounded read",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::from("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+/// Rebuilds the exact runtime weight-plan identity from a verified derived
+/// artifact without opening a HIP session.  The derived-lock fingerprint is
+/// an artifact identity; this digest is the plan identity used by prefix and
+/// checkpoint state, and must therefore be kept as a separate field.
+pub fn dynamic_model_plan_digest_preflight(
+    gguf_path: &Path,
+    derived: &DerivedGgufLock,
+) -> Result<String, BackendErrorV1> {
+    let verified = verify_derived_gguf(derived.clone(), gguf_path)
+        .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
+    if derived.semantic_model_id.starts_with("qwen35moe:") {
+        let source = verify_gguf_qwen35_moe(verified).map_err(|error| {
+            BackendErrorV1::new(format!("Qwen MoE GGUF validation failed: {error}"))
+        })?;
+        return build_gguf_qwen35_moe_weight_load_plan(&source)
+            .map(|plan| plan.digest_hex())
+            .map_err(|error| BackendErrorV1::new(format!("Qwen MoE load plan failed: {error}")));
+    }
+    let reviewed =
+        builtin_reviewed_model_lock(&derived.source_lock_fingerprints).map_err(|error| {
+            BackendErrorV1::new(format!("built-in model lock resolution failed: {error}"))
+        })?;
+    match reviewed {
+        ReviewedModelLock::Qwen35(lock) => build_verified_gguf_qwen_weight_load_plan(
+            &lock,
+            verified,
+            QwenComponentSelection::TEXT_ONLY,
+        )
+        .map(|(_, plan)| plan.digest_hex())
+        .map_err(|error| BackendErrorV1::new(format!("verified Qwen load plan failed: {error}"))),
+        ReviewedModelLock::Gemma4(lock) => {
+            build_verified_gguf_gemma_weight_load_plan(&lock, verified)
+                .map(|(_, plan)| plan.digest_hex())
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("verified Gemma load plan failed: {error}"))
+                })
+        }
+    }
+}
+
+/// Computes the same path-independent identity used by a loaded Qwen adapter
+/// catalog, while only reading bounded, non-symlink lock/payload files. The
+/// backend repeats model/plan verification when opening the resident model.
+pub fn qwen_adapter_catalog_identity_preflight(
+    config: &QwenAdapterCatalogConfigV1,
+) -> Result<String, BackendErrorV1> {
+    validate_qwen_adapter_catalog_config(config)?;
+    let mut entries = Vec::with_capacity(config.lora.len() + config.control_vectors.len());
+    for artifact in &config.lora {
+        let lock_bytes = read_qwen_adapter_file(&artifact.lock_path, MAX_QWEN_ADAPTER_LOCK_BYTES)
+            .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "LoRA adapter {} lock read failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        let lock = parse_lora_lock_v1(&lock_bytes).map_err(|error| {
+            BackendErrorV1::new(format!(
+                "LoRA adapter {} lock verification failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        if lock.payload_size == 0 || lock.payload_size > MAX_QWEN_ADAPTER_PAYLOAD_BYTES {
+            return Err(BackendErrorV1::new(format!(
+                "LoRA adapter {} payload size is outside the bounded limit",
+                artifact.alias
+            )));
+        }
+        let payload =
+            read_qwen_adapter_file(&artifact.payload_path, lock.payload_size).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "LoRA adapter {} payload read failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if payload.len() as u64 != lock.payload_size
+            || !sha256_prefixed(&payload).eq_ignore_ascii_case(&lock.payload_sha256)
+        {
+            return Err(BackendErrorV1::new(format!(
+                "LoRA adapter {} payload hash or size differs",
+                artifact.alias
+            )));
+        }
+        let canonical = serde_json::to_vec(&lock).map_err(|error| {
+            BackendErrorV1::new(format!("adapter lock canonicalization failed: {error}"))
+        })?;
+        entries.push(QwenAdapterCatalogIdentityEntry {
+            kind: "lora",
+            alias: artifact.alias.clone(),
+            artifact_id: lock.artifact_id,
+            lock_sha256: sha256_prefixed(&canonical),
+            payload_sha256: lock.payload_sha256,
+            payload_size: lock.payload_size,
+        });
+    }
+    for artifact in &config.control_vectors {
+        let lock_bytes = read_qwen_adapter_file(&artifact.lock_path, MAX_QWEN_ADAPTER_LOCK_BYTES)
+            .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "control-vector {} lock read failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        let lock = parse_control_vector_lock_v1(&lock_bytes).map_err(|error| {
+            BackendErrorV1::new(format!(
+                "control-vector {} lock verification failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        if lock.payload_size == 0 || lock.payload_size > MAX_QWEN_ADAPTER_PAYLOAD_BYTES {
+            return Err(BackendErrorV1::new(format!(
+                "control-vector {} payload size is outside the bounded limit",
+                artifact.alias
+            )));
+        }
+        let payload =
+            read_qwen_adapter_file(&artifact.payload_path, lock.payload_size).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "control-vector {} payload read failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if payload.len() as u64 != lock.payload_size
+            || !sha256_prefixed(&payload).eq_ignore_ascii_case(&lock.payload_sha256)
+        {
+            return Err(BackendErrorV1::new(format!(
+                "control-vector {} payload hash or size differs",
+                artifact.alias
+            )));
+        }
+        let canonical = serde_json::to_vec(&lock).map_err(|error| {
+            BackendErrorV1::new(format!("adapter lock canonicalization failed: {error}"))
+        })?;
+        entries.push(QwenAdapterCatalogIdentityEntry {
+            kind: "control-vector",
+            alias: artifact.alias.clone(),
+            artifact_id: lock.artifact_id,
+            lock_sha256: sha256_prefixed(&canonical),
+            payload_sha256: lock.payload_sha256,
+            payload_size: lock.payload_size,
+        });
+    }
+    Ok(qwen_adapter_catalog_identity_from_entries(entries))
+}
+
+fn load_qwen_adapter_catalog(
+    config: Option<&QwenAdapterCatalogConfigV1>,
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+) -> Result<Option<QwenAdapterCatalogV1>, BackendErrorV1> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let dims = AdapterModelDimsV1::new(
+        lock.model.architecture.text_config.hidden_size,
+        lock.model.architecture.text_config.num_hidden_layers,
+    )
+    .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+    let mut lora = BTreeMap::new();
+    for artifact in &config.lora {
+        let lock_bytes = read_qwen_adapter_file(&artifact.lock_path, MAX_QWEN_ADAPTER_LOCK_BYTES)
+            .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "LoRA adapter {} lock read failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        let adapter_lock =
+            serde_json::from_slice::<LoraAdapterLockV1>(&lock_bytes).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "LoRA adapter {} lock parse failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if adapter_lock.payload_size == 0
+            || adapter_lock.payload_size > MAX_QWEN_ADAPTER_PAYLOAD_BYTES
+        {
+            return Err(BackendErrorV1::new(format!(
+                "LoRA adapter {} payload size is outside the bounded limit",
+                artifact.alias
+            )));
+        }
+        let payload = read_qwen_adapter_file(&artifact.payload_path, adapter_lock.payload_size)
+            .map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "LoRA adapter {} payload read failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if payload.len() as u64 != adapter_lock.payload_size {
+            return Err(BackendErrorV1::new(format!(
+                "LoRA adapter {} payload size changed during read",
+                artifact.alias
+            )));
+        }
+        let verified = VerifiedLoraPayloadV1::from_bytes(
+            &lock_bytes,
+            Arc::<[u8]>::from(payload),
+            lock.fingerprint(),
+            plan,
+        )
+        .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "LoRA adapter {} verification failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        lora.insert(artifact.alias.clone(), Arc::new(verified));
+    }
+    let mut control_vectors = BTreeMap::new();
+    for artifact in &config.control_vectors {
+        let lock_bytes = read_qwen_adapter_file(&artifact.lock_path, MAX_QWEN_ADAPTER_LOCK_BYTES)
+            .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "control-vector {} lock read failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        let adapter_lock =
+            serde_json::from_slice::<ControlVectorLockV1>(&lock_bytes).map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "control-vector {} lock parse failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if adapter_lock.payload_size == 0
+            || adapter_lock.payload_size > MAX_QWEN_ADAPTER_PAYLOAD_BYTES
+        {
+            return Err(BackendErrorV1::new(format!(
+                "control-vector {} payload size is outside the bounded limit",
+                artifact.alias
+            )));
+        }
+        let payload = read_qwen_adapter_file(&artifact.payload_path, adapter_lock.payload_size)
+            .map_err(|error| {
+                BackendErrorV1::new(format!(
+                    "control-vector {} payload read failed: {error}",
+                    artifact.alias
+                ))
+            })?;
+        if payload.len() as u64 != adapter_lock.payload_size {
+            return Err(BackendErrorV1::new(format!(
+                "control-vector {} payload size changed during read",
+                artifact.alias
+            )));
+        }
+        let verified = VerifiedControlVectorPayloadV1::from_bytes(
+            &lock_bytes,
+            Arc::<[u8]>::from(payload),
+            lock.fingerprint(),
+            plan,
+            dims,
+        )
+        .map_err(|error| {
+            BackendErrorV1::new(format!(
+                "control-vector {} verification failed: {error}",
+                artifact.alias
+            ))
+        })?;
+        control_vectors.insert(artifact.alias.clone(), Arc::new(verified));
+    }
+    Ok(Some(QwenAdapterCatalogV1 {
+        lora,
+        control_vectors,
+    }))
+}
+
+fn resolve_qwen_adapters(
+    catalog: Option<&QwenAdapterCatalogV1>,
+    request: &crate::api::ModelVariantRequestV1,
+) -> Result<AdapterRequestSetV1, BackendErrorV1> {
+    if request.adapters().is_empty() && request.control_vectors().is_empty() {
+        return Ok(AdapterRequestSetV1::disabled());
+    }
+    let catalog = catalog.ok_or_else(|| {
+        BackendErrorV1::new("request selected adapters but no Qwen adapter catalog is configured")
+    })?;
+    let lora = request
+        .adapters()
+        .iter()
+        .map(|selection| {
+            let artifact = catalog.lora.get(selection.name()).ok_or_else(|| {
+                BackendErrorV1::new(format!("unknown Qwen LoRA adapter {}", selection.name()))
+            })?;
+            Ok(LoraAdapterSelectionV1 {
+                alias: selection.name().to_owned(),
+                artifact: Arc::clone(artifact),
+                scale: selection.scale(),
+            })
+        })
+        .collect::<Result<Vec<_>, BackendErrorV1>>()?;
+    let controls = request
+        .control_vectors()
+        .iter()
+        .map(|selection| {
+            let artifact = catalog
+                .control_vectors
+                .get(selection.name())
+                .ok_or_else(|| {
+                    BackendErrorV1::new(format!("unknown Qwen control vector {}", selection.name()))
+                })?;
+            Ok(ControlVectorSelectionV1 {
+                alias: selection.name().to_owned(),
+                artifact: Arc::clone(artifact),
+                scale: selection.scale(),
+            })
+        })
+        .collect::<Result<Vec<_>, BackendErrorV1>>()?;
+    AdapterRequestSetV1::new(lora, controls)
+        .map_err(|error| BackendErrorV1::new(format!("Qwen adapter request rejected: {error}")))
 }
 
 #[derive(Clone, Debug)]
@@ -1236,9 +1694,19 @@ pub struct ProductionShutdownAuditV1 {
     pub requests: Vec<ProductionRequestAuditV1>,
 }
 
+enum ShutdownStateV1 {
+    Active,
+    Pending {
+        session: Arc<ExecutionSession>,
+        model_ready_current_bytes: u64,
+    },
+    Complete(ProductionShutdownAuditV1),
+}
+
 pub struct QwenChatBackendV1 {
     state: Mutex<Option<QwenBackendStateV1>>,
     audits: Mutex<Vec<ProductionRequestAuditV1>>,
+    shutdown: Mutex<ShutdownStateV1>,
     shutdown_timeout: Duration,
     identity: BackendIdentityV1,
 }
@@ -1544,11 +2012,88 @@ struct QwenBackendStateV1 {
     persistent_checkpoint_descriptor_digest: Option<[u8; 32]>,
     persistent_capture_requested: bool,
     persistent_capture: Option<QwenCapturedChatCheckpointV1>,
+    adapter_catalog: Option<QwenAdapterCatalogV1>,
+}
+
+struct QwenAdapterCatalogV1 {
+    lora: BTreeMap<String, Arc<VerifiedLoraPayloadV1>>,
+    control_vectors: BTreeMap<String, Arc<VerifiedControlVectorPayloadV1>>,
+}
+
+struct QwenAdapterCatalogIdentityEntry {
+    kind: &'static str,
+    alias: String,
+    artifact_id: String,
+    lock_sha256: String,
+    payload_sha256: String,
+    payload_size: u64,
+}
+
+fn qwen_adapter_catalog_identity_from_entries(
+    entries: impl IntoIterator<Item = QwenAdapterCatalogIdentityEntry>,
+) -> String {
+    let entries = entries.into_iter().collect::<Vec<_>>();
+    if entries.is_empty() {
+        return "adapter:none-v1".to_owned();
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-qwen-adapter-catalog-v1");
+    for entry in entries {
+        digest.update([if entry.kind == "lora" { 1 } else { 2 }]);
+        digest.update((entry.alias.len() as u64).to_le_bytes());
+        digest.update(entry.alias.as_bytes());
+        let identity = format!(
+            "{}:{}:{}:{}:{}:{}",
+            entry.kind,
+            entry.artifact_id,
+            entry.lock_sha256,
+            entry.payload_sha256,
+            entry.payload_size,
+            "v1"
+        );
+        digest.update((identity.len() as u64).to_le_bytes());
+        digest.update(identity.as_bytes());
+    }
+    let digest = digest.finalize();
+    let mut output = String::from("adapter:catalog-v1:sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+impl QwenAdapterCatalogV1 {
+    fn identity(&self) -> String {
+        let entries = self
+            .lora
+            .iter()
+            .map(|(alias, artifact)| QwenAdapterCatalogIdentityEntry {
+                kind: "lora",
+                alias: alias.clone(),
+                artifact_id: artifact.identity().artifact_id().to_owned(),
+                lock_sha256: artifact.identity().lock_sha256().to_owned(),
+                payload_sha256: artifact.identity().payload_sha256().to_owned(),
+                payload_size: artifact.identity().payload_size(),
+            })
+            .chain(self.control_vectors.iter().map(|(alias, artifact)| {
+                QwenAdapterCatalogIdentityEntry {
+                    kind: "control-vector",
+                    alias: alias.clone(),
+                    artifact_id: artifact.identity().artifact_id().to_owned(),
+                    lock_sha256: artifact.identity().lock_sha256().to_owned(),
+                    payload_sha256: artifact.identity().payload_sha256().to_owned(),
+                    payload_size: artifact.identity().payload_size(),
+                }
+            }));
+        qwen_adapter_catalog_identity_from_entries(entries)
+    }
 }
 
 pub struct Gemma4ChatBackendV1 {
     state: Mutex<Option<Gemma4BackendStateV1>>,
     audits: Mutex<Vec<ProductionRequestAuditV1>>,
+    shutdown: Mutex<ShutdownStateV1>,
     shutdown_timeout: Duration,
     identity: BackendIdentityV1,
 }
@@ -1593,6 +2138,7 @@ fn qwen_prefix_identity(
     state: &QwenBackendStateV1,
     graph: &QwenGraph,
     state_capacity: u64,
+    adapter_identity: &str,
 ) -> Result<PrefixStateIdentityV1, BackendErrorV1> {
     let descriptor = graph
         .states()
@@ -1621,7 +2167,7 @@ fn qwen_prefix_identity(
     PrefixStateIdentityV1::new(
         state.plan.lock_fingerprint.as_bytes(),
         derived_identity.as_bytes(),
-        b"adapter:none-v1",
+        adapter_identity.as_bytes(),
         renderer_identity.as_bytes(),
         state.tokenizer.snapshot().fingerprint().as_bytes(),
         state.kv_cache_encoding,
@@ -1834,6 +2380,7 @@ fn qwen_checkpoint_identity(
     renderer: &Qwen35ChatTemplateV1,
     target: &str,
     fp8_provider: Option<&str>,
+    adapter_identity: &str,
     kv_cache_encoding: KvCacheEncoding,
     tokens: &[u32],
 ) -> Result<CheckpointIdentity, BackendErrorV1> {
@@ -1844,6 +2391,7 @@ fn qwen_checkpoint_identity(
         renderer,
         target,
         fp8_provider,
+        adapter_identity,
         kv_cache_encoding,
         qwen_checkpoint_kv_descriptor_digest(graph),
         tokens,
@@ -1858,6 +2406,7 @@ fn qwen_checkpoint_identity_with_descriptor_digest(
     renderer: &Qwen35ChatTemplateV1,
     target: &str,
     fp8_provider: Option<&str>,
+    adapter_identity: &str,
     kv_cache_encoding: KvCacheEncoding,
     descriptor_digest: [u8; 32],
     tokens: &[u32],
@@ -1871,7 +2420,7 @@ fn qwen_checkpoint_identity_with_descriptor_digest(
     CheckpointIdentity::for_tokens(
         model_fingerprint.to_owned(),
         format!("derived-artifact:{}", plan.digest_hex()),
-        "adapter:none-v1",
+        adapter_identity,
         renderer_identity,
         tokenizer.snapshot().fingerprint().to_owned(),
         target_semantics,
@@ -1888,12 +2437,12 @@ fn qwen_checkpoint_identity_with_descriptor_digest(
 fn build_qwen_checkpoint_runtime(
     config: &CheckpointStartupConfigV1,
     graph: &QwenGraph,
-    plan: &WeightLoadPlan,
-    tokenizer: &TokenizerFrontendV1,
-    renderer: &Qwen35ChatTemplateV1,
-    target: &str,
+    _plan: &WeightLoadPlan,
+    _tokenizer: &TokenizerFrontendV1,
+    _renderer: &Qwen35ChatTemplateV1,
+    _target: &str,
     fp8_provider: Option<&str>,
-    kv_cache_encoding: KvCacheEncoding,
+    _kv_cache_encoding: KvCacheEncoding,
 ) -> Result<Option<QwenCheckpointRuntimeV1>, BackendErrorV1> {
     let CheckpointStartupConfigV1::Enabled {
         directory,
@@ -1922,23 +2471,6 @@ fn build_qwen_checkpoint_runtime(
                 .map_err(|_| BackendErrorV1::new("Qwen checkpoint load failed"))
         })
         .transpose()?;
-    if let Some(checkpoint) = loaded.as_ref() {
-        let expected = qwen_checkpoint_identity(
-            graph,
-            plan,
-            tokenizer,
-            renderer,
-            target,
-            fp8_provider,
-            kv_cache_encoding,
-            &checkpoint.payload.token_history,
-        )?;
-        if checkpoint.header.identity != expected {
-            return Err(BackendErrorV1::new(
-                "Qwen checkpoint identity differs from the running model",
-            ));
-        }
-    }
     Ok(Some(QwenCheckpointRuntimeV1 {
         store,
         loaded,
@@ -2051,6 +2583,13 @@ impl QwenChatBackendV1 {
         .map_err(|error| {
             BackendErrorV1::new(format!("verified GGUF model load plan failed: {error}"))
         })?;
+        let adapter_catalog =
+            load_qwen_adapter_catalog(config.adapter_catalog.as_ref(), &lock, &plan)?;
+        if source.has_fp8_recipe() && adapter_catalog.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen adapter catalog requires the dense BF16 GGUF artifact",
+            ));
+        }
         let source = Arc::new(source);
         let tokenizer =
             TokenizerFrontendV1::from_qwen35_gguf(&lock, source.gguf()).map_err(|error| {
@@ -2205,8 +2744,10 @@ impl QwenChatBackendV1 {
                 ),
                 persistent_capture_requested: false,
                 persistent_capture: None,
+                adapter_catalog,
             })),
             audits: Mutex::new(Vec::new()),
+            shutdown: Mutex::new(ShutdownStateV1::Active),
             shutdown_timeout: config.shutdown_timeout,
             identity,
         })
@@ -2216,6 +2757,11 @@ impl QwenChatBackendV1 {
         config: QwenBackendConfigV1,
         derived: sllm_core::DerivedGgufLock,
     ) -> Result<Self, BackendErrorV1> {
+        if config.adapter_catalog.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen adapter catalog is supported only by dense BF16 Qwen",
+            ));
+        }
         validate_qwen_phase41_operational_config(&config.phase41)?;
         let verified = verify_derived_gguf(derived, &config.gguf_path)
             .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
@@ -2300,8 +2846,10 @@ impl QwenChatBackendV1 {
                 persistent_checkpoint_descriptor_digest: None,
                 persistent_capture_requested: false,
                 persistent_capture: None,
+                adapter_catalog: None,
             })),
             audits: Mutex::new(Vec::new()),
+            shutdown: Mutex::new(ShutdownStateV1::Active),
             shutdown_timeout: config.shutdown_timeout,
             identity,
         })
@@ -2364,6 +2912,7 @@ impl QwenChatBackendV1 {
             &state.renderer,
             &state.target,
             state.fp8_provider.as_deref(),
+            "adapter:none-v1",
             state.kv_cache_encoding,
             descriptor_digest,
             &checkpoint.payload.token_history,
@@ -2446,6 +2995,30 @@ impl QwenChatBackendV1 {
         &self.identity.model_fingerprint
     }
 
+    /// Returns the exact verified runtime weight-plan digest used by state
+    /// identities.  This is intentionally distinct from the derived-lock
+    /// artifact fingerprint.
+    pub fn plan_digest(&self) -> &str {
+        &self.identity.plan_digest
+    }
+
+    /// Returns the verified, path-independent identity of the offline adapter
+    /// catalog loaded with this backend. Empty catalogs use the stable disabled
+    /// identity and never expose filesystem paths or payload bytes.
+    pub fn adapter_catalog_identity(&self) -> Result<String, BackendErrorV1> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        Ok(state
+            .as_ref()
+            .and_then(|state| state.adapter_catalog.as_ref())
+            .map_or_else(
+                || "adapter:none-v1".to_owned(),
+                QwenAdapterCatalogV1::identity,
+            ))
+    }
+
     pub const fn context_length(&self) -> u32 {
         self.identity.context_length
     }
@@ -2470,45 +3043,80 @@ impl QwenChatBackendV1 {
     }
 
     pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?
-            .take()
-            .ok_or_else(|| BackendErrorV1::new("Qwen backend is already shut down"))?;
-        let QwenBackendStateV1 {
-            resident,
-            mtp_resident,
-            vision_resident,
-            prefix_cache,
-            session,
-            model_ready_current_bytes,
-            ..
-        } = state;
-        drop(prefix_cache);
-        drop(resident);
-        drop(mtp_resident);
-        drop(vision_resident);
+        let pending = {
+            let status = self
+                .shutdown
+                .lock()
+                .map_err(|_| BackendErrorV1::new("Qwen shutdown state is poisoned"))?;
+            match &*status {
+                ShutdownStateV1::Complete(audit) => return Ok(audit.clone()),
+                ShutdownStateV1::Pending {
+                    session,
+                    model_ready_current_bytes,
+                } => Some((Arc::clone(session), *model_ready_current_bytes)),
+                ShutdownStateV1::Active => None,
+            }
+        };
+        let (session, model_ready_current_bytes) = if let Some(pending) = pending {
+            pending
+        } else {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?
+                .take()
+                .ok_or_else(|| BackendErrorV1::new("Qwen backend is already shut down"))?;
+            let QwenBackendStateV1 {
+                resident,
+                mtp_resident,
+                vision_resident,
+                prefix_cache,
+                session,
+                model_ready_current_bytes,
+                ..
+            } = state;
+            drop(prefix_cache);
+            drop(resident);
+            drop(mtp_resident);
+            drop(vision_resident);
+            (session, model_ready_current_bytes)
+        };
+        let mark_pending = |session: &Arc<ExecutionSession>| {
+            if let Ok(mut status) = self.shutdown.lock() {
+                *status = ShutdownStateV1::Pending {
+                    session: Arc::clone(session),
+                    model_ready_current_bytes,
+                };
+            }
+        };
         let before_shutdown = session.memory_snapshot();
         if before_shutdown.current_bytes() != 0 {
+            mark_pending(&session);
             return Err(BackendErrorV1::new(format!(
                 "resident drop left {} tracked device bytes",
                 before_shutdown.current_bytes()
             )));
         }
-        let report = session.shutdown(self.shutdown_timeout).map_err(|error| {
-            BackendErrorV1::new(format!("HIP session shutdown failed: {error}"))
-        })?;
+        let report = match session.shutdown(self.shutdown_timeout) {
+            Ok(report) => report,
+            Err(error) => {
+                mark_pending(&session);
+                return Err(BackendErrorV1::new(format!(
+                    "HIP session shutdown failed: {error}"
+                )));
+            }
+        };
         let final_memory = session.memory_snapshot();
         if final_memory.current_bytes() != 0
             || report.retryable_cleanup != 0
             || report.durable_quarantine != 0
         {
+            mark_pending(&session);
             return Err(BackendErrorV1::new(
                 "HIP session shutdown did not reach a zero-cleanup terminal state",
             ));
         }
-        Ok(ProductionShutdownAuditV1 {
+        let audit = ProductionShutdownAuditV1 {
             schema_version: "openai-chat-production-shutdown-v1".to_owned(),
             target: self.identity.target.clone(),
             model_fingerprint: self.identity.model_fingerprint.clone(),
@@ -2520,7 +3128,11 @@ impl QwenChatBackendV1 {
             retryable_cleanup: report.retryable_cleanup,
             durable_quarantine: report.durable_quarantine,
             requests: self.request_audits(),
-        })
+        };
+        if let Ok(mut status) = self.shutdown.lock() {
+            *status = ShutdownStateV1::Complete(audit.clone());
+        }
+        Ok(audit)
     }
 
     fn record_audit(&self, audit: ProductionRequestAuditV1) {
@@ -2635,6 +3247,7 @@ impl Gemma4ChatBackendV1 {
                 checkpoint_descriptor_digest: Some(checkpoint_descriptor_digest),
             })),
             audits: Mutex::new(Vec::new()),
+            shutdown: Mutex::new(ShutdownStateV1::Active),
             shutdown_timeout: config.shutdown_timeout,
             identity,
         })
@@ -2649,6 +3262,13 @@ impl Gemma4ChatBackendV1 {
 
     pub fn model_fingerprint(&self) -> &str {
         &self.identity.model_fingerprint
+    }
+
+    /// Returns the exact verified runtime weight-plan digest used by state
+    /// identities.  This is intentionally distinct from the derived-lock
+    /// artifact fingerprint.
+    pub fn plan_digest(&self) -> &str {
+        &self.identity.plan_digest
     }
 
     pub const fn context_length(&self) -> u32 {
@@ -2675,40 +3295,76 @@ impl Gemma4ChatBackendV1 {
     }
 
     pub fn shutdown(&self) -> Result<ProductionShutdownAuditV1, BackendErrorV1> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?
-            .take()
-            .ok_or_else(|| BackendErrorV1::new("Gemma backend is already shut down"))?;
-        let Gemma4BackendStateV1 {
-            resident,
-            prefix_cache,
-            session,
-            ..
-        } = state;
-        drop(prefix_cache);
-        drop(resident);
+        let pending = {
+            let status = self
+                .shutdown
+                .lock()
+                .map_err(|_| BackendErrorV1::new("Gemma shutdown state is poisoned"))?;
+            match &*status {
+                ShutdownStateV1::Complete(audit) => return Ok(audit.clone()),
+                ShutdownStateV1::Pending {
+                    session,
+                    model_ready_current_bytes,
+                } => Some((Arc::clone(session), *model_ready_current_bytes)),
+                ShutdownStateV1::Active => None,
+            }
+        };
+        let (session, model_ready_current_bytes) = if let Some(pending) = pending {
+            pending
+        } else {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?
+                .take()
+                .ok_or_else(|| BackendErrorV1::new("Gemma backend is already shut down"))?;
+            let Gemma4BackendStateV1 {
+                resident,
+                prefix_cache,
+                session,
+                model_ready_current_bytes,
+                ..
+            } = state;
+            drop(prefix_cache);
+            drop(resident);
+            (session, model_ready_current_bytes)
+        };
+        let mark_pending = |session: &Arc<ExecutionSession>| {
+            if let Ok(mut status) = self.shutdown.lock() {
+                *status = ShutdownStateV1::Pending {
+                    session: Arc::clone(session),
+                    model_ready_current_bytes,
+                };
+            }
+        };
         let before_shutdown = session.memory_snapshot();
         if before_shutdown.current_bytes() != 0 {
+            mark_pending(&session);
             return Err(BackendErrorV1::new(format!(
                 "Gemma resident drop left {} tracked device bytes",
                 before_shutdown.current_bytes()
             )));
         }
-        let report = session.shutdown(self.shutdown_timeout).map_err(|error| {
-            BackendErrorV1::new(format!("HIP session shutdown failed: {error}"))
-        })?;
+        let report = match session.shutdown(self.shutdown_timeout) {
+            Ok(report) => report,
+            Err(error) => {
+                mark_pending(&session);
+                return Err(BackendErrorV1::new(format!(
+                    "HIP session shutdown failed: {error}"
+                )));
+            }
+        };
         let final_memory = session.memory_snapshot();
         if final_memory.current_bytes() != 0
             || report.retryable_cleanup != 0
             || report.durable_quarantine != 0
         {
+            mark_pending(&session);
             return Err(BackendErrorV1::new(
                 "HIP session shutdown did not reach a zero-cleanup terminal state",
             ));
         }
-        Ok(ProductionShutdownAuditV1 {
+        let audit = ProductionShutdownAuditV1 {
             schema_version: "openai-chat-production-shutdown-v1".to_owned(),
             target: self.identity.target.clone(),
             model_fingerprint: self.identity.model_fingerprint.clone(),
@@ -2720,7 +3376,11 @@ impl Gemma4ChatBackendV1 {
             retryable_cleanup: report.retryable_cleanup,
             durable_quarantine: report.durable_quarantine,
             requests: self.request_audits(),
-        })
+        };
+        if let Ok(mut status) = self.shutdown.lock() {
+            *status = ShutdownStateV1::Complete(audit.clone());
+        }
+        Ok(audit)
     }
 
     fn record_audit(&self, audit: ProductionRequestAuditV1) {
@@ -2983,6 +3643,23 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let prepared_prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
         let assistant_prefill_tokens = prepared_prompt.assistant_prefill_token_ids().to_vec();
         let prompt = prepared_prompt.token_ids().to_vec();
+        let adapter_request =
+            resolve_qwen_adapters(state.adapter_catalog.as_ref(), request.model_variant())?;
+        let adapters_enabled = adapter_request.identity() != "adapter:none-v1";
+        if adapters_enabled
+            && (state.moe_artifact.is_some()
+                || state.gguf_moe.is_some()
+                || state.sidecar.is_some()
+                || state.nvfp4_sidecar.is_some()
+                || state
+                    .gguf_source
+                    .as_ref()
+                    .is_some_and(|source| source.has_fp8_recipe()))
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen adapters require the dense BF16 text execution path",
+            ));
+        }
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()
@@ -3016,6 +3693,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let multimodal_prompt = if processed_images.is_empty() {
             None
         } else {
+            if adapters_enabled {
+                return Err(BackendErrorV1::new(
+                    "Qwen adapters are currently text-only and reject multimodal requests",
+                ));
+            }
             if state.moe_artifact.is_some() || state.gguf_moe.is_some() {
                 return Err(BackendErrorV1::new(
                     "Qwen3.5 MoE production path is text-only",
@@ -3138,6 +3820,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     .map_err(|error| BackendErrorV1::new(error.to_string()))?,
             ),
         };
+        if adapters_enabled && context_policy.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen adapters cannot be combined with context-window shifting",
+            ));
+        }
         if context_policy.is_some() && generation.device_selector_seed().is_some() {
             return Err(BackendErrorV1::new(
                 "context-window shifting cannot be combined with device-selector sampling",
@@ -3227,6 +3914,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             && state.mtp_resident.is_some()
             && !requires_logits
             && multimodal_prompt.is_none();
+        if adapters_enabled && mtp_target {
+            return Err(BackendErrorV1::new(
+                "Qwen adapters cannot be combined with MTP draft execution",
+            ));
+        }
         let ngram_draft_width = match &state.phase41.draft {
             DraftStartupConfigV1::Ngram { width, .. } if !requires_logits => usize::from(*width),
             _ => 0,
@@ -3354,6 +4046,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     &state.renderer,
                     &state.target,
                     state.fp8_provider.as_deref(),
+                    adapter_request.identity(),
                     state.kv_cache_encoding,
                     &checkpoint.payload.token_history,
                 )?;
@@ -3380,7 +4073,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 } => prompt_tokens <= max_logical_tokens,
             };
         let prefix_identity = prefix_cache_eligible
-            .then(|| qwen_prefix_identity(state, &graph, state_capacity))
+            .then(|| {
+                qwen_prefix_identity(state, &graph, state_capacity, adapter_request.identity())
+            })
             .transpose()?;
         let prefix_hit = prefix_identity
             .as_ref()
@@ -3429,6 +4124,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                             &state.renderer,
                             &state.target,
                             state.fp8_provider.as_deref(),
+                            adapter_request.identity(),
                             state.kv_cache_encoding,
                             &prompt,
                         )?,
@@ -3447,13 +4143,18 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         {
             let owner = state
                 .resident
-                .new_request_from_checkpoint(checkpoint, graph, identity)
+                .new_request_from_checkpoint_with_adapters(
+                    checkpoint,
+                    graph,
+                    identity,
+                    adapter_request.clone(),
+                )
                 .map_err(|_| BackendErrorV1::new("Qwen checkpoint request provisioning failed"))?;
             (owner, None)
         } else if let Some(hit) = prefix_hit {
             let owner = state
                 .resident
-                .new_request_from_prefix(&hit.prefix, graph)
+                .new_request_from_prefix_with_adapters(&hit.prefix, graph, adapter_request.clone())
                 .map_err(|error| {
                     BackendErrorV1::new(format!("prefix request provisioning failed: {error}"))
                 })?;
@@ -3461,7 +4162,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         } else {
             let owner = state
                 .resident
-                .new_request_for_session(Arc::clone(&state.session), graph)
+                .new_request_for_session_with_adapters(
+                    Arc::clone(&state.session),
+                    graph,
+                    adapter_request,
+                )
                 .map_err(|error| {
                     BackendErrorV1::new(format!("request provisioning failed: {error}"))
                 })?;
@@ -4764,6 +5469,7 @@ fn capture_qwen_persistent_checkpoint(
         &state.renderer,
         &state.target,
         state.fp8_provider.as_deref(),
+        executor.inner().adapter_identity(),
         state.kv_cache_encoding,
         token_history,
     )
@@ -5842,6 +6548,52 @@ mod tests {
                 .baseline_bytes()
                 .unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn qwen_adapter_catalog_requires_strict_sorted_aliases() {
+        let artifact = |alias: &str| QwenAdapterArtifactConfigV1 {
+            alias: alias.to_owned(),
+            lock_path: PathBuf::from("lock.json"),
+            payload_path: PathBuf::from("payload.bin"),
+        };
+        let unsorted = QwenAdapterCatalogConfigV1 {
+            lora: vec![artifact("zeta"), artifact("alpha")],
+            control_vectors: Vec::new(),
+        };
+        assert!(validate_qwen_adapter_catalog_config(&unsorted).is_err());
+        let duplicate_across_kinds = QwenAdapterCatalogConfigV1 {
+            lora: vec![artifact("same")],
+            control_vectors: vec![artifact("same")],
+        };
+        assert!(validate_qwen_adapter_catalog_config(&duplicate_across_kinds).is_err());
+    }
+
+    #[test]
+    fn qwen_adapter_resolver_is_disabled_or_fails_closed_without_catalog() {
+        let empty = crate::api::ModelVariantRequestV1::default();
+        assert_eq!(
+            resolve_qwen_adapters(None, &empty).unwrap().identity(),
+            "adapter:none-v1"
+        );
+        let selection = crate::api::ArtifactScaleSelectionV1::new("missing".to_owned(), 1.0)
+            .expect("bounded test selection");
+        let request = crate::api::ModelVariantRequestV1::from_parts(vec![selection], Vec::new())
+            .expect("sorted test selection");
+        assert!(resolve_qwen_adapters(None, &request).is_err());
+        assert_eq!(
+            QwenAdapterCatalogV1 {
+                lora: BTreeMap::new(),
+                control_vectors: BTreeMap::new(),
+            }
+            .identity(),
+            "adapter:none-v1"
+        );
+        assert_eq!(
+            qwen_adapter_catalog_identity_preflight(&QwenAdapterCatalogConfigV1::default())
+                .unwrap(),
+            "adapter:none-v1"
         );
     }
 

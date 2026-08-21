@@ -14,6 +14,9 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 use crate::StateForkAuditV1;
+use crate::adapter::{
+    AdapterRequestSetV1, ControlVectorSelectionV1, LoraAdapterSelectionV1, VerifiedLoraTargetV1,
+};
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::execution::{
     ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
@@ -25,7 +28,7 @@ use crate::kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
 };
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
-use crate::model::{TensorDType, VerifiedCache};
+use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
     SemanticOpKind, TokenSelectorContractV1,
@@ -179,6 +182,7 @@ struct QwenPrefixIdentityV1 {
     model_fingerprint: String,
     plan_digest: [u8; 32],
     graph_semantics_digest: [u8; 32],
+    adapter_identity: String,
     state_capacity: u64,
     is_mtp: bool,
     is_multimodal: bool,
@@ -285,6 +289,10 @@ impl QwenStateImageV1 {
         &self.identity.graph_semantics_digest
     }
 
+    pub fn adapter_identity(&self) -> &str {
+        &self.identity.adapter_identity
+    }
+
     pub fn state_capacity(&self) -> u64 {
         self.identity.state_capacity
     }
@@ -367,6 +375,7 @@ impl QwenStateImageV1 {
         }
         if identity.model_lock_fingerprint != self.identity.model_fingerprint
             || identity.plan_digest != qwen_hex_digest(&self.identity.plan_digest)
+            || identity.adapter_identity != self.identity.adapter_identity
             || identity.kv_descriptor_digest != self.kv_descriptor_digest()
             || self
                 .kv_layers
@@ -506,6 +515,10 @@ impl QwenPrefixStateV1 {
 
     pub fn graph_semantics_digest(&self) -> &[u8; 32] {
         &self.inner.identity.graph_semantics_digest
+    }
+
+    pub fn adapter_identity(&self) -> &str {
+        &self.inner.identity.adapter_identity
     }
 
     pub fn cached_terminal_output(&self) -> &QwenExecutionOutput {
@@ -1182,7 +1195,18 @@ impl QwenResidentModel {
         &self,
         graph: QwenGraph,
     ) -> Result<QwenExecutionRequest, QwenExecutionError> {
-        QwenExecutionCore::from_resident(Arc::clone(&self.inner), graph).map(|core| {
+        self.new_request_with_adapters(graph, AdapterRequestSetV1::disabled())
+    }
+
+    /// Creates a request-local owner with verified dense-BF16 adapter effects.
+    /// Adapter payloads are uploaded into request-state buffers; the resident
+    /// model, tokenizer, and graph metadata remain shared and immutable.
+    pub fn new_request_with_adapters(
+        &self,
+        graph: QwenGraph,
+        adapters: AdapterRequestSetV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        QwenExecutionCore::from_resident(Arc::clone(&self.inner), graph, adapters).map(|core| {
             QwenExecutionRequest {
                 _resident: Arc::clone(&self.inner),
                 core,
@@ -1249,7 +1273,16 @@ impl QwenResidentModel {
         prefix: &QwenPrefixStateV1,
         graph: QwenGraph,
     ) -> Result<QwenExecutionRequest, QwenExecutionError> {
-        let mut request = self.new_request(graph)?;
+        self.new_request_from_prefix_with_adapters(prefix, graph, AdapterRequestSetV1::disabled())
+    }
+
+    pub fn new_request_from_prefix_with_adapters(
+        &self,
+        prefix: &QwenPrefixStateV1,
+        graph: QwenGraph,
+        adapters: AdapterRequestSetV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request_with_adapters(graph, adapters)?;
         request.core.install_prefix(prefix)?;
         Ok(request)
     }
@@ -1279,7 +1312,22 @@ impl QwenResidentModel {
         graph: QwenGraph,
         expected_identity: &CheckpointIdentity,
     ) -> Result<QwenExecutionRequest, QwenExecutionError> {
-        let mut request = self.new_request(graph)?;
+        self.new_request_from_checkpoint_with_adapters(
+            checkpoint,
+            graph,
+            expected_identity,
+            AdapterRequestSetV1::disabled(),
+        )
+    }
+
+    pub fn new_request_from_checkpoint_with_adapters(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+        adapters: AdapterRequestSetV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request_with_adapters(graph, adapters)?;
         request
             .core
             .restore_checkpoint(checkpoint, expected_identity)?;
@@ -1360,6 +1408,20 @@ impl QwenResidentModel {
             ));
         }
         self.new_request(graph)
+    }
+
+    pub fn new_request_for_session_with_adapters(
+        &self,
+        session: Arc<ExecutionSession>,
+        graph: QwenGraph,
+        adapters: AdapterRequestSetV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        if session.id() != self.inner.session.id() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "request session differs from the resident model session".to_owned(),
+            ));
+        }
+        self.new_request_with_adapters(graph, adapters)
     }
 
     /// Compatibility spelling for callers that prefer factory terminology.
@@ -1735,6 +1797,10 @@ impl QwenExecutionRequest {
         self.core.session.id()
     }
 
+    pub fn adapter_identity(&self) -> &str {
+        &self.core.adapters.identity
+    }
+
     /// Returns the immutable audit accumulated by successful compute
     /// submissions. An empty audit is never a successful request audit.
     pub fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
@@ -1847,6 +1913,51 @@ struct QwenExecutionCore {
     rope_position_delta: i64,
     last_output: Option<QwenExecutionOutput>,
     pending_speculative: Option<PendingSpeculativeBlock>,
+    adapters: QwenAdapterRuntime,
+}
+
+struct QwenAdapterRuntime {
+    identity: String,
+    lora: Vec<QwenLoraDeviceArtifact>,
+    controls: Vec<QwenControlDeviceArtifact>,
+}
+
+struct QwenLoraDeviceArtifact {
+    selection: LoraAdapterSelectionV1,
+    buffer: ExecutionBuffer,
+}
+
+struct QwenControlDeviceArtifact {
+    selection: ControlVectorSelectionV1,
+    buffer: ExecutionBuffer,
+}
+
+impl QwenAdapterRuntime {
+    fn disabled() -> Self {
+        Self {
+            identity: AdapterRequestSetV1::disabled().identity().to_owned(),
+            lora: Vec::new(),
+            controls: Vec::new(),
+        }
+    }
+
+    fn has_lora_target(&self, tensor_name: &str) -> bool {
+        self.lora.iter().any(|artifact| {
+            artifact
+                .selection
+                .artifact
+                .targets()
+                .iter()
+                .any(|target| target.tensor_name() == tensor_name)
+        })
+    }
+
+    fn controls_for_layer(&self, layer: u32) -> impl Iterator<Item = &QwenControlDeviceArtifact> {
+        self.controls.iter().filter(move |artifact| {
+            let (start, end) = artifact.selection.artifact.layer_range();
+            u64::from(layer) >= start && u64::from(layer) < end
+        })
+    }
 }
 
 struct PendingSpeculativeBlock {
@@ -1942,6 +2053,215 @@ fn qwen_prepared_execution_plan(
         })
         .collect();
     PreparedExecutionPlan::new(nodes).map_err(Into::into)
+}
+
+impl QwenAdapterRuntime {
+    fn provision(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        graph: &QwenGraph,
+        plan: &WeightLoadPlan,
+        adapters: AdapterRequestSetV1,
+        completion_timeout: Duration,
+    ) -> Result<Self, QwenExecutionError> {
+        let identity = adapters.identity().to_owned();
+        if adapters.adapters().is_empty() && adapters.controls().is_empty() {
+            return Ok(Self::disabled());
+        }
+        validate_dense_bf16_adapter_graph(graph, plan)?;
+        let hidden_size = graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "embedding.output")
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "adapter provisioning cannot resolve Qwen hidden size".to_owned(),
+                )
+            })?;
+        let layer_count = u64::try_from(graph.layer_types().len()).map_err(|_| {
+            QwenExecutionError::InvalidGraph("Qwen layer count does not fit u64".to_owned())
+        })?;
+        let mut lora = Vec::with_capacity(adapters.adapters().len());
+        for selection in adapters.adapters().iter().cloned() {
+            let lock = selection.artifact.lock();
+            if lock.base_model_fingerprint != graph.model_fingerprint()
+                || lock.base_weight_plan_digest != qwen_plan_digest_string(graph.plan_digest())
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "adapter identity differs from the request graph".to_owned(),
+                ));
+            }
+            for target in selection.artifact.targets() {
+                validate_lora_target_graph(graph, target)?;
+            }
+            let buffer = session.allocate_with_category(
+                u64::try_from(selection.artifact.payload().len()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "LoRA payload length does not fit u64".to_owned(),
+                    )
+                })?,
+                crate::AllocationCategory::RequestState,
+            )?;
+            let view = TensorView::contiguous(DType::U8, &[selection.artifact.payload().len()])?;
+            upload_exact_bytes(
+                session,
+                queue,
+                &buffer,
+                &view,
+                selection.artifact.payload(),
+                completion_timeout,
+                "LoRA adapter payload upload",
+            )?;
+            lora.push(QwenLoraDeviceArtifact { selection, buffer });
+        }
+        let mut controls = Vec::with_capacity(adapters.controls().len());
+        for selection in adapters.controls().iter().cloned() {
+            let lock = selection.artifact.lock();
+            if lock.base_model_fingerprint != graph.model_fingerprint()
+                || lock.base_weight_plan_digest != qwen_plan_digest_string(graph.plan_digest())
+                || lock.layer_end > layer_count
+                || lock.hidden_size != u64::try_from(hidden_size).unwrap_or(u64::MAX)
+            {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "control-vector identity differs from the request graph".to_owned(),
+                ));
+            }
+            let buffer = session.allocate_with_category(
+                u64::try_from(selection.artifact.payload().len()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "control-vector payload length does not fit u64".to_owned(),
+                    )
+                })?,
+                crate::AllocationCategory::RequestState,
+            )?;
+            let view = TensorView::contiguous(DType::U8, &[selection.artifact.payload().len()])?;
+            upload_exact_bytes(
+                session,
+                queue,
+                &buffer,
+                &view,
+                selection.artifact.payload(),
+                completion_timeout,
+                "control-vector payload upload",
+            )?;
+            controls.push(QwenControlDeviceArtifact { selection, buffer });
+        }
+        Ok(Self {
+            identity,
+            lora,
+            controls,
+        })
+    }
+}
+
+fn validate_dense_bf16_adapter_graph(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+) -> Result<(), QwenExecutionError> {
+    if graph.model_fingerprint() != QWEN35_4B_FINGERPRINT
+        || graph.fp8_sidecar_fingerprint().is_some()
+        || graph.is_mtp()
+        || graph.is_multimodal()
+        || graph.layer_types().len() != 32
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Phase45 adapters require the reviewed dense BF16 Qwen3.5-4B text graph".to_owned(),
+        ));
+    }
+    if graph.nodes().iter().any(|node| {
+        matches!(
+            node.kind(),
+            QwenGraphNodeKind::Semantic(SemanticOpKind::SparseMoe)
+        )
+    }) {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Phase45 adapters reject sparse-MoE Qwen graphs".to_owned(),
+        ));
+    }
+    if graph
+        .weight_bindings()
+        .iter()
+        .any(|binding| !is_reviewed_dense_adapter_weight(binding.tensor_name(), binding.dtype()))
+    {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Phase45 adapters require reviewed BF16 weights plus fixed F32 GDN state weights"
+                .to_owned(),
+        ));
+    }
+    if !matches!(
+        plan.schema_version.as_str(),
+        "model-lock-v1" | "gguf-model-plan-v1"
+    ) || plan.entries.iter().any(|entry| {
+        entry.classification == WeightClassification::Required
+            && !is_reviewed_dense_adapter_weight(&entry.tensor_name, entry.dtype)
+    }) {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Phase45 adapters require a reviewed dense BF16 weight plan".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_reviewed_dense_adapter_weight(name: &str, dtype: TensorDType) -> bool {
+    match dtype {
+        TensorDType::Bf16 => true,
+        // Qwen3.5's reviewed dense text graph keeps only these two GDN
+        // state parameters in F32; all other adapter-visible weights remain
+        // BF16.
+        TensorDType::F32 => {
+            let Some(rest) = name.strip_prefix("model.language_model.layers.") else {
+                return false;
+            };
+            let Some((layer, suffix)) = rest.split_once(".linear_attn.") else {
+                return false;
+            };
+            layer.parse::<u32>().is_ok() && matches!(suffix, "A_log" | "norm.weight")
+        }
+        TensorDType::F16 | TensorDType::I32 | TensorDType::I64 | TensorDType::U8 => false,
+    }
+}
+
+fn qwen_plan_digest_string(digest: &[u8; 32]) -> String {
+    let mut output = String::from("sha256:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn validate_lora_target_graph(
+    graph: &QwenGraph,
+    target: &VerifiedLoraTargetV1,
+) -> Result<(), QwenExecutionError> {
+    let binding = graph
+        .weight_binding(target.tensor_name())
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+    if binding.dtype() != TensorDType::Bf16 || binding.shape() != target.target_shape().as_slice() {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "LoRA target {} differs from the dense BF16 graph",
+            target.tensor_name()
+        )));
+    }
+    let is_matmul_target = graph.nodes().iter().any(|node| {
+        node.inputs().get(1).is_some_and(|&weight_id| {
+            graph
+                .tensor_metadata()
+                .get(weight_id)
+                .is_some_and(|tensor| tensor.name() == target.tensor_name())
+        }) && matches!(
+            node.kind(),
+            QwenGraphNodeKind::Semantic(SemanticOpKind::Matmul)
+        )
+    });
+    if !is_matmul_target {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "LoRA target {} is not a Qwen matmul weight",
+            target.tensor_name()
+        )));
+    }
+    Ok(())
 }
 
 trait QwenProvisionSource {
@@ -3098,6 +3418,7 @@ impl QwenExecutionCore {
     fn from_resident(
         resident: Arc<QwenResidentInner>,
         graph: QwenGraph,
+        adapters: AdapterRequestSetV1,
     ) -> Result<Self, QwenExecutionError> {
         let layout = validate_graph_plan(&graph, &resident.plan)?;
         if graph.model_fingerprint() != resident.model_fingerprint {
@@ -3148,6 +3469,14 @@ impl QwenExecutionCore {
             })
             .collect::<Result<BTreeMap<usize, CachedScale>, QwenExecutionError>>()?;
         let (kv_states, linear_states) = create_states(resident.session.as_ref(), &graph)?;
+        let adapters = QwenAdapterRuntime::provision(
+            resident.session.as_ref(),
+            &resident.queue,
+            &graph,
+            &resident.plan,
+            adapters,
+            resident.completion_timeout,
+        )?;
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
         let core = Self {
             session: Arc::clone(&resident.session),
@@ -3170,6 +3499,7 @@ impl QwenExecutionCore {
             rope_position_delta: 0,
             last_output: None,
             pending_speculative: None,
+            adapters,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -3226,7 +3556,7 @@ impl QwenExecutionCore {
         }
         Ok(QwenStateImageV1 {
             session_id: self.session.id(),
-            identity: qwen_prefix_identity(&self.graph, &self.plan),
+            identity: qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity),
             committed_length: self.committed_length,
             rope_position_delta: self.rope_position_delta,
             kv_layers,
@@ -3320,6 +3650,7 @@ impl QwenExecutionCore {
         let identity = &checkpoint.header.identity;
         if identity.model_lock_fingerprint != self.graph.model_fingerprint()
             || identity.plan_digest != self.plan.digest_hex()
+            || identity.adapter_identity != self.adapters.identity
             || identity.kv_descriptor_digest
                 != qwen_kv_descriptor_digest(
                     self.kv_states
@@ -3464,7 +3795,7 @@ impl QwenExecutionCore {
         }
         self.restore_state_image(&QwenStateImageV1 {
             session_id: self.session.id(),
-            identity: qwen_prefix_identity(&self.graph, &self.plan),
+            identity: qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity),
             committed_length: logical_position,
             rope_position_delta,
             kv_layers,
@@ -3482,7 +3813,8 @@ impl QwenExecutionCore {
                 "state image belongs to a different execution session".to_owned(),
             ));
         }
-        let expected_identity = qwen_prefix_identity(&self.graph, &self.plan);
+        let expected_identity =
+            qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity);
         if image.identity != expected_identity {
             return Err(QwenExecutionError::InvalidRequest(
                 "state image model, plan, graph, or capacity identity differs".to_owned(),
@@ -3566,7 +3898,7 @@ impl QwenExecutionCore {
         }
         self.ensure_state_lengths(self.committed_length)?;
 
-        let identity = qwen_prefix_identity(&self.graph, &self.plan);
+        let identity = qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity);
         let mut kv_states = BTreeMap::new();
         let mut linear_states = BTreeMap::new();
         let mut audit = QwenPrefixForkAuditV1::default();
@@ -3644,7 +3976,8 @@ impl QwenExecutionCore {
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
-        let expected_identity = qwen_prefix_identity(&self.graph, &self.plan);
+        let expected_identity =
+            qwen_prefix_identity(&self.graph, &self.plan, &self.adapters.identity);
         if prefix.inner.session.id() != self.session.id() {
             return Err(QwenExecutionError::InvalidRequest(
                 "prefix state belongs to a different execution session".to_owned(),
@@ -3654,6 +3987,7 @@ impl QwenExecutionCore {
             || prefix.inner.identity.plan_digest != expected_identity.plan_digest
             || prefix.inner.identity.graph_semantics_digest
                 != expected_identity.graph_semantics_digest
+            || prefix.inner.identity.adapter_identity != expected_identity.adapter_identity
             || prefix.inner.identity.is_mtp != expected_identity.is_mtp
             || prefix.inner.identity.is_multimodal != expected_identity.is_multimodal
         {
@@ -3915,6 +4249,7 @@ impl QwenExecutionCore {
             rope_position_delta: 0,
             last_output: None,
             pending_speculative: None,
+            adapters: QwenAdapterRuntime::disabled(),
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -5219,6 +5554,19 @@ impl QwenExecutionCore {
                 node.label()
             ))
         })?;
+        if operation.kind() == SemanticOpKind::Matmul
+            && self
+                .node_weight_name(node)
+                .is_some_and(|name| self.adapters.has_lora_target(name))
+        {
+            return self.execute_lora_matmul(
+                node,
+                token_count,
+                boundary_after,
+                terminal_rows,
+                pending,
+            );
+        }
         if operation.kind() == SemanticOpKind::AttentionPreprocess {
             return Err(QwenExecutionError::InvalidGraph(format!(
                 "attention preprocess must use the typed D0 node: {}",
@@ -5316,6 +5664,9 @@ impl QwenExecutionCore {
                 )));
             }
             pending.retain_semantic(node.label(), submission);
+            if let Some(layer) = Self::control_layer(node) {
+                self.execute_control_after_node(node, token_count, layer, pending)?;
+            }
             return Ok(None);
         }
         // The terminal argmax completion is the final stream-ordered segment
@@ -5528,6 +5879,407 @@ impl QwenExecutionCore {
         }))
     }
 
+    fn node_weight_name<'a>(&'a self, node: &'a QwenGraphNode) -> Option<&'a str> {
+        node.inputs()
+            .get(1)
+            .and_then(|&tensor_id| self.graph.tensor_metadata().get(tensor_id))
+            .map(|tensor| tensor.name())
+    }
+
+    fn allocate_adapter_temp(
+        &self,
+        view: &TensorView,
+    ) -> Result<(ExecutionBuffer, TensorView), QwenExecutionError> {
+        let temp_view = TensorView::contiguous(view.dtype(), view.shape())?;
+        let buffer = self.session.allocate_with_category(
+            temp_view.payload_bytes(),
+            crate::AllocationCategory::Workspace,
+        )?;
+        Ok((buffer, temp_view))
+    }
+
+    fn retain_adapter_semantic(
+        &self,
+        label: &str,
+        descriptor: SemanticOpDescriptor,
+        inputs: Vec<OwnedTensorBinding>,
+        outputs: Vec<OwnedTensorBinding>,
+        pending: &mut ExecutionSegment,
+    ) -> Result<(), QwenExecutionError> {
+        let submission = self.submit_semantic(
+            descriptor,
+            inputs,
+            outputs,
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(0, 0)),
+        )?;
+        pending.retain_semantic(label, submission);
+        Ok(())
+    }
+
+    fn execute_lora_matmul(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        terminal_rows: TerminalOutputRows,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        if boundary_after.is_some() {
+            return Err(QwenExecutionError::InvalidGraph(
+                "LoRA matmul cannot own an execution boundary".to_owned(),
+            ));
+        }
+        let weight_name = self.node_weight_name(node).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("LoRA matmul has no weight input".to_owned())
+        })?;
+        let is_terminal_projection = self.is_terminal_projection(node)?;
+        let activation = if is_terminal_projection && terminal_rows == TerminalOutputRows::Last {
+            last_row_view(&self.view(node.inputs()[0], token_count)?)?
+        } else {
+            self.view(node.inputs()[0], token_count)?
+        };
+        let weight = self.view(node.inputs()[1], token_count)?;
+        let output = if is_terminal_projection && terminal_rows == TerminalOutputRows::Last {
+            first_row_view(&self.view(node.outputs()[0], token_count)?)?
+        } else {
+            self.view(node.outputs()[0], token_count)?
+        };
+        if activation.shape().len() != 2
+            || weight.shape().len() != 2
+            || output.shape().len() != 2
+            || output.shape()[1] != weight.shape()[0]
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "LoRA matmul has an invalid runtime shape".to_owned(),
+            ));
+        }
+        let rows = activation.shape()[0];
+        let input = activation.shape()[1];
+        let output_width = output.shape()[1];
+        let (base_buffer, base_view) = self.allocate_adapter_temp(&output)?;
+        let base_descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![activation.clone(), weight.clone()],
+            vec![base_view.clone()],
+        )?;
+        let base_inputs = vec![
+            self.bind_view(node.inputs()[0], activation.clone(), AccessMode::Read)?,
+            self.bind(node.inputs()[1], token_count, AccessMode::Read)?,
+        ];
+        let base_outputs =
+            vec![
+                self.session
+                    .bind(&base_buffer, base_view.clone(), AccessMode::Write)?,
+            ];
+        let base_submission = self.submit_semantic(
+            base_descriptor,
+            base_inputs,
+            base_outputs,
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+        )?;
+        pending.retain_semantic(node.label(), base_submission);
+        let mut accumulator = (base_buffer, base_view);
+        let matching = self
+            .adapters
+            .lora
+            .iter()
+            .filter_map(|artifact| {
+                artifact
+                    .selection
+                    .artifact
+                    .targets()
+                    .iter()
+                    .find(|target| target.tensor_name() == weight_name)
+                    .map(|target| (artifact, target))
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "LoRA runtime target disappeared during execution".to_owned(),
+            ));
+        }
+        for (adapter, target) in matching {
+            let rank = usize::try_from(target.rank()).map_err(|_| {
+                QwenExecutionError::InvalidRequest("LoRA rank does not fit usize".to_owned())
+            })?;
+            let a_view = TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[rank, input],
+                &[input, 1],
+                target.a_offset(),
+            )?;
+            let b_view = TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[output_width, rank],
+                &[rank, 1],
+                target.b_offset(),
+            )?;
+            let low_template = TensorView::contiguous(DType::Bf16, &[rows, rank])?;
+            let (low_buffer, low_view) = self.allocate_adapter_temp(&low_template)?;
+            let low_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), a_view.clone()],
+                vec![low_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.lora.project",
+                low_descriptor,
+                vec![
+                    self.bind_view(node.inputs()[0], activation.clone(), AccessMode::Read)?,
+                    self.session
+                        .bind(&adapter.buffer, a_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&low_buffer, low_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            let delta_template = TensorView::contiguous(DType::Bf16, &[rows, output_width])?;
+            let (delta_buffer, delta_view) = self.allocate_adapter_temp(&delta_template)?;
+            let delta_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![low_view.clone(), b_view.clone()],
+                vec![delta_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.lora.expand",
+                delta_descriptor,
+                vec![
+                    self.session.bind(&low_buffer, low_view, AccessMode::Read)?,
+                    self.session
+                        .bind(&adapter.buffer, b_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&delta_buffer, delta_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            let effective_scale = adapter.selection.scale
+                * (adapter.selection.artifact.lock().alpha / target.rank() as f32);
+            if !effective_scale.is_finite() {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "LoRA effective scale is non-finite".to_owned(),
+                ));
+            }
+            let scalar_view = TensorView::contiguous(DType::Bf16, &[1])?;
+            let scalar_buffer = self.session.allocate_with_category(
+                scalar_view.payload_bytes(),
+                crate::AllocationCategory::Workspace,
+            )?;
+            let scalar_bits = bf16_scalar_from_f32(effective_scale)?;
+            upload_exact_bytes(
+                self.session.as_ref(),
+                &self.queue,
+                &scalar_buffer,
+                &scalar_view,
+                &scalar_bits.to_le_bytes(),
+                self.completion_timeout,
+                "LoRA scale upload",
+            )?;
+            let scaled_template = TensorView::contiguous(DType::Bf16, &[rows, output_width])?;
+            let (scaled_buffer, scaled_view) = self.allocate_adapter_temp(&scaled_template)?;
+            let scale_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::ScalarMul,
+                vec![delta_view.clone(), scalar_view.clone()],
+                vec![scaled_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.lora.scale",
+                scale_descriptor,
+                vec![
+                    self.session
+                        .bind(&delta_buffer, delta_view, AccessMode::Read)?,
+                    self.session
+                        .bind(&scalar_buffer, scalar_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&scaled_buffer, scaled_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            let (sum_buffer, sum_view) = self.allocate_adapter_temp(&output)?;
+            let add_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Add,
+                vec![accumulator.1.clone(), scaled_view.clone()],
+                vec![sum_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.lora.add",
+                add_descriptor,
+                vec![
+                    self.session
+                        .bind(&accumulator.0, accumulator.1, AccessMode::Read)?,
+                    self.session
+                        .bind(&scaled_buffer, scaled_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&sum_buffer, sum_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            accumulator = (sum_buffer, sum_view);
+        }
+        let copy_descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::Copy,
+            vec![accumulator.1.clone()],
+            vec![output.clone()],
+        )?;
+        self.retain_adapter_semantic(
+            "adapter.lora.commit",
+            copy_descriptor,
+            vec![
+                self.session
+                    .bind(&accumulator.0, accumulator.1, AccessMode::Read)?,
+            ],
+            vec![self.bind_view(node.outputs()[0], output, AccessMode::Write)?],
+            pending,
+        )?;
+        Ok(None)
+    }
+
+    fn control_layer(node: &QwenGraphNode) -> Option<u32> {
+        let rest = node.label().strip_prefix("layer.")?;
+        let (layer, suffix) = rest.split_once('.')?;
+        if !suffix.ends_with("mlp_residual_add") {
+            return None;
+        }
+        layer.parse().ok()
+    }
+
+    fn execute_control_after_node(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        layer: u32,
+        pending: &mut ExecutionSegment,
+    ) -> Result<(), QwenExecutionError> {
+        let controls = self.adapters.controls_for_layer(layer).collect::<Vec<_>>();
+        if controls.is_empty() {
+            return Ok(());
+        }
+        if node.outputs().len() != 1 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "control-vector residual node must have one output".to_owned(),
+            ));
+        }
+        for control in controls {
+            let input = self.view(node.outputs()[0], token_count)?;
+            if input.shape().len() != 2 {
+                return Err(QwenExecutionError::InvalidGraph(
+                    "control-vector residual must be a rank-2 hidden tensor".to_owned(),
+                ));
+            }
+            let hidden = input.shape()[1];
+            let lock = control.selection.artifact.lock();
+            if u64::try_from(hidden).ok() != Some(lock.hidden_size) {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "control-vector hidden size differs from residual".to_owned(),
+                ));
+            }
+            let layer_offset = u64::from(layer)
+                .checked_sub(lock.layer_start)
+                .and_then(|index| index.checked_mul(lock.hidden_size))
+                .and_then(|elements| elements.checked_mul(2))
+                .and_then(|offset| lock.vector_offset.checked_add(offset))
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "control-vector layer payload offset overflowed".to_owned(),
+                    )
+                })?;
+            let vector = TensorView::new(
+                DType::Bf16,
+                Encoding::Unquantized,
+                &[hidden],
+                &[1],
+                layer_offset,
+            )?;
+            let effective_scale = control.selection.scale;
+            if !effective_scale.is_finite() {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "control-vector scale is non-finite".to_owned(),
+                ));
+            }
+            let scalar_view = TensorView::contiguous(DType::Bf16, &[1])?;
+            let scalar_buffer = self.session.allocate_with_category(
+                scalar_view.payload_bytes(),
+                crate::AllocationCategory::Workspace,
+            )?;
+            let scalar_bits = bf16_scalar_from_f32(effective_scale)?;
+            upload_exact_bytes(
+                self.session.as_ref(),
+                &self.queue,
+                &scalar_buffer,
+                &scalar_view,
+                &scalar_bits.to_le_bytes(),
+                self.completion_timeout,
+                "control-vector scale upload",
+            )?;
+            let (scaled_buffer, scaled_view) = self.allocate_adapter_temp(&vector)?;
+            let scale_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::ScalarMul,
+                vec![vector.clone(), scalar_view.clone()],
+                vec![scaled_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.control.scale",
+                scale_descriptor,
+                vec![
+                    self.session
+                        .bind(&control.buffer, vector.clone(), AccessMode::Read)?,
+                    self.session
+                        .bind(&scalar_buffer, scalar_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&scaled_buffer, scaled_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            let (output_buffer, output_view) = self.allocate_adapter_temp(&input)?;
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::BroadcastAdd,
+                vec![input.clone(), scaled_view.clone()],
+                vec![output_view.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.control.broadcast_add",
+                descriptor,
+                vec![
+                    self.bind(node.outputs()[0], token_count, AccessMode::Read)?,
+                    self.session
+                        .bind(&scaled_buffer, scaled_view, AccessMode::Read)?,
+                ],
+                vec![
+                    self.session
+                        .bind(&output_buffer, output_view.clone(), AccessMode::Write)?,
+                ],
+                pending,
+            )?;
+            let copy_descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Copy,
+                vec![output_view.clone()],
+                vec![input.clone()],
+            )?;
+            self.retain_adapter_semantic(
+                "adapter.control.commit",
+                copy_descriptor,
+                vec![
+                    self.session
+                        .bind(&output_buffer, output_view, AccessMode::Read)?,
+                ],
+                vec![self.bind(node.outputs()[0], token_count, AccessMode::Write)?],
+                pending,
+            )?;
+        }
+        Ok(())
+    }
+
     fn execute_semantic_all_rows(
         &self,
         node: &QwenGraphNode,
@@ -5541,6 +6293,19 @@ impl QwenExecutionCore {
                 node.label()
             ))
         })?;
+        if operation.kind() == SemanticOpKind::Matmul
+            && self
+                .node_weight_name(node)
+                .is_some_and(|name| self.adapters.has_lora_target(name))
+        {
+            return self.execute_lora_matmul(
+                node,
+                token_count,
+                boundary_after,
+                TerminalOutputRows::All,
+                pending,
+            );
+        }
         if operation.kind() == SemanticOpKind::AttentionPreprocess {
             return Err(QwenExecutionError::InvalidGraph(format!(
                 "attention preprocess must use the typed D0 node: {}",
@@ -5589,6 +6354,9 @@ impl QwenExecutionCore {
                 )));
             }
             pending.retain_semantic(node.label(), submission);
+            if let Some(layer) = Self::control_layer(node) {
+                self.execute_control_after_node(node, token_count, layer, pending)?;
+            }
             return Ok(None);
         }
         if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
@@ -7886,6 +8654,27 @@ fn i32_bytes(values: &[i32]) -> Vec<u8> {
     bytes
 }
 
+fn bf16_from_f32(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let rounding = 0x7fff_u32 + ((bits >> 16) & 1);
+    ((bits.wrapping_add(rounding)) >> 16) as u16
+}
+
+fn bf16_scalar_from_f32(value: f32) -> Result<u16, QwenExecutionError> {
+    if !value.is_finite() {
+        return Err(QwenExecutionError::InvalidRequest(
+            "adapter scalar is non-finite".to_owned(),
+        ));
+    }
+    let bits = bf16_from_f32(value);
+    if bits & 0x7f80 == 0x7f80 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "adapter scalar overflows BF16".to_owned(),
+        ));
+    }
+    Ok(bits)
+}
+
 fn position_bytes(start_position: u64, token_count: u64) -> Result<Vec<u8>, QwenExecutionError> {
     let count = usize::try_from(token_count).map_err(|_| {
         QwenExecutionError::InvalidRequest("position token count does not fit usize".to_owned())
@@ -7943,7 +8732,11 @@ fn validate_input_token_ids(token_ids: &[i32]) -> Result<(), QwenExecutionError>
     Ok(())
 }
 
-fn qwen_prefix_identity(graph: &QwenGraph, plan: &WeightLoadPlan) -> QwenPrefixIdentityV1 {
+fn qwen_prefix_identity(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    adapter_identity: &str,
+) -> QwenPrefixIdentityV1 {
     let mut digest = Sha256::new();
     digest.update((graph.states().len() as u64).to_le_bytes());
     for state in graph.states() {
@@ -8001,6 +8794,7 @@ fn qwen_prefix_identity(graph: &QwenGraph, plan: &WeightLoadPlan) -> QwenPrefixI
         model_fingerprint: graph.model_fingerprint().to_owned(),
         plan_digest: *plan.digest(),
         graph_semantics_digest: digest.finalize().into(),
+        adapter_identity: adapter_identity.to_owned(),
         state_capacity: graph.state_capacity(),
         is_mtp: graph.is_mtp(),
         is_multimodal: graph.is_multimodal(),
@@ -8437,6 +9231,10 @@ mod tests {
 
         fn preprocess(&self) -> Vec<(AttentionPreprocessPositionMode, u32, u32)> {
             self.state.lock().expect("recorder lock").preprocess.clone()
+        }
+
+        fn uploads(&self) -> Vec<Vec<u8>> {
+            self.state.lock().expect("recorder lock").uploads.clone()
         }
 
         fn set_failure(&self, kind: SemanticOpKind) {
@@ -9188,6 +9986,123 @@ mod tests {
         (core, source)
     }
 
+    fn control_fixture(
+        graph: &QwenGraph,
+        plan: &WeightLoadPlan,
+    ) -> Arc<crate::adapter::VerifiedControlVectorPayloadV1> {
+        let hidden_size = graph
+            .tensor_metadata()
+            .iter()
+            .find(|tensor| tensor.name() == "embedding.output")
+            .and_then(|tensor| tensor.view().shape().get(1).copied())
+            .expect("fixture hidden size");
+        let layer_count = u64::try_from(graph.layer_types().len()).expect("fixture layer count");
+        let payload = [0x00_u8, 0x3f_u8].repeat(hidden_size);
+        let payload_sha256 = format!("sha256:{:x}", Sha256::digest(&payload));
+        let lock = serde_json::json!({
+            "schema_version": "sllm-adapter-lock-v1",
+            "kind": "control-vector",
+            "artifact_id": "control-runtime-fixture-v1",
+            "dtype": "bf16",
+            "base_model_fingerprint": graph.model_fingerprint(),
+            "base_weight_plan_digest": plan.digest_hex(),
+            "payload_sha256": payload_sha256,
+            "payload_size": payload.len(),
+            "hidden_size": hidden_size,
+            "layer_start": 0,
+            "layer_end": 1,
+            "vector_offset": 0,
+            "vector_size": payload.len(),
+        });
+        let dims = crate::adapter::AdapterModelDimsV1::new(
+            u64::try_from(hidden_size).expect("fixture hidden size"),
+            layer_count,
+        )
+        .expect("fixture dimensions");
+        let lock_json = serde_json::to_vec(&lock).expect("fixture lock serializes");
+        Arc::new(
+            crate::adapter::VerifiedControlVectorPayloadV1::from_bytes(
+                &lock_json,
+                Arc::<[u8]>::from(payload),
+                graph.model_fingerprint(),
+                plan,
+                dims,
+            )
+            .expect("fixture control vector verifies"),
+        )
+    }
+
+    #[test]
+    fn adapter_scalar_bf16_conversion_is_finite_and_signed_at_boundaries() {
+        for value in [0.0_f32, -2.0, 0.5, 16.0, -16.0] {
+            let bits = bf16_scalar_from_f32(value).expect("finite BF16 scalar");
+            assert_ne!(bits & 0x7f80, 0x7f80, "scalar {value} became BF16 Inf/NaN");
+            assert_eq!(bits, bf16_from_f32(value));
+        }
+        assert!(bf16_scalar_from_f32(f32::INFINITY).is_err());
+        assert!(bf16_scalar_from_f32(f32::NAN).is_err());
+        // The largest finite f32 rounds to the BF16 exponent reserved for
+        // Inf/NaN; reject it instead of submitting a non-finite multiplier.
+        assert!(bf16_scalar_from_f32(f32::from_bits(0x7f7f_ffff)).is_err());
+    }
+
+    #[test]
+    fn control_scale_is_uploaded_and_precedes_broadcast_add_in_submission_graph() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                Duration::from_millis(1),
+                &source,
+            )
+            .expect("resident fixture provisions"),
+        );
+        let artifact = control_fixture(&graph, &plan);
+        let mut event_start = recorder.events().len();
+        for (alias, scale) in [("zero", 0.0_f32), ("negative", -2.0), ("fraction", 0.5)] {
+            let request = AdapterRequestSetV1::new(
+                Vec::new(),
+                vec![ControlVectorSelectionV1 {
+                    alias: alias.to_owned(),
+                    artifact: Arc::clone(&artifact),
+                    scale,
+                }],
+            )
+            .expect("control request validates");
+            let mut core =
+                QwenExecutionCore::from_resident(Arc::clone(&resident), graph.clone(), request)
+                    .expect("adapter request provisions");
+            core.prefill(&[1]).expect("control request executes");
+
+            let events = recorder.events();
+            let request_events = &events[event_start..];
+            let scalar = request_events
+                .iter()
+                .position(|event| event == "prepare:ScalarMul")
+                .expect("control scale scalar-mul is prepared");
+            let broadcast = request_events
+                .iter()
+                .position(|event| event == "prepare:BroadcastAdd")
+                .expect("control broadcast-add is prepared");
+            assert!(scalar < broadcast, "scale must precede residual add");
+            let scalar_upload = recorder
+                .uploads()
+                .into_iter()
+                .rev()
+                .find(|bytes| bytes.len() == std::mem::size_of::<u16>())
+                .expect("control scale upload is recorded");
+            let actual = u16::from_le_bytes(scalar_upload.try_into().expect("BF16 scalar"));
+            assert_eq!(actual, bf16_scalar_from_f32(scale).unwrap());
+            event_start = events.len();
+            drop(core);
+        }
+    }
+
     #[test]
     fn terminal_row_views_cover_non_aligned_boundaries() {
         for rows in [1_usize, 2, 3, 17, 255, 256, 257, 2_047, 2_049] {
@@ -9727,6 +10642,9 @@ mod tests {
                 .all(|layer| matches!(layer.image().metadata().active_slot, Some(0 | 1)))
         );
 
+        let mut wrong_adapter = image.clone();
+        wrong_adapter.identity.adapter_identity = "adapter:other-v1".to_owned();
+
         let mut restored = QwenExecutionCore::provision(
             Arc::clone(&session),
             graph.clone(),
@@ -9735,6 +10653,11 @@ mod tests {
             &source,
         )
         .expect("restore destination provisions");
+        assert!(matches!(
+            restored.restore_state_image(&wrong_adapter),
+            Err(QwenExecutionError::InvalidRequest(_))
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
         restored
             .restore_state_image(&image)
             .expect("all state image layers restore");
@@ -9814,7 +10737,7 @@ mod tests {
         let identity = CheckpointIdentity::for_tokens(
             image.model_fingerprint().to_owned(),
             "artifact-v1",
-            "qwen-adapter-v1",
+            image.adapter_identity().to_owned(),
             "renderer-v1",
             "tokenizer-v1",
             "gfx942",
@@ -9938,7 +10861,7 @@ mod tests {
         let identity = CheckpointIdentity::for_tokens(
             image.model_fingerprint(),
             "artifact-v1",
-            "adapter-v1",
+            image.adapter_identity(),
             "renderer-v1",
             "tokenizer-v1",
             "recorder",
@@ -10652,8 +11575,12 @@ mod tests {
         assert_eq!(resident_memory.request_state().current_bytes(), 0);
         assert_eq!(resident_memory.workspace().current_bytes(), 0);
 
-        let request = QwenExecutionCore::from_resident(Arc::clone(&resident), graph.clone())
-            .expect("first fresh request provisions");
+        let request = QwenExecutionCore::from_resident(
+            Arc::clone(&resident),
+            graph.clone(),
+            AdapterRequestSetV1::disabled(),
+        )
+        .expect("first fresh request provisions");
         let request_memory = session.memory_snapshot();
         assert!(request_memory.request_state().current_bytes() > 0);
         assert_eq!(
@@ -10669,9 +11596,12 @@ mod tests {
         assert_eq!(returned.request_state().current_bytes(), 0);
         assert_eq!(returned.workspace().current_bytes(), 0);
 
-        let request =
-            QwenExecutionCore::from_resident(resident.clone(), graph_with_different_shape)
-                .expect("second fresh request provisions");
+        let request = QwenExecutionCore::from_resident(
+            resident.clone(),
+            graph_with_different_shape,
+            AdapterRequestSetV1::disabled(),
+        )
+        .expect("second fresh request provisions");
         drop(request);
         assert_eq!(source.uploaded().len(), upload_count);
         drop(resident);

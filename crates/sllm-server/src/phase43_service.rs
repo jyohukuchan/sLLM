@@ -31,6 +31,7 @@ use crate::api::{
     ApiErrorV1, ChatCompletionRequestV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES,
 };
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1};
+use crate::model_lifecycle::ModelLifecycleLeaseV1;
 use crate::phase43_api::{
     AnthropicContentBlockV1, AnthropicMessagesRequestV1, AnthropicRoleV1, AnthropicSystemV1,
     Phase43ApiErrorV1, Phase43ErrorCodeV1, ResponsesInputItemV1, ResponsesInputV1,
@@ -43,8 +44,9 @@ use crate::phase43_transport::{
     responses_non_stream_v1,
 };
 use crate::resume::{ReplayErrorV1, ResumableStoreV1};
+use crate::runtime::ModelRegistryEntryV1;
 use crate::runtime::{GenerationReceiverV1, SchedulerEventV1};
-use crate::service::AppStateV1;
+use crate::service::{AppStateV1, resolve_model_for_request};
 
 const ANTHROPIC_VERSION_HEADER: HeaderName = HeaderName::from_static("anthropic-version");
 const LAST_EVENT_ID: HeaderName = HeaderName::from_static("last-event-id");
@@ -116,6 +118,8 @@ struct ToolDecodeContextV1 {
 }
 
 struct PreparedProtocolV1 {
+    model: Arc<ModelRegistryEntryV1>,
+    lifecycle_lease: Option<ModelLifecycleLeaseV1>,
     request: ChatCompletionRequestV1,
     decoder: Option<ToolDecodeContextV1>,
     context: ProtocolContextV1,
@@ -196,10 +200,7 @@ fn prepare_responses(
         request.max_output_tokens(),
         "max_output_tokens",
     )?;
-    let model = state
-        .registry
-        .get(request.model())
-        .ok_or_else(|| ApiErrorV1::model_not_found(request.model()))?;
+    let (model, lifecycle_lease) = resolve_model_for_request(state, request.model())?;
     let reasoning = request.reasoning_effort().is_some();
     let reasoning_budget = request
         .reasoning_effort()
@@ -256,7 +257,8 @@ fn prepare_responses(
             reasoning,
             reasoning_budget,
             Some(schema),
-        )?;
+        )?
+        .with_model_variant(request.sllm().model_variant().clone());
         (
             generation_request,
             Some(ToolDecodeContextV1 {
@@ -279,10 +281,13 @@ fn prepare_responses(
             request.sllm().resumable(),
             reasoning,
             reasoning_budget,
-        )?;
+        )?
+        .with_model_variant(request.sllm().model_variant().clone());
         (generation_request, None)
     };
     Ok(PreparedProtocolV1 {
+        model,
+        lifecycle_lease,
         context: ProtocolContextV1::new(ProtocolProfileV1::Responses, request.model(), reasoning),
         request: generation_request,
         decoder,
@@ -300,10 +305,7 @@ fn prepare_anthropic(
         request.max_tokens(),
         "max_tokens",
     )?;
-    let model = state
-        .registry
-        .get(request.model())
-        .ok_or_else(|| ApiErrorV1::model_not_found(request.model()))?;
+    let (model, lifecycle_lease) = resolve_model_for_request(state, request.model())?;
     let (history, simple_messages, has_tool_history) = lower_anthropic_history(&request)?;
     let tools = lower_tools(request.tools())?;
     let uses_tool_protocol = !tools.is_empty() || has_tool_history;
@@ -340,7 +342,8 @@ fn prepare_anthropic(
             false,
             None,
             Some(schema),
-        )?;
+        )?
+        .with_model_variant(request.sllm().model_variant().clone());
         (
             generation_request,
             Some(ToolDecodeContextV1 {
@@ -363,10 +366,13 @@ fn prepare_anthropic(
             request.sllm().resumable(),
             false,
             None,
-        )?;
+        )?
+        .with_model_variant(request.sllm().model_variant().clone());
         (generation_request, None)
     };
     Ok(PreparedProtocolV1 {
+        model,
+        lifecycle_lease,
         context: ProtocolContextV1::new(ProtocolProfileV1::Anthropic, request.model(), false),
         request: generation_request,
         decoder,
@@ -596,10 +602,11 @@ async fn execute_protocol(prepared: PreparedProtocolV1, state: &AppStateV1) -> R
         )
         .into_response();
     }
-    let Some(model) = state.registry.get(prepared.request.model()) else {
-        return ApiErrorV1::model_not_found(prepared.request.model()).into_response();
-    };
-    let receiver = match state.scheduler.submit(model, prepared.request) {
+    let receiver = match state.scheduler.submit_with_lease(
+        prepared.model,
+        prepared.request,
+        prepared.lifecycle_lease,
+    ) {
         Ok(receiver) => receiver,
         Err(error) => return protocol_error_response(prepared.context.profile, &error),
     };

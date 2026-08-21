@@ -20,6 +20,7 @@ pub enum SemanticOpKind {
     Argmax,
     TokenSelect,
     SparseMoe,
+    BroadcastAdd,
 }
 
 /// The only accepted C3a1 Q/gate storage layout. The packed tensor is
@@ -227,6 +228,7 @@ impl SemanticOpKind {
         match self {
             Self::Copy => "copy",
             Self::Add => "add",
+            Self::BroadcastAdd => "broadcast_add",
             Self::ScalarMul => "scalar_mul",
             Self::Embedding => "embedding",
             Self::Matmul => "matmul",
@@ -248,6 +250,7 @@ impl SemanticOpKind {
         match self {
             Self::Copy => (1, 1),
             Self::Add => (2, 1),
+            Self::BroadcastAdd => (2, 1),
             Self::ScalarMul => (2, 1),
             Self::Embedding => (2, 1),
             Self::Matmul => (2, 1),
@@ -1361,6 +1364,9 @@ impl SemanticOpDescriptor {
             SemanticOpKind::Add => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
+            SemanticOpKind::BroadcastAdd => {
+                validate_broadcast_add(&self.inputs, &self.outputs)?;
+            }
             SemanticOpKind::ScalarMul => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
@@ -1837,6 +1843,51 @@ fn validate_baseline_elementwise(
     Ok(())
 }
 
+fn validate_broadcast_add(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
+    let input = &inputs[0];
+    let vector = &inputs[1];
+    let output = &outputs[0];
+    let tensors = [
+        (input, ElementwiseTensor::Input0),
+        (vector, ElementwiseTensor::Input1),
+        (output, ElementwiseTensor::Output),
+    ];
+    for (tensor, role) in tensors {
+        if tensor.shape().is_empty() {
+            return Err(OpError::ElementwiseRankZero {
+                kind: SemanticOpKind::BroadcastAdd,
+                tensor: role,
+            });
+        }
+        if tensor.shape().contains(&0) {
+            return Err(OpError::BroadcastAddZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::BroadcastAddNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::BroadcastAddUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+        if tensor.dtype() != DType::Bf16 {
+            return Err(OpError::BroadcastAddUnsupportedDType {
+                tensor: role,
+                actual: tensor.dtype(),
+            });
+        }
+    }
+    if input.shape().len() != 2
+        || vector.shape().len() != 1
+        || output.shape() != input.shape()
+        || vector.shape()[0] != input.shape()[1]
+    {
+        return Err(OpError::BroadcastAddShapeMismatch);
+    }
+    Ok(())
+}
+
 fn validate_rms_norm(
     inputs: &[TensorView],
     outputs: &[TensorView],
@@ -2028,6 +2079,21 @@ pub enum OpError {
     },
     ElementwiseUnsupportedEncoding {
         kind: SemanticOpKind,
+        tensor: ElementwiseTensor,
+        actual: Encoding,
+    },
+    BroadcastAddShapeMismatch,
+    BroadcastAddZeroExtent {
+        tensor: ElementwiseTensor,
+    },
+    BroadcastAddNonContiguous {
+        tensor: ElementwiseTensor,
+    },
+    BroadcastAddUnsupportedDType {
+        tensor: ElementwiseTensor,
+        actual: DType,
+    },
+    BroadcastAddUnsupportedEncoding {
         tensor: ElementwiseTensor,
         actual: Encoding,
     },
@@ -2260,6 +2326,23 @@ impl fmt::Display for OpError {
                 formatter,
                 "{} {tensor} must use unquantized encoding, got {actual:?}",
                 kind.name()
+            ),
+            Self::BroadcastAddShapeMismatch => formatter.write_str(
+                "broadcast_add requires contiguous BF16 input/output [M,H] and vector [H]",
+            ),
+            Self::BroadcastAddZeroExtent { tensor } => {
+                write!(formatter, "broadcast_add {tensor} must not have zero extents")
+            }
+            Self::BroadcastAddNonContiguous { tensor } => {
+                write!(formatter, "broadcast_add {tensor} must be row-major contiguous")
+            }
+            Self::BroadcastAddUnsupportedDType { tensor, actual } => write!(
+                formatter,
+                "broadcast_add {tensor} must use bf16, got {actual}"
+            ),
+            Self::BroadcastAddUnsupportedEncoding { tensor, actual } => write!(
+                formatter,
+                "broadcast_add {tensor} must use unquantized encoding, got {actual:?}"
             ),
             Self::SigmoidMulShapeMismatch => formatter.write_str(
                 "sigmoid_mul requires identical contiguous BF16 [M,H,256] gate, attention value, and output",

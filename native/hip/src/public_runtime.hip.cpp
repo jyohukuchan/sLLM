@@ -121,6 +121,14 @@ hipError_t launch_tanh_softcap(const uint16_t *const input,
   return fake_hip::elementwise_tanh_softcap_launch(input, cap, output,
                                                    element_count, stream);
 }
+
+hipError_t
+launch_broadcast_add(const uint16_t *const input, const uint16_t *const vector,
+                     uint16_t *const output, const uint64_t element_count,
+                     const uint64_t width, const hipStream_t stream) noexcept {
+  return fake_hip::elementwise_broadcast_add_launch(
+      input, vector, output, element_count, width, stream);
+}
 } // namespace sllm_elementwise_kernel
 
 namespace sllm_embedding_kernel {
@@ -2534,6 +2542,11 @@ void initialize_elementwise_dispatch_info(
     info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1;
     logical_symbol = ::sllm_elementwise_kernel::kTanhSoftcapLogicalKernelId;
     device_symbol = ::sllm_elementwise_kernel::kTanhSoftcapDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kBroadcastAddLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kBroadcastAddDeviceSymbol;
     break;
   default:
     info->kernel_id = 0U;
@@ -7809,6 +7822,13 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
       launch_status = ::sllm_elementwise_kernel::launch_gelu_tanh_mul(
           input0, input1, output, plan->metadata.element_count, queue->stream);
+    } else if (plan->metadata.operation ==
+               SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD) {
+      const uint16_t *const input1 = static_cast<const uint16_t *>(
+          byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      launch_status = ::sllm_elementwise_kernel::launch_broadcast_add(
+          input0, input1, output, plan->metadata.element_count,
+          plan->metadata.input0.shape[1], queue->stream);
     } else {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));

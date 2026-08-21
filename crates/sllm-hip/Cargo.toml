@@ -67,6 +67,10 @@ name = "sllm-qwen35-moe-admission"
 path = "src/bin/sllm-qwen35-moe-admission.rs"
 
 [[bin]]
+name = "sllm-qwen35-adapter-evidence"
+path = "src/bin/sllm-qwen35-adapter-evidence.rs"
+
+[[bin]]
 name = "sllm-mxfp4-w4a4-evidence"
 path = "src/bin/sllm-mxfp4-w4a4-evidence.rs"
 

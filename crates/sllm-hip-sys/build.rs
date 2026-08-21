@@ -1167,6 +1167,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1);\n\
+             println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);\n\
@@ -1289,6 +1290,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP);\n\
+             println!(\"const SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD);\n\
              println!(\"const SLLM_COMPLETION_STATE_PENDING={{}}\", bindings::SLLM_COMPLETION_STATE_PENDING);\n\
              println!(\"const SLLM_COMPLETION_STATE_SUCCESS={{}}\", bindings::SLLM_COMPLETION_STATE_SUCCESS);\n\
              println!(\"const SLLM_COMPLETION_STATE_FAILURE={{}}\", bindings::SLLM_COMPLETION_STATE_FAILURE);\n\

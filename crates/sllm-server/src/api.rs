@@ -28,6 +28,11 @@ const MAX_SAMPLER_SEQUENCE_BREAKER_BYTES: usize = 1_024;
 const MAX_SCHEMA_NAME_BYTES: usize = 256;
 const MAX_SCHEMA_DESCRIPTION_BYTES: usize = 4_096;
 const MAX_SCHEMA_BYTES: usize = 64 * 1024;
+pub const MAX_MODEL_VARIANT_SELECTIONS: usize = 4;
+pub const MAX_MODEL_VARIANT_NAME_BYTES: usize = 128;
+pub const MODEL_VARIANT_SCALE_MIN: f32 = -16.0;
+pub const MODEL_VARIANT_SCALE_MAX: f32 = 16.0;
+pub const MODEL_VARIANT_SCALE_DEFAULT: f32 = 1.0;
 
 const SUPPORTED_FIELDS: &[&str] = &[
     "model",
@@ -120,6 +125,175 @@ impl ReasoningOptionsV1 {
     pub const fn enabled(self) -> bool {
         matches!(self.thinking, ThinkingModeV1::Enabled)
     }
+}
+
+/// One transport-neutral, data-only adapter or control-vector selection.
+///
+/// Paths, digests, payloads, and execution handles deliberately do not cross
+/// the request boundary.  The later model resolver binds this visible name to
+/// a verified artifact identity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtifactScaleSelectionV1 {
+    name: String,
+    scale: f32,
+}
+
+impl ArtifactScaleSelectionV1 {
+    pub(crate) fn new(name: String, scale: f32) -> Result<Self, String> {
+        if name.is_empty() || name.len() > MAX_MODEL_VARIANT_NAME_BYTES {
+            return Err(format!(
+                "name must contain 1..={MAX_MODEL_VARIANT_NAME_BYTES} visible ASCII bytes"
+            ));
+        }
+        if !name.bytes().all(|byte| {
+            byte.is_ascii_uppercase()
+                || byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'-')
+        }) {
+            return Err("name must match [A-Za-z0-9._-]".to_owned());
+        }
+        if !scale.is_finite() {
+            return Err("scale must be finite".to_owned());
+        }
+        if !(MODEL_VARIANT_SCALE_MIN..=MODEL_VARIANT_SCALE_MAX).contains(&scale) {
+            return Err(format!(
+                "scale must be in [{MODEL_VARIANT_SCALE_MIN},{MODEL_VARIANT_SCALE_MAX}]"
+            ));
+        }
+        Ok(Self { name, scale })
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub const fn scale(&self) -> f32 {
+        self.scale
+    }
+}
+
+/// Ordered request-local adapter/control-vector selections shared by all
+/// public transports.  Empty lists are valid and remain distinct from a
+/// future resolver's normalized artifact identity.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ModelVariantRequestV1 {
+    adapters: Vec<ArtifactScaleSelectionV1>,
+    control_vectors: Vec<ArtifactScaleSelectionV1>,
+}
+
+impl ModelVariantRequestV1 {
+    pub(crate) fn from_parts(
+        adapters: Vec<ArtifactScaleSelectionV1>,
+        control_vectors: Vec<ArtifactScaleSelectionV1>,
+    ) -> Result<Self, String> {
+        validate_model_variant_list(&adapters, "adapters")?;
+        validate_model_variant_list(&control_vectors, "control_vectors")?;
+        let adapter_names = adapters
+            .iter()
+            .map(ArtifactScaleSelectionV1::name)
+            .collect::<BTreeSet<_>>();
+        if control_vectors
+            .iter()
+            .any(|selection| adapter_names.contains(selection.name()))
+        {
+            return Err("adapter and control_vectors names must be distinct".to_owned());
+        }
+        Ok(Self {
+            adapters,
+            control_vectors,
+        })
+    }
+
+    pub fn adapters(&self) -> &[ArtifactScaleSelectionV1] {
+        &self.adapters
+    }
+
+    pub fn control_vectors(&self) -> &[ArtifactScaleSelectionV1] {
+        &self.control_vectors
+    }
+}
+
+fn validate_model_variant_list(
+    selections: &[ArtifactScaleSelectionV1],
+    label: &str,
+) -> Result<(), String> {
+    if selections.len() > MAX_MODEL_VARIANT_SELECTIONS {
+        return Err(format!(
+            "{label} must contain at most {MAX_MODEL_VARIANT_SELECTIONS} entries"
+        ));
+    }
+    for pair in selections.windows(2) {
+        if pair[0].name() >= pair[1].name() {
+            return Err(format!(
+                "{label} names must be strictly lexicographically increasing and unique"
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_model_variant_value(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<Vec<ArtifactScaleSelectionV1>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| format!("{label} must be an array"))?;
+    if values.len() > MAX_MODEL_VARIANT_SELECTIONS {
+        return Err(format!(
+            "{label} must contain at most {MAX_MODEL_VARIANT_SELECTIONS} entries"
+        ));
+    }
+    let mut selections = Vec::with_capacity(values.len());
+    for (index, value) in values.iter().enumerate() {
+        let path = format!("{label}[{index}]");
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("{path} must be an object"))?;
+        for key in object.keys() {
+            if key != "name" && key != "scale" {
+                return Err(format!("{path}.{key} is not supported"));
+            }
+        }
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("{path}.name must be a string"))?;
+        let scale = match object.get("scale") {
+            None => MODEL_VARIANT_SCALE_DEFAULT,
+            Some(Value::Number(number)) => {
+                let value = number
+                    .as_f64()
+                    .ok_or_else(|| format!("{path}.scale must be a finite number"))?;
+                if !value.is_finite()
+                    || !(f64::from(MODEL_VARIANT_SCALE_MIN)..=f64::from(MODEL_VARIANT_SCALE_MAX))
+                        .contains(&value)
+                {
+                    if !value.is_finite() {
+                        return Err(format!("{path}.scale must be a finite number"));
+                    }
+                    return Err(format!(
+                        "{path}.scale must be in [{MODEL_VARIANT_SCALE_MIN},{MODEL_VARIANT_SCALE_MAX}]"
+                    ));
+                }
+                let value = value as f32;
+                if !value.is_finite() {
+                    return Err(format!("{path}.scale must be a finite number"));
+                }
+                value
+            }
+            Some(_) => return Err(format!("{path}.scale must be a number")),
+        };
+        let selection = ArtifactScaleSelectionV1::new(name.to_owned(), scale)
+            .map_err(|error| format!("{path}: {error}"))?;
+        selections.push(selection);
+    }
+    validate_model_variant_list(&selections, label)?;
+    Ok(selections)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -608,6 +782,7 @@ pub struct ChatCompletionRequestV1 {
     logprobs: Option<LogprobOptionsV1>,
     response_format: Option<ResponseFormatV1>,
     sampler: Option<SamplerExtensionConfigV1>,
+    model_variant: ModelVariantRequestV1,
 }
 
 /// Backend-neutral input carried by the shared generation scheduler.
@@ -707,6 +882,15 @@ impl ChatCompletionRequestV1 {
         self.sampler.as_ref()
     }
 
+    pub fn model_variant(&self) -> &ModelVariantRequestV1 {
+        &self.model_variant
+    }
+
+    pub(crate) fn with_model_variant(mut self, model_variant: ModelVariantRequestV1) -> Self {
+        self.model_variant = model_variant;
+        self
+    }
+
     /// Clone a validated request for one independent choice.  Choice zero is
     /// deliberately byte-for-byte compatible with the original seed; later
     /// choices receive a versioned deterministic derivation when a seed was
@@ -771,6 +955,7 @@ impl ChatCompletionRequestV1 {
             logprobs,
             response_format: None,
             sampler: None,
+            model_variant: ModelVariantRequestV1::default(),
         })
     }
 
@@ -807,6 +992,7 @@ impl ChatCompletionRequestV1 {
             logprobs: None,
             response_format: None,
             sampler: None,
+            model_variant: ModelVariantRequestV1::default(),
         })
     }
 
@@ -886,6 +1072,7 @@ impl ChatCompletionRequestV1 {
             logprobs: None,
             response_format,
             sampler: None,
+            model_variant: ModelVariantRequestV1::default(),
         })
     }
 
@@ -961,6 +1148,7 @@ impl ChatCompletionRequestV1 {
             logprobs: None,
             response_format: None,
             sampler: None,
+            model_variant: ModelVariantRequestV1::default(),
         })
     }
 
@@ -1096,6 +1284,8 @@ struct WireSllmOptions {
     max_reasoning_tokens: Option<u32>,
     resumable: Option<bool>,
     sampling: Option<WireSamplerExtensionOptions>,
+    adapters: Option<Value>,
+    control_vectors: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -1900,8 +2090,13 @@ pub(crate) fn parse_chat_completion_request_for_profile(
     };
     let generation = GenerationConfigV1::new(max_completion_tokens, sampling, stop_strings)
         .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
-    let (reasoning, resumable, sampler) = match wire.sllm {
-        None => (ReasoningOptionsV1::disabled(), false, None),
+    let (reasoning, resumable, sampler, model_variant) = match wire.sllm {
+        None => (
+            ReasoningOptionsV1::disabled(),
+            false,
+            None,
+            ModelVariantRequestV1::default(),
+        ),
         Some(options) => {
             let thinking = match options.thinking.unwrap_or(WireThinkingMode::Disabled) {
                 WireThinkingMode::Enabled => ThinkingModeV1::Enabled,
@@ -1938,6 +2133,13 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     "max_reasoning_tokens requires sllm.thinking=enabled",
                 ));
             }
+            let adapters = parse_model_variant_value(options.adapters.as_ref(), "sllm.adapters")
+                .map_err(|error| ApiErrorV1::invalid_value("sllm.adapters", error))?;
+            let control_vectors =
+                parse_model_variant_value(options.control_vectors.as_ref(), "sllm.control_vectors")
+                    .map_err(|error| ApiErrorV1::invalid_value("sllm.control_vectors", error))?;
+            let model_variant = ModelVariantRequestV1::from_parts(adapters, control_vectors)
+                .map_err(|error| ApiErrorV1::invalid_value("sllm", error))?;
             (
                 ReasoningOptionsV1 {
                     thinking,
@@ -1947,6 +2149,7 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                 },
                 options.resumable.unwrap_or(false),
                 parse_sampler_extension(options.sampling)?,
+                model_variant,
             )
         }
     };
@@ -1982,6 +2185,7 @@ pub(crate) fn parse_chat_completion_request_for_profile(
         logprobs,
         response_format,
         sampler,
+        model_variant,
     })
 }
 
