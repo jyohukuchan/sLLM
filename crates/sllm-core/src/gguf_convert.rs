@@ -1119,7 +1119,7 @@ fn recipe_from_metadata(
 }
 
 fn standard_dimensions(logical_shape: &[u64]) -> Result<(Vec<u64>, Option<Vec<u64>>), GgufError> {
-    if logical_shape.is_empty() || logical_shape.iter().any(|dimension| *dimension == 0) {
+    if logical_shape.is_empty() || logical_shape.contains(&0) {
         return Err(invalid("tensor logical shape is empty or contains zero"));
     }
     let mut dimensions = logical_shape.to_vec();

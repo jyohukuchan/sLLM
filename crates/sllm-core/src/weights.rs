@@ -1001,7 +1001,7 @@ fn build_qwen_component_weight_load_plan_inner<'a>(
     let mut destination_cursor = 0_u64;
 
     for descriptor in by_name.values() {
-        validate_descriptor(descriptor, &locked_files)?;
+        validate_descriptor(descriptor, locked_files)?;
         let (mut classification, mut consumer) = classify_descriptor(
             descriptor,
             &config.layer_types,

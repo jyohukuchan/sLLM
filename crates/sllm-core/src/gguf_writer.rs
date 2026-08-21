@@ -37,7 +37,7 @@ impl GgufWriteTensor {
         if self.dimensions.is_empty() || self.dimensions.len() > 4 {
             return Err(invalid("write tensor dimension count is invalid"));
         }
-        if self.dimensions.iter().any(|dimension| *dimension == 0) {
+        if self.dimensions.contains(&0) {
             return Err(invalid("write tensor has a zero dimension"));
         }
         let block_size = self.tensor_type.block_size();

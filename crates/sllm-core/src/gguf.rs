@@ -689,8 +689,7 @@ fn validate_recipe_bindings(
                 binding.value_tensor
             )));
         }
-        if binding.logical_shape.is_empty() || binding.logical_shape.iter().any(|value| *value == 0)
-        {
+        if binding.logical_shape.is_empty() || binding.logical_shape.contains(&0) {
             return Err(invalid(format!(
                 "binding {} has invalid logical shape",
                 binding.logical_tensor
@@ -812,7 +811,7 @@ fn validate_recipe_bindings(
     for binding in &recipe.logical_shapes {
         if binding.tensor.is_empty()
             || binding.logical_shape.len() <= MAX_DIMS as usize
-            || binding.logical_shape.iter().any(|value| *value == 0)
+            || binding.logical_shape.contains(&0)
             || !shape_names.insert(binding.tensor.as_str())
             || logical_names.contains(binding.tensor.as_str())
         {
