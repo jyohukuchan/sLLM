@@ -186,6 +186,68 @@ non-unified KVの通常local-subagent起動へ昇格した。これは外部runt
 詳細は[selection summary](../../ci/matrix/phase-x-qwen38-multi-gpu-selection-v1.json)と
 [local Qwen運用正本](../development/local-qwen-subagent.md)を参照する。
 
+### 2026-08-21 Phase36 Session A: Hot Aisle MI300X VF
+
+Session A の `project-verified` scope は、Hot Aisle の MI300X VF x1 に固定した次の exact tuple だけである。
+
+| 項目 | 検証値 |
+| --- | --- |
+| GPU identity / capability | MI300X VF x1、`gfx942:sramecc+:xnack-`、wave64、304 CU、HBM `205,822,885,888` bytes、NPS1/SPX、VMM `true` |
+| OS / driver | Ubuntu 24.04.4、kernel `6.8.0-124`、amdgpu `6.16.13` |
+| execution toolchain | ROCm 7.14.0、HIP `7.14.60850`、LLVM 23 |
+| device artifacts | logical `gfx942`、唯一のdevice bundle `gfx942:sramecc+:xnack-`、Code Object V6、ELF flags `0xE4C`（SRAM ECC on / XNACK off）、全kernel wave64（generic/別targetなし） |
+
+operator matrix は 99/99 を PASS した。Qwen3.5-4B BF16/FP8 GGUF の固定短生成も全 dispatch が HIP-only、
+fallback `0`、cleanup `0` だった。gfx942 の FP8 は OCP E4M3FN storage payload を native FNUZ resident bytes/scales へ
+正しく変換し、raw reinterpret は行わない。BF16 の Hello token は `[11,353,2688,4313,310]`、FP8 は
+`[11,353,1044,4313,310]` で、これは cross-provider の N1 差として記録する。Unicode と stop の確認も同じ
+target/provider/cleanup contract を満たした。Phase29 由来の GDN wave32 scope leak は修正済みで、wave64 では
+sequential norm を維持する。最終artifactで99/99を再実行し、BF16/FP8 resident/peakとsecond resident request、model drop後0も
+確認した。終了時は foreign process `0`、全sysfs RAS blockのCE/UE `0`、VRAM baseline 復帰、provider の `/opt/rocm` link復元を確認した。
+
+この Session A evidence は Sessions B-D、9B、low-bit KV/long context、MTP、vision、service、performance、multi-GPU、
+別SKU/VM/bare-metal へ拡張しない。lifecycle は引き続き `experimental` とする。
+
+### 2026-08-21 Phase36 Sessions B/C: MI300X long-context・MTP・vision・service
+
+同じHot Aisle MI300X VF x1、exact `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14 tupleで、Session Bは
+FP16/dynamic FP8/static FP8/NVFP4 Full Attentionを各29 case、FP16 KV state 19 case、独立low-bit oracleをPASSした。
+Qwen3.5-4B BF16 targetのFP16/dynamic FP8 KVはauto/512/2K/4K/8K/16Kの全12 rowが
+10,001 input / 2 output、HIP-only、
+fallbackなし、cleanup 0で、入力ID `23066`×10,001から生成ID `[23066,23066]`へ一致した。gfx942は
+`contiguous-resident`を維持し、物理HBM/GTT観測後に共通baselineへ復帰した。VMM=trueであることだけを根拠に
+`virtual-contiguous`対応とはしない。
+
+Session CはBF16 target＋FP16 KVのMTP target-only/width 2/3/4/7/8、FP8 target＋dynamic FP8 target KVの
+target-only/width 3をPASSした。MTP side pathはBF16 weights＋FP16 KVで、target側のFP8/FP8とは別にreportする。
+PNG/JPEG/WebPは各64 image-pad token、同じ生成ID、first-image lazy residency、second-image reuse、shutdown cleanupを
+確認した。OpenAI profile v1のraw/official client、non-stream/SSE、reasoning/stop/seed、cancel/recovery、二並行queue、
+graceful shutdownもexact gfx942/HIP-only、fallbackなし、cleanup 0でPASSした。終了後はGPU process 0、provider ROCm root復元を
+確認した。これはSessions B/Cの限定evidenceであり、Session Dの反復性能/llama.cpp/profile、9B、別tupleへ
+一般化しない。追跡結果は[Session B summary](../../ci/matrix/phase36-mi300x-session-b-summary-v1.json)と
+[Session C summary](../../ci/matrix/phase36-mi300x-session-c-summary-v1.json)に固定し、lifecycleは`experimental`のままである。
+
+### 2026-08-21 Phase36 Session D: MI300X repeated performance
+
+同じHot Aisle MI300X VF x1、exact `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14 tupleで、4B BF16/FNUZ FP8の
+short-odd、32/32、prefill-long、decode-long、10,001/2を各3+10回実行した。全10 rowはHIP-only、fallbackなし、
+process終了後HBM/GTT baseline一致でPASSした。10,001/2 E2E中央値はBF16 `22.556130816`秒、FP8
+`22.556528472`秒である。fixed llama.cpp peerは同じupstream model revisionだがGGUF bytes/tensor setが異なるE1で、
+`0.8512540725`秒だった。rocprofv3はGDN `73.95%`、Full Attention `25.12%`を主要device familyとして分類した。
+これは性能/observer evidenceであり、GPU lifecycle昇格や別tuple対応を意味しない。Sessions A〜DをPhase 36の
+完了範囲としてcloseし、VMはユーザーが削除した。詳細は
+[Session D summary](../../ci/matrix/phase36-mi300x-session-d-summary-v1.json)を正とする。
+
+### 2026-08-21 R9700 direct 10,001/2 E2E comparison
+
+canonical R9700 exact `gfx1201`で、Qwen3.5-4B BF16、FP16 KV、`23066`×10,001 input / 2 output、greedy、
+3 warmup＋10 measuredをcurrent-source sLLMとfixed llama.cpp `b10453`へ実行した。E2E中央値は
+sLLM `3.936429665`秒、llama.cpp `2.063845785`秒で比`1.90733x`、prefill比は`1.89197x`だった。
+生成は全試行`[23066,23066]`、sLLMはHIP-only、fallback/cleanup 0、llama.cppは33/33 layer full offload、
+終了後process 0、VRAM 0%へ復帰した。model GGUF bytes/tensor setが異なるためE1 system-equivalentに限定し、
+別SKU/model/shape/ROCm、strict artifact identity、一般性能保証へ拡張しない。
+[R9700 summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

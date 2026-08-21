@@ -369,6 +369,60 @@ Full Attention 232 case、GDN 12 case、10,001-input combined full model、wrong
 gfx942 wave64はcompile-onlyを通した。software lifecycleは`experimental`のままで、別ROCm/compiler/driver、別SKU/model shape、
 長時間運転、gfx942実行へ一般化しない。[Phase 35 summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
 
+### 2026-08-21 Phase36 Session A Hot Aisle MI300X tuple
+
+Session A の software compatibility は Hot Aisle MI300X VF x1 の exact tuple に限定する: Ubuntu 24.04.4、kernel
+`6.8.0-124`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、LLVM 23、`gfx942:sramecc+:xnack-`、wave64、
+304 CU、HBM `205,822,885,888` bytes、NPS1/SPX、VMM `true`。実行中はROCm 7.14 rootをlogical `/opt/rocm`へ限定し、
+終了後はprovider `/opt/rocm-7.2.4`へ復元した。release artifact はlogical `gfx942`、唯一のdevice bundle
+`gfx942:sramecc+:xnack-`、Code Object V6、ELF flags `0xE4C`、全kernel wave64で、generic/別target artifactを含めない。
+最終artifactのoperator matrixは99/99 PASSである。
+
+Qwen3.5-4B BF16/FP8 GGUF の固定短生成は HIP-only、fallback `0`、cleanup `0`。gfx942 FP8 は OCP E4M3FN storage を
+native FNUZ resident bytes/scales へ正しく rebasing/conversion し、raw reinterpret をしない。Hello token は BF16
+`[11,353,2688,4313,310]`、FP8 `[11,353,1044,4313,310]`（cross-provider N1 差）で、Unicode/stop も同じ contract を満たした。
+Phase29 GDN wave32 scope leak は修正済みで wave64 の sequential norm を維持する。
+second resident request/model reuse、drop後allocation 0も確認した。post-run process `0`、全sysfs RAS block CE/UE `0`、VRAM
+baseline復帰、provider `/opt/rocm` link復元、VM外raw退避を確認した。
+
+この記録は Session A の `project-verified` scope のみであり、Sessions B-D、9B、low-bit KV/long context、MTP、vision、service、
+performance、multi-GPU、別SKU/VM/bare-metal を含まない。software lifecycle は `experimental` のままとする。
+
+### 2026-08-21 Phase36 Sessions B/C Hot Aisle MI300X tuple
+
+Session Aと同じUbuntu 24.04.4、kernel `6.8.0-124`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
+LLVM 23、exact `gfx942:sramecc+:xnack-`、wave64 tupleでSessions B/Cを実行した。Session Bは4 KV encodingの
+Full Attention 116 case、FP16 KV state 19 case、独立low-bit oracle、およびBF16 targetのFP16/dynamic FP8 KVの
+10,001 input / 2 output × 6 chunk設定をPASSした。全model rowはHIP-only、fallbackなし、cleanup 0で、HBM/GTTは
+共通baselineへ復帰した。
+
+Session CはBF16/FP8 targetの代表MTP、PNG/JPEG/WebP visionとlazy residency、OpenAI profile v1のraw/official-client
+non-stream/SSE、reasoning、stop、seed、disconnect/recovery、二並行queue、graceful shutdownをPASSした。
+`amd-smi metric`はprovider実装の`partition`例外で`unavailable`だったが、static identity、sysfs memory、process audit、
+runtime reportを0へ置換せず別に保持した。GPU work後はROCm 7.14 bindを解除し、provider `/opt/rocm-7.2.4`へ復元した。
+このtupleはSession D、9B、反復性能、llama.cpp/profile、別OS/driver/ROCm/SKUを含まず、software lifecycleは
+`experimental`のままである。詳細は[Session B summary](../../ci/matrix/phase36-mi300x-session-b-summary-v1.json)と
+[Session C summary](../../ci/matrix/phase36-mi300x-session-c-summary-v1.json)を正とする。
+
+### 2026-08-21 Phase36 Session D Hot Aisle MI300X tuple
+
+Sessions A〜Cと同じUbuntu 24.04.4、kernel `6.8.0-124`、amdgpu `6.16.13`、ROCm 7.14.0、HIP
+`7.14.60850`、LLVM 23、exact `gfx942:sramecc+:xnack-`、wave64 tupleでSession Dを実行した。BF16/FNUZ FP8の
+各5ケースを3 warmup＋10 measuredでPASSし、fixed llama.cpp `b10453`のE1比較とBF16 10,001/2 rocprofv3を取得した。
+全rowは単一ROCm loader closure、HIP-only、fallbackなし、process終了後HBM/GTT baseline復帰を満たした。
+当該tupleの4B反復性能/profileだけを`project-verified` evidenceへ追加し、9B、Gemma/MoE、長時間安定性、
+別OS/driver/ROCm/SKUは含めない。Sessions A〜DをPhase 36の完了範囲としてcloseし、VMはユーザーが削除した。
+software lifecycleは`experimental`のままで、[Session D summary](../../ci/matrix/phase36-mi300x-session-d-summary-v1.json)を正とする。
+
+### 2026-08-21 local R9700 direct E2E tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
+LLVM 23、canonical R9700 exact `gfx1201`のtupleで、Qwen3.5-4B BF16、FP16 KV、10,001/2 direct rowを
+3 warmup＋10 measured実行した。sLLM / fixed llama.cpp `b10453`のE2E中央値は
+`3.936429665/2.063845785`秒、比`1.90733x`で、生成`[23066,23066]`、HIP-only/full-offload、cleanup 0、
+終了後process 0を確認した。GGUF bytes/tensor setは異なるE1であり、このtuple以外の性能やstrict identityを主張しない。
+software lifecycleは`experimental`のままで、[R9700 summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

@@ -1,0 +1,166 @@
+{
+  "schema_version": "r9700-sllm-llama-e2e-v1",
+  "state": "PASS",
+  "observed_at_utc": "2026-08-21T08:30:51Z",
+  "classification": "E1_SYSTEM_EQUIVALENT",
+  "strict_identical": false,
+  "hardware": {
+    "product": "AMD Radeon AI PRO R9700",
+    "target": "gfx1201",
+    "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+    "bdf": "0000:07:00.0",
+    "visible_gpu_count": 1
+  },
+  "software": {
+    "os": "Ubuntu 24.04.4",
+    "kernel": "6.17.0-35-generic",
+    "amdgpu": "6.16.13",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "llvm": "23.0.0"
+  },
+  "protocol": {
+    "input_token_id": 23066,
+    "input_token_count": 10001,
+    "requested_output_tokens": 2,
+    "generated_token_ids": [23066, 23066],
+    "weights": "BF16",
+    "kv": "F16",
+    "greedy": true,
+    "batch_size": 1,
+    "sequences": 1,
+    "warmup_requests": 3,
+    "measured_requests": 10,
+    "n_ctx": 10003,
+    "n_batch": 10001,
+    "n_ubatch": 512,
+    "single_resident_model": true,
+    "timing_boundary": "pretokenized direct engine request start through request cleanup"
+  },
+  "engines": {
+    "sllm": {
+      "binary": {
+        "sha256": "9ac318611bb8e95bd69769d8d98a9b0b517c56d81ce7dde2739c4de22a15164f",
+        "size_bytes": 12511648,
+        "build_id": "e6c3a35a3b3ed3739292f5790e69ad3bbb044650"
+      },
+      "source": {
+        "base_commit": "faf39339d42c837c1ff899f90b03632ac5fe57af",
+        "base_tree": "274a07514f1338b715acc70057a56a3485431142",
+        "dirty": true,
+        "build_inputs_manifest_sha256": "cc05d6de988f7084453c705bb068346402dca9dffb9e8cd0f2430880f24b90ee",
+        "worktree_patch_sha256": "fc08847677cd2370ff3c32e870deff6e1dee12e9a6c9471c4935211fa585d0e9"
+      },
+      "model": {
+        "repo_id": "Qwen/Qwen3.5-4B",
+        "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+        "size_bytes": 9343583936,
+        "lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+        "mtp_tensors_present": true,
+        "mtp_enabled": false
+      },
+      "audit": {
+        "all_dispatches_hip": true,
+        "fallback_used": false,
+        "kernel_dispatch_count": 13416,
+        "submission_count": 12168,
+        "cleanup_failures": 0,
+        "model_load_count": 1,
+        "model_reused": true,
+        "resident_vram_bytes": 8411592192,
+        "peak_vram_bytes": 14068931072
+      },
+      "metrics": {
+        "ttft_ns": {"median": 3865440493.5, "mad": 10622137.5, "min": 3829162009, "max": 3933993881, "values": [3829162009, 3902659997, 3919230736, 3863983170, 3869675697, 3865606421, 3865274566, 3933993881, 3856247911, 3853388801]},
+        "prefill_ns": {"median": 3858745633.5, "mad": 11191077.5, "min": 3822404592, "max": 3927056171, "values": [3822404592, 3895956901, 3912610532, 3857402987, 3862923810, 3858922796, 3858568471, 3927056171, 3848838913, 3846270199]},
+        "prefill_tokens_per_second": {"median": 2591.774885148353, "mad": 7.538774697011831, "min": 2546.691354672757, "max": 2616.4158605636167, "values": [2616.4158605636167, 2567.0201837789787, 2556.0939220004125, 2592.676998930317, 2588.9715904078366, 2591.6558917339894, 2591.8938785627165, 2546.691354672757, 2598.4459797005798, 2600.18133999015]},
+        "tpot_ns": {"median": 53015936.5, "mad": 73001, "min": 52645698, "max": 53135696, "values": [52645698, 53135696, 52987473, 53045043, 52985391, 53132513, 52861308, 53044400, 52979398, 53125400]},
+        "decode_tokens_per_second": {"median": 18.86225829937711, "mad": 0.025936990152791495, "min": 18.819740311672966, "max": 18.99490438895881, "values": [18.99490438895881, 18.819740311672966, 18.87238517677565, 18.85190290071025, 18.87312674544574, 18.820867742506362, 18.917428225574742, 18.85213142197857, 18.87526166303362, 18.823387682728036]},
+        "e2e_ns": {"median": 3936429665, "mad": 10413922, "min": 3900424827, "max": 4006511365, "values": [3900424827, 3973444235, 3989812389, 3934562741, 3942043681, 3936927524, 3935931806, 4006511365, 3927686043, 3924345443]}
+      },
+      "raw": {"file": "raw/sllm.json", "sha256": "03f86b8379772b927772497a84eee99e91b8282e93e6d77d591e38c95d57437b", "size_bytes": 989093}
+    },
+    "llama_cpp": {
+      "binary": {
+        "sha256": "3b9571d33456d8b4af4af050a3f307b54dc32c1108f91985c69d07e29467c353",
+        "size_bytes": 250464,
+        "wrapper_source_sha256": "482db0addf9e2321dcd37869dc7401bc301c48bd671a264489135dc0f92a134e",
+        "libggml_hip_sha256": "2fda1203da612bb6e4d119cf1aa3d2d6c75187f08df243c304cd1cf87da4e9c6"
+      },
+      "source": {
+        "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+        "tree": "f9a9f82f92eb23b6dbc05494e542ddb1f907a0c4",
+        "tag": "b10453",
+        "dirty": false,
+        "cmake_cache_sha256": "41a95442d9bccc1aec4dc2609a5f77e6e435b9e062247631bf253a697000ac32",
+        "hip_architectures": "gfx1201",
+        "ggml_native": false,
+        "hip_graphs": true,
+        "hip_no_vmm": true
+      },
+      "model": {
+        "repo_id": "Qwen/Qwen3.5-4B",
+        "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "sha256": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045",
+        "size_bytes": 8424393568,
+        "mtp_tensors_present": false,
+        "mtp_enabled": false
+      },
+      "audit": {
+        "full_gpu_offload": true,
+        "offloaded_layers": 33,
+        "offloadable_layers": 33,
+        "visible_gpu_count": 1,
+        "cleanup_failures": 0,
+        "model_load_count": 1,
+        "model_reused": true,
+        "gpu_model_buffer_mib": 8023.67
+      },
+      "metrics": {
+        "ttft_ns": {"median": 2040909736, "mad": 5559175, "min": 2034671734, "max": 2051173651, "values": [2034958463, 2038908948, 2042910524, 2047121374, 2048726185, 2051173651, 2046076813, 2036335246, 2034671734, 2038636300]},
+        "prefill_ns": {"median": 2039533769.5, "mad": 5565010, "min": 2033297318, "max": 2049784424, "values": [2033570276, 2037537591, 2041529948, 2045778049, 2047355339, 2049784424, 2044700296, 2034977870, 2033297318, 2037248584]},
+        "prefill_tokens_per_second": {"median": 4903.576361370502, "mad": 13.38506643740584, "min": 4879.049661468205, "max": 4918.611710872281, "values": [4917.951505306129, 4908.375700244934, 4898.777022496071, 4888.604609326317, 4884.838410553997, 4879.049661468205, 4891.181372431317, 4914.549758715558, 4918.611710872281, 4909.072009447032]},
+        "tpot_ns": {"median": 21509062.5, "mad": 94102.5, "min": 21368531, "max": 22074793, "values": [21368531, 21455952, 21388012, 21561225, 21599195, 21514313, 21712396, 21503812, 21410990, 22074793]},
+        "decode_tokens_per_second": {"median": 46.4920337456801, "mad": 0.20348239816084046, "min": 45.300538039020346, "max": 46.797788767042526, "values": [46.797788767042526, 46.6071139607322, 46.7551635935121, 46.37955403739815, 46.29802175497744, 46.48068474229226, 46.05663971861972, 46.50338274906793, 46.70498655129912, 45.300538039020346]},
+        "e2e_ns": {"median": 2063845785, "mad": 5529211, "min": 2057228596, "max": 2073807755, "values": [2057466146, 2061478312, 2065452798, 2069797320, 2071518252, 2073807755, 2068952672, 2058978260, 2057228596, 2062238772]}
+      },
+      "raw": {"file": "raw/llama.json", "sha256": "11a79ed36296ef5cde24973fad5e8ce64c9b864aaadbb9ca22b9a91f03f585db", "size_bytes": 853443}
+    }
+  },
+  "comparison": {
+    "sllm_over_llama_ratio": {
+      "ttft_ns": 1.8939791531770125,
+      "prefill_ns": 1.8919743772842688,
+      "prefill_tokens_per_second": 0.5285478789656244,
+      "tpot_ns": 2.4648185619433667,
+      "decode_tokens_per_second": 0.4057094684770536,
+      "e2e_ns": 1.907327424175736
+    },
+    "e2e_percent_slower": 90.7327424175736,
+    "same_input_ids": true,
+    "same_generated_ids": true,
+    "same_upstream_model_revision": true,
+    "different_gguf_bytes_and_tensor_sets": true
+  },
+  "health": {
+    "pre_process_count": 0,
+    "post_process_count": 0,
+    "post_vram_percent": 0,
+    "post_throttle_status": "UNTHROTTLED",
+    "post_cleanup_pass": true
+  },
+  "raw_artifacts": {
+    "retention": "untracked local evidence",
+    "root": "/home/homelab1/.local/share/sllm-evidence/r9700-sllm-llama-e2e/2026-08-21-r1",
+    "pre_static_sha256": "3bda6db27ef7b07b79da1bb4347b7774509d8e218e57b1174248c0f14bcc5750",
+    "post_static_sha256": "3bda6db27ef7b07b79da1bb4347b7774509d8e218e57b1174248c0f14bcc5750",
+    "post_process_sha256": "cb4d383b3ff033370ec738db174ceed5c077d07b1022343a6208fa6a5d65d11e",
+    "post_metric_sha256": "96a45851a7bff73c6bc967218e90d8e5fdaaf0842b6d91cba84ba864e1353e8e"
+  },
+  "limitations": [
+    "The sLLM and llama.cpp GGUF files have different bytes, tensor sets, and converter lineage, so this is E1 system-equivalent rather than strict artifact identity.",
+    "Only Qwen3.5-4B BF16 weights, FP16 KV, the 10001/2 direct case, one R9700, and the recorded software tuple were measured.",
+    "The sLLM binary was built from a captured dirty worktree; its build-input and patch digests are retained with the raw evidence."
+  ]
+}

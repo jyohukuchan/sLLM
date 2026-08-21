@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.local/schemas/r9700-sllm-llama-e2e-v1.schema.json",
+  "title": "R9700 sLLM versus llama.cpp E2E summary v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "observed_at_utc", "classification", "strict_identical", "hardware", "software", "protocol", "engines", "comparison", "health", "raw_artifacts", "limitations"],
+  "properties": {
+    "schema_version": {"const": "r9700-sllm-llama-e2e-v1"},
+    "state": {"const": "PASS"},
+    "observed_at_utc": {"type": "string", "format": "date-time"},
+    "classification": {"const": "E1_SYSTEM_EQUIVALENT"},
+    "strict_identical": {"const": false},
+    "hardware": {"$ref": "#/$defs/hardware"},
+    "software": {"$ref": "#/$defs/software"},
+    "protocol": {"$ref": "#/$defs/protocol"},
+    "engines": {"$ref": "#/$defs/engines"},
+    "comparison": {"$ref": "#/$defs/comparison"},
+    "health": {"$ref": "#/$defs/health"},
+    "raw_artifacts": {"$ref": "#/$defs/raw_artifacts"},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "positive_int": {"type": "integer", "exclusiveMinimum": 0},
+    "nonnegative_int": {"type": "integer", "minimum": 0},
+    "hardware": {
+      "type": "object", "additionalProperties": false,
+      "required": ["product", "target", "gpu_uuid", "bdf", "visible_gpu_count"],
+      "properties": {
+        "product": {"const": "AMD Radeon AI PRO R9700"},
+        "target": {"const": "gfx1201"},
+        "gpu_uuid": {"const": "GPU-a8e9ddefa2d60f55"},
+        "bdf": {"const": "0000:07:00.0"},
+        "visible_gpu_count": {"const": 1}
+      }
+    },
+    "software": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "kernel", "amdgpu", "rocm", "hip", "llvm"],
+      "properties": {
+        "os": {"const": "Ubuntu 24.04.4"},
+        "kernel": {"const": "6.17.0-35-generic"},
+        "amdgpu": {"const": "6.16.13"},
+        "rocm": {"const": "7.14.0"},
+        "hip": {"const": "7.14.60850"},
+        "llvm": {"const": "23.0.0"}
+      }
+    },
+    "token_ids": {"type": "array", "minItems": 10001, "maxItems": 10001, "items": {"const": 23066}},
+    "protocol": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_token_id", "input_token_count", "requested_output_tokens", "generated_token_ids", "weights", "kv", "greedy", "batch_size", "sequences", "warmup_requests", "measured_requests", "n_ctx", "n_batch", "n_ubatch", "single_resident_model", "timing_boundary"],
+      "properties": {
+        "input_token_id": {"const": 23066},
+        "input_token_count": {"const": 10001},
+        "requested_output_tokens": {"const": 2},
+        "generated_token_ids": {"const": [23066, 23066]},
+        "weights": {"const": "BF16"},
+        "kv": {"const": "F16"},
+        "greedy": {"const": true},
+        "batch_size": {"const": 1},
+        "sequences": {"const": 1},
+        "warmup_requests": {"const": 3},
+        "measured_requests": {"const": 10},
+        "n_ctx": {"const": 10003},
+        "n_batch": {"const": 10001},
+        "n_ubatch": {"const": 512},
+        "single_resident_model": {"const": true},
+        "timing_boundary": {"const": "pretokenized direct engine request start through request cleanup"}
+      }
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["median", "mad", "min", "max", "values"],
+      "properties": {
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "mad": {"type": "number", "minimum": 0},
+        "min": {"type": "number", "exclusiveMinimum": 0},
+        "max": {"type": "number", "exclusiveMinimum": 0},
+        "values": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "number", "exclusiveMinimum": 0}}
+      }
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "tpot_ns", "decode_tokens_per_second", "e2e_ns"],
+      "properties": {
+        "ttft_ns": {"$ref": "#/$defs/metric"},
+        "prefill_ns": {"$ref": "#/$defs/metric"},
+        "prefill_tokens_per_second": {"$ref": "#/$defs/metric"},
+        "tpot_ns": {"$ref": "#/$defs/metric"},
+        "decode_tokens_per_second": {"$ref": "#/$defs/metric"},
+        "e2e_ns": {"$ref": "#/$defs/metric"}
+      }
+    },
+    "raw_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["file", "sha256", "size_bytes"],
+      "properties": {
+        "file": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/positive_int"}
+      }
+    },
+    "sllm_engine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "source", "model", "audit", "metrics", "raw"],
+      "properties": {
+        "binary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sha256", "size_bytes", "build_id"],
+          "properties": {"sha256": {"const": "9ac318611bb8e95bd69769d8d98a9b0b517c56d81ce7dde2739c4de22a15164f"}, "size_bytes": {"const": 12511648}, "build_id": {"const": "e6c3a35a3b3ed3739292f5790e69ad3bbb044650"}}
+        },
+        "source": {
+          "type": "object", "additionalProperties": false,
+          "required": ["base_commit", "base_tree", "dirty", "build_inputs_manifest_sha256", "worktree_patch_sha256"],
+          "properties": {"base_commit": {"const": "faf39339d42c837c1ff899f90b03632ac5fe57af"}, "base_tree": {"const": "274a07514f1338b715acc70057a56a3485431142"}, "dirty": {"const": true}, "build_inputs_manifest_sha256": {"const": "cc05d6de988f7084453c705bb068346402dca9dffb9e8cd0f2430880f24b90ee"}, "worktree_patch_sha256": {"const": "fc08847677cd2370ff3c32e870deff6e1dee12e9a6c9471c4935211fa585d0e9"}}
+        },
+        "model": {
+          "type": "object", "additionalProperties": false,
+          "required": ["repo_id", "revision", "sha256", "size_bytes", "lock_sha256", "mtp_tensors_present", "mtp_enabled"],
+          "properties": {"repo_id": {"const": "Qwen/Qwen3.5-4B"}, "revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}, "sha256": {"const": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675"}, "size_bytes": {"const": 9343583936}, "lock_sha256": {"const": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318"}, "mtp_tensors_present": {"const": true}, "mtp_enabled": {"const": false}}
+        },
+        "audit": {
+          "type": "object", "additionalProperties": false,
+          "required": ["all_dispatches_hip", "fallback_used", "kernel_dispatch_count", "submission_count", "cleanup_failures", "model_load_count", "model_reused", "resident_vram_bytes", "peak_vram_bytes"],
+          "properties": {"all_dispatches_hip": {"const": true}, "fallback_used": {"const": false}, "kernel_dispatch_count": {"$ref": "#/$defs/positive_int"}, "submission_count": {"$ref": "#/$defs/positive_int"}, "cleanup_failures": {"const": 0}, "model_load_count": {"const": 1}, "model_reused": {"const": true}, "resident_vram_bytes": {"$ref": "#/$defs/positive_int"}, "peak_vram_bytes": {"$ref": "#/$defs/positive_int"}}
+        },
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "raw": {"allOf": [{"$ref": "#/$defs/raw_ref"}, {"properties": {"file": {"const": "raw/sllm.json"}}}]}
+      }
+    },
+    "llama_engine": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "source", "model", "audit", "metrics", "raw"],
+      "properties": {
+        "binary": {
+          "type": "object", "additionalProperties": false,
+          "required": ["sha256", "size_bytes", "wrapper_source_sha256", "libggml_hip_sha256"],
+          "properties": {"sha256": {"const": "3b9571d33456d8b4af4af050a3f307b54dc32c1108f91985c69d07e29467c353"}, "size_bytes": {"const": 250464}, "wrapper_source_sha256": {"const": "482db0addf9e2321dcd37869dc7401bc301c48bd671a264489135dc0f92a134e"}, "libggml_hip_sha256": {"const": "2fda1203da612bb6e4d119cf1aa3d2d6c75187f08df243c304cd1cf87da4e9c6"}}
+        },
+        "source": {
+          "type": "object", "additionalProperties": false,
+          "required": ["commit", "tree", "tag", "dirty", "cmake_cache_sha256", "hip_architectures", "ggml_native", "hip_graphs", "hip_no_vmm"],
+          "properties": {"commit": {"const": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"}, "tree": {"const": "f9a9f82f92eb23b6dbc05494e542ddb1f907a0c4"}, "tag": {"const": "b10453"}, "dirty": {"const": false}, "cmake_cache_sha256": {"const": "41a95442d9bccc1aec4dc2609a5f77e6e435b9e062247631bf253a697000ac32"}, "hip_architectures": {"const": "gfx1201"}, "ggml_native": {"const": false}, "hip_graphs": {"const": true}, "hip_no_vmm": {"const": true}}
+        },
+        "model": {
+          "type": "object", "additionalProperties": false,
+          "required": ["repo_id", "revision", "sha256", "size_bytes", "mtp_tensors_present", "mtp_enabled"],
+          "properties": {"repo_id": {"const": "Qwen/Qwen3.5-4B"}, "revision": {"const": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a"}, "sha256": {"const": "636158bd8a217374134cc2455aa40603f7579366fda0f0f5efcbf8bcba37c045"}, "size_bytes": {"const": 8424393568}, "mtp_tensors_present": {"const": false}, "mtp_enabled": {"const": false}}
+        },
+        "audit": {
+          "type": "object", "additionalProperties": false,
+          "required": ["full_gpu_offload", "offloaded_layers", "offloadable_layers", "visible_gpu_count", "cleanup_failures", "model_load_count", "model_reused", "gpu_model_buffer_mib"],
+          "properties": {"full_gpu_offload": {"const": true}, "offloaded_layers": {"const": 33}, "offloadable_layers": {"const": 33}, "visible_gpu_count": {"const": 1}, "cleanup_failures": {"const": 0}, "model_load_count": {"const": 1}, "model_reused": {"const": true}, "gpu_model_buffer_mib": {"type": "number", "exclusiveMinimum": 0}}
+        },
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "raw": {"allOf": [{"$ref": "#/$defs/raw_ref"}, {"properties": {"file": {"const": "raw/llama.json"}}}]}
+      }
+    },
+    "engines": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sllm", "llama_cpp"],
+      "properties": {"sllm": {"$ref": "#/$defs/sllm_engine"}, "llama_cpp": {"$ref": "#/$defs/llama_engine"}}
+    },
+    "comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sllm_over_llama_ratio", "e2e_percent_slower", "same_input_ids", "same_generated_ids", "same_upstream_model_revision", "different_gguf_bytes_and_tensor_sets"],
+      "properties": {
+        "sllm_over_llama_ratio": {
+          "type": "object", "additionalProperties": false,
+          "required": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "tpot_ns", "decode_tokens_per_second", "e2e_ns"],
+          "properties": {"ttft_ns": {"type": "number", "exclusiveMinimum": 0}, "prefill_ns": {"type": "number", "exclusiveMinimum": 0}, "prefill_tokens_per_second": {"type": "number", "exclusiveMinimum": 0}, "tpot_ns": {"type": "number", "exclusiveMinimum": 0}, "decode_tokens_per_second": {"type": "number", "exclusiveMinimum": 0}, "e2e_ns": {"type": "number", "exclusiveMinimum": 0}}
+        },
+        "e2e_percent_slower": {"type": "number", "exclusiveMinimum": 0},
+        "same_input_ids": {"const": true},
+        "same_generated_ids": {"const": true},
+        "same_upstream_model_revision": {"const": true},
+        "different_gguf_bytes_and_tensor_sets": {"const": true}
+      }
+    },
+    "health": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pre_process_count", "post_process_count", "post_vram_percent", "post_throttle_status", "post_cleanup_pass"],
+      "properties": {"pre_process_count": {"const": 0}, "post_process_count": {"const": 0}, "post_vram_percent": {"const": 0}, "post_throttle_status": {"const": "UNTHROTTLED"}, "post_cleanup_pass": {"const": true}}
+    },
+    "raw_artifacts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retention", "root", "pre_static_sha256", "post_static_sha256", "post_process_sha256", "post_metric_sha256"],
+      "properties": {"retention": {"const": "untracked local evidence"}, "root": {"type": "string", "minLength": 1}, "pre_static_sha256": {"$ref": "#/$defs/sha256"}, "post_static_sha256": {"$ref": "#/$defs/sha256"}, "post_process_sha256": {"$ref": "#/$defs/sha256"}, "post_metric_sha256": {"$ref": "#/$defs/sha256"}}
+    }
+  }
+}
