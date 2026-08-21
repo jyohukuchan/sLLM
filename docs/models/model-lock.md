@@ -337,3 +337,15 @@ plan digestを追加lockで固定する。primary lockは
 load前に全identityとselectorを検証し、architecture lockとlogical topologyが一致する場合だけcontainer-neutral descriptorへ
 lowerする。NVIDIA 31BとKimi K3のmetadata lockはbounded schema/referenceまたはarchitecture handoff用であり、full payloadを
 検証していない状態をfull-model supportへ昇格しない。
+
+## Phase 41 derived state identity
+
+Prefix entryとsession checkpointはpath、alias、cache directoryをmodel identityとして使用しない。canonical identityは少なくとも
+reviewed model-lock fingerprint、derived artifact/recipeまたはweight-plan digest、adapter identity、renderer/template digest、
+tokenizer fingerprint、exact token digest、KV encodingとdescriptor/layout digest、target semantics、context-policy digestを含む。
+いずれかが異なるstateはmissまたは明示rejectとし、別model/adapter/template/encoding/targetへsilent reuseしない。
+
+Qwen/Gemma checkpointは保存された全state planeのdescriptor metadataとpayload checksumを検証してからfresh request ownerへimportする。
+同じmodel familyでもcapacity、static FP8 scale、full/sliding topology、linear/GDN layoutが異なる場合は同一identityではない。
+checkpoint filenameとdirectoryはlookup locatorにすぎず、identity比較を代替しない。Phase 41 productionのstateless prompt checkpointは
+token historyのnonempty suffix continuationだけを許し、mid-generation session identityやwire session IDをmodel lockへ暗黙追加しない。

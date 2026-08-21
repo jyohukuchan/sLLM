@@ -1,8 +1,8 @@
-extern "C" sllm_status_t sllm_rotary_prepare(
-    const sllm_context_t *const raw_context,
-    const sllm_rotary_desc_t *const descriptor,
-    sllm_rotary_plan_t **const raw_plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_rotary_prepare(const sllm_context_t *const raw_context,
+                    const sllm_rotary_desc_t *const descriptor,
+                    sllm_rotary_plan_t **const raw_plan,
+                    sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (raw_plan != nullptr) {
       *raw_plan = nullptr;
@@ -50,8 +50,8 @@ extern "C" sllm_status_t sllm_rotary_prepare(
           lookup<Buffer>(descriptor_copy.positions.buffer, HandleKind::Buffer);
       resolved[3] = lookup<Buffer>(descriptor_copy.query_output.buffer,
                                    HandleKind::Buffer);
-      resolved[4] = lookup<Buffer>(descriptor_copy.key_output.buffer,
-                                   HandleKind::Buffer);
+      resolved[4] =
+          lookup<Buffer>(descriptor_copy.key_output.buffer, HandleKind::Buffer);
       if (context == nullptr) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
@@ -150,9 +150,9 @@ sllm_rotary_plan_release(sllm_rotary_plan_t **const raw_plan,
       return sink_status;
     }
     if (raw_plan == nullptr || *raw_plan == nullptr) {
-      return sllm_public_runtime::write_error(
-          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
-          "rotary plan handle is null");
+      return sllm_public_runtime::write_error(error_sink,
+                                              SLLM_STATUS_INVALID_ARGUMENT,
+                                              "rotary plan handle is null");
     }
     RotaryPlan *plan = nullptr;
     bool quarantine_plan = false;
@@ -199,12 +199,12 @@ sllm_rotary_plan_release(sllm_rotary_plan_t **const raw_plan,
   }
 }
 
-extern "C" sllm_status_t sllm_rotary_execute(
-    const sllm_rotary_plan_t *const raw_plan,
-    const sllm_queue_t *const raw_queue,
-    sllm_completion_t **const completion_output,
-    sllm_rotary_dispatch_info_t *const dispatch_info,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_rotary_execute(const sllm_rotary_plan_t *const raw_plan,
+                    const sllm_queue_t *const raw_queue,
+                    sllm_completion_t **const completion_output,
+                    sllm_rotary_dispatch_info_t *const dispatch_info,
+                    sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -273,8 +273,8 @@ extern "C" sllm_status_t sllm_rotary_execute(
 
     std::unique_ptr<Completion> candidate;
     NativeEventGuard event_guard;
-    ArrayOperationExecuteScopeGuard execute_guard(
-        plan, queue, &candidate, &event_guard, error_sink);
+    ArrayOperationExecuteScopeGuard execute_guard(plan, queue, &candidate,
+                                                  &event_guard, error_sink);
 
     const sllm_status_t device_status =
         select_context_device(plan->context, error_sink);
@@ -311,13 +311,11 @@ extern "C" sllm_status_t sllm_rotary_execute(
         byte_pointer(plan->buffers[2], plan->metadata.positions.byte_offset));
     std::vector<int32_t> host_positions(
         static_cast<std::size_t>(plan->metadata.token_count));
-    hipError_t status = hipMemcpyAsync(
-        host_positions.data(), positions,
-        host_positions.size() * sizeof(int32_t), hipMemcpyDeviceToHost,
-        queue->stream);
+    hipError_t status = hipMemcpyAsync(host_positions.data(), positions,
+                                       host_positions.size() * sizeof(int32_t),
+                                       hipMemcpyDeviceToHost, queue->stream);
     if (status != hipSuccess) {
-      return hip_failure(error_sink, status,
-                         "rotary position validation copy");
+      return hip_failure(error_sink, status, "rotary position validation copy");
     }
     status = hipStreamSynchronize(queue->stream);
     if (status != hipSuccess) {
@@ -328,11 +326,17 @@ extern "C" sllm_status_t sllm_rotary_execute(
       const int64_t expected =
           static_cast<int64_t>(plan->metadata.start_position) +
           static_cast<int64_t>(index);
-      if (host_positions[index] != static_cast<int32_t>(expected)) {
+      const bool valid =
+          plan->metadata.position_payload_mode ==
+                  SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+              ? host_positions[index] >= 0 &&
+                    static_cast<uint64_t>(host_positions[index]) <
+                        static_cast<uint64_t>(plan->metadata.max_position)
+              : host_positions[index] == static_cast<int32_t>(expected);
+      if (!valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
-            "rotary position payload does not equal the requested contiguous "
-            "range");
+            "rotary position payload is outside the requested mode");
       }
     }
 
@@ -381,8 +385,8 @@ extern "C" sllm_status_t sllm_rotary_execute(
     if (token == 0U) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
-          candidate, event_guard,
-          "rotary completion handle allocation failed", error_sink);
+          candidate, event_guard, "rotary completion handle allocation failed",
+          error_sink);
     }
     if (candidate->event != nullptr) {
       event_guard.release();
@@ -416,9 +420,8 @@ extern "C" sllm_status_t sllm_rotary_execute(
         queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();
-      return cleanup_failed_submission(candidate, token, status,
-                                       "rotary kernel launch", queue,
-                                       error_sink);
+      return cleanup_failed_submission(
+          candidate, token, status, "rotary kernel launch", queue, error_sink);
     }
     status = candidate->event != nullptr
                  ? hipEventRecord(candidate->event, queue->stream)
@@ -428,8 +431,8 @@ extern "C" sllm_status_t sllm_rotary_execute(
       return cleanup_failed_submission(candidate, token, status,
                                        "hipEventRecord", queue, error_sink);
     }
-    initialize_rotary_dispatch_info(dispatch_info, dispatch_id,
-                                    plan->metadata, arch_name);
+    initialize_rotary_dispatch_info(dispatch_info, dispatch_id, plan->metadata,
+                                    arch_name);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

@@ -1,25 +1,34 @@
 //! Production model backends for the profile-v1 transport.
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sllm_core::{
-    AllocationSnapshot, Backend, CompiledGrammar, DrySamplingConfigV1 as CoreDrySamplingConfigV1,
-    DynamicTemperatureV1, ExecutionSession, ExecutionSessionRequest,
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
+    AllocationSnapshot, Backend, CheckpointIdentity, CheckpointStore, CompiledGrammar,
+    ContextPositionPolicyV1, ContextWindowStateV1, DraftProposalV1,
+    DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, ExecutionSession,
+    ExecutionSessionRequest, GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock,
+    Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding,
     LogitBiasV1 as CoreLogitBiasV1, MirostatModeV1,
-    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, OsSamplingRandom,
-    QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection, QwenExecutionRequest,
-    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
-    QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
-    SamplerChainConfigV1, VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe,
-    VerifiedGgufWeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
-    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
-    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
-    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph_with_kv_cache_encoding,
+    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, NgramDraftProviderV1,
+    OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1, PrefixCacheValueV1,
+    PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind, PrefixStateIdentityV1,
+    QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection, QwenExecutionRequest, QwenGraph,
+    QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
+    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
+    QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
+    SessionCheckpoint, VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufGemmaSource,
+    VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
+    WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
+    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_position_payload_mode,
     build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
     build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
     build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
@@ -31,7 +40,8 @@ use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1,
     Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1,
-    SpeculativeGenerationAdapterV1, TokenizerFrontendV1, gemma4_generation_stop_policy,
+    SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenizerFrontendV1,
+    gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -276,6 +286,294 @@ fn gguf_fp8_dtype(provider: &str) -> sllm_core::DType {
     }
 }
 
+pub const MAX_PREFIX_CACHE_ENTRIES_V1: u16 = 256;
+pub const MAX_PREFIX_CACHE_LOGICAL_TOKENS_V1: u64 = 1_048_576;
+pub const MAX_DRAFT_NGRAM_ORDER_V1: u8 = 16;
+pub const MAX_DRAFT_WIDTH_V1: u8 = 8;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum PrefixCacheStartupConfigV1 {
+    #[default]
+    Disabled,
+    Enabled {
+        max_entries: u16,
+        max_logical_tokens: u64,
+        max_resident_bytes: u64,
+    },
+}
+
+impl PrefixCacheStartupConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        match self {
+            Self::Disabled => Ok(()),
+            Self::Enabled {
+                max_entries,
+                max_logical_tokens,
+                max_resident_bytes,
+            } if (1..=MAX_PREFIX_CACHE_ENTRIES_V1).contains(max_entries)
+                && (1..=MAX_PREFIX_CACHE_LOGICAL_TOKENS_V1).contains(max_logical_tokens)
+                && *max_resident_bytes != 0 =>
+            {
+                Ok(())
+            }
+            Self::Enabled { .. } => Err(BackendErrorV1::new(
+                "prefix cache limits must be entries 1..=256, logical tokens 1..=1048576, and nonzero resident bytes",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ContextWindowStartupConfigV1 {
+    #[default]
+    Disabled,
+    KeepPrefixRecentV1 {
+        keep_prefix: u64,
+        keep_recent: u64,
+    },
+}
+
+impl ContextWindowStartupConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        match self {
+            Self::Disabled => Ok(()),
+            Self::KeepPrefixRecentV1 {
+                keep_prefix,
+                keep_recent,
+            } => {
+                let retained = keep_prefix.checked_add(*keep_recent).ok_or_else(|| {
+                    BackendErrorV1::new("context keep-prefix/recent sum overflowed")
+                })?;
+                if retained == 0 {
+                    return Err(BackendErrorV1::new(
+                        "keep-prefix-recent-v1 must retain at least one token",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum CheckpointStartupConfigV1 {
+    #[default]
+    Disabled,
+    Enabled {
+        directory: PathBuf,
+        quota_bytes: u64,
+        load_name: Option<String>,
+        save_name: Option<String>,
+    },
+}
+
+impl CheckpointStartupConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        match self {
+            Self::Disabled => Ok(()),
+            Self::Enabled {
+                directory,
+                quota_bytes,
+                load_name,
+                save_name,
+            } => {
+                if directory.as_os_str().is_empty() || *quota_bytes == 0 {
+                    return Err(BackendErrorV1::new(
+                        "checkpoint directory and nonzero quota are required when enabled",
+                    ));
+                }
+                if load_name.is_none() && save_name.is_none() {
+                    return Err(BackendErrorV1::new(
+                        "checkpoint enablement requires an explicit load or save name",
+                    ));
+                }
+                if load_name.is_some() && save_name.is_some() {
+                    return Err(BackendErrorV1::new(
+                        "checkpoint load and save names cannot be enabled together",
+                    ));
+                }
+                for name in load_name.iter().chain(save_name.iter()) {
+                    validate_checkpoint_name(name)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Startup-only validation seam. It proves that an explicitly requested
+    /// load target exists and is a regular non-symlink file without reading or
+    /// exposing checkpoint contents or its path in an error.
+    pub fn validate_startup_load_exists(&self) -> Result<(), BackendErrorV1> {
+        self.validate()?;
+        let Self::Enabled {
+            directory,
+            load_name: Some(load_name),
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let metadata = std::fs::symlink_metadata(directory.join(format!("{load_name}.ckpt")))
+            .map_err(|_| BackendErrorV1::new("configured checkpoint load target is unavailable"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(BackendErrorV1::new(
+                "configured checkpoint load target is unavailable",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn validate_checkpoint_name(name: &str) -> Result<(), BackendErrorV1> {
+    if name.is_empty()
+        || name.len() > 128
+        || name == "."
+        || name == ".."
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(BackendErrorV1::new("checkpoint name is invalid"));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum DraftStartupConfigV1 {
+    #[default]
+    Disabled,
+    MtpAuto,
+    Ngram {
+        order: u8,
+        width: u8,
+    },
+    External {
+        model_identity: String,
+        tokenizer_identity: String,
+        vocabulary_size: u32,
+        width: u8,
+    },
+}
+
+impl DraftStartupConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        match self {
+            Self::Disabled | Self::MtpAuto => Ok(()),
+            Self::Ngram { order, width }
+                if (1..=MAX_DRAFT_NGRAM_ORDER_V1).contains(order)
+                    && (1..=MAX_DRAFT_WIDTH_V1).contains(width) =>
+            {
+                Ok(())
+            }
+            Self::Ngram { .. } => Err(BackendErrorV1::new(
+                "ngram order must be 1..=16 and draft width must be 1..=8",
+            )),
+            Self::External {
+                model_identity,
+                tokenizer_identity,
+                vocabulary_size,
+                width,
+            } => {
+                if !valid_draft_identity(model_identity)
+                    || !valid_draft_identity(tokenizer_identity)
+                    || *vocabulary_size == 0
+                    || !(1..=MAX_DRAFT_WIDTH_V1).contains(width)
+                {
+                    return Err(BackendErrorV1::new(
+                        "external draft identity, vocabulary, or width is invalid",
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn valid_draft_identity(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 1024 && !value.as_bytes().contains(&0)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Phase41ProductionConfigV1 {
+    pub prefix_cache: PrefixCacheStartupConfigV1,
+    pub context_window: ContextWindowStartupConfigV1,
+    pub checkpoint: CheckpointStartupConfigV1,
+    pub draft: DraftStartupConfigV1,
+}
+
+impl Phase41ProductionConfigV1 {
+    pub fn validate(&self) -> Result<(), BackendErrorV1> {
+        self.prefix_cache.validate()?;
+        self.context_window.validate()?;
+        self.checkpoint.validate()?;
+        self.draft.validate()
+    }
+
+    pub fn validate_startup(&self) -> Result<(), BackendErrorV1> {
+        self.validate()?;
+        self.checkpoint.validate_startup_load_exists()
+    }
+}
+
+fn validate_qwen_phase41_operational_config(
+    config: &Phase41ProductionConfigV1,
+) -> Result<(), BackendErrorV1> {
+    if matches!(config.draft, DraftStartupConfigV1::External { .. }) {
+        return Err(BackendErrorV1::new(
+            "external draft requires an independently provisioned executor; configuration-only identity cannot start production inference",
+        ));
+    }
+    if !matches!(config.prefix_cache, PrefixCacheStartupConfigV1::Disabled)
+        && matches!(config.draft, DraftStartupConfigV1::MtpAuto)
+    {
+        return Err(BackendErrorV1::new(
+            "prefix cache and MTP-auto cannot be combined until the MTP owner accepts a prefixed target state",
+        ));
+    }
+    if !matches!(config.checkpoint, CheckpointStartupConfigV1::Disabled)
+        && (!matches!(config.prefix_cache, PrefixCacheStartupConfigV1::Disabled)
+            || !matches!(
+                config.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+            || !matches!(config.draft, DraftStartupConfigV1::Disabled))
+    {
+        return Err(BackendErrorV1::new(
+            "Qwen prompt checkpoint cannot be combined with prefix cache, context shifting, or draft execution",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gemma_phase41_operational_config(
+    config: &Phase41ProductionConfigV1,
+) -> Result<(), BackendErrorV1> {
+    if !matches!(config.checkpoint, CheckpointStartupConfigV1::Disabled)
+        && (!matches!(config.prefix_cache, PrefixCacheStartupConfigV1::Disabled)
+            || !matches!(
+                config.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+            || !matches!(config.draft, DraftStartupConfigV1::Disabled))
+    {
+        return Err(BackendErrorV1::new(
+            "Gemma prompt checkpoint cannot be combined with prefix cache, context shifting, or draft execution",
+        ));
+    }
+    match config.draft {
+        DraftStartupConfigV1::Disabled => Ok(()),
+        DraftStartupConfigV1::MtpAuto => Err(BackendErrorV1::new(
+            "Gemma production does not have a provisioned MTP draft executor",
+        )),
+        DraftStartupConfigV1::Ngram { .. } => Err(BackendErrorV1::new(
+            "ngram speculative verification is currently implemented only by the Qwen target",
+        )),
+        DraftStartupConfigV1::External { .. } => Err(BackendErrorV1::new(
+            "external draft requires an independently provisioned executor; configuration-only identity cannot start production inference",
+        )),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
     pub gguf_path: PathBuf,
@@ -286,6 +584,7 @@ pub struct QwenBackendConfigV1 {
     pub shutdown_timeout: Duration,
     pub context_length: u32,
     pub kv_cache_encoding: KvCacheEncoding,
+    pub phase41: Phase41ProductionConfigV1,
 }
 
 impl QwenBackendConfigV1 {
@@ -300,6 +599,7 @@ impl QwenBackendConfigV1 {
                 "Qwen backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
+        self.phase41.validate()?;
         Ok(())
     }
 }
@@ -313,6 +613,7 @@ pub struct Gemma4BackendConfigV1 {
     pub completion_timeout: Duration,
     pub shutdown_timeout: Duration,
     pub context_length: u32,
+    pub phase41: Phase41ProductionConfigV1,
 }
 
 impl Gemma4BackendConfigV1 {
@@ -327,6 +628,7 @@ impl Gemma4BackendConfigV1 {
                 "Gemma backend target, context length, and timeouts must be valid and nonzero",
             ));
         }
+        self.phase41.validate()?;
         Ok(())
     }
 }
@@ -368,6 +670,55 @@ pub struct ProductionRequestAuditV1 {
     pub allocated_workspace_bytes: u64,
     pub cleanup_request_state_bytes: u64,
     pub cleanup_workspace_bytes: u64,
+    pub phase41: ProductionPhase41AuditV1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductionPrefixCacheResultV1 {
+    Miss,
+    ExactHit,
+    PartialHit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductionCheckpointOperationV1 {
+    Load,
+    Save,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductionCheckpointResultV1 {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ProductionDraftProviderV1 {
+    Mtp,
+    Ngram,
+    External,
+}
+
+/// Bounded Phase 41 request evidence. Absence means that the corresponding
+/// opt-in facility was disabled or did not run. This deliberately contains no
+/// path, checkpoint name, model identity, token ID, or token content.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct ProductionPhase41AuditV1 {
+    pub prefix_cache_result: Option<ProductionPrefixCacheResultV1>,
+    pub prefix_shared_pages: u64,
+    pub prefix_cow_pages: u64,
+    pub prefix_copied_bytes: u64,
+    pub checkpoint_operation: Option<ProductionCheckpointOperationV1>,
+    pub checkpoint_result: Option<ProductionCheckpointResultV1>,
+    pub context_shift_count: u64,
+    pub draft_provider: Option<ProductionDraftProviderV1>,
+    pub draft_proposed_tokens: u64,
+    pub draft_accepted_tokens: u64,
+    pub draft_rejected_tokens: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -390,6 +741,267 @@ pub struct QwenChatBackendV1 {
     audits: Mutex<Vec<ProductionRequestAuditV1>>,
     shutdown_timeout: Duration,
     identity: BackendIdentityV1,
+}
+
+enum QwenPrefixCacheRuntimeV1 {
+    Disabled,
+    Enabled {
+        index: PrefixCacheV1,
+        states: HashMap<PrefixEntryIdV1, QwenPrefixStateV1>,
+    },
+}
+
+enum GemmaPrefixCacheRuntimeV1 {
+    Disabled,
+    Enabled {
+        index: PrefixCacheV1,
+        states: HashMap<PrefixEntryIdV1, Gemma4PrefixStateV1>,
+    },
+}
+
+struct QwenPrefixHitV1 {
+    prefix: QwenPrefixStateV1,
+    lease: PrefixLeaseV1,
+    matched_tokens: Vec<u32>,
+    kind: PrefixLookupKind,
+}
+
+struct QwenCheckpointRuntimeV1 {
+    store: Arc<CheckpointStore>,
+    loaded: Option<Arc<SessionCheckpoint>>,
+    save_name: Option<String>,
+}
+
+struct QwenCheckpointSaveV1 {
+    store: Arc<CheckpointStore>,
+    name: String,
+    identity: CheckpointIdentity,
+    prompt_tokens: Vec<u32>,
+    status: Arc<AtomicU8>,
+}
+
+const CHECKPOINT_STATUS_NONE: u8 = 0;
+const CHECKPOINT_STATUS_SUCCEEDED: u8 = 1;
+const CHECKPOINT_STATUS_FAILED: u8 = 2;
+
+struct GemmaPrefixHitV1 {
+    prefix: Gemma4PrefixStateV1,
+    lease: PrefixLeaseV1,
+    matched_tokens: Vec<u32>,
+    kind: PrefixLookupKind,
+}
+
+impl QwenPrefixCacheRuntimeV1 {
+    fn new(config: &PrefixCacheStartupConfigV1) -> Result<Self, BackendErrorV1> {
+        match config {
+            PrefixCacheStartupConfigV1::Disabled => Ok(Self::Disabled),
+            PrefixCacheStartupConfigV1::Enabled {
+                max_entries,
+                max_logical_tokens,
+                max_resident_bytes,
+            } => Ok(Self::Enabled {
+                index: PrefixCacheV1::new(
+                    PrefixCacheConfigV1::new(
+                        usize::from(*max_entries),
+                        *max_logical_tokens,
+                        *max_resident_bytes,
+                    )
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                ),
+                states: HashMap::new(),
+            }),
+        }
+    }
+
+    fn baseline_bytes(&self) -> Result<u64, BackendErrorV1> {
+        match self {
+            Self::Disabled => Ok(0),
+            Self::Enabled { states, .. } => checked_prefix_request_state_baseline(
+                states
+                    .values()
+                    .map(|prefix| prefix.fork_audit().destination_owned_bytes()),
+            ),
+        }
+    }
+
+    fn lookup(
+        &self,
+        identity: &PrefixStateIdentityV1,
+        tokens: &[u32],
+    ) -> Result<Option<QwenPrefixHitV1>, BackendErrorV1> {
+        let Self::Enabled { index, states } = self else {
+            return Ok(None);
+        };
+        let Some(result) = index
+            .lookup(identity, tokens)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let prefix = states
+            .get(&result.lease().entry_id())
+            .cloned()
+            .ok_or_else(|| {
+                BackendErrorV1::new("prefix index referenced an absent Qwen state owner")
+            })?;
+        let matched_tokens = result.lease().tokens().to_vec();
+        let kind = result.kind();
+        let lease = result.into_lease();
+        Ok(Some(QwenPrefixHitV1 {
+            prefix,
+            lease,
+            matched_tokens,
+            kind,
+        }))
+    }
+
+    fn publish(
+        &mut self,
+        identity: PrefixStateIdentityV1,
+        tokens: &[u32],
+        prefix: QwenPrefixStateV1,
+    ) -> Result<(), BackendErrorV1> {
+        let Self::Enabled { index, states } = self else {
+            return Ok(());
+        };
+        let logical_tokens = u64::try_from(tokens.len())
+            .map_err(|_| BackendErrorV1::new("prefix token count overflowed u64"))?;
+        let audit = prefix.fork_audit();
+        let id = index
+            .publish(
+                PrefixCacheKeyV1::new(identity, tokens)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                PrefixCacheValueV1::new(
+                    logical_tokens,
+                    audit.cache_resident_bytes(),
+                    *prefix.graph_semantics_digest(),
+                )
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            )
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        states.insert(id, prefix);
+        reconcile_prefix_states(index, states)?;
+        Ok(())
+    }
+}
+
+impl GemmaPrefixCacheRuntimeV1 {
+    fn new(config: &PrefixCacheStartupConfigV1) -> Result<Self, BackendErrorV1> {
+        match config {
+            PrefixCacheStartupConfigV1::Disabled => Ok(Self::Disabled),
+            PrefixCacheStartupConfigV1::Enabled {
+                max_entries,
+                max_logical_tokens,
+                max_resident_bytes,
+            } => Ok(Self::Enabled {
+                index: PrefixCacheV1::new(
+                    PrefixCacheConfigV1::new(
+                        usize::from(*max_entries),
+                        *max_logical_tokens,
+                        *max_resident_bytes,
+                    )
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                ),
+                states: HashMap::new(),
+            }),
+        }
+    }
+
+    fn baseline_bytes(&self) -> Result<u64, BackendErrorV1> {
+        match self {
+            Self::Disabled => Ok(0),
+            Self::Enabled { states, .. } => checked_prefix_request_state_baseline(
+                states
+                    .values()
+                    .map(|prefix| prefix.fork_audit().destination_owned_bytes()),
+            ),
+        }
+    }
+
+    fn lookup(
+        &self,
+        identity: &PrefixStateIdentityV1,
+        tokens: &[u32],
+    ) -> Result<Option<GemmaPrefixHitV1>, BackendErrorV1> {
+        let Self::Enabled { index, states } = self else {
+            return Ok(None);
+        };
+        let Some(result) = index
+            .lookup(identity, tokens)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let prefix = states
+            .get(&result.lease().entry_id())
+            .cloned()
+            .ok_or_else(|| {
+                BackendErrorV1::new("prefix index referenced an absent Gemma state owner")
+            })?;
+        let matched_tokens = result.lease().tokens().to_vec();
+        let kind = result.kind();
+        let lease = result.into_lease();
+        Ok(Some(GemmaPrefixHitV1 {
+            prefix,
+            lease,
+            matched_tokens,
+            kind,
+        }))
+    }
+
+    fn publish(
+        &mut self,
+        identity: PrefixStateIdentityV1,
+        tokens: &[u32],
+        prefix: Gemma4PrefixStateV1,
+    ) -> Result<(), BackendErrorV1> {
+        let Self::Enabled { index, states } = self else {
+            return Ok(());
+        };
+        let logical_tokens = u64::try_from(tokens.len())
+            .map_err(|_| BackendErrorV1::new("prefix token count overflowed u64"))?;
+        let audit = prefix.fork_audit();
+        let id = index
+            .publish(
+                PrefixCacheKeyV1::new(identity, tokens)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                PrefixCacheValueV1::new(
+                    logical_tokens,
+                    audit.cache_resident_bytes(),
+                    *prefix.plan_digest(),
+                )
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            )
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        states.insert(id, prefix);
+        reconcile_prefix_states(index, states)?;
+        Ok(())
+    }
+}
+
+fn reconcile_prefix_states<T>(
+    index: &PrefixCacheV1,
+    states: &mut HashMap<PrefixEntryIdV1, T>,
+) -> Result<(), BackendErrorV1> {
+    let published = index
+        .published_entry_ids()
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    states.retain(|id, _| published.contains(id));
+    Ok(())
+}
+
+fn checked_prefix_request_state_baseline(
+    destination_owned_bytes: impl IntoIterator<Item = u64>,
+) -> Result<u64, BackendErrorV1> {
+    destination_owned_bytes
+        .into_iter()
+        .try_fold(0_u64, |total, bytes| {
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| BackendErrorV1::new("prefix request-state baseline overflowed u64"))
+        })
 }
 
 struct QwenBackendStateV1 {
@@ -415,6 +1027,9 @@ struct QwenBackendStateV1 {
     vision_resident: Option<QwenVisionResidentModel>,
     completion_timeout: Duration,
     kv_cache_encoding: KvCacheEncoding,
+    phase41: Phase41ProductionConfigV1,
+    prefix_cache: QwenPrefixCacheRuntimeV1,
+    checkpoint: Option<QwenCheckpointRuntimeV1>,
 }
 
 pub struct Gemma4ChatBackendV1 {
@@ -428,13 +1043,17 @@ struct Gemma4BackendStateV1 {
     _lock: Gemma4ModelLock,
     tokenizer: TokenizerFrontendV1,
     stop_policy: GenerationStopPolicyV1,
-    _plan: WeightLoadPlan,
+    plan: WeightLoadPlan,
     resident: Gemma4ResidentModel,
     session: Arc<ExecutionSession>,
     target: String,
     model_ready_current_bytes: u64,
     weight_encoding: String,
     kv_bytes_per_token: u64,
+    phase41: Phase41ProductionConfigV1,
+    prefix_cache: GemmaPrefixCacheRuntimeV1,
+    checkpoint: Option<QwenCheckpointRuntimeV1>,
+    checkpoint_descriptor_digest: Option<[u8; 32]>,
 }
 
 #[derive(Clone)]
@@ -447,13 +1066,425 @@ struct BackendIdentityV1 {
     recommended_context_tokens: u32,
 }
 
+fn context_policy_identity_version(config: &ContextWindowStartupConfigV1) -> u32 {
+    match config {
+        ContextWindowStartupConfigV1::Disabled => 0,
+        ContextWindowStartupConfigV1::KeepPrefixRecentV1 { .. } => {
+            sllm_core::CONTEXT_POSITION_POLICY_VERSION_V1
+        }
+    }
+}
+
+fn qwen_prefix_identity(
+    state: &QwenBackendStateV1,
+    graph: &QwenGraph,
+    state_capacity: u64,
+) -> Result<PrefixStateIdentityV1, BackendErrorV1> {
+    let descriptor = graph
+        .states()
+        .iter()
+        .find_map(|state| match state.descriptor() {
+            QwenGraphStateDescriptor::Kv(descriptor) => Some(descriptor),
+            QwenGraphStateDescriptor::Linear(_) => None,
+        })
+        .ok_or_else(|| BackendErrorV1::new("Qwen prefix identity has no KV descriptor"))?;
+    let layout = descriptor.layout();
+    let heads = u32::try_from(layout.heads())
+        .map_err(|_| BackendErrorV1::new("Qwen KV head count overflowed u32"))?;
+    let head_dim = u32::try_from(layout.head_dim())
+        .map_err(|_| BackendErrorV1::new("Qwen KV head dimension overflowed u32"))?;
+    let derived_identity = format!("{}:capacity={state_capacity}", state.plan.digest_hex());
+    let renderer_identity = format!(
+        "qwen35-chat-v{}:{}",
+        state.renderer.version(),
+        state.renderer.consistency_label()
+    );
+    let target_semantics = format!(
+        "{}:{}",
+        state.target,
+        state.fp8_provider.as_deref().unwrap_or("bf16")
+    );
+    PrefixStateIdentityV1::new(
+        state.plan.lock_fingerprint.as_bytes(),
+        derived_identity.as_bytes(),
+        b"adapter:none-v1",
+        renderer_identity.as_bytes(),
+        state.tokenizer.snapshot().fingerprint().as_bytes(),
+        state.kv_cache_encoding,
+        PrefixKvLayoutV1::new(heads, head_dim)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+        target_semantics.as_bytes(),
+        context_policy_identity_version(&state.phase41.context_window),
+    )
+    .map_err(|error| BackendErrorV1::new(error.to_string()))
+}
+
+fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
+    let mut descriptors = BTreeMap::new();
+    for state in graph.states() {
+        if let QwenGraphStateDescriptor::Kv(descriptor) = state.descriptor() {
+            descriptors.insert(state.layer(), descriptor);
+        }
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-qwen-kv-descriptor-v1");
+    digest.update((descriptors.len() as u64).to_le_bytes());
+    for (layer, descriptor) in descriptors {
+        digest.update(layer.to_le_bytes());
+        digest.update(descriptor.layer_id().to_le_bytes());
+        digest.update(descriptor.capacity().to_le_bytes());
+        digest.update((descriptor.layout().heads() as u64).to_le_bytes());
+        digest.update((descriptor.layout().head_dim() as u64).to_le_bytes());
+        let encoding = match descriptor.cache_encoding() {
+            KvCacheEncoding::Fp16 => 0_u8,
+            KvCacheEncoding::Fp8E4M3Fn => 1_u8,
+            KvCacheEncoding::Fp8E4M3FnStatic => 2_u8,
+            KvCacheEncoding::Nvfp4 => 3_u8,
+        };
+        digest.update([encoding]);
+        if let Some((key, value)) = descriptor.static_fp8_scales() {
+            digest.update([1]);
+            digest.update(key.to_bits().to_le_bytes());
+            digest.update(value.to_bits().to_le_bytes());
+        } else {
+            digest.update([0]);
+        }
+    }
+    digest.finalize().into()
+}
+
+fn qwen_checkpoint_context_policy_digest() -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-qwen-checkpoint-context-disabled-v1");
+    digest.finalize().into()
+}
+
+fn gemma_checkpoint_context_policy_digest() -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-gemma4-checkpoint-context-disabled-v1");
+    digest.finalize().into()
+}
+
+fn gemma_checkpoint_kv_descriptor_digest(
+    graph: &sllm_core::Gemma4Graph,
+    source: &VerifiedGgufGemmaSource,
+) -> Result<[u8; 32], BackendErrorV1> {
+    let mut full_layers = BTreeMap::new();
+    let mut sliding_layers = BTreeMap::new();
+    for descriptor in graph.kv_descriptors() {
+        if let Some(retention_window) = descriptor.retention_window {
+            sliding_layers.insert(
+                descriptor.layer,
+                (
+                    descriptor.heads,
+                    descriptor.head_dim,
+                    descriptor.capacity,
+                    retention_window,
+                ),
+            );
+            continue;
+        }
+        let scale = source.kv_scale(descriptor.layer).ok_or_else(|| {
+            BackendErrorV1::new("Gemma checkpoint descriptor scale is unavailable")
+        })?;
+        let state_descriptor = sllm_core::KvStateDescriptor::new_with_static_fp8(
+            descriptor.layer,
+            descriptor.capacity,
+            usize::try_from(descriptor.heads)
+                .map_err(|_| BackendErrorV1::new("Gemma checkpoint head count overflowed"))?,
+            usize::try_from(descriptor.head_dim)
+                .map_err(|_| BackendErrorV1::new("Gemma checkpoint head dimension overflowed"))?,
+            scale.key_decode_scale(),
+            scale.value_decode_scale(),
+        )
+        .map_err(|_| BackendErrorV1::new("Gemma checkpoint descriptor construction failed"))?;
+        full_layers.insert(descriptor.layer, state_descriptor);
+    }
+    if full_layers.is_empty() {
+        return Err(BackendErrorV1::new(
+            "Gemma checkpoint graph has no full-attention KV descriptors",
+        ));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-gemma4-checkpoint-descriptors-v1");
+    digest.update([3_u8]);
+    digest.update((full_layers.len() as u64).to_le_bytes());
+    for (&layer, descriptor) in &full_layers {
+        digest.update([1]);
+        digest.update(layer.to_le_bytes());
+        digest.update(descriptor.layer_id().to_le_bytes());
+        digest.update(descriptor.capacity().to_le_bytes());
+        digest.update((descriptor.layout().heads() as u64).to_le_bytes());
+        digest.update((descriptor.layout().head_dim() as u64).to_le_bytes());
+        let (key, value) = descriptor
+            .static_fp8_scales()
+            .ok_or_else(|| BackendErrorV1::new("Gemma checkpoint descriptor scale is absent"))?;
+        digest.update([1]);
+        digest.update(key.to_bits().to_le_bytes());
+        digest.update(value.to_bits().to_le_bytes());
+    }
+    digest.update((sliding_layers.len() as u64).to_le_bytes());
+    for (&layer, &(heads, head_dim, capacity, retention_window)) in &sliding_layers {
+        digest.update([2]);
+        digest.update(layer.to_le_bytes());
+        digest.update(heads.to_le_bytes());
+        digest.update(head_dim.to_le_bytes());
+        digest.update(capacity.to_le_bytes());
+        digest.update(retention_window.to_le_bytes());
+        digest.update(b"bf16-unquantized-key-value");
+    }
+    Ok(digest.finalize().into())
+}
+
+fn gemma_checkpoint_identity(
+    model_fingerprint: &str,
+    plan: &WeightLoadPlan,
+    tokenizer: &TokenizerFrontendV1,
+    target: &str,
+    descriptor_digest: [u8; 32],
+    tokens: &[u32],
+) -> Result<CheckpointIdentity, BackendErrorV1> {
+    CheckpointIdentity::for_tokens(
+        model_fingerprint.to_owned(),
+        format!("derived-artifact:{}", plan.digest_hex()),
+        "adapter:none-v1",
+        "gemma4-raw-chat-v1",
+        tokenizer.snapshot().fingerprint().to_owned(),
+        format!("{target}:mixed-nvfp4-w4a4-fp8-w8a8"),
+        plan.digest_hex(),
+        tokens,
+        KvCacheEncoding::Fp8E4M3FnStatic,
+        descriptor_digest,
+        gemma_checkpoint_context_policy_digest(),
+    )
+    .map_err(|_| BackendErrorV1::new("Gemma checkpoint identity construction failed"))
+}
+
+fn build_gemma_checkpoint_runtime(
+    config: &CheckpointStartupConfigV1,
+    graph: &sllm_core::Gemma4Graph,
+    plan: &WeightLoadPlan,
+    tokenizer: &TokenizerFrontendV1,
+    target: &str,
+    descriptor_digest: [u8; 32],
+) -> Result<Option<QwenCheckpointRuntimeV1>, BackendErrorV1> {
+    let CheckpointStartupConfigV1::Enabled {
+        directory,
+        quota_bytes,
+        load_name,
+        save_name,
+    } = config
+    else {
+        return Ok(None);
+    };
+    let store = Arc::new(
+        CheckpointStore::new(directory, *quota_bytes)
+            .map_err(|_| BackendErrorV1::new("Gemma checkpoint store initialization failed"))?,
+    );
+    let loaded = load_name
+        .as_deref()
+        .map(|name| {
+            store
+                .load_validated(name)
+                .map(Arc::new)
+                .map_err(|_| BackendErrorV1::new("Gemma checkpoint load failed"))
+        })
+        .transpose()?;
+    if let Some(checkpoint) = loaded.as_ref() {
+        let expected = gemma_checkpoint_identity(
+            graph.lock_fingerprint(),
+            plan,
+            tokenizer,
+            target,
+            descriptor_digest,
+            &checkpoint.payload.token_history,
+        )?;
+        if checkpoint.header.identity != expected {
+            return Err(BackendErrorV1::new(
+                "Gemma checkpoint identity differs from the running model",
+            ));
+        }
+    }
+    Ok(Some(QwenCheckpointRuntimeV1 {
+        store,
+        loaded,
+        save_name: save_name.clone(),
+    }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn qwen_checkpoint_identity(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    tokenizer: &TokenizerFrontendV1,
+    renderer: &Qwen35ChatTemplateV1,
+    target: &str,
+    fp8_provider: Option<&str>,
+    kv_cache_encoding: KvCacheEncoding,
+    tokens: &[u32],
+) -> Result<CheckpointIdentity, BackendErrorV1> {
+    let renderer_identity = format!(
+        "qwen35-chat-v{}:{}",
+        renderer.version(),
+        renderer.consistency_label()
+    );
+    let target_semantics = format!("{}:{}", target, fp8_provider.unwrap_or("bf16"));
+    CheckpointIdentity::for_tokens(
+        graph.model_fingerprint().to_owned(),
+        format!("derived-artifact:{}", plan.digest_hex()),
+        "adapter:none-v1",
+        renderer_identity,
+        tokenizer.snapshot().fingerprint().to_owned(),
+        target_semantics,
+        plan.digest_hex(),
+        tokens,
+        kv_cache_encoding,
+        qwen_checkpoint_kv_descriptor_digest(graph),
+        qwen_checkpoint_context_policy_digest(),
+    )
+    .map_err(|_| BackendErrorV1::new("Qwen checkpoint identity construction failed"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_qwen_checkpoint_runtime(
+    config: &CheckpointStartupConfigV1,
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    tokenizer: &TokenizerFrontendV1,
+    renderer: &Qwen35ChatTemplateV1,
+    target: &str,
+    fp8_provider: Option<&str>,
+    kv_cache_encoding: KvCacheEncoding,
+) -> Result<Option<QwenCheckpointRuntimeV1>, BackendErrorV1> {
+    let CheckpointStartupConfigV1::Enabled {
+        directory,
+        quota_bytes,
+        load_name,
+        save_name,
+    } = config
+    else {
+        return Ok(None);
+    };
+    if fp8_provider.is_some() || graph.is_mtp() || graph.is_multimodal() {
+        return Err(BackendErrorV1::new(
+            "Qwen prompt checkpoint requires the dense BF16 text graph",
+        ));
+    }
+    let store = Arc::new(
+        CheckpointStore::new(directory, *quota_bytes)
+            .map_err(|_| BackendErrorV1::new("Qwen checkpoint store initialization failed"))?,
+    );
+    let loaded = load_name
+        .as_deref()
+        .map(|name| {
+            store
+                .load_validated(name)
+                .map(Arc::new)
+                .map_err(|_| BackendErrorV1::new("Qwen checkpoint load failed"))
+        })
+        .transpose()?;
+    if let Some(checkpoint) = loaded.as_ref() {
+        let expected = qwen_checkpoint_identity(
+            graph,
+            plan,
+            tokenizer,
+            renderer,
+            target,
+            fp8_provider,
+            kv_cache_encoding,
+            &checkpoint.payload.token_history,
+        )?;
+        if checkpoint.header.identity != expected {
+            return Err(BackendErrorV1::new(
+                "Qwen checkpoint identity differs from the running model",
+            ));
+        }
+    }
+    Ok(Some(QwenCheckpointRuntimeV1 {
+        store,
+        loaded,
+        save_name: save_name.clone(),
+    }))
+}
+
+fn gemma_prefix_identity(
+    state: &Gemma4BackendStateV1,
+) -> Result<PrefixStateIdentityV1, BackendErrorV1> {
+    let renderer_identity = b"gemma4-raw-chat-v1";
+    PrefixStateIdentityV1::new(
+        state.plan.lock_fingerprint.as_bytes(),
+        state.plan.digest_hex().as_bytes(),
+        b"adapter:none-v1",
+        renderer_identity,
+        state.tokenizer.snapshot().fingerprint().as_bytes(),
+        KvCacheEncoding::Fp8E4M3FnStatic,
+        PrefixKvLayoutV1::new(1, 512).map_err(|error| BackendErrorV1::new(error.to_string()))?,
+        state.target.as_bytes(),
+        context_policy_identity_version(&state.phase41.context_window),
+    )
+    .map_err(|error| BackendErrorV1::new(error.to_string()))
+}
+
+fn require_request_memory_baseline(
+    snapshot: AllocationSnapshot,
+    expected_request_state_bytes: u64,
+    boundary: &str,
+) -> Result<(), BackendErrorV1> {
+    if snapshot.poisoned()
+        || snapshot.request_state().current_bytes() != expected_request_state_bytes
+        || snapshot.workspace().current_bytes() != 0
+    {
+        return Err(BackendErrorV1::new(format!(
+            "{boundary} differs from the prefix-cache request-state baseline"
+        )));
+    }
+    Ok(())
+}
+
+fn production_prefix_kind(kind: PrefixLookupKind) -> ProductionPrefixCacheResultV1 {
+    match kind {
+        PrefixLookupKind::ExactHit => ProductionPrefixCacheResultV1::ExactHit,
+        PrefixLookupKind::PartialHit => ProductionPrefixCacheResultV1::PartialHit,
+        PrefixLookupKind::Miss => ProductionPrefixCacheResultV1::Miss,
+    }
+}
+
+fn production_ngram_provider(order: u8) -> Result<NgramDraftProviderV1, BackendErrorV1> {
+    NgramDraftProviderV1::new(1, usize::from(order))
+        .map_err(|error| BackendErrorV1::new(error.to_string()))
+}
+
+fn require_prompt_only_prefix(
+    committed_length: u64,
+    prompt_token_count: usize,
+) -> Result<(), GenerationServiceError> {
+    let prompt_token_count = u64::try_from(prompt_token_count).map_err(|_| {
+        GenerationServiceError::Execution("prompt token count overflowed u64".to_owned())
+    })?;
+    if committed_length != prompt_token_count {
+        return Err(GenerationServiceError::Execution(
+            "prefix publication included state outside the immutable prompt".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl QwenChatBackendV1 {
     pub fn open(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
+        validate_qwen_phase41_operational_config(&config.phase41)?;
         let derived = read_derived_gguf_lock(&config.derived_lock_path).map_err(|error| {
             BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
         })?;
         if derived.semantic_model_id.starts_with("qwen35moe:") {
+            if !matches!(
+                config.phase41.checkpoint,
+                CheckpointStartupConfigV1::Disabled
+            ) {
+                return Err(BackendErrorV1::new(
+                    "Qwen prompt checkpoint requires the dense BF16 text graph",
+                ));
+            }
             if config.kv_cache_encoding != KvCacheEncoding::Fp16 {
                 return Err(BackendErrorV1::new(
                     "Qwen MoE currently requires FP16 KV cache",
@@ -503,16 +1534,23 @@ impl QwenChatBackendV1 {
                 &plan,
                 &source,
                 1,
-                1,
+                u64::from(config.context_length),
                 gguf_fp8_dtype(gguf_fp8_provider.expect("validated GGUF FP8 provider")),
                 config.kv_cache_encoding,
             )
         } else {
-            build_qwen35_graph_with_kv_cache_encoding(&lock, &plan, 1, 1, config.kv_cache_encoding)
+            build_qwen35_graph_with_kv_cache_encoding(
+                &lock,
+                &plan,
+                1,
+                u64::from(config.context_length),
+                config.kv_cache_encoding,
+            )
         }
         .map_err(|error| {
             BackendErrorV1::new(format!("resident seed graph construction failed: {error}"))
         })?;
+        let checkpoint_graph = seed_graph.clone();
         let backend = HipBackend::connect()
             .map_err(|error| BackendErrorV1::new(format!("HIP backend is unavailable: {error}")))?;
         let session_request = ExecutionSessionRequest::new(config.device_index, &config.target)
@@ -583,6 +1621,17 @@ impl QwenChatBackendV1 {
             context_length: config.context_length,
             recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
+        let prefix_cache = QwenPrefixCacheRuntimeV1::new(&config.phase41.prefix_cache)?;
+        let checkpoint = build_qwen_checkpoint_runtime(
+            &config.phase41.checkpoint,
+            &checkpoint_graph,
+            &plan,
+            &tokenizer,
+            &renderer,
+            &config.target,
+            fp8_provider.as_deref(),
+            config.kv_cache_encoding,
+        )?;
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
                 stop_policy: lock.generation_stop_policy().clone(),
@@ -607,6 +1656,9 @@ impl QwenChatBackendV1 {
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
                 kv_cache_encoding: config.kv_cache_encoding,
+                phase41: config.phase41,
+                prefix_cache,
+                checkpoint,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -618,6 +1670,7 @@ impl QwenChatBackendV1 {
         config: QwenBackendConfigV1,
         derived: sllm_core::DerivedGgufLock,
     ) -> Result<Self, BackendErrorV1> {
+        validate_qwen_phase41_operational_config(&config.phase41)?;
         let verified = verify_derived_gguf(derived, &config.gguf_path)
             .map_err(|error| BackendErrorV1::new(format!("GGUF verification failed: {error}")))?;
         let source = Arc::new(verify_gguf_qwen35_moe(verified).map_err(|error| {
@@ -668,6 +1721,7 @@ impl QwenChatBackendV1 {
             context_length: config.context_length,
             recommended_context_tokens: QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
+        let prefix_cache = QwenPrefixCacheRuntimeV1::new(&config.phase41.prefix_cache)?;
         Ok(Self {
             state: Mutex::new(Some(QwenBackendStateV1 {
                 lock: None,
@@ -692,6 +1746,9 @@ impl QwenChatBackendV1 {
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
                 kv_cache_encoding: KvCacheEncoding::Fp16,
+                phase41: config.phase41,
+                prefix_cache,
+                checkpoint: None,
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -744,10 +1801,12 @@ impl QwenChatBackendV1 {
             resident,
             mtp_resident,
             vision_resident,
+            prefix_cache,
             session,
             model_ready_current_bytes,
             ..
         } = state;
+        drop(prefix_cache);
         drop(resident);
         drop(mtp_resident);
         drop(vision_resident);
@@ -800,6 +1859,7 @@ impl QwenChatBackendV1 {
 impl Gemma4ChatBackendV1 {
     pub fn open(config: Gemma4BackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
+        validate_gemma_phase41_operational_config(&config.phase41)?;
         let derived = read_derived_gguf_lock(&config.derived_lock_path).map_err(|error| {
             BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
         })?;
@@ -826,6 +1886,21 @@ impl Gemma4ChatBackendV1 {
                     "verified Gemma tokenizer construction failed: {error}"
                 ))
             })?;
+        let checkpoint_graph =
+            sllm_core::build_gemma4_graph(&lock, &plan, 1, 0, u64::from(config.context_length))
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("Gemma checkpoint graph failed: {error}"))
+                })?;
+        let checkpoint_descriptor_digest =
+            gemma_checkpoint_kv_descriptor_digest(&checkpoint_graph, source.as_ref())?;
+        let checkpoint = build_gemma_checkpoint_runtime(
+            &config.phase41.checkpoint,
+            &checkpoint_graph,
+            &plan,
+            &tokenizer,
+            &config.target,
+            checkpoint_descriptor_digest,
+        )?;
         let stop_policy = gemma4_generation_stop_policy(&lock).map_err(|error| {
             BackendErrorV1::new(format!("Gemma stop policy construction failed: {error}"))
         })?;
@@ -862,18 +1937,23 @@ impl Gemma4ChatBackendV1 {
             context_length: config.context_length,
             recommended_context_tokens: GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32,
         };
+        let prefix_cache = GemmaPrefixCacheRuntimeV1::new(&config.phase41.prefix_cache)?;
         Ok(Self {
             state: Mutex::new(Some(Gemma4BackendStateV1 {
                 _lock: lock,
                 tokenizer,
                 stop_policy,
-                _plan: plan,
+                plan,
                 resident,
                 session,
                 target: config.target,
                 model_ready_current_bytes,
                 weight_encoding: "mixed-nvfp4-w4a4-fp8-w8a8".to_owned(),
                 kv_bytes_per_token: GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN,
+                phase41: config.phase41,
+                prefix_cache,
+                checkpoint,
+                checkpoint_descriptor_digest: Some(checkpoint_descriptor_digest),
             })),
             audits: Mutex::new(Vec::new()),
             shutdown_timeout: config.shutdown_timeout,
@@ -923,8 +2003,12 @@ impl Gemma4ChatBackendV1 {
             .take()
             .ok_or_else(|| BackendErrorV1::new("Gemma backend is already shut down"))?;
         let Gemma4BackendStateV1 {
-            resident, session, ..
+            resident,
+            prefix_cache,
+            session,
+            ..
         } = state;
+        drop(prefix_cache);
         drop(resident);
         let before_shutdown = session.memory_snapshot();
         if before_shutdown.current_bytes() != 0 {
@@ -992,7 +2076,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .as_mut()
             .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
         let ready = state.session.memory_snapshot();
-        require_clean_request_memory(ready, "request admission")?;
+        require_request_memory_baseline(
+            ready,
+            state.prefix_cache.baseline_bytes()?,
+            "request admission",
+        )?;
         if ready.model_resident().current_bytes() != state.model_ready_current_bytes {
             return Err(BackendErrorV1::new(
                 "model-resident accounting changed before request admission",
@@ -1037,6 +2125,22 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let prompt = service.prepare_input(&input).map_err(|error| {
             BackendErrorV1::new(format!("generation input preparation failed: {error}"))
         })?;
+        let loaded_checkpoint = state
+            .checkpoint
+            .as_ref()
+            .and_then(|runtime| runtime.loaded.clone());
+        let checkpoint_suffix = loaded_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                let prefix = &checkpoint.payload.token_history;
+                if prompt.len() <= prefix.len() || !prompt.starts_with(prefix) {
+                    return Err(BackendErrorV1::new(
+                        "Qwen checkpoint request must extend the loaded prompt token prefix",
+                    ));
+                }
+                Ok(prompt[prefix.len()..].to_vec())
+            })
+            .transpose()?;
         let processed_images = request
             .messages()
             .iter()
@@ -1137,11 +2241,92 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             })?;
             Some(assembled)
         };
+        if multimodal_prompt.is_some()
+            && !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            )
+        {
+            return Err(BackendErrorV1::new(
+                "prefix cache is currently text-only and rejects multimodal requests",
+            ));
+        }
+        if loaded_checkpoint.is_some() && multimodal_prompt.is_some() {
+            return Err(BackendErrorV1::new(
+                "Qwen prompt checkpoint continuation is text-only",
+            ));
+        }
+        if multimodal_prompt.is_some()
+            && matches!(state.phase41.draft, DraftStartupConfigV1::Ngram { .. })
+        {
+            return Err(BackendErrorV1::new(
+                "ngram draft verification is currently text-only",
+            ));
+        }
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
-        let state_capacity = prompt_tokens
-            .checked_add(u64::from(generation.max_new_tokens()))
-            .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
+        let context_policy = match &state.phase41.context_window {
+            ContextWindowStartupConfigV1::Disabled => None,
+            ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                keep_prefix,
+                keep_recent,
+            } => Some(
+                ContextPositionPolicyV1::keep_prefix_recent_v1(*keep_prefix, *keep_recent)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            ),
+        };
+        if context_policy.is_some() && generation.device_selector_seed().is_some() {
+            return Err(BackendErrorV1::new(
+                "context-window shifting cannot be combined with device-selector sampling",
+            ));
+        }
+        if context_policy.is_some()
+            && (multimodal_prompt.is_some()
+                || state.moe_artifact.is_some()
+                || state.gguf_moe.is_some()
+                || state
+                    .gguf_source
+                    .as_ref()
+                    .is_some_and(|source| source.has_fp8_recipe())
+                || state.sidecar.is_some()
+                || state.nvfp4_sidecar.is_some()
+                || state.kv_cache_encoding != KvCacheEncoding::Fp16
+                || !matches!(
+                    state.phase41.prefix_cache,
+                    PrefixCacheStartupConfigV1::Disabled
+                )
+                || !matches!(state.phase41.draft, DraftStartupConfigV1::Disabled))
+        {
+            return Err(BackendErrorV1::new(
+                "context-window shifting currently supports only dense BF16 text without prefix cache, MTP, ngram, multimodal, or quantized variants",
+            ));
+        }
+        let state_capacity = if state.checkpoint.is_some()
+            || context_policy.is_some()
+            || !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            ) {
+            u64::from(self.identity.context_length)
+        } else {
+            prompt_tokens
+                .checked_add(u64::from(generation.max_new_tokens()))
+                .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?
+        };
+        let initial_context_decision = context_policy
+            .map(|policy| {
+                policy
+                    .plan_initial(prompt_tokens, state_capacity)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))
+            })
+            .transpose()?;
+        if requires_logits
+            && initial_context_decision.is_some_and(|decision| decision.requires_shift())
+        {
+            return Err(BackendErrorV1::new(
+                "context-window shifting with an oversized prompt does not support an initial logits readback",
+            ));
+        }
         if state_capacity > u64::from(self.identity.context_length) {
             return Err(BackendErrorV1::new(format!(
                 "request requires {state_capacity} context tokens but the server was started with --context-length {}",
@@ -1163,27 +2348,46 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .available_memory_bytes()
             .map_err(|error| BackendErrorV1::new(error.to_string()))?
             .ok_or_else(|| BackendErrorV1::new("backend omitted available device memory"))?;
-        let chunk_candidates = if multimodal_prompt.is_some() {
-            vec![prompt_tokens]
-        } else {
-            qwen_prefill_chunk_candidates(placement_total_memory_bytes, prompt_tokens)
-                .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        let graph_prompt_tokens = initial_context_decision
+            .map(|decision| decision.proposed_state().logical_length())
+            .unwrap_or(prompt_tokens);
+        let chunk_candidates =
+            if initial_context_decision.is_some_and(|decision| decision.requires_shift()) {
+                vec![graph_prompt_tokens]
+            } else if multimodal_prompt.is_some() {
+                vec![prompt_tokens]
+            } else {
+                qwen_prefill_chunk_candidates(placement_total_memory_bytes, graph_prompt_tokens)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?
+            };
+        let mtp_target = matches!(state.phase41.draft, DraftStartupConfigV1::MtpAuto)
+            && state.mtp_resident.is_some()
+            && !requires_logits
+            && multimodal_prompt.is_none();
+        let ngram_draft_width = match &state.phase41.draft {
+            DraftStartupConfigV1::Ngram { width, .. } if !requires_logits => usize::from(*width),
+            _ => 0,
         };
-        let mtp_target =
-            state.mtp_resident.is_some() && !requires_logits && multimodal_prompt.is_none();
+        if requires_logits && matches!(state.phase41.draft, DraftStartupConfigV1::Ngram { .. }) {
+            return Err(BackendErrorV1::new(
+                "ngram speculative verification currently requires exact greedy generation",
+            ));
+        }
         let build_graph = |chunk_rows: u64| {
             let target_rows = if mtp_target {
                 chunk_rows.max(2)
+            } else if ngram_draft_width != 0 {
+                chunk_rows.max(ngram_draft_width as u64 + 1)
             } else {
                 chunk_rows
             };
             if let Some(artifact) = &state.moe_artifact {
-                build_qwen35_moe_execution_graph(artifact, &state.plan, chunk_rows, state_capacity)
+                build_qwen35_moe_execution_graph(artifact, &state.plan, target_rows, state_capacity)
             } else if let Some(source) = &state.gguf_moe {
                 build_qwen35_gguf_moe_execution_graph(
                     source,
                     &state.plan,
-                    chunk_rows,
+                    target_rows,
                     state_capacity,
                 )
             } else if multimodal_prompt.is_some() {
@@ -1198,7 +2402,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     state.lock.as_ref().expect("dense Qwen lock"),
                     &state.plan,
                     nvfp4_sidecar,
-                    chunk_rows,
+                    target_rows,
                     state_capacity,
                 )
             } else if let Some(source) = state
@@ -1210,7 +2414,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     state.lock.as_ref().expect("dense Qwen lock"),
                     &state.plan,
                     source,
-                    chunk_rows,
+                    target_rows,
                     state_capacity,
                     gguf_fp8_dtype(
                         state
@@ -1235,14 +2439,14 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         state.lock.as_ref().expect("dense Qwen lock"),
                         &state.plan,
                         sidecar,
-                        chunk_rows,
+                        target_rows,
                         state_capacity,
                     ),
                     (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
                         state.lock.as_ref().expect("dense Qwen lock"),
                         &state.plan,
                         sidecar,
-                        chunk_rows,
+                        target_rows,
                         state_capacity,
                     ),
                     _ => unreachable!("validated FP8 server state has a selected provider"),
@@ -1277,96 +2481,347 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             ))
         })?;
         let prefill_chunk_capacity_tokens = graph.token_count();
-        let mut owner = state
-            .resident
-            .new_request_for_session(Arc::clone(&state.session), graph)
-            .map_err(|error| {
-                BackendErrorV1::new(format!("request provisioning failed: {error}"))
-            })?;
+        let checkpoint_identity = loaded_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                let expected = qwen_checkpoint_identity(
+                    &graph,
+                    &state.plan,
+                    &state.tokenizer,
+                    &state.renderer,
+                    &state.target,
+                    state.fp8_provider.as_deref(),
+                    state.kv_cache_encoding,
+                    &checkpoint.payload.token_history,
+                )?;
+                if checkpoint.header.identity != expected {
+                    return Err(BackendErrorV1::new(
+                        "Qwen checkpoint identity differs from the request graph",
+                    ));
+                }
+                Ok(expected)
+            })
+            .transpose()?;
+        let prefix_cache_enabled = !matches!(
+            state.phase41.prefix_cache,
+            PrefixCacheStartupConfigV1::Disabled
+        );
+        let prefix_cache_eligible = prefix_cache_enabled
+            && !requires_logits
+            && multimodal_prompt.is_none()
+            && match state.phase41.prefix_cache {
+                PrefixCacheStartupConfigV1::Disabled => false,
+                PrefixCacheStartupConfigV1::Enabled {
+                    max_logical_tokens, ..
+                } => prompt_tokens <= max_logical_tokens,
+            };
+        let prefix_identity = prefix_cache_eligible
+            .then(|| qwen_prefix_identity(state, &graph, state_capacity))
+            .transpose()?;
+        let prefix_hit = prefix_identity
+            .as_ref()
+            .map(|identity| state.prefix_cache.lookup(identity, &prompt))
+            .transpose()?
+            .flatten();
+        let mut phase41_audit = ProductionPhase41AuditV1 {
+            prefix_cache_result: prefix_cache_eligible.then_some(
+                prefix_hit
+                    .as_ref()
+                    .map_or(ProductionPrefixCacheResultV1::Miss, |hit| {
+                        production_prefix_kind(hit.kind)
+                    }),
+            ),
+            ..ProductionPhase41AuditV1::default()
+        };
+        if loaded_checkpoint.is_some() {
+            phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Load);
+            phase41_audit.checkpoint_result = Some(ProductionCheckpointResultV1::Succeeded);
+        }
+        if let Some(hit) = prefix_hit.as_ref() {
+            let audit = hit.prefix.fork_audit();
+            phase41_audit.prefix_shared_pages = audit.shared_pages();
+            phase41_audit.prefix_copied_bytes = audit.copied_bytes();
+        }
+        let prefix_continuation = prefix_hit.is_some();
+        let checkpoint_save_status = Arc::new(AtomicU8::new(CHECKPOINT_STATUS_NONE));
+        let checkpoint_save = if loaded_checkpoint.is_none() && !prefix_continuation {
+            state
+                .checkpoint
+                .as_ref()
+                .and_then(|runtime| runtime.save_name.as_ref())
+                .map(|name| {
+                    Ok(QwenCheckpointSaveV1 {
+                        store: state
+                            .checkpoint
+                            .as_ref()
+                            .expect("checkpoint runtime exists for save name")
+                            .store
+                            .clone(),
+                        name: name.clone(),
+                        identity: qwen_checkpoint_identity(
+                            &graph,
+                            &state.plan,
+                            &state.tokenizer,
+                            &state.renderer,
+                            &state.target,
+                            state.fp8_provider.as_deref(),
+                            state.kv_cache_encoding,
+                            &prompt,
+                        )?,
+                        prompt_tokens: prompt.clone(),
+                        status: Arc::clone(&checkpoint_save_status),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let checkpoint_save_requested = checkpoint_save.is_some();
+        let (owner, prefix_hit) = if let (Some(checkpoint), Some(identity)) =
+            (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
+        {
+            let owner = state
+                .resident
+                .new_request_from_checkpoint(checkpoint, graph, identity)
+                .map_err(|_| BackendErrorV1::new("Qwen checkpoint request provisioning failed"))?;
+            (owner, None)
+        } else if let Some(hit) = prefix_hit {
+            let owner = state
+                .resident
+                .new_request_from_prefix(&hit.prefix, graph)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("prefix request provisioning failed: {error}"))
+                })?;
+            (owner, Some(hit))
+        } else {
+            let owner = state
+                .resident
+                .new_request_for_session(Arc::clone(&state.session), graph)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("request provisioning failed: {error}"))
+                })?;
+            (owner, None)
+        };
+        let execution_prompt = checkpoint_suffix.as_deref().unwrap_or(&prompt);
         let mut allocated = state.session.memory_snapshot();
         let mut random =
             OsSamplingRandom::for_randomness_and_seed(requires_randomness, resolved_sampling_seed)
                 .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
-        let (outcome, dispatch, memory, prefill_chunk_count) = if let Some(multimodal_prompt) =
-            multimodal_prompt.as_ref()
-        {
-            let mut executor = QwenMultimodalExecutorV1 {
-                inner: &mut owner,
-                prompt: multimodal_prompt,
-                prefilled: false,
-            };
-            let outcome = service.generate_tokens_with_sink(
-                &mut executor,
-                &prompt,
-                &generation,
-                cancellation,
-                &mut random,
-                &mut output_sink,
-            );
-            let dispatch = owner.audit_snapshot().ok();
-            let memory = owner.memory_audit_snapshot().ok();
-            let prefill_chunk_count = owner.prefill_chunk_count();
-            drop(owner);
-            (outcome, dispatch, memory, Some(prefill_chunk_count))
-        } else if !requires_logits
-            && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
-        {
-            let mtp_graph = build_qwen35_mtp_graph(
-                state.lock.as_ref().expect("MTP requires dense Qwen lock"),
-                mtp_plan,
-                state_capacity,
-            )
-            .map_err(|error| BackendErrorV1::new(format!("MTP request graph failed: {error}")))?;
-            let mtp_owner = mtp_resident
-                .new_request_for_session(Arc::clone(&state.session), mtp_graph)
+        let mut post_cow_error = None;
+        let (outcome, dispatch, memory, prefill_chunk_count, published_prefix) =
+            if let Some(multimodal_prompt) = multimodal_prompt.as_ref() {
+                let mut owner = owner;
+                let mut executor = QwenMultimodalExecutorV1 {
+                    inner: &mut owner,
+                    prompt: multimodal_prompt,
+                    prefilled: false,
+                };
+                let outcome = service.generate_tokens_with_sink(
+                    &mut executor,
+                    execution_prompt,
+                    &generation,
+                    cancellation,
+                    &mut random,
+                    &mut output_sink,
+                );
+                let dispatch = owner.audit_snapshot().ok();
+                let memory = owner.memory_audit_snapshot().ok();
+                let prefill_chunk_count = owner.prefill_chunk_count();
+                drop(owner);
+                (outcome, dispatch, memory, Some(prefill_chunk_count), None)
+            } else if mtp_target
+                && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
+            {
+                let mtp_graph = build_qwen35_mtp_graph(
+                    state.lock.as_ref().expect("MTP requires dense Qwen lock"),
+                    mtp_plan,
+                    state_capacity,
+                )
                 .map_err(|error| {
-                    BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
+                    BackendErrorV1::new(format!("MTP request graph failed: {error}"))
                 })?;
-            allocated = state.session.memory_snapshot();
-            let mut executor = SpeculativeGenerationAdapterV1::new(
-                QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
-                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
-            );
-            let outcome = service.generate_tokens_with_sink(
-                &mut executor,
-                &prompt,
-                &generation,
-                cancellation,
-                &mut random,
-                &mut output_sink,
-            );
-            let dispatch = executor.inner().target().audit_snapshot().ok();
-            let memory = executor.inner().target().memory_audit_snapshot().ok();
-            let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
-            drop(executor);
-            (outcome, dispatch, memory, Some(prefill_chunk_count))
-        } else {
-            let outcome = service.generate_tokens_with_sink(
-                &mut owner,
-                &prompt,
-                &generation,
-                cancellation,
-                &mut random,
-                &mut output_sink,
-            );
-            let dispatch = owner.audit_snapshot().ok();
-            let memory = owner.memory_audit_snapshot().ok();
-            let prefill_chunk_count = owner.prefill_chunk_count();
-            drop(owner);
-            (outcome, dispatch, memory, Some(prefill_chunk_count))
-        };
-        let cleanup = state.session.memory_snapshot();
-        let cleanup_result =
-            require_clean_request_memory(cleanup, "request cleanup").and_then(|()| {
-                if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
-                    Ok(())
-                } else {
-                    Err(BackendErrorV1::new(
-                        "model-resident accounting changed after request cleanup",
-                    ))
+                let mtp_owner = mtp_resident
+                    .new_request_for_session(Arc::clone(&state.session), mtp_graph)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("MTP request provisioning failed: {error}"))
+                    })?;
+                allocated = state.session.memory_snapshot();
+                let mut executor = SpeculativeGenerationAdapterV1::new(
+                    QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
+                        .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                );
+                let outcome = service.generate_tokens_with_sink(
+                    &mut executor,
+                    execution_prompt,
+                    &generation,
+                    cancellation,
+                    &mut random,
+                    &mut output_sink,
+                );
+                let dispatch = executor.inner().target().audit_snapshot().ok();
+                let memory = executor.inner().target().memory_audit_snapshot().ok();
+                let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
+                let proposed = executor.inner().proposed_draft_tokens();
+                let accepted = executor.inner().accepted_draft_tokens();
+                phase41_audit.draft_provider = Some(ProductionDraftProviderV1::Mtp);
+                phase41_audit.draft_proposed_tokens = proposed;
+                phase41_audit.draft_accepted_tokens = accepted;
+                phase41_audit.draft_rejected_tokens = proposed.saturating_sub(accepted);
+                drop(executor);
+                (outcome, dispatch, memory, Some(prefill_chunk_count), None)
+            } else if let DraftStartupConfigV1::Ngram { order, width } = &state.phase41.draft {
+                let target = match prefix_hit {
+                    Some(hit) => {
+                        QwenPrefixGenerationExecutorV1::from_hit(owner, hit, usize::from(*width))
+                    }
+                    None => QwenPrefixGenerationExecutorV1::fresh(
+                        owner,
+                        usize::from(*width),
+                        prefix_cache_eligible,
+                    ),
+                };
+                let provider = production_ngram_provider(*order)?;
+                let mut executor = SpeculativeGenerationAdapterV1::with_provider_and_draft_width(
+                    target,
+                    provider,
+                    usize::from(*width),
+                )
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+                let outcome = service.generate_tokens_with_sink(
+                    &mut executor,
+                    execution_prompt,
+                    &generation,
+                    cancellation,
+                    &mut random,
+                    &mut output_sink,
+                );
+                let dispatch = executor.inner().inner().audit_snapshot().ok();
+                let memory = executor.inner().inner().memory_audit_snapshot().ok();
+                let prefill_chunk_count = executor.inner().inner().prefill_chunk_count();
+                let accounting = executor.accounting();
+                phase41_audit.draft_provider = Some(ProductionDraftProviderV1::Ngram);
+                phase41_audit.draft_proposed_tokens = accounting.proposed_tokens();
+                phase41_audit.draft_accepted_tokens = accounting.accepted_tokens();
+                phase41_audit.draft_rejected_tokens = accounting.rejected_tokens();
+                phase41_audit.context_shift_count = executor.inner().context_shift_count();
+                if prefix_continuation {
+                    match executor.inner().refresh_prefix_fork_audit() {
+                        Ok(audit) => {
+                            phase41_audit.prefix_cow_pages = phase41_audit
+                                .prefix_shared_pages
+                                .saturating_sub(audit.shared_pages());
+                            phase41_audit.prefix_shared_pages = audit.shared_pages();
+                            phase41_audit.prefix_copied_bytes = audit.copied_bytes();
+                        }
+                        Err(error) => {
+                            post_cow_error = Some(BackendErrorV1::new(format!(
+                                "Qwen prefix COW accounting failed: {error}"
+                            )));
+                            executor.cancel();
+                        }
+                    }
                 }
-            });
+                let published_prefix = executor.inner_mut().take_published_prefix();
+                drop(executor);
+                (
+                    outcome,
+                    dispatch,
+                    memory,
+                    Some(prefill_chunk_count),
+                    published_prefix,
+                )
+            } else {
+                let mut executor = match prefix_hit {
+                    Some(hit) => QwenPrefixGenerationExecutorV1::from_hit(owner, hit, 1),
+                    None => {
+                        let executor =
+                            QwenPrefixGenerationExecutorV1::fresh(owner, 1, prefix_cache_eligible);
+                        match checkpoint_save {
+                            Some(save) => executor.with_checkpoint_save(save),
+                            None => executor,
+                        }
+                    }
+                };
+                if let Some(policy) = context_policy {
+                    let lock = state.lock.as_ref().ok_or_else(|| {
+                        BackendErrorV1::new("context shifting requires the dense Qwen lock")
+                    })?;
+                    executor = executor.with_context_shift(
+                        state.resident.clone(),
+                        lock.clone(),
+                        state.plan.clone(),
+                        policy,
+                        state_capacity,
+                    );
+                }
+                let outcome = service.generate_tokens_with_sink(
+                    &mut executor,
+                    execution_prompt,
+                    &generation,
+                    cancellation,
+                    &mut random,
+                    &mut output_sink,
+                );
+                let dispatch = executor.inner().audit_snapshot().ok();
+                let memory = executor.inner().memory_audit_snapshot().ok();
+                let prefill_chunk_count = executor.inner().prefill_chunk_count();
+                phase41_audit.context_shift_count = executor.context_shift_count();
+                if prefix_continuation {
+                    match executor.refresh_prefix_fork_audit() {
+                        Ok(audit) => {
+                            phase41_audit.prefix_cow_pages = phase41_audit
+                                .prefix_shared_pages
+                                .saturating_sub(audit.shared_pages());
+                            phase41_audit.prefix_shared_pages = audit.shared_pages();
+                            phase41_audit.prefix_copied_bytes = audit.copied_bytes();
+                        }
+                        Err(error) => {
+                            post_cow_error = Some(BackendErrorV1::new(format!(
+                                "Qwen prefix COW accounting failed: {error}"
+                            )));
+                            executor.cancel();
+                        }
+                    }
+                }
+                let published_prefix = executor.take_published_prefix();
+                drop(executor);
+                (
+                    outcome,
+                    dispatch,
+                    memory,
+                    Some(prefill_chunk_count),
+                    published_prefix,
+                )
+            };
+        if checkpoint_save_requested {
+            phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Save);
+            phase41_audit.checkpoint_result = Some(
+                if checkpoint_save_status.load(Ordering::Acquire) == CHECKPOINT_STATUS_SUCCEEDED {
+                    ProductionCheckpointResultV1::Succeeded
+                } else {
+                    ProductionCheckpointResultV1::Failed
+                },
+            );
+        }
+        if let (Some(identity), Some(prefix)) = (prefix_identity, published_prefix) {
+            let _ = state.prefix_cache.publish(identity, &prompt, prefix);
+        }
+        let cleanup = state.session.memory_snapshot();
+        let cleanup_result = require_request_memory_baseline(
+            cleanup,
+            state.prefix_cache.baseline_bytes()?,
+            "request cleanup",
+        )
+        .and_then(|()| {
+            if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
+                Ok(())
+            } else {
+                Err(BackendErrorV1::new(
+                    "model-resident accounting changed after request cleanup",
+                ))
+            }
+        });
         let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let generation_result = outcome
             .map_err(|error| BackendErrorV1::new(format!("generation failed: {error}")))
@@ -1400,9 +2855,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
                 })
             });
-        let result = match (generation_result, cleanup_result) {
-            (_, Err(error)) => Err(error),
-            (result, Ok(())) => result,
+        let result = match (post_cow_error, generation_result, cleanup_result) {
+            (Some(error), _, _) => Err(error),
+            (None, _, Err(error)) => Err(error),
+            (None, result, Ok(())) => result,
         };
         let first_kv = memory.as_ref().and_then(|audit| audit.kv_layers().first());
         let committed_kv_bytes = memory
@@ -1475,6 +2931,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             allocated_workspace_bytes: allocated.workspace().current_bytes(),
             cleanup_request_state_bytes: cleanup.request_state().current_bytes(),
             cleanup_workspace_bytes: cleanup.workspace().current_bytes(),
+            phase41: phase41_audit,
         });
         result
     }
@@ -1505,7 +2962,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             .as_mut()
             .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
         let ready = state.session.memory_snapshot();
-        require_clean_request_memory(ready, "Gemma request admission")?;
+        require_request_memory_baseline(
+            ready,
+            state.prefix_cache.baseline_bytes()?,
+            "Gemma request admission",
+        )?;
         if ready.model_resident().current_bytes() != state.model_ready_current_bytes {
             return Err(BackendErrorV1::new(
                 "Gemma model-resident accounting changed before request admission",
@@ -1515,6 +2976,12 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         let service = GenerationServiceV1::new(&state.tokenizer, None, &state.stop_policy)
             .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
         let mut generation = generation_config_for_request(request, &state.tokenizer)?;
+        let requires_logits = generation
+            .sampler_chain()
+            .map_or(generation.sampling().requires_logits(), |chain| {
+                chain.requires_logits()
+            })
+            || generation.grammar().is_some();
         let requires_randomness = generation.sampler_chain().map_or(
             generation.sampling().requires_logits(),
             SamplerChainConfigV1::requires_randomness,
@@ -1532,50 +2999,291 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             .map_err(|error| {
                 BackendErrorV1::new(format!("generation input preparation failed: {error}"))
             })?;
+        let loaded_checkpoint = state
+            .checkpoint
+            .as_ref()
+            .and_then(|runtime| runtime.loaded.clone());
+        let checkpoint_suffix = loaded_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                let prefix = &checkpoint.payload.token_history;
+                if prompt.len() <= prefix.len() || !prompt.starts_with(prefix) {
+                    return Err(BackendErrorV1::new(
+                        "Gemma checkpoint request must extend the loaded prompt token prefix",
+                    ));
+                }
+                Ok(prompt[prefix.len()..].to_vec())
+            })
+            .transpose()?;
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
-        let state_capacity = prompt_tokens
-            .checked_add(u64::from(generation.max_new_tokens()))
-            .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
+        let context_policy = match &state.phase41.context_window {
+            ContextWindowStartupConfigV1::Disabled => None,
+            ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                keep_prefix,
+                keep_recent,
+            } => Some(
+                ContextPositionPolicyV1::keep_prefix_recent_v1(*keep_prefix, *keep_recent)
+                    .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            ),
+        };
+        if context_policy.is_some() && generation.device_selector_seed().is_some() {
+            return Err(BackendErrorV1::new(
+                "context-window shifting cannot be combined with device-selector sampling",
+            ));
+        }
+        if context_policy.is_some()
+            && !matches!(
+                state.phase41.prefix_cache,
+                PrefixCacheStartupConfigV1::Disabled
+            )
+        {
+            return Err(BackendErrorV1::new(
+                "Gemma context-window shifting cannot be combined with prefix cache",
+            ));
+        }
+        let state_capacity = if context_policy.is_some() || state.checkpoint.is_some() {
+            u64::from(self.identity.context_length)
+        } else {
+            prompt_tokens
+                .checked_add(u64::from(generation.max_new_tokens()))
+                .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?
+        };
         if state_capacity > u64::from(self.identity.context_length) {
             return Err(BackendErrorV1::new(format!(
                 "request requires {state_capacity} context tokens but the server was started with --context-length {}",
                 self.identity.context_length
             )));
         }
-        let mut owner = state
-            .resident
-            .new_request_for_session(Arc::clone(&state.session), prompt_tokens, state_capacity)
-            .map_err(|error| {
-                BackendErrorV1::new(format!("request provisioning failed: {error}"))
-            })?;
+        let checkpoint_identity = loaded_checkpoint
+            .as_ref()
+            .map(|checkpoint| {
+                let descriptor_digest = state.checkpoint_descriptor_digest.ok_or_else(|| {
+                    BackendErrorV1::new("Gemma checkpoint descriptor is unavailable")
+                })?;
+                let expected = gemma_checkpoint_identity(
+                    state._lock.fingerprint(),
+                    &state.plan,
+                    &state.tokenizer,
+                    &state.target,
+                    descriptor_digest,
+                    &checkpoint.payload.token_history,
+                )?;
+                if checkpoint.header.identity != expected {
+                    return Err(BackendErrorV1::new(
+                        "Gemma checkpoint identity differs from the request graph",
+                    ));
+                }
+                Ok(expected)
+            })
+            .transpose()?;
+        let prefix_cache_enabled = !matches!(
+            state.phase41.prefix_cache,
+            PrefixCacheStartupConfigV1::Disabled
+        );
+        let prefix_cache_eligible = prefix_cache_enabled
+            && !requires_logits
+            && match state.phase41.prefix_cache {
+                PrefixCacheStartupConfigV1::Disabled => false,
+                PrefixCacheStartupConfigV1::Enabled {
+                    max_logical_tokens, ..
+                } => prompt_tokens <= max_logical_tokens,
+            };
+        let prefix_identity = prefix_cache_eligible
+            .then(|| gemma_prefix_identity(state))
+            .transpose()?;
+        let prefix_hit = prefix_identity
+            .as_ref()
+            .map(|identity| state.prefix_cache.lookup(identity, &prompt))
+            .transpose()?
+            .flatten();
+        let mut phase41_audit = ProductionPhase41AuditV1 {
+            prefix_cache_result: prefix_cache_eligible.then_some(
+                prefix_hit
+                    .as_ref()
+                    .map_or(ProductionPrefixCacheResultV1::Miss, |hit| {
+                        production_prefix_kind(hit.kind)
+                    }),
+            ),
+            ..ProductionPhase41AuditV1::default()
+        };
+        if loaded_checkpoint.is_some() {
+            phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Load);
+            phase41_audit.checkpoint_result = Some(ProductionCheckpointResultV1::Succeeded);
+        }
+        if let Some(hit) = prefix_hit.as_ref() {
+            let audit = hit.prefix.fork_audit();
+            phase41_audit.prefix_shared_pages = audit.shared_pages();
+            phase41_audit.prefix_copied_bytes = audit.copied_bytes();
+        }
+        let prefix_continuation = prefix_hit.is_some();
+        let checkpoint_save_status = Arc::new(AtomicU8::new(CHECKPOINT_STATUS_NONE));
+        let checkpoint_save = if loaded_checkpoint.is_none() && !prefix_continuation {
+            state
+                .checkpoint
+                .as_ref()
+                .and_then(|runtime| runtime.save_name.as_ref())
+                .map(|name| {
+                    let descriptor_digest =
+                        state.checkpoint_descriptor_digest.ok_or_else(|| {
+                            BackendErrorV1::new("Gemma checkpoint descriptor is unavailable")
+                        })?;
+                    Ok(QwenCheckpointSaveV1 {
+                        store: state
+                            .checkpoint
+                            .as_ref()
+                            .expect("checkpoint runtime exists for save name")
+                            .store
+                            .clone(),
+                        name: name.clone(),
+                        identity: gemma_checkpoint_identity(
+                            state._lock.fingerprint(),
+                            &state.plan,
+                            &state.tokenizer,
+                            &state.target,
+                            descriptor_digest,
+                            &prompt,
+                        )?,
+                        prompt_tokens: prompt.clone(),
+                        status: Arc::clone(&checkpoint_save_status),
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let checkpoint_save_requested = checkpoint_save.is_some();
+        let initial_graph_tokens = context_policy
+            .and_then(|policy| {
+                policy
+                    .plan_initial(prompt_tokens, state_capacity)
+                    .ok()
+                    .map(|decision| decision.proposed_state().logical_length())
+            })
+            .unwrap_or(prompt_tokens);
+        if requires_logits && context_policy.is_some() && initial_graph_tokens < prompt_tokens {
+            return Err(BackendErrorV1::new(
+                "context-window shifting with an oversized prompt does not support an initial logits readback",
+            ));
+        }
+        let mut executor = if let (Some(checkpoint), Some(identity)) =
+            (loaded_checkpoint.as_ref(), checkpoint_identity.as_ref())
+        {
+            let suffix_tokens = u64::try_from(
+                checkpoint_suffix
+                    .as_ref()
+                    .expect("checkpoint suffix validated before owner creation")
+                    .len(),
+            )
+            .map_err(|_| BackendErrorV1::new("Gemma checkpoint suffix length overflowed"))?;
+            let owner = state
+                .resident
+                .new_request_from_checkpoint(checkpoint, identity, suffix_tokens, state_capacity)
+                .map_err(|_| BackendErrorV1::new("Gemma checkpoint request provisioning failed"))?;
+            GemmaPrefixGenerationExecutorV1::fresh(owner, false)
+        } else if let Some(hit) = prefix_hit {
+            let suffix_tokens = prompt_tokens
+                .checked_sub(hit.prefix.committed_length())
+                .ok_or_else(|| BackendErrorV1::new("Gemma prefix length exceeded prompt length"))?;
+            let owner = state
+                .resident
+                .new_request_from_prefix(&hit.prefix, suffix_tokens.max(1), state_capacity)
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("prefix request provisioning failed: {error}"))
+                })?;
+            GemmaPrefixGenerationExecutorV1::from_hit(owner, hit)
+        } else {
+            let owner = state
+                .resident
+                .new_request_for_session(
+                    Arc::clone(&state.session),
+                    initial_graph_tokens,
+                    state_capacity,
+                )
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("request provisioning failed: {error}"))
+                })?;
+            {
+                let executor = GemmaPrefixGenerationExecutorV1::fresh(owner, prefix_cache_eligible);
+                if let Some(policy) = context_policy {
+                    executor.with_context_shift(state.resident.clone(), policy, state_capacity)
+                } else {
+                    executor
+                }
+            }
+        };
+        if checkpoint_save_requested {
+            // The save owner is always the fresh text owner; prefix/context/draft
+            // combinations are rejected during startup validation.
+            executor = executor.with_checkpoint_save(
+                checkpoint_save
+                    .expect("checkpoint save request was recorded before owner creation"),
+            );
+        }
         let allocated = state.session.memory_snapshot();
         let mut random =
             OsSamplingRandom::for_randomness_and_seed(requires_randomness, resolved_sampling_seed)
                 .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
+        let mut post_cow_error = None;
         let outcome = service.generate_tokens_with_sink(
-            &mut owner,
-            &prompt,
+            &mut executor,
+            checkpoint_suffix.as_deref().unwrap_or(&prompt),
             &generation,
             cancellation,
             &mut random,
             &mut output_sink,
         );
-        let dispatch = owner.audit_snapshot().ok();
-        let observed_length = owner.committed_length();
-        drop(owner);
-        let cleanup = state.session.memory_snapshot();
-        let cleanup_result = require_clean_request_memory(cleanup, "Gemma request cleanup")
-            .and_then(|()| {
-                if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
-                    Ok(())
-                } else {
-                    Err(BackendErrorV1::new(
-                        "Gemma model-resident accounting changed after request cleanup",
-                    ))
+        let dispatch = executor.inner().audit_snapshot().ok();
+        let observed_length = executor.inner().committed_length();
+        phase41_audit.context_shift_count = executor.context_shift_count();
+        if prefix_continuation {
+            match executor.refresh_prefix_fork_audit() {
+                Ok(audit) => {
+                    phase41_audit.prefix_cow_pages = phase41_audit
+                        .prefix_shared_pages
+                        .saturating_sub(audit.shared_pages());
+                    phase41_audit.prefix_shared_pages = audit.shared_pages();
+                    phase41_audit.prefix_copied_bytes = audit.copied_bytes();
                 }
-            });
+                Err(error) => {
+                    post_cow_error = Some(BackendErrorV1::new(format!(
+                        "Gemma prefix COW accounting failed: {error}"
+                    )));
+                    executor.cancel();
+                }
+            }
+        }
+        let published_prefix = executor.take_published_prefix();
+        if checkpoint_save_requested {
+            phase41_audit.checkpoint_operation = Some(ProductionCheckpointOperationV1::Save);
+            phase41_audit.checkpoint_result = Some(
+                if checkpoint_save_status.load(Ordering::Acquire) == CHECKPOINT_STATUS_SUCCEEDED {
+                    ProductionCheckpointResultV1::Succeeded
+                } else {
+                    ProductionCheckpointResultV1::Failed
+                },
+            );
+        }
+        drop(executor);
+        if let (Some(identity), Some(prefix)) = (prefix_identity, published_prefix) {
+            let _ = state.prefix_cache.publish(identity, &prompt, prefix);
+        }
+        let cleanup = state.session.memory_snapshot();
+        let cleanup_result = require_request_memory_baseline(
+            cleanup,
+            state.prefix_cache.baseline_bytes()?,
+            "Gemma request cleanup",
+        )
+        .and_then(|()| {
+            if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
+                Ok(())
+            } else {
+                Err(BackendErrorV1::new(
+                    "Gemma model-resident accounting changed after request cleanup",
+                ))
+            }
+        });
         let elapsed_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let generation_result = outcome
             .map_err(|error| BackendErrorV1::new(format!("generation failed: {error}")))
@@ -1600,9 +3308,10 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
                 })
             });
-        let result = match (generation_result, cleanup_result) {
-            (_, Err(error)) => Err(error),
-            (result, Ok(())) => result,
+        let result = match (post_cow_error, generation_result, cleanup_result) {
+            (Some(error), _, _) => Err(error),
+            (None, _, Err(error)) => Err(error),
+            (None, result, Ok(())) => result,
         };
         let completion_tokens = result
             .as_ref()
@@ -1650,6 +3359,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             allocated_workspace_bytes: allocated.workspace().current_bytes(),
             cleanup_request_state_bytes: cleanup.request_state().current_bytes(),
             cleanup_workspace_bytes: cleanup.workspace().current_bytes(),
+            phase41: phase41_audit,
         });
         result
     }
@@ -1694,6 +3404,807 @@ fn render_gemma4_raw_messages(messages: &[crate::ChatMessageV1]) -> Result<Strin
 
 struct OutputSinkAdapterV1<'a> {
     inner: &'a mut dyn GenerationDeltaSinkV1,
+}
+
+struct QwenPrefixGenerationExecutorV1 {
+    inner: QwenExecutionRequest,
+    matched_tokens: Option<Vec<u32>>,
+    _lease: Option<PrefixLeaseV1>,
+    published_prefix: Option<QwenPrefixStateV1>,
+    publish_prefix: bool,
+    draft_width: usize,
+    speculative_block_pending: bool,
+    context_shift: Option<QwenContextShiftRuntimeV1>,
+    checkpoint_save: Option<QwenCheckpointSaveV1>,
+}
+
+struct QwenContextShiftRuntimeV1 {
+    resident: QwenResidentModel,
+    lock: ModelLock,
+    plan: WeightLoadPlan,
+    policy: ContextPositionPolicyV1,
+    state: ContextWindowStateV1,
+    history: Vec<i32>,
+    capacity: u64,
+}
+
+impl QwenPrefixGenerationExecutorV1 {
+    fn fresh(inner: QwenExecutionRequest, draft_width: usize, publish_prefix: bool) -> Self {
+        Self {
+            inner,
+            matched_tokens: None,
+            _lease: None,
+            published_prefix: None,
+            publish_prefix,
+            draft_width,
+            speculative_block_pending: false,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
+    fn from_hit(inner: QwenExecutionRequest, hit: QwenPrefixHitV1, draft_width: usize) -> Self {
+        Self {
+            inner,
+            matched_tokens: Some(hit.matched_tokens),
+            _lease: Some(hit.lease),
+            published_prefix: None,
+            publish_prefix: false,
+            draft_width,
+            speculative_block_pending: false,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
+    fn with_context_shift(
+        mut self,
+        resident: QwenResidentModel,
+        lock: ModelLock,
+        plan: WeightLoadPlan,
+        policy: ContextPositionPolicyV1,
+        capacity: u64,
+    ) -> Self {
+        self.context_shift = Some(QwenContextShiftRuntimeV1 {
+            resident,
+            lock,
+            plan,
+            policy,
+            state: ContextWindowStateV1::new(0, 0, 0),
+            history: Vec::new(),
+            capacity,
+        });
+        self
+    }
+
+    fn with_checkpoint_save(mut self, checkpoint: QwenCheckpointSaveV1) -> Self {
+        self.checkpoint_save = Some(checkpoint);
+        self
+    }
+
+    fn save_checkpoint_after_prefill(
+        &mut self,
+        prompt_token_count: usize,
+    ) -> Result<(), GenerationServiceError> {
+        let Some(checkpoint) = self.checkpoint_save.take() else {
+            return Ok(());
+        };
+        if checkpoint.prompt_tokens.len() != prompt_token_count {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            return Err(GenerationServiceError::Execution(
+                "checkpoint prompt length changed before save".to_owned(),
+            ));
+        }
+        let prompt_len = u64::try_from(prompt_token_count).map_err(|_| {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            GenerationServiceError::CountOverflow
+        })?;
+        let result = self
+            .inner
+            .checkpoint(
+                checkpoint.identity,
+                &checkpoint.prompt_tokens,
+                &[],
+                &[],
+                &[],
+                &[],
+                prompt_len,
+                prompt_len,
+                1,
+            )
+            .map_err(|_| GenerationServiceError::Execution("checkpoint capture failed".to_owned()))
+            .and_then(|checkpoint_payload| {
+                checkpoint
+                    .store
+                    .save(&checkpoint.name, &checkpoint_payload)
+                    .map(|_| ())
+                    .map_err(|_| {
+                        GenerationServiceError::Execution("checkpoint save failed".to_owned())
+                    })
+            });
+        if result.is_ok() {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_SUCCEEDED, Ordering::Release);
+        } else {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+        }
+        result
+    }
+
+    fn inner(&self) -> &QwenExecutionRequest {
+        &self.inner
+    }
+
+    fn context_shift_count(&self) -> u64 {
+        self.context_shift
+            .as_ref()
+            .map_or(0, |context| context.state.shift_count())
+    }
+
+    fn refresh_prefix_fork_audit(&self) -> Result<QwenPrefixForkAuditV1, GenerationServiceError> {
+        self.inner
+            .refresh_prefix_fork_audit()
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))
+    }
+
+    fn take_published_prefix(&mut self) -> Option<QwenPrefixStateV1> {
+        self.published_prefix.take()
+    }
+
+    fn publish_fresh_prefix(
+        &mut self,
+        prompt_token_count: usize,
+    ) -> Result<(), GenerationServiceError> {
+        if self.publish_prefix && self.matched_tokens.is_none() {
+            let prefix = self
+                .inner
+                .prefix_state()
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            require_prompt_only_prefix(prefix.committed_length(), prompt_token_count)?;
+            self.published_prefix = Some(prefix);
+        }
+        Ok(())
+    }
+
+    fn prefix_prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let Some(matched_tokens) = self.matched_tokens.as_deref() else {
+            if let Some(context) = self.context_shift.as_mut() {
+                let token_history = input_token_ids
+                    .iter()
+                    .map(|&token| {
+                        i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if token_history.len() as u64 > context.capacity {
+                    let decision = context
+                        .policy
+                        .plan_initial(token_history.len() as u64, context.capacity)
+                        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                    let retained = decision
+                        .retained_token_ids(&token_history)
+                        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                    let graph = build_qwen35_graph_with_position_payload_mode(
+                        &context.lock,
+                        &context.plan,
+                        retained.len() as u64,
+                        context.capacity,
+                        sllm_core::AttentionPreprocessPositionPayloadModeV1::Explicit,
+                    )
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                    context
+                        .policy
+                        .validate_adapter(graph.context_adapter_capabilities())
+                        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                    let (owner, output) = context
+                        .resident
+                        .new_request_from_context_shift(
+                            graph,
+                            decision,
+                            ContextWindowStateV1::new(
+                                token_history.len() as u64,
+                                token_history.len() as u64,
+                                0,
+                            ),
+                            &token_history,
+                        )
+                        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                    self.inner = owner;
+                    context.state = decision.proposed_state();
+                    context.history = retained;
+                    return qwen_step_from_output(
+                        &output,
+                        output.token_ids().len().saturating_sub(1),
+                    );
+                }
+                context.state = ContextWindowStateV1::new(
+                    token_history.len() as u64,
+                    token_history.len() as u64,
+                    0,
+                );
+                context.history = token_history;
+            }
+            let step = GenerationExecutorV1::prefill(
+                &mut self.inner,
+                input_token_ids,
+                include_last_logits,
+            )?;
+            self.publish_fresh_prefix(input_token_ids.len())?;
+            self.save_checkpoint_after_prefill(input_token_ids.len())?;
+            return Ok(step);
+        };
+        if include_last_logits || !input_token_ids.starts_with(matched_tokens) {
+            return Err(GenerationServiceError::Execution(
+                "prefix continuation requires exact greedy prompt semantics".to_owned(),
+            ));
+        }
+        let suffix = input_token_ids[matched_tokens.len()..]
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = self
+            .inner
+            .continue_from_prefix(&suffix)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        qwen_step_from_output(&output, output.token_ids().len().saturating_sub(1))
+    }
+}
+
+impl GenerationExecutorV1 for QwenPrefixGenerationExecutorV1 {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        self.prefix_prefill(input_token_ids, include_last_logits)
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let output = GenerationExecutorV1::decode(&mut self.inner, token_id, include_last_logits)?;
+        if let Some(context) = self.context_shift.as_mut() {
+            context.history.push(
+                i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            );
+            context.state = context
+                .state
+                .after_append(1, context.capacity)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        Ok(output)
+    }
+
+    fn before_decode(&mut self, _token_id: u32) -> Result<(), GenerationServiceError> {
+        let Some(context) = self.context_shift.as_mut() else {
+            return Ok(());
+        };
+        let decision = context
+            .policy
+            .plan(context.state, context.capacity, 1)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if !decision.requires_shift() {
+            return Ok(());
+        }
+        let retained = decision
+            .retained_token_ids(&context.history)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let graph = build_qwen35_graph_with_position_payload_mode(
+            &context.lock,
+            &context.plan,
+            retained.len() as u64,
+            context.capacity,
+            sllm_core::AttentionPreprocessPositionPayloadModeV1::Explicit,
+        )
+        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        context
+            .policy
+            .validate_adapter(graph.context_adapter_capabilities())
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let (owner, _output) = context
+            .resident
+            .new_request_from_context_shift(graph, decision, context.state, &context.history)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.inner = owner;
+        context.state = decision.proposed_state();
+        context.history = retained;
+        Ok(())
+    }
+
+    fn supports_device_selector(&self) -> bool {
+        self.matched_tokens.is_none() && self.context_shift.is_none()
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.matched_tokens.is_some() || self.context_shift.is_some() {
+            return Err(GenerationServiceError::DeviceSelectorUnsupported);
+        }
+        let step = GenerationExecutorV1::prefill_with_device_selector(
+            &mut self.inner,
+            input_token_ids,
+            selector,
+        )?;
+        self.publish_fresh_prefix(input_token_ids.len())?;
+        self.save_checkpoint_after_prefill(input_token_ids.len())?;
+        Ok(step)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.context_shift.is_some() {
+            return Err(GenerationServiceError::DeviceSelectorUnsupported);
+        }
+        let output =
+            GenerationExecutorV1::decode_with_device_selector(&mut self.inner, token_id, selector)?;
+        if let Some(context) = self.context_shift.as_mut() {
+            context.history.push(
+                i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            );
+            context.state = context
+                .state
+                .after_append(1, context.capacity)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        Ok(output)
+    }
+
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+impl SpeculativeGenerationExecutorV1 for QwenPrefixGenerationExecutorV1 {
+    fn speculative_decode_greedy(
+        &mut self,
+        _pending_token: u32,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        Err(GenerationServiceError::Execution(
+            "ngram target verification requires an explicit proposal".to_owned(),
+        ))
+    }
+
+    fn has_draft_provider(&self) -> bool {
+        true
+    }
+
+    fn speculative_draft_width(&self) -> usize {
+        self.draft_width
+    }
+
+    fn speculative_decode_with_proposal(
+        &mut self,
+        pending_token: u32,
+        proposal: &DraftProposalV1,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        if self.speculative_block_pending {
+            return Err(GenerationServiceError::Execution(
+                "previous ngram target block is still pending".to_owned(),
+            ));
+        }
+        if proposal.token_ids().is_empty() || proposal.token_ids().len() > self.draft_width {
+            return Err(GenerationServiceError::Execution(
+                "ngram proposal width exceeds the target graph".to_owned(),
+            ));
+        }
+        let mut input = Vec::with_capacity(proposal.token_ids().len() + 1);
+        input.push(
+            i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+        );
+        input.extend(
+            proposal
+                .token_ids()
+                .iter()
+                .map(|&token| {
+                    i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        let output = self
+            .inner
+            .decode_block_with_mtp_state(&input)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if output.token_ids().len() != input.len() {
+            return Err(GenerationServiceError::MissingDeviceArgmax);
+        }
+        let accepted = proposal
+            .token_ids()
+            .iter()
+            .zip(output.token_ids())
+            .take_while(|(draft, target)| i32::try_from(**draft).ok() == Some(**target))
+            .count();
+        let committed_rows = accepted + 1;
+        let steps = (0..committed_rows)
+            .map(|row| qwen_step_from_output(&output, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.speculative_block_pending = true;
+        Ok(steps)
+    }
+
+    fn finalize_speculative_decode(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<(), GenerationServiceError> {
+        if !self.speculative_block_pending {
+            return Err(GenerationServiceError::Execution(
+                "no ngram target block is pending".to_owned(),
+            ));
+        }
+        self.inner
+            .resolve_decode_block(committed_input_rows)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.speculative_block_pending = false;
+        Ok(())
+    }
+}
+
+struct GemmaPrefixGenerationExecutorV1 {
+    inner: sllm_core::Gemma4ExecutionRequest,
+    matched_tokens: Option<Vec<u32>>,
+    _lease: Option<PrefixLeaseV1>,
+    published_prefix: Option<Gemma4PrefixStateV1>,
+    publish_prefix: bool,
+    context_shift: Option<GemmaContextShiftRuntimeV1>,
+    checkpoint_save: Option<QwenCheckpointSaveV1>,
+}
+
+struct GemmaContextShiftRuntimeV1 {
+    resident: Gemma4ResidentModel,
+    policy: ContextPositionPolicyV1,
+    state: ContextWindowStateV1,
+    history: Vec<i32>,
+    capacity: u64,
+}
+
+impl GemmaPrefixGenerationExecutorV1 {
+    fn fresh(inner: sllm_core::Gemma4ExecutionRequest, publish_prefix: bool) -> Self {
+        Self {
+            inner,
+            matched_tokens: None,
+            _lease: None,
+            published_prefix: None,
+            publish_prefix,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
+    fn from_hit(inner: sllm_core::Gemma4ExecutionRequest, hit: GemmaPrefixHitV1) -> Self {
+        Self {
+            inner,
+            matched_tokens: Some(hit.matched_tokens),
+            _lease: Some(hit.lease),
+            published_prefix: None,
+            publish_prefix: false,
+            context_shift: None,
+            checkpoint_save: None,
+        }
+    }
+
+    fn with_context_shift(
+        mut self,
+        resident: Gemma4ResidentModel,
+        policy: ContextPositionPolicyV1,
+        capacity: u64,
+    ) -> Self {
+        self.context_shift = Some(GemmaContextShiftRuntimeV1 {
+            resident,
+            policy,
+            state: ContextWindowStateV1::new(0, 0, 0),
+            history: Vec::new(),
+            capacity,
+        });
+        self
+    }
+
+    fn with_checkpoint_save(mut self, checkpoint: QwenCheckpointSaveV1) -> Self {
+        self.checkpoint_save = Some(checkpoint);
+        self
+    }
+
+    fn save_checkpoint_after_prefill(
+        &mut self,
+        prompt_token_count: usize,
+    ) -> Result<(), GenerationServiceError> {
+        let Some(checkpoint) = self.checkpoint_save.take() else {
+            return Ok(());
+        };
+        if checkpoint.prompt_tokens.len() != prompt_token_count {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            return Err(GenerationServiceError::Execution(
+                "checkpoint prompt length changed before save".to_owned(),
+            ));
+        }
+        let prompt_len = u64::try_from(prompt_token_count).map_err(|_| {
+            checkpoint
+                .status
+                .store(CHECKPOINT_STATUS_FAILED, Ordering::Release);
+            GenerationServiceError::CountOverflow
+        })?;
+        let result = self
+            .inner
+            .checkpoint(
+                checkpoint.identity,
+                &checkpoint.prompt_tokens,
+                &[],
+                &[],
+                &[],
+                &[],
+                prompt_len,
+                prompt_len,
+                1,
+            )
+            .map_err(|_| GenerationServiceError::Execution("checkpoint capture failed".to_owned()))
+            .and_then(|checkpoint_payload| {
+                checkpoint
+                    .store
+                    .save(&checkpoint.name, &checkpoint_payload)
+                    .map(|_| ())
+                    .map_err(|_| {
+                        GenerationServiceError::Execution("checkpoint save failed".to_owned())
+                    })
+            });
+        checkpoint.status.store(
+            if result.is_ok() {
+                CHECKPOINT_STATUS_SUCCEEDED
+            } else {
+                CHECKPOINT_STATUS_FAILED
+            },
+            Ordering::Release,
+        );
+        result
+    }
+
+    fn inner(&self) -> &sllm_core::Gemma4ExecutionRequest {
+        &self.inner
+    }
+
+    fn context_shift_count(&self) -> u64 {
+        self.context_shift
+            .as_ref()
+            .map_or(0, |context| context.state.shift_count())
+    }
+
+    fn refresh_prefix_fork_audit(&self) -> Result<Gemma4PrefixForkAuditV1, GenerationServiceError> {
+        self.inner
+            .refresh_prefix_fork_audit()
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))
+    }
+
+    fn take_published_prefix(&mut self) -> Option<Gemma4PrefixStateV1> {
+        self.published_prefix.take()
+    }
+
+    fn publish_fresh_prefix(
+        &mut self,
+        prompt_token_count: usize,
+    ) -> Result<(), GenerationServiceError> {
+        if self.publish_prefix && self.matched_tokens.is_none() {
+            let prefix = self
+                .inner
+                .prefix_state()
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            require_prompt_only_prefix(prefix.committed_length(), prompt_token_count)?;
+            self.published_prefix = Some(prefix);
+        }
+        Ok(())
+    }
+}
+
+impl GenerationExecutorV1 for GemmaPrefixGenerationExecutorV1 {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if let Some(matched_tokens) = self.matched_tokens.as_deref() {
+            if include_last_logits || !input_token_ids.starts_with(matched_tokens) {
+                return Err(GenerationServiceError::Execution(
+                    "Gemma prefix continuation requires exact greedy prompt semantics".to_owned(),
+                ));
+            }
+            let suffix = input_token_ids[matched_tokens.len()..]
+                .iter()
+                .map(|&token| {
+                    i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let output = self
+                .inner
+                .continue_from_prefix(&suffix)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            return gemma_step_from_output(&output, output.token_ids().len().saturating_sub(1));
+        }
+        if let Some(context) = self.context_shift.as_mut() {
+            let history = input_token_ids
+                .iter()
+                .map(|&token| {
+                    i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if history.len() as u64 > context.capacity {
+                let decision = context
+                    .policy
+                    .plan_initial(history.len() as u64, context.capacity)
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                context
+                    .policy
+                    .validate_adapter(Gemma4ResidentModel::context_adapter_capabilities())
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                let retained_history = decision
+                    .retained_token_ids(&history)
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                let (owner, output) = context
+                    .resident
+                    .new_request_from_context_shift(
+                        decision,
+                        ContextWindowStateV1::new(history.len() as u64, history.len() as u64, 0),
+                        &history,
+                        context.capacity,
+                    )
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                self.inner = owner;
+                context.state = decision.proposed_state();
+                context.history = retained_history;
+                return gemma_step_from_output(&output, output.token_ids().len().saturating_sub(1));
+            }
+            context.state =
+                ContextWindowStateV1::new(history.len() as u64, history.len() as u64, 0);
+            context.history = history;
+        }
+        let step =
+            GenerationExecutorV1::prefill(&mut self.inner, input_token_ids, include_last_logits)?;
+        self.publish_fresh_prefix(input_token_ids.len())?;
+        self.save_checkpoint_after_prefill(input_token_ids.len())?;
+        Ok(step)
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let output = GenerationExecutorV1::decode(&mut self.inner, token_id, include_last_logits)?;
+        if let Some(context) = self.context_shift.as_mut() {
+            context.history.push(
+                i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            );
+            context.state = context
+                .state
+                .after_append(1, context.capacity)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        Ok(output)
+    }
+
+    fn before_decode(&mut self, _token_id: u32) -> Result<(), GenerationServiceError> {
+        let Some(context) = self.context_shift.as_mut() else {
+            return Ok(());
+        };
+        let decision = context
+            .policy
+            .plan(context.state, context.capacity, 1)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        if !decision.requires_shift() {
+            return Ok(());
+        }
+        context
+            .policy
+            .validate_adapter(Gemma4ResidentModel::context_adapter_capabilities())
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let retained = decision
+            .retained_token_ids(&context.history)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let (owner, _output) = context
+            .resident
+            .new_request_from_context_shift(
+                decision,
+                context.state,
+                &context.history,
+                context.capacity,
+            )
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        self.inner = owner;
+        context.state = decision.proposed_state();
+        context.history = retained;
+        Ok(())
+    }
+
+    fn supports_device_selector(&self) -> bool {
+        self.matched_tokens.is_none() && self.context_shift.is_none()
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.matched_tokens.is_some() || self.context_shift.is_some() {
+            return Err(GenerationServiceError::DeviceSelectorUnsupported);
+        }
+        let step = GenerationExecutorV1::prefill_with_device_selector(
+            &mut self.inner,
+            input_token_ids,
+            selector,
+        )?;
+        self.publish_fresh_prefix(input_token_ids.len())?;
+        self.save_checkpoint_after_prefill(input_token_ids.len())?;
+        Ok(step)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &sllm_core::DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.context_shift.is_some() {
+            return Err(GenerationServiceError::DeviceSelectorUnsupported);
+        }
+        let output =
+            GenerationExecutorV1::decode_with_device_selector(&mut self.inner, token_id, selector)?;
+        if let Some(context) = self.context_shift.as_mut() {
+            context.history.push(
+                i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            );
+            context.state = context
+                .state
+                .after_append(1, context.capacity)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        }
+        Ok(output)
+    }
+
+    fn cancel(&mut self) {
+        self.inner.cancel();
+    }
+}
+
+fn qwen_step_from_output(
+    output: &sllm_core::QwenExecutionOutput,
+    row: usize,
+) -> Result<GenerationStepV1, GenerationServiceError> {
+    let token = *output
+        .token_ids()
+        .get(row)
+        .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+    Ok(GenerationStepV1::new(
+        u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+        output.last_logits().map(<[f32]>::to_vec),
+    ))
+}
+
+fn gemma_step_from_output(
+    output: &sllm_core::Gemma4ExecutionOutput,
+    row: usize,
+) -> Result<GenerationStepV1, GenerationServiceError> {
+    let token = *output
+        .token_ids()
+        .get(row)
+        .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+    Ok(GenerationStepV1::new(
+        u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+        output.last_logits().map(<[f32]>::to_vec),
+    ))
 }
 
 struct QwenMultimodalExecutorV1<'a> {
@@ -1798,6 +4309,368 @@ fn require_clean_request_memory(
 mod tests {
     use super::*;
     use crate::ChatMessageV1;
+
+    fn checkpoint_test_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "sllm-phase41-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn phase41_defaults_are_disabled_and_valid() {
+        let config = Phase41ProductionConfigV1::default();
+        assert_eq!(config.prefix_cache, PrefixCacheStartupConfigV1::Disabled);
+        assert_eq!(
+            config.context_window,
+            ContextWindowStartupConfigV1::Disabled
+        );
+        assert_eq!(config.checkpoint, CheckpointStartupConfigV1::Disabled);
+        assert_eq!(config.draft, DraftStartupConfigV1::Disabled);
+        config.validate_startup().unwrap();
+        validate_qwen_phase41_operational_config(&config).unwrap();
+        validate_gemma_phase41_operational_config(&config).unwrap();
+        assert_eq!(
+            QwenPrefixCacheRuntimeV1::new(&config.prefix_cache)
+                .unwrap()
+                .baseline_bytes()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            GemmaPrefixCacheRuntimeV1::new(&config.prefix_cache)
+                .unwrap()
+                .baseline_bytes()
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn operational_draft_validation_fails_closed_without_silent_fallback() {
+        let external = Phase41ProductionConfigV1 {
+            draft: DraftStartupConfigV1::External {
+                model_identity: "draft-model-v1".to_owned(),
+                tokenizer_identity: "tokenizer-v1".to_owned(),
+                vocabulary_size: 1024,
+                width: 2,
+            },
+            ..Phase41ProductionConfigV1::default()
+        };
+        external.validate_startup().unwrap();
+        for error in [
+            validate_qwen_phase41_operational_config(&external).unwrap_err(),
+            validate_gemma_phase41_operational_config(&external).unwrap_err(),
+        ] {
+            assert!(
+                error
+                    .to_string()
+                    .contains("independently provisioned executor")
+            );
+        }
+
+        let qwen_prefix_mtp = Phase41ProductionConfigV1 {
+            prefix_cache: PrefixCacheStartupConfigV1::Enabled {
+                max_entries: 1,
+                max_logical_tokens: 1,
+                max_resident_bytes: 1,
+            },
+            draft: DraftStartupConfigV1::MtpAuto,
+            ..Phase41ProductionConfigV1::default()
+        };
+        qwen_prefix_mtp.validate_startup().unwrap();
+        assert!(
+            validate_qwen_phase41_operational_config(&qwen_prefix_mtp)
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+
+        for draft in [
+            DraftStartupConfigV1::MtpAuto,
+            DraftStartupConfigV1::Ngram { order: 2, width: 2 },
+        ] {
+            let config = Phase41ProductionConfigV1 {
+                draft,
+                ..Phase41ProductionConfigV1::default()
+            };
+            config.validate_startup().unwrap();
+            assert!(validate_gemma_phase41_operational_config(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn qwen_checkpoint_rejects_other_phase41_state_owners() {
+        let checkpoint = CheckpointStartupConfigV1::Enabled {
+            directory: PathBuf::from("checkpoints"),
+            quota_bytes: 1024,
+            load_name: None,
+            save_name: Some("prompt".to_owned()),
+        };
+        for config in [
+            Phase41ProductionConfigV1 {
+                checkpoint: checkpoint.clone(),
+                prefix_cache: PrefixCacheStartupConfigV1::Enabled {
+                    max_entries: 1,
+                    max_logical_tokens: 1,
+                    max_resident_bytes: 1,
+                },
+                ..Phase41ProductionConfigV1::default()
+            },
+            Phase41ProductionConfigV1 {
+                checkpoint: checkpoint.clone(),
+                context_window: ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                    keep_prefix: 1,
+                    keep_recent: 1,
+                },
+                ..Phase41ProductionConfigV1::default()
+            },
+            Phase41ProductionConfigV1 {
+                checkpoint: checkpoint.clone(),
+                draft: DraftStartupConfigV1::Ngram { order: 2, width: 1 },
+                ..Phase41ProductionConfigV1::default()
+            },
+        ] {
+            assert!(validate_qwen_phase41_operational_config(&config).is_err());
+            assert!(validate_gemma_phase41_operational_config(&config).is_err());
+        }
+        let enabled = Phase41ProductionConfigV1 {
+            checkpoint,
+            ..Phase41ProductionConfigV1::default()
+        };
+        assert!(validate_qwen_phase41_operational_config(&enabled).is_ok());
+        assert!(validate_gemma_phase41_operational_config(&enabled).is_ok());
+    }
+
+    #[test]
+    fn checkpoint_load_and_save_names_are_exclusive() {
+        let config = CheckpointStartupConfigV1::Enabled {
+            directory: PathBuf::from("checkpoints"),
+            quota_bytes: 1024,
+            load_name: Some("load".to_owned()),
+            save_name: Some("save".to_owned()),
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn enabled_prefix_runtime_starts_with_zero_owned_baseline() {
+        let config = PrefixCacheStartupConfigV1::Enabled {
+            max_entries: 1,
+            max_logical_tokens: 1,
+            max_resident_bytes: 1,
+        };
+        assert_eq!(
+            QwenPrefixCacheRuntimeV1::new(&config)
+                .unwrap()
+                .baseline_bytes()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            GemmaPrefixCacheRuntimeV1::new(&config)
+                .unwrap()
+                .baseline_bytes()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            checked_prefix_request_state_baseline([0, 17, 23]).unwrap(),
+            40
+        );
+        assert!(checked_prefix_request_state_baseline([u64::MAX, 1]).is_err());
+    }
+
+    #[test]
+    fn prefix_lookup_kinds_map_to_bounded_production_audit_values() {
+        assert_eq!(
+            production_prefix_kind(PrefixLookupKind::Miss),
+            ProductionPrefixCacheResultV1::Miss
+        );
+        assert_eq!(
+            production_prefix_kind(PrefixLookupKind::PartialHit),
+            ProductionPrefixCacheResultV1::PartialHit
+        );
+        assert_eq!(
+            production_prefix_kind(PrefixLookupKind::ExactHit),
+            ProductionPrefixCacheResultV1::ExactHit
+        );
+    }
+
+    #[test]
+    fn production_ngram_order_is_a_longest_suffix_search_bound() {
+        let provider = production_ngram_provider(7).unwrap();
+        assert_eq!(provider.min_order(), 1);
+        assert_eq!(provider.max_order(), 7);
+    }
+
+    #[test]
+    fn fresh_prefix_publication_accepts_prompt_only_state() {
+        require_prompt_only_prefix(3, 3).unwrap();
+        for committed_length in [2, 4] {
+            assert!(require_prompt_only_prefix(committed_length, 3).is_err());
+        }
+    }
+
+    #[test]
+    fn phase41_prefix_and_draft_limits_check_both_boundaries() {
+        for max_entries in [1, MAX_PREFIX_CACHE_ENTRIES_V1] {
+            PrefixCacheStartupConfigV1::Enabled {
+                max_entries,
+                max_logical_tokens: MAX_PREFIX_CACHE_LOGICAL_TOKENS_V1,
+                max_resident_bytes: 1,
+            }
+            .validate()
+            .unwrap();
+        }
+        for max_entries in [0, MAX_PREFIX_CACHE_ENTRIES_V1 + 1] {
+            assert!(
+                PrefixCacheStartupConfigV1::Enabled {
+                    max_entries,
+                    max_logical_tokens: 1,
+                    max_resident_bytes: 1,
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        for order in [1, MAX_DRAFT_NGRAM_ORDER_V1] {
+            for width in [1, MAX_DRAFT_WIDTH_V1] {
+                DraftStartupConfigV1::Ngram { order, width }
+                    .validate()
+                    .unwrap();
+            }
+        }
+        for (order, width) in [
+            (0, 1),
+            (MAX_DRAFT_NGRAM_ORDER_V1 + 1, 1),
+            (1, 0),
+            (1, MAX_DRAFT_WIDTH_V1 + 1),
+        ] {
+            assert!(
+                DraftStartupConfigV1::Ngram { order, width }
+                    .validate()
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn context_policy_rejects_empty_and_overflowing_retention() {
+        ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+            keep_prefix: 0,
+            keep_recent: 1,
+        }
+        .validate()
+        .unwrap();
+        assert!(
+            ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                keep_prefix: 0,
+                keep_recent: 0,
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                keep_prefix: u64::MAX,
+                keep_recent: 1,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn checkpoint_load_seam_fails_closed_without_disclosing_the_target() {
+        let directory = checkpoint_test_directory("load");
+        std::fs::create_dir(&directory).unwrap();
+        let config = CheckpointStartupConfigV1::Enabled {
+            directory: directory.clone(),
+            quota_bytes: 1,
+            load_name: Some("missing-load".to_owned()),
+            save_name: None,
+        };
+        let error = config
+            .validate_startup_load_exists()
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, "configured checkpoint load target is unavailable");
+        assert!(!error.contains(directory.to_string_lossy().as_ref()));
+        assert!(!error.contains("missing-load"));
+
+        std::fs::write(directory.join("missing-load.ckpt"), b"typed seam only").unwrap();
+        config.validate_startup_load_exists().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_names_are_bounded_and_cannot_escape_the_directory() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../escape",
+            "contains/slash",
+            "contains space",
+        ] {
+            assert!(
+                CheckpointStartupConfigV1::Enabled {
+                    directory: PathBuf::from("checkpoints"),
+                    quota_bytes: 1,
+                    load_name: None,
+                    save_name: Some(name.to_owned()),
+                }
+                .validate()
+                .is_err(),
+                "accepted invalid name {name:?}"
+            );
+        }
+        CheckpointStartupConfigV1::Enabled {
+            directory: PathBuf::from("checkpoints"),
+            quota_bytes: 1,
+            load_name: None,
+            save_name: Some("safe_NAME-1.0".to_owned()),
+        }
+        .validate()
+        .unwrap();
+    }
+
+    #[test]
+    fn phase41_audit_is_bounded_and_redacted() {
+        let json = serde_json::to_value(ProductionPhase41AuditV1 {
+            prefix_cache_result: Some(ProductionPrefixCacheResultV1::PartialHit),
+            prefix_shared_pages: 3,
+            prefix_cow_pages: 1,
+            prefix_copied_bytes: 4096,
+            checkpoint_operation: Some(ProductionCheckpointOperationV1::Load),
+            checkpoint_result: Some(ProductionCheckpointResultV1::Succeeded),
+            context_shift_count: 2,
+            draft_provider: Some(ProductionDraftProviderV1::External),
+            draft_proposed_tokens: 7,
+            draft_accepted_tokens: 5,
+            draft_rejected_tokens: 2,
+        })
+        .unwrap();
+        assert_eq!(json["prefix_cache_result"], "partial-hit");
+        assert_eq!(json["checkpoint_operation"], "load");
+        assert_eq!(json["checkpoint_result"], "succeeded");
+        assert_eq!(json["draft_provider"], "external");
+        let serialized = serde_json::to_string(&json).unwrap();
+        for forbidden in [
+            "path",
+            "directory",
+            "identity",
+            "checkpoint_name",
+            "token_id",
+        ] {
+            assert!(!serialized.contains(forbidden), "audit exposed {forbidden}");
+        }
+    }
 
     #[test]
     fn embedded_gguf_fp8_provider_accepts_native_and_fnuz_targets() {

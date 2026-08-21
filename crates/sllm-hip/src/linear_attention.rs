@@ -10,6 +10,7 @@ use std::time::Duration;
 use sllm_core::{
     ExecutionSessionId, LinearAttentionLayout, LinearAttentionRequest,
     LinearAttentionStateDescriptor, LinearAttentionStateId, LinearAttentionStateSnapshot,
+    StateForkAuditV1, StateForkModeV1,
 };
 use sllm_hip_sys as sys;
 
@@ -121,6 +122,109 @@ impl LinearAttentionStateResource {
         })
     }
 
+    pub(crate) fn fork(
+        &self,
+        state_id: LinearAttentionStateId,
+        descriptor: LinearAttentionStateDescriptor,
+    ) -> Result<(Self, StateForkAuditV1), RuntimeError> {
+        if descriptor.layer_id() != self.inner.descriptor.layer_id()
+            || descriptor.layout() != self.inner.descriptor.layout()
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidLinearAttentionStateDescriptor,
+                "native linear fork requires matching layer/layout metadata",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_state_fork_info_t {
+            struct_size: size_of::<sys::sllm_state_fork_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            mode: 0,
+            source_state_identity: 0,
+            child_state_identity: 0,
+            source_owned_bytes: 0,
+            child_owned_bytes: 0,
+            copied_bytes: 0,
+            shared_bytes: 0,
+            published_length: 0,
+            page_bytes: 0,
+            reserved: [0; 4],
+        };
+        let mut raw_child = std::ptr::null_mut();
+        let destination_info = sys::sllm_linear_attention_state_create_info_t {
+            struct_size: size_of::<sys::sllm_linear_attention_state_create_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            session_id: self.inner.session_id.raw(),
+            layer_id: descriptor.layer_id(),
+            flags: 0,
+            capacity_tokens: descriptor.capacity(),
+            qk_heads: descriptor.layout().qk_heads() as u32,
+            value_heads: descriptor.layout().value_heads() as u32,
+            head_dim: descriptor.layout().head_dim() as u32,
+            conv_kernel_size: descriptor.layout().conv_kernel_size() as u32,
+        };
+        let status = unsafe {
+            sys::sllm_linear_attention_state_fork(
+                self.raw_handle()?.as_ptr(),
+                &destination_info,
+                &mut raw_child,
+                &mut info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        let raw_child = NonNull::new(raw_child).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native linear fork returned a null child handle on success",
+            )
+        })?;
+        if info.mode != sys::SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY {
+            let mut child_handle = raw_child.as_ptr();
+            let _ = unsafe {
+                sys::sllm_linear_attention_state_release(&mut child_handle, &mut error_sink)
+            };
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidLinearAttentionStateDescriptor,
+                "native linear fork did not use device copy mode",
+            ));
+        }
+        let audit = StateForkAuditV1::new(
+            StateForkModeV1::DeviceCopy,
+            info.published_length,
+            0,
+            info.copied_bytes,
+            info.child_owned_bytes,
+        )
+        .map_err(|error| {
+            let mut child_handle = raw_child.as_ptr();
+            let _ = unsafe {
+                sys::sllm_linear_attention_state_release(&mut child_handle, &mut error_sink)
+            };
+            RuntimeError::new(
+                RuntimeStatus::InvalidLinearAttentionStateDescriptor,
+                format!("native linear fork audit failed core validation: {error}"),
+            )
+        })?;
+        Ok((
+            Self {
+                inner: Arc::new(LinearAttentionStateInner {
+                    raw: raw_child.as_ptr() as usize,
+                    context: self.inner.context.clone(),
+                    session_id: self.inner.session_id,
+                    state_id,
+                    descriptor,
+                    last_generation: AtomicU64::new(
+                        self.inner.last_generation.load(Ordering::Acquire),
+                    ),
+                }),
+            },
+            audit,
+        ))
+    }
+
     pub(crate) fn snapshot(&self) -> Result<LinearAttentionStateSnapshot, RuntimeError> {
         let mut info = empty_view_info();
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
@@ -161,6 +265,148 @@ impl LinearAttentionStateResource {
                 self.raw_handle()?.as_ptr(),
                 expected_length,
                 rewind_length,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn export_chunk(
+        &self,
+        plane: u32,
+        byte_offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), RuntimeError> {
+        if destination.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "linear export chunk must not be empty",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_state_chunk_t {
+            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            plane,
+            reserved0: 0,
+            reserved1: 0,
+            byte_offset,
+            byte_length: destination.len() as u64,
+            host_pointer: destination.as_mut_ptr().cast(),
+            host_capacity: destination.len() as u64,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_linear_attention_state_export(
+                self.raw_handle()?.as_ptr(),
+                &chunk,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn import_chunk(
+        &self,
+        plane: u32,
+        byte_offset: u64,
+        source: &[u8],
+    ) -> Result<(), RuntimeError> {
+        if source.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "linear import chunk must not be empty",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_state_chunk_t {
+            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            plane,
+            reserved0: 0,
+            reserved1: 0,
+            byte_offset,
+            byte_length: source.len() as u64,
+            host_pointer: source.as_ptr().cast_mut().cast(),
+            host_capacity: source.len() as u64,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_linear_attention_state_import(
+                self.raw_handle()?.as_ptr(),
+                &chunk,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn image_query(&self) -> Result<sys::sllm_state_image_info_t, RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_state_image_info_t {
+            struct_size: size_of::<sys::sllm_state_image_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            reserved0: 0,
+            session_id: 0,
+            layer_id: 0,
+            dtype: 0,
+            encoding: 0,
+            active_slot: 0,
+            capacity_tokens: 0,
+            published_length: 0,
+            generation: 0,
+            plane_count: 0,
+            reserved: [0; 7],
+        };
+        let status = unsafe {
+            sys::sllm_linear_attention_state_image_query(
+                self.raw_handle()?.as_ptr(),
+                &mut info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        Ok(info)
+    }
+
+    pub(crate) fn image_plane_size(&self, plane: u32) -> Result<u64, RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut size_bytes = 0_u64;
+        let status = unsafe {
+            sys::sllm_linear_attention_state_image_plane_size(
+                self.raw_handle()?.as_ptr(),
+                plane,
+                &mut size_bytes,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        if size_bytes == 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidLinearAttentionStateDescriptor,
+                "native linear image plane size is zero",
+            ));
+        }
+        Ok(size_bytes)
+    }
+
+    pub(crate) fn import_finalize(
+        &self,
+        info: &sys::sllm_state_image_info_t,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sys::sllm_linear_attention_state_import_finalize(
+                self.raw_handle()?.as_ptr(),
+                info,
                 &mut error_sink,
             )
         };

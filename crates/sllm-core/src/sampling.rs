@@ -11,6 +11,8 @@ use std::fmt;
 use std::fs::File;
 use std::io::Read;
 
+use sha2::{Digest, Sha256};
+
 /// Validated OpenAI profile-v1 sampling parameters.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SamplingParametersV1 {
@@ -108,6 +110,10 @@ pub enum SamplingError {
     TokenIdOutOfRange { token_id: u32 },
     InvalidMaskLength,
     UnsupportedDeviceSelector,
+    RuntimeStateTooLarge,
+    RuntimeStateMalformed,
+    RuntimeStateVersionUnsupported { version: u16 },
+    RuntimeStateIdentityMismatch,
 }
 
 impl fmt::Display for SamplingError {
@@ -185,6 +191,20 @@ impl fmt::Display for SamplingError {
             Self::UnsupportedDeviceSelector => {
                 formatter.write_str("sampler chain cannot use the prepared device selector subset")
             }
+            Self::RuntimeStateTooLarge => {
+                formatter.write_str("sampler runtime state exceeds its bounded size")
+            }
+            Self::RuntimeStateMalformed => {
+                formatter.write_str("sampler runtime state is malformed")
+            }
+            Self::RuntimeStateVersionUnsupported { version } => {
+                write!(
+                    formatter,
+                    "unsupported sampler runtime state version {version}"
+                )
+            }
+            Self::RuntimeStateIdentityMismatch => formatter
+                .write_str("sampler runtime state identity differs from the sampler config"),
         }
     }
 }
@@ -197,9 +217,24 @@ pub trait SamplingRandomSource {
 }
 
 /// Linux OS-seeded per-request generator.
-#[derive(Debug)]
+pub const SAMPLING_RUNTIME_STATE_SCHEMA_V1: &str = "sllm-sampling-runtime-state-v1";
+const SAMPLING_RUNTIME_MAGIC: [u8; 8] = *b"SLLMSMP1";
+const SAMPLING_RUNTIME_VERSION: u16 = 1;
+pub const MAX_SAMPLING_RUNTIME_STATE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_SAMPLING_RUNTIME_COUNT_ENTRIES: usize = 1_048_576;
+
+/// Request-local SplitMix64 state.  The state is intentionally omitted from
+/// Debug output because it is part of the request's reproducibility material.
 pub struct OsSamplingRandom {
     state: u64,
+}
+
+impl fmt::Debug for OsSamplingRandom {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OsSamplingRandom")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OsSamplingRandom {
@@ -249,6 +284,22 @@ impl OsSamplingRandom {
         }
     }
 
+    /// Returns the post-draw stream state without exposing it through Debug.
+    /// A caller persisting this value must treat it as sensitive request state.
+    pub const fn snapshot_state(&self) -> u64 {
+        self.state
+    }
+
+    /// Reconstructs a request-local stream at an exact post-draw state.
+    pub const fn from_snapshot_state(state: u64) -> Self {
+        Self { state }
+    }
+
+    /// Restores a request-local stream at an exact post-draw state.
+    pub const fn restore_snapshot_state(&mut self, state: u64) {
+        self.state = state;
+    }
+
     fn next_u64(&mut self) -> u64 {
         // SplitMix64 is used after the state is seeded by the OS or supplied
         // explicitly by the request. It is adequate for categorical sampling
@@ -267,10 +318,20 @@ impl SamplingRandomSource for OsSamplingRandom {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProfileSamplerV1 {
     parameters: SamplingParametersV1,
     token_counts: BTreeMap<u32, u32>,
+}
+
+impl fmt::Debug for ProfileSamplerV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ProfileSamplerV1")
+            .field("parameters", &self.parameters)
+            .field("token_count_entries", &self.token_counts.len())
+            .finish()
+    }
 }
 
 impl ProfileSamplerV1 {
@@ -602,7 +663,7 @@ pub const SAMPLER_STAGE_ORDER_V1: &[SamplerStageV1] = &[
 /// Backend-neutral, versioned sampler-chain configuration. All optional
 /// stages are disabled by default; `legacy` therefore retains the exact
 /// profile-v1 path, including greedy Argmax's no-logits/no-RNG behavior.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SamplerChainConfigV1 {
     pub parameters: SamplingParametersV1,
     pub top_k: Option<usize>,
@@ -619,6 +680,35 @@ pub struct SamplerChainConfigV1 {
     /// Return selected logprob metadata even when `top_logprobs` is zero.
     pub return_logprobs: bool,
     pub top_logprobs: usize,
+}
+
+impl fmt::Debug for SamplerChainConfigV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SamplerChainConfigV1")
+            .field("parameters", &self.parameters)
+            .field("top_k", &self.top_k)
+            .field("min_p", &self.min_p)
+            .field("typical_p", &self.typical_p)
+            .field("repeat_penalty", &self.repeat_penalty)
+            .field("repeat_last_n", &self.repeat_last_n)
+            .field("dynamic_temperature", &self.dynamic_temperature)
+            .field("ignore_eos_enabled", &self.ignore_eos_token.is_some())
+            .field("logit_bias_entries", &self.logit_bias.len())
+            .field("dry_enabled", &self.dry.is_some())
+            .field(
+                "dry_sequence_breaker_count",
+                &self
+                    .dry
+                    .as_ref()
+                    .map_or(0, |dry| dry.sequence_breakers.len()),
+            )
+            .field("xtc", &self.xtc)
+            .field("mirostat", &self.mirostat)
+            .field("return_logprobs", &self.return_logprobs)
+            .field("top_logprobs", &self.top_logprobs)
+            .finish()
+    }
 }
 
 impl SamplerChainConfigV1 {
@@ -832,6 +922,101 @@ impl SamplerChainConfigV1 {
             || self.return_logprobs
             || self.top_logprobs > 0
     }
+
+    /// Stable identity for the validated sampler policy.  Runtime snapshots
+    /// carry this digest so they cannot be restored under a different chain.
+    pub fn identity_digest(&self) -> [u8; 32] {
+        sampler_config_digest(self)
+    }
+}
+
+fn sampler_config_digest(config: &SamplerChainConfigV1) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(SAMPLING_RUNTIME_STATE_SCHEMA_V1.as_bytes());
+    digest.update(config.parameters.temperature().to_bits().to_le_bytes());
+    digest.update(config.parameters.top_p().to_bits().to_le_bytes());
+    digest.update(config.parameters.presence_penalty().to_bits().to_le_bytes());
+    digest.update(
+        config
+            .parameters
+            .frequency_penalty()
+            .to_bits()
+            .to_le_bytes(),
+    );
+    match config.top_k {
+        Some(value) => {
+            digest.update([1]);
+            digest.update((value as u64).to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest.update(config.min_p.to_bits().to_le_bytes());
+    digest.update(config.typical_p.to_bits().to_le_bytes());
+    digest.update(config.repeat_penalty.to_bits().to_le_bytes());
+    digest.update((config.repeat_last_n as u64).to_le_bytes());
+    match config.dynamic_temperature {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.min_temperature.to_bits().to_le_bytes());
+            digest.update(value.max_temperature.to_bits().to_le_bytes());
+            digest.update(value.exponent.to_bits().to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    match config.ignore_eos_token {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest.update((config.logit_bias.len() as u64).to_le_bytes());
+    for entry in &config.logit_bias {
+        digest.update(entry.token_id.to_le_bytes());
+        digest.update(entry.bias.to_bits().to_le_bytes());
+    }
+    match &config.dry {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.multiplier.to_bits().to_le_bytes());
+            digest.update(value.base.to_bits().to_le_bytes());
+            digest.update((value.allowed_length as u64).to_le_bytes());
+            digest.update((value.penalty_last_n as u64).to_le_bytes());
+            digest.update((value.sequence_breakers.len() as u64).to_le_bytes());
+            for breaker in &value.sequence_breakers {
+                digest.update((breaker.len() as u64).to_le_bytes());
+                for token in breaker {
+                    digest.update(token.to_le_bytes());
+                }
+            }
+        }
+        None => digest.update([0]),
+    }
+    match config.xtc {
+        Some(value) => {
+            digest.update([1]);
+            digest.update(value.probability.to_bits().to_le_bytes());
+            digest.update(value.threshold.to_bits().to_le_bytes());
+            digest.update((value.min_keep as u64).to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    match config.mirostat {
+        Some(value) => {
+            digest.update([1]);
+            digest.update([match value.mode {
+                MirostatModeV1::V1 => 1,
+                MirostatModeV1::V2 => 2,
+            }]);
+            digest.update(value.tau.to_bits().to_le_bytes());
+            digest.update(value.eta.to_bits().to_le_bytes());
+            digest.update(value.mu.to_bits().to_le_bytes());
+        }
+        None => digest.update([0]),
+    }
+    digest.update([u8::from(config.return_logprobs)]);
+    digest.update((config.top_logprobs as u64).to_le_bytes());
+    digest.finalize().into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -850,7 +1035,7 @@ pub struct SamplingSelectionV1 {
 /// Inputs for the bounded M=1 prepared device selector subset.  The vectors
 /// are vocabulary-sized and are uploaded on the model execution queue; only
 /// the fixed-size selected record is read back.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct DeviceTokenSelectorRequestV1 {
     additive_logits: Vec<f32>,
     valid_mask: Vec<u8>,
@@ -858,6 +1043,18 @@ pub struct DeviceTokenSelectorRequestV1 {
     seed: u64,
     counter: u64,
     return_logprob: bool,
+}
+
+impl fmt::Debug for DeviceTokenSelectorRequestV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceTokenSelectorRequestV1")
+            .field("additive_logits_len", &self.additive_logits.len())
+            .field("valid_mask_len", &self.valid_mask.len())
+            .field("temperature", &self.temperature)
+            .field("return_logprob", &self.return_logprob)
+            .finish()
+    }
 }
 
 impl DeviceTokenSelectorRequestV1 {
@@ -886,12 +1083,24 @@ impl DeviceTokenSelectorRequestV1 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SamplerChainV1 {
     config: SamplerChainConfigV1,
     token_counts: BTreeMap<u32, u32>,
     history: Vec<u32>,
     mirostat_mu: f64,
+}
+
+impl fmt::Debug for SamplerChainV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SamplerChainV1")
+            .field("config", &self.config)
+            .field("token_count_entries", &self.token_counts.len())
+            .field("history_len", &self.history.len())
+            .field("has_mirostat_state", &self.config.mirostat.is_some())
+            .finish()
+    }
 }
 
 impl SamplerChainV1 {
@@ -922,6 +1131,121 @@ impl SamplerChainV1 {
 
     pub fn config(&self) -> &SamplerChainConfigV1 {
         &self.config
+    }
+
+    /// Encodes the mutable sampler state without exposing token IDs or the
+    /// Mirostat value through Debug.  The config identity is embedded so a
+    /// snapshot cannot be applied to a different sampler policy.
+    pub fn snapshot(&self) -> Result<Vec<u8>, SamplingError> {
+        if self.token_counts.len() > MAX_SAMPLING_RUNTIME_COUNT_ENTRIES
+            || self.history.len() > MAX_SAMPLING_HISTORY
+            || !self.mirostat_mu.is_finite()
+        {
+            return Err(SamplingError::RuntimeStateTooLarge);
+        }
+        if self.config.mirostat.is_none() && self.mirostat_mu != 0.0 {
+            return Err(SamplingError::RuntimeStateMalformed);
+        }
+        let counts_bytes = self
+            .token_counts
+            .len()
+            .checked_mul(8)
+            .ok_or(SamplingError::RuntimeStateTooLarge)?;
+        let history_bytes = self
+            .history
+            .len()
+            .checked_mul(4)
+            .ok_or(SamplingError::RuntimeStateTooLarge)?;
+        let header_bytes = 8usize
+            .checked_add(2 + 2 + 32 + 4 + 4 + 8)
+            .ok_or(SamplingError::RuntimeStateTooLarge)?;
+        let total_bytes = header_bytes
+            .checked_add(counts_bytes)
+            .and_then(|value| value.checked_add(history_bytes))
+            .ok_or(SamplingError::RuntimeStateTooLarge)?;
+        if total_bytes > MAX_SAMPLING_RUNTIME_STATE_BYTES {
+            return Err(SamplingError::RuntimeStateTooLarge);
+        }
+        let mut bytes = Vec::with_capacity(total_bytes);
+        bytes.extend_from_slice(&SAMPLING_RUNTIME_MAGIC);
+        bytes.extend_from_slice(&SAMPLING_RUNTIME_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&self.config.identity_digest());
+        bytes.extend_from_slice(&(self.token_counts.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(self.history.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&self.mirostat_mu.to_bits().to_le_bytes());
+        for (&token, &count) in &self.token_counts {
+            if count == 0 {
+                return Err(SamplingError::RuntimeStateMalformed);
+            }
+            bytes.extend_from_slice(&token.to_le_bytes());
+            bytes.extend_from_slice(&count.to_le_bytes());
+        }
+        for &token in &self.history {
+            bytes.extend_from_slice(&token.to_le_bytes());
+        }
+        debug_assert_eq!(bytes.len(), total_bytes);
+        Ok(bytes)
+    }
+
+    /// Reconstructs a sampler from an exact mutable-state snapshot.
+    pub fn from_snapshot(
+        config: SamplerChainConfigV1,
+        bytes: &[u8],
+    ) -> Result<Self, SamplingError> {
+        config.validate()?;
+        let mut cursor = SamplerRuntimeCursor::new(bytes)?;
+        let version = cursor.u16()?;
+        if version != SAMPLING_RUNTIME_VERSION {
+            return Err(SamplingError::RuntimeStateVersionUnsupported { version });
+        }
+        if cursor.u16()? != 0 {
+            return Err(SamplingError::RuntimeStateMalformed);
+        }
+        let mut expected_digest = [0u8; 32];
+        expected_digest.copy_from_slice(cursor.take(32)?);
+        if expected_digest != config.identity_digest() {
+            return Err(SamplingError::RuntimeStateIdentityMismatch);
+        }
+        let count_len =
+            usize::try_from(cursor.u32()?).map_err(|_| SamplingError::RuntimeStateTooLarge)?;
+        let history_len =
+            usize::try_from(cursor.u32()?).map_err(|_| SamplingError::RuntimeStateTooLarge)?;
+        if count_len > MAX_SAMPLING_RUNTIME_COUNT_ENTRIES || history_len > MAX_SAMPLING_HISTORY {
+            return Err(SamplingError::RuntimeStateTooLarge);
+        }
+        let mirostat_mu = f64::from_bits(cursor.u64()?);
+        if !mirostat_mu.is_finite() || (config.mirostat.is_none() && mirostat_mu != 0.0) {
+            return Err(SamplingError::RuntimeStateMalformed);
+        }
+        let mut token_counts = BTreeMap::new();
+        for _ in 0..count_len {
+            let token = cursor.u32()?;
+            let count = cursor.u32()?;
+            if count == 0 || token_counts.insert(token, count).is_some() {
+                return Err(SamplingError::RuntimeStateMalformed);
+            }
+        }
+        let mut history = Vec::with_capacity(history_len);
+        for _ in 0..history_len {
+            history.push(cursor.u32()?);
+        }
+        cursor.finish()?;
+        Ok(Self {
+            config,
+            token_counts,
+            history,
+            mirostat_mu,
+        })
+    }
+
+    /// Transactionally replaces this sampler's mutable state from a snapshot.
+    pub fn restore_snapshot(&mut self, bytes: &[u8]) -> Result<(), SamplingError> {
+        let restored = Self::from_snapshot(self.config.clone(), bytes)?;
+        self.token_counts = restored.token_counts;
+        self.history = restored.history;
+        self.mirostat_mu = restored.mirostat_mu;
+        Ok(())
     }
 
     pub fn accept(&mut self, token_id: u32) -> Result<(), SamplingError> {
@@ -1280,6 +1604,67 @@ impl SamplerChainV1 {
             return Err(SamplingError::EmptyDistribution);
         }
         Ok(chosen)
+    }
+}
+
+struct SamplerRuntimeCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> SamplerRuntimeCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, SamplingError> {
+        if bytes.len() > MAX_SAMPLING_RUNTIME_STATE_BYTES {
+            return Err(SamplingError::RuntimeStateTooLarge);
+        }
+        if bytes.len() < SAMPLING_RUNTIME_MAGIC.len()
+            || bytes[..SAMPLING_RUNTIME_MAGIC.len()] != SAMPLING_RUNTIME_MAGIC
+        {
+            return Err(SamplingError::RuntimeStateMalformed);
+        }
+        Ok(Self {
+            bytes,
+            offset: SAMPLING_RUNTIME_MAGIC.len(),
+        })
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], SamplingError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(SamplingError::RuntimeStateTooLarge)?;
+        if end > self.bytes.len() {
+            return Err(SamplingError::RuntimeStateMalformed);
+        }
+        let result = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(result)
+    }
+
+    fn u16(&mut self) -> Result<u16, SamplingError> {
+        let mut bytes = [0u8; 2];
+        bytes.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, SamplingError> {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, SamplingError> {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn finish(self) -> Result<(), SamplingError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(SamplingError::RuntimeStateMalformed)
+        }
     }
 }
 
@@ -1686,6 +2071,20 @@ mod tests {
     }
 
     #[test]
+    fn random_snapshot_restores_exact_stream_without_debug_leak() {
+        let parameters = params(0.7, 0.9, 0.0, 0.0);
+        let mut first =
+            OsSamplingRandom::for_parameters_and_seed(parameters, Some(0xdead_beef_u64)).unwrap();
+        let _ = first.next_unit_f64().unwrap();
+        let snapshot = first.snapshot_state();
+        let mut replay = OsSamplingRandom::from_snapshot_state(snapshot);
+        assert_eq!(first.next_unit_f64(), replay.next_unit_f64());
+        let debug = format!("{first:?}");
+        assert!(debug.contains("OsSamplingRandom"));
+        assert!(!debug.contains("dead_beef"));
+    }
+
+    #[test]
     fn non_aligned_vocab_temperature_and_top_p_boundaries_are_exact() {
         let logits = [0.0, 1.0, 2.0, 3.0, -1.0, -2.0, -3.0];
         let top_one = ProfileSamplerV1::new(params(1.0, 0.0, 0.0, 0.0), &[]).unwrap();
@@ -1876,6 +2275,86 @@ mod tests {
                 .with_mirostat(mirostat)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn chain_snapshot_roundtrip_preserves_mirostat_state_and_identity() {
+        let mirostat = MirostatSamplingConfigV1::new(MirostatModeV1::V2, 2.0, 0.2, 4.0).unwrap();
+        let config = SamplerChainConfigV1::new(params(1.0, 1.0, 0.0, 0.0))
+            .with_mirostat(mirostat)
+            .unwrap();
+        let mut chain = SamplerChainV1::new(config.clone(), &[1, 2, 1]).unwrap();
+        let parameters = params(1.0, 1.0, 0.0, 0.0);
+        let mut warmup_random =
+            OsSamplingRandom::for_parameters_and_seed(parameters, Some(11)).unwrap();
+        chain
+            .select(0, Some(&[0.1, 0.7, 1.2, -0.2]), &mut warmup_random)
+            .unwrap();
+        let snapshot = chain.snapshot().unwrap();
+        let mut restored = SamplerChainV1::from_snapshot(config.clone(), &snapshot).unwrap();
+        assert_eq!(
+            restored.config().identity_digest(),
+            config.identity_digest()
+        );
+        assert_eq!(format!("{chain:?}"), format!("{restored:?}"));
+
+        let mut random_a = OsSamplingRandom::for_parameters_and_seed(parameters, Some(19)).unwrap();
+        let mut random_b = OsSamplingRandom::for_parameters_and_seed(parameters, Some(19)).unwrap();
+        for _ in 0..4 {
+            assert_eq!(
+                chain
+                    .select(0, Some(&[0.1, 0.7, 1.2, -0.2]), &mut random_a)
+                    .unwrap()
+                    .token_id,
+                restored
+                    .select(0, Some(&[0.1, 0.7, 1.2, -0.2]), &mut random_b)
+                    .unwrap()
+                    .token_id
+            );
+        }
+    }
+
+    #[test]
+    fn chain_snapshot_rejects_identity_corruption_and_bounds() {
+        let config = SamplerChainConfigV1::new(params(1.0, 1.0, 0.0, 0.0));
+        let chain = SamplerChainV1::new(config.clone(), &[1, 2]).unwrap();
+        let snapshot = chain.snapshot().unwrap();
+        let different = SamplerChainConfigV1::new(params(0.8, 1.0, 0.0, 0.0));
+        assert!(matches!(
+            SamplerChainV1::from_snapshot(different, &snapshot),
+            Err(SamplingError::RuntimeStateIdentityMismatch)
+        ));
+        assert!(matches!(
+            SamplerChainV1::from_snapshot(config.clone(), &snapshot[..snapshot.len() - 1]),
+            Err(SamplingError::RuntimeStateMalformed)
+        ));
+        let mut unsupported = snapshot.clone();
+        unsupported[8] = 2;
+        assert!(matches!(
+            SamplerChainV1::from_snapshot(config, &unsupported),
+            Err(SamplingError::RuntimeStateVersionUnsupported { version: 2 })
+        ));
+        assert!(matches!(
+            SamplerChainV1::from_snapshot(
+                SamplerChainConfigV1::new(params(1.0, 1.0, 0.0, 0.0)),
+                &vec![0_u8; MAX_SAMPLING_RUNTIME_STATE_BYTES + 1],
+            ),
+            Err(SamplingError::RuntimeStateTooLarge)
+        ));
+    }
+
+    #[test]
+    fn sampler_debug_omits_configured_token_contents() {
+        let config = SamplerChainConfigV1::new(params(1.0, 1.0, 0.0, 0.0))
+            .with_ignore_eos(999_999_937)
+            .with_logit_bias(vec![LogitBiasV1 {
+                token_id: 999_999_937,
+                bias: 1.0,
+            }])
+            .unwrap();
+        let chain = SamplerChainV1::new(config, &[]).unwrap();
+        let debug = format!("{chain:?}");
+        assert!(!debug.contains("999999937"));
     }
 
     #[test]

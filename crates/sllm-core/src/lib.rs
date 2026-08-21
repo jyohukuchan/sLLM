@@ -4,6 +4,7 @@
 //! It does not allocate model data, emulate a GPU, or execute numerical work.
 
 mod backend;
+mod context_window;
 mod dtype;
 mod execution;
 mod fake;
@@ -26,6 +27,7 @@ mod mxfp;
 mod nvfp4;
 mod nvfp4_sidecar;
 mod op;
+mod prefix_cache;
 mod prepared_execution;
 mod quantized_model;
 mod qwen35_moe;
@@ -36,6 +38,7 @@ mod qwen_vision;
 mod qwen_vision_execution;
 mod registry;
 mod sampling;
+mod session_checkpoint;
 mod speculative;
 mod tensor;
 mod weights;
@@ -44,19 +47,25 @@ pub use backend::{
     Backend, BackendCapabilities, BackendError, BackendSupport, ExecutionReceipt,
     MaterializedTensor,
 };
+pub use context_window::{
+    CONTEXT_POSITION_POLICY_VERSION_V1, ContextAdapterCapabilitiesV1, ContextAdapterRequirementsV1,
+    ContextPositionPolicyV1, ContextRetainedRangesV1, ContextShiftDecisionV1, ContextShiftError,
+    ContextShiftKindV1, ContextShiftTransactionV1, ContextTokenRangeV1, ContextWindowStateV1,
+};
 pub use dtype::{DType, Encoding, EncodingError, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 pub use execution::{
     AdapterResource, AllocationCategory, AllocationCategorySnapshot, AllocationSnapshot,
-    BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DispatchEvidence,
-    ExecutionAdapterAccess, ExecutionBuffer, ExecutionBufferId,
-    ExecutionCausalAttentionSubmissionAdapter, ExecutionError, ExecutionKvStateSubmissionAdapter,
-    ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue, ExecutionQueueFence,
-    ExecutionQueueFenceAdapter, ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession,
-    ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest, ExecutionState,
-    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvState, KvStateAppendSubmission,
-    KvStateId, LinearAttentionBindings, LinearAttentionState, LinearAttentionStateId,
-    LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
+    BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DeviceCopy,
+    DeviceCopyAuditV1, DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer,
+    ExecutionBufferId, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
+    ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue,
+    ExecutionQueueFence, ExecutionQueueFenceAdapter, ExecutionQueueId, ExecutionReadbackAdapter,
+    ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest,
+    ExecutionState, ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
+    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
+    LinearAttentionStateId, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
+    PreparedOperation, PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport,
+    Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{
@@ -82,9 +91,11 @@ pub use gemma4::{
 pub use gemma4_execution::{
     Gemma4ExecutionAudit, Gemma4ExecutionLayout, Gemma4ExecutionLayoutError, Gemma4ExecutionNode,
     Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
-    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
-    Gemma4TensorBacking, build_gemma4_execution_layout, build_gemma4_nvfp4_execution_layout,
-    build_gemma4_quantized_execution_layout, provision_gemma4_execution_buffers,
+    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4KvStateImageV1, Gemma4PrefixForkAuditV1,
+    Gemma4PrefixStateV1, Gemma4ProvisionedBuffers, Gemma4ResidentModel, Gemma4SlidingStateImageV1,
+    Gemma4StateImageV1, Gemma4TensorBacking, build_gemma4_execution_layout,
+    build_gemma4_nvfp4_execution_layout, build_gemma4_quantized_execution_layout,
+    provision_gemma4_execution_buffers,
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
@@ -93,7 +104,7 @@ pub use gemma4_graph::{
     Gemma4AttentionDescriptor, Gemma4Graph, Gemma4GraphBindingClass, Gemma4GraphError,
     Gemma4GraphNode, Gemma4GraphNodeKind, Gemma4KvDescriptor, Gemma4NormRole, Gemma4RequestState,
     Gemma4RequestStateSnapshot, Gemma4RequestTransition, Gemma4RopeDescriptor, Gemma4RopeType,
-    build_gemma4_graph,
+    build_gemma4_graph, build_gemma4_graph_with_position_mode,
 };
 pub use gguf::{
     GGUF_ALIGNMENT, GGUF_VERSION, GgufArray, GgufError, GgufExtensionV1, GgufLogicalShapeBinding,
@@ -114,9 +125,10 @@ pub use gguf_writer::{
     GgufWriteTensor, VerifiedDerivedGguf, read_derived_gguf_lock, verify_derived_gguf, write_gguf,
 };
 pub use grammar::{
-    CompiledGrammar, GrammarError, GrammarState, JsonSchemaLowerer, MAX_GRAMMAR_ACTIVE_STATES,
-    MAX_GRAMMAR_ALTERNATIVES, MAX_GRAMMAR_BYTES, MAX_GRAMMAR_NAME_BYTES, MAX_GRAMMAR_NESTING,
-    MAX_GRAMMAR_REPEAT, MAX_GRAMMAR_RULES, MAX_GRAMMAR_STACK, MAX_JSON_ENUM, MAX_JSON_PROPERTIES,
+    CompiledGrammar, GRAMMAR_RUNTIME_STATE_SCHEMA_V1, GrammarError, GrammarState,
+    JsonSchemaLowerer, MAX_GRAMMAR_ACTIVE_STATES, MAX_GRAMMAR_ALTERNATIVES, MAX_GRAMMAR_BYTES,
+    MAX_GRAMMAR_NAME_BYTES, MAX_GRAMMAR_NESTING, MAX_GRAMMAR_REPEAT, MAX_GRAMMAR_RULES,
+    MAX_GRAMMAR_RUNTIME_STATE_BYTES, MAX_GRAMMAR_STACK, MAX_JSON_ENUM, MAX_JSON_PROPERTIES,
     MAX_TOKEN_PIECE_BYTES, MAX_TOKEN_TRIE_NODES, TokenTrie, Utf8State,
 };
 pub use handles::{
@@ -126,6 +138,7 @@ pub use handles::{
 pub use kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvMemoryKind, KvPhysicalMemorySnapshot,
     KvStateAppendRequest, KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot,
+    StateForkAuditV1, StateForkModeV1,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -162,11 +175,18 @@ pub use nvfp4_sidecar::{
 };
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
-    AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
-    RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
-    RotaryTensor, SemanticOp, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
-    SplitHalfRotaryContract, TokenSelectorContractV1, TokenSelectorTensor,
-    WindowedCausalAttentionContract,
+    AttentionPreprocessPositionMode, AttentionPreprocessPositionPayloadModeV1,
+    AttentionPreprocessTensor, ElementwiseTensor, OpError, RmsNormAliasPolicy, RmsNormContract,
+    RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor, RotaryPositionModeV1, RotaryTensor,
+    SemanticOp, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
+    TokenSelectorContractV1, TokenSelectorTensor, WindowedCausalAttentionContract,
+};
+pub use prefix_cache::{
+    DEFAULT_PREFIX_CACHE_MAX_ENTRIES, DEFAULT_PREFIX_CACHE_MAX_LOGICAL_TOKENS,
+    DEFAULT_PREFIX_CACHE_MAX_RESIDENT_BYTES, MAX_PREFIX_IDENTITY_BYTES, PrefixCacheAuditSnapshot,
+    PrefixCacheBackendV1, PrefixCacheConfigV1, PrefixCacheError, PrefixCacheKeyV1, PrefixCacheV1,
+    PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
+    PrefixLookupResultV1, PrefixStateIdentityV1,
 };
 pub use prepared_execution::{
     ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
@@ -184,8 +204,9 @@ pub use qwen_execution::{
     QWEN_PREFILL_CHUNK_BUCKETS, QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS,
     QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES, QwenExecutionAudit, QwenExecutionError,
     QwenExecutionOutput, QwenExecutionRequest, QwenGraphMemoryEstimate, QwenKvLayerMemoryAudit,
-    QwenKvPayloadEvidence, QwenRequestMemoryAudit, QwenResidentModel, qwen_graph_memory_estimate,
-    qwen_prefill_chunk_candidates,
+    QwenKvPayloadEvidence, QwenKvStateImageV1, QwenLinearStateImageV1, QwenPrefixForkAuditV1,
+    QwenPrefixStateV1, QwenRequestMemoryAudit, QwenResidentModel, QwenStateImageV1,
+    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
 };
 pub use qwen_graph::{
     QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES,
@@ -195,9 +216,9 @@ pub use qwen_graph::{
     QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
     build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
     build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_moe_execution_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_qwen35_nvfp4_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_position_payload_mode,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,
@@ -231,15 +252,29 @@ pub use qwen35_moe::{
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
     DeviceTokenSelectorRequestV1, DrySamplingConfigV1, DynamicTemperatureV1, LogitBiasV1,
-    MAX_CANDIDATES, MAX_SAMPLING_HISTORY, MAX_SEQUENCE_BREAKER_TOKENS, MAX_SEQUENCE_BREAKERS,
+    MAX_CANDIDATES, MAX_SAMPLING_HISTORY, MAX_SAMPLING_RUNTIME_COUNT_ENTRIES,
+    MAX_SAMPLING_RUNTIME_STATE_BYTES, MAX_SEQUENCE_BREAKER_TOKENS, MAX_SEQUENCE_BREAKERS,
     MirostatModeV1, MirostatSamplingConfigV1, OsSamplingRandom, ProfileSamplerV1,
-    SAMPLER_CHAIN_SCHEMA_V1, SAMPLER_STAGE_ORDER_V1, SamplerChainConfigV1, SamplerChainV1,
-    SamplerStageV1, SamplingError, SamplingLogprobV1, SamplingParametersV1, SamplingRandomSource,
-    SamplingSelectionV1, XtcSamplingConfigV1,
+    SAMPLER_CHAIN_SCHEMA_V1, SAMPLER_STAGE_ORDER_V1, SAMPLING_RUNTIME_STATE_SCHEMA_V1,
+    SamplerChainConfigV1, SamplerChainV1, SamplerStageV1, SamplingError, SamplingLogprobV1,
+    SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, XtcSamplingConfigV1,
+};
+pub use session_checkpoint::{
+    CHECKPOINT_MAGIC, CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointError,
+    CheckpointIdentity, CheckpointPayload, CheckpointStore, MAX_CHECKPOINT_BYTES,
+    MAX_CHECKPOINT_HEADER_BYTES, MAX_CHECKPOINT_SECTIONS, MAX_CONVERSATION_BYTES,
+    MAX_IDENTITY_FIELD_BYTES, MAX_KV_PLANES, MAX_SECTION_BYTES, MAX_STATE_LAYERS, MAX_STATE_PLANES,
+    MAX_TOKEN_HISTORY, OpaqueStatePlane, SessionCheckpoint, SessionCheckpointHeader,
+    SessionCheckpointStore, SessionStateHeaderV1, StateLayerMetadataV1, StateOwnerKindV1,
+    StatePlaneKindV1, token_sequence_digest,
 };
 pub use speculative::{
-    DraftToken, OpaqueStateCheckpoint, SpeculativeDecision, SpeculativeError,
-    SpeculativeTransaction, TokenDistribution, verify_greedy, verify_stochastic,
+    DraftProposalV1, DraftProviderKindV1, DraftProviderV1, DraftToken,
+    ExternalDraftCompatibilityV1, ExternalDraftModelV1, ExternalDraftProviderV1,
+    MAX_NGRAM_ORDER_V1, MAX_SPECULATIVE_DRAFT_WIDTH_V1, MAX_SPECULATIVE_HISTORY_TOKENS_V1,
+    NgramDraftProviderV1, OpaqueStateCheckpoint, SpeculativeAccountingV1, SpeculativeDecision,
+    SpeculativeError, SpeculativeTransaction, TokenDistribution,
+    validate_external_draft_compatibility_v1, verify_greedy, verify_stochastic,
     verify_target_selected,
 };
 pub use tensor::{TensorError, TensorView};
@@ -1361,6 +1396,60 @@ mod tests {
         );
     }
 
+    #[test]
+    fn split_half_rotary_explicit_positions_keep_the_same_tensor_contract() {
+        let contract = SplitHalfRotaryContract::new_with_position_mode(
+            16,
+            8,
+            256,
+            256,
+            10_000.0,
+            3,
+            3,
+            262_144,
+            RotaryPositionModeV1::Explicit,
+        )
+        .unwrap();
+        let (inputs, outputs) = rotary_views(3, 16, 8, 256);
+        let descriptor = SemanticOpDescriptor::new_rotary(inputs, outputs, contract).unwrap();
+        assert_eq!(contract.position_mode(), RotaryPositionModeV1::Explicit);
+        assert_eq!(descriptor.rotary_contract(), Some(contract));
+    }
+
+    #[test]
+    fn split_half_rotary_explicit_position_boundaries_are_checked() {
+        for start in [63_u64, 64, 65, 127, 128, 129] {
+            let contract = SplitHalfRotaryContract::new_with_position_mode(
+                16,
+                8,
+                256,
+                256,
+                10_000.0,
+                start,
+                3,
+                262_144,
+                RotaryPositionModeV1::Explicit,
+            )
+            .unwrap();
+            assert_eq!(contract.start_position(), start as u32);
+            assert_eq!(contract.position_mode(), RotaryPositionModeV1::Explicit);
+        }
+        assert!(
+            SplitHalfRotaryContract::new_with_position_mode(
+                16,
+                8,
+                256,
+                256,
+                10_000.0,
+                262_143,
+                2,
+                262_144,
+                RotaryPositionModeV1::Explicit,
+            )
+            .is_err()
+        );
+    }
+
     fn causal_attention_views(
         m: usize,
         length: usize,
@@ -1478,6 +1567,29 @@ mod tests {
                 assert_eq!(contract.max_position_embeddings(), 262_144);
             }
         }
+    }
+
+    #[test]
+    fn attention_preprocess_explicit_position_payload_is_additive() {
+        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout_and_context_and_position_payload_mode(
+            AttentionPreprocessPositionMode::DecodeContinuation,
+            64,
+            3,
+            16,
+            4,
+            256,
+            262_144,
+            AttentionPreprocessPositionPayloadModeV1::Explicit,
+        )
+        .unwrap();
+        assert_eq!(
+            contract.position_payload_mode(),
+            AttentionPreprocessPositionPayloadModeV1::Explicit
+        );
+        assert_eq!(
+            contract.position_mode(),
+            AttentionPreprocessPositionMode::DecodeContinuation
+        );
     }
 
     #[test]

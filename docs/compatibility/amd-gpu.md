@@ -515,6 +515,18 @@ evidenceとは別である。Phase40ではllama.cpp sourceの直接reuseはな�
 [history](../history/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)および
 [tracked GPU summary](../../ci/matrix/phase40-token-selector-gpu-summary-v1.json)を参照する。
 
+### 2026-08-22 Phase41 state fork/COW/image
+
+canonical V620 `GPU-76a08c022586fed6` / exact `gfx1030`とR9700 `GPU-a8e9ddefa2d60f55` / exact `gfx1201`で、
+opaque stateのreal-GPU matrixを実行した。FP16 VMM fork/COWは63/64/65/127/128/129 token境界、source/child K/V、
+child append後のsource不変をbyte exactで確認した。dynamic/static FP8とNVFP4は全2/4/6 plane、linear attentionはactive slotと
+scratchを含む5 planeをimport/fork/export oracleへ照合した。各binaryは14 bundleが指定targetだけを含み、fallback、cleanup failure、
+終了後GPU process、uncorrectable ECCはいずれも0だった。
+
+exact `gfx942:sramecc+:xnack-`はROCm 7.14/LLVM 23、wave64でcompile/linkだけをPASSした。MI300X VMは削除済みなので
+Phase 41 state/context/checkpointのreal gfx942 evidenceは追加せず、既存Phase 36の別scopeへも遡及しない。lifecycleは全targetで
+`experimental`のままで、証跡範囲は[Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

@@ -175,6 +175,8 @@ pub const SLLM_HIP_ATTENTION_PREPROCESS_QGATE_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM: u32 = 64;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION: u32 = 4_294_967_295;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_MAX_M: u64 = 262_144;
+pub const SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1: u32 = 0;
+pub const SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1: u32 = 1;
 pub const SLLM_HIP_ROTARY_VERSION: u32 = 1;
 pub const SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_ROTARY_KERNEL_ID_SPLIT_HALF_BF16_FP32_V1: u32 = 1;
@@ -218,6 +220,22 @@ pub const SLLM_HIP_KV_ENCODING_FP16_V1: u32 = 0;
 pub const SLLM_HIP_KV_ENCODING_FP8_V1: u32 = 1;
 pub const SLLM_HIP_KV_ENCODING_NVFP4_V1: u32 = 2;
 pub const SLLM_HIP_KV_ENCODING_FP8_STATIC_V1: u32 = 3;
+pub const SLLM_HIP_STATE_FORK_VERSION: u32 = 1;
+pub const SLLM_HIP_STATE_FORK_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY: u32 = 1;
+pub const SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES: u32 = 2;
+pub const SLLM_HIP_KV_STATE_PLANE_KEY: u32 = 1;
+pub const SLLM_HIP_KV_STATE_PLANE_VALUE: u32 = 2;
+pub const SLLM_HIP_KV_STATE_PLANE_KEY_SCALE: u32 = 3;
+pub const SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE: u32 = 4;
+pub const SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE: u32 = 5;
+pub const SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE: u32 = 6;
+pub const SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0: u32 = 1;
+pub const SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT1: u32 = 2;
+pub const SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT0: u32 = 3;
+pub const SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT1: u32 = 4;
+pub const SLLM_HIP_LINEAR_STATE_PLANE_SCRATCH: u32 = 5;
+pub const SLLM_HIP_STATE_CHUNK_MAX_BYTES: u64 = 1_073_741_824;
 pub const SLLM_HIP_CAUSAL_ATTENTION_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1: u32 = 1;
@@ -492,6 +510,17 @@ pub struct sllm_transfer_desc_t {
     pub abi_version: u32,
     pub host_pointer: *mut core::ffi::c_void,
     pub buffer_offset_bytes: u64,
+    pub size_bytes: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_buffer_copy_d2d_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub source_offset_bytes: u64,
+    pub destination_offset_bytes: u64,
     pub size_bytes: u64,
     pub reserved: [u32; 4],
 }
@@ -1169,6 +1198,59 @@ pub struct sllm_linear_attention_view_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_state_fork_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub mode: u32,
+    pub source_state_identity: u64,
+    pub child_state_identity: u64,
+    pub source_owned_bytes: u64,
+    pub child_owned_bytes: u64,
+    pub copied_bytes: u64,
+    pub shared_bytes: u64,
+    pub published_length: u64,
+    pub page_bytes: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_state_chunk_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub plane: u32,
+    pub reserved0: u32,
+    pub reserved1: u32,
+    pub byte_offset: u64,
+    pub byte_length: u64,
+    pub host_pointer: *mut core::ffi::c_void,
+    pub host_capacity: u64,
+    pub reserved: [u32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_state_image_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub reserved0: u32,
+    pub session_id: u64,
+    pub layer_id: u32,
+    pub dtype: u32,
+    pub encoding: u32,
+    pub active_slot: u32,
+    pub capacity_tokens: u64,
+    pub published_length: u64,
+    pub generation: u64,
+    pub plane_count: u32,
+    pub reserved: [u32; 7],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_linear_attention_desc_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1297,6 +1379,14 @@ unsafe extern "C" {
         queue: *const sllm_queue_t,
         buffer: *const sllm_buffer_t,
         transfer: *const sllm_transfer_desc_t,
+        completion: *mut *mut sllm_completion_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_buffer_copy_d2d(
+        queue: *const sllm_queue_t,
+        source: *const sllm_buffer_t,
+        destination: *const sllm_buffer_t,
+        copy: *const sllm_buffer_copy_d2d_desc_t,
         completion: *mut *mut sllm_completion_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
@@ -1584,6 +1674,44 @@ unsafe extern "C" {
         completion: *mut sllm_completion_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_kv_state_fork(
+        source: *const sllm_kv_state_t,
+        destination_info: *const sllm_kv_state_create_info_v2_t,
+        child: *mut *mut sllm_kv_state_t,
+        fork_info: *mut sllm_state_fork_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_fork_query(
+        state: *const sllm_kv_state_t,
+        fork_info: *mut sllm_state_fork_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_export(
+        state: *const sllm_kv_state_t,
+        chunk: *const sllm_state_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_import(
+        state: *const sllm_kv_state_t,
+        chunk: *const sllm_state_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_image_query(
+        state: *const sllm_kv_state_t,
+        image_info: *mut sllm_state_image_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_image_plane_size(
+        state: *const sllm_kv_state_t,
+        plane: u32,
+        size_bytes: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_kv_state_import_finalize(
+        state: *const sllm_kv_state_t,
+        image_info: *const sllm_state_image_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_causal_attention_execute(
         context: *const sllm_context_t,
         queue: *const sllm_queue_t,
@@ -1611,6 +1739,39 @@ unsafe extern "C" {
         state: *const sllm_linear_attention_state_t,
         expected_length: u64,
         rewind_length: u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_fork(
+        source: *const sllm_linear_attention_state_t,
+        destination_info: *const sllm_linear_attention_state_create_info_t,
+        child: *mut *mut sllm_linear_attention_state_t,
+        fork_info: *mut sllm_state_fork_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_export(
+        state: *const sllm_linear_attention_state_t,
+        chunk: *const sllm_state_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_import(
+        state: *const sllm_linear_attention_state_t,
+        chunk: *const sllm_state_chunk_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_image_query(
+        state: *const sllm_linear_attention_state_t,
+        image_info: *mut sllm_state_image_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_image_plane_size(
+        state: *const sllm_linear_attention_state_t,
+        plane: u32,
+        size_bytes: *mut u64,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_linear_attention_state_import_finalize(
+        state: *const sllm_linear_attention_state_t,
+        image_info: *const sllm_state_image_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_linear_attention_execute(

@@ -1385,5 +1385,72 @@ int main() {
       << offsetof(sllm_linear_attention_dispatch_info_t, gcn_arch_name)
       << " reserved="
       << offsetof(sllm_linear_attention_dispatch_info_t, reserved) << '\n';
+  std::cout << "layout sllm_buffer_copy_d2d_desc_t size="
+            << sizeof(sllm_buffer_copy_d2d_desc_t)
+            << " align=" << alignof(sllm_buffer_copy_d2d_desc_t)
+            << " struct_size="
+            << offsetof(sllm_buffer_copy_d2d_desc_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_buffer_copy_d2d_desc_t, abi_version)
+            << " source_offset_bytes="
+            << offsetof(sllm_buffer_copy_d2d_desc_t, source_offset_bytes)
+            << " destination_offset_bytes="
+            << offsetof(sllm_buffer_copy_d2d_desc_t, destination_offset_bytes)
+            << " size_bytes="
+            << offsetof(sllm_buffer_copy_d2d_desc_t, size_bytes)
+            << " reserved=" << offsetof(sllm_buffer_copy_d2d_desc_t, reserved)
+            << '\n';
+  std::cout
+      << "layout sllm_state_fork_info_t size=" << sizeof(sllm_state_fork_info_t)
+      << " align=" << alignof(sllm_state_fork_info_t)
+      << " struct_size=" << offsetof(sllm_state_fork_info_t, struct_size)
+      << " abi_version=" << offsetof(sllm_state_fork_info_t, abi_version)
+      << " info_version=" << offsetof(sllm_state_fork_info_t, info_version)
+      << " mode=" << offsetof(sllm_state_fork_info_t, mode)
+      << " source_state_identity="
+      << offsetof(sllm_state_fork_info_t, source_state_identity)
+      << " child_state_identity="
+      << offsetof(sllm_state_fork_info_t, child_state_identity)
+      << " source_owned_bytes="
+      << offsetof(sllm_state_fork_info_t, source_owned_bytes)
+      << " child_owned_bytes="
+      << offsetof(sllm_state_fork_info_t, child_owned_bytes)
+      << " copied_bytes=" << offsetof(sllm_state_fork_info_t, copied_bytes)
+      << " shared_bytes=" << offsetof(sllm_state_fork_info_t, shared_bytes)
+      << " published_length="
+      << offsetof(sllm_state_fork_info_t, published_length)
+      << " page_bytes=" << offsetof(sllm_state_fork_info_t, page_bytes)
+      << " reserved=" << offsetof(sllm_state_fork_info_t, reserved) << '\n';
+  std::cout << "layout sllm_state_chunk_t size=" << sizeof(sllm_state_chunk_t)
+            << " align=" << alignof(sllm_state_chunk_t)
+            << " struct_size=" << offsetof(sllm_state_chunk_t, struct_size)
+            << " abi_version=" << offsetof(sllm_state_chunk_t, abi_version)
+            << " info_version=" << offsetof(sllm_state_chunk_t, info_version)
+            << " plane=" << offsetof(sllm_state_chunk_t, plane)
+            << " byte_offset=" << offsetof(sllm_state_chunk_t, byte_offset)
+            << " byte_length=" << offsetof(sllm_state_chunk_t, byte_length)
+            << " host_pointer=" << offsetof(sllm_state_chunk_t, host_pointer)
+            << " host_capacity=" << offsetof(sllm_state_chunk_t, host_capacity)
+            << " reserved=" << offsetof(sllm_state_chunk_t, reserved) << '\n';
+  std::cout << "layout sllm_state_image_info_t size="
+            << sizeof(sllm_state_image_info_t)
+            << " align=" << alignof(sllm_state_image_info_t)
+            << " struct_size=" << offsetof(sllm_state_image_info_t, struct_size)
+            << " abi_version=" << offsetof(sllm_state_image_info_t, abi_version)
+            << " info_version="
+            << offsetof(sllm_state_image_info_t, info_version)
+            << " session_id=" << offsetof(sllm_state_image_info_t, session_id)
+            << " layer_id=" << offsetof(sllm_state_image_info_t, layer_id)
+            << " dtype=" << offsetof(sllm_state_image_info_t, dtype)
+            << " encoding=" << offsetof(sllm_state_image_info_t, encoding)
+            << " active_slot=" << offsetof(sllm_state_image_info_t, active_slot)
+            << " capacity_tokens="
+            << offsetof(sllm_state_image_info_t, capacity_tokens)
+            << " published_length="
+            << offsetof(sllm_state_image_info_t, published_length)
+            << " generation=" << offsetof(sllm_state_image_info_t, generation)
+            << " plane_count=" << offsetof(sllm_state_image_info_t, plane_count)
+            << " reserved=" << offsetof(sllm_state_image_info_t, reserved)
+            << '\n';
   return 0;
 }

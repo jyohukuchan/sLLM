@@ -11,13 +11,19 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
+use crate::StateForkAuditV1;
+use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::execution::{
-    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, KvState,
-    KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState, OwnedTensorBinding,
-    PrepareSupport, Submission,
+    ExecutionBuffer, ExecutionError, ExecutionQueue, ExecutionSession, ExecutionStateImageV1,
+    KvState, KvStateAppendSubmission, LinearAttentionBindings, LinearAttentionState,
+    OwnedTensorBinding, PrepareSupport, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
-use crate::kv_state::{CausalAttentionDescriptor, KvPhysicalMemorySnapshot, KvStateDescriptor};
+use crate::kv_state::{
+    CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
+};
 use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDescriptor};
 use crate::model::{TensorDType, VerifiedCache};
 use crate::op::{
@@ -30,8 +36,11 @@ use crate::prepared_execution::{
     PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
 };
 use crate::qwen_graph::{
-    QwenGraph, QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphTensorBacking,
-    QwenGraphWeightBinding,
+    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenGraph, QwenGraphNode, QwenGraphNodeKind,
+    QwenGraphStateDescriptor, QwenGraphStateKind, QwenGraphTensorBacking, QwenGraphWeightBinding,
+};
+use crate::session_checkpoint::{
+    CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
 };
 use crate::tensor::{TensorError, TensorView};
 use crate::weights::{
@@ -60,6 +69,445 @@ pub struct QwenExecutionOutput {
 
 /// Evidence-only `(layer, key bytes, value bytes)` semantic KV payload.
 pub type QwenKvPayloadEvidence = (u32, Vec<u8>, Vec<u8>);
+
+/// Aggregated, redacted accounting for every state fork that made up one
+/// immutable Qwen prefix owner.  The accounting never exposes a native
+/// handle, pointer, page table, token id, or payload byte.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QwenPrefixForkAuditV1 {
+    kv_states: u32,
+    linear_states: u32,
+    shared_pages: u64,
+    copied_bytes: u64,
+    destination_owned_bytes: u64,
+    cache_resident_bytes: u64,
+}
+
+impl QwenPrefixForkAuditV1 {
+    pub const fn kv_states(self) -> u32 {
+        self.kv_states
+    }
+
+    pub const fn linear_states(self) -> u32 {
+        self.linear_states
+    }
+
+    pub const fn shared_pages(self) -> u64 {
+        self.shared_pages
+    }
+
+    pub const fn copied_bytes(self) -> u64 {
+        self.copied_bytes
+    }
+
+    pub const fn destination_owned_bytes(self) -> u64 {
+        self.destination_owned_bytes
+    }
+
+    /// Resident bytes attributable to this immutable prefix owner. Shared
+    /// VMM KV pages are charged from backend physical-memory metadata; a
+    /// backend without that optional metadata is charged the full descriptor
+    /// footprint as a conservative compatibility fallback. Device-copy KV
+    /// and all linear state use their destination-owned audit bytes.
+    pub const fn cache_resident_bytes(self) -> u64 {
+        self.cache_resident_bytes
+    }
+
+    fn add(
+        &mut self,
+        audit: StateForkAuditV1,
+        linear: bool,
+        kv_physical: Option<KvPhysicalMemorySnapshot>,
+        kv_fallback_resident_bytes: u64,
+    ) -> Result<(), QwenExecutionError> {
+        if linear {
+            self.linear_states = self.linear_states.checked_add(1).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("linear fork count overflowed".to_owned())
+            })?;
+        } else {
+            self.kv_states = self.kv_states.checked_add(1).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("KV fork count overflowed".to_owned())
+            })?;
+        }
+        self.shared_pages = self
+            .shared_pages
+            .checked_add(audit.shared_pages())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("shared page count overflowed".to_owned())
+            })?;
+        self.copied_bytes = self
+            .copied_bytes
+            .checked_add(audit.copied_bytes())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("fork copied-byte count overflowed".to_owned())
+            })?;
+        self.destination_owned_bytes = self
+            .destination_owned_bytes
+            .checked_add(audit.destination_owned_bytes())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("fork owned-byte count overflowed".to_owned())
+            })?;
+        let resident_bytes = if linear {
+            audit.destination_owned_bytes()
+        } else {
+            match audit.mode() {
+                crate::StateForkModeV1::SharedReadOnlyPages => kv_physical
+                    .map(|physical| physical.committed_bytes_per_plane())
+                    .and_then(|bytes| bytes.checked_mul(2))
+                    .unwrap_or(kv_fallback_resident_bytes),
+                crate::StateForkModeV1::DeviceCopy => audit.destination_owned_bytes(),
+            }
+        };
+        self.cache_resident_bytes = self
+            .cache_resident_bytes
+            .checked_add(resident_bytes)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "prefix resident-byte count overflowed".to_owned(),
+                )
+            })?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct QwenPrefixIdentityV1 {
+    model_fingerprint: String,
+    plan_digest: [u8; 32],
+    graph_semantics_digest: [u8; 32],
+    state_capacity: u64,
+    is_mtp: bool,
+    is_multimodal: bool,
+}
+
+/// Immutable, request-independent Qwen prefix owner.  It owns only quiescent
+/// KV and linear/GDN state forks plus identity and terminal metadata; request
+/// workspace, queue, prepared plans, completions, and selector output are not
+/// retained or shared.
+pub struct QwenPrefixStateV1 {
+    inner: Arc<QwenPrefixStateInner>,
+}
+
+/// One KV layer in a serialized Qwen state image. The descriptor is retained
+/// alongside the opaque bytes so a restore cannot silently change encoding,
+/// layout, capacity, or layer identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenKvStateImageV1 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV1,
+}
+
+impl QwenKvStateImageV1 {
+    pub fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub fn image(&self) -> &ExecutionStateImageV1 {
+        &self.image
+    }
+}
+
+/// One linear/GDN layer in a serialized Qwen state image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QwenLinearStateImageV1 {
+    descriptor: LinearAttentionStateDescriptor,
+    image: ExecutionStateImageV1,
+}
+
+impl QwenLinearStateImageV1 {
+    pub fn descriptor(&self) -> LinearAttentionStateDescriptor {
+        self.descriptor
+    }
+
+    pub fn image(&self) -> &ExecutionStateImageV1 {
+        &self.image
+    }
+}
+
+/// Complete, backend-neutral Qwen request state image. Native state handles
+/// are never persisted; each layer carries only its validated descriptor and
+/// exact opaque planes. Terminal output is optional because a checkpoint can
+/// restore state for a non-empty suffix without retaining visible output.
+#[derive(Clone, PartialEq)]
+pub struct QwenStateImageV1 {
+    session_id: crate::ExecutionSessionId,
+    identity: QwenPrefixIdentityV1,
+    committed_length: u64,
+    rope_position_delta: i64,
+    kv_layers: BTreeMap<u32, QwenKvStateImageV1>,
+    linear_layers: BTreeMap<u32, QwenLinearStateImageV1>,
+    cached_terminal_output: Option<QwenExecutionOutput>,
+}
+
+impl fmt::Debug for QwenStateImageV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QwenStateImageV1")
+            .field("session_id", &self.session_id)
+            .field("identity", &"<redacted>")
+            .field("committed_length", &self.committed_length)
+            .field("kv_layer_count", &self.kv_layers.len())
+            .field("linear_layer_count", &self.linear_layers.len())
+            .field(
+                "has_cached_terminal_output",
+                &self.cached_terminal_output.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl QwenStateImageV1 {
+    pub fn session_id(&self) -> crate::ExecutionSessionId {
+        self.session_id
+    }
+
+    pub fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    pub fn rope_position_delta(&self) -> i64 {
+        self.rope_position_delta
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.identity.model_fingerprint
+    }
+
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.identity.plan_digest
+    }
+
+    pub fn graph_semantics_digest(&self) -> &[u8; 32] {
+        &self.identity.graph_semantics_digest
+    }
+
+    pub fn state_capacity(&self) -> u64 {
+        self.identity.state_capacity
+    }
+
+    pub fn kv_layers(&self) -> &BTreeMap<u32, QwenKvStateImageV1> {
+        &self.kv_layers
+    }
+
+    pub fn linear_layers(&self) -> &BTreeMap<u32, QwenLinearStateImageV1> {
+        &self.linear_layers
+    }
+
+    pub fn cached_terminal_output(&self) -> Option<&QwenExecutionOutput> {
+        self.cached_terminal_output.as_ref()
+    }
+
+    /// Returns a copy suitable for checkpoint restore when terminal output is
+    /// intentionally not persisted. Non-empty suffix continuation remains
+    /// valid, while an empty suffix fails closed without a cached output.
+    pub fn without_terminal_output(mut self) -> Self {
+        self.cached_terminal_output = None;
+        self
+    }
+
+    /// Returns the canonical digest of the KV descriptors carried by this
+    /// image.  Checkpoint callers should copy this value into
+    /// [`CheckpointIdentity::kv_descriptor_digest`]; restore recomputes it
+    /// from the fresh graph before importing any opaque bytes.
+    pub fn kv_descriptor_digest(&self) -> [u8; 32] {
+        qwen_kv_descriptor_digest(
+            self.kv_layers
+                .iter()
+                .map(|(layer, image)| (*layer, image.descriptor)),
+        )
+    }
+
+    /// Flattens a quiescent Qwen image into the backend-neutral checkpoint
+    /// envelope.  Native handles and terminal output are intentionally not
+    /// retained.  `absolute_position - logical_position` is the checked RoPE
+    /// position delta represented by the image.
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_checkpoint(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpoint, QwenExecutionError> {
+        if token_history.len() as u64 != self.committed_length {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint token history length differs from Qwen state length".to_owned(),
+            ));
+        }
+        if logical_position != self.committed_length {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint logical position differs from Qwen state length".to_owned(),
+            ));
+        }
+        let rope_delta = absolute_position
+            .checked_sub(logical_position)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "checkpoint absolute position precedes logical position".to_owned(),
+                )
+            })?;
+        let rope_delta = i64::try_from(rope_delta).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "checkpoint RoPE position delta exceeds i64".to_owned(),
+            )
+        })?;
+        if rope_delta != self.rope_position_delta {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint RoPE position delta differs from Qwen state".to_owned(),
+            ));
+        }
+        if identity.model_lock_fingerprint != self.identity.model_fingerprint
+            || identity.plan_digest != qwen_hex_digest(&self.identity.plan_digest)
+            || identity.kv_descriptor_digest != self.kv_descriptor_digest()
+            || self
+                .kv_layers
+                .values()
+                .any(|layer| layer.descriptor.cache_encoding() != identity.kv_encoding)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint identity does not match Qwen model, plan, or KV encoding/descriptors"
+                    .to_owned(),
+            ));
+        }
+
+        let mut state_layers = Vec::with_capacity(self.kv_layers.len() + self.linear_layers.len());
+        let mut state_planes = Vec::new();
+        for image in self.kv_layers.values() {
+            let metadata = image.image.metadata().clone();
+            if metadata.published_length != logical_position {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "checkpoint KV published length differs from logical position".to_owned(),
+                ));
+            }
+            state_layers.push(metadata);
+            state_planes.extend(image.image.planes().iter().cloned());
+        }
+        for image in self.linear_layers.values() {
+            let metadata = image.image.metadata().clone();
+            if metadata.published_length != logical_position {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "checkpoint linear published length differs from logical position".to_owned(),
+                ));
+            }
+            state_layers.push(metadata);
+            state_planes.extend(image.image.planes().iter().cloned());
+        }
+        let payload = CheckpointPayload {
+            token_history: token_history.to_vec(),
+            conversation: conversation.to_vec(),
+            state_layers,
+            state_planes,
+            sampler_state: sampler_state.to_vec(),
+            grammar_state: grammar_state.to_vec(),
+            stop_state: stop_state.to_vec(),
+        };
+        SessionCheckpoint::new(
+            identity,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+            payload,
+        )
+        .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))
+    }
+
+    /// Alias retained for checkpoint-oriented callers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpoint, QwenExecutionError> {
+        self.to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+}
+
+struct QwenPrefixStateInner {
+    session: Arc<ExecutionSession>,
+    identity: QwenPrefixIdentityV1,
+    committed_length: u64,
+    rope_position_delta: i64,
+    kv_states: BTreeMap<u32, KvState>,
+    linear_states: BTreeMap<u32, LinearAttentionState>,
+    cached_terminal_output: QwenExecutionOutput,
+    fork_audit: QwenPrefixForkAuditV1,
+}
+
+impl fmt::Debug for QwenPrefixStateV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QwenPrefixStateV1")
+            .field("session", &self.inner.session.id())
+            .field("committed_length", &self.inner.committed_length)
+            .field("state_capacity", &self.inner.identity.state_capacity)
+            .field("fork_audit", &self.inner.fork_audit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for QwenPrefixStateV1 {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl QwenPrefixStateV1 {
+    pub fn committed_length(&self) -> u64 {
+        self.inner.committed_length
+    }
+
+    pub fn rope_position_delta(&self) -> i64 {
+        self.inner.rope_position_delta
+    }
+
+    pub fn state_capacity(&self) -> u64 {
+        self.inner.identity.state_capacity
+    }
+
+    pub fn fork_audit(&self) -> QwenPrefixForkAuditV1 {
+        self.inner.fork_audit
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.inner.identity.model_fingerprint
+    }
+
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.inner.identity.plan_digest
+    }
+
+    pub fn graph_semantics_digest(&self) -> &[u8; 32] {
+        &self.inner.identity.graph_semantics_digest
+    }
+
+    pub fn cached_terminal_output(&self) -> &QwenExecutionOutput {
+        &self.inner.cached_terminal_output
+    }
+}
 
 pub const QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS: u64 = 512;
 pub const QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -463,6 +911,7 @@ impl From<OpError> for QwenExecutionError {
 /// execution session. It owns only model-resident buffers and the shared queue;
 /// every call to [`Self::new_request`] creates fresh graph-local workspace and
 /// fresh KV/linear-attention state.
+#[derive(Clone)]
 pub struct QwenResidentModel {
     inner: Arc<QwenResidentInner>,
 }
@@ -724,6 +1173,162 @@ impl QwenResidentModel {
         })
     }
 
+    /// Builds a fresh explicit-position Qwen request from retained prefix and
+    /// recent token ranges. The source history is only read; state publication
+    /// occurs on the fresh request after the retained prefill succeeds.
+    pub fn new_request_from_context_shift(
+        &self,
+        graph: QwenGraph,
+        decision: ContextShiftDecisionV1,
+        state: ContextWindowStateV1,
+        token_history: &[i32],
+    ) -> Result<(QwenExecutionRequest, QwenExecutionOutput), QwenExecutionError> {
+        if !decision.requires_shift() || decision.old_state() != state {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen context shift decision is stale or does not require a shift".to_owned(),
+            ));
+        }
+        let retained = decision
+            .retained_token_ids(token_history)
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let positions = decision
+            .retained_absolute_positions(state.logical_length())
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        let retained_len = u64::try_from(retained.len()).map_err(|_| {
+            QwenExecutionError::InvalidRequest("retained length overflowed".to_owned())
+        })?;
+        if retained_len == 0 || retained_len != decision.proposed_state().logical_length() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen retained state length differs from the shift decision".to_owned(),
+            ));
+        }
+        if graph.position_payload_mode()
+            != crate::AttentionPreprocessPositionPayloadModeV1::Explicit
+            || graph.token_count() < retained_len
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen context shift requires an explicit-position graph with sufficient token capacity"
+                    .to_owned(),
+            ));
+        }
+        let mut request = self.new_request(graph)?;
+        let output = request.prefill_with_absolute_positions(&retained, &positions)?;
+        let delta = state
+            .absolute_position()
+            .checked_sub(retained_len)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("Qwen RoPE delta overflowed".to_owned())
+            })?;
+        request.set_rope_position_delta(delta)?;
+        Ok((request, output))
+    }
+
+    /// Creates a fresh request workspace and transactionally forks every
+    /// published KV and linear/GDN state from an immutable prefix owner.  The
+    /// prefix owner is never reused as a mutable request state.
+    pub fn new_request_from_prefix(
+        &self,
+        prefix: &QwenPrefixStateV1,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request.core.install_prefix(prefix)?;
+        Ok(request)
+    }
+
+    /// Creates a fresh request and transactionally imports every state layer
+    /// from a backend-neutral Qwen image. The source image is never mutated;
+    /// any partial destination import is dropped with the fresh request.
+    pub fn new_request_from_state_image(
+        &self,
+        image: &QwenStateImageV1,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request.core.restore_state_image(image)?;
+        Ok(request)
+    }
+
+    /// Restores a backend-neutral checkpoint into a fresh request.  Unlike a
+    /// raw [`QwenStateImageV1`], the checkpoint carries no source session ID;
+    /// therefore this is the only state-image path that may cross process or
+    /// execution-session boundaries.  The caller supplies the complete
+    /// frontend identity so renderer/tokenizer/sampler policy cannot be
+    /// silently changed during restore.
+    pub fn new_request_from_checkpoint(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        let mut request = self.new_request(graph)?;
+        request
+            .core
+            .restore_checkpoint(checkpoint, expected_identity)?;
+        Ok(request)
+    }
+
+    /// Compatibility spelling for persistent-session factories.
+    pub fn restore_request_from_checkpoint(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        graph: QwenGraph,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_checkpoint(checkpoint, graph, expected_identity)
+    }
+
+    /// Alias used by checkpoint restore callers.
+    pub fn restore_request_from_state_image(
+        &self,
+        image: &QwenStateImageV1,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_state_image(image, graph)
+    }
+
+    /// Short alias for service factories that use request-oriented naming.
+    pub fn request_from_state_image(
+        &self,
+        image: &QwenStateImageV1,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_state_image(image, graph)
+    }
+
+    /// Compatibility spelling for callers that use a factory-oriented name.
+    pub fn request_from_prefix(
+        &self,
+        prefix: &QwenPrefixStateV1,
+        graph: QwenGraph,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_prefix(prefix, graph)
+    }
+
+    /// Argument-order compatibility alias for adapters that pass the graph
+    /// before the reusable prefix owner.
+    pub fn new_request_with_prefix(
+        &self,
+        graph: QwenGraph,
+        prefix: &QwenPrefixStateV1,
+    ) -> Result<QwenExecutionRequest, QwenExecutionError> {
+        self.new_request_from_prefix(prefix, graph)
+    }
+
+    /// Runs an explicit suffix continuation from an immutable prefix. An
+    /// empty suffix returns the cached terminal output; a non-empty suffix is
+    /// lowered as chunked `DecodeContinuation` transitions.
+    pub fn generate_from_prefix(
+        &self,
+        prefix: &QwenPrefixStateV1,
+        graph: QwenGraph,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        let mut request = self.new_request_from_prefix(prefix, graph)?;
+        request.decode_continuation(suffix)
+    }
+
     /// Explicit-session variant used by service owners that keep the session
     /// handle separately. It rejects even a same-backend session with a
     /// different identity before graph/state allocation.
@@ -815,6 +1420,108 @@ impl QwenExecutionRequest {
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.prefill(token_ids)
+    }
+
+    /// Prefills an explicit-position graph with compact logical rows and
+    /// caller-supplied absolute RoPE positions.
+    pub fn prefill_with_absolute_positions(
+        &mut self,
+        token_ids: &[i32],
+        positions: &[u64],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core
+            .prefill_with_absolute_positions(token_ids, positions)
+    }
+
+    /// Publishes a quiescent immutable prefix owner. All KV and linear/GDN
+    /// layers are forked through the execution-session contract; a failure in
+    /// any layer leaves this request unchanged and drops already-created
+    /// destination owners.
+    pub fn prefix_state(&self) -> Result<QwenPrefixStateV1, QwenExecutionError> {
+        self.core.publish_prefix()
+    }
+
+    /// Compatibility spelling for the explicit prefix publication API.
+    pub fn create_prefix_state(&self) -> Result<QwenPrefixStateV1, QwenExecutionError> {
+        self.prefix_state()
+    }
+
+    /// Updates the checked absolute-minus-logical RoPE delta used by later
+    /// compacted decode transitions. This metadata is changed only on a fresh
+    /// successfully prefilled request by the context-shift factory.
+    pub fn set_rope_position_delta(&mut self, delta: i64) -> Result<(), QwenExecutionError> {
+        self.core.set_rope_position_delta(delta)
+    }
+
+    /// Exports every quiescent KV and linear/GDN layer plus model/plan/graph
+    /// identity and the current RoPE position delta.
+    pub fn state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
+        self.core.export_state_image()
+    }
+
+    /// Compatibility spelling for checkpoint writers.
+    pub fn export_state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
+        self.state_image()
+    }
+
+    /// Compatibility spelling for persistent-session callers.
+    pub fn save_state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
+        self.state_image()
+    }
+
+    /// Captures this request as a backend-neutral checkpoint. Terminal output
+    /// is deliberately omitted, so restore callers must provide a non-empty
+    /// suffix before requesting continuation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpoint, QwenExecutionError> {
+        self.state_image()?.to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+
+    /// Continues a prefix-derived request using DecodeContinuation chunks.
+    /// Empty suffixes are resolved from the immutable cached terminal output.
+    pub fn decode_continuation(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_continuation(suffix)
+    }
+
+    /// Explicit alias emphasizing that this API consumes a prefix suffix.
+    pub fn continue_from_prefix(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_continuation(suffix)
+    }
+
+    /// Compatibility alias for generation adapters that call the suffix a
+    /// prefill even though its position mode is DecodeContinuation.
+    pub fn prefill_from_prefix(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.decode_continuation(suffix)
     }
 
     /// Runs prefill and publishes the final row of full-vocabulary logits in
@@ -1005,6 +1712,14 @@ impl QwenExecutionRequest {
     /// submissions. An empty audit is never a successful request audit.
     pub fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
         self.core.audit_snapshot()
+    }
+
+    /// Reconciles post-COW ownership for every KV destination in a prefix
+    /// continuation and returns the aggregate redacted fork audit. A fresh
+    /// request has no fork destinations and therefore returns an explicit
+    /// unsupported error instead of silently omitting accounting.
+    pub fn refresh_prefix_fork_audit(&self) -> Result<QwenPrefixForkAuditV1, QwenExecutionError> {
+        self.core.refresh_prefix_fork_audit()
     }
 
     /// Captures all request-local state at one quiescent boundary. HIP-backed
@@ -2433,6 +3148,660 @@ impl QwenExecutionCore {
         Ok(core)
     }
 
+    fn export_state_image(&self) -> Result<QwenStateImageV1, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "state image export requires a non-empty committed request".to_owned(),
+            ));
+        }
+        self.ensure_state_lengths(self.committed_length)?;
+        let mut kv_layers = BTreeMap::new();
+        for (&layer, state) in &self.kv_states {
+            let image = self.session.export_kv_state_image(state)?;
+            validate_qwen_layer_image(
+                &image,
+                StateOwnerKindV1::Kv,
+                layer,
+                state.descriptor(),
+                self.committed_length,
+            )?;
+            kv_layers.insert(
+                layer,
+                QwenKvStateImageV1 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        let mut linear_layers = BTreeMap::new();
+        for (&layer, state) in &self.linear_states {
+            let image = self.session.export_linear_attention_state_image(state)?;
+            validate_qwen_layer_image(
+                &image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                state.descriptor(),
+                self.committed_length,
+            )?;
+            linear_layers.insert(
+                layer,
+                QwenLinearStateImageV1 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        Ok(QwenStateImageV1 {
+            session_id: self.session.id(),
+            identity: qwen_prefix_identity(&self.graph, &self.plan),
+            committed_length: self.committed_length,
+            rope_position_delta: self.rope_position_delta,
+            kv_layers,
+            linear_layers,
+            cached_terminal_output: self.last_output.clone(),
+        })
+    }
+
+    fn restore_state_image(&mut self, image: &QwenStateImageV1) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        self.validate_state_image_identity(image)?;
+
+        // Keep the fresh request's original maps and publication scalars
+        // untouched until every layer has imported and snapshotted exactly.
+        let mut imported_kv = BTreeMap::new();
+        for (&layer, destination) in &self.kv_states {
+            let entry = image.kv_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "state image KV layer {layer} is absent"
+                ))
+            })?;
+            self.session
+                .import_kv_state_image(destination, &entry.image)?;
+            let snapshot = self.session.kv_state_snapshot(destination)?;
+            if snapshot.length() != image.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "restored KV",
+                    expected: image.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            imported_kv.insert(layer, destination.clone());
+        }
+        let mut imported_linear = BTreeMap::new();
+        for (&layer, destination) in &self.linear_states {
+            let entry = image.linear_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "state image linear layer {layer} is absent"
+                ))
+            })?;
+            self.session
+                .import_linear_attention_state_image(destination, &entry.image)?;
+            let snapshot = self.session.linear_attention_state_snapshot(destination)?;
+            if snapshot.length() != image.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "restored linear",
+                    expected: image.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            imported_linear.insert(layer, destination.clone());
+        }
+
+        self.kv_states = imported_kv;
+        self.linear_states = imported_linear;
+        self.committed_length = image.committed_length;
+        self.rope_position_delta = image.rope_position_delta;
+        self.last_output = image.cached_terminal_output.clone();
+        Ok(())
+    }
+
+    fn restore_checkpoint(
+        &mut self,
+        checkpoint: &SessionCheckpoint,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+
+        // Revalidate before consuming opaque payload bytes without encoding
+        // (and therefore duplicating) a potentially large checkpoint.
+        checkpoint
+            .validate()
+            .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+        if checkpoint.header.identity != *expected_identity {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint frontend identity differs from the restore caller".to_owned(),
+            ));
+        }
+        let identity = &checkpoint.header.identity;
+        if identity.model_lock_fingerprint != self.graph.model_fingerprint()
+            || identity.plan_digest != self.plan.digest_hex()
+            || identity.kv_descriptor_digest
+                != qwen_kv_descriptor_digest(
+                    self.kv_states
+                        .iter()
+                        .map(|(layer, state)| (*layer, state.descriptor())),
+                )
+            || self
+                .kv_states
+                .values()
+                .any(|state| state.descriptor().cache_encoding() != identity.kv_encoding)
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint model, plan, or KV encoding/descriptor identity differs".to_owned(),
+            ));
+        }
+        let logical_position = checkpoint.header.logical_position;
+        if logical_position == 0
+            || logical_position != checkpoint.header.token_count
+            || logical_position > self.graph.state_capacity()
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint logical position is inconsistent with token history or capacity"
+                    .to_owned(),
+            ));
+        }
+        let rope_delta = checkpoint
+            .header
+            .absolute_position
+            .checked_sub(logical_position)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "checkpoint absolute position precedes logical position".to_owned(),
+                )
+            })?;
+        let rope_position_delta = i64::try_from(rope_delta).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "checkpoint RoPE position delta exceeds i64".to_owned(),
+            )
+        })?;
+
+        let layers = &checkpoint.payload.state_layers;
+        let planes = &checkpoint.payload.state_planes;
+        let mut layer_keys = BTreeSet::new();
+        for layer in layers {
+            if !layer_keys.insert((layer.owner, layer.layer_id)) {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "checkpoint contains duplicate layer metadata".to_owned(),
+                ));
+            }
+            if layer.published_length != logical_position {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "checkpoint layer length differs from logical position".to_owned(),
+                ));
+            }
+        }
+        let expected_keys = self
+            .kv_states
+            .keys()
+            .copied()
+            .map(|layer| (StateOwnerKindV1::Kv, layer))
+            .chain(
+                self.linear_states
+                    .keys()
+                    .copied()
+                    .map(|layer| (StateOwnerKindV1::LinearAttention, layer)),
+            )
+            .collect::<BTreeSet<_>>();
+        if layer_keys != expected_keys {
+            return Err(QwenExecutionError::InvalidRequest(
+                "checkpoint layer topology differs from the fresh Qwen graph".to_owned(),
+            ));
+        }
+
+        let mut kv_layers = BTreeMap::new();
+        for (&layer, destination) in &self.kv_states {
+            let metadata = layers
+                .iter()
+                .find(|metadata| {
+                    metadata.owner == StateOwnerKindV1::Kv && metadata.layer_id == layer
+                })
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "checkpoint KV layer {layer} is absent"
+                    ))
+                })?;
+            let layer_planes = planes
+                .iter()
+                .filter(|plane| plane.owner == StateOwnerKindV1::Kv && plane.layer_id == layer)
+                .cloned()
+                .collect::<Vec<_>>();
+            let state_image = ExecutionStateImageV1::new(metadata.clone(), layer_planes);
+            validate_qwen_layer_image(
+                &state_image,
+                StateOwnerKindV1::Kv,
+                layer,
+                destination.descriptor(),
+                logical_position,
+            )?;
+            kv_layers.insert(
+                layer,
+                QwenKvStateImageV1 {
+                    descriptor: destination.descriptor(),
+                    image: state_image,
+                },
+            );
+        }
+        let mut linear_layers = BTreeMap::new();
+        for (&layer, destination) in &self.linear_states {
+            let metadata = layers
+                .iter()
+                .find(|metadata| {
+                    metadata.owner == StateOwnerKindV1::LinearAttention
+                        && metadata.layer_id == layer
+                })
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "checkpoint linear layer {layer} is absent"
+                    ))
+                })?;
+            let layer_planes = planes
+                .iter()
+                .filter(|plane| {
+                    plane.owner == StateOwnerKindV1::LinearAttention && plane.layer_id == layer
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let state_image = ExecutionStateImageV1::new(metadata.clone(), layer_planes);
+            validate_qwen_layer_image(
+                &state_image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                destination.descriptor(),
+                logical_position,
+            )?;
+            linear_layers.insert(
+                layer,
+                QwenLinearStateImageV1 {
+                    descriptor: destination.descriptor(),
+                    image: state_image,
+                },
+            );
+        }
+        self.restore_state_image(&QwenStateImageV1 {
+            session_id: self.session.id(),
+            identity: qwen_prefix_identity(&self.graph, &self.plan),
+            committed_length: logical_position,
+            rope_position_delta,
+            kv_layers,
+            linear_layers,
+            cached_terminal_output: None,
+        })
+    }
+
+    fn validate_state_image_identity(
+        &self,
+        image: &QwenStateImageV1,
+    ) -> Result<(), QwenExecutionError> {
+        if image.session_id != self.session.id() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "state image belongs to a different execution session".to_owned(),
+            ));
+        }
+        let expected_identity = qwen_prefix_identity(&self.graph, &self.plan);
+        if image.identity != expected_identity {
+            return Err(QwenExecutionError::InvalidRequest(
+                "state image model, plan, graph, or capacity identity differs".to_owned(),
+            ));
+        }
+        if image.committed_length == 0 || image.committed_length > self.graph.state_capacity() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "state image length {} exceeds request capacity {}",
+                image.committed_length,
+                self.graph.state_capacity()
+            )));
+        }
+        if let Some(output) = &image.cached_terminal_output {
+            if output.committed_length() != image.committed_length {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "cached state-image output length differs from committed length".to_owned(),
+                ));
+            }
+        }
+        if image.kv_layers.len() != self.kv_states.len()
+            || image.linear_layers.len() != self.linear_states.len()
+            || image.kv_layers.keys().ne(self.kv_states.keys())
+            || image.linear_layers.keys().ne(self.linear_states.keys())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "state image layer set differs from the request graph".to_owned(),
+            ));
+        }
+        for (&layer, destination) in &self.kv_states {
+            let entry = image.kv_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "state image KV layer {layer} is absent"
+                ))
+            })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "state image KV layer {layer} descriptor or encoding differs"
+                )));
+            }
+            validate_qwen_layer_image(
+                &entry.image,
+                StateOwnerKindV1::Kv,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+        for (&layer, destination) in &self.linear_states {
+            let entry = image.linear_layers.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "state image linear layer {layer} is absent"
+                ))
+            })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "state image linear layer {layer} descriptor or capacity differs"
+                )));
+            }
+            validate_qwen_layer_image(
+                &entry.image,
+                StateOwnerKindV1::LinearAttention,
+                layer,
+                destination.descriptor(),
+                image.committed_length,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn publish_prefix(&self) -> Result<QwenPrefixStateV1, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        if self.committed_length == 0 || self.last_output.is_none() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefix publication requires a completed non-empty transition".to_owned(),
+            ));
+        }
+        self.ensure_state_lengths(self.committed_length)?;
+
+        let identity = qwen_prefix_identity(&self.graph, &self.plan);
+        let mut kv_states = BTreeMap::new();
+        let mut linear_states = BTreeMap::new();
+        let mut audit = QwenPrefixForkAuditV1::default();
+
+        // Fork every state into a new owner before exposing the prefix. If a
+        // later layer fails, these local maps drop and the source request is
+        // left untouched.
+        for (&layer, source) in &self.kv_states {
+            let descriptor = source.descriptor();
+            let (forked, fork_audit) = self.session.fork_kv_state(source, descriptor)?;
+            let snapshot = self.session.kv_state_snapshot(&forked)?;
+            if snapshot.length() != self.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "forked kv",
+                    expected: self.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            let fallback_resident_bytes = descriptor
+                .resident_bytes_per_plane()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "KV prefix resident-byte footprint overflowed".to_owned(),
+                    )
+                })?;
+            audit.add(
+                fork_audit,
+                false,
+                snapshot.physical_memory(),
+                fallback_resident_bytes,
+            )?;
+            kv_states.insert(layer, forked);
+        }
+        for (&layer, source) in &self.linear_states {
+            let descriptor = source.descriptor();
+            let (forked, fork_audit) = self
+                .session
+                .fork_linear_attention_state(source, descriptor)?;
+            let snapshot = self.session.linear_attention_state_snapshot(&forked)?;
+            if snapshot.length() != self.committed_length {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "forked linear",
+                    expected: self.committed_length,
+                    actual: snapshot.length(),
+                });
+            }
+            audit.add(fork_audit, true, None, 0)?;
+            linear_states.insert(layer, forked);
+        }
+
+        Ok(QwenPrefixStateV1 {
+            inner: Arc::new(QwenPrefixStateInner {
+                session: Arc::clone(&self.session),
+                identity,
+                committed_length: self.committed_length,
+                rope_position_delta: self.rope_position_delta,
+                kv_states,
+                linear_states,
+                cached_terminal_output: self
+                    .last_output
+                    .clone()
+                    .expect("checked cached terminal output"),
+                fork_audit: audit,
+            }),
+        })
+    }
+
+    fn install_prefix(&mut self, prefix: &QwenPrefixStateV1) -> Result<(), QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.pending_speculative.is_some() {
+            return Err(QwenExecutionError::Busy);
+        }
+        let expected_identity = qwen_prefix_identity(&self.graph, &self.plan);
+        if prefix.inner.session.id() != self.session.id() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefix state belongs to a different execution session".to_owned(),
+            ));
+        }
+        if prefix.inner.identity.model_fingerprint != expected_identity.model_fingerprint
+            || prefix.inner.identity.plan_digest != expected_identity.plan_digest
+            || prefix.inner.identity.graph_semantics_digest
+                != expected_identity.graph_semantics_digest
+            || prefix.inner.identity.is_mtp != expected_identity.is_mtp
+            || prefix.inner.identity.is_multimodal != expected_identity.is_multimodal
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefix graph/model/plan state identity differs from the request graph".to_owned(),
+            ));
+        }
+        if prefix.committed_length() == 0 || prefix.committed_length() > self.graph.state_capacity()
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "prefix length {} exceeds request capacity {}",
+                prefix.committed_length(),
+                self.graph.state_capacity()
+            )));
+        }
+        if prefix.cached_terminal_output().committed_length() != prefix.committed_length() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "cached prefix terminal output length differs from prefix state".to_owned(),
+            ));
+        }
+        if prefix.inner.kv_states.len() != self.kv_states.len()
+            || prefix.inner.linear_states.len() != self.linear_states.len()
+            || prefix.inner.kv_states.keys().ne(self.kv_states.keys())
+            || prefix
+                .inner
+                .linear_states
+                .keys()
+                .ne(self.linear_states.keys())
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefix state layer set differs from the request graph".to_owned(),
+            ));
+        }
+
+        let mut forked_kv = BTreeMap::new();
+        let mut forked_linear = BTreeMap::new();
+        // Keep old request states in place until every destination fork and
+        // snapshot has passed validation.
+        for (&layer, destination) in &self.kv_states {
+            let source = prefix.inner.kv_states.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!("prefix KV layer {layer} is absent"))
+            })?;
+            if destination.descriptor().layer_id() != source.descriptor().layer_id()
+                || destination.descriptor().layout() != source.descriptor().layout()
+                || destination.descriptor().cache_encoding() != source.descriptor().cache_encoding()
+                || destination.descriptor().static_fp8_scales()
+                    != source.descriptor().static_fp8_scales()
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "prefix KV layer {layer} descriptor differs"
+                )));
+            }
+            let (forked, _) = self
+                .session
+                .fork_kv_state(source, destination.descriptor())?;
+            let snapshot = self.session.kv_state_snapshot(&forked)?;
+            if snapshot.length() != prefix.committed_length() {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "installed kv",
+                    expected: prefix.committed_length(),
+                    actual: snapshot.length(),
+                });
+            }
+            forked_kv.insert(layer, forked);
+        }
+        for (&layer, destination) in &self.linear_states {
+            let source = prefix.inner.linear_states.get(&layer).ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!("prefix linear layer {layer} is absent"))
+            })?;
+            if destination.descriptor().layer_id() != source.descriptor().layer_id()
+                || destination.descriptor().layout() != source.descriptor().layout()
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "prefix linear layer {layer} descriptor differs"
+                )));
+            }
+            let (forked, _) = self
+                .session
+                .fork_linear_attention_state(source, destination.descriptor())?;
+            let snapshot = self.session.linear_attention_state_snapshot(&forked)?;
+            if snapshot.length() != prefix.committed_length() {
+                return Err(QwenExecutionError::StateLength {
+                    layer,
+                    state: "installed linear",
+                    expected: prefix.committed_length(),
+                    actual: snapshot.length(),
+                });
+            }
+            forked_linear.insert(layer, forked);
+        }
+
+        self.kv_states = forked_kv;
+        self.linear_states = forked_linear;
+        self.committed_length = prefix.committed_length();
+        self.rope_position_delta = prefix.rope_position_delta();
+        self.last_output = Some(prefix.cached_terminal_output().clone());
+        self.ensure_state_lengths(self.committed_length)
+    }
+
+    fn decode_continuation(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if suffix.is_empty() {
+            return self.last_output.clone().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(
+                    "empty continuation has no cached terminal output".to_owned(),
+                )
+            });
+        }
+        if self.committed_length == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "continuation requires an installed non-empty prefix".to_owned(),
+            ));
+        }
+        validate_input_token_ids(suffix)?;
+        let suffix_len = u64::try_from(suffix.len()).map_err(|_| {
+            QwenExecutionError::InvalidRequest("continuation length does not fit u64".to_owned())
+        })?;
+        let end = self
+            .committed_length
+            .checked_add(suffix_len)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("continuation length overflowed u64".to_owned())
+            })?;
+        if end > self.graph.state_capacity() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "continuation end {end} exceeds request capacity {}",
+                self.graph.state_capacity()
+            )));
+        }
+        let chunk_capacity = usize::try_from(self.graph.token_count()).map_err(|_| {
+            QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
+        })?;
+        if chunk_capacity == 0 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "graph token count is zero".to_owned(),
+            ));
+        }
+        let chunk_count = suffix.len().div_ceil(chunk_capacity);
+        let mut final_output = None;
+        for (index, chunk) in suffix.chunks(chunk_capacity).enumerate() {
+            let final_chunk = index + 1 == chunk_count;
+            let output = self.run_transition(
+                chunk,
+                AttentionPreprocessPositionMode::DecodeContinuation,
+                false,
+                false,
+                false,
+                false,
+                None,
+                None,
+                final_chunk,
+                None,
+            )?;
+            if final_chunk {
+                final_output = Some(output);
+            }
+        }
+        self.prefill_chunk_count = u64::try_from(chunk_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "continuation chunk count does not fit u64".to_owned(),
+            )
+        })?;
+        final_output.ok_or_else(|| {
+            QwenExecutionError::InvalidRequest(
+                "continuation produced no terminal output".to_owned(),
+            )
+        })
+    }
+
     #[cfg(test)]
     fn provision<S: QwenProvisionSource>(
         session: Arc<ExecutionSession>,
@@ -2526,6 +3895,38 @@ impl QwenExecutionCore {
 
     fn prefill(&mut self, token_ids: &[i32]) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.prefill_impl(token_ids, false, false, None, None, None)
+    }
+
+    fn prefill_with_absolute_positions(
+        &mut self,
+        token_ids: &[i32],
+        positions: &[u64],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.graph.position_payload_mode()
+            != crate::AttentionPreprocessPositionPayloadModeV1::Explicit
+            || positions.len() != token_ids.len()
+            || token_ids.is_empty()
+            || u64::try_from(token_ids.len()).ok().is_none_or(|count| {
+                count > self.graph.state_capacity() || count > self.graph.token_count()
+            })
+        {
+            return Err(QwenExecutionError::InvalidRequest(
+                "explicit-position prefill graph or input length is invalid".to_owned(),
+            ));
+        }
+        self.run_transition_with_positions(
+            token_ids,
+            AttentionPreprocessPositionMode::Prefill,
+            false,
+            false,
+            false,
+            false,
+            None,
+            None,
+            true,
+            None,
+            Some(positions),
+        )
     }
 
     fn prefill_with_last_logits(
@@ -2956,6 +4357,19 @@ impl QwenExecutionCore {
         )
     }
 
+    fn set_rope_position_delta(&mut self, delta: i64) -> Result<(), QwenExecutionError> {
+        if delta < 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "Qwen RoPE position delta must be non-negative".to_owned(),
+            ));
+        }
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        self.rope_position_delta = delta;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_transition(
         &mut self,
@@ -2969,6 +4383,36 @@ impl QwenExecutionCore {
         multimodal: Option<(&[u16], &[[i32; 3]])>,
         emit_terminal: bool,
         device_selector: Option<&DeviceTokenSelectorRequestV1>,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.run_transition_with_positions(
+            token_ids,
+            position_mode,
+            include_last_logits,
+            include_all_logits_bf16,
+            force_all_terminal_rows,
+            include_hidden_states,
+            target_hidden_bf16,
+            multimodal,
+            emit_terminal,
+            device_selector,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn run_transition_with_positions(
+        &mut self,
+        token_ids: &[i32],
+        position_mode: AttentionPreprocessPositionMode,
+        include_last_logits: bool,
+        include_all_logits_bf16: bool,
+        force_all_terminal_rows: bool,
+        include_hidden_states: bool,
+        target_hidden_bf16: Option<&[u16]>,
+        multimodal: Option<(&[u16], &[[i32; 3]])>,
+        emit_terminal: bool,
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
+        explicit_positions: Option<&[u64]>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
@@ -3013,7 +4457,22 @@ impl QwenExecutionCore {
                 "multimodal graph/input mode differs".to_owned(),
             ));
         }
-        let rope_start_position = if start_position == 0 {
+        if explicit_positions.is_some_and(|positions| {
+            positions.len() != token_ids.len()
+                || positions
+                    .iter()
+                    .any(|position| *position >= QWEN_RUNTIME_MAX_CONTEXT_TOKENS)
+        }) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "explicit Qwen position payload differs from token input or runtime range"
+                    .to_owned(),
+            ));
+        }
+        let rope_start_position = if let Some(positions) = explicit_positions {
+            *positions.first().ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("explicit position payload is empty".to_owned())
+            })?
+        } else if start_position == 0 {
             0
         } else {
             let committed = i64::try_from(start_position).map_err(|_| {
@@ -3088,6 +4547,7 @@ impl QwenExecutionCore {
             token_count,
             target_hidden_bf16,
             multimodal,
+            explicit_positions,
         )?;
         let output = self.lower_graph(
             token_count,
@@ -3213,7 +4673,14 @@ impl QwenExecutionCore {
                             kv_heads,
                             head_dim,
                             token_count: transition.token_count(),
-                            start_position: rope_start_position,
+                            start_position: if self.graph.position_payload_mode()
+                                == crate::AttentionPreprocessPositionPayloadModeV1::Explicit
+                                && matches!(position_mode, AttentionPreprocessPositionMode::Prefill)
+                            {
+                                0
+                            } else {
+                                rope_start_position
+                            },
                             position_mode,
                         },
                         &mut pending,
@@ -4007,7 +5474,8 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout_and_context(
+        let contract =
+            AttentionPreprocessContract::new_qwen3_5_with_layout_and_context_and_position_payload_mode(
             execution.position_mode,
             i64::try_from(execution.start_position).map_err(|_| {
                 QwenExecutionError::InvalidRequest("position does not fit i64".to_owned())
@@ -4016,11 +5484,19 @@ impl QwenExecutionCore {
             execution.q_heads,
             execution.kv_heads,
             execution.head_dim,
-            u32::try_from(self.graph.state_capacity()).map_err(|_| {
+            u32::try_from(if self.graph.position_payload_mode()
+                == crate::AttentionPreprocessPositionPayloadModeV1::Explicit
+            {
+                QWEN_RUNTIME_MAX_CONTEXT_TOKENS
+            } else {
+                self.graph.state_capacity()
+            })
+            .map_err(|_| {
                 QwenExecutionError::InvalidRequest(
                     "request context exceeds the u32 execution ABI".to_owned(),
                 )
             })?,
+            self.graph.position_payload_mode(),
         )?;
         let descriptor = SemanticOpDescriptor::new_attention_preprocess(
             self.views(node.inputs(), execution.token_count)?,
@@ -4228,6 +5704,28 @@ impl QwenExecutionCore {
         })
     }
 
+    fn refresh_prefix_fork_audit(&self) -> Result<QwenPrefixForkAuditV1, QwenExecutionError> {
+        let states = self.kv_states.values().collect::<Vec<_>>();
+        let queried = self
+            .session
+            .kv_state_fork_query_all(states.iter().copied())?;
+        let mut aggregate = QwenPrefixForkAuditV1::default();
+        for (state, audit) in states.into_iter().zip(queried) {
+            let descriptor = state.descriptor();
+            let fallback_resident_bytes = descriptor
+                .resident_bytes_per_plane()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "KV fork resident-byte footprint overflowed".to_owned(),
+                    )
+                })?;
+            let physical = self.session.kv_state_snapshot(state)?.physical_memory();
+            aggregate.add(audit, false, physical, fallback_resident_bytes)?;
+        }
+        Ok(aggregate)
+    }
+
     fn validate_cached_scale(
         &self,
         node: &QwenGraphNode,
@@ -4290,6 +5788,7 @@ impl QwenExecutionCore {
         token_count: u64,
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
+        explicit_positions: Option<&[u64]>,
     ) -> Result<(), QwenExecutionError> {
         let token_tensor = self.tensor_id("input.token_ids")?;
         let position_tensor = self.tensor_id("input.positions")?;
@@ -4320,7 +5819,11 @@ impl QwenExecutionCore {
                 mrope_position_bytes(&positions)
             }
         } else {
-            position_bytes(start_position, token_count)?
+            if let Some(positions) = explicit_positions {
+                position_values_bytes(positions)?
+            } else {
+                position_bytes(start_position, token_count)?
+            }
         };
         upload_exact_bytes(
             self.session.as_ref(),
@@ -6184,6 +7687,19 @@ fn position_bytes(start_position: u64, token_count: u64) -> Result<Vec<u8>, Qwen
     Ok(positions)
 }
 
+fn position_values_bytes(positions: &[u64]) -> Result<Vec<u8>, QwenExecutionError> {
+    let mut bytes = Vec::with_capacity(positions.len().saturating_mul(std::mem::size_of::<i32>()));
+    for position in positions {
+        let position = i32::try_from(*position).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "position does not fit the I32 input contract".to_owned(),
+            )
+        })?;
+        bytes.extend_from_slice(&position.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
 fn mrope_position_bytes(positions: &[[i32; 3]]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(positions.len().saturating_mul(12));
     for position in positions {
@@ -6204,6 +7720,230 @@ fn validate_input_token_ids(token_ids: &[i32]) -> Result<(), QwenExecutionError>
     {
         return Err(QwenExecutionError::InvalidRequest(format!(
             "input token ID {token} at index {index} is outside [0, {QWEN35_VOCAB_SIZE})"
+        )));
+    }
+    Ok(())
+}
+
+fn qwen_prefix_identity(graph: &QwenGraph, plan: &WeightLoadPlan) -> QwenPrefixIdentityV1 {
+    let mut digest = Sha256::new();
+    digest.update((graph.states().len() as u64).to_le_bytes());
+    for state in graph.states() {
+        digest.update(state.layer().to_le_bytes());
+        let kind = match state.kind() {
+            QwenGraphStateKind::FullKey => 1_u8,
+            QwenGraphStateKind::FullValue => 2,
+            QwenGraphStateKind::LinearConvolution => 3,
+            QwenGraphStateKind::LinearRecurrent => 4,
+        };
+        digest.update([kind]);
+        match state.descriptor() {
+            QwenGraphStateDescriptor::Kv(descriptor) => {
+                digest.update([1]);
+                digest.update(descriptor.layer_id().to_le_bytes());
+                digest.update((descriptor.layout().heads() as u64).to_le_bytes());
+                digest.update((descriptor.layout().head_dim() as u64).to_le_bytes());
+                let encoding = match descriptor.cache_encoding() {
+                    crate::KvCacheEncoding::Fp16 => 1_u8,
+                    crate::KvCacheEncoding::Fp8E4M3Fn => 2,
+                    crate::KvCacheEncoding::Fp8E4M3FnStatic => 3,
+                    crate::KvCacheEncoding::Nvfp4 => 4,
+                };
+                digest.update([encoding]);
+                if let Some((key, value)) = descriptor.static_fp8_scales() {
+                    digest.update([1]);
+                    digest.update(key.to_bits().to_le_bytes());
+                    digest.update(value.to_bits().to_le_bytes());
+                } else {
+                    digest.update([0]);
+                }
+            }
+            QwenGraphStateDescriptor::Linear(descriptor) => {
+                digest.update([2]);
+                digest.update(descriptor.layer_id().to_le_bytes());
+                let layout = descriptor.layout();
+                digest.update((layout.qk_heads() as u64).to_le_bytes());
+                digest.update((layout.value_heads() as u64).to_le_bytes());
+                digest.update((layout.head_dim() as u64).to_le_bytes());
+                digest.update((layout.conv_kernel_size() as u64).to_le_bytes());
+            }
+        }
+        digest.update(format!("{:?}|{:?}", state.dtype(), state.encoding()).as_bytes());
+        digest.update((state.shape().len() as u64).to_le_bytes());
+        for extent in state.shape() {
+            digest.update(extent.to_le_bytes());
+        }
+        digest.update((state.strides().len() as u64).to_le_bytes());
+        for stride in state.strides() {
+            digest.update(stride.to_le_bytes());
+        }
+        digest.update(state.byte_size().to_le_bytes());
+    }
+    QwenPrefixIdentityV1 {
+        model_fingerprint: graph.model_fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        graph_semantics_digest: digest.finalize().into(),
+        state_capacity: graph.state_capacity(),
+        is_mtp: graph.is_mtp(),
+        is_multimodal: graph.is_multimodal(),
+    }
+}
+
+fn qwen_hex_digest(bytes: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(71);
+    output.push_str("sha256:");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+/// Canonical descriptor identity shared by checkpoint export and fresh-graph
+/// restore.  It covers every field that changes the physical KV ABI,
+/// including static FP8 decode scales and layout geometry.
+fn qwen_kv_descriptor_digest(
+    descriptors: impl IntoIterator<Item = (u32, KvStateDescriptor)>,
+) -> [u8; 32] {
+    let mut ordered = descriptors.into_iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|(layer, _)| *layer);
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-qwen-kv-descriptor-v1");
+    digest.update((ordered.len() as u64).to_le_bytes());
+    for (layer, descriptor) in ordered {
+        digest.update(layer.to_le_bytes());
+        digest.update(descriptor.layer_id().to_le_bytes());
+        digest.update(descriptor.capacity().to_le_bytes());
+        digest.update((descriptor.layout().heads() as u64).to_le_bytes());
+        digest.update((descriptor.layout().head_dim() as u64).to_le_bytes());
+        let encoding = match descriptor.cache_encoding() {
+            KvCacheEncoding::Fp16 => 0_u8,
+            KvCacheEncoding::Fp8E4M3Fn => 1,
+            KvCacheEncoding::Fp8E4M3FnStatic => 2,
+            KvCacheEncoding::Nvfp4 => 3,
+        };
+        digest.update([encoding]);
+        if let Some((key, value)) = descriptor.static_fp8_scales() {
+            digest.update([1]);
+            digest.update(key.to_bits().to_le_bytes());
+            digest.update(value.to_bits().to_le_bytes());
+        } else {
+            digest.update([0]);
+        }
+    }
+    digest.finalize().into()
+}
+
+trait QwenStateImageDescriptor {
+    fn capacity(&self) -> u64;
+    fn plane_kinds(&self) -> Vec<StatePlaneKindV1>;
+}
+
+impl QwenStateImageDescriptor for KvStateDescriptor {
+    fn capacity(&self) -> u64 {
+        KvStateDescriptor::capacity(*self)
+    }
+
+    fn plane_kinds(&self) -> Vec<StatePlaneKindV1> {
+        let mut planes = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
+        match self.cache_encoding() {
+            KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
+            KvCacheEncoding::Fp8E4M3Fn => {
+                planes.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
+            }
+            KvCacheEncoding::Nvfp4 => {
+                planes.extend([
+                    StatePlaneKindV1::KvKeyScale,
+                    StatePlaneKindV1::KvValueScale,
+                    StatePlaneKindV1::KvKeyOuterScale,
+                    StatePlaneKindV1::KvValueOuterScale,
+                ]);
+            }
+        }
+        planes
+    }
+}
+
+impl QwenStateImageDescriptor for LinearAttentionStateDescriptor {
+    fn capacity(&self) -> u64 {
+        LinearAttentionStateDescriptor::capacity(*self)
+    }
+
+    fn plane_kinds(&self) -> Vec<StatePlaneKindV1> {
+        vec![
+            StatePlaneKindV1::LinearConvSlot0,
+            StatePlaneKindV1::LinearConvSlot1,
+            StatePlaneKindV1::LinearRecurrentSlot0,
+            StatePlaneKindV1::LinearRecurrentSlot1,
+            StatePlaneKindV1::LinearScratch,
+        ]
+    }
+}
+
+fn validate_qwen_layer_image<D: QwenStateImageDescriptor>(
+    image: &ExecutionStateImageV1,
+    owner: StateOwnerKindV1,
+    layer: u32,
+    descriptor: D,
+    expected_length: u64,
+) -> Result<(), QwenExecutionError> {
+    let metadata = image.metadata();
+    if metadata.owner != owner || metadata.layer_id != layer {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "state image layer {layer} owner or layer identity differs"
+        )));
+    }
+    if metadata.published_length != expected_length || expected_length > descriptor.capacity() {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "state image layer {layer} published length differs"
+        )));
+    }
+    match owner {
+        StateOwnerKindV1::Kv if metadata.active_slot.is_some() => {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "KV state image layer {layer} has an active slot"
+            )));
+        }
+        StateOwnerKindV1::LinearAttention if !matches!(metadata.active_slot, Some(0 | 1)) => {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "linear state image layer {layer} has an invalid active slot"
+            )));
+        }
+        _ => {}
+    }
+    let expected_planes = descriptor.plane_kinds();
+    if image.planes().len() != expected_planes.len() {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "state image layer {layer} is missing or has unexpected planes"
+        )));
+    }
+    let mut seen = Vec::with_capacity(image.planes().len());
+    for plane in image.planes() {
+        if plane.owner != owner || plane.layer_id != layer {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "state image layer {layer} plane identity differs"
+            )));
+        }
+        if plane.bytes.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "state image layer {layer} contains an empty plane"
+            )));
+        }
+        if !expected_planes.contains(&plane.plane) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "state image layer {layer} contains an unexpected plane"
+            )));
+        }
+        if seen.contains(&plane.plane) {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "state image layer {layer} contains a duplicate plane"
+            )));
+        }
+        seen.push(plane.plane);
+    }
+    if expected_planes.iter().any(|plane| !seen.contains(plane)) {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "state image layer {layer} is missing a required plane"
         )));
     }
     Ok(())
@@ -6251,7 +7991,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use crate::execution::{
         AdapterResource, BoundSemanticOp, ExecutionAdapterAccess,
@@ -6434,6 +8174,8 @@ mod tests {
         shutdown_calls: Arc<AtomicUsize>,
         total_memory_bytes: Arc<AtomicU64>,
         available_memory_bytes: Arc<AtomicU64>,
+        state_image_import_calls: Arc<AtomicUsize>,
+        state_image_failure: Arc<AtomicBool>,
     }
 
     impl Default for ExecutionRecorder {
@@ -6445,6 +8187,8 @@ mod tests {
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
                 total_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
                 available_memory_bytes: Arc::new(AtomicU64::new(u64::MAX)),
+                state_image_import_calls: Arc::new(AtomicUsize::new(0)),
+                state_image_failure: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -6483,6 +8227,14 @@ mod tests {
 
         fn set_pending(&self, kind: SemanticOpKind) {
             *self.pending_kind.lock().expect("pending lock") = Some(kind);
+        }
+
+        fn set_state_image_failure(&self, enabled: bool) {
+            self.state_image_failure.store(enabled, Ordering::Relaxed);
+        }
+
+        fn state_image_import_calls(&self) -> usize {
+            self.state_image_import_calls.load(Ordering::Relaxed)
         }
 
         fn semantic_completion(&self, kind: SemanticOpKind) -> ExecutionState {
@@ -6644,6 +8396,39 @@ mod tests {
             Ok(AdapterResource::new(()))
         }
 
+        fn fork_kv_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            source: &KvState,
+            destination_id: crate::KvStateId,
+            _destination_descriptor: KvStateDescriptor,
+        ) -> Result<(AdapterResource, crate::StateForkAuditV1), ExecutionError> {
+            let length = *self
+                .state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .get(&source.id().raw())
+                .expect("created source KV state");
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .insert(destination_id.raw(), length);
+            self.event(format!("fork-kv:{}:{length}", source.layer_id()));
+            let audit = crate::StateForkAuditV1::new(
+                crate::StateForkModeV1::SharedReadOnlyPages,
+                length,
+                1,
+                0,
+                0,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
+            Ok((AdapterResource::new(()), audit))
+        }
+
         fn kv_state_snapshot(
             &self,
             access: &ExecutionAdapterAccess<'_>,
@@ -6657,10 +8442,97 @@ mod tests {
                 .get(&state.id().raw())
                 .expect("created KV state");
             self.event(format!("kv-snapshot:{}:{length}", state.layer_id()));
-            KvStateSnapshot::new(access.session_id(), state.id(), state.descriptor(), length)
-                .map_err(|error| ExecutionError::InvalidRequest {
-                    reason: error.to_string(),
-                })
+            let physical = KvPhysicalMemorySnapshot::new(
+                state.descriptor().capacity(),
+                length,
+                1,
+                1,
+                state.descriptor().capacity(),
+                length,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })?;
+            KvStateSnapshot::new_with_physical_memory(
+                access.session_id(),
+                state.id(),
+                state.descriptor(),
+                length,
+                physical,
+            )
+            .map_err(|error| ExecutionError::InvalidRequest {
+                reason: error.to_string(),
+            })
+        }
+
+        fn export_kv_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+        ) -> Result<ExecutionStateImageV1, ExecutionError> {
+            let length = *self
+                .state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .get(&state.id().raw())
+                .expect("created KV state");
+            let mut kinds = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
+            match state.descriptor().cache_encoding() {
+                KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
+                KvCacheEncoding::Fp8E4M3Fn => {
+                    kinds.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
+                }
+                KvCacheEncoding::Nvfp4 => {
+                    kinds.extend([
+                        StatePlaneKindV1::KvKeyScale,
+                        StatePlaneKindV1::KvValueScale,
+                        StatePlaneKindV1::KvKeyOuterScale,
+                        StatePlaneKindV1::KvValueOuterScale,
+                    ]);
+                }
+            }
+            Ok(ExecutionStateImageV1::new(
+                crate::StateLayerMetadataV1 {
+                    owner: StateOwnerKindV1::Kv,
+                    layer_id: state.layer_id(),
+                    published_length: length,
+                    generation: 1,
+                    active_slot: None,
+                },
+                kinds
+                    .into_iter()
+                    .map(|plane| crate::OpaqueStatePlane {
+                        owner: StateOwnerKindV1::Kv,
+                        layer_id: state.layer_id(),
+                        plane,
+                        bytes: vec![state.layer_id() as u8, plane as u8],
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn import_kv_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &KvState,
+            image: &ExecutionStateImageV1,
+        ) -> Result<(), ExecutionError> {
+            self.state_image_import_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.event(format!("import-kv-image:{}", state.layer_id()));
+            if self.state_image_failure.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 91,
+                    diagnostic: "recorder KV image import failure".to_owned(),
+                });
+            }
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .kv_lengths
+                .insert(state.id().raw(), image.metadata().published_length);
+            Ok(())
         }
 
         fn append_kv_state(
@@ -6739,6 +8611,28 @@ mod tests {
             Ok(AdapterResource::new(()))
         }
 
+        fn fork_linear_attention_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            source: &LinearAttentionState,
+            destination_id: crate::LinearAttentionStateId,
+            _destination_descriptor: LinearAttentionStateDescriptor,
+        ) -> Result<(AdapterResource, crate::StateForkAuditV1), ExecutionError> {
+            let length = self.linear_length(source);
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .linear_lengths
+                .insert(destination_id.raw(), length);
+            self.event(format!("fork-linear:{}:{length}", source.layer_id()));
+            let audit =
+                crate::StateForkAuditV1::new(crate::StateForkModeV1::DeviceCopy, length, 0, 1, 1)
+                    .map_err(|error| ExecutionError::InvalidRequest {
+                    reason: error.to_string(),
+                })?;
+            Ok((AdapterResource::new(()), audit))
+        }
+
         fn linear_attention_state_snapshot(
             &self,
             access: &ExecutionAdapterAccess<'_>,
@@ -6755,6 +8649,62 @@ mod tests {
             .map_err(|error| ExecutionError::InvalidRequest {
                 reason: error.to_string(),
             })
+        }
+
+        fn export_linear_attention_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+        ) -> Result<ExecutionStateImageV1, ExecutionError> {
+            let length = self.linear_length(state);
+            let kinds = [
+                StatePlaneKindV1::LinearConvSlot0,
+                StatePlaneKindV1::LinearConvSlot1,
+                StatePlaneKindV1::LinearRecurrentSlot0,
+                StatePlaneKindV1::LinearRecurrentSlot1,
+                StatePlaneKindV1::LinearScratch,
+            ];
+            Ok(ExecutionStateImageV1::new(
+                crate::StateLayerMetadataV1 {
+                    owner: StateOwnerKindV1::LinearAttention,
+                    layer_id: state.layer_id(),
+                    published_length: length,
+                    generation: 1,
+                    active_slot: Some((state.layer_id() % 2) as u8),
+                },
+                kinds
+                    .into_iter()
+                    .map(|plane| crate::OpaqueStatePlane {
+                        owner: StateOwnerKindV1::LinearAttention,
+                        layer_id: state.layer_id(),
+                        plane,
+                        bytes: vec![state.layer_id() as u8, plane as u8],
+                    })
+                    .collect(),
+            ))
+        }
+
+        fn import_linear_attention_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            state: &LinearAttentionState,
+            image: &ExecutionStateImageV1,
+        ) -> Result<(), ExecutionError> {
+            self.state_image_import_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.event(format!("import-linear-image:{}", state.layer_id()));
+            if self.state_image_failure.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 92,
+                    diagnostic: "recorder linear image import failure".to_owned(),
+                });
+            }
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .linear_lengths
+                .insert(state.id().raw(), image.metadata().published_length);
+            Ok(())
         }
 
         fn execute_linear_attention(
@@ -7393,6 +9343,527 @@ mod tests {
             core.audit_snapshot(),
             Err(QwenExecutionError::Poisoned)
         ));
+    }
+
+    #[test]
+    fn prefix_owner_forks_all_state_layers_and_continues_without_mutating_source() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![101, 102, 103],
+            vec![201],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        let source_output = source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let prefix = source_core.publish_prefix().expect("prefix publishes");
+
+        assert_eq!(prefix.committed_length(), 3);
+        assert_eq!(prefix.cached_terminal_output(), &source_output);
+        assert_eq!(prefix.fork_audit().kv_states(), 8);
+        assert_eq!(prefix.fork_audit().linear_states(), 24);
+        assert_eq!(prefix.fork_audit().shared_pages(), 8);
+        assert_eq!(prefix.fork_audit().copied_bytes(), 24);
+        assert_eq!(prefix.fork_audit().cache_resident_bytes(), 72);
+        assert_eq!(source_core.committed_length, 3);
+        source_core
+            .ensure_state_lengths(3)
+            .expect("source remains exact");
+
+        let mut continuation =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("continuation provisions");
+        continuation
+            .install_prefix(&prefix)
+            .expect("prefix installs transactionally");
+        assert_eq!(continuation.committed_length, 3);
+        assert_eq!(continuation.last_output.as_ref(), Some(&source_output));
+
+        let empty = continuation
+            .decode_continuation(&[])
+            .expect("empty suffix uses cached output");
+        assert_eq!(empty, source_output);
+        let suffix = continuation
+            .decode_continuation(&[4, 5, 6, 7])
+            .expect("non-empty suffix uses continuation chunks");
+        assert_eq!(suffix.token_ids(), [201]);
+        assert_eq!(suffix.committed_length(), 7);
+        continuation
+            .ensure_state_lengths(7)
+            .expect("continuation states remain synchronized");
+        assert_eq!(prefix.committed_length(), 3);
+        assert_eq!(prefix.cached_terminal_output().committed_length(), 3);
+        source_core
+            .ensure_state_lengths(3)
+            .expect("source is isolated");
+    }
+
+    #[test]
+    fn qwen_state_image_exports_all_layers_and_restores_transactionally() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![101, 102, 103],
+            vec![201],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        let output = source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let image = source_core
+            .export_state_image()
+            .expect("state image export");
+        assert_eq!(image.session_id(), session.id());
+        assert_eq!(image.committed_length(), 3);
+        assert_eq!(image.kv_layers().len(), 8);
+        assert_eq!(image.linear_layers().len(), 24);
+        assert_eq!(image.cached_terminal_output(), Some(&output));
+        assert!(
+            image
+                .kv_layers()
+                .values()
+                .all(|layer| layer.image().metadata().published_length == 3)
+        );
+        assert!(
+            image
+                .linear_layers()
+                .values()
+                .all(|layer| matches!(layer.image().metadata().active_slot, Some(0 | 1)))
+        );
+
+        let mut restored = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("restore destination provisions");
+        restored
+            .restore_state_image(&image)
+            .expect("all state image layers restore");
+        assert_eq!(restored.committed_length, 3);
+        assert_eq!(restored.rope_position_delta, image.rope_position_delta());
+        assert_eq!(restored.last_output.as_ref(), Some(&output));
+        restored
+            .ensure_state_lengths(3)
+            .expect("restored layer lengths match");
+        assert!(recorder.state_image_import_calls() >= 32);
+    }
+
+    #[test]
+    fn qwen_resident_model_state_image_factory_restores_fresh_request() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![101, 102, 103],
+            vec![201],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let image = source_core
+            .export_state_image()
+            .expect("state image export");
+        let resident_inner = QwenResidentInner::provision(
+            session,
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("resident provisions");
+        let resident = QwenResidentModel {
+            inner: Arc::new(resident_inner),
+        };
+        let request = resident
+            .new_request_from_state_image(&image, graph)
+            .expect("resident state-image factory restores");
+        assert_eq!(request.committed_length(), 3);
+        assert_eq!(request.last_output(), image.cached_terminal_output());
+    }
+
+    #[test]
+    fn qwen_checkpoint_round_trip_cross_session_checks_identity_positions_and_suffix() {
+        let source_recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+            101, 102, 103,
+        ]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let source_session = Arc::new(ExecutionSession::new("source", source_recorder));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&source_session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let image = source_core.export_state_image().expect("source image");
+        let kv_encoding = image
+            .kv_layers()
+            .values()
+            .next()
+            .expect("KV layers")
+            .descriptor()
+            .cache_encoding();
+        let identity = CheckpointIdentity::for_tokens(
+            image.model_fingerprint().to_owned(),
+            "artifact-v1",
+            "qwen-adapter-v1",
+            "renderer-v1",
+            "tokenizer-v1",
+            "gfx942",
+            qwen_hex_digest(image.plan_digest()),
+            &[1, 2, 3],
+            kv_encoding,
+            image.kv_descriptor_digest(),
+            [7; 32],
+        )
+        .expect("checkpoint identity");
+        let mut wrong_encoding = identity.clone();
+        wrong_encoding.kv_encoding = KvCacheEncoding::Fp8E4M3FnStatic;
+        assert!(matches!(
+            image.to_checkpoint(
+                wrong_encoding,
+                &[1, 2, 3],
+                b"conversation",
+                b"sampler",
+                b"grammar",
+                b"stop",
+                3,
+                3,
+                1,
+            ),
+            Err(QwenExecutionError::InvalidRequest(reason))
+                if reason.contains("KV encoding/descriptors")
+        ));
+        let checkpoint = image
+            .to_checkpoint(
+                identity.clone(),
+                &[1, 2, 3],
+                b"conversation",
+                b"sampler",
+                b"grammar",
+                b"stop",
+                3,
+                3,
+                1,
+            )
+            .expect("checkpoint flatten");
+        let encoded = checkpoint.encode().expect("checkpoint encoding");
+        let decoded = SessionCheckpoint::decode_with_identity(&encoded, Some(&identity))
+            .expect("checkpoint decoding");
+        assert_eq!(decoded.payload.token_history, [1, 2, 3]);
+        assert_eq!(
+            decoded.header.absolute_position - decoded.header.logical_position,
+            0
+        );
+        assert!(image.cached_terminal_output().is_some());
+
+        // The destination has a different execution session. Checkpoint
+        // restore must succeed while raw QwenStateImage restore rejects it.
+        let destination_recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![201]]));
+        let destination_session = Arc::new(ExecutionSession::new(
+            "destination",
+            destination_recorder.clone(),
+        ));
+        let mut destination = QwenExecutionCore::provision(
+            Arc::clone(&destination_session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("destination provisions");
+        assert!(matches!(
+            destination.restore_state_image(&image),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("different execution session")
+        ));
+        destination
+            .restore_checkpoint(&decoded, &identity)
+            .expect("cross-session checkpoint restore");
+        assert_eq!(destination.committed_length, 3);
+        let suffix = destination
+            .decode_continuation(&[4])
+            .expect("non-empty suffix continuation");
+        assert_eq!(suffix.committed_length(), 4);
+
+        let mut wrong_identity = identity.clone();
+        wrong_identity.adapter_identity = "different-adapter".to_owned();
+        assert!(matches!(
+            destination.restore_checkpoint(&decoded, &wrong_identity),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("frontend identity")
+        ));
+        assert_eq!(destination_recorder.state_image_import_calls(), 32);
+
+        let mut malformed = decoded.clone();
+        malformed.header.absolute_position = 2;
+        assert!(matches!(
+            destination.restore_checkpoint(&malformed, &identity),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("absolute position") || reason.contains("checkpoint")
+        ));
+        assert_eq!(destination.committed_length, 4);
+    }
+
+    #[test]
+    fn qwen_checkpoint_rejects_missing_topology_before_import() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+            101, 102, 103,
+        ]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("provision");
+        core.prefill(&[1, 2, 3]).expect("prefill");
+        let image = core.export_state_image().expect("image");
+        let encoding = image
+            .kv_layers()
+            .values()
+            .next()
+            .unwrap()
+            .descriptor()
+            .cache_encoding();
+        let identity = CheckpointIdentity::for_tokens(
+            image.model_fingerprint(),
+            "artifact-v1",
+            "adapter-v1",
+            "renderer-v1",
+            "tokenizer-v1",
+            "recorder",
+            qwen_hex_digest(image.plan_digest()),
+            &[1, 2, 3],
+            encoding,
+            image.kv_descriptor_digest(),
+            [0; 32],
+        )
+        .unwrap();
+        let mut checkpoint = image
+            .to_checkpoint(identity.clone(), &[1, 2, 3], &[], &[], &[], &[], 3, 3, 1)
+            .unwrap();
+        checkpoint.payload.state_layers.pop();
+        let mut destination =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("destination provision");
+        assert!(
+            destination
+                .restore_checkpoint(&checkpoint, &identity)
+                .is_err()
+        );
+        assert_eq!(recorder.state_image_import_calls(), 0);
+        assert_eq!(destination.committed_length, 0);
+    }
+
+    #[test]
+    fn qwen_state_image_without_terminal_output_rejects_empty_suffix_but_continues_nonempty() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+            vec![101, 102, 103],
+            vec![201],
+        ]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let image = source_core
+            .export_state_image()
+            .expect("state image export")
+            .without_terminal_output();
+
+        let mut restored =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("restore destination provisions");
+        restored
+            .restore_state_image(&image)
+            .expect("state image without output restores");
+        assert!(matches!(
+            restored.decode_continuation(&[]),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("cached terminal")
+        ));
+        let output = restored
+            .decode_continuation(&[4])
+            .expect("non-empty suffix resumes restored state");
+        assert_eq!(output.committed_length(), 4);
+    }
+
+    #[test]
+    fn qwen_state_image_rejects_wrong_missing_duplicate_and_mixed_lengths_before_import() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+            101, 102, 103,
+        ]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let valid = source_core
+            .export_state_image()
+            .expect("state image export");
+
+        let mut wrong_layer = valid.clone();
+        let first_layer = *wrong_layer.kv_layers.keys().next().unwrap();
+        let entry = wrong_layer.kv_layers.get_mut(&first_layer).unwrap();
+        entry.image = ExecutionStateImageV1::new(
+            crate::StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: first_layer + 1,
+                published_length: 3,
+                generation: 1,
+                active_slot: None,
+            },
+            entry.image.planes().to_vec(),
+        );
+        let mut destination = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("destination provisions");
+        assert!(matches!(
+            destination.restore_state_image(&wrong_layer),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("owner or layer")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+
+        let mut missing = valid.clone();
+        missing.kv_layers.remove(&first_layer);
+        assert!(matches!(
+            destination.restore_state_image(&missing),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("layer set")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+
+        let mut duplicate = valid.clone();
+        let duplicate_layer = *duplicate.kv_layers.keys().next().unwrap();
+        let duplicate_image = duplicate
+            .kv_layers
+            .get(&duplicate_layer)
+            .unwrap()
+            .image
+            .clone();
+        let mut duplicate_planes = duplicate_image.planes().to_vec();
+        duplicate_planes[1].plane = duplicate_planes[0].plane;
+        duplicate.kv_layers.get_mut(&duplicate_layer).unwrap().image =
+            ExecutionStateImageV1::new(duplicate_image.metadata().clone(), duplicate_planes);
+        assert!(matches!(
+            destination.restore_state_image(&duplicate),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("duplicate")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+
+        let mut mixed = valid.clone();
+        let second_layer = *mixed.kv_layers.keys().nth(1).unwrap();
+        let second_image = mixed.kv_layers.get(&second_layer).unwrap().image.clone();
+        let mut metadata = second_image.metadata().clone();
+        metadata.published_length = 2;
+        mixed.kv_layers.get_mut(&second_layer).unwrap().image =
+            ExecutionStateImageV1::new(metadata, second_image.planes().to_vec());
+        assert!(matches!(
+            destination.restore_state_image(&mixed),
+            Err(QwenExecutionError::InvalidRequest(reason)) if reason.contains("published length")
+        ));
+        assert_eq!(recorder.state_image_import_calls(), 0);
+    }
+
+    #[test]
+    fn qwen_state_image_adapter_failure_does_not_publish_destination() {
+        let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([vec![
+            101, 102, 103,
+        ]]));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut source_core = QwenExecutionCore::provision(
+            Arc::clone(&session),
+            graph.clone(),
+            plan.clone(),
+            Duration::from_millis(1),
+            &source,
+        )
+        .expect("source provisions");
+        source_core.prefill(&[1, 2, 3]).expect("source prefill");
+        let image = source_core
+            .export_state_image()
+            .expect("state image export");
+        recorder.set_state_image_failure(true);
+
+        let mut destination =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("destination provisions");
+        assert!(matches!(
+            destination.restore_state_image(&image),
+            Err(QwenExecutionError::Execution(
+                ExecutionError::BackendStatus { status: 91, .. }
+            ))
+        ));
+        assert_eq!(destination.committed_length, 0);
+        assert!(destination.last_output.is_none());
+        assert!(recorder.state_image_import_calls() > 0);
+    }
+
+    #[test]
+    fn qwen_state_image_encoding_plane_contract_covers_fp16_fp8_static_and_nvfp4() {
+        let expected = [
+            (KvCacheEncoding::Fp16, 2),
+            (KvCacheEncoding::Fp8E4M3Fn, 4),
+            (KvCacheEncoding::Fp8E4M3FnStatic, 2),
+            (KvCacheEncoding::Nvfp4, 6),
+        ];
+        for (encoding, count) in expected {
+            let descriptor = KvStateDescriptor::new_with_storage(0, 3, 4, 256, encoding).unwrap();
+            assert_eq!(descriptor.plane_kinds().len(), count);
+        }
+        assert_eq!(
+            LinearAttentionStateDescriptor::new(0, 3)
+                .unwrap()
+                .plane_kinds()
+                .len(),
+            5
+        );
     }
 
     #[test]

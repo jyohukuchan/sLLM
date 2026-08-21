@@ -1007,7 +1007,7 @@ candidateを再確認した。
 | planned | Phase 38 | MI300X residual closure・peer比較 | Phase 37後のfresh profileからFNUZ/GEMM、execution replay、KV provider等をAmdahl順に限定評価する |
 | 完了 | Phase 39 | service operability・認証・observability | health/readiness、bounded metrics・memory、redacted slots、opt-in resumable SSE、TLS/CORS、複数user/admin keyをhost integrationで固定した |
 | 完了 | Phase 40 | token selection・grammar・structured generation | host/API/HIP/Qwen/Gemmaへ統合。V620/R9700 selector matrixとV620 Qwen/Gemma model integrationをPASS、gfx942 realのみdeferred |
-| planned | Phase 41 | prefix/KV・session state・speculation | prefix reuse、checkpoint、context shift、assistant prefill、external draft/ngramをidentity-safeに実装する |
+| 完了 | Phase 41 | prefix/KV・session state・speculation | identity-safe prefix fork/COW、stateless prompt checkpoint、context shift、assistant prefill、model-neutral draftをQwen/Gemmaへ統合し、両RDNA実機state matrixをPASSした |
 | planned | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、infillを公開する |
 | planned | Phase 43 | Responses・Anthropic・function/tool protocol | 別仕様pinと共通internal itemでAPI/event/tool callを実装し、tool実行とは分離する |
 | planned | Phase 44 | template・reasoning・interactive UX | sandboxed generic template、reasoning control、interactive/reverse prompt/prompt fileを実装する |
@@ -1156,6 +1156,21 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
   historyは[Phase 40 archive plan](archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)と
   [Phase 40 history](../history/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)を正とする。
 
+### Phase 41: prefix・session state・speculation（完了）
+
+- canonical identity、bounded longest-prefix index、lease/LRU、Qwen/Gemma opaque state forkを実装した。VMMはread-only page shareと
+  tail COW、contiguous stateはsame-device D2Dを使い、post-COW physical bytesとcache resident bytesを重複なく計上する。
+- Qwen/Gemmaの全KV encoding plane、Qwen GDN/linear、Gemma full 8層+sliding 40層をversioned checkpointへ保存し、strict
+  filesystem/checksum/quota検証後にfresh ownerへtransactional restoreする。productionはstateless prompt boundaryのload/saveに
+  限定し、mid-generation resumeや暗黙のglobal sessionをclaimしない。
+- `keep-prefix-recent-v1`、explicit absolute RoPE/attention position、assistant prefill、MTP/external/ngram共通draft contractを統合した。
+  unsupported combinationはGPU work前にfail closedとし、default disabled時の既存memory/token semanticsを維持する。
+- workspace test/clippy、native C ABI、V620 `gfx1030` / R9700 `gfx1201`のall-plane fork/COW/export-import、gfx942
+  `sramecc+:xnack-` wave64 compileをPASSした。MI300X real runはVM再確保後へdeferredする。詳細は
+  [archive plan](archive/2026/08/21-31/phase41-prefix-session-speculation.md)、
+  [history](../history/2026/08/21-31/phase41-prefix-session-speculation.md)、
+  [GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。llama.cpp sourceの直接reuseはない。
+
 ### llama.cppとの差分（機能・運用の未割当棚卸し）
 
 - 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
@@ -1173,7 +1188,7 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 | 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | HTTPは`/v1/models`と`/v1/chat/completions`だけを公開し、Chat CompletionsはPhase 40で`n=1..=8`へ拡張した。Responsesは既存deferred、その他のHTTP endpoint/runtime modeは未割当。CLIのtokenize/render/decodeとinternal embedding opを、対応するHTTP APIのsupportとは数えない |
 | 制約生成・tool | GBNF/JSON Schema constrained decoding、structured output、function/tool calling、組込みtool/MCP実行、logit bias、logprobs | Phase 40でbounded GBNF/JSON Schema、structured `response_format`、logit bias、post-mask logprobsをprofile v1へ実装した。tools/function、tool result parser、組込みtool/MCP実行は未割当で、実行権限は別のsecurity判断とする |
 | sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | Phase 40でversioned ordered sampler chainと追加samplerを実装済み。GPU TokenSelectは対応subsetだけを明示routeし、高度な全候補filterはhost pathへ残す。既存performance backlogのGPU sampling移行とは分ける |
-| prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | stateはrequest-localで、cross-request prefix/session reuseはない。prefix/KV cacheと簡易永続化のbacklog、将来RoPE scalingへ接続するが、追加runtime controlは未割当。model固有MTPはこの比較から除外する |
+| prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | Phase 41でidentity-safe prefix/KV reuse、stateless prompt checkpoint、keep-prefix/recent context shift、assistant prefill、MTP/external/ngram共通contractを実装した。mid-generation/wire session resume、external executor provisioning、FIM/infillは後続範囲に残る |
 | adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
 | template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
 | service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | Phase 39でhealth/readiness、bounded metrics/runtime memory、redacted props/slots・admin cancel、opt-in resumable SSE、exact CORS、Rustls、複数user/admin keyとrotationを実装済み。server UIだけをPhase 48に残す |
@@ -1184,7 +1199,7 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
   Phase 36 Session Cは[archived plan](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)に固定したprofile v1のservice、reasoning、stop/sampling、連続・二並行request、
   lifecycle matrixをそのまま実行し、上表の未実装機能を未実行FAIL、追加受入条件、またはPhase 36 blockerとして扱わない。
 
-KV/会話/model lockの簡易永続化はPhase 41、Responses APIはPhase 43、WebUIはPhase 48へ割り当てた。
+KV/会話/model lockのstateless prompt checkpointはPhase 41で完了した。Responses APIはPhase 43、WebUIはPhase 48へ割り当てた。
 TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、人間による発表、
 LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り当てない。これらを初期versionの完了条件へ
 読み替えず、完了済みのPhase 18へ後続範囲を逆流させない。
@@ -1332,9 +1347,14 @@ LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り�
   [history](../history/2026/08/21-31/phase39-service-operability.md)を正とする。
 - MI300X性能laneの次はPhase 37だが、VMは削除済みなので再確保前はgfx942 compile/selector/oracle準備までをdraftとし、
   GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、Phase 38で
-  fresh residualを閉じる。機能laneの次はPhase 40とし、MI300X待ちの間もhost側を独立して進める。Phase 37/38のGPU完了は
-  Phase 40以降の開始・merge gateにしない。詳細、依存、受入条件、
+  fresh residualを閉じる。機能laneはPhase 40/41を完了した。MI300X待ちの間もhost/RDNA側を独立して進め、
+  Phase 37/38のGPU完了はPhase 41以降の開始・merge gateにしない。Phase 41の詳細は
+  [archive plan](archive/2026/08/21-31/phase41-prefix-session-speculation.md)、全体の詳細、依存、受入条件、
   intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
+- Phase 41はidentity-safe prefix fork/COW、Qwen/Gemma stateless prompt checkpoint、context shift、assistant prefill、
+  model-neutral MTP/external/ngram contractを完了した。V620/R9700の実GPU state matrixとgfx942 feature-pinned compileをPASSし、
+  MI300X実機だけをdeferredした。詳細は
+  [Phase 41 archive plan](archive/2026/08/21-31/phase41-prefix-session-speculation.md)を正とする。
 - Phase 40は完了した。既存profile-v1のtoken列とtemperature-zero Argmaxをlegacy adapterで維持し、ordered sampler chain、
   post-mask logprobs、bounded GBNF/token trie/UTF-8 state、明示JSON Schema subset、独立`n=1..=8` choice state、selected-only
   D2HのHIP prepared selectorを実装した。V620/R9700実機correctnessとgfx942 compile routeをPASSし、MI300X実機PASSはVM再確保後へ

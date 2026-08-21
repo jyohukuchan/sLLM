@@ -33,6 +33,7 @@ struct DescriptorMetadata final {
   uint32_t rotary_dim;
   uint32_t theta_bits;
   uint32_t max_position;
+  uint32_t position_payload_mode;
 };
 
 sllm_status_t validate_descriptor_prefix(const sllm_rotary_desc_t *descriptor,

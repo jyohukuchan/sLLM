@@ -121,7 +121,14 @@ impl RotaryDescriptor {
             struct_size: size_of::<sys::sllm_rotary_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
             op_version: sys::SLLM_HIP_ROTARY_VERSION,
-            reserved0: 0,
+            reserved0: match contract.position_mode() {
+                sllm_core::RotaryPositionModeV1::Contiguous => {
+                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1
+                }
+                sllm_core::RotaryPositionModeV1::Explicit => {
+                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+                }
+            },
             start_position: u64::from(contract.start_position()),
             q_heads: contract.q_heads(),
             kv_heads: contract.kv_heads(),

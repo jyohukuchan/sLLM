@@ -2254,10 +2254,10 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
       return false;
     }
   }
-  if (!expect_status(sllm_queue_set_completion_mode(
-                         queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
-                         &error.sink),
-                     SLLM_STATUS_OK, "set deferred completion mode", error)) {
+  if (!expect_status(
+          sllm_queue_set_completion_mode(
+              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED, &error.sink),
+          SLLM_STATUS_OK, "set deferred completion mode", error)) {
     return false;
   }
   const std::size_t events_before = fake_hip::live_events();
@@ -2276,20 +2276,19 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
       return false;
     }
   }
-  if (!expect_status(sllm_queue_set_completion_mode(
-                         queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED,
-                         &error.sink),
-                     SLLM_STATUS_PUBLIC_BUSY,
-                     "completion mode change with active segment", error)) {
+  if (!expect_status(
+          sllm_queue_set_completion_mode(
+              queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED, &error.sink),
+          SLLM_STATUS_PUBLIC_BUSY, "completion mode change with active segment",
+          error)) {
     return false;
   }
   sllm_completion_result_t result{};
   result.struct_size = sizeof(result);
   result.abi_version = SLLM_HIP_ABI_VERSION;
-  if (!expect_status(sllm_completion_query(operations[0], &result,
-                                            &error.sink),
-                     SLLM_STATUS_PUBLIC_PENDING,
-                     "eventless completion query", error) ||
+  if (!expect_status(sllm_completion_query(operations[0], &result, &error.sink),
+                     SLLM_STATUS_PUBLIC_PENDING, "eventless completion query",
+                     error) ||
       result.state != SLLM_COMPLETION_STATE_PENDING) {
     std::cerr << "deferred pending-query invariant failed, state="
               << result.state << '\n';
@@ -2306,8 +2305,8 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
   result = {};
   result.struct_size = sizeof(result);
   result.abi_version = SLLM_HIP_ABI_VERSION;
-  if (!expect_status(sllm_completion_finalize_after(
-                         operations[0], fence, &result, &error.sink),
+  if (!expect_status(sllm_completion_finalize_after(operations[0], fence,
+                                                    &result, &error.sink),
                      SLLM_STATUS_PUBLIC_NOT_READY,
                      "finalize before fence success", error) ||
       result.state != SLLM_COMPLETION_STATE_PENDING) {
@@ -2328,8 +2327,8 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
     result = {};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
-    if (!expect_status(sllm_completion_finalize_after(
-                           operation, fence, &result, &error.sink),
+    if (!expect_status(sllm_completion_finalize_after(operation, fence, &result,
+                                                      &error.sink),
                        SLLM_STATUS_OK, "deferred completion finalize", error) ||
         result.state != SLLM_COMPLETION_STATE_SUCCESS) {
       std::cerr << "deferred finalize invariant failed at " << index
@@ -2344,10 +2343,10 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
     }
   }
   if (!release_completion(&fence) || fake_hip::live_events() != events_before ||
-      !expect_status(sllm_queue_set_completion_mode(
-                         queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED,
-                         &error.sink),
-                     SLLM_STATUS_OK, "restore profiled completion mode", error)) {
+      !expect_status(
+          sllm_queue_set_completion_mode(
+              queue, SLLM_QUEUE_COMPLETION_MODE_PROFILED, &error.sink),
+          SLLM_STATUS_OK, "restore profiled completion mode", error)) {
     std::cerr << "deferred fence cleanup invariant failed, events="
               << fake_hip::live_events() << '\n';
     return false;
@@ -2363,7 +2362,8 @@ bool deferred_segment_uses_one_fence_event_and_finalizes_exactly() {
   fake_hip::set_event_record_status(hipSuccess);
   for (auto &plan : plans) {
     if (!expect_status(sllm_rmsnorm_plan_release(&plan, &error.sink),
-                       SLLM_STATUS_OK, "deferred segment plan release", error)) {
+                       SLLM_STATUS_OK, "deferred segment plan release",
+                       error)) {
       return false;
     }
   }
@@ -2785,14 +2785,10 @@ bool create_attention_resources(sllm_context_t **const context,
     return false;
   }
   const uint64_t sizes[8] = {
-      m * 16U * 512U * sizeof(uint16_t),
-      m * 4U * 256U * sizeof(uint16_t),
-      16U * 256U * sizeof(uint16_t),
-      4U * 256U * sizeof(uint16_t),
-      m * 3U * sizeof(int32_t),
-      m * 16U * 256U * sizeof(uint16_t),
-      m * 16U * 256U * sizeof(uint16_t),
-      m * 4U * 256U * sizeof(uint16_t),
+      m * 16U * 512U * sizeof(uint16_t), m * 4U * 256U * sizeof(uint16_t),
+      16U * 256U * sizeof(uint16_t),     4U * 256U * sizeof(uint16_t),
+      m * 3U * sizeof(int32_t),          m * 16U * 256U * sizeof(uint16_t),
+      m * 16U * 256U * sizeof(uint16_t), m * 4U * 256U * sizeof(uint16_t),
   };
   for (std::size_t index = 0U; index != buffers->size(); ++index) {
     if (!create_buffer_sized(*context, sizes[index], &(*buffers)[index])) {
@@ -2924,7 +2920,7 @@ bool attention_preprocess_prepare_validation_and_old_abi() {
     return false;
   }
   auto reserved = descriptor;
-  reserved.reserved[0] = 1U;
+  reserved.reserved[1] = 1U;
   if (!expect(reserved, SLLM_STATUS_RESERVED_NONZERO,
               "attention reserved rejection")) {
     return false;
@@ -3072,19 +3068,19 @@ bool attention_preprocess_mrope_positions_dispatch() {
   Error error;
   auto descriptor = attention_preprocess_descriptor(buffers, m, 0U);
   const uint64_t positions_shape[] = {m, 3U};
-  descriptor.positions = attention_binding(
-      buffers[4], SLLM_TENSOR_DTYPE_I32, 2U, positions_shape);
+  descriptor.positions =
+      attention_binding(buffers[4], SLLM_TENSOR_DTYPE_I32, 2U, positions_shape);
   sllm_attention_preprocess_plan_t *plan = nullptr;
   sllm_completion_t *completion = nullptr;
   auto info = attention_preprocess_dispatch_info();
   const bool valid =
       upload_attention_positions(queue, buffers[4], positions) &&
-      expect_status(sllm_attention_preprocess_prepare(
-                        context, &descriptor, &plan, &error.sink),
+      expect_status(sllm_attention_preprocess_prepare(context, &descriptor,
+                                                      &plan, &error.sink),
                     SLLM_STATUS_OK, "attention mRoPE prepare", error) &&
       plan != nullptr &&
-      expect_status(sllm_attention_preprocess_execute(
-                        plan, queue, &completion, &info, &error.sink),
+      expect_status(sllm_attention_preprocess_execute(plan, queue, &completion,
+                                                      &info, &error.sink),
                     SLLM_STATUS_OK, "attention mRoPE execute", error) &&
       completion != nullptr && info.dispatch_count == 1U &&
       fake_hip::attention_preprocess_launch_calls() == 1U &&
@@ -3168,6 +3164,24 @@ sllm_rotary_dispatch_info_t rotary_dispatch_info() {
   info.abi_version = SLLM_HIP_ABI_VERSION;
   info.info_version = SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION;
   return info;
+}
+
+bool upload_rotary_positions(const sllm_queue_t *const queue,
+                             const sllm_buffer_t *const buffer,
+                             const std::vector<int32_t> &positions) {
+  sllm_transfer_desc_t transfer{};
+  transfer.struct_size = sizeof(transfer);
+  transfer.abi_version = SLLM_HIP_ABI_VERSION;
+  transfer.host_pointer = const_cast<int32_t *>(positions.data());
+  transfer.size_bytes =
+      static_cast<uint64_t>(positions.size() * sizeof(int32_t));
+  Error error;
+  sllm_completion_t *completion = nullptr;
+  return expect_status(sllm_buffer_copy_h2d(queue, buffer, &transfer,
+                                            &completion, &error.sink),
+                       SLLM_STATUS_OK, "rotary position upload", error) &&
+         query_completion(completion, SLLM_STATUS_OK) &&
+         release_completion(&completion);
 }
 
 bool rotary_prepare_execute_lifetime_and_negative_contract() {
@@ -3263,6 +3277,34 @@ bool rotary_prepare_execute_lifetime_and_negative_contract() {
       release_completion(&completion) &&
       expect_status(sllm_rotary_plan_release(&plan, &error.sink),
                     SLLM_STATUS_OK, "rotary plan release", error);
+  if (!valid) {
+    release_rotary_buffers(&buffers);
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  auto explicit_descriptor = descriptor;
+  explicit_descriptor.reserved0 = SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1;
+  positions = {static_cast<int32_t>(start_position),
+               static_cast<int32_t>(start_position + 2U),
+               static_cast<int32_t>(start_position + 2U)};
+  if (!upload_rotary_positions(queue, buffers[2], positions) ||
+      !expect_status(sllm_rotary_prepare(context, &explicit_descriptor, &plan,
+                                         &error.sink),
+                     SLLM_STATUS_OK, "rotary explicit prepare", error) ||
+      plan == nullptr ||
+      !expect_status(
+          sllm_rotary_execute(plan, queue, &completion, &info, &error.sink),
+          SLLM_STATUS_OK, "rotary explicit execute", error) ||
+      completion == nullptr || !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion) ||
+      !expect_status(sllm_rotary_plan_release(&plan, &error.sink),
+                     SLLM_STATUS_OK, "rotary explicit plan release", error)) {
+    release_rotary_buffers(&buffers);
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
   release_rotary_buffers(&buffers);
   return valid && release_queue(&queue) && release_context(&context) &&
          fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
@@ -4968,6 +5010,582 @@ bool linear_attention_transaction_and_lifetime_contract() {
          release_context(&context);
 }
 
+bool state_fork_vmm_and_linear_image_contract() {
+  fake_hip::reset();
+  constexpr uint64_t source_capacity = 2048U;
+  constexpr uint64_t destination_capacity = 4096U;
+  constexpr uint64_t prefix_length = 1025U;
+  constexpr uint64_t kv_elements_per_token = 4U * 256U;
+  constexpr uint64_t kv_bytes_per_token =
+      kv_elements_per_token * sizeof(uint16_t);
+  const std::size_t prefix_bytes =
+      static_cast<std::size_t>(prefix_length * kv_bytes_per_token);
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_kv_state_t *source = nullptr;
+  sllm_kv_state_t *child = nullptr;
+  sllm_buffer_t *source_key = nullptr;
+  sllm_buffer_t *source_value = nullptr;
+  sllm_buffer_t *child_key = nullptr;
+  sllm_buffer_t *child_value = nullptr;
+  Error error;
+  const auto cleanup_kv = [&]() {
+    bool result = true;
+    if (child != nullptr) {
+      result = expect_status(sllm_kv_state_release(&child, &error.sink),
+                             SLLM_STATUS_OK, "fork child release", error) &&
+               result;
+    }
+    if (source != nullptr) {
+      result = expect_status(sllm_kv_state_release(&source, &error.sink),
+                             SLLM_STATUS_OK, "fork source release", error) &&
+               result;
+    }
+    result = release_buffer(&source_key) && result;
+    result = release_buffer(&source_value) && result;
+    result = release_buffer(&child_key) && result;
+    result = release_buffer(&child_value) && result;
+    result = release_queue(&queue) && result;
+    result = release_context(&context) && result;
+    return result;
+  };
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_kv_state(context, source_capacity, &source) ||
+      !create_buffer_sized(context, prefix_bytes, &source_key) ||
+      !create_buffer_sized(context, prefix_bytes, &source_value)) {
+    (void)cleanup_kv();
+    return false;
+  }
+  std::vector<uint16_t> source_words(
+      static_cast<std::size_t>(prefix_length * kv_elements_per_token),
+      UINT16_C(0x3f80));
+  if (!upload_kv_words(queue, source_key, source_words) ||
+      !upload_kv_words(queue, source_value, source_words)) {
+    (void)cleanup_kv();
+    return false;
+  }
+  sllm_kv_append_desc_t append =
+      kv_append_descriptor(source_key, source_value, prefix_length, 0U);
+  sllm_kv_append_info_t append_info = kv_append_info();
+  sllm_completion_t *completion = nullptr;
+  if (!expect_status(sllm_kv_state_append(source, queue, &append, &completion,
+                                          &append_info, &error.sink),
+                     SLLM_STATUS_OK, "fork source append", error) ||
+      completion == nullptr || !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion)) {
+    (void)cleanup_kv();
+    return false;
+  }
+
+  sllm_kv_state_create_info_v2_t destination_info{};
+  destination_info.struct_size = sizeof(destination_info);
+  destination_info.abi_version = SLLM_HIP_ABI_VERSION;
+  destination_info.create_info_version =
+      SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
+  destination_info.session_id = 0x1234U;
+  destination_info.layer_id = 7U;
+  destination_info.capacity_tokens = destination_capacity;
+  destination_info.head_count = 4U;
+  destination_info.head_dim = 256U;
+  destination_info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+  destination_info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+  destination_info.dtype = SLLM_TENSOR_DTYPE_F16;
+  destination_info.encoding = SLLM_HIP_KV_ENCODING_FP16_V1;
+  sllm_state_fork_info_t fork_info{};
+  fork_info.struct_size = sizeof(fork_info);
+  fork_info.abi_version = SLLM_HIP_ABI_VERSION;
+  fork_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  bool valid =
+      expect_status(sllm_kv_state_fork(source, &destination_info, &child,
+                                       &fork_info, &error.sink),
+                    SLLM_STATUS_OK, "fork VMM child", error) &&
+      child != nullptr &&
+      fork_info.mode == SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES &&
+      fork_info.published_length == prefix_length &&
+      fork_info.shared_bytes >= fork_info.page_bytes * 2U &&
+      fork_info.child_owned_bytes == 0U && fork_info.copied_bytes == 0U &&
+      fork_info.page_bytes == UINT64_C(2) * 1024U * 1024U;
+  if (!valid || !create_buffer_sized(context, kv_bytes_per_token, &child_key) ||
+      !create_buffer_sized(context, kv_bytes_per_token, &child_value)) {
+    (void)cleanup_kv();
+    return false;
+  }
+  std::vector<uint16_t> child_words(
+      static_cast<std::size_t>(kv_elements_per_token), UINT16_C(0x4000));
+  valid = valid && upload_kv_words(queue, child_key, child_words) &&
+          upload_kv_words(queue, child_value, child_words);
+  sllm_state_fork_info_t pre_cow_info{};
+  pre_cow_info.struct_size = sizeof(pre_cow_info);
+  pre_cow_info.abi_version = SLLM_HIP_ABI_VERSION;
+  pre_cow_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_fork_query(child, &pre_cow_info, &error.sink),
+                    SLLM_STATUS_OK, "fork pre-COW audit query", error);
+  append = kv_append_descriptor(child_key, child_value, 1U, prefix_length);
+  append_info = kv_append_info();
+  completion = nullptr;
+  valid = valid &&
+          expect_status(sllm_kv_state_append(child, queue, &append, &completion,
+                                             &append_info, &error.sink),
+                        SLLM_STATUS_OK, "fork child append", error) &&
+          completion != nullptr &&
+          query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion);
+
+  const uint64_t tail_offset = prefix_length * kv_bytes_per_token;
+  std::vector<uint16_t> source_tail(
+      static_cast<std::size_t>(kv_elements_per_token));
+  std::vector<uint16_t> child_tail(
+      static_cast<std::size_t>(kv_elements_per_token));
+  const auto export_chunk = [&](const sllm_kv_state_t *const state,
+                                const uint32_t plane, const uint64_t offset,
+                                void *const host, const uint64_t bytes) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = plane;
+    chunk.byte_offset = offset;
+    chunk.byte_length = bytes;
+    chunk.host_pointer = host;
+    chunk.host_capacity = bytes;
+    return expect_status(sllm_kv_state_export(state, &chunk, &error.sink),
+                         SLLM_STATUS_OK, "fork raw KV export", error);
+  };
+  valid =
+      valid &&
+      export_chunk(source, SLLM_HIP_KV_STATE_PLANE_KEY, tail_offset,
+                   source_tail.data(), kv_bytes_per_token) &&
+      export_chunk(child, SLLM_HIP_KV_STATE_PLANE_KEY, tail_offset,
+                   child_tail.data(), kv_bytes_per_token) &&
+      source_tail ==
+          std::vector<uint16_t>(source_tail.size(), UINT16_C(0x0000)) &&
+      child_tail == std::vector<uint16_t>(child_tail.size(), UINT16_C(0x4000));
+
+  sllm_state_fork_info_t dynamic_info{};
+  dynamic_info.struct_size = sizeof(dynamic_info);
+  dynamic_info.abi_version = SLLM_HIP_ABI_VERSION;
+  dynamic_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_fork_query(child, &dynamic_info, &error.sink),
+                    SLLM_STATUS_OK, "fork dynamic audit query", error) &&
+      dynamic_info.copied_bytes >= dynamic_info.page_bytes &&
+      dynamic_info.shared_bytes < fork_info.shared_bytes;
+
+  sllm_state_image_info_t image_info{};
+  image_info.struct_size = sizeof(image_info);
+  image_info.abi_version = SLLM_HIP_ABI_VERSION;
+  image_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_image_query(source, &image_info, &error.sink),
+                    SLLM_STATUS_OK, "fork KV image query", error) &&
+      image_info.capacity_tokens == source_capacity &&
+      image_info.published_length == prefix_length &&
+      image_info.generation == 1U && image_info.plane_count == 2U;
+  std::vector<uint8_t> source_key_image(prefix_bytes);
+  std::vector<uint8_t> source_value_image(prefix_bytes);
+  const auto export_image = [&](const uint32_t plane, void *const host) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = plane;
+    chunk.byte_length = prefix_bytes;
+    chunk.host_pointer = host;
+    chunk.host_capacity = prefix_bytes;
+    return expect_status(sllm_kv_state_export(source, &chunk, &error.sink),
+                         SLLM_STATUS_OK, "fork KV image export", error);
+  };
+  const auto import_image = [&](const uint32_t plane, void *const host) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = plane;
+    chunk.byte_length = prefix_bytes;
+    chunk.host_pointer = host;
+    chunk.host_capacity = prefix_bytes;
+    return expect_status(sllm_kv_state_import(child, &chunk, &error.sink),
+                         SLLM_STATUS_OK, "fork KV image import", error);
+  };
+  valid =
+      valid &&
+      export_image(SLLM_HIP_KV_STATE_PLANE_KEY, source_key_image.data()) &&
+      export_image(SLLM_HIP_KV_STATE_PLANE_VALUE, source_value_image.data()) &&
+      import_image(SLLM_HIP_KV_STATE_PLANE_KEY, source_key_image.data()) &&
+      import_image(SLLM_HIP_KV_STATE_PLANE_VALUE, source_value_image.data()) &&
+      expect_status(
+          sllm_kv_state_import_finalize(child, &image_info, &error.sink),
+          SLLM_STATUS_OK, "fork KV image finalize", error);
+  sllm_kv_view_info_t child_view{};
+  child_view.struct_size = sizeof(child_view);
+  child_view.abi_version = SLLM_HIP_ABI_VERSION;
+  child_view.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_kv_state_query(child, &child_view, &error.sink),
+                        SLLM_STATUS_OK, "fork KV image query after finalize",
+                        error) &&
+          child_view.capacity_tokens == destination_capacity &&
+          child_view.observed_length == prefix_length &&
+          child_view.generation == 1U;
+
+  if (!cleanup_kv()) {
+    return false;
+  }
+
+  struct LowBitRecipe final {
+    uint32_t dtype;
+    uint32_t encoding;
+    uint32_t block_size;
+    uint32_t scale_dtype;
+    uint32_t plane_count;
+    uint64_t value_bytes;
+    uint64_t scale_bytes;
+    uint64_t outer_scale_bytes;
+    float static_key_scale;
+    float static_value_scale;
+  };
+  const std::array<LowBitRecipe, 3> lowbit_recipes = {{
+      {SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_V1, 0U,
+       SLLM_TENSOR_DTYPE_F32, 4U, 4U * 256U, 4U * sizeof(float), 0U, 0.0F,
+       0.0F},
+      {SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_STATIC_V1, 0U,
+       SLLM_TENSOR_DTYPE_F32, 2U, 4U * 256U, 0U, 0U, 0.125F, 0.25F},
+      {SLLM_TENSOR_DTYPE_U8, SLLM_HIP_KV_ENCODING_NVFP4_V1, 16U,
+       SLLM_TENSOR_DTYPE_F8_E4M3_FN, 6U, 4U * (256U / 2U), 4U * (256U / 16U),
+       4U * sizeof(float), 0.0F, 0.0F},
+  }};
+  const auto run_lowbit_image_case = [&](const LowBitRecipe &recipe,
+                                         const uint32_t case_index) {
+    fake_hip::reset();
+    constexpr uint64_t lowbit_source_capacity = 17U;
+    constexpr uint64_t lowbit_destination_capacity = 33U;
+    sllm_context_t *lowbit_context = nullptr;
+    sllm_kv_state_t *lowbit_source = nullptr;
+    sllm_kv_state_t *lowbit_child = nullptr;
+    Error lowbit_error;
+    sllm_kv_state_create_info_v2_t create{};
+    create.struct_size = sizeof(create);
+    create.abi_version = SLLM_HIP_ABI_VERSION;
+    create.create_info_version =
+        recipe.encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+            ? SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
+            : SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
+    create.session_id = 0x2000U + case_index;
+    create.layer_id = 31U + case_index;
+    create.capacity_tokens = lowbit_source_capacity;
+    create.head_count = 4U;
+    create.head_dim = 256U;
+    create.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT;
+    create.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+    create.dtype = recipe.dtype;
+    create.encoding = recipe.encoding;
+    create.block_size = recipe.block_size;
+    create.scale_dtype = recipe.scale_dtype;
+    if (recipe.encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1) {
+      std::memcpy(&create.reserved[0], &recipe.static_key_scale,
+                  sizeof(recipe.static_key_scale));
+      std::memcpy(&create.reserved[1], &recipe.static_value_scale,
+                  sizeof(recipe.static_value_scale));
+    }
+    bool case_valid =
+        create_context(&lowbit_context) &&
+        expect_status(
+            sllm_kv_state_create_v2(lowbit_context, &create, &lowbit_source,
+                                    &lowbit_error.sink),
+            SLLM_STATUS_OK, "low-bit image source create", lowbit_error) &&
+        lowbit_source != nullptr;
+    auto release_lowbit = [&]() {
+      bool released = true;
+      if (lowbit_child != nullptr) {
+        released =
+            expect_status(
+                sllm_kv_state_release(&lowbit_child, &lowbit_error.sink),
+                SLLM_STATUS_OK, "low-bit image child release", lowbit_error) &&
+            released;
+      }
+      if (lowbit_source != nullptr) {
+        released =
+            expect_status(
+                sllm_kv_state_release(&lowbit_source, &lowbit_error.sink),
+                SLLM_STATUS_OK, "low-bit image source release", lowbit_error) &&
+            released;
+      }
+      released = release_context(&lowbit_context) && released;
+      return released;
+    };
+    if (!case_valid) {
+      (void)release_lowbit();
+      return false;
+    }
+    sllm_state_image_info_t image{};
+    image.struct_size = sizeof(image);
+    image.abi_version = SLLM_HIP_ABI_VERSION;
+    image.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    case_valid =
+        expect_status(sllm_kv_state_image_query(lowbit_source, &image,
+                                                &lowbit_error.sink),
+                      SLLM_STATUS_OK, "low-bit image query", lowbit_error) &&
+        image.plane_count == recipe.plane_count &&
+        image.capacity_tokens == lowbit_source_capacity;
+    const std::array<uint64_t, 6> plane_bytes = {
+        recipe.value_bytes, recipe.value_bytes,       recipe.scale_bytes,
+        recipe.scale_bytes, recipe.outer_scale_bytes, recipe.outer_scale_bytes};
+    std::array<std::vector<uint8_t>, 6> plane_images;
+    for (std::size_t index = 0U; index != recipe.plane_count; ++index) {
+      plane_images[index].resize(static_cast<std::size_t>(plane_bytes[index]));
+      for (std::size_t byte = 0U; byte != plane_images[index].size(); ++byte) {
+        plane_images[index][byte] = static_cast<uint8_t>(0x20U + index + byte);
+      }
+      sllm_state_chunk_t chunk{};
+      chunk.struct_size = sizeof(chunk);
+      chunk.abi_version = SLLM_HIP_ABI_VERSION;
+      chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+      chunk.plane = static_cast<uint32_t>(index + 1U);
+      chunk.byte_length = plane_bytes[index];
+      chunk.host_pointer = plane_images[index].data();
+      chunk.host_capacity = plane_bytes[index];
+      case_valid =
+          case_valid &&
+          expect_status(
+              sllm_kv_state_import(lowbit_source, &chunk, &lowbit_error.sink),
+              SLLM_STATUS_OK, "low-bit raw plane import", lowbit_error);
+    }
+    image.published_length = 1U;
+    image.generation = 7U;
+    case_valid =
+        case_valid &&
+        expect_status(sllm_kv_state_import_finalize(lowbit_source, &image,
+                                                    &lowbit_error.sink),
+                      SLLM_STATUS_OK, "low-bit image finalize", lowbit_error);
+    sllm_kv_state_create_info_v2_t destination = create;
+    destination.capacity_tokens = lowbit_destination_capacity;
+    sllm_state_fork_info_t fork{};
+    fork.struct_size = sizeof(fork);
+    fork.abi_version = SLLM_HIP_ABI_VERSION;
+    fork.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    case_valid =
+        case_valid &&
+        expect_status(sllm_kv_state_fork(lowbit_source, &destination,
+                                         &lowbit_child, &fork,
+                                         &lowbit_error.sink),
+                      SLLM_STATUS_OK, "low-bit image fork", lowbit_error) &&
+        lowbit_child != nullptr &&
+        fork.mode == SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY &&
+        fork.published_length == 1U;
+    for (std::size_t index = 0U; index != recipe.plane_count; ++index) {
+      sllm_state_chunk_t chunk{};
+      chunk.struct_size = sizeof(chunk);
+      chunk.abi_version = SLLM_HIP_ABI_VERSION;
+      chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+      chunk.plane = static_cast<uint32_t>(index + 1U);
+      chunk.byte_length = plane_bytes[index];
+      chunk.host_pointer = plane_images[index].data();
+      chunk.host_capacity = plane_bytes[index];
+      case_valid =
+          case_valid &&
+          expect_status(
+              sllm_kv_state_export(lowbit_child, &chunk, &lowbit_error.sink),
+              SLLM_STATUS_OK, "low-bit raw plane export", lowbit_error);
+    }
+    return release_lowbit() && case_valid;
+  };
+  for (const LowBitRecipe &recipe : lowbit_recipes) {
+    valid =
+        run_lowbit_image_case(
+            recipe, static_cast<uint32_t>(&recipe - lowbit_recipes.data())) &&
+        valid;
+  }
+
+  /* A linear state fork is a device copy, but must preserve the published
+   * active slot and the image metadata/finalize transaction. */
+  fake_hip::reset();
+  sllm_context_t *linear_context = nullptr;
+  sllm_queue_t *linear_queue = nullptr;
+  sllm_linear_attention_state_t *linear_source = nullptr;
+  sllm_linear_attention_state_t *linear_child = nullptr;
+  std::array<sllm_buffer_t *, 9> buffers{};
+  const std::array<uint64_t, 9> sizes = {
+      8192U * 2U, 4096U * 2U, 32U * 2U,  32U * 2U,  8192U * 4U * 2U,
+      32U * 4U,   32U * 2U,   128U * 4U, 4096U * 2U};
+  const auto cleanup_linear = [&]() {
+    bool result = true;
+    if (linear_child != nullptr) {
+      result =
+          expect_status(
+              sllm_linear_attention_state_release(&linear_child, &error.sink),
+              SLLM_STATUS_OK, "linear fork child release", error) &&
+          result;
+    }
+    if (linear_source != nullptr) {
+      result =
+          expect_status(
+              sllm_linear_attention_state_release(&linear_source, &error.sink),
+              SLLM_STATUS_OK, "linear fork source release", error) &&
+          result;
+    }
+    for (auto &buffer : buffers) {
+      result = release_buffer(&buffer) && result;
+    }
+    result = release_queue(&linear_queue) && result;
+    result = release_context(&linear_context) && result;
+    return result;
+  };
+  if (!create_context(&linear_context) ||
+      !create_queue(linear_context, &linear_queue)) {
+    (void)cleanup_linear();
+    return false;
+  }
+  for (std::size_t index = 0U; index != buffers.size(); ++index) {
+    if (!create_buffer_sized(linear_context, sizes[index], &buffers[index])) {
+      (void)cleanup_linear();
+      return false;
+    }
+  }
+  sllm_linear_attention_state_create_info_t linear_create{};
+  linear_create.struct_size = sizeof(linear_create);
+  linear_create.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_create.session_id = 0x5a17U;
+  linear_create.layer_id = 9U;
+  linear_create.capacity_tokens = 7U;
+  linear_create.qk_heads = 16U;
+  linear_create.value_heads = 32U;
+  linear_create.head_dim = 128U;
+  linear_create.conv_kernel_size = 4U;
+  valid = valid &&
+          expect_status(
+              sllm_linear_attention_state_create(linear_context, &linear_create,
+                                                 &linear_source, &error.sink),
+              SLLM_STATUS_OK, "linear fork source create", error);
+  const uint64_t qkv_shape[] = {1U, 8192U};
+  const uint64_t output_shape[] = {1U, 4096U};
+  const uint64_t scalar_shape[] = {1U, 32U};
+  constexpr uint64_t conv_shape[] = {8192U, 1U, 4U};
+  constexpr uint64_t head_shape[] = {32U};
+  constexpr uint64_t norm_shape[] = {128U};
+  sllm_linear_attention_desc_t linear_desc{};
+  linear_desc.struct_size = sizeof(linear_desc);
+  linear_desc.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_desc.op_version = SLLM_HIP_LINEAR_ATTENTION_VERSION;
+  linear_desc.expected_length = 1U;
+  linear_desc.state = linear_source;
+  linear_desc.qkv =
+      attention_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 2U, qkv_shape);
+  linear_desc.z =
+      attention_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+  linear_desc.b_input =
+      attention_binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+  linear_desc.a_input =
+      attention_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 2U, scalar_shape);
+  linear_desc.conv_weight =
+      attention_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16, 3U, conv_shape);
+  linear_desc.a_log =
+      attention_binding(buffers[5], SLLM_TENSOR_DTYPE_F32, 1U, head_shape);
+  linear_desc.dt_bias =
+      attention_binding(buffers[6], SLLM_TENSOR_DTYPE_BF16, 1U, head_shape);
+  linear_desc.norm_weight =
+      attention_binding(buffers[7], SLLM_TENSOR_DTYPE_F32, 1U, norm_shape);
+  linear_desc.output =
+      attention_binding(buffers[8], SLLM_TENSOR_DTYPE_BF16, 2U, output_shape);
+  sllm_linear_attention_dispatch_info_t linear_dispatch{};
+  linear_dispatch.struct_size = sizeof(linear_dispatch);
+  linear_dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_dispatch.info_version =
+      SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
+  completion = nullptr;
+  valid = valid &&
+          expect_status(sllm_linear_attention_execute(
+                            linear_context, linear_queue, &linear_desc,
+                            &completion, &linear_dispatch, &error.sink),
+                        SLLM_STATUS_OK, "linear fork source execute", error) &&
+          completion != nullptr &&
+          query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion);
+  sllm_linear_attention_view_info_t linear_view{};
+  linear_view.struct_size = sizeof(linear_view);
+  linear_view.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_linear_attention_state_query(
+                            linear_source, &linear_view, &error.sink),
+                        SLLM_STATUS_OK, "linear fork source query", error) &&
+          linear_view.active_slot == 1U && linear_view.observed_length == 1U &&
+          linear_view.generation == 1U;
+  sllm_linear_attention_state_create_info_t linear_destination = linear_create;
+  linear_destination.capacity_tokens = 11U;
+  sllm_state_fork_info_t linear_fork_info{};
+  linear_fork_info.struct_size = sizeof(linear_fork_info);
+  linear_fork_info.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_fork_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_linear_attention_state_fork(
+                            linear_source, &linear_destination, &linear_child,
+                            &linear_fork_info, &error.sink),
+                        SLLM_STATUS_OK, "linear fork child", error) &&
+          linear_child != nullptr &&
+          linear_fork_info.mode == SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY &&
+          linear_fork_info.published_length == 1U &&
+          linear_fork_info.copied_bytes != 0U &&
+          linear_fork_info.shared_bytes == 0U;
+  sllm_state_image_info_t linear_image{};
+  linear_image.struct_size = sizeof(linear_image);
+  linear_image.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_image.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_linear_attention_state_image_query(
+                            linear_source, &linear_image, &error.sink),
+                        SLLM_STATUS_OK, "linear image query", error) &&
+          linear_image.active_slot == 1U &&
+          linear_image.capacity_tokens == 7U &&
+          linear_image.published_length == 1U && linear_image.plane_count == 5U;
+  const std::array<uint64_t, 5> linear_plane_bytes = {
+      UINT64_C(3) * 8192U * sizeof(uint16_t),
+      UINT64_C(3) * 8192U * sizeof(uint16_t),
+      UINT64_C(32) * 128U * 128U * sizeof(float),
+      UINT64_C(32) * 128U * 128U * sizeof(float),
+      UINT64_C(8192) * sizeof(uint16_t)};
+  std::array<std::vector<uint8_t>, 5> linear_images;
+  for (std::size_t index = 0U; index != linear_images.size(); ++index) {
+    linear_images[index].resize(
+        static_cast<std::size_t>(linear_plane_bytes[index]));
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    chunk.plane = static_cast<uint32_t>(index + 1U);
+    chunk.byte_length = linear_plane_bytes[index];
+    chunk.host_pointer = linear_images[index].data();
+    chunk.host_capacity = linear_plane_bytes[index];
+    valid =
+        valid && expect_status(sllm_linear_attention_state_export(
+                                   linear_source, &chunk, &error.sink),
+                               SLLM_STATUS_OK, "linear image export", error);
+    valid =
+        valid && expect_status(sllm_linear_attention_state_import(
+                                   linear_child, &chunk, &error.sink),
+                               SLLM_STATUS_OK, "linear image import", error);
+  }
+  valid =
+      valid && expect_status(sllm_linear_attention_state_import_finalize(
+                                 linear_child, &linear_image, &error.sink),
+                             SLLM_STATUS_OK, "linear image finalize", error);
+  linear_view = {};
+  linear_view.struct_size = sizeof(linear_view);
+  linear_view.abi_version = SLLM_HIP_ABI_VERSION;
+  linear_view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+  valid = valid &&
+          expect_status(sllm_linear_attention_state_query(
+                            linear_child, &linear_view, &error.sink),
+                        SLLM_STATUS_OK, "linear image query after finalize",
+                        error) &&
+          linear_view.active_slot == 1U && linear_view.capacity_tokens == 11U &&
+          linear_view.observed_length == 1U && linear_view.generation == 1U;
+  return cleanup_linear() && valid;
+}
+
 } // namespace
 
 int main() {
@@ -5069,6 +5687,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(
       kv_vattention_page_boundary_and_idempotent_cancel_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
+  SLLM_RUN_KV_CONTRACT(state_fork_vmm_and_linear_image_contract)
 #undef SLLM_RUN_KV_CONTRACT
   std::cout << "production public runtime host fault test: PASS\n";
   return 0;

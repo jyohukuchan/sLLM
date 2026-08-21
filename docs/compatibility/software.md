@@ -423,6 +423,17 @@ LLVM 23、canonical R9700 exact `gfx1201`のtupleで、Qwen3.5-4B BF16、FP16 KV
 終了後process 0を確認した。GGUF bytes/tensor setは異なるE1であり、このtuple以外の性能やstrict identityを主張しない。
 software lifecycleは`experimental`のままで、[R9700 summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
 
+### 2026-08-22 Phase41 local state tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、ROCm 7.14.0、HIP `7.14.60850`、LLVM 23で、canonical V620
+exact `gfx1030`とR9700 exact `gfx1201`のopaque KV/linear state fork、COW、encoding-native export/import matrixをPASSした。
+FP16 63/64/65/127/128/129、dynamic/static FP8、NVFP4、linear active slot/scratchをstate oracleへ照合し、target-only、
+fallbackなし、cleanup/process/ECC failure 0を確認した。このtupleはPhase 41 state contractに限定し、full-model性能、長時間運転、
+別driver/ROCm/SKU、production checkpoint/contextの全組合せへ一般化しない。software lifecycleは`experimental`を維持する。
+
+同じsourceはexact `gfx942:sramecc+:xnack-`、wave64でcompile/linkしたが、MI300X real runはVM再確保後へdeferredした。
+[Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

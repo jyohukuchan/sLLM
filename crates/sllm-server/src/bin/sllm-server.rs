@@ -15,10 +15,12 @@ use sllm_core::{
     ReviewedModelLock, builtin_reviewed_model_lock, read_derived_gguf_lock,
 };
 use sllm_server::{
-    ChatGenerationBackendV1, CredentialStoreV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
-    ModelRegistryEntryV1, ModelRegistryV1, ProductionShutdownAuditV1, QwenBackendConfigV1,
-    QwenChatBackendV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1, ServerConfigV1,
-    ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1, build_router_v1,
+    ChatGenerationBackendV1, CheckpointStartupConfigV1, ContextWindowStartupConfigV1,
+    CredentialStoreV1, DraftStartupConfigV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
+    ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
+    ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1,
+    SchedulerConfigV1, SchedulerV1, ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1,
+    ServerMetricsV1, build_router_v1,
 };
 
 fn main() -> ExitCode {
@@ -56,10 +58,19 @@ struct Config {
     shutdown_timeout: Duration,
     context_length: Option<u32>,
     kv_cache_encoding: KvCacheEncoding,
+    phase41: Phase41ProductionConfigV1,
 }
 
 fn parse_args() -> Result<Config, String> {
-    let mut raw = env::args().skip(1);
+    parse_args_from(env::args().skip(1))
+}
+
+fn parse_args_from<I>(args: I) -> Result<Config, String>
+where
+    I: IntoIterator,
+    I::Item: Into<String>,
+{
+    let mut raw = args.into_iter().map(Into::into);
     let mut values = BTreeMap::new();
     while let Some(flag) = raw.next() {
         if flag == "--help" || flag == "-h" {
@@ -161,6 +172,152 @@ fn parse_args() -> Result<Config, String> {
             ));
         }
     };
+
+    let prefix_cache_mode = values
+        .remove("--prefix-cache")
+        .unwrap_or_else(|| "disabled".to_owned());
+    let prefix_cache = match prefix_cache_mode.as_str() {
+        "disabled" => {
+            reject_disabled_options(
+                &values,
+                &[
+                    "--prefix-cache-max-entries",
+                    "--prefix-cache-max-tokens",
+                    "--prefix-cache-max-resident-bytes",
+                ],
+                "--prefix-cache",
+            )?;
+            PrefixCacheStartupConfigV1::Disabled
+        }
+        "enabled" => PrefixCacheStartupConfigV1::Enabled {
+            max_entries: parse_value(
+                &take_required(&mut values, "--prefix-cache-max-entries")?,
+                "prefix cache max entries",
+            )?,
+            max_logical_tokens: parse_value(
+                &take_required(&mut values, "--prefix-cache-max-tokens")?,
+                "prefix cache max tokens",
+            )?,
+            max_resident_bytes: parse_value(
+                &take_required(&mut values, "--prefix-cache-max-resident-bytes")?,
+                "prefix cache max resident bytes",
+            )?,
+        },
+        value => {
+            return Err(format!(
+                "--prefix-cache must be disabled or enabled: {value}"
+            ));
+        }
+    };
+    let context_policy = values
+        .remove("--context-policy")
+        .unwrap_or_else(|| "disabled".to_owned());
+    let context_window = match context_policy.as_str() {
+        "disabled" => {
+            reject_disabled_options(
+                &values,
+                &["--context-keep-prefix", "--context-keep-recent"],
+                "--context-policy",
+            )?;
+            ContextWindowStartupConfigV1::Disabled
+        }
+        "keep-prefix-recent-v1" => ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+            keep_prefix: parse_value(
+                &take_required(&mut values, "--context-keep-prefix")?,
+                "context keep-prefix",
+            )?,
+            keep_recent: parse_value(
+                &take_required(&mut values, "--context-keep-recent")?,
+                "context keep-recent",
+            )?,
+        },
+        value => {
+            return Err(format!(
+                "--context-policy must be disabled or keep-prefix-recent-v1: {value}"
+            ));
+        }
+    };
+    let checkpoint_mode = values
+        .remove("--checkpoint")
+        .unwrap_or_else(|| "disabled".to_owned());
+    let checkpoint = match checkpoint_mode.as_str() {
+        "disabled" => {
+            reject_disabled_options(
+                &values,
+                &[
+                    "--checkpoint-directory",
+                    "--checkpoint-quota-bytes",
+                    "--checkpoint-load",
+                    "--checkpoint-save",
+                ],
+                "--checkpoint",
+            )?;
+            CheckpointStartupConfigV1::Disabled
+        }
+        "enabled" => CheckpointStartupConfigV1::Enabled {
+            directory: PathBuf::from(take_required(&mut values, "--checkpoint-directory")?),
+            quota_bytes: parse_value(
+                &take_required(&mut values, "--checkpoint-quota-bytes")?,
+                "checkpoint quota bytes",
+            )?,
+            load_name: values.remove("--checkpoint-load"),
+            save_name: values.remove("--checkpoint-save"),
+        },
+        value => return Err(format!("--checkpoint must be disabled or enabled: {value}")),
+    };
+    let draft_mode = values
+        .remove("--draft")
+        .unwrap_or_else(|| "disabled".to_owned());
+    let draft = match draft_mode.as_str() {
+        "disabled" | "mtp-auto" => {
+            reject_disabled_options(
+                &values,
+                &[
+                    "--draft-ngram-order",
+                    "--draft-width",
+                    "--draft-model-identity",
+                    "--draft-tokenizer-identity",
+                    "--draft-vocabulary-size",
+                ],
+                "--draft",
+            )?;
+            if draft_mode == "disabled" {
+                DraftStartupConfigV1::Disabled
+            } else {
+                DraftStartupConfigV1::MtpAuto
+            }
+        }
+        "ngram" => DraftStartupConfigV1::Ngram {
+            order: parse_value(
+                &take_required(&mut values, "--draft-ngram-order")?,
+                "draft ngram order",
+            )?,
+            width: parse_value(&take_required(&mut values, "--draft-width")?, "draft width")?,
+        },
+        "external" => DraftStartupConfigV1::External {
+            model_identity: take_required(&mut values, "--draft-model-identity")?,
+            tokenizer_identity: take_required(&mut values, "--draft-tokenizer-identity")?,
+            vocabulary_size: parse_value(
+                &take_required(&mut values, "--draft-vocabulary-size")?,
+                "draft vocabulary size",
+            )?,
+            width: parse_value(&take_required(&mut values, "--draft-width")?, "draft width")?,
+        },
+        value => {
+            return Err(format!(
+                "--draft must be disabled, mtp-auto, ngram, or external: {value}"
+            ));
+        }
+    };
+    let phase41 = Phase41ProductionConfigV1 {
+        prefix_cache,
+        context_window,
+        checkpoint,
+        draft,
+    };
+    phase41
+        .validate()
+        .map_err(|error| format!("Phase41 configuration invalid: {error}"))?;
     if let Some(flag) = values.keys().next() {
         return Err(format!("unknown argument {flag}\n{}", usage()));
     }
@@ -188,10 +345,15 @@ fn parse_args() -> Result<Config, String> {
         shutdown_timeout,
         context_length,
         kv_cache_encoding,
+        phase41,
     })
 }
 
 fn run(config: Config) -> Result<(), String> {
+    config
+        .phase41
+        .validate_startup()
+        .map_err(|error| format!("Phase41 startup configuration invalid: {error}"))?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -246,6 +408,7 @@ fn run(config: Config) -> Result<(), String> {
                         .context_length
                         .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                     kv_cache_encoding: config.kv_cache_encoding,
+                    phase41: config.phase41.clone(),
                 })
                 .map_err(|error| error.to_string())?,
             ))
@@ -263,6 +426,7 @@ fn run(config: Config) -> Result<(), String> {
                             .context_length
                             .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
                         kv_cache_encoding: config.kv_cache_encoding,
+                        phase41: config.phase41.clone(),
                     })
                     .map_err(|error| error.to_string())?,
                 )),
@@ -284,6 +448,7 @@ fn run(config: Config) -> Result<(), String> {
                         context_length: config
                             .context_length
                             .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
+                        phase41: config.phase41.clone(),
                         },
                     )
                     .map_err(|error| error.to_string())?))
@@ -599,8 +764,19 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
+fn reject_disabled_options(
+    values: &BTreeMap<String, String>,
+    options: &[&str],
+    mode_flag: &str,
+) -> Result<(), String> {
+    if let Some(option) = options.iter().find(|option| values.contains_key(**option)) {
+        return Err(format!("{option} requires {mode_flag} to be enabled"));
+    }
+    Ok(())
+}
+
 fn usage() -> &'static str {
-    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N]"
+    "usage: sllm-server --gguf PATH --derived-lock PATH --device-index N --target GFX [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -608,7 +784,28 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{context_length_warning, read_private_key_file, read_tls_cert_file};
+    use super::{
+        context_length_warning, parse_args_from, read_private_key_file, read_tls_cert_file,
+    };
+    use sllm_server::{
+        CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
+        PrefixCacheStartupConfigV1,
+    };
+
+    fn base_args(extra: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1201",
+        ];
+        args.extend_from_slice(extra);
+        args.into_iter().map(str::to_owned).collect()
+    }
 
     #[test]
     fn context_warning_is_advisory_only_above_the_model_recommendation() {
@@ -619,6 +816,291 @@ mod tests {
         assert_eq!(warning["kind"], "context_length_exceeds_recommended");
         assert_eq!(warning["context_length"], 1_000_000);
         assert_eq!(warning["official_recommended_context_tokens"], 262_144);
+    }
+
+    #[test]
+    fn phase41_cli_defaults_every_opt_in_disabled() {
+        let config = parse_args_from(base_args(&[])).expect("default CLI should parse");
+        assert!(matches!(
+            config.phase41.prefix_cache,
+            PrefixCacheStartupConfigV1::Disabled
+        ));
+        assert!(matches!(
+            config.phase41.context_window,
+            ContextWindowStartupConfigV1::Disabled
+        ));
+        assert!(matches!(
+            config.phase41.checkpoint,
+            CheckpointStartupConfigV1::Disabled
+        ));
+        assert!(matches!(
+            config.phase41.draft,
+            DraftStartupConfigV1::Disabled
+        ));
+    }
+
+    #[test]
+    fn phase41_cli_accepts_documented_boundaries() {
+        let config = parse_args_from(base_args(&[
+            "--prefix-cache",
+            "enabled",
+            "--prefix-cache-max-entries",
+            "1",
+            "--prefix-cache-max-tokens",
+            "1",
+            "--prefix-cache-max-resident-bytes",
+            "1",
+            "--context-policy",
+            "keep-prefix-recent-v1",
+            "--context-keep-prefix",
+            "0",
+            "--context-keep-recent",
+            "1",
+            "--checkpoint",
+            "enabled",
+            "--checkpoint-directory",
+            "/var/lib/sllm/checkpoints",
+            "--checkpoint-quota-bytes",
+            "1",
+            "--checkpoint-save",
+            "startup",
+            "--draft",
+            "ngram",
+            "--draft-ngram-order",
+            "16",
+            "--draft-width",
+            "8",
+        ]))
+        .expect("valid Phase41 boundary configuration should parse");
+        assert!(matches!(
+            config.phase41.prefix_cache,
+            PrefixCacheStartupConfigV1::Enabled {
+                max_entries: 1,
+                max_logical_tokens: 1,
+                max_resident_bytes: 1,
+            }
+        ));
+        assert!(matches!(
+            config.phase41.context_window,
+            ContextWindowStartupConfigV1::KeepPrefixRecentV1 {
+                keep_prefix: 0,
+                keep_recent: 1,
+            }
+        ));
+        assert!(matches!(
+            config.phase41.draft,
+            DraftStartupConfigV1::Ngram {
+                order: 16,
+                width: 8,
+            }
+        ));
+
+        let upper = parse_args_from(base_args(&[
+            "--prefix-cache",
+            "enabled",
+            "--prefix-cache-max-entries",
+            "256",
+            "--prefix-cache-max-tokens",
+            "1048576",
+            "--prefix-cache-max-resident-bytes",
+            "1",
+            "--context-policy",
+            "keep-prefix-recent-v1",
+            "--context-keep-prefix",
+            "0",
+            "--context-keep-recent",
+            "0",
+        ]));
+        assert!(upper.is_err(), "context keep 0/0 must be rejected");
+
+        let upper = parse_args_from(base_args(&[
+            "--prefix-cache",
+            "enabled",
+            "--prefix-cache-max-entries",
+            "256",
+            "--prefix-cache-max-tokens",
+            "1048576",
+            "--prefix-cache-max-resident-bytes",
+            "1",
+            "--context-policy",
+            "keep-prefix-recent-v1",
+            "--context-keep-prefix",
+            "1",
+            "--context-keep-recent",
+            "0",
+        ]))
+        .expect("prefix cache upper bounds should parse");
+        assert!(matches!(
+            upper.phase41.prefix_cache,
+            PrefixCacheStartupConfigV1::Enabled {
+                max_entries: 256,
+                max_logical_tokens: 1_048_576,
+                max_resident_bytes: 1,
+            }
+        ));
+    }
+
+    #[test]
+    fn phase41_cli_rejects_just_over_limits_and_context_overflow() {
+        for args in [
+            vec![
+                "--prefix-cache",
+                "enabled",
+                "--prefix-cache-max-entries",
+                "257",
+                "--prefix-cache-max-tokens",
+                "1",
+                "--prefix-cache-max-resident-bytes",
+                "1",
+            ],
+            vec![
+                "--prefix-cache",
+                "enabled",
+                "--prefix-cache-max-entries",
+                "1",
+                "--prefix-cache-max-tokens",
+                "1048577",
+                "--prefix-cache-max-resident-bytes",
+                "1",
+            ],
+            vec![
+                "--context-policy",
+                "keep-prefix-recent-v1",
+                "--context-keep-prefix",
+                "18446744073709551615",
+                "--context-keep-recent",
+                "1",
+            ],
+        ] {
+            assert!(
+                parse_args_from(base_args(&args)).is_err(),
+                "expected just-over/overflow limits to be rejected: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn phase41_cli_accepts_external_draft_and_checks_width_bounds() {
+        let valid = parse_args_from(base_args(&[
+            "--draft",
+            "external",
+            "--draft-model-identity",
+            "target-lock",
+            "--draft-tokenizer-identity",
+            "tokenizer-lock",
+            "--draft-vocabulary-size",
+            "1",
+            "--draft-width",
+            "8",
+        ]))
+        .expect("valid external draft configuration should parse");
+        assert!(matches!(
+            valid.phase41.draft,
+            DraftStartupConfigV1::External {
+                vocabulary_size: 1,
+                width: 8,
+                ..
+            }
+        ));
+        for width in ["0", "9"] {
+            assert!(
+                parse_args_from(base_args(&[
+                    "--draft",
+                    "external",
+                    "--draft-model-identity",
+                    "target-lock",
+                    "--draft-tokenizer-identity",
+                    "tokenizer-lock",
+                    "--draft-vocabulary-size",
+                    "1",
+                    "--draft-width",
+                    width,
+                ]))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn phase41_cli_load_validation_is_explicit_and_redacted() {
+        let directory = std::env::temp_dir().join(format!(
+            "sllm-phase41-cli-missing-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&directory).unwrap();
+        let directory_string = directory.to_string_lossy().into_owned();
+        let config = parse_args_from(base_args(&[
+            "--checkpoint",
+            "enabled",
+            "--checkpoint-directory",
+            &directory_string,
+            "--checkpoint-quota-bytes",
+            "1",
+            "--checkpoint-load",
+            "missing",
+        ]))
+        .expect("checkpoint load option should parse");
+        let error = config.phase41.validate_startup().unwrap_err().to_string();
+        assert_eq!(error, "configured checkpoint load target is unavailable");
+        assert!(!error.contains(&directory_string));
+        assert!(!error.contains("missing"));
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn phase41_cli_rejects_missing_or_incompatible_options() {
+        for args in [
+            vec!["--prefix-cache", "enabled"],
+            vec![
+                "--prefix-cache-max-entries",
+                "1",
+                "--prefix-cache-max-tokens",
+                "1",
+                "--prefix-cache-max-resident-bytes",
+                "1",
+            ],
+            vec![
+                "--context-policy",
+                "keep-prefix-recent-v1",
+                "--context-keep-prefix",
+                "0",
+            ],
+            vec![
+                "--checkpoint",
+                "enabled",
+                "--checkpoint-directory",
+                "/tmp/checkpoints",
+                "--checkpoint-quota-bytes",
+                "1",
+            ],
+            vec![
+                "--draft",
+                "ngram",
+                "--draft-ngram-order",
+                "0",
+                "--draft-width",
+                "1",
+            ],
+            vec![
+                "--draft",
+                "external",
+                "--draft-model-identity",
+                "target",
+                "--draft-tokenizer-identity",
+                "tokenizer",
+                "--draft-vocabulary-size",
+                "1",
+            ],
+        ] {
+            assert!(
+                parse_args_from(base_args(&args)).is_err(),
+                "expected invalid Phase41 options to be rejected: {args:?}"
+            );
+        }
     }
 
     #[cfg(unix)]

@@ -510,6 +510,76 @@ impl Qwen35ChatTemplateV1 {
         Ok(output)
     }
 
+    /// Renders an explicit assistant continuation.  Historical messages are
+    /// closed exactly as in the reviewed template, while the final assistant
+    /// generation marker and prefill remain open: no `<|im_end|>` is emitted
+    /// after the prefix.  The caller owns the semantic decision to opt into
+    /// this path; ordinary `render` output is unchanged.
+    pub fn render_with_assistant_prefill(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        assistant_prefill: &str,
+    ) -> Result<String, ChatRenderError> {
+        self.render_with_assistant_prefill_output_limit(
+            messages,
+            options,
+            assistant_prefill,
+            QWEN35_CHAT_MAX_OUTPUT_BYTES,
+        )
+    }
+
+    pub fn render_with_assistant_prefill_output_limit(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        assistant_prefill: &str,
+        output_limit_bytes: usize,
+    ) -> Result<String, ChatRenderError> {
+        if output_limit_bytes > QWEN35_CHAT_MAX_OUTPUT_BYTES {
+            return Err(ChatRenderError::OutputLimitExceedsHostCap);
+        }
+        let last_user = validate_typed_messages(messages)?;
+        let history_options = Qwen35RenderOptionsV1 {
+            add_generation_prompt: false,
+            thinking: options.thinking,
+        };
+        let generation_prompt = generation_prompt(options.thinking, self.default_thinking);
+        let mut planned = 0usize;
+        let mut result = Ok(());
+        visit_fragments(
+            messages,
+            history_options,
+            last_user,
+            self.default_thinking,
+            |fragment| {
+                if result.is_ok() {
+                    result = checked_fragment(&mut planned, fragment, output_limit_bytes);
+                }
+            },
+        );
+        if result.is_ok() {
+            result = checked_fragment(&mut planned, generation_prompt, output_limit_bytes);
+        }
+        if result.is_ok() {
+            result = checked_fragment(&mut planned, assistant_prefill, output_limit_bytes);
+        }
+        result?;
+
+        let mut output = String::with_capacity(planned);
+        visit_fragments(
+            messages,
+            history_options,
+            last_user,
+            self.default_thinking,
+            |fragment| output.push_str(fragment),
+        );
+        output.push_str(generation_prompt);
+        output.push_str(assistant_prefill);
+        debug_assert_eq!(output.len(), planned);
+        Ok(output)
+    }
+
     pub fn render_untrusted(
         &self,
         request: UntrustedChatRequestV1,
@@ -819,6 +889,14 @@ fn write_output(
     visit_fragments(messages, options, last_user, default_thinking, |fragment| {
         output.push_str(fragment);
     });
+}
+
+fn generation_prompt(thinking: ThinkingModeV1, default_thinking: bool) -> &'static str {
+    match thinking {
+        ThinkingModeV1::TemplateDefault if default_thinking => GENERATION_THINKING,
+        ThinkingModeV1::Enabled => GENERATION_THINKING,
+        ThinkingModeV1::TemplateDefault | ThinkingModeV1::Disabled => GENERATION_DISABLED,
+    }
 }
 
 #[cfg(test)]
@@ -1210,6 +1288,28 @@ mod tests {
                 .unwrap()
                 .contains("\n</think>\n\n<think>raw opening<|im_end|>")
         );
+    }
+
+    #[test]
+    fn explicit_assistant_prefill_keeps_the_continuation_open() {
+        let renderer = renderer();
+        let messages = [Qwen35ChatMessageV1::user("Q")];
+        let output = renderer
+            .render_with_assistant_prefill(
+                &messages,
+                Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: ThinkingModeV1::Enabled,
+                },
+                "partial answer",
+            )
+            .unwrap();
+        assert_eq!(
+            output,
+            "<|im_start|>user\nQ<|im_end|>\n<|im_start|>assistant\n<think>\npartial answer"
+        );
+        assert!(!output.ends_with("<|im_end|>\n"));
+        assert!(!output.contains("partial answer<|im_end|>"));
     }
 
     #[test]

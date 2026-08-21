@@ -301,8 +301,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
 
     std::unique_ptr<Completion> candidate;
     NativeEventGuard event_guard;
-    ArrayOperationExecuteScopeGuard execute_guard(
-        plan, queue, &candidate, &event_guard, error_sink);
+    ArrayOperationExecuteScopeGuard execute_guard(plan, queue, &candidate,
+                                                  &event_guard, error_sink);
 
     const sllm_status_t device_status =
         select_context_device(plan->context, error_sink);
@@ -356,14 +356,23 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
           "attention preprocess position validation synchronize");
     }
     for (std::size_t index = 0U; index != host_positions.size(); ++index) {
-      const int64_t expected = static_cast<int64_t>(plan->metadata.start_position) +
+      const int64_t expected =
+          static_cast<int64_t>(plan->metadata.start_position) +
           static_cast<int64_t>(index / plan->metadata.position_components);
-      const bool valid = plan->metadata.position_components == 1U
-          ? host_positions[index] == static_cast<int32_t>(expected)
-          // The mRoPE ABI carries signed I32 components while its public
-          // exclusive upper bound is UINT32_MAX. Every non-negative I32
-          // value is therefore representable and below that bound.
-          : host_positions[index] >= 0;
+      const bool valid =
+          plan->metadata.position_payload_mode ==
+                  SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+              ? host_positions[index] >= 0 &&
+                    static_cast<uint64_t>(host_positions[index]) <
+                        static_cast<uint64_t>(
+                            SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION)
+          : plan->metadata.position_components == 1U
+              ? host_positions[index] == static_cast<int32_t>(expected)
+              // The mRoPE ABI carries signed I32 components while its
+              // public exclusive upper bound is UINT32_MAX. Every
+              // non-negative I32 value is therefore representable and
+              // below that bound.
+              : host_positions[index] >= 0;
       if (!valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
@@ -454,9 +463,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     status = ::sllm_attention_preprocess_kernel::launch(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
-        plan->metadata.q_heads, plan->metadata.k_heads,
-        plan->metadata.head_dim, plan->metadata.position_components,
-        queue->stream);
+        plan->metadata.q_heads, plan->metadata.k_heads, plan->metadata.head_dim,
+        plan->metadata.position_components, queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,

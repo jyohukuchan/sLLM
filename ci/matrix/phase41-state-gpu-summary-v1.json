@@ -1,0 +1,55 @@
+{
+  "schema": "sllm-phase41-state-gpu-summary-v1",
+  "date": "2026-08-22",
+  "software": {
+    "os": "Ubuntu 24.04.4",
+    "kernel": "6.17.0-35-generic",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "llvm": "23"
+  },
+  "scope": {
+    "runner": "native/hip/tests/phase41_state_gpu_test.cpp",
+    "cases": [
+      "fp16-vmm-fork-cow-63-64-65-127-128-129",
+      "fp16-source-child-kv-byte-exact",
+      "fp8-dynamic-all-planes-byte-exact",
+      "fp8-static-all-planes-byte-exact",
+      "nvfp4-all-planes-byte-exact",
+      "linear-active-slot-scratch-five-plane-clone"
+    ],
+    "fallback_allowed": false,
+    "cleanup_failures_allowed": 0
+  },
+  "rows": [
+    {
+      "device": "V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "target": "gfx1030",
+      "binary_sha256": "87b9979bf86294a35b4c5102840244c24979be1a75967f9d330cabd9f2eb9f72",
+      "hip_bundle_count": 14,
+      "target_only": true,
+      "result": "PASS"
+    },
+    {
+      "device": "R9700",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "target": "gfx1201",
+      "binary_sha256": "5caaa3da19728c3850788feb356fb9e454eb9fbd0e5c4297120997cd844f6fe0",
+      "hip_bundle_count": 14,
+      "target_only": true,
+      "result": "PASS"
+    }
+  ],
+  "postconditions": {
+    "gpu_process_count": 0,
+    "uncorrectable_ecc_count": 0,
+    "cleanup_failures": 0
+  },
+  "gfx942": {
+    "target": "gfx942:sramecc+:xnack-",
+    "wavefront": 64,
+    "result": "compile-only PASS",
+    "real_gpu_result": "deferred"
+  }
+}

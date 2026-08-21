@@ -201,6 +201,8 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ATTENTION_PREPROCESS_ROTARY_DIM UINT32_C(64)
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION UINT32_C(4294967295)
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_M UINT64_C(262144)
+#define SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1 UINT32_C(0)
+#define SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1 UINT32_C(1)
 
 #define SLLM_HIP_ROTARY_VERSION UINT32_C(1)
 #define SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -248,6 +250,24 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_KV_ENCODING_FP8_V1 UINT32_C(1)
 #define SLLM_HIP_KV_ENCODING_NVFP4_V1 UINT32_C(2)
 #define SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 UINT32_C(3)
+
+/* Additive Phase 41 state-fork and raw-plane persistence ABI. */
+#define SLLM_HIP_STATE_FORK_VERSION UINT32_C(1)
+#define SLLM_HIP_STATE_FORK_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY UINT32_C(1)
+#define SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES UINT32_C(2)
+#define SLLM_HIP_KV_STATE_PLANE_KEY UINT32_C(1)
+#define SLLM_HIP_KV_STATE_PLANE_VALUE UINT32_C(2)
+#define SLLM_HIP_KV_STATE_PLANE_KEY_SCALE UINT32_C(3)
+#define SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE UINT32_C(4)
+#define SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE UINT32_C(5)
+#define SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE UINT32_C(6)
+#define SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT0 UINT32_C(1)
+#define SLLM_HIP_LINEAR_STATE_PLANE_CONV_SLOT1 UINT32_C(2)
+#define SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT0 UINT32_C(3)
+#define SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT1 UINT32_C(4)
+#define SLLM_HIP_LINEAR_STATE_PLANE_SCRATCH UINT32_C(5)
+#define SLLM_HIP_STATE_CHUNK_MAX_BYTES UINT64_C(1073741824)
 
 #define SLLM_HIP_CAUSAL_ATTENTION_VERSION UINT32_C(1)
 #define SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -474,6 +494,18 @@ typedef struct sllm_transfer_desc_t {
   uint64_t size_bytes;
   uint32_t reserved[4];
 } sllm_transfer_desc_t;
+
+/* Device-to-device copies use independent offsets and never stage through
+ * host memory.  The descriptor is copied before the asynchronous submission
+ * returns. */
+typedef struct sllm_buffer_copy_d2d_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t source_offset_bytes;
+  uint64_t destination_offset_bytes;
+  uint64_t size_bytes;
+  uint32_t reserved[4];
+} sllm_buffer_copy_d2d_desc_t;
 
 typedef struct sllm_completion_result_t {
   uint32_t struct_size;
@@ -1133,6 +1165,55 @@ typedef struct sllm_linear_attention_view_info_t {
   uint32_t reserved[4];
 } sllm_linear_attention_view_info_t;
 
+typedef struct sllm_state_fork_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t mode;
+  uint64_t source_state_identity;
+  uint64_t child_state_identity;
+  uint64_t source_owned_bytes;
+  uint64_t child_owned_bytes;
+  uint64_t copied_bytes;
+  uint64_t shared_bytes;
+  uint64_t published_length;
+  uint64_t page_bytes;
+  uint32_t reserved[4];
+} sllm_state_fork_info_t;
+
+/* Chunk operations copy the exact native encoding.  No FP16 conversion,
+ * host replay, or scheduler-visible pointers are involved. */
+typedef struct sllm_state_chunk_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t plane;
+  uint32_t reserved0;
+  uint32_t reserved1;
+  uint64_t byte_offset;
+  uint64_t byte_length;
+  void *host_pointer;
+  uint64_t host_capacity;
+  uint32_t reserved[4];
+} sllm_state_chunk_t;
+
+typedef struct sllm_state_image_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t reserved0;
+  uint64_t session_id;
+  uint32_t layer_id;
+  uint32_t dtype;
+  uint32_t encoding;
+  uint32_t active_slot;
+  uint64_t capacity_tokens;
+  uint64_t published_length;
+  uint64_t generation;
+  uint32_t plane_count;
+  uint32_t reserved[7];
+} sllm_state_image_info_t;
+
 /* Projected inputs use qkv BF16 [M,8192], z BF16 [M,4096], b/a BF16
  * [M,32]. Convolution weight is BF16 [8192,1,4], A_log is F32 [32],
  * dt_bias is BF16 [32], norm_weight is raw F32 [128], and output is BF16
@@ -1256,6 +1337,12 @@ SLLM_HIP_API sllm_status_t sllm_buffer_copy_d2h(
     const sllm_transfer_desc_t *transfer, sllm_completion_t **completion,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t sllm_buffer_copy_d2d(
+    const sllm_queue_t *queue, const sllm_buffer_t *source,
+    const sllm_buffer_t *destination, const sllm_buffer_copy_d2d_desc_t *copy,
+    sllm_completion_t **completion,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 /* Production execution may defer numeric-operation completion events until
  * one ordered queue fence closes a model-neutral segment.  PROFILED remains
  * the default and preserves standalone per-operation timing semantics. */
@@ -1263,9 +1350,9 @@ SLLM_HIP_API sllm_status_t sllm_queue_set_completion_mode(
     const sllm_queue_t *queue, sllm_queue_completion_mode_t mode,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
-SLLM_HIP_API sllm_status_t sllm_queue_fence(
-    const sllm_queue_t *queue, sllm_completion_t **completion,
-    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+SLLM_HIP_API sllm_status_t
+sllm_queue_fence(const sllm_queue_t *queue, sllm_completion_t **completion,
+                 sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 /* Finalizes an eventless numeric completion after a successful fence on the
  * same context, queue, and stream. */
@@ -1380,8 +1467,8 @@ SLLM_HIP_API sllm_status_t sllm_token_selector_plan_release(
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_token_selector_execute(
-    const sllm_token_selector_plan_t *plan,
-    const sllm_queue_t *queue, sllm_completion_t **completion,
+    const sllm_token_selector_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
     sllm_token_selector_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
@@ -1505,6 +1592,36 @@ SLLM_HIP_API sllm_status_t sllm_kv_state_append_cancel(
     const sllm_kv_state_t *state, sllm_completion_t *completion,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t
+sllm_kv_state_fork(const sllm_kv_state_t *source,
+                   const sllm_kv_state_create_info_v2_t *destination_info,
+                   sllm_kv_state_t **child, sllm_state_fork_info_t *fork_info,
+                   sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_fork_query(
+    const sllm_kv_state_t *state, sllm_state_fork_info_t *fork_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_export(
+    const sllm_kv_state_t *state, const sllm_state_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_import(
+    const sllm_kv_state_t *state, const sllm_state_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_image_query(
+    const sllm_kv_state_t *state, sllm_state_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_image_plane_size(
+    const sllm_kv_state_t *state, uint32_t plane, uint64_t *size_bytes,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_kv_state_import_finalize(
+    const sllm_kv_state_t *state, const sllm_state_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t sllm_causal_attention_execute(
     const sllm_context_t *context, const sllm_queue_t *queue,
     const sllm_causal_attention_desc_t *descriptor,
@@ -1532,6 +1649,34 @@ SLLM_HIP_API sllm_status_t sllm_linear_attention_state_query(
 SLLM_HIP_API sllm_status_t sllm_linear_attention_state_rewind_last(
     const sllm_linear_attention_state_t *state, uint64_t expected_length,
     uint64_t rewind_length, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_fork(
+    const sllm_linear_attention_state_t *source,
+    const sllm_linear_attention_state_create_info_t *destination_info,
+    sllm_linear_attention_state_t **child, sllm_state_fork_info_t *fork_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_export(
+    const sllm_linear_attention_state_t *state, const sllm_state_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_import(
+    const sllm_linear_attention_state_t *state, const sllm_state_chunk_t *chunk,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_image_query(
+    const sllm_linear_attention_state_t *state,
+    sllm_state_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_image_plane_size(
+    const sllm_linear_attention_state_t *state, uint32_t plane,
+    uint64_t *size_bytes, sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_linear_attention_state_import_finalize(
+    const sllm_linear_attention_state_t *state,
+    const sllm_state_image_info_t *image_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_linear_attention_execute(
     const sllm_context_t *context, const sllm_queue_t *queue,

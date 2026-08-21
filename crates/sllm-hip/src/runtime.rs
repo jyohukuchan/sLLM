@@ -3592,6 +3592,104 @@ impl Queue {
             true,
         )
     }
+
+    /// Enqueue an exact device-to-device copy without host staging.
+    pub fn copy_device_to_device(
+        &self,
+        source: &Buffer,
+        destination: &Buffer,
+        source_offset_bytes: u64,
+        destination_offset_bytes: u64,
+        size_bytes: u64,
+    ) -> Result<Completion, RuntimeError> {
+        reap_pending_cleanup();
+        if size_bytes == 0 || size_bytes > sys::SLLM_HIP_MAX_TRANSFER_BYTES {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "D2D copy size is outside the bounded transfer range",
+            ));
+        }
+        if !Arc::ptr_eq(&self.inner.context, &source.inner._context)
+            || !Arc::ptr_eq(&self.inner.context, &destination.inner._context)
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "D2D queue and buffers must belong to one context",
+            ));
+        }
+        let source_size = source.size_bytes()?;
+        let destination_size = destination.size_bytes()?;
+        let source_end = source_offset_bytes.checked_add(size_bytes).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "D2D source range overflowed",
+            )
+        })?;
+        let destination_end = destination_offset_bytes
+            .checked_add(size_bytes)
+            .ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidArgument,
+                    "D2D destination range overflowed",
+                )
+            })?;
+        if source_end > source_size || destination_end > destination_size {
+            return Err(RuntimeError::local(
+                RuntimeStatus::BufferOutOfBounds,
+                "D2D range exceeds a device buffer",
+            ));
+        }
+        if Arc::ptr_eq(&source.inner, &destination.inner)
+            && source_offset_bytes < destination_end
+            && destination_offset_bytes < source_end
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "D2D overlapping ranges are not supported",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let descriptor = sys::sllm_buffer_copy_d2d_desc_t {
+            struct_size: size_of::<sys::sllm_buffer_copy_d2d_desc_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            source_offset_bytes,
+            destination_offset_bytes,
+            size_bytes,
+            reserved: [0; 4],
+        };
+        let queue_raw = self.raw_handle()?;
+        let source_raw = source.raw_handle()?;
+        let destination_raw = destination.raw_handle()?;
+        let mut raw_completion = std::ptr::null_mut();
+        let raw = unsafe {
+            sys::sllm_buffer_copy_d2d(
+                queue_raw.as_ptr(),
+                source_raw.as_ptr(),
+                destination_raw.as_ptr(),
+                &descriptor,
+                &mut raw_completion,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(raw, &error_buffer, error_sink.message_length)?;
+        let raw_completion = NonNull::new(raw_completion).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native D2D copy returned a null completion on success",
+            )
+        })?;
+        Ok(Completion {
+            raw: Some(raw_completion),
+            _context: Arc::clone(&self.inner.context),
+            _queue: Arc::clone(&self.inner),
+            _buffer: Some(Arc::clone(&destination.inner)),
+            transfer_size_bytes: size_bytes,
+            d2h: false,
+            terminal: false,
+            safe_to_release: false,
+        })
+    }
 }
 
 struct BufferInner {

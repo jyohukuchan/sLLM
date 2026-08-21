@@ -13,7 +13,8 @@ use crate::model::{
     TensorDescriptor, reviewed_qwen35_spec,
 };
 use crate::op::{
-    OpError, RmsNormScaleMode, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
+    AttentionPreprocessPositionPayloadModeV1, OpError, RmsNormScaleMode, SemanticOpDescriptor,
+    SemanticOpKind, SparseMoeContract,
 };
 use crate::qwen35_moe::{
     QWEN35_MOE_LAYER_BLOB_BYTES, QWEN35_MOE_MODEL_FINGERPRINT, VerifiedGgufQwen35Moe,
@@ -459,9 +460,20 @@ pub struct QwenGraph {
     fp8_sidecar_fingerprint: Option<String>,
     mtp: bool,
     multimodal: bool,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
 }
 
 impl QwenGraph {
+    /// Capabilities advertised to the backend-neutral context-window policy.
+    /// Qwen text keeps a checked RoPE delta alongside the compact logical
+    /// state and accepts explicit position payloads at the execution boundary.
+    /// Full-attention RoPE/attention consume the retained absolute positions;
+    /// GDN/linear state is deliberately recomputed over the compact retained
+    /// sequence in logical order and does not consume absolute position IDs.
+    pub const fn context_adapter_capabilities(&self) -> crate::ContextAdapterCapabilitiesV1 {
+        crate::ContextAdapterCapabilitiesV1::new(1, 1, 1, true, true)
+    }
+
     pub fn fp8_sidecar_fingerprint(&self) -> Option<&str> {
         self.fp8_sidecar_fingerprint.as_deref()
     }
@@ -472,6 +484,10 @@ impl QwenGraph {
 
     pub const fn is_multimodal(&self) -> bool {
         self.multimodal
+    }
+
+    pub const fn position_payload_mode(&self) -> AttentionPreprocessPositionPayloadModeV1 {
+        self.position_payload_mode
     }
 }
 
@@ -565,6 +581,45 @@ pub fn build_qwen35_graph_with_kv_cache_encoding(
     state_capacity: u64,
     kv_cache_encoding: crate::KvCacheEncoding,
 ) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
+        lock,
+        plan,
+        token_count,
+        state_capacity,
+        kv_cache_encoding,
+        AttentionPreprocessPositionPayloadModeV1::Contiguous,
+    )
+}
+
+/// Builds the reviewed BF16-weight graph with an explicitly selected KV
+/// encoding and attention-preprocess position payload mode. Explicit mode is
+/// used by context-shift requests whose compact logical state retains an
+/// absolute RoPE origin rather than a contiguous zero-based position range.
+pub fn build_qwen35_graph_with_position_payload_mode(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
+) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
+        lock,
+        plan,
+        token_count,
+        state_capacity,
+        crate::KvCacheEncoding::Fp16,
+        position_payload_mode,
+    )
+}
+
+fn build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
+) -> Result<QwenGraph, QwenGraphError> {
     let spec = validate_reviewed_model(lock)?;
     let dimensions = QwenGraphDimensions::from_spec(spec)?;
     if token_count == 0 {
@@ -603,6 +658,7 @@ pub fn build_qwen35_graph_with_kv_cache_encoding(
         mtp: false,
         multimodal: false,
         moe: false,
+        position_payload_mode,
     })?;
     builder.build()
 }
@@ -766,6 +822,7 @@ fn build_qwen35_moe_execution_graph_config(
         mtp: false,
         multimodal: false,
         moe: true,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -853,6 +910,7 @@ pub fn build_qwen35_multimodal_graph(
         mtp: false,
         multimodal: true,
         moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -894,6 +952,7 @@ pub fn build_qwen35_mtp_graph(
         mtp: true,
         multimodal: false,
         moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -1035,6 +1094,7 @@ pub fn build_qwen35_gguf_fp8_graph(
         mtp: false,
         multimodal: false,
         moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -1162,6 +1222,7 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
         mtp: false,
         multimodal: false,
         moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -1249,6 +1310,7 @@ fn build_qwen35_fp8_graph_with_dtype(
         mtp: false,
         multimodal: false,
         moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
     })?
     .build()
 }
@@ -2060,6 +2122,7 @@ struct GraphBuilderConfig {
     mtp: bool,
     multimodal: bool,
     moe: bool,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
 }
 
 fn qwen_kv_state_descriptor(
@@ -2093,6 +2156,7 @@ struct GraphBuilder {
     mtp: bool,
     multimodal: bool,
     moe: bool,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
     tensors: Vec<QwenGraphTensor>,
     producers: Vec<Option<usize>>,
     nodes: Vec<QwenGraphNode>,
@@ -2119,6 +2183,7 @@ impl GraphBuilder {
             mtp,
             multimodal,
             moe,
+            position_payload_mode,
         } = config;
         let bindings = bindings
             .into_iter()
@@ -2152,6 +2217,7 @@ impl GraphBuilder {
             mtp,
             multimodal,
             moe,
+            position_payload_mode,
             tensors: Vec::new(),
             producers: Vec::new(),
             nodes: Vec::new(),
@@ -2184,6 +2250,7 @@ impl GraphBuilder {
             fp8_sidecar_fingerprint: self.fp8_sidecar_fingerprint,
             mtp: self.mtp,
             multimodal: self.multimodal,
+            position_payload_mode: self.position_payload_mode,
         })
     }
 
@@ -4083,6 +4150,33 @@ mod tests {
         (graph, plan)
     }
 
+    #[test]
+    fn explicit_position_payload_graph_preserves_mode_in_execution_metadata() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let graph = build_qwen35_graph_with_position_payload_mode(
+            &lock,
+            &plan,
+            3,
+            17,
+            AttentionPreprocessPositionPayloadModeV1::Explicit,
+        )
+        .expect("explicit-position graph builds");
+        assert_eq!(
+            graph.position_payload_mode(),
+            AttentionPreprocessPositionPayloadModeV1::Explicit
+        );
+        let capabilities = graph.context_adapter_capabilities();
+        assert!(capabilities.supports_absolute_positions());
+        assert!(capabilities.supports_discontiguous_ranges());
+        assert!(
+            graph
+                .states()
+                .iter()
+                .any(|state| matches!(state.descriptor(), QwenGraphStateDescriptor::Linear(_)))
+        );
+    }
+
     pub(super) fn mtp_execution_fixture() -> (QwenGraph, WeightLoadPlan) {
         let lock = fixed_lock();
         let descriptors = synthetic_descriptors(&lock, 297, 15);
@@ -4133,6 +4227,7 @@ mod tests {
             mtp: false,
             multimodal: false,
             moe: false,
+            position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
         })
         .expect("fixture bindings")
         .build()
@@ -4763,6 +4858,7 @@ mod tests {
             mtp: false,
             multimodal: false,
             moe: false,
+            position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
         })
         .expect("fixture bindings");
         let source = builder.add_tensor("source", view(DType::Bf16, &[4]).unwrap());

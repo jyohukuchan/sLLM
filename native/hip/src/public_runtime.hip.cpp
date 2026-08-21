@@ -485,23 +485,28 @@ struct KvVmmPlane final {
   uint64_t mapped_bytes;
   uint64_t page_bytes;
   std::vector<hipMemGenericAllocationHandle_t> handles;
+  std::vector<uint8_t> shared_pages;
   bool contiguous;
 
   KvVmmPlane() noexcept
       : address(nullptr), logical_bytes(0U), reservation_bytes(0U),
-        mapped_bytes(0U), page_bytes(0U), handles(), contiguous(false) {}
+        mapped_bytes(0U), page_bytes(0U), handles(), shared_pages(),
+        contiguous(false) {}
   KvVmmPlane(const KvVmmPlane &) = delete;
   KvVmmPlane &operator=(const KvVmmPlane &) = delete;
   KvVmmPlane(KvVmmPlane &&other) noexcept
       : address(other.address), logical_bytes(other.logical_bytes),
         reservation_bytes(other.reservation_bytes),
         mapped_bytes(other.mapped_bytes), page_bytes(other.page_bytes),
-        handles(std::move(other.handles)), contiguous(other.contiguous) {
+        handles(std::move(other.handles)),
+        shared_pages(std::move(other.shared_pages)),
+        contiguous(other.contiguous) {
     other.address = nullptr;
     other.logical_bytes = 0U;
     other.reservation_bytes = 0U;
     other.mapped_bytes = 0U;
     other.page_bytes = 0U;
+    other.shared_pages.clear();
     other.contiguous = false;
   }
 
@@ -591,9 +596,210 @@ struct KvVmmPlane final {
         return status;
       }
       handles.push_back(handle);
+      shared_pages.push_back(0U);
       mapped_bytes += page_bytes;
     }
     return hipSuccess;
+  }
+
+  hipError_t mark_read_only(const uint64_t visible_bytes,
+                            const int device_index) noexcept {
+    if (contiguous || address == nullptr || mapped_bytes == 0U) {
+      return hipSuccess;
+    }
+    (void)device_index;
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    const hipError_t status = hipSuccess;
+#else
+    hipMemAccessDesc access{};
+    access.location.type = hipMemLocationTypeDevice;
+    access.location.id = device_index;
+    access.flags = hipMemAccessFlagsProtRead;
+    const std::size_t page_count = std::min(
+        handles.size(), static_cast<std::size_t>(
+                            (visible_bytes + page_bytes - 1U) / page_bytes));
+    const hipError_t status =
+        page_count == 0U
+            ? hipSuccess
+            : hipMemSetAccess(address,
+                              page_count * static_cast<std::size_t>(page_bytes),
+                              &access, 1U);
+#endif
+    if (status == hipSuccess) {
+      shared_pages.assign(handles.size(), 0U);
+      const std::size_t shared_page_count = std::min(
+          handles.size(), static_cast<std::size_t>(
+                              (visible_bytes + page_bytes - 1U) / page_bytes));
+      std::fill(shared_pages.begin(),
+                shared_pages.begin() +
+                    static_cast<std::ptrdiff_t>(shared_page_count),
+                uint8_t{1});
+    }
+    return status;
+  }
+
+  /* Retain every source VMM allocation and map it in a fresh reservation.
+   * The child mappings are read-only until an append performs COW. */
+  hipError_t clone_shared_from(const KvVmmPlane &source,
+                               const uint64_t destination_logical_bytes,
+                               const uint64_t visible_bytes,
+                               const int device_index) noexcept {
+    if (source.contiguous || source.address == nullptr ||
+        source.page_bytes == 0U || source.mapped_bytes == 0U) {
+      return hipErrorInvalidValue;
+    }
+    const uint64_t destination_reservation =
+        ((destination_logical_bytes + source.page_bytes - 1U) /
+         source.page_bytes) *
+        source.page_bytes;
+    hipError_t status = reserve(destination_logical_bytes,
+                                destination_reservation, source.page_bytes);
+    if (status != hipSuccess) {
+      return status;
+    }
+    hipMemAccessDesc access{};
+    access.location.type = hipMemLocationTypeDevice;
+    access.location.id = device_index;
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+    access.flags = hipMemAccessFlagsProtReadWrite;
+#else
+    access.flags = hipMemAccessFlagsProtRead;
+#endif
+    const std::size_t visible_pages = std::min(
+        source.handles.size(),
+        static_cast<std::size_t>((visible_bytes + source.page_bytes - 1U) /
+                                 source.page_bytes));
+    for (std::size_t index = 0U; index < visible_pages; ++index) {
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      const void *const source_address =
+          static_cast<const char *>(source.address) +
+          index * static_cast<std::size_t>(source.page_bytes);
+#endif
+      hipMemGenericAllocationHandle_t retained = nullptr;
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      hipMemAllocationProp properties{};
+      properties.type = hipMemAllocationTypePinned;
+      properties.location.type = hipMemLocationTypeDevice;
+      properties.location.id = device_index;
+      status = hipMemCreate(&retained, static_cast<std::size_t>(page_bytes),
+                            &properties, 0U);
+#else
+      status = hipMemRetainAllocationHandle(&retained,
+                                            const_cast<void *>(source_address));
+#endif
+      if (status != hipSuccess) {
+        release_noexcept();
+        return status;
+      }
+      void *const target = static_cast<char *>(address) +
+                           index * static_cast<std::size_t>(page_bytes);
+      status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                         retained, 0U);
+      if (status == hipSuccess) {
+        status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                                 &access, 1U);
+      }
+      if (status != hipSuccess) {
+        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+        (void)hipMemRelease(retained);
+        release_noexcept();
+        return status;
+      }
+      handles.push_back(retained);
+      shared_pages.push_back(1U);
+      mapped_bytes += page_bytes;
+    }
+    return hipSuccess;
+  }
+
+  /* Make all shared pages intersecting [0, required_bytes) private.  The
+   * temporary mapping keeps the old retained allocation available for
+   * rollback if mapping the replacement fails. */
+  hipError_t make_private(const uint64_t start_bytes, const uint64_t end_bytes,
+                          const hipMemAllocationProp &properties,
+                          const hipMemAccessDesc &rw_access) noexcept {
+    if (contiguous || start_bytes >= end_bytes || shared_pages.empty()) {
+      return hipSuccess;
+    }
+    const std::size_t first_page =
+        static_cast<std::size_t>(start_bytes / page_bytes);
+    const std::size_t page_count = std::min(
+        shared_pages.size(),
+        static_cast<std::size_t>((end_bytes + page_bytes - 1U) / page_bytes));
+    for (std::size_t index = first_page; index < page_count; ++index) {
+      if (shared_pages[index] == 0U) {
+        continue;
+      }
+      void *temporary = nullptr;
+      hipError_t status = hipMemAddressReserve(
+          &temporary, static_cast<std::size_t>(page_bytes),
+          static_cast<std::size_t>(page_bytes), nullptr, 0U);
+      if (status != hipSuccess) {
+        return status;
+      }
+      hipMemGenericAllocationHandle_t replacement = nullptr;
+      status = hipMemCreate(&replacement, static_cast<std::size_t>(page_bytes),
+                            &properties, 0U);
+      if (status == hipSuccess) {
+        status = hipMemMap(temporary, static_cast<std::size_t>(page_bytes), 0U,
+                           replacement, 0U);
+      }
+      if (status == hipSuccess) {
+        status = hipMemSetAccess(
+            temporary, static_cast<std::size_t>(page_bytes), &rw_access, 1U);
+      }
+      void *const target = static_cast<char *>(address) +
+                           index * static_cast<std::size_t>(page_bytes);
+      if (status == hipSuccess) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        std::memcpy(temporary, target, static_cast<std::size_t>(page_bytes));
+        status = hipSuccess;
+#else
+        status =
+            hipMemcpy(temporary, target, static_cast<std::size_t>(page_bytes),
+                      hipMemcpyDeviceToDevice);
+#endif
+      }
+      if (status == hipSuccess) {
+        status = hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+      }
+      if (status == hipSuccess) {
+        status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                           replacement, 0U);
+      }
+      if (status == hipSuccess) {
+        status = hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                                 &rw_access, 1U);
+      }
+      if (status != hipSuccess) {
+        /* Best-effort remap of the source handle keeps the state usable on a
+         * recoverable HIP error; callers fail closed if this also fails. */
+        if (status != hipSuccess) {
+          (void)hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                          handles[index], 0U);
+          (void)hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                                &rw_access, 1U);
+        }
+        if (replacement != nullptr) {
+          (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
+          (void)hipMemRelease(replacement);
+        }
+        (void)hipMemAddressFree(temporary,
+                                static_cast<std::size_t>(page_bytes));
+        return status;
+      }
+      (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
+      (void)hipMemAddressFree(temporary, static_cast<std::size_t>(page_bytes));
+      (void)hipMemRelease(handles[index]);
+      handles[index] = replacement;
+      shared_pages[index] = 0U;
+    }
+    return hipSuccess;
+  }
+
+  uint64_t shared_page_count() const noexcept {
+    return static_cast<uint64_t>(
+        std::count(shared_pages.begin(), shared_pages.end(), uint8_t{1}));
   }
 
   hipError_t release_checked() noexcept {
@@ -605,6 +811,7 @@ struct KvVmmPlane final {
       reservation_bytes = 0U;
       mapped_bytes = 0U;
       page_bytes = 0U;
+      shared_pages.clear();
       contiguous = false;
       return status;
     }
@@ -623,6 +830,7 @@ struct KvVmmPlane final {
       }
     }
     handles.clear();
+    shared_pages.clear();
     mapped_bytes = 0U;
     if (address != nullptr) {
       const hipError_t free_status = hipMemAddressFree(
@@ -670,9 +878,13 @@ struct KvState final : QuarantineNode {
   uint64_t mapped_token_capacity;
   uint64_t committed_bytes_per_plane;
   uint32_t memory_kind;
+  uint32_t fork_mode;
   sllm_public_runtime::AccountingState accounting;
   uint64_t published_length;
   uint64_t generation;
+  uint64_t shared_page_count;
+  uint64_t cow_copied_bytes;
+  uint32_t import_plane_mask;
   uint64_t last_published_start;
   uint64_t last_published_end;
   uint64_t last_published_generation;
@@ -729,7 +941,11 @@ struct KvState final : QuarantineNode {
         memory_kind(key_plane.contiguous
                         ? SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
                         : SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS),
+        fork_mode(key_plane.contiguous
+                      ? SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY
+                      : SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES),
         accounting(), published_length(0U), generation(0U),
+        shared_page_count(0U), cow_copied_bytes(0U), import_plane_mask(0U),
         last_published_start(0U), last_published_end(0U),
         last_published_generation(0U), transition_token(0U),
         transition_start(0U), transition_count(0U), transition_end(0U),
@@ -808,6 +1024,7 @@ struct LinearAttentionState final : QuarantineNode {
   uint64_t published_length;
   uint64_t generation;
   uint32_t active_slot;
+  uint32_t import_plane_mask;
   uint64_t last_published_start;
   uint64_t last_published_end;
   uint64_t last_published_generation;
@@ -835,10 +1052,11 @@ struct LinearAttentionState final : QuarantineNode {
         output_width(value_heads_value * head_dim_value),
         conv_state(conv_value), recurrent_state(recurrent_value),
         scratch(nullptr), scratch_bytes(0U), accounting(), published_length(0U),
-        generation(0U), active_slot(0U), last_published_start(0U),
-        last_published_end(0U), last_published_generation(0U),
-        transition_token(0U), transition_start(0U), transition_count(0U),
-        transition_end(0U), commit_allowed(false), release_active(false) {}
+        generation(0U), active_slot(0U), import_plane_mask(0U),
+        last_published_start(0U), last_published_end(0U),
+        last_published_generation(0U), transition_token(0U),
+        transition_start(0U), transition_count(0U), transition_end(0U),
+        commit_allowed(false), release_active(false) {}
 };
 
 struct Event final : QuarantineNode {
@@ -872,15 +1090,15 @@ struct TokenSelectorPlan final : QuarantineNode {
   bool release_active;
   bool in_flight;
 
-  TokenSelectorPlan(Context *const context_value, Buffer *const logits_value,
-                    Buffer *const additive_value, Buffer *const mask_value,
-                    Buffer *const output_value,
-                    const sllm_token_selector::DescriptorMetadata &metadata_value)
-      : QuarantineNode(HandleKind::TokenSelectorPlan),
-        context(context_value), logits(logits_value),
-        additive_logits(additive_value), valid_mask(mask_value),
-        output(output_value), metadata(metadata_value), release_active(false),
-        in_flight(false) {}
+  TokenSelectorPlan(
+      Context *const context_value, Buffer *const logits_value,
+      Buffer *const additive_value, Buffer *const mask_value,
+      Buffer *const output_value,
+      const sllm_token_selector::DescriptorMetadata &metadata_value)
+      : QuarantineNode(HandleKind::TokenSelectorPlan), context(context_value),
+        logits(logits_value), additive_logits(additive_value),
+        valid_mask(mask_value), output(output_value), metadata(metadata_value),
+        release_active(false), in_flight(false) {}
 };
 
 struct Completion final : QuarantineNode {
@@ -959,6 +1177,9 @@ struct Completion final : QuarantineNode {
   uint64_t linear_attention_count;
   uint64_t linear_attention_end;
   bool queue_fence;
+  bool d2d_copy;
+  Buffer *d2d_source;
+  Buffer *d2d_destination;
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, const uint64_t transfer_size,
@@ -990,7 +1211,9 @@ struct Completion final : QuarantineNode {
              const CausalAttentionBuffers causal_attention_buffers_value = {},
              ElementwisePlan *const argmax_plan_value = nullptr,
              Buffer *const argmax_logits_value = nullptr,
-             Buffer *const argmax_output_value = nullptr)
+             Buffer *const argmax_output_value = nullptr,
+             Buffer *const d2d_source_value = nullptr,
+             Buffer *const d2d_destination_value = nullptr)
       : QuarantineNode(HandleKind::Completion), context(context_value),
         queue(queue_value), buffer(buffer_value), event(nullptr),
         timing_start_event(nullptr), timing_elapsed_ns(0U), timing_valid(false),
@@ -1036,7 +1259,10 @@ struct Completion final : QuarantineNode {
         linear_attention(false), linear_attention_state(nullptr),
         linear_attention_buffers(), linear_attention_token(0U),
         linear_attention_start(0U), linear_attention_count(0U),
-        linear_attention_end(0U), queue_fence(false) {}
+        linear_attention_end(0U), queue_fence(false),
+        d2d_copy(d2d_source_value != nullptr ||
+                 d2d_destination_value != nullptr),
+        d2d_source(d2d_source_value), d2d_destination(d2d_destination_value) {}
 
   Completion(Context *const context_value, Queue *const queue_value,
              Buffer *const buffer_value, ElementwisePlan *const plan_value,
@@ -2952,6 +3178,23 @@ bool rollback_reserved_submission(Context *const context, Queue *const queue,
   return false;
 }
 
+bool rollback_reserved_d2d_submission(Context *const context,
+                                      Queue *const queue, Buffer *const source,
+                                      Buffer *const destination,
+                                      sllm_error_sink_t *const sink) noexcept {
+  std::lock_guard<std::mutex> lock(context->accounting_mutex);
+  if (sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
+          context->accounting, queue->accounting, source->accounting,
+          destination->accounting)) {
+    return true;
+  }
+  poison_context_locked(context);
+  (void)sllm_public_runtime::write_error(
+      sink, SLLM_STATUS_INTERNAL_ERROR,
+      "D2D submission accounting rollback failed; context poisoned");
+  return false;
+}
+
 bool rollback_reserved_rmsnorm_submission(
     RmsNormPlan *const plan, Queue *const queue,
     sllm_error_sink_t *const sink) noexcept {
@@ -3011,11 +3254,10 @@ bool rollback_reserved_token_selector_submission(
     sllm_error_sink_t *const sink) noexcept {
   Context *const context = plan->context;
   std::lock_guard<std::mutex> lock(context->accounting_mutex);
-  if (sllm_public_runtime::AccountingState::
-          rollback_token_selector_submission(
-              context->accounting, queue->accounting,
-              plan->logits->accounting, plan->additive_logits->accounting,
-              plan->valid_mask->accounting, plan->output->accounting)) {
+  if (sllm_public_runtime::AccountingState::rollback_token_selector_submission(
+          context->accounting, queue->accounting, plan->logits->accounting,
+          plan->additive_logits->accounting, plan->valid_mask->accounting,
+          plan->output->accounting)) {
     plan->in_flight = false;
     return true;
   }
@@ -3224,6 +3466,14 @@ bool reserve_submission_references(Queue *const queue,
       queue->context->accounting, queue->accounting, buffer->accounting);
 }
 
+bool reserve_d2d_submission_references(Queue *const queue, Buffer *const source,
+                                       Buffer *const destination) noexcept {
+  std::lock_guard<std::mutex> lock(queue->context->accounting_mutex);
+  return sllm_public_runtime::AccountingState::reserve_two_buffer_submission(
+      queue->context->accounting, queue->accounting, source->accounting,
+      destination->accounting);
+}
+
 bool release_submission_references(Completion *const completion) noexcept {
   if (completion->active_release_attempted) {
     return completion->references_released;
@@ -3234,8 +3484,9 @@ bool release_submission_references(Completion *const completion) noexcept {
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
     if (completion->queue_fence) {
-      released = sllm_public_runtime::AccountingState::
-          release_queue_fence_active(completion->queue->accounting);
+      released =
+          sllm_public_runtime::AccountingState::release_queue_fence_active(
+              completion->queue->accounting);
     } else if (completion->rmsnorm) {
       released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
           completion->queue->accounting,
@@ -3261,8 +3512,8 @@ bool release_submission_references(Completion *const completion) noexcept {
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
     } else if (completion->token_selector) {
-      released = sllm_public_runtime::AccountingState::
-          release_token_selector_active(
+      released =
+          sllm_public_runtime::AccountingState::release_token_selector_active(
               completion->queue->accounting,
               completion->token_selector_logits->accounting,
               completion->token_selector_additive->accounting,
@@ -3286,6 +3537,11 @@ bool release_submission_references(Completion *const completion) noexcept {
       released = release_linear_attention_active(
           completion->queue, completion->linear_attention_state,
           completion->linear_attention_buffers);
+    } else if (completion->d2d_copy) {
+      released =
+          sllm_public_runtime::AccountingState::release_two_buffer_active(
+              completion->queue->accounting, completion->d2d_source->accounting,
+              completion->d2d_destination->accounting);
     } else {
       released = sllm_public_runtime::AccountingState::release_active(
           completion->queue->accounting, completion->buffer->accounting);
@@ -3386,6 +3642,12 @@ bool rollback_submission_references(Completion *const completion) noexcept {
           completion->context, completion->queue,
           completion->linear_attention_state,
           completion->linear_attention_buffers);
+    } else if (completion->d2d_copy) {
+      released =
+          sllm_public_runtime::AccountingState::rollback_two_buffer_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->d2d_source->accounting,
+              completion->d2d_destination->accounting);
     } else {
       released = sllm_public_runtime::AccountingState::rollback_submission(
           completion->context->accounting, completion->queue->accounting,
@@ -3440,9 +3702,9 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   if (!sllm_public_runtime::FaultInjector::consume(
           sllm_public_runtime::FaultPoint::AccountingFailure)) {
     if (completion->queue_fence) {
-      released = sllm_public_runtime::AccountingState::
-          release_queue_fence_completion(completion->context->accounting,
-                                         completion->queue->accounting);
+      released =
+          sllm_public_runtime::AccountingState::release_queue_fence_completion(
+              completion->context->accounting, completion->queue->accounting);
     } else if (completion->rmsnorm) {
       released =
           sllm_public_runtime::AccountingState::release_rmsnorm_completion(
@@ -3497,6 +3759,12 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
           completion->context, completion->queue,
           completion->linear_attention_state,
           completion->linear_attention_buffers);
+    } else if (completion->d2d_copy) {
+      released =
+          sllm_public_runtime::AccountingState::release_two_buffer_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->d2d_source->accounting,
+              completion->d2d_destination->accounting);
     } else {
       released = sllm_public_runtime::AccountingState::
           release_completion_and_lifetime_guard(completion->context->accounting,
@@ -3512,8 +3780,9 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   return released;
 }
 
-sllm_status_t finalize_completion_success(
-    Completion *const completion, sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+finalize_completion_success(Completion *const completion,
+                            sllm_error_sink_t *const sink) noexcept {
   if (!release_submission_references(completion)) {
     completion->terminal = true;
     completion->success = false;
@@ -3581,9 +3850,8 @@ sllm_status_t poll_completion(Completion *const completion,
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
         completion->argmax || completion->token_selector ||
-        completion->array_operation ||
-        completion->kv_state_append || completion->causal_attention ||
-        completion->linear_attention) {
+        completion->array_operation || completion->kv_state_append ||
+        completion->causal_attention || completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
         completion->terminal = true;
         completion->success = false;
@@ -4108,18 +4376,19 @@ private:
 
 class TokenSelectorExecuteScopeGuard final {
 public:
-  TokenSelectorExecuteScopeGuard(
-      TokenSelectorPlan *const plan, Queue *const queue,
-      std::unique_ptr<Completion> *const candidate,
-      NativeEventGuard *const event_guard, sllm_error_sink_t *const sink) noexcept
+  TokenSelectorExecuteScopeGuard(TokenSelectorPlan *const plan,
+                                 Queue *const queue,
+                                 std::unique_ptr<Completion> *const candidate,
+                                 NativeEventGuard *const event_guard,
+                                 sllm_error_sink_t *const sink) noexcept
       : plan_(plan), queue_(queue), candidate_(candidate),
         event_guard_(event_guard), sink_(sink), token_(0U),
         phase_(Phase::Reserved) {}
 
   TokenSelectorExecuteScopeGuard(const TokenSelectorExecuteScopeGuard &) =
       delete;
-  TokenSelectorExecuteScopeGuard &operator=(
-      const TokenSelectorExecuteScopeGuard &) = delete;
+  TokenSelectorExecuteScopeGuard &
+  operator=(const TokenSelectorExecuteScopeGuard &) = delete;
 
   ~TokenSelectorExecuteScopeGuard() { cleanup(); }
 
@@ -4467,6 +4736,164 @@ sllm_status_t submit_copy(const sllm_queue_t *const raw_queue,
   if (record_status != hipSuccess) {
     return cleanup_failed_submission(candidate, token, record_status,
                                      "hipEventRecord", queue, sink);
+  }
+  *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+  (void)candidate.release();
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t submit_d2d_copy(const sllm_queue_t *const raw_queue,
+                              const sllm_buffer_t *const raw_source,
+                              const sllm_buffer_t *const raw_destination,
+                              const sllm_buffer_copy_d2d_desc_t *const copy,
+                              sllm_completion_t **const completion_output,
+                              sllm_error_sink_t *const sink) {
+  if (completion_output != nullptr)
+    *completion_output = nullptr;
+  if (raw_queue == nullptr || raw_source == nullptr ||
+      raw_destination == nullptr || copy == nullptr ||
+      completion_output == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "D2D queue, buffers, descriptor, or completion output is null");
+  }
+  if (copy->struct_size != sizeof(*copy) ||
+      copy->abi_version != SLLM_HIP_ABI_VERSION || copy->size_bytes == 0U ||
+      copy->reserved[0] != 0U || copy->reserved[1] != 0U ||
+      copy->reserved[2] != 0U || copy->reserved[3] != 0U) {
+    return sllm_public_runtime::write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                                            "D2D descriptor is invalid");
+  }
+  Queue *queue = nullptr;
+  Buffer *source = nullptr;
+  Buffer *destination = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+    source = lookup<Buffer>(raw_source, HandleKind::Buffer);
+    destination = lookup<Buffer>(raw_destination, HandleKind::Buffer);
+    if (queue == nullptr || source == nullptr || destination == nullptr) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+          "D2D queue or buffer handle is stale or has the wrong kind");
+    }
+    if (queue->context != source->context ||
+        queue->context != destination->context) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "D2D queue and buffers must belong to one context");
+    }
+    if (queue->release_active || source->release_active ||
+        destination->release_active || queue->context->poisoned.load()) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_PUBLIC_BUSY,
+          "D2D queue or buffer release is already in progress");
+    }
+    if (sllm_public_runtime::add_overflows(copy->source_offset_bytes,
+                                           copy->size_bytes) ||
+        copy->source_offset_bytes + copy->size_bytes > source->size_bytes ||
+        sllm_public_runtime::add_overflows(copy->destination_offset_bytes,
+                                           copy->size_bytes) ||
+        copy->destination_offset_bytes + copy->size_bytes >
+            destination->size_bytes) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+          "D2D copy range is outside a device buffer");
+    }
+    if (source == destination &&
+        copy->source_offset_bytes <
+            copy->destination_offset_bytes + copy->size_bytes &&
+        copy->destination_offset_bytes <
+            copy->source_offset_bytes + copy->size_bytes) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "D2D overlapping ranges are not supported");
+    }
+    if (!reserve_d2d_submission_references(queue, source, destination)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "public D2D submission accounting is exhausted");
+    }
+  }
+  std::unique_ptr<Completion> candidate;
+  try {
+    candidate = std::make_unique<Completion>(queue->context, queue, destination,
+                                             copy->size_bytes, false,
+                                             std::vector<uint8_t>{});
+    candidate->d2d_copy = true;
+    candidate->d2d_source = source;
+    candidate->d2d_destination = destination;
+  } catch (...) {
+    (void)rollback_reserved_d2d_submission(queue->context, queue, source,
+                                           destination, sink);
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "public D2D completion allocation failed before enqueue");
+  }
+  const sllm_status_t device_status =
+      select_context_device(queue->context, sink);
+  if (device_status != SLLM_STATUS_OK) {
+    if (!rollback_reserved_d2d_submission(queue->context, queue, source,
+                                          destination, sink)) {
+      candidate->orphaned = true;
+      retain_poisoned(candidate, candidate->context);
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "D2D submission rollback failed after device selection failure");
+    }
+    return device_status;
+  }
+  hipEvent_t native_event = nullptr;
+  const hipError_t event_status =
+      hipEventCreateWithFlags(&native_event, hipEventDisableTiming);
+  if (event_status != hipSuccess) {
+    if (!rollback_reserved_d2d_submission(queue->context, queue, source,
+                                          destination, sink)) {
+      candidate->orphaned = true;
+      retain_poisoned(candidate, candidate->context);
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "D2D submission rollback failed after event creation failure");
+    }
+    return hip_failure(sink, event_status, "hipEventCreateWithFlags");
+  }
+  NativeEventGuard event_guard(queue->context, native_event);
+  candidate->event = native_event;
+  uintptr_t token = 0U;
+  try {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    token = register_handle(candidate.get(), HandleKind::Completion);
+  } catch (...) {
+    return rollback_unpublished_submission(
+        candidate, event_guard,
+        "public D2D completion registry allocation failed before enqueue",
+        sink);
+  }
+  if (token == 0U) {
+    return rollback_unpublished_submission(
+        candidate, event_guard,
+        "public D2D completion handle token allocation failed", sink);
+  }
+  event_guard.release();
+  void *const destination_pointer =
+      static_cast<char *>(destination->device_pointer) +
+      static_cast<std::size_t>(copy->destination_offset_bytes);
+  const void *const source_pointer =
+      static_cast<const char *>(source->device_pointer) +
+      static_cast<std::size_t>(copy->source_offset_bytes);
+  const hipError_t copy_status =
+      hipMemcpyAsync(destination_pointer, source_pointer,
+                     static_cast<std::size_t>(copy->size_bytes),
+                     hipMemcpyDeviceToDevice, queue->stream);
+  if (copy_status != hipSuccess) {
+    return cleanup_failed_submission(candidate, token, copy_status,
+                                     "hipMemcpyAsync D2D", queue, sink);
+  }
+  const hipError_t record_status =
+      hipEventRecord(candidate->event, queue->stream);
+  if (record_status != hipSuccess) {
+    return cleanup_failed_submission(candidate, token, record_status,
+                                     "hipEventRecord D2D", queue, sink);
   }
   *completion_output = reinterpret_cast<sllm_completion_t *>(token);
   (void)candidate.release();
@@ -5675,9 +6102,31 @@ sllm_buffer_copy_d2h(const sllm_queue_t *const queue,
   }
 }
 
-extern "C" sllm_status_t sllm_queue_set_completion_mode(
-    const sllm_queue_t *const raw_queue, const uint32_t mode,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_buffer_copy_d2d(const sllm_queue_t *const queue,
+                     const sllm_buffer_t *const source,
+                     const sllm_buffer_t *const destination,
+                     const sllm_buffer_copy_d2d_desc_t *const copy,
+                     sllm_completion_t **const completion,
+                     sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    return submit_d2d_copy(queue, source, destination, copy, completion,
+                           error_sink);
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in public D2D copy");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_queue_set_completion_mode(const sllm_queue_t *const raw_queue,
+                               const uint32_t mode,
+                               sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -5787,8 +6236,7 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
     std::unique_ptr<Completion> candidate;
     try {
       candidate = std::make_unique<Completion>(
-          queue->context, queue, nullptr, 0U, false,
-          std::vector<uint8_t>{});
+          queue->context, queue, nullptr, 0U, false, std::vector<uint8_t>{});
       candidate->queue_fence = true;
     } catch (...) {
       (void)rollback();
@@ -5797,8 +6245,8 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
           "queue fence completion allocation failed");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t create_status = hipEventCreateWithFlags(
-        &native_event, hipEventDisableTiming);
+    const hipError_t create_status =
+        hipEventCreateWithFlags(&native_event, hipEventDisableTiming);
     if (create_status != hipSuccess) {
       (void)rollback();
       return hip_failure(error_sink, create_status,
@@ -5848,11 +6296,11 @@ sllm_queue_fence(const sllm_queue_t *const raw_queue,
   }
 }
 
-extern "C" sllm_status_t sllm_completion_finalize_after(
-    sllm_completion_t *const raw_completion,
-    sllm_completion_t *const raw_fence,
-    sllm_completion_result_t *const result,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_completion_finalize_after(sllm_completion_t *const raw_completion,
+                               sllm_completion_t *const raw_fence,
+                               sllm_completion_result_t *const result,
+                               sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status =
         sllm_public_runtime::validate_error_sink(error_sink);
@@ -5883,8 +6331,7 @@ extern "C" sllm_status_t sllm_completion_finalize_after(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "completion cannot be finalized by itself");
     }
-    std::scoped_lock state_locks(completion->state_mutex,
-                                 fence->state_mutex);
+    std::scoped_lock state_locks(completion->state_mutex, fence->state_mutex);
     if (!fence->queue_fence || !fence->terminal || !fence->success ||
         !fence->safe_to_release || completion->context != fence->context ||
         completion->queue != fence->queue) {
@@ -6785,8 +7232,7 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
           return SLLM_STATUS_INTERNAL_ERROR;
         }
         execute_guard.disarm();
-        return hip_failure(error_sink, event_status,
-                           "hipEventCreateWithFlags");
+        return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
       }
       event_guard.adopt(plan->context, native_event);
       candidate->event = native_event;
@@ -7256,9 +7702,10 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     }
 
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = queue_profiles_completions(queue)
-                                        ? hipEventCreateWithFlags(&native_event, 0U)
-                                        : hipSuccess;
+    const hipError_t event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&native_event, 0U)
+            : hipSuccess;
     if (event_status != hipSuccess) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -7271,10 +7718,10 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
     candidate->event = native_event;
 
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_event_status = queue_profiles_completions(queue)
-                                               ? hipEventCreateWithFlags(
-                                                     &timing_start_event, 0U)
-                                               : hipSuccess;
+    const hipError_t timing_event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&timing_start_event, 0U)
+            : hipSuccess;
     if (timing_event_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -7401,8 +7848,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "matmul_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
-#include "token_selector_runtime.inc"
 #include "rotary_runtime.inc"
+#include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
 
 namespace {
@@ -7785,8 +8232,7 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
                    : static_cast<uint64_t>(head_count) *
                          ((static_cast<uint64_t>(head_dim) + 1U) / 2U));
     const uint64_t scale_bytes_per_token =
-        (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-         info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1)
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
             : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
                    ? static_cast<uint64_t>(head_count) *
@@ -8750,6 +9196,66 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
                     plane.page_bytes;
       return plane.grow(required_mapped_bytes, allocation_properties, access);
     };
+    const auto cow_plane = [&](KvVmmPlane &plane,
+                               const uint64_t bytes_per_token) -> hipError_t {
+      if (bytes_per_token == 0U || plane.contiguous) {
+        return hipSuccess;
+      }
+      const uint64_t start_bytes = metadata.start_position * bytes_per_token;
+      const uint64_t end_bytes = metadata.end_position * bytes_per_token;
+      return plane.make_private(start_bytes, end_bytes, allocation_properties,
+                                access);
+    };
+    const uint64_t shared_before =
+        state->key_plane.shared_page_count() +
+        state->value_plane.shared_page_count() +
+        state->key_scale_plane.shared_page_count() +
+        state->value_scale_plane.shared_page_count() +
+        state->key_outer_scale_plane.shared_page_count() +
+        state->value_outer_scale_plane.shared_page_count();
+    /* Shared VMM pages are protected read-only at fork.  COW every KV plane
+     * before any append kernel can observe the new token; a partial tail page
+     * is intentionally included by the ceil-page calculation. */
+    hipError_t cow_status =
+        cow_plane(state->key_plane, state->value_bytes_per_token);
+    if (cow_status == hipSuccess) {
+      cow_status = cow_plane(state->value_plane, state->value_bytes_per_token);
+    }
+    if (cow_status == hipSuccess) {
+      cow_status =
+          cow_plane(state->key_scale_plane, state->scale_bytes_per_token);
+    }
+    if (cow_status == hipSuccess) {
+      cow_status =
+          cow_plane(state->value_scale_plane, state->scale_bytes_per_token);
+    }
+    if (cow_status == hipSuccess) {
+      cow_status = cow_plane(state->key_outer_scale_plane,
+                             state->outer_scale_bytes_per_token);
+    }
+    if (cow_status == hipSuccess) {
+      cow_status = cow_plane(state->value_outer_scale_plane,
+                             state->outer_scale_bytes_per_token);
+    }
+    if (cow_status != hipSuccess) {
+      execute_guard.disarm();
+      if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
+                                           error_sink)) {
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      return hip_failure(error_sink, cow_status,
+                         "copy-on-write shared KV pages");
+    }
+    const uint64_t shared_after =
+        state->key_plane.shared_page_count() +
+        state->value_plane.shared_page_count() +
+        state->key_scale_plane.shared_page_count() +
+        state->value_scale_plane.shared_page_count() +
+        state->key_outer_scale_plane.shared_page_count() +
+        state->value_outer_scale_plane.shared_page_count();
+    state->shared_page_count = shared_after;
+    state->cow_copied_bytes +=
+        (shared_before - shared_after) * state->physical_page_bytes;
     hipError_t grow_status =
         grow_plane(state->key_plane, state->value_bytes_per_token);
     if (grow_status == hipSuccess) {
@@ -8831,9 +9337,10 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
           "KV append completion allocation failed before enqueue");
     }
     hipEvent_t native_event = nullptr;
-    const hipError_t event_status = queue_profiles_completions(queue)
-                                        ? hipEventCreateWithFlags(&native_event, 0U)
-                                        : hipSuccess;
+    const hipError_t event_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&native_event, 0U)
+            : hipSuccess;
     if (event_status != hipSuccess) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
@@ -8845,10 +9352,10 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     event_guard.adopt(state->context, native_event);
     candidate->event = native_event;
     hipEvent_t timing_start_event = nullptr;
-    const hipError_t timing_status = queue_profiles_completions(queue)
-                                         ? hipEventCreateWithFlags(
-                                               &timing_start_event, 0U)
-                                         : hipSuccess;
+    const hipError_t timing_status =
+        queue_profiles_completions(queue)
+            ? hipEventCreateWithFlags(&timing_start_event, 0U)
+            : hipSuccess;
     if (timing_status != hipSuccess) {
       execute_guard.disarm();
       return rollback_unpublished_submission(
@@ -8990,6 +9497,7 @@ sllm_kv_state_append_cancel(const sllm_kv_state_t *const raw_state,
 }
 
 #include "linear_attention_runtime.inc"
+#include "state_fork_runtime.inc"
 
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 extern "C" std::size_t sllm_test_orphan_count() noexcept {

@@ -6,9 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sllm_core::{
-    CompiledGrammar, DeviceTokenSelectorRequestV1, Gemma4ExecutionRequest, Gemma4ModelLock,
-    GrammarError, QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1, SamplingError,
-    SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, TokenTrie,
+    CompiledGrammar, DeviceTokenSelectorRequestV1, DraftProposalV1, DraftProviderV1,
+    Gemma4ExecutionRequest, Gemma4ModelLock, GrammarError, MAX_SPECULATIVE_DRAFT_WIDTH_V1,
+    QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1, SamplingError,
+    SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, SpeculativeAccountingV1,
+    SpeculativeError, TokenTrie, verify_target_selected,
 };
 
 use crate::{
@@ -56,6 +58,63 @@ pub enum GenerationInputV1 {
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
     },
+    /// Explicit continuation input.  The assistant prefix is part of the
+    /// model context, but is not emitted as generated output.
+    PromptWithAssistantPrefill {
+        prompt: String,
+        assistant_prefill: String,
+    },
+    /// Explicit chat continuation input.  This is intentionally separate
+    /// from `Messages` so the legacy rendering/token sequence remains exact.
+    MessagesWithAssistantPrefill {
+        messages: Vec<Qwen35ChatMessageV1>,
+        options: Qwen35RenderOptionsV1,
+        assistant_prefill: String,
+    },
+}
+
+/// Tokenized generation input with an explicit assistant continuation
+/// boundary.  `token_ids()` is the complete context passed to the executor;
+/// `assistant_prefill_token_ids()` is used only for grammar state priming and
+/// accounting/visibility semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedGenerationInputV1 {
+    assistant_prefill_start: usize,
+    token_ids: Vec<u32>,
+}
+
+impl PreparedGenerationInputV1 {
+    pub fn from_token_ids(
+        base_token_ids: Vec<u32>,
+        assistant_prefill_token_ids: Vec<u32>,
+    ) -> Result<Self, GenerationServiceError> {
+        if base_token_ids.is_empty() {
+            return Err(GenerationServiceError::EmptyPromptTokens);
+        }
+        let combined_len = base_token_ids
+            .len()
+            .checked_add(assistant_prefill_token_ids.len())
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let mut token_ids = Vec::with_capacity(combined_len);
+        token_ids.extend_from_slice(&base_token_ids);
+        token_ids.extend_from_slice(&assistant_prefill_token_ids);
+        Ok(Self {
+            assistant_prefill_start: base_token_ids.len(),
+            token_ids,
+        })
+    }
+
+    pub fn base_token_ids(&self) -> &[u32] {
+        &self.token_ids[..self.assistant_prefill_start]
+    }
+
+    pub fn assistant_prefill_token_ids(&self) -> &[u32] {
+        &self.token_ids[self.assistant_prefill_start..]
+    }
+
+    pub fn token_ids(&self) -> &[u32] {
+        &self.token_ids
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -459,6 +518,13 @@ pub trait GenerationExecutorV1 {
         include_last_logits: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError>;
 
+    /// Optional pre-decode admission hook. Context-window adapters use this
+    /// to transactionally rebuild a compact owner before the token is
+    /// submitted; legacy executors retain the no-op default.
+    fn before_decode(&mut self, _token_id: u32) -> Result<(), GenerationServiceError> {
+        Ok(())
+    }
+
     fn supports_device_selector(&self) -> bool {
         false
     }
@@ -479,6 +545,14 @@ pub trait GenerationExecutorV1 {
         Err(GenerationServiceError::DeviceSelectorUnsupported)
     }
 
+    /// Finalize request-local work which was staged ahead of the sequential
+    /// generation loop. Ordinary executors have nothing to do; speculative
+    /// adapters use this hook to discard unconsumed target rows on a clean
+    /// stop or length boundary.
+    fn finish(&mut self) -> Result<(), GenerationServiceError> {
+        Ok(())
+    }
+
     fn cancel(&mut self);
 }
 
@@ -489,6 +563,53 @@ pub trait SpeculativeGenerationExecutorV1: GenerationExecutorV1 {
         &mut self,
         pending_token: u32,
     ) -> Result<Vec<GenerationStepV1>, GenerationServiceError>;
+
+    /// Returns the provider owned by the target adapter, when it has one.
+    /// Keeping this seam on the executor lets the legacy Qwen MTP owner use
+    /// the same provider/verification loop as externally supplied providers
+    /// without changing its public constructor or call sites.
+    fn draft_provider(&mut self) -> Option<&mut dyn DraftProviderV1> {
+        None
+    }
+
+    fn has_draft_provider(&self) -> bool {
+        false
+    }
+
+    /// Maximum proposal width accepted by this target graph.  Targets which
+    /// do not expose a provider retain the legacy width for compatibility.
+    fn speculative_draft_width(&self) -> usize {
+        MAX_SPECULATIVE_DRAFT_WIDTH_V1
+    }
+
+    /// Verifies one provider proposal and returns only canonical target steps
+    /// in publication order.  The default preserves the old exact-greedy
+    /// executor contract; model adapters override it when they can consume a
+    /// proposal from a model-neutral provider.
+    fn speculative_decode_with_proposal(
+        &mut self,
+        pending_token: u32,
+        proposal: &DraftProposalV1,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        let _ = proposal;
+        self.speculative_decode_greedy(pending_token)
+    }
+
+    /// Publish exactly the input rows consumed by the sequential frontend from
+    /// the most recently staged speculative block. Implementations which do
+    /// not stage target state retain the no-op compatibility behavior.
+    fn finalize_speculative_decode(
+        &mut self,
+        _committed_input_rows: usize,
+    ) -> Result<(), GenerationServiceError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingSpeculativeBlockV1 {
+    total_input_rows: usize,
+    consumed_input_rows: usize,
 }
 
 /// Adapts an exact speculative executor to the unchanged one-token generation
@@ -498,14 +619,48 @@ pub trait SpeculativeGenerationExecutorV1: GenerationExecutorV1 {
 pub struct SpeculativeGenerationAdapterV1<E> {
     inner: E,
     queued: VecDeque<(u32, GenerationStepV1)>,
+    provider: Option<Box<dyn DraftProviderV1>>,
+    committed_target_tokens: Vec<u32>,
+    accounting: SpeculativeAccountingV1,
+    max_draft_width: usize,
+    pending_block: Option<PendingSpeculativeBlockV1>,
 }
 
-impl<E> SpeculativeGenerationAdapterV1<E> {
+impl<E: SpeculativeGenerationExecutorV1> SpeculativeGenerationAdapterV1<E> {
     pub fn new(inner: E) -> Self {
         Self {
             inner,
             queued: VecDeque::new(),
+            provider: None,
+            committed_target_tokens: Vec::new(),
+            accounting: SpeculativeAccountingV1::default(),
+            max_draft_width: MAX_SPECULATIVE_DRAFT_WIDTH_V1,
+            pending_block: None,
         }
+    }
+
+    /// Creates an adapter with an explicit model-neutral draft provider.
+    /// The provider owns its own state/RNG; only target steps cross the
+    /// executor boundary.
+    pub fn with_provider<P: DraftProviderV1 + 'static>(inner: E, provider: P) -> Self {
+        Self::with_provider_and_draft_width(inner, provider, MAX_SPECULATIVE_DRAFT_WIDTH_V1)
+            .expect("the default speculative width is valid")
+    }
+
+    pub fn with_provider_and_draft_width<P: DraftProviderV1 + 'static>(
+        inner: E,
+        provider: P,
+        max_draft_width: usize,
+    ) -> Result<Self, GenerationServiceError> {
+        if !(1..=MAX_SPECULATIVE_DRAFT_WIDTH_V1).contains(&max_draft_width) {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::DraftWidthExceeded.to_string(),
+            ));
+        }
+        let mut adapter = Self::new(inner);
+        adapter.provider = Some(Box::new(provider));
+        adapter.max_draft_width = max_draft_width;
+        Ok(adapter)
     }
 
     pub fn inner(&self) -> &E {
@@ -519,6 +674,135 @@ impl<E> SpeculativeGenerationAdapterV1<E> {
     pub fn into_inner(self) -> E {
         self.inner
     }
+
+    pub const fn accounting(&self) -> SpeculativeAccountingV1 {
+        self.accounting
+    }
+
+    pub fn provider(&self) -> Option<&dyn DraftProviderV1> {
+        self.provider.as_deref()
+    }
+
+    fn finalize_pending_block(&mut self) -> Result<(), GenerationServiceError> {
+        let Some(pending) = self.pending_block.take() else {
+            return Ok(());
+        };
+        if pending.consumed_input_rows == 0
+            || pending.consumed_input_rows > pending.total_input_rows
+        {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
+        self.inner
+            .finalize_speculative_decode(pending.consumed_input_rows)?;
+        self.queued.clear();
+        Ok(())
+    }
+
+    fn stage_steps(
+        &mut self,
+        steps: Vec<GenerationStepV1>,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let total_input_rows = steps.len();
+        let mut steps = steps.into_iter();
+        let first = steps.next().ok_or_else(|| {
+            GenerationServiceError::Execution(
+                "speculative executor returned no canonical target step".to_owned(),
+            )
+        })?;
+        let mut expected_input = first.device_argmax();
+        for step in steps {
+            let next_expected = step.device_argmax();
+            self.queued.push_back((expected_input, step));
+            expected_input = next_expected;
+        }
+        self.pending_block = Some(PendingSpeculativeBlockV1 {
+            total_input_rows,
+            // The token supplied to the speculative decode call is the first
+            // input row and was already selected by the sequential frontend.
+            consumed_input_rows: 1,
+        });
+        if total_input_rows == 1 {
+            self.finalize_pending_block()?;
+        }
+        Ok(first)
+    }
+
+    fn proposal(
+        &mut self,
+        pending_token: u32,
+    ) -> Result<Option<DraftProposalV1>, GenerationServiceError> {
+        self.committed_target_tokens.push(pending_token);
+        let target_width = self.inner.speculative_draft_width();
+        if !(1..=MAX_SPECULATIVE_DRAFT_WIDTH_V1).contains(&target_width) {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::DraftWidthExceeded.to_string(),
+            ));
+        }
+        let max_width = self.max_draft_width.min(target_width);
+        if let Some(provider) = self.provider.as_mut() {
+            return provider
+                .propose(&self.committed_target_tokens, max_width)
+                .map_err(GenerationServiceError::from);
+        }
+        self.inner
+            .draft_provider()
+            .map(|provider| {
+                provider
+                    .propose(&self.committed_target_tokens, max_width)
+                    .map_err(GenerationServiceError::from)
+            })
+            .transpose()
+            .map(|proposal| proposal.flatten())
+    }
+
+    fn record_proposal(
+        &mut self,
+        proposal: &DraftProposalV1,
+        steps: &[GenerationStepV1],
+    ) -> Result<(), GenerationServiceError> {
+        if steps.is_empty() || steps.len() > proposal.token_ids().len() + 1 {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
+        let target_tokens = steps
+            .iter()
+            .map(GenerationStepV1::device_argmax)
+            .collect::<Vec<_>>();
+        let accepted = proposal
+            .token_ids()
+            .iter()
+            .zip(&target_tokens)
+            .take_while(|(draft, target)| draft == target)
+            .count();
+        let expected_steps = if accepted == proposal.token_ids().len() {
+            proposal.token_ids().len() + 1
+        } else {
+            accepted + 1
+        };
+        if steps.len() != expected_steps {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
+        // A rejecting target commits only the accepted prefix and its
+        // replacement row.  verify_target_selected intentionally stops at
+        // that first mismatch, so padding the unavailable tail is safe.
+        let mut verification_tokens = target_tokens.clone();
+        if verification_tokens.len() < proposal.token_ids().len() + 1 {
+            let filler = *verification_tokens.last().ok_or_else(|| {
+                GenerationServiceError::Speculative(SpeculativeError::InvalidDecision.to_string())
+            })?;
+            verification_tokens.resize(proposal.token_ids().len() + 1, filler);
+        }
+        let decision = verify_target_selected(proposal.token_ids(), &verification_tokens)
+            .map_err(GenerationServiceError::from)?;
+        self.accounting
+            .record(proposal, &decision)
+            .map_err(GenerationServiceError::from)
+    }
 }
 
 impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
@@ -529,7 +813,15 @@ impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
         input_token_ids: &[u32],
         include_last_logits: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        self.finalize_pending_block()?;
         self.queued.clear();
+        self.committed_target_tokens = input_token_ids.to_vec();
+        self.accounting = SpeculativeAccountingV1::default();
+        if let Some(provider) = self.provider.as_mut() {
+            provider.reset().map_err(GenerationServiceError::from)?;
+        } else if let Some(provider) = self.inner.draft_provider() {
+            provider.reset().map_err(GenerationServiceError::from)?;
+        }
         self.inner.prefill(input_token_ids, include_last_logits)
     }
 
@@ -552,25 +844,43 @@ impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
                     "generation loop input differs from the accepted speculative token".to_owned(),
                 ));
             }
+            self.committed_target_tokens.push(token_id);
+            let pending = self.pending_block.as_mut().ok_or_else(|| {
+                GenerationServiceError::Speculative(SpeculativeError::InvalidDecision.to_string())
+            })?;
+            pending.consumed_input_rows = pending
+                .consumed_input_rows
+                .checked_add(1)
+                .ok_or(GenerationServiceError::CountOverflow)?;
+            if pending.consumed_input_rows == pending.total_input_rows {
+                self.finalize_pending_block()?;
+            }
             return Ok(step);
         }
-        let steps = self.inner.speculative_decode_greedy(token_id)?;
-        let mut steps = steps.into_iter();
-        let first = steps.next().ok_or_else(|| {
-            GenerationServiceError::Execution(
-                "speculative executor returned no canonical target step".to_owned(),
-            )
-        })?;
-        let mut expected_input = first.device_argmax();
-        for step in steps {
-            let next_expected = step.device_argmax();
-            self.queued.push_back((expected_input, step));
-            expected_input = next_expected;
+        // Preserve the original executor-only contract for adapters that do
+        // not expose a model-neutral provider. This is retained for API
+        // compatibility with custom exact-greedy executors.
+        if self.provider.is_none() && !self.inner.has_draft_provider() {
+            let steps = self.inner.speculative_decode_greedy(token_id)?;
+            return self.stage_steps(steps);
         }
-        Ok(first)
+        let Some(proposal) = self.proposal(token_id)? else {
+            return self.inner.decode(token_id, false);
+        };
+        let steps = self
+            .inner
+            .speculative_decode_with_proposal(token_id, &proposal)?;
+        self.record_proposal(&proposal, &steps)?;
+        self.stage_steps(steps)
+    }
+
+    fn finish(&mut self) -> Result<(), GenerationServiceError> {
+        self.finalize_pending_block()?;
+        self.inner.finish()
     }
 
     fn cancel(&mut self) {
+        let _ = self.finalize_pending_block();
         self.queued.clear();
         self.inner.cancel();
     }
@@ -581,6 +891,13 @@ impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
 /// `draft_width` is the number of MTP proposal tokens in one speculative
 /// block. The target verify block contains one additional row for the pending
 /// token, so its required row capacity is `draft_width + 1`.
+struct PendingQwenSpeculativeBlockV1 {
+    hidden_rows_bf16: Vec<u16>,
+    target_accepted_draft_tokens: usize,
+    target_input_rows: usize,
+    proposed_draft_tokens: usize,
+}
+
 pub struct QwenMtpGenerationExecutorV1 {
     target: QwenExecutionRequest,
     mtp: QwenExecutionRequest,
@@ -590,6 +907,7 @@ pub struct QwenMtpGenerationExecutorV1 {
     proposed_draft_tokens: u64,
     accepted_draft_tokens: u64,
     committed_target_rows: u64,
+    pending_speculative_block: Option<PendingQwenSpeculativeBlockV1>,
 }
 
 impl QwenMtpGenerationExecutorV1 {
@@ -610,6 +928,7 @@ impl QwenMtpGenerationExecutorV1 {
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
+            pending_speculative_block: None,
         }
     }
 
@@ -628,6 +947,7 @@ impl QwenMtpGenerationExecutorV1 {
             proposed_draft_tokens: 0,
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
+            pending_speculative_block: None,
         })
     }
 
@@ -701,6 +1021,11 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         input_token_ids: &[u32],
         _: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.pending_speculative_block.is_some() {
+            return Err(GenerationServiceError::Execution(
+                "speculative target block must be finalized before prefill".to_owned(),
+            ));
+        }
         let input = input_token_ids
             .iter()
             .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
@@ -764,42 +1089,143 @@ impl GenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
 }
 
 impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
+    fn draft_provider(&mut self) -> Option<&mut dyn DraftProviderV1> {
+        Some(self)
+    }
+
+    fn has_draft_provider(&self) -> bool {
+        true
+    }
+
+    fn speculative_draft_width(&self) -> usize {
+        self.draft_width
+    }
+
     fn speculative_decode_greedy(
         &mut self,
         pending_token: u32,
     ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        let proposal = self
+            .propose_mtp_draft(pending_token, self.draft_width)
+            .map_err(GenerationServiceError::from)?
+            .ok_or_else(|| {
+                GenerationServiceError::Execution("MTP provider returned no draft".to_owned())
+            })?;
+        self.speculative_decode_with_proposal(pending_token, &proposal)
+    }
+
+    fn speculative_decode_with_proposal(
+        &mut self,
+        pending_token: u32,
+        proposal: &DraftProposalV1,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        self.verify_mtp_draft(pending_token, proposal)
+    }
+
+    fn finalize_speculative_decode(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<(), GenerationServiceError> {
+        self.finalize_mtp_draft(committed_input_rows)
+    }
+}
+
+impl DraftProviderV1 for QwenMtpGenerationExecutorV1 {
+    fn kind(&self) -> sllm_core::DraftProviderKindV1 {
+        sllm_core::DraftProviderKindV1::QwenMtp
+    }
+
+    fn propose(
+        &mut self,
+        committed_target_tokens: &[u32],
+        max_width: usize,
+    ) -> Result<Option<DraftProposalV1>, SpeculativeError> {
+        if committed_target_tokens.len() > sllm_core::MAX_SPECULATIVE_HISTORY_TOKENS_V1 {
+            return Err(SpeculativeError::HistoryLimitExceeded);
+        }
+        if !(1..=MAX_SPECULATIVE_DRAFT_WIDTH_V1).contains(&max_width) {
+            return Err(if max_width == 0 {
+                SpeculativeError::ZeroDraftWidth
+            } else {
+                SpeculativeError::DraftWidthExceeded
+            });
+        }
+        let pending_token = committed_target_tokens
+            .last()
+            .copied()
+            .ok_or(SpeculativeError::HistoryLimitExceeded)?;
+        self.propose_mtp_draft(pending_token, max_width)
+    }
+}
+
+impl QwenMtpGenerationExecutorV1 {
+    fn propose_mtp_draft(
+        &mut self,
+        pending_token: u32,
+        requested_width: usize,
+    ) -> Result<Option<DraftProposalV1>, SpeculativeError> {
+        let width = requested_width.min(self.draft_width);
+        if width == 0 {
+            return Err(SpeculativeError::ZeroDraftWidth);
+        }
         if self.last_target_hidden_bf16.len() != Self::HIDDEN_WIDTH {
+            return Err(SpeculativeError::HistoryLimitExceeded);
+        }
+        let pending = i32::try_from(pending_token)
+            .map_err(|_| SpeculativeError::TokenOutOfVocabulary(pending_token))?;
+        let mut drafts = Vec::with_capacity(width);
+        let mut proposal_token = pending;
+        let mut proposal_hidden = self.last_target_hidden_bf16.clone();
+        for _ in 0..width {
+            let proposal = self
+                .mtp
+                .decode_mtp(proposal_token, &proposal_hidden)
+                .map_err(|_| SpeculativeError::InvalidDecision)?;
+            proposal_token = *proposal
+                .token_ids()
+                .first()
+                .ok_or(SpeculativeError::ZeroDraftWidth)?;
+            proposal_hidden = proposal
+                .hidden_states_bf16()
+                .ok_or(SpeculativeError::InvalidDecision)?
+                .to_vec();
+            drafts.push(
+                u32::try_from(proposal_token)
+                    .map_err(|_| SpeculativeError::TokenOutOfVocabulary(proposal_token as u32))?,
+            );
+        }
+        Ok(Some(DraftProposalV1::new(self.kind(), drafts)?))
+    }
+
+    fn verify_mtp_draft(
+        &mut self,
+        pending_token: u32,
+        proposal: &DraftProposalV1,
+    ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+        if self.pending_speculative_block.is_some() {
             return Err(GenerationServiceError::Execution(
-                "MTP executor was not initialized by prefill".to_owned(),
+                "previous speculative target block is still pending".to_owned(),
+            ));
+        }
+        let drafts = proposal.token_ids();
+        if drafts.is_empty() || drafts.len() > self.draft_width {
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::DraftWidthExceeded.to_string(),
             ));
         }
         let pending =
             i32::try_from(pending_token).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
-        let mut drafts = Vec::with_capacity(self.draft_width);
-        let mut proposal_token = pending;
-        let mut proposal_hidden = self.last_target_hidden_bf16.clone();
-        for _ in 0..self.draft_width {
-            let proposal = self
-                .mtp
-                .decode_mtp(proposal_token, &proposal_hidden)
-                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
-            proposal_token = *proposal
-                .token_ids()
-                .first()
-                .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
-            proposal_hidden = proposal
-                .hidden_states_bf16()
-                .ok_or_else(|| {
-                    GenerationServiceError::Execution(
-                        "MTP proposal omitted hidden state".to_owned(),
-                    )
-                })?
-                .to_vec();
-            drafts.push(proposal_token);
-        }
         let mut block_inputs = Vec::with_capacity(self.draft_width + 1);
         block_inputs.push(pending);
-        block_inputs.extend_from_slice(&drafts);
+        block_inputs.extend(
+            drafts
+                .iter()
+                .copied()
+                .map(|token| {
+                    i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
         let block = self
             .target
             .decode_block_with_mtp_state(&block_inputs)
@@ -807,17 +1233,17 @@ impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
         let hidden = block.hidden_states_bf16().ok_or_else(|| {
             GenerationServiceError::Execution("target verify omitted hidden rows".to_owned())
         })?;
-        if block.token_ids().len() != self.draft_width + 1
-            || hidden.len() != (self.draft_width + 1) * Self::HIDDEN_WIDTH
+        let draft_width = drafts.len();
+        if block.token_ids().len() != draft_width + 1
+            || hidden.len() != (draft_width + 1) * Self::HIDDEN_WIDTH
         {
             return Err(GenerationServiceError::Execution(
                 "target verify row count differs from draft width".to_owned(),
             ));
         }
         let mut accepted = 0_usize;
-        while accepted < self.draft_width {
-            let draft = u32::try_from(drafts[accepted])
-                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        while accepted < draft_width {
+            let draft = drafts[accepted];
             let target = u32::try_from(block.token_ids()[accepted])
                 .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
             if draft != target {
@@ -825,44 +1251,120 @@ impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
             }
             accepted += 1;
         }
-        let committed_rows = if accepted == self.draft_width {
-            self.draft_width + 1
+        let committed_rows = if accepted == draft_width {
+            draft_width + 1
         } else {
             accepted + 1
         };
         let steps = (0..committed_rows)
             .map(|row| Self::step_from_output(&block, row))
             .collect::<Result<Vec<_>, _>>()?;
-        self.last_target_hidden_bf16 = hidden
-            [(committed_rows - 1) * Self::HIDDEN_WIDTH..committed_rows * Self::HIDDEN_WIDTH]
-            .to_vec();
-        if accepted != self.draft_width {
-            for _ in 0..self.draft_width.saturating_sub(committed_rows) {
+        if proposal.provider() == sllm_core::DraftProviderKindV1::QwenMtp {
+            // The MTP provider already executed one transition per proposed
+            // token. Retain only rows accepted by the target, adding the final
+            // all-accept row which was not needed to produce a proposal.
+            if accepted != draft_width {
+                for _ in 0..draft_width.saturating_sub(committed_rows) {
+                    self.mtp
+                        .rewind_last_decode_transition()
+                        .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+                }
+            } else {
+                let previous_hidden_start = (draft_width - 1) * Self::HIDDEN_WIDTH;
                 self.mtp
-                    .rewind_last_decode_transition()
+                    .decode_mtp(
+                        i32::try_from(drafts[draft_width - 1])
+                            .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+                        &hidden[previous_hidden_start..previous_hidden_start + Self::HIDDEN_WIDTH],
+                    )
                     .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
             }
         } else {
-            let previous_hidden_start = (self.draft_width - 1) * Self::HIDDEN_WIDTH;
+            // An external or n-gram provider does not touch MTP state. Advance
+            // the request-local MTP owner along the target-accepted inputs so
+            // later blocks retain the same hidden-state alignment as Qwen MTP.
+            for (row, &block_input) in block_inputs.iter().take(committed_rows).enumerate() {
+                let hidden_before = if row == 0 {
+                    self.last_target_hidden_bf16.as_slice()
+                } else {
+                    let start = (row - 1) * Self::HIDDEN_WIDTH;
+                    &hidden[start..start + Self::HIDDEN_WIDTH]
+                };
+                self.mtp
+                    .decode_mtp(block_input, hidden_before)
+                    .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            }
+        }
+        self.pending_speculative_block = Some(PendingQwenSpeculativeBlockV1 {
+            hidden_rows_bf16: hidden.to_vec(),
+            target_accepted_draft_tokens: accepted,
+            target_input_rows: committed_rows,
+            proposed_draft_tokens: draft_width,
+        });
+        Ok(steps)
+    }
+
+    fn finalize_mtp_draft(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<(), GenerationServiceError> {
+        let pending = self.pending_speculative_block.take().ok_or_else(|| {
+            GenerationServiceError::Execution(
+                "no speculative target block is pending finalization".to_owned(),
+            )
+        })?;
+        if committed_input_rows == 0 || committed_input_rows > pending.target_input_rows {
+            self.pending_speculative_block = Some(pending);
+            return Err(GenerationServiceError::Speculative(
+                SpeculativeError::InvalidDecision.to_string(),
+            ));
+        }
+
+        let proposal_blocks = self
+            .proposal_blocks
+            .checked_add(1)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let proposed_draft_tokens = self
+            .proposed_draft_tokens
+            .checked_add(
+                u64::try_from(pending.proposed_draft_tokens)
+                    .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let committed_accepted = pending
+            .target_accepted_draft_tokens
+            .min(committed_input_rows);
+        let accepted_draft_tokens = self
+            .accepted_draft_tokens
+            .checked_add(
+                u64::try_from(committed_accepted)
+                    .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let committed_target_rows = self
+            .committed_target_rows
+            .checked_add(
+                u64::try_from(committed_input_rows)
+                    .map_err(|_| GenerationServiceError::CountOverflow)?,
+            )
+            .ok_or(GenerationServiceError::CountOverflow)?;
+
+        for _ in committed_input_rows..pending.target_input_rows {
             self.mtp
-                .decode_mtp(
-                    drafts[self.draft_width - 1],
-                    &hidden[previous_hidden_start..previous_hidden_start + Self::HIDDEN_WIDTH],
-                )
+                .rewind_last_decode_transition()
                 .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
         }
         self.target
-            .resolve_decode_block(committed_rows)
+            .resolve_decode_block(committed_input_rows)
             .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
-        self.proposal_blocks = self.proposal_blocks.saturating_add(1);
-        self.proposed_draft_tokens = self
-            .proposed_draft_tokens
-            .saturating_add(self.draft_width as u64);
-        self.accepted_draft_tokens = self.accepted_draft_tokens.saturating_add(accepted as u64);
-        self.committed_target_rows = self
-            .committed_target_rows
-            .saturating_add(committed_rows as u64);
-        Ok(steps)
+        let hidden_start = (committed_input_rows - 1) * Self::HIDDEN_WIDTH;
+        self.last_target_hidden_bf16 =
+            pending.hidden_rows_bf16[hidden_start..hidden_start + Self::HIDDEN_WIDTH].to_vec();
+        self.proposal_blocks = proposal_blocks;
+        self.proposed_draft_tokens = proposed_draft_tokens;
+        self.accepted_draft_tokens = accepted_draft_tokens;
+        self.committed_target_rows = committed_target_rows;
+        Ok(())
     }
 }
 
@@ -871,6 +1373,14 @@ impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
 /// boundaries without loading a model asset.
 pub trait GenerationTextFrontendV1 {
     fn encode_generation(&self, text: &str) -> Result<Vec<u32>, GenerationServiceError>;
+
+    /// Encodes an explicit assistant continuation without injecting prompt
+    /// special tokens.  Lightweight test frontends inherit the generation
+    /// encoder because they do not model special-token insertion.
+    fn encode_assistant_prefill(&self, text: &str) -> Result<Vec<u32>, GenerationServiceError> {
+        self.encode_generation(text)
+    }
+
     fn decode_generation(&self, token_ids: &[u32]) -> Result<String, GenerationServiceError>;
 
     /// Returns the decoder-aware raw token pieces needed by constrained
@@ -898,6 +1408,12 @@ impl GenerationOutputSinkV1 for IgnoreGenerationOutput {
 impl GenerationTextFrontendV1 for TokenizerFrontendV1 {
     fn encode_generation(&self, text: &str) -> Result<Vec<u32>, GenerationServiceError> {
         self.encode(text)
+            .map(|ids| ids.as_slice().to_vec())
+            .map_err(|_| GenerationServiceError::Tokenize)
+    }
+
+    fn encode_assistant_prefill(&self, text: &str) -> Result<Vec<u32>, GenerationServiceError> {
+        self.encode_without_special_tokens(text)
             .map(|ids| ids.as_slice().to_vec())
             .map_err(|_| GenerationServiceError::Tokenize)
     }
@@ -1120,6 +1636,7 @@ pub enum GenerationServiceError {
     InconsistentChoicePrompt,
     SamplingConfigurationMismatch,
     TokenBytesUnsupported,
+    Speculative(String),
     Grammar(GrammarError),
     Sampling(SamplingError),
     Execution(String),
@@ -1180,6 +1697,9 @@ impl fmt::Display for GenerationServiceError {
             Self::TokenBytesUnsupported => {
                 formatter.write_str("generation frontend does not expose raw token bytes")
             }
+            Self::Speculative(reason) => {
+                write!(formatter, "speculative generation failed: {reason}")
+            }
             Self::Grammar(error) => error.fmt(formatter),
             Self::Sampling(error) => error.fmt(formatter),
             Self::Execution(reason) => write!(formatter, "generation execution failed: {reason}"),
@@ -1200,6 +1720,12 @@ impl From<SamplingError> for GenerationServiceError {
 impl From<GrammarError> for GenerationServiceError {
     fn from(error: GrammarError) -> Self {
         Self::Grammar(error)
+    }
+}
+
+impl From<SpeculativeError> for GenerationServiceError {
+    fn from(error: SpeculativeError) -> Self {
+        Self::Speculative(error.to_string())
     }
 }
 
@@ -1245,8 +1771,8 @@ impl<'a> GenerationServiceV1<'a> {
         random: &mut impl SamplingRandomSource,
         sink: &mut impl GenerationOutputSinkV1,
     ) -> Result<GenerationResultV1, GenerationServiceError> {
-        let prompt = self.prepare_input(input)?;
-        self.generate_tokens_with_sink(executor, &prompt, config, cancellation, random, sink)
+        let prepared = self.prepare_input_plan(input)?;
+        self.generate_prepared_with_sink(executor, &prepared, config, cancellation, random, sink)
     }
 
     /// Runs the same renderer/tokenizer path as [`Self::generate`] while
@@ -1255,19 +1781,84 @@ impl<'a> GenerationServiceV1<'a> {
         &self,
         input: &GenerationInputV1,
     ) -> Result<Vec<u32>, GenerationServiceError> {
-        let rendered = match input {
-            GenerationInputV1::Prompt(prompt) => prompt.clone(),
-            GenerationInputV1::Messages { messages, options } => self
-                .renderer
-                .ok_or(GenerationServiceError::MissingRenderer)?
-                .render(messages, *options)
-                .map_err(|_| GenerationServiceError::Render)?,
+        Ok(self.prepare_input_plan(input)?.token_ids().to_vec())
+    }
+
+    /// Prepares a transport-independent input while retaining the explicit
+    /// assistant-prefix boundary needed by grammar, usage, and visibility
+    /// semantics.  Existing `prepare_input` callers receive the same token
+    /// IDs as before for the legacy variants.
+    pub fn prepare_input_plan(
+        &self,
+        input: &GenerationInputV1,
+    ) -> Result<PreparedGenerationInputV1, GenerationServiceError> {
+        let (rendered, assistant_prefill) = match input {
+            GenerationInputV1::Prompt(prompt) => (prompt.clone(), None),
+            GenerationInputV1::Messages { messages, options } => (
+                self.renderer
+                    .ok_or(GenerationServiceError::MissingRenderer)?
+                    .render(messages, *options)
+                    .map_err(|_| GenerationServiceError::Render)?,
+                None,
+            ),
+            GenerationInputV1::PromptWithAssistantPrefill {
+                prompt,
+                assistant_prefill,
+            } => (prompt.clone(), Some(assistant_prefill.as_str())),
+            GenerationInputV1::MessagesWithAssistantPrefill {
+                messages,
+                options,
+                assistant_prefill,
+            } => (
+                self.renderer
+                    .ok_or(GenerationServiceError::MissingRenderer)?
+                    .render_with_assistant_prefill(messages, *options, "")
+                    .map_err(|_| GenerationServiceError::Render)?,
+                Some(assistant_prefill.as_str()),
+            ),
         };
-        let prompt = self.tokenizer.encode_generation(&rendered)?;
-        if prompt.is_empty() {
-            return Err(GenerationServiceError::EmptyPromptTokens);
+        let base_token_ids = self.tokenizer.encode_generation(&rendered)?;
+        let assistant_prefill_token_ids = assistant_prefill
+            .map(|prefill| self.tokenizer.encode_assistant_prefill(prefill))
+            .transpose()?
+            .unwrap_or_default();
+        PreparedGenerationInputV1::from_token_ids(base_token_ids, assistant_prefill_token_ids)
+    }
+
+    pub fn generate_prepared(
+        &self,
+        executor: &mut impl GenerationExecutorV1,
+        input: &PreparedGenerationInputV1,
+        config: &GenerationConfigV1,
+        cancellation: &GenerationCancellationV1,
+        random: &mut impl SamplingRandomSource,
+    ) -> Result<GenerationResultV1, GenerationServiceError> {
+        let mut sink = IgnoreGenerationOutput;
+        self.generate_prepared_with_sink(executor, input, config, cancellation, random, &mut sink)
+    }
+
+    pub fn generate_prepared_with_sink(
+        &self,
+        executor: &mut impl GenerationExecutorV1,
+        input: &PreparedGenerationInputV1,
+        config: &GenerationConfigV1,
+        cancellation: &GenerationCancellationV1,
+        random: &mut impl SamplingRandomSource,
+        sink: &mut impl GenerationOutputSinkV1,
+    ) -> Result<GenerationResultV1, GenerationServiceError> {
+        let result = self.generate_tokens_inner(
+            executor,
+            input.token_ids(),
+            input.assistant_prefill_token_ids(),
+            config,
+            cancellation,
+            random,
+            sink,
+        );
+        if result.is_err() {
+            executor.cancel();
         }
-        Ok(prompt)
+        result
     }
 
     pub fn generate_tokens(
@@ -1304,6 +1895,7 @@ impl<'a> GenerationServiceV1<'a> {
         let result = self.generate_tokens_inner(
             executor,
             input_token_ids,
+            &[],
             config,
             cancellation,
             random,
@@ -1315,10 +1907,12 @@ impl<'a> GenerationServiceV1<'a> {
         result
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn generate_tokens_inner(
         &self,
         executor: &mut impl GenerationExecutorV1,
         input_token_ids: &[u32],
+        assistant_prefill_token_ids: &[u32],
         config: &GenerationConfigV1,
         cancellation: &GenerationCancellationV1,
         random: &mut impl SamplingRandomSource,
@@ -1351,6 +1945,24 @@ impl<'a> GenerationServiceV1<'a> {
         } else {
             (None, None)
         };
+        // An explicit assistant continuation is already part of the prompt
+        // context.  Prime the grammar with its exact raw token bytes before
+        // constructing the first candidate mask; invalid prefixes therefore
+        // fail closed before any executor work is submitted.
+        if let Some(state) = grammar_state.as_mut()
+            && !assistant_prefill_token_ids.is_empty()
+        {
+            let table = self.tokenizer.token_byte_table()?;
+            for &token in assistant_prefill_token_ids {
+                let entry = table
+                    .entry(token)
+                    .ok_or(GenerationServiceError::TokenIdOverflow)?;
+                let bytes = entry
+                    .bytes()
+                    .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
+                state.accept(bytes)?;
+            }
+        }
         let use_device_selector = config.device_selector_seed.is_some()
             && sampler.supports_device_selector()
             && executor.supports_device_selector();
@@ -1389,8 +2001,20 @@ impl<'a> GenerationServiceV1<'a> {
         let mut normal_tokens = Vec::<u32>::new();
         let mut decoded_snapshots = Vec::<String>::new();
         let mut decode_inputs = Vec::new();
-        let mut decoded = String::new();
-        let mut unstable_utf8_tail = String::new();
+        let mut decode_context_tokens = assistant_prefill_token_ids.to_vec();
+        let assistant_decoded = if decode_context_tokens.is_empty() {
+            String::new()
+        } else {
+            self.tokenizer.decode_generation(&decode_context_tokens)?
+        };
+        let assistant_stable_end = assistant_decoded.trim_end_matches('\u{fffd}').len();
+        let mut decoded = assistant_decoded[..assistant_stable_end].to_owned();
+        let mut unstable_utf8_tail = assistant_decoded[assistant_stable_end..].to_owned();
+        // Prime only the suffix which can begin a stop sequence. Complete stop
+        // strings wholly inside prompt state are not generation stops, and no
+        // bytes released by priming are ever sent to the visible sink.
+        matcher.prime(&decoded);
+        let mut generated_decoded = String::new();
         let mut output_text = String::new();
         let mut finish_reason = None;
         let mut stop_token_id = None;
@@ -1443,7 +2067,7 @@ impl<'a> GenerationServiceV1<'a> {
             if self.stop_policy.stop_token_ids.contains(&token) {
                 finish_reason = Some(FinishReasonV1::Stop);
                 stop_token_id = Some(token);
-                if !unstable_utf8_tail.is_empty() {
+                if !normal_tokens.is_empty() && !unstable_utf8_tail.is_empty() {
                     let tail = matcher.push(&unstable_utf8_tail);
                     publish_visible(&mut output_text, &tail.visible, sink)?;
                 }
@@ -1451,12 +2075,9 @@ impl<'a> GenerationServiceV1<'a> {
                 break;
             }
 
-            let candidate_ids = normal_tokens
-                .iter()
-                .copied()
-                .chain(std::iter::once(token))
-                .collect::<Vec<_>>();
-            let candidate = self.tokenizer.decode_generation(&candidate_ids)?;
+            decode_context_tokens.push(token);
+            let candidate_ids = &decode_context_tokens;
+            let candidate = self.tokenizer.decode_generation(candidate_ids)?;
             // Hugging Face byte-fallback decoding can temporarily end in one
             // or more replacement characters and repair that suffix after a
             // later token completes the UTF-8 sequence. Never publish or feed
@@ -1468,10 +2089,11 @@ impl<'a> GenerationServiceV1<'a> {
                 .ok_or(GenerationServiceError::NonPrefixDecode)?;
             let match_result = matcher.push(delta);
             publish_visible(&mut output_text, &match_result.visible, sink)?;
+            generated_decoded.push_str(delta);
             decoded = stable_candidate.to_owned();
             unstable_utf8_tail = candidate[stable_end..].to_owned();
             normal_tokens.push(token);
-            decoded_snapshots.push(candidate);
+            decoded_snapshots.push(format!("{generated_decoded}{unstable_utf8_tail}"));
             if let Some(stop) = match_result.matched {
                 finish_reason = Some(FinishReasonV1::Stop);
                 matched_stop = Some(stop);
@@ -1495,6 +2117,7 @@ impl<'a> GenerationServiceV1<'a> {
             decode_inputs.push(token);
             check_cancelled(cancellation)?;
             step = if use_device_selector {
+                executor.before_decode(token)?;
                 device_mask = build_valid_token_mask(
                     grammar_state.as_ref(),
                     grammar_trie.as_ref(),
@@ -1512,6 +2135,7 @@ impl<'a> GenerationServiceV1<'a> {
                 )?;
                 executor.decode_with_device_selector(token, &selector)?
             } else {
+                executor.before_decode(token)?;
                 executor.decode(token, include_logits)?
             };
             decode_steps = decode_steps
@@ -1519,6 +2143,7 @@ impl<'a> GenerationServiceV1<'a> {
                 .ok_or(GenerationServiceError::CountOverflow)?;
         }
 
+        executor.finish()?;
         let finish_reason = finish_reason.ok_or(GenerationServiceError::CountOverflow)?;
         let visible_count = decoded_snapshots
             .iter()
@@ -1699,6 +2324,28 @@ impl IncrementalStopMatcher {
         }
     }
 
+    fn prime(&mut self, context: &str) {
+        debug_assert!(!self.stopped);
+        let mut best = None;
+        for (start, _) in context
+            .char_indices()
+            .chain(std::iter::once((context.len(), '\0')))
+        {
+            let suffix = &context[start..];
+            if self
+                .stops
+                .iter()
+                .any(|stop| suffix.len() < stop.len() && stop.starts_with(suffix))
+                && best.is_none_or(|current: usize| suffix.len() > current)
+            {
+                best = Some(suffix.len());
+            }
+        }
+        self.pending = best
+            .map(|length| context[context.len() - length..].to_owned())
+            .unwrap_or_default();
+    }
+
     fn finish(&mut self) -> String {
         if self.stopped {
             return String::new();
@@ -1743,6 +2390,7 @@ mod tests {
     struct TinyExecutor {
         steps: VecDeque<GenerationStepV1>,
         include_logits: Vec<bool>,
+        prefill_inputs: Vec<Vec<u32>>,
         decode_inputs: Vec<u32>,
         cancel_count: u32,
     }
@@ -1772,9 +2420,10 @@ mod tests {
     impl GenerationExecutorV1 for TinyExecutor {
         fn prefill(
             &mut self,
-            _: &[u32],
+            input_token_ids: &[u32],
             include_last_logits: bool,
         ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.prefill_inputs.push(input_token_ids.to_vec());
             self.next(include_last_logits)
         }
 
@@ -1795,6 +2444,7 @@ mod tests {
     struct TinyDeviceSelectorExecutor {
         selections: VecDeque<SamplingSelectionV1>,
         requests: Vec<(u64, u64, usize, usize)>,
+        prefill_inputs: Vec<Vec<u32>>,
         decode_inputs: Vec<u32>,
         cancel_count: u32,
     }
@@ -1838,9 +2488,10 @@ mod tests {
 
         fn prefill_with_device_selector(
             &mut self,
-            _: &[u32],
+            input_token_ids: &[u32],
             selector: &DeviceTokenSelectorRequestV1,
         ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.prefill_inputs.push(input_token_ids.to_vec());
             Ok(self.select(selector))
         }
 
@@ -1864,7 +2515,74 @@ mod tests {
         batches: VecDeque<Vec<GenerationStepV1>>,
         speculative_inputs: Vec<u32>,
         target_only_inputs: Vec<u32>,
+        finalized_rows: Vec<usize>,
         cancelled: bool,
+    }
+
+    struct TinyProviderExecutor {
+        prefill_step: Option<GenerationStepV1>,
+        batches: VecDeque<Vec<GenerationStepV1>>,
+        proposals: Vec<Vec<u32>>,
+        target_only_inputs: Vec<u32>,
+        finalized_rows: Vec<usize>,
+        cancelled: bool,
+    }
+
+    impl GenerationExecutorV1 for TinyProviderExecutor {
+        fn prefill(
+            &mut self,
+            _: &[u32],
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.prefill_step.take().ok_or_else(|| {
+                GenerationServiceError::Execution("missing provider prefill".to_owned())
+            })
+        }
+
+        fn decode(
+            &mut self,
+            token_id: u32,
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.target_only_inputs.push(token_id);
+            Err(GenerationServiceError::Execution(
+                "provider path unexpectedly used target-only decode".to_owned(),
+            ))
+        }
+
+        fn cancel(&mut self) {
+            self.cancelled = true;
+        }
+    }
+
+    impl SpeculativeGenerationExecutorV1 for TinyProviderExecutor {
+        fn speculative_decode_greedy(
+            &mut self,
+            _: u32,
+        ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+            Err(GenerationServiceError::Execution(
+                "legacy provider path unexpectedly used".to_owned(),
+            ))
+        }
+
+        fn speculative_decode_with_proposal(
+            &mut self,
+            _: u32,
+            proposal: &DraftProposalV1,
+        ) -> Result<Vec<GenerationStepV1>, GenerationServiceError> {
+            self.proposals.push(proposal.token_ids().to_vec());
+            self.batches.pop_front().ok_or_else(|| {
+                GenerationServiceError::Execution("missing provider target batch".to_owned())
+            })
+        }
+
+        fn finalize_speculative_decode(
+            &mut self,
+            committed_input_rows: usize,
+        ) -> Result<(), GenerationServiceError> {
+            self.finalized_rows.push(committed_input_rows);
+            Ok(())
+        }
     }
 
     impl GenerationExecutorV1 for TinySpeculativeExecutor {
@@ -1904,6 +2622,14 @@ mod tests {
                 GenerationServiceError::Execution("missing speculative batch".to_owned())
             })
         }
+
+        fn finalize_speculative_decode(
+            &mut self,
+            committed_input_rows: usize,
+        ) -> Result<(), GenerationServiceError> {
+            self.finalized_rows.push(committed_input_rows);
+            Ok(())
+        }
     }
 
     struct PieceFrontend;
@@ -1930,6 +2656,10 @@ mod tests {
                     11 if token_ids.get(index + 1) == Some(&12) => "",
                     11 => "�",
                     12 => "終わりtail",
+                    13 => "ab",
+                    14 => "c",
+                    15 => "終",
+                    16 => "わりtail",
                     _ => "?",
                 });
             }
@@ -2042,14 +2772,16 @@ mod tests {
         let mut executor = TinyDeviceSelectorExecutor {
             selections: VecDeque::from([selection(1), selection(9)]),
             requests: Vec::new(),
+            prefill_inputs: Vec::new(),
             decode_inputs: Vec::new(),
             cancel_count: 0,
         };
+        let prepared = PreparedGenerationInputV1::from_token_ids(vec![1], vec![3, 17]).unwrap();
 
         let result = service
-            .generate_tokens(
+            .generate_prepared(
                 &mut executor,
-                &[1],
+                &prepared,
                 &config,
                 &GenerationCancellationV1::new(),
                 &mut FixedRandom(0.99),
@@ -2058,6 +2790,7 @@ mod tests {
 
         assert_eq!(result.generated_token_ids(), [1, 9]);
         assert_eq!(result.stop_token_id(), Some(9));
+        assert_eq!(executor.prefill_inputs, [vec![1, 3, 17]]);
         assert_eq!(executor.decode_inputs, [1]);
         assert_eq!(executor.requests, [(7, 0, 16, 16), (7, 1, 16, 16)]);
         assert_eq!(executor.cancel_count, 0);
@@ -2109,6 +2842,131 @@ mod tests {
         assert_eq!(executor.cancel_count, 0);
         assert_eq!(result.selections().len(), 3);
         assert_eq!(result.selections()[0].token_id, 5);
+    }
+
+    #[test]
+    fn assistant_prefill_is_combined_for_execution_but_hidden_from_output() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let prepared = PreparedGenerationInputV1::from_token_ids(vec![1, 3], vec![17]).unwrap();
+        let config =
+            GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec!["?".to_owned()])
+                .unwrap();
+        let mut executor = TinyExecutor::argmax([5]);
+        let mut sink = RecordingSink {
+            deltas: Vec::new(),
+            fail_after: None,
+        };
+        let result = service
+            .generate_prepared_with_sink(
+                &mut executor,
+                &prepared,
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+                &mut sink,
+            )
+            .unwrap();
+
+        assert_eq!(prepared.token_ids(), [1, 3, 17]);
+        assert_eq!(executor.prefill_inputs, [vec![1, 3, 17]]);
+        assert_eq!(result.input_token_ids(), [1, 3, 17]);
+        assert_eq!(result.generated_token_ids(), [5]);
+        assert_eq!(result.output_text(), "A");
+        assert_eq!(result.matched_stop(), None);
+        assert_eq!(sink.deltas, ["A"]);
+        assert_eq!(result.usage().prompt_tokens(), 3);
+        assert_eq!(result.usage().completion_tokens(), 1);
+    }
+
+    #[test]
+    fn assistant_prefill_primes_ascii_and_unicode_stop_prefixes_without_republishing_them() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+
+        for (prefill, generated, stop) in [
+            (vec![13], 14, "abc"),
+            (vec![15], 16, "終わり"),
+            // Token 11 is an unstable byte-fallback prefix. Token 12 repairs
+            // it into the complete Unicode stop without exposing U+FFFD.
+            (vec![11], 12, "終わり"),
+        ] {
+            let prepared = PreparedGenerationInputV1::from_token_ids(vec![1], prefill).unwrap();
+            let config =
+                GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec![stop.to_owned()])
+                    .unwrap();
+            let mut executor = TinyExecutor::argmax([generated]);
+            let result = service
+                .generate_prepared(
+                    &mut executor,
+                    &prepared,
+                    &config,
+                    &GenerationCancellationV1::new(),
+                    &mut FixedRandom(0.0),
+                )
+                .unwrap();
+            assert_eq!(result.output_text(), "");
+            assert_eq!(result.matched_stop(), Some(stop));
+            assert_eq!(result.finish_reason(), FinishReasonV1::Stop);
+            assert!(!result.output_text().contains('\u{fffd}'));
+            assert_eq!(result.usage().prompt_tokens(), 2);
+            assert_eq!(result.usage().completion_tokens(), 1);
+        }
+    }
+
+    #[test]
+    fn assistant_prefill_primes_grammar_before_executor_and_rejects_invalid_prefix() {
+        let frontend = GrammarPieceFrontend::new();
+        let mut stop_policy = policy();
+        stop_policy.stop_token_ids = vec![9];
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec![])
+            .unwrap()
+            .with_grammar(CompiledGrammar::compile("root ::= \"hello\"\n").unwrap());
+
+        let valid = PreparedGenerationInputV1::from_token_ids(vec![1], vec![1]).unwrap();
+        let mut stop_logits = vec![0.0_f32; 16];
+        stop_logits[9] = 20.0;
+        let mut executor = TinyExecutor {
+            steps: [GenerationStepV1::new(9, Some(stop_logits))].into(),
+            ..TinyExecutor::default()
+        };
+        let mut sink = RecordingSink {
+            deltas: Vec::new(),
+            fail_after: None,
+        };
+        let result = service
+            .generate_prepared_with_sink(
+                &mut executor,
+                &valid,
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+                &mut sink,
+            )
+            .unwrap();
+        assert_eq!(executor.prefill_inputs, [vec![1, 1]]);
+        assert_eq!(result.generated_token_ids(), [9]);
+        assert_eq!(result.output_text(), "");
+        assert!(sink.deltas.is_empty());
+        assert_eq!(result.usage().prompt_tokens(), 2);
+
+        let invalid = PreparedGenerationInputV1::from_token_ids(vec![1], vec![2]).unwrap();
+        let mut invalid_executor = TinyExecutor::argmax([9]);
+        assert!(matches!(
+            service.generate_prepared(
+                &mut invalid_executor,
+                &invalid,
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+            ),
+            Err(GenerationServiceError::Grammar(_))
+        ));
+        assert!(invalid_executor.prefill_inputs.is_empty());
+        assert_eq!(invalid_executor.cancel_count, 1);
     }
 
     #[test]
@@ -2237,6 +3095,7 @@ mod tests {
             ]]),
             speculative_inputs: Vec::new(),
             target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
             cancelled: false,
         };
         let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
@@ -2245,6 +3104,73 @@ mod tests {
         assert_eq!(adapter.decode(6, false).unwrap().device_argmax(), 7);
         assert_eq!(adapter.inner().speculative_inputs, [5]);
         assert!(adapter.inner().target_only_inputs.is_empty());
+        assert_eq!(adapter.inner().finalized_rows, [2]);
+    }
+
+    #[test]
+    fn speculative_tail_is_finalized_to_only_consumed_rows_at_length_and_stop() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+
+        for (stops, expected_reason, expected_text) in [
+            (Vec::new(), FinishReasonV1::Length, "AB"),
+            (vec!["B".to_owned()], FinishReasonV1::Stop, "A"),
+        ] {
+            let inner = TinySpeculativeExecutor {
+                prefill_step: Some(GenerationStepV1::new(5, None)),
+                target_only_steps: VecDeque::new(),
+                batches: VecDeque::from([vec![
+                    GenerationStepV1::new(6, None),
+                    GenerationStepV1::new(7, None),
+                    GenerationStepV1::new(5, None),
+                ]]),
+                speculative_inputs: Vec::new(),
+                target_only_inputs: Vec::new(),
+                finalized_rows: Vec::new(),
+                cancelled: false,
+            };
+            let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
+            let config = GenerationConfigV1::new(2, SamplingParametersV1::greedy(), stops).unwrap();
+            let result = service
+                .generate_tokens(
+                    &mut adapter,
+                    &[1],
+                    &config,
+                    &GenerationCancellationV1::new(),
+                    &mut FixedRandom(f64::NAN),
+                )
+                .unwrap();
+            assert_eq!(result.generated_token_ids(), [5, 6]);
+            assert_eq!(result.output_text(), expected_text);
+            assert_eq!(result.finish_reason(), expected_reason);
+            assert_eq!(result.usage().completion_tokens(), 2);
+            assert_eq!(adapter.inner().finalized_rows, [1]);
+            assert!(adapter.queued.is_empty());
+        }
+    }
+
+    #[test]
+    fn speculative_cancel_finalizes_consumed_rows_before_invalidating_owner() {
+        let inner = TinySpeculativeExecutor {
+            prefill_step: Some(GenerationStepV1::new(5, None)),
+            target_only_steps: VecDeque::new(),
+            batches: VecDeque::from([vec![
+                GenerationStepV1::new(6, None),
+                GenerationStepV1::new(7, None),
+            ]]),
+            speculative_inputs: Vec::new(),
+            target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
+        adapter.prefill(&[1], false).unwrap();
+        adapter.decode(5, false).unwrap();
+        adapter.cancel();
+        assert_eq!(adapter.inner().finalized_rows, [1]);
+        assert!(adapter.inner().cancelled);
+        assert!(adapter.queued.is_empty());
     }
 
     #[test]
@@ -2255,6 +3181,7 @@ mod tests {
             batches: VecDeque::new(),
             speculative_inputs: Vec::new(),
             target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
             cancelled: false,
         };
         let mut adapter = SpeculativeGenerationAdapterV1::new(inner);
@@ -2262,6 +3189,170 @@ mod tests {
         adapter.decode(1, true).unwrap();
         assert!(adapter.inner().speculative_inputs.is_empty());
         assert_eq!(adapter.inner().target_only_inputs, [1]);
+    }
+
+    #[test]
+    fn model_neutral_ngram_provider_shares_acceptance_and_accounting_loop() {
+        let provider = sllm_core::NgramDraftProviderV1::new(1, 1).unwrap();
+        let inner = TinyProviderExecutor {
+            prefill_step: Some(GenerationStepV1::new(1, None)),
+            batches: VecDeque::from([vec![
+                GenerationStepV1::new(2, None),
+                GenerationStepV1::new(9, None),
+            ]]),
+            proposals: Vec::new(),
+            target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter =
+            SpeculativeGenerationAdapterV1::with_provider_and_draft_width(inner, provider, 1)
+                .unwrap();
+        assert_eq!(
+            adapter.prefill(&[1, 2, 1], false).unwrap().device_argmax(),
+            1
+        );
+        assert_eq!(adapter.decode(1, false).unwrap().device_argmax(), 2);
+        assert_eq!(adapter.decode(2, false).unwrap().device_argmax(), 9);
+        assert_eq!(adapter.inner().proposals, [vec![2]]);
+        assert_eq!(adapter.accounting().proposal_blocks(), 1);
+        assert_eq!(adapter.accounting().proposed_tokens(), 1);
+        assert_eq!(adapter.accounting().accepted_tokens(), 1);
+        assert_eq!(adapter.accounting().rejected_tokens(), 0);
+        assert_eq!(adapter.accounting().emitted_target_tokens(), 2);
+        assert!(adapter.inner().target_only_inputs.is_empty());
+        assert_eq!(adapter.inner().finalized_rows, [2]);
+    }
+
+    #[test]
+    fn model_neutral_partial_accept_finalizes_target_replacement_rows_exactly() {
+        let provider = sllm_core::NgramDraftProviderV1::new(1, 1).unwrap();
+        let inner = TinyProviderExecutor {
+            prefill_step: Some(GenerationStepV1::new(1, None)),
+            // History [1,2,3,1] proposes [2,3]. The target accepts 2 and
+            // replaces 3 with 9, so exactly two input rows may be published.
+            batches: VecDeque::from([vec![
+                GenerationStepV1::new(2, None),
+                GenerationStepV1::new(9, None),
+            ]]),
+            proposals: Vec::new(),
+            target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter =
+            SpeculativeGenerationAdapterV1::with_provider_and_draft_width(inner, provider, 2)
+                .unwrap();
+        adapter.prefill(&[1, 2, 3, 1], false).unwrap();
+        assert_eq!(adapter.decode(1, false).unwrap().device_argmax(), 2);
+        assert_eq!(adapter.decode(2, false).unwrap().device_argmax(), 9);
+        assert_eq!(adapter.inner().proposals, [vec![2, 3]]);
+        assert_eq!(adapter.inner().finalized_rows, [2]);
+        assert_eq!(adapter.accounting().accepted_tokens(), 1);
+        assert_eq!(adapter.accounting().rejected_tokens(), 1);
+        assert_eq!(adapter.accounting().emitted_target_tokens(), 2);
+    }
+
+    #[test]
+    fn model_neutral_external_provider_rejection_publishes_only_target_replacement() {
+        #[derive(Default)]
+        struct DraftModel {
+            reset_prefixes: Vec<Vec<u32>>,
+        }
+
+        impl sllm_core::ExternalDraftModelV1 for DraftModel {
+            fn model_fingerprint(&self) -> &str {
+                "draft-model"
+            }
+
+            fn tokenizer_fingerprint(&self) -> &str {
+                "tok"
+            }
+
+            fn vocabulary_size(&self) -> u32 {
+                32
+            }
+
+            fn reset_to_prefix(
+                &mut self,
+                committed_target_tokens: &[u32],
+            ) -> Result<(), SpeculativeError> {
+                self.reset_prefixes.push(committed_target_tokens.to_vec());
+                Ok(())
+            }
+
+            fn propose_next(&mut self, _: Option<u32>) -> Result<u32, SpeculativeError> {
+                Ok(7)
+            }
+        }
+
+        let compatibility =
+            sllm_core::ExternalDraftCompatibilityV1::new("tok", "tok", 32, 32).unwrap();
+        let provider =
+            sllm_core::ExternalDraftProviderV1::new(DraftModel::default(), compatibility).unwrap();
+        let inner = TinyProviderExecutor {
+            prefill_step: Some(GenerationStepV1::new(1, None)),
+            batches: VecDeque::from([vec![GenerationStepV1::new(8, None)]]),
+            proposals: Vec::new(),
+            target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter =
+            SpeculativeGenerationAdapterV1::with_provider_and_draft_width(inner, provider, 1)
+                .unwrap();
+        adapter.prefill(&[4], false).unwrap();
+        assert_eq!(adapter.decode(1, false).unwrap().device_argmax(), 8);
+        assert_eq!(adapter.inner().proposals, [vec![7]]);
+        assert_eq!(adapter.accounting().accepted_tokens(), 0);
+        assert_eq!(adapter.accounting().rejected_tokens(), 1);
+        assert_eq!(adapter.accounting().emitted_target_tokens(), 1);
+        assert_eq!(adapter.inner().finalized_rows, [1]);
+    }
+
+    #[test]
+    fn model_neutral_provider_width_is_fail_closed_at_both_boundaries() {
+        for width in [0, 9, usize::MAX] {
+            let inner = TinyProviderExecutor {
+                prefill_step: Some(GenerationStepV1::new(1, None)),
+                batches: VecDeque::new(),
+                proposals: Vec::new(),
+                target_only_inputs: Vec::new(),
+                finalized_rows: Vec::new(),
+                cancelled: false,
+            };
+            let provider = sllm_core::NgramDraftProviderV1::new(1, 1).unwrap();
+            assert!(
+                SpeculativeGenerationAdapterV1::with_provider_and_draft_width(
+                    inner, provider, width,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn model_neutral_all_accept_requires_the_target_bonus_row() {
+        let provider = sllm_core::NgramDraftProviderV1::new(1, 1).unwrap();
+        let inner = TinyProviderExecutor {
+            prefill_step: Some(GenerationStepV1::new(1, None)),
+            // History [1,2,1] proposes 2. Returning only that accepted row is
+            // invalid because an all-accept target block must include bonus.
+            batches: VecDeque::from([vec![GenerationStepV1::new(2, None)]]),
+            proposals: Vec::new(),
+            target_only_inputs: Vec::new(),
+            finalized_rows: Vec::new(),
+            cancelled: false,
+        };
+        let mut adapter =
+            SpeculativeGenerationAdapterV1::with_provider_and_draft_width(inner, provider, 1)
+                .unwrap();
+        adapter.prefill(&[1, 2, 1], false).unwrap();
+        assert!(matches!(
+            adapter.decode(1, false),
+            Err(GenerationServiceError::Speculative(_))
+        ));
+        assert_eq!(adapter.accounting(), SpeculativeAccountingV1::default());
     }
 
     #[test]

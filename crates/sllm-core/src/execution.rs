@@ -12,12 +12,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::kv_state::{
-    CausalAttentionDescriptor, KvStateAppendRequest, KvStateDescriptor, KvStateLayout,
-    KvStateSnapshot,
+    CausalAttentionDescriptor, KvCacheEncoding, KvStateAppendRequest, KvStateDescriptor,
+    KvStateLayout, KvStateSnapshot, StateForkAuditV1, StateForkModeV1,
 };
 use crate::linear_attention::{
     LinearAttentionDescriptor, LinearAttentionLayout, LinearAttentionRequest,
     LinearAttentionStateDescriptor, LinearAttentionStateSnapshot,
+};
+use crate::session_checkpoint::{
+    OpaqueStatePlane, StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
 use crate::{AccessMode, DType, Encoding, SemanticOpDescriptor, SemanticOpKind, TensorView};
 
@@ -336,6 +339,31 @@ pub struct ShutdownReport {
     pub durable_quarantine: usize,
 }
 
+/// One complete, quiescent image for a single request-local state layer.
+///
+/// The bytes are encoding-native and opaque to core.  Core validates the
+/// owner/layer/plane topology before an adapter is allowed to consume an
+/// image; adapters own the actual device import/export and publication.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionStateImageV1 {
+    metadata: StateLayerMetadataV1,
+    planes: Vec<OpaqueStatePlane>,
+}
+
+impl ExecutionStateImageV1 {
+    pub fn new(metadata: StateLayerMetadataV1, planes: Vec<OpaqueStatePlane>) -> Self {
+        Self { metadata, planes }
+    }
+
+    pub const fn metadata(&self) -> &StateLayerMetadataV1 {
+        &self.metadata
+    }
+
+    pub fn planes(&self) -> &[OpaqueStatePlane] {
+        &self.planes
+    }
+}
+
 /// Errors in the owned execution boundary.  Backend diagnostics are copied
 /// into owned strings so no C ABI or borrowed asynchronous state leaks out.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -619,6 +647,21 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         source: &BufferRange,
     ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError>;
 
+    /// Enqueues an exact device-to-device copy.  Adapters must not stage
+    /// through host memory or expose a borrowed pointer; the returned
+    /// transfer owns all backend completion state until terminal observation.
+    fn copy_device_to_device(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _source: &BufferRange,
+        _destination: &BufferRange,
+    ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support device-to-device buffer copy".to_owned(),
+        })
+    }
+
     fn shutdown(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -650,6 +693,34 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
+    /// Forks one quiescent, published KV prefix into a fresh opaque owner.
+    /// The adapter may use read-only VMM sharing or an exact device copy, but
+    /// must never return the source handle as the destination resource.
+    fn fork_kv_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _source: &KvState,
+        _destination_id: KvStateId,
+        _destination_descriptor: KvStateDescriptor,
+    ) -> Result<(AdapterResource, StateForkAuditV1), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support quiescent KV state fork".to_owned(),
+        })
+    }
+
+    /// Re-queries child ownership after a completed append/COW transition.
+    /// Backends that do not expose VMM ownership accounting may leave this at
+    /// the default; native VMM adapters must return a redacted audit.
+    fn kv_state_fork_query(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+    ) -> Result<StateForkAuditV1, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV fork ownership query".to_owned(),
+        })
+    }
+
     /// Evidence-only readback of one backend-owned semantic KV plane.
     fn readback_kv_state(
         &self,
@@ -661,6 +732,31 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     ) -> Result<(), ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support KV state readback".to_owned(),
+        })
+    }
+
+    /// Exports one complete quiescent KV image. The adapter must return every
+    /// encoding-native plane exactly once and must not expose native handles.
+    fn export_kv_state_image(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV state image export".to_owned(),
+        })
+    }
+
+    /// Imports one complete KV image in one adapter call. The adapter must
+    /// stage all bytes and publish the restored length only after success.
+    fn import_kv_state_image(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &KvState,
+        _image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support KV state image import".to_owned(),
         })
     }
 
@@ -741,6 +837,45 @@ pub trait ExecutionSessionAdapter: Send + Sync {
     ) -> Result<LinearAttentionStateSnapshot, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support linear-attention state snapshots".to_owned(),
+        })
+    }
+
+    /// Clones a quiescent convolution/recurrent state into an independent
+    /// device owner. Mutable linear state is never shared between requests.
+    fn fork_linear_attention_state(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _source: &LinearAttentionState,
+        _destination_id: LinearAttentionStateId,
+        _destination_descriptor: LinearAttentionStateDescriptor,
+    ) -> Result<(AdapterResource, StateForkAuditV1), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support quiescent linear-attention state fork".to_owned(),
+        })
+    }
+
+    /// Exports one complete quiescent linear/GDN image, including both
+    /// double-buffer slots and the active-slot publication metadata.
+    fn export_linear_attention_state_image(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention state image export".to_owned(),
+        })
+    }
+
+    /// Imports one complete linear/GDN image in one adapter call. Publication
+    /// of active slot, generation, and length belongs to the adapter.
+    fn import_linear_attention_state_image(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _state: &LinearAttentionState,
+        _image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support linear-attention state image import".to_owned(),
         })
     }
 
@@ -1093,6 +1228,8 @@ impl ExecutionSession {
             attention_in_flight: Arc::new(AtomicBool::new(false)),
             operation_admission: Arc::new(Mutex::new(())),
             _allocation: allocation,
+            fork_audit: None,
+            cow_allocations: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -1105,6 +1242,163 @@ impl ExecutionSession {
             .adapter
             .kv_state_snapshot(&ExecutionAdapterAccess { session: self }, state)?;
         validate_kv_state_snapshot(self, state, snapshot)
+    }
+
+    /// Exports a complete, quiescent image for one KV layer. Core validates
+    /// the adapter's topology and publication metadata before returning it.
+    pub fn export_kv_state_image(
+        &self,
+        state: &KvState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let snapshot = self.kv_state_snapshot(state)?;
+        let image = self
+            .state
+            .adapter
+            .export_kv_state_image(&ExecutionAdapterAccess { session: self }, state)?;
+        validate_state_image(
+            &image,
+            StateOwnerKindV1::Kv,
+            state.layer_id(),
+            state.capacity(),
+            snapshot.length(),
+            kv_state_plane_kinds(state.descriptor().cache_encoding()),
+        )?;
+        Ok(image)
+    }
+
+    /// Imports a complete KV image after all metadata and planes pass core
+    /// validation. The adapter is called exactly once, so invalid input never
+    /// reaches backend publication.
+    pub fn import_kv_state_image(
+        &self,
+        state: &KvState,
+        image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let current = self.kv_state_snapshot(state)?;
+        if current.length() != 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image import requires a fresh empty KV destination".to_owned(),
+            });
+        }
+        validate_state_image(
+            image,
+            StateOwnerKindV1::Kv,
+            state.layer_id(),
+            state.capacity(),
+            image.metadata().published_length,
+            kv_state_plane_kinds(state.descriptor().cache_encoding()),
+        )?;
+        self.state.adapter.import_kv_state_image(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            image,
+        )
+    }
+
+    /// Forks a committed prefix into an independent state owner. Core closes
+    /// admission around the source while the backend captures its published
+    /// length and validates the returned redacted accounting.
+    pub fn fork_kv_state(
+        &self,
+        source: &KvState,
+        destination_descriptor: KvStateDescriptor,
+    ) -> Result<(KvState, StateForkAuditV1), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(source)?;
+        if source.append_in_flight.load(Ordering::Acquire)
+            || source.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        if source.descriptor.layer_id() != destination_descriptor.layer_id()
+            || source.descriptor.layout() != destination_descriptor.layout()
+            || source.descriptor.cache_encoding() != destination_descriptor.cache_encoding()
+            || source.descriptor.static_fp8_scales() != destination_descriptor.static_fp8_scales()
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "KV fork destination changes layer, layout, encoding, or static scales"
+                    .to_owned(),
+            });
+        }
+        let _admission = source
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        let source_snapshot = self.kv_state_snapshot(source)?;
+        if source_snapshot.length() == 0
+            || destination_descriptor.capacity() < source_snapshot.length()
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: "KV fork requires a non-empty prefix within destination capacity"
+                    .to_owned(),
+            });
+        }
+        let destination_id = KvStateId::new(next_execution_id());
+        let (resource, audit) = self.state.adapter.fork_kv_state(
+            &ExecutionAdapterAccess { session: self },
+            source,
+            destination_id,
+            destination_descriptor,
+        )?;
+        let maximum_bytes = kv_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
+            ExecutionError::InvalidRequest {
+                reason: "KV fork destination resident bytes overflowed".to_owned(),
+            }
+        })?;
+        if audit.published_length() != source_snapshot.length()
+            || audit.destination_owned_bytes() > maximum_bytes
+            || (audit.mode() == crate::StateForkModeV1::DeviceCopy
+                && (audit.copied_bytes() == 0 || audit.destination_owned_bytes() == 0))
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "backend KV fork audit differs from the admitted prefix".to_owned(),
+            });
+        }
+        let allocation = (audit.destination_owned_bytes() != 0)
+            .then(|| {
+                self.state.allocation_accounting.reserve(
+                    AllocationCategory::RequestState,
+                    audit.destination_owned_bytes(),
+                )
+            })
+            .transpose()?;
+        Ok((
+            KvState {
+                state: Arc::clone(&self.state),
+                id: destination_id,
+                descriptor: destination_descriptor,
+                payload: resource.payload,
+                append_in_flight: Arc::new(AtomicBool::new(false)),
+                attention_in_flight: Arc::new(AtomicBool::new(false)),
+                operation_admission: Arc::new(Mutex::new(())),
+                _allocation: allocation,
+                fork_audit: Some(Arc::new(Mutex::new(audit))),
+                cow_allocations: Arc::new(Mutex::new(Vec::new())),
+            },
+            audit,
+        ))
     }
 
     /// Reads one semantic K or V plane for exactness evidence. Production
@@ -1159,6 +1453,81 @@ impl ExecutionSession {
             byte_offset,
             destination,
         )
+    }
+
+    /// Reconciles native post-COW ownership accounting for a forked KV child.
+    /// Destination-owned and copied bytes may only increase; shared pages may
+    /// only decrease. Any newly owned bytes are admitted into request-state
+    /// accounting exactly once.
+    pub fn kv_state_fork_query(&self, state: &KvState) -> Result<StateForkAuditV1, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_kv_state(state)?;
+        let Some(previous) = state.fork_audit.as_ref() else {
+            return Err(ExecutionError::Unsupported {
+                reason: "state is not a fork destination".to_owned(),
+            });
+        };
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.append_in_flight.load(Ordering::Acquire)
+            || state.attention_in_flight.load(Ordering::Acquire)
+        {
+            return Err(ExecutionError::Busy);
+        }
+        let audit = self
+            .state
+            .adapter
+            .kv_state_fork_query(&ExecutionAdapterAccess { session: self }, state)?;
+        let mut previous = previous.lock().map_err(|_| ExecutionError::Busy)?;
+        if audit.mode() != previous.mode()
+            || audit.published_length() < previous.published_length()
+            || audit.copied_bytes() < previous.copied_bytes()
+            || audit.destination_owned_bytes() < previous.destination_owned_bytes()
+            || (audit.mode() == StateForkModeV1::SharedReadOnlyPages
+                && audit.shared_pages() > previous.shared_pages())
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "KV fork ownership audit is not monotonic".to_owned(),
+            });
+        }
+        let delta = audit
+            .destination_owned_bytes()
+            .saturating_sub(previous.destination_owned_bytes());
+        if delta != 0 {
+            let lease = self
+                .state
+                .allocation_accounting
+                .reserve(AllocationCategory::RequestState, delta)?;
+            state
+                .cow_allocations
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .push(lease);
+        }
+        *previous = audit;
+        Ok(audit)
+    }
+
+    /// Reconciles all forked KV destinations at one quiescent boundary.
+    ///
+    /// Each query is applied through [`Self::kv_state_fork_query`], so newly
+    /// COW-owned bytes are admitted into request-state accounting before the
+    /// aggregate is returned. Callers should pass only request states that
+    /// were created by a prefix fork; a fresh non-fork destination is an
+    /// explicit unsupported error rather than silently skipping accounting.
+    pub fn kv_state_fork_query_all<'a, I>(
+        &self,
+        states: I,
+    ) -> Result<Vec<StateForkAuditV1>, ExecutionError>
+    where
+        I: IntoIterator<Item = &'a KvState>,
+    {
+        states
+            .into_iter()
+            .map(|state| self.kv_state_fork_query(state))
+            .collect()
     }
 
     pub fn rewind_last_kv_state_transition(
@@ -1217,6 +1586,7 @@ impl ExecutionSession {
             descriptor,
             payload: resource.payload,
             execution_in_flight: Arc::new(AtomicBool::new(false)),
+            operation_admission: Arc::new(Mutex::new(())),
             _allocation: allocation,
         })
     }
@@ -1234,6 +1604,155 @@ impl ExecutionSession {
         validate_linear_attention_state_snapshot(self, state, snapshot)
     }
 
+    /// Exports a complete, quiescent linear/GDN image, including both state
+    /// slots and active-slot/generation publication metadata.
+    pub fn export_linear_attention_state_image(
+        &self,
+        state: &LinearAttentionState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        let snapshot = self.linear_attention_state_snapshot(state)?;
+        let image = self.state.adapter.export_linear_attention_state_image(
+            &ExecutionAdapterAccess { session: self },
+            state,
+        )?;
+        validate_state_image(
+            &image,
+            StateOwnerKindV1::LinearAttention,
+            state.layer_id(),
+            state.capacity(),
+            snapshot.length(),
+            linear_state_plane_kinds(),
+        )?;
+        Ok(image)
+    }
+
+    /// Imports a complete linear/GDN image after all metadata and planes pass
+    /// core validation. The adapter is called exactly once.
+    pub fn import_linear_attention_state_image(
+        &self,
+        state: &LinearAttentionState,
+        image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if state.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        let current = self.linear_attention_state_snapshot(state)?;
+        if current.length() != 0 {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image import requires a fresh empty linear destination".to_owned(),
+            });
+        }
+        validate_state_image(
+            image,
+            StateOwnerKindV1::LinearAttention,
+            state.layer_id(),
+            state.capacity(),
+            image.metadata().published_length,
+            linear_state_plane_kinds(),
+        )?;
+        self.state.adapter.import_linear_attention_state_image(
+            &ExecutionAdapterAccess { session: self },
+            state,
+            image,
+        )
+    }
+
+    /// Creates an independent device-side clone of one published linear/GDN
+    /// state. Its active double-buffer slot and length are copied atomically.
+    pub fn fork_linear_attention_state(
+        &self,
+        source: &LinearAttentionState,
+        destination_descriptor: LinearAttentionStateDescriptor,
+    ) -> Result<(LinearAttentionState, StateForkAuditV1), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_linear_attention_state(source)?;
+        // Hold admission while the adapter captures the source.  A flag-only
+        // pre-check would permit a transition to start between the check and
+        // the fork callback.
+        let _admission = source
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
+        if source.execution_in_flight.load(Ordering::Acquire) {
+            return Err(ExecutionError::Busy);
+        }
+        if source.descriptor.layer_id() != destination_descriptor.layer_id()
+            || source.descriptor.layout() != destination_descriptor.layout()
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "linear-state fork destination changes layer or layout".to_owned(),
+            });
+        }
+        let source_snapshot = self.linear_attention_state_snapshot(source)?;
+        if source_snapshot.length() == 0
+            || destination_descriptor.capacity() < source_snapshot.length()
+        {
+            return Err(ExecutionError::InvalidRange {
+                reason: "linear-state fork requires a non-empty prefix within destination capacity"
+                    .to_owned(),
+            });
+        }
+        let destination_id = LinearAttentionStateId::new(next_execution_id());
+        let (resource, audit) = self.state.adapter.fork_linear_attention_state(
+            &ExecutionAdapterAccess { session: self },
+            source,
+            destination_id,
+            destination_descriptor,
+        )?;
+        let maximum_bytes =
+            linear_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
+                ExecutionError::InvalidRequest {
+                    reason: "linear-state fork destination resident bytes overflowed".to_owned(),
+                }
+            })?;
+        if audit.published_length() != source_snapshot.length()
+            || audit.destination_owned_bytes() > maximum_bytes
+            || audit.mode() != crate::StateForkModeV1::DeviceCopy
+            || audit.copied_bytes() == 0
+            || audit.destination_owned_bytes() == 0
+        {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "backend linear-state fork audit differs from the admitted prefix"
+                    .to_owned(),
+            });
+        }
+        let allocation = (audit.destination_owned_bytes() != 0)
+            .then(|| {
+                self.state.allocation_accounting.reserve(
+                    AllocationCategory::RequestState,
+                    audit.destination_owned_bytes(),
+                )
+            })
+            .transpose()?;
+        Ok((
+            LinearAttentionState {
+                state: Arc::clone(&self.state),
+                id: destination_id,
+                descriptor: destination_descriptor,
+                payload: resource.payload,
+                execution_in_flight: Arc::new(AtomicBool::new(false)),
+                operation_admission: Arc::new(Mutex::new(())),
+                _allocation: allocation,
+            },
+            audit,
+        ))
+    }
+
     pub fn rewind_last_linear_attention_transition(
         &self,
         state: &LinearAttentionState,
@@ -1242,6 +1761,10 @@ impl ExecutionSession {
     ) -> Result<(), ExecutionError> {
         self.ensure_open()?;
         self.ensure_linear_attention_state(state)?;
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
         if state.execution_in_flight.load(Ordering::Acquire) {
             return Err(ExecutionError::Busy);
         }
@@ -1272,6 +1795,13 @@ impl ExecutionSession {
                 reason: "linear-attention transition exceeds state capacity".to_owned(),
             });
         }
+        // Serialize setting the in-flight bit with a concurrent state fork.
+        // The guard is released after admission; the bit then blocks forks
+        // until completion cleanup clears it.
+        let _admission = state
+            .operation_admission
+            .lock()
+            .map_err(|_| ExecutionError::Busy)?;
         if state
             .execution_in_flight
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -1585,6 +2115,86 @@ impl ExecutionSession {
             completion_state: ExecutionState::Pending,
             inner,
         })
+    }
+
+    /// Enqueues an exact device-to-device copy on one owned queue.  Core
+    /// checks every identity, range, overlap, and transfer-limit condition
+    /// before the backend callback; no host staging or readback fallback is
+    /// permitted.
+    pub fn copy_device_to_device(
+        &self,
+        queue: &ExecutionQueue,
+        source: BufferRange,
+        destination: BufferRange,
+    ) -> Result<DeviceCopy, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(source.buffer())?;
+        self.ensure_buffer(destination.buffer())?;
+        if source.size_bytes() != destination.size_bytes() {
+            return Err(ExecutionError::InvalidRange {
+                reason: "device-to-device source and destination lengths must match".to_owned(),
+            });
+        }
+        let size_bytes = source.size_bytes();
+        if size_bytes == 0 {
+            return Err(ExecutionError::InvalidRange {
+                reason: "device-to-device copy range must be non-zero".to_owned(),
+            });
+        }
+        if size_bytes > self.max_transfer_bytes()? {
+            return Err(ExecutionError::InvalidRange {
+                reason: "device-to-device copy exceeds the backend transfer limit".to_owned(),
+            });
+        }
+        if source.buffer().id() == destination.buffer().id()
+            && source.offset_bytes() < destination.end_offset()
+            && destination.offset_bytes() < source.end_offset()
+        {
+            return Err(ExecutionError::AliasOverlap {
+                left: "device-to-device source",
+                right: "device-to-device destination",
+            });
+        }
+        let inner = self.state.adapter.copy_device_to_device(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            &source,
+            &destination,
+        )?;
+        Ok(DeviceCopy {
+            state: Arc::clone(&self.state),
+            queue: queue.clone(),
+            source,
+            destination,
+            completion_state: ExecutionState::Pending,
+            inner,
+            audit: DeviceCopyAuditV1 {
+                copied_bytes: size_bytes,
+                destination_owned_bytes: size_bytes,
+            },
+        })
+    }
+
+    /// Allocates an exact-size request-state destination and enqueues a
+    /// device-side clone.  The returned [`DeviceCopy`] retains both ranges
+    /// until terminal completion even if the caller drops the destination
+    /// buffer handle early.
+    pub fn clone_device_buffer_range_to_request_state(
+        &self,
+        queue: &ExecutionQueue,
+        source: BufferRange,
+    ) -> Result<(ExecutionBuffer, DeviceCopy), ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        self.ensure_buffer(source.buffer())?;
+        let destination =
+            self.allocate_with_category(source.size_bytes(), AllocationCategory::RequestState)?;
+        let destination_range = destination.range(0, source.size_bytes())?;
+        match self.copy_device_to_device(queue, source, destination_range) {
+            Ok(copy) => Ok((destination, copy)),
+            Err(error) => Err(error),
+        }
     }
 
     pub fn readback(
@@ -1994,6 +2604,8 @@ pub struct KvState {
     attention_in_flight: Arc<AtomicBool>,
     operation_admission: Arc<Mutex<()>>,
     _allocation: Option<Arc<AllocationLease>>,
+    fork_audit: Option<Arc<Mutex<StateForkAuditV1>>>,
+    cow_allocations: Arc<Mutex<Vec<Arc<AllocationLease>>>>,
 }
 
 impl fmt::Debug for KvState {
@@ -2046,6 +2658,7 @@ pub struct LinearAttentionState {
     descriptor: LinearAttentionStateDescriptor,
     payload: Arc<dyn Any + Send + Sync>,
     execution_in_flight: Arc<AtomicBool>,
+    operation_admission: Arc<Mutex<()>>,
     _allocation: Option<Arc<AllocationLease>>,
 }
 
@@ -2914,6 +3527,142 @@ fn intervals_overlap(left_start: u64, left_end: u64, right_start: u64, right_end
     left_start < right_end && right_start < left_end
 }
 
+fn kv_state_plane_kinds(encoding: KvCacheEncoding) -> Vec<StatePlaneKindV1> {
+    let mut planes = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
+    match encoding {
+        KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
+        KvCacheEncoding::Fp8E4M3Fn => {
+            planes.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
+        }
+        KvCacheEncoding::Nvfp4 => {
+            planes.extend([
+                StatePlaneKindV1::KvKeyScale,
+                StatePlaneKindV1::KvValueScale,
+                StatePlaneKindV1::KvKeyOuterScale,
+                StatePlaneKindV1::KvValueOuterScale,
+            ]);
+        }
+    }
+    planes
+}
+
+fn linear_state_plane_kinds() -> Vec<StatePlaneKindV1> {
+    vec![
+        StatePlaneKindV1::LinearConvSlot0,
+        StatePlaneKindV1::LinearConvSlot1,
+        StatePlaneKindV1::LinearRecurrentSlot0,
+        StatePlaneKindV1::LinearRecurrentSlot1,
+        StatePlaneKindV1::LinearScratch,
+    ]
+}
+
+fn state_plane_owner(plane: StatePlaneKindV1) -> StateOwnerKindV1 {
+    match plane {
+        StatePlaneKindV1::KvKey
+        | StatePlaneKindV1::KvValue
+        | StatePlaneKindV1::KvKeyScale
+        | StatePlaneKindV1::KvValueScale
+        | StatePlaneKindV1::KvKeyOuterScale
+        | StatePlaneKindV1::KvValueOuterScale => StateOwnerKindV1::Kv,
+        StatePlaneKindV1::LinearConvSlot0
+        | StatePlaneKindV1::LinearConvSlot1
+        | StatePlaneKindV1::LinearRecurrentSlot0
+        | StatePlaneKindV1::LinearRecurrentSlot1
+        | StatePlaneKindV1::LinearScratch => StateOwnerKindV1::LinearAttention,
+    }
+}
+
+fn validate_state_image(
+    image: &ExecutionStateImageV1,
+    owner: StateOwnerKindV1,
+    layer_id: u32,
+    capacity: u64,
+    expected_length: u64,
+    expected_planes: Vec<StatePlaneKindV1>,
+) -> Result<(), ExecutionError> {
+    let metadata = image.metadata();
+    if metadata.owner != owner {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "state image owner does not match the target state".to_owned(),
+        });
+    }
+    if metadata.layer_id != layer_id {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "state image layer does not match the target state".to_owned(),
+        });
+    }
+    if metadata.published_length > capacity {
+        return Err(ExecutionError::InvalidRange {
+            reason: "state image published length exceeds state capacity".to_owned(),
+        });
+    }
+    if metadata.published_length != expected_length {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "state image published length does not match the state snapshot".to_owned(),
+        });
+    }
+    match owner {
+        StateOwnerKindV1::Kv if metadata.active_slot.is_some() => {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "KV state image must not define an active slot".to_owned(),
+            });
+        }
+        StateOwnerKindV1::LinearAttention if !matches!(metadata.active_slot, Some(0 | 1)) => {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "linear state image active slot must be 0 or 1".to_owned(),
+            });
+        }
+        _ => {}
+    }
+
+    let planes = image.planes();
+    if planes.len() != expected_planes.len() {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "state image has missing or unexpected planes".to_owned(),
+        });
+    }
+    let mut seen = Vec::with_capacity(planes.len());
+    for plane in planes {
+        if plane.owner != owner {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image plane owner does not match metadata".to_owned(),
+            });
+        }
+        if plane.layer_id != layer_id {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image plane layer does not match metadata".to_owned(),
+            });
+        }
+        if state_plane_owner(plane.plane) != plane.owner {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image plane kind does not match its owner".to_owned(),
+            });
+        }
+        if plane.bytes.is_empty() {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image plane bytes must not be empty".to_owned(),
+            });
+        }
+        if !expected_planes.contains(&plane.plane) {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image contains an unexpected plane".to_owned(),
+            });
+        }
+        if seen.contains(&plane.plane) {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "state image contains a duplicate plane".to_owned(),
+            });
+        }
+        seen.push(plane.plane);
+    }
+    if expected_planes.iter().any(|plane| !seen.contains(plane)) {
+        return Err(ExecutionError::InvalidRequest {
+            reason: "state image is missing a required plane".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_kv_state_snapshot(
     session: &ExecutionSession,
     state: &KvState,
@@ -3416,6 +4165,73 @@ pub struct Transfer {
     inner: Box<dyn ExecutionTransferAdapter>,
 }
 
+/// Redacted accounting for one device-to-device copy.  It exposes byte
+/// counts only; buffer identities and backend handles remain opaque.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceCopyAuditV1 {
+    copied_bytes: u64,
+    destination_owned_bytes: u64,
+}
+
+impl DeviceCopyAuditV1 {
+    pub const fn copied_bytes(self) -> u64 {
+        self.copied_bytes
+    }
+
+    pub const fn destination_owned_bytes(self) -> u64 {
+        self.destination_owned_bytes
+    }
+}
+
+/// An asynchronous owned device-to-device copy.  Source and destination
+/// ranges, queue, and backend completion are retained until terminal
+/// observation or adapter cleanup.
+pub struct DeviceCopy {
+    state: Arc<ExecutionSessionState>,
+    queue: ExecutionQueue,
+    source: BufferRange,
+    destination: BufferRange,
+    completion_state: ExecutionState,
+    inner: Box<dyn ExecutionTransferAdapter>,
+    audit: DeviceCopyAuditV1,
+}
+
+impl fmt::Debug for DeviceCopy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DeviceCopy")
+            .field("session_id", &self.state.id)
+            .field("queue", &self.queue.id())
+            .field("source", &self.source)
+            .field("destination", &self.destination)
+            .field("completion_state", &self.completion_state)
+            .field("audit", &self.audit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DeviceCopy {
+    pub const fn state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub const fn audit(&self) -> DeviceCopyAuditV1 {
+        self.audit
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.query()?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self.inner.wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+}
+
 impl fmt::Debug for Transfer {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -3573,6 +4389,7 @@ mod tests {
         shutdown_calls: AtomicUsize,
         upload_calls: AtomicUsize,
         readback_calls: AtomicUsize,
+        d2d_copy_error: AtomicBool,
         support_gate: Mutex<Option<SupportGate>>,
     }
 
@@ -3719,6 +4536,46 @@ mod tests {
             }))
         }
 
+        fn copy_device_to_device(
+            &self,
+            access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            source: &BufferRange,
+            destination: &BufferRange,
+        ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError> {
+            if self.d2d_copy_error.load(Ordering::Relaxed) {
+                return Err(ExecutionError::Unsupported {
+                    reason: "test D2D backend failure".to_owned(),
+                });
+            }
+            let source_start = usize::try_from(source.offset_bytes()).map_err(|_| {
+                ExecutionError::InvalidRange {
+                    reason: "test D2D source offset does not fit usize".to_owned(),
+                }
+            })?;
+            let source_size =
+                usize::try_from(source.size_bytes()).map_err(|_| ExecutionError::InvalidRange {
+                    reason: "test D2D source size does not fit usize".to_owned(),
+                })?;
+            let bytes = access
+                .downcast_buffer_payload::<Mutex<Vec<u8>>>(source.buffer())?
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?[source_start..source_start + source_size]
+                .to_vec();
+            let destination_start = usize::try_from(destination.offset_bytes()).map_err(|_| {
+                ExecutionError::InvalidRange {
+                    reason: "test D2D destination offset does not fit usize".to_owned(),
+                }
+            })?;
+            let mut destination_storage = access
+                .downcast_buffer_payload::<Mutex<Vec<u8>>>(destination.buffer())?
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            destination_storage[destination_start..destination_start + source_size]
+                .copy_from_slice(&bytes);
+            Ok(Box::new(TestTransfer))
+        }
+
         fn shutdown(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
@@ -3814,6 +4671,24 @@ mod tests {
         linear_drop_saw_core_admission: AtomicBool,
         append_drop_saw_core_admission: AtomicBool,
         wrong_snapshot_identity: AtomicBool,
+        kv_fork_mode: Mutex<crate::StateForkModeV1>,
+        linear_fork_mode: Mutex<crate::StateForkModeV1>,
+        kv_fork_calls: AtomicUsize,
+        linear_fork_calls: AtomicUsize,
+        kv_fork_error: AtomicBool,
+        linear_fork_error: AtomicBool,
+        kv_fork_invalid_audit: AtomicBool,
+        linear_fork_invalid_audit: AtomicBool,
+        kv_export_image: Mutex<Option<ExecutionStateImageV1>>,
+        linear_export_image: Mutex<Option<ExecutionStateImageV1>>,
+        kv_imported_image: Mutex<Option<ExecutionStateImageV1>>,
+        linear_imported_image: Mutex<Option<ExecutionStateImageV1>>,
+        kv_image_export_calls: AtomicUsize,
+        linear_image_export_calls: AtomicUsize,
+        kv_image_import_calls: AtomicUsize,
+        linear_image_import_calls: AtomicUsize,
+        kv_image_import_error: AtomicBool,
+        linear_image_import_error: AtomicBool,
     }
 
     struct FakeLinearStateEntry {
@@ -3845,12 +4720,42 @@ mod tests {
                     linear_drop_saw_core_admission: AtomicBool::new(false),
                     append_drop_saw_core_admission: AtomicBool::new(false),
                     wrong_snapshot_identity: AtomicBool::new(false),
+                    kv_fork_mode: Mutex::new(crate::StateForkModeV1::SharedReadOnlyPages),
+                    linear_fork_mode: Mutex::new(crate::StateForkModeV1::DeviceCopy),
+                    kv_fork_calls: AtomicUsize::new(0),
+                    linear_fork_calls: AtomicUsize::new(0),
+                    kv_fork_error: AtomicBool::new(false),
+                    linear_fork_error: AtomicBool::new(false),
+                    kv_fork_invalid_audit: AtomicBool::new(false),
+                    linear_fork_invalid_audit: AtomicBool::new(false),
+                    kv_export_image: Mutex::new(None),
+                    linear_export_image: Mutex::new(None),
+                    kv_imported_image: Mutex::new(None),
+                    linear_imported_image: Mutex::new(None),
+                    kv_image_export_calls: AtomicUsize::new(0),
+                    linear_image_export_calls: AtomicUsize::new(0),
+                    kv_image_import_calls: AtomicUsize::new(0),
+                    linear_image_import_calls: AtomicUsize::new(0),
+                    kv_image_import_error: AtomicBool::new(false),
+                    linear_image_import_error: AtomicBool::new(false),
                 }),
                 state_resource_drops: Arc::new(AtomicUsize::new(0)),
                 buffer_drops: Arc::new(AtomicUsize::new(0)),
                 causal_attention_calls: AtomicUsize::new(0),
                 causal_attention_drops: Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        fn set_kv_fork_mode(&self, mode: crate::StateForkModeV1) {
+            *self.store.kv_fork_mode.lock().expect("KV fork mode lock") = mode;
+        }
+
+        fn set_linear_fork_mode(&self, mode: crate::StateForkModeV1) {
+            *self
+                .store
+                .linear_fork_mode
+                .lock()
+                .expect("linear fork mode lock") = mode;
         }
     }
 
@@ -4108,6 +5013,128 @@ mod tests {
             })
         }
 
+        fn export_kv_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _state: &KvState,
+        ) -> Result<ExecutionStateImageV1, ExecutionError> {
+            self.store
+                .kv_image_export_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.store
+                .kv_export_image
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .clone()
+                .ok_or_else(|| ExecutionError::Unsupported {
+                    reason: "fake KV image not configured".to_owned(),
+                })
+        }
+
+        fn import_kv_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _state: &KvState,
+            image: &ExecutionStateImageV1,
+        ) -> Result<(), ExecutionError> {
+            self.store
+                .kv_image_import_calls
+                .fetch_add(1, Ordering::Relaxed);
+            if self.store.kv_image_import_error.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 71,
+                    diagnostic: "fake KV image import failure".to_owned(),
+                });
+            }
+            *self
+                .store
+                .kv_imported_image
+                .lock()
+                .map_err(|_| ExecutionError::Busy)? = Some(image.clone());
+            Ok(())
+        }
+
+        fn fork_kv_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            source: &KvState,
+            destination_id: KvStateId,
+            destination_descriptor: crate::KvStateDescriptor,
+        ) -> Result<(AdapterResource, StateForkAuditV1), ExecutionError> {
+            self.store.kv_fork_calls.fetch_add(1, Ordering::Relaxed);
+            if self.store.kv_fork_error.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 41,
+                    diagnostic: "fake KV fork failure".to_owned(),
+                });
+            }
+            let length = self
+                .store
+                .entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .iter()
+                .find(|entry| entry.id == source.id())
+                .ok_or(ExecutionError::WrongKvState {
+                    expected: source.id(),
+                    actual: KvStateId::new(1),
+                })?
+                .length;
+            let mode = *self
+                .store
+                .kv_fork_mode
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let owned_bytes = match mode {
+                crate::StateForkModeV1::SharedReadOnlyPages => 0,
+                crate::StateForkModeV1::DeviceCopy => {
+                    kv_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
+                        ExecutionError::InvalidRequest {
+                            reason: "fake KV fork allocation overflow".to_owned(),
+                        }
+                    })?
+                }
+            };
+            let shared_pages = match mode {
+                crate::StateForkModeV1::SharedReadOnlyPages => length.div_ceil(256),
+                crate::StateForkModeV1::DeviceCopy => 0,
+            };
+            let audit_length = if self.store.kv_fork_invalid_audit.load(Ordering::Relaxed) {
+                length.saturating_add(1)
+            } else {
+                length
+            };
+            let audit = StateForkAuditV1::new(
+                mode,
+                audit_length,
+                shared_pages,
+                if mode == crate::StateForkModeV1::DeviceCopy {
+                    owned_bytes
+                } else {
+                    0
+                },
+                owned_bytes,
+            )
+            .map_err(|_| ExecutionError::InvalidRequest {
+                reason: "fake KV fork produced invalid audit".to_owned(),
+            })?;
+            if !self.store.kv_fork_invalid_audit.load(Ordering::Relaxed) {
+                self.store
+                    .entries
+                    .lock()
+                    .map_err(|_| ExecutionError::Busy)?
+                    .push(FakeStateEntry {
+                        id: destination_id,
+                        descriptor: destination_descriptor,
+                        length,
+                    });
+            }
+            Ok((
+                AdapterResource::new(DropPayload(Arc::clone(&self.state_resource_drops))),
+                audit,
+            ))
+        }
+
         fn append_kv_state(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
@@ -4257,6 +5284,128 @@ mod tests {
             })
         }
 
+        fn export_linear_attention_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _state: &LinearAttentionState,
+        ) -> Result<ExecutionStateImageV1, ExecutionError> {
+            self.store
+                .linear_image_export_calls
+                .fetch_add(1, Ordering::Relaxed);
+            self.store
+                .linear_export_image
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .clone()
+                .ok_or_else(|| ExecutionError::Unsupported {
+                    reason: "fake linear image not configured".to_owned(),
+                })
+        }
+
+        fn import_linear_attention_state_image(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _state: &LinearAttentionState,
+            image: &ExecutionStateImageV1,
+        ) -> Result<(), ExecutionError> {
+            self.store
+                .linear_image_import_calls
+                .fetch_add(1, Ordering::Relaxed);
+            if self.store.linear_image_import_error.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 72,
+                    diagnostic: "fake linear image import failure".to_owned(),
+                });
+            }
+            *self
+                .store
+                .linear_imported_image
+                .lock()
+                .map_err(|_| ExecutionError::Busy)? = Some(image.clone());
+            Ok(())
+        }
+
+        fn fork_linear_attention_state(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            source: &LinearAttentionState,
+            destination_id: LinearAttentionStateId,
+            destination_descriptor: LinearAttentionStateDescriptor,
+        ) -> Result<(AdapterResource, StateForkAuditV1), ExecutionError> {
+            self.store.linear_fork_calls.fetch_add(1, Ordering::Relaxed);
+            if self.store.linear_fork_error.load(Ordering::Relaxed) {
+                return Err(ExecutionError::BackendStatus {
+                    status: 42,
+                    diagnostic: "fake linear fork failure".to_owned(),
+                });
+            }
+            let length = self
+                .store
+                .linear_entries
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?
+                .iter()
+                .find(|entry| entry.id == source.id())
+                .ok_or(ExecutionError::WrongLinearAttentionState {
+                    expected: source.id(),
+                    actual: LinearAttentionStateId::new(1),
+                })?
+                .length;
+            let mode = *self
+                .store
+                .linear_fork_mode
+                .lock()
+                .map_err(|_| ExecutionError::Busy)?;
+            let owned_bytes = match mode {
+                crate::StateForkModeV1::SharedReadOnlyPages => 0,
+                crate::StateForkModeV1::DeviceCopy => {
+                    linear_state_allocation_bytes(destination_descriptor).ok_or_else(|| {
+                        ExecutionError::InvalidRequest {
+                            reason: "fake linear fork allocation overflow".to_owned(),
+                        }
+                    })?
+                }
+            };
+            let shared_pages = match mode {
+                crate::StateForkModeV1::SharedReadOnlyPages => length.div_ceil(256),
+                crate::StateForkModeV1::DeviceCopy => 0,
+            };
+            let audit_length = if self.store.linear_fork_invalid_audit.load(Ordering::Relaxed) {
+                length.saturating_add(1)
+            } else {
+                length
+            };
+            let audit = StateForkAuditV1::new(
+                mode,
+                audit_length,
+                shared_pages,
+                if mode == crate::StateForkModeV1::DeviceCopy {
+                    owned_bytes
+                } else {
+                    0
+                },
+                owned_bytes,
+            )
+            .map_err(|_| ExecutionError::InvalidRequest {
+                reason: "fake linear fork produced invalid audit".to_owned(),
+            })?;
+            if !self.store.linear_fork_invalid_audit.load(Ordering::Relaxed) {
+                self.store
+                    .linear_entries
+                    .lock()
+                    .map_err(|_| ExecutionError::Busy)?
+                    .push(FakeLinearStateEntry {
+                        id: destination_id,
+                        descriptor: destination_descriptor,
+                        length,
+                    });
+            }
+            Ok((
+                AdapterResource::new(DropPayload(Arc::clone(&self.state_resource_drops))),
+                audit,
+            ))
+        }
+
         fn execute_linear_attention(
             &self,
             _access: &ExecutionAdapterAccess<'_>,
@@ -4335,6 +5484,122 @@ mod tests {
     }
 
     #[test]
+    fn device_copy_is_byte_exact_and_retains_both_ranges_until_completion() {
+        let adapter = Arc::new(TestAdapter::default());
+        let session = ExecutionSession::new("d2d-test", adapter);
+        let queue = session.create_queue().unwrap();
+        let source = session
+            .allocate_with_category(8, AllocationCategory::Workspace)
+            .unwrap();
+        let source_range = source.range(0, 8).unwrap();
+        let bytes: Arc<[u8]> = Arc::from([3_u8, 1, 4, 1, 5, 9, 2, 6]);
+        let mut upload = session.upload(&queue, source_range.clone(), bytes).unwrap();
+        assert_eq!(
+            upload.wait(Duration::ZERO).unwrap(),
+            ExecutionState::Success
+        );
+
+        let (destination, mut copy) = session
+            .clone_device_buffer_range_to_request_state(&queue, source_range)
+            .unwrap();
+        assert_eq!(copy.audit().copied_bytes(), 8);
+        assert_eq!(copy.audit().destination_owned_bytes(), 8);
+        assert_eq!(session.memory_snapshot().request_state().current_bytes(), 8);
+        drop(source);
+        assert_eq!(session.memory_snapshot().workspace().current_bytes(), 8);
+        assert_eq!(copy.wait(Duration::ZERO).unwrap(), ExecutionState::Success);
+
+        let mut readback = session
+            .readback(&queue, destination.range(0, 8).unwrap())
+            .unwrap();
+        assert_eq!(
+            readback.wait(Duration::ZERO).unwrap(),
+            ExecutionState::Success
+        );
+        let mut actual = [0_u8; 8];
+        assert_eq!(readback.read_into(&mut actual).unwrap(), 8);
+        assert_eq!(actual, [3, 1, 4, 1, 5, 9, 2, 6]);
+        drop(readback);
+        drop(upload);
+        drop(destination);
+        drop(copy);
+        assert_eq!(session.memory_snapshot().workspace().current_bytes(), 0);
+        assert_eq!(session.memory_snapshot().request_state().current_bytes(), 0);
+    }
+
+    #[test]
+    fn device_copy_rejects_identity_length_overlap_limit_and_backend_failure() {
+        let test_session = session("d2d-test");
+        let queue = test_session.create_queue().unwrap();
+        let source = test_session.allocate(8).unwrap();
+        let destination = test_session.allocate(8).unwrap();
+        assert!(matches!(
+            test_session.copy_device_to_device(
+                &queue,
+                source.range(0, 4).unwrap(),
+                destination.range(0, 8).unwrap()
+            ),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        assert!(matches!(
+            test_session.copy_device_to_device(
+                &queue,
+                source.range(0, 4).unwrap(),
+                source.range(2, 4).unwrap()
+            ),
+            Err(ExecutionError::AliasOverlap { .. })
+        ));
+
+        let large = test_session.allocate(257).unwrap();
+        let large_destination = test_session.allocate(257).unwrap();
+        assert!(matches!(
+            test_session.copy_device_to_device(
+                &queue,
+                large.range(0, 257).unwrap(),
+                large_destination.range(0, 257).unwrap()
+            ),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+
+        let foreign = session("d2d-test");
+        let foreign_buffer = foreign.allocate(8).unwrap();
+        assert!(matches!(
+            test_session.copy_device_to_device(
+                &queue,
+                source.range(0, 8).unwrap(),
+                foreign_buffer.range(0, 8).unwrap()
+            ),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+        let foreign_queue = foreign.create_queue().unwrap();
+        assert!(matches!(
+            test_session.copy_device_to_device(
+                &foreign_queue,
+                source.range(0, 8).unwrap(),
+                destination.range(0, 8).unwrap()
+            ),
+            Err(ExecutionError::WrongQueue { .. })
+        ));
+
+        let failing_adapter = Arc::new(TestAdapter::default());
+        failing_adapter
+            .d2d_copy_error
+            .store(true, Ordering::Relaxed);
+        let failing_session = ExecutionSession::new("d2d-failure", failing_adapter);
+        let failing_queue = failing_session.create_queue().unwrap();
+        let failing_source = failing_session.allocate(8).unwrap();
+        let failing_destination = failing_session.allocate(8).unwrap();
+        assert!(matches!(
+            failing_session.copy_device_to_device(
+                &failing_queue,
+                failing_source.range(0, 8).unwrap(),
+                failing_destination.range(0, 8).unwrap()
+            ),
+            Err(ExecutionError::Unsupported { .. })
+        ));
+    }
+
+    #[test]
     fn allocation_accounting_poison_is_sticky_after_overflow() {
         let accounting = Arc::new(AllocationAccounting::default());
         let huge = accounting
@@ -4380,6 +5645,216 @@ mod tests {
             Err(ExecutionError::Unsupported { reason })
                 if reason.contains("linear-attention state")
         ));
+    }
+
+    fn test_state_image(
+        owner: StateOwnerKindV1,
+        layer_id: u32,
+        published_length: u64,
+        active_slot: Option<u8>,
+        planes: &[StatePlaneKindV1],
+    ) -> ExecutionStateImageV1 {
+        ExecutionStateImageV1::new(
+            StateLayerMetadataV1 {
+                owner,
+                layer_id,
+                published_length,
+                generation: 17,
+                active_slot,
+            },
+            planes
+                .iter()
+                .copied()
+                .map(|plane| OpaqueStatePlane {
+                    owner,
+                    layer_id,
+                    plane,
+                    bytes: vec![plane as u8, 0xa5],
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn state_image_exports_all_kv_planes_and_preserves_exact_bytes() {
+        let (session, adapter) = kv_session();
+        let descriptor =
+            crate::KvStateDescriptor::new_with_storage(7, 9, 4, 256, crate::KvCacheEncoding::Nvfp4)
+                .unwrap();
+        let state = session.create_kv_state(descriptor).unwrap();
+        let expected_planes = [
+            StatePlaneKindV1::KvKey,
+            StatePlaneKindV1::KvValue,
+            StatePlaneKindV1::KvKeyScale,
+            StatePlaneKindV1::KvValueScale,
+            StatePlaneKindV1::KvKeyOuterScale,
+            StatePlaneKindV1::KvValueOuterScale,
+        ];
+        let expected = test_state_image(StateOwnerKindV1::Kv, 7, 0, None, &expected_planes);
+        *adapter
+            .store
+            .kv_export_image
+            .lock()
+            .expect("KV export image lock") = Some(expected.clone());
+
+        let actual = session.export_kv_state_image(&state).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            adapter.store.kv_image_export_calls.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn state_image_exports_linear_slots_and_publication_metadata() {
+        let (session, adapter) = kv_session();
+        let descriptor = LinearAttentionStateDescriptor::new(11, 9).unwrap();
+        let state = session.create_linear_attention_state(descriptor).unwrap();
+        let expected_planes = [
+            StatePlaneKindV1::LinearConvSlot0,
+            StatePlaneKindV1::LinearConvSlot1,
+            StatePlaneKindV1::LinearRecurrentSlot0,
+            StatePlaneKindV1::LinearRecurrentSlot1,
+            StatePlaneKindV1::LinearScratch,
+        ];
+        let expected = test_state_image(
+            StateOwnerKindV1::LinearAttention,
+            11,
+            0,
+            Some(1),
+            &expected_planes,
+        );
+        *adapter
+            .store
+            .linear_export_image
+            .lock()
+            .expect("linear export image lock") = Some(expected.clone());
+
+        let actual = session.export_linear_attention_state_image(&state).unwrap();
+        assert_eq!(actual.metadata().active_slot, Some(1));
+        assert_eq!(actual.metadata().generation, 17);
+        assert_eq!(actual.metadata().published_length, 0);
+        assert_eq!(actual.planes(), expected.planes());
+        assert_eq!(
+            adapter
+                .store
+                .linear_image_export_calls
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn state_image_import_validates_identity_owner_layer_and_duplicates_before_adapter() {
+        let (session, adapter) = kv_session();
+        let descriptor = crate::KvStateDescriptor::new(3, 9).unwrap();
+        let state = session.create_kv_state(descriptor).unwrap();
+        let expected_planes = [StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
+        let valid = test_state_image(StateOwnerKindV1::Kv, 3, 4, None, &expected_planes);
+
+        session.import_kv_state_image(&state, &valid).unwrap();
+        assert_eq!(
+            adapter.store.kv_image_import_calls.load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            adapter
+                .store
+                .kv_imported_image
+                .lock()
+                .expect("KV imported image lock")
+                .as_ref(),
+            Some(&valid)
+        );
+
+        let mut wrong_layer = valid.clone();
+        wrong_layer.metadata.layer_id = 4;
+        assert!(matches!(
+            session.import_kv_state_image(&state, &wrong_layer),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("layer")
+        ));
+
+        let mut wrong_owner = valid.clone();
+        wrong_owner.metadata.owner = StateOwnerKindV1::LinearAttention;
+        assert!(matches!(
+            session.import_kv_state_image(&state, &wrong_owner),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("owner")
+        ));
+
+        let mut duplicate = valid.clone();
+        duplicate.planes[1].plane = StatePlaneKindV1::KvKey;
+        assert!(matches!(
+            session.import_kv_state_image(&state, &duplicate),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("duplicate")
+        ));
+        assert_eq!(
+            adapter.store.kv_image_import_calls.load(Ordering::Relaxed),
+            1
+        );
+
+        adapter.store.entries.lock().unwrap()[0].length = 1;
+        assert!(matches!(
+            session.import_kv_state_image(&state, &valid),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("fresh empty")
+        ));
+        assert_eq!(
+            adapter.store.kv_image_import_calls.load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn state_image_import_failure_does_not_publish_or_accept_partial_input() {
+        let (session, adapter) = kv_session();
+        let descriptor = crate::KvStateDescriptor::new(5, 9).unwrap();
+        let state = session.create_kv_state(descriptor).unwrap();
+        let expected_planes = [StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
+        let valid = test_state_image(StateOwnerKindV1::Kv, 5, 4, None, &expected_planes);
+        adapter
+            .store
+            .kv_image_import_error
+            .store(true, Ordering::Relaxed);
+
+        assert!(matches!(
+            session.import_kv_state_image(&state, &valid),
+            Err(ExecutionError::BackendStatus { status: 71, .. })
+        ));
+        assert_eq!(
+            adapter.store.kv_image_import_calls.load(Ordering::Relaxed),
+            1
+        );
+        assert!(
+            adapter
+                .store
+                .kv_imported_image
+                .lock()
+                .expect("KV imported image lock")
+                .is_none()
+        );
+
+        let missing_plane = ExecutionStateImageV1::new(
+            StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: 5,
+                published_length: 4,
+                generation: 17,
+                active_slot: None,
+            },
+            vec![OpaqueStatePlane {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: 5,
+                plane: StatePlaneKindV1::KvKey,
+                bytes: vec![1],
+            }],
+        );
+        assert!(matches!(
+            session.import_kv_state_image(&state, &missing_plane),
+            Err(ExecutionError::InvalidRequest { reason }) if reason.contains("missing")
+        ));
+        assert_eq!(
+            adapter.store.kv_image_import_calls.load(Ordering::Relaxed),
+            1
+        );
     }
 
     fn kv_session() -> (ExecutionSession, Arc<KvStateAdapter>) {
@@ -4526,6 +6001,372 @@ mod tests {
                 AccessMode::Write,
             ),
         )
+    }
+
+    fn publish_kv_prefix(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        state: &KvState,
+        token_count: usize,
+    ) {
+        let (key, value) = valid_kv_bindings(session, token_count);
+        let mut append = session
+            .append_kv_state(state, queue, key, value, 0, 0)
+            .expect("fake KV prefix admission");
+        assert_eq!(
+            append
+                .wait(Duration::ZERO)
+                .expect("fake KV prefix completion"),
+            ExecutionState::Success
+        );
+    }
+
+    fn publish_linear_prefix(
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        state: &LinearAttentionState,
+        token_count: usize,
+    ) {
+        let descriptor = LinearAttentionDescriptor::new(0, token_count as u64, token_count as u64)
+            .expect("fake linear prefix descriptor");
+        let mut transition = session
+            .linear_attention(
+                state,
+                queue,
+                valid_linear_bindings(session, token_count),
+                descriptor,
+            )
+            .expect("fake linear prefix admission");
+        assert_eq!(
+            transition
+                .wait(Duration::ZERO)
+                .expect("fake linear prefix completion"),
+            ExecutionState::Success
+        );
+    }
+
+    #[test]
+    fn kv_state_fork_covers_shared_copy_boundaries_and_independent_owners() {
+        for (token_count, mode) in [
+            (1_usize, crate::StateForkModeV1::SharedReadOnlyPages),
+            (255, crate::StateForkModeV1::SharedReadOnlyPages),
+            (256, crate::StateForkModeV1::SharedReadOnlyPages),
+            (257, crate::StateForkModeV1::DeviceCopy),
+        ] {
+            let (session, adapter) = kv_session();
+            adapter.set_kv_fork_mode(mode);
+            let queue = session.create_queue().unwrap();
+            let descriptor = KvStateDescriptor::new(4, token_count as u64 + 1).unwrap();
+            let source = session.create_kv_state(descriptor).unwrap();
+            publish_kv_prefix(&session, &queue, &source, token_count);
+            let source_bytes = kv_state_allocation_bytes(descriptor).unwrap();
+
+            let (destination, audit) = session.fork_kv_state(&source, descriptor).unwrap();
+            assert_ne!(source.id(), destination.id());
+            assert_eq!(audit.mode(), mode);
+            assert_eq!(audit.published_length(), token_count as u64);
+            match mode {
+                crate::StateForkModeV1::SharedReadOnlyPages => {
+                    assert_eq!(audit.shared_pages(), (token_count as u64).div_ceil(256));
+                    assert_eq!(audit.copied_bytes(), 0);
+                    assert_eq!(audit.destination_owned_bytes(), 0);
+                }
+                crate::StateForkModeV1::DeviceCopy => {
+                    assert_eq!(audit.shared_pages(), 0);
+                    assert_eq!(audit.copied_bytes(), source_bytes);
+                    assert_eq!(audit.destination_owned_bytes(), source_bytes);
+                }
+            }
+            assert_eq!(
+                session.memory_snapshot().request_state().current_bytes(),
+                source_bytes + audit.destination_owned_bytes()
+            );
+
+            let (key, value) = valid_kv_bindings(&session, 1);
+            let mut destination_append = session
+                .append_kv_state(
+                    &destination,
+                    &queue,
+                    key,
+                    value,
+                    token_count as u64,
+                    token_count as u64,
+                )
+                .unwrap();
+            assert_eq!(
+                destination_append.wait(Duration::ZERO).unwrap(),
+                ExecutionState::Success
+            );
+            assert_eq!(
+                source.snapshot(&session).unwrap().length(),
+                token_count as u64
+            );
+            assert_eq!(
+                destination.snapshot(&session).unwrap().length(),
+                token_count as u64 + 1
+            );
+            drop(destination_append);
+            drop(destination);
+            assert_eq!(
+                session.memory_snapshot().request_state().current_bytes(),
+                source_bytes
+            );
+        }
+    }
+
+    #[test]
+    fn kv_state_fork_query_all_is_empty_for_no_destinations() {
+        let (session, _) = kv_session();
+        let audits = session
+            .kv_state_fork_query_all(std::iter::empty::<&KvState>())
+            .unwrap();
+        assert!(audits.is_empty());
+    }
+
+    #[test]
+    fn kv_state_fork_rejects_zero_prefix_identity_layout_encoding_capacity_and_busy() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let descriptor = KvStateDescriptor::new(7, 3).unwrap();
+        let source = session.create_kv_state(descriptor).unwrap();
+        assert!(matches!(
+            session.fork_kv_state(&source, descriptor),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+
+        publish_kv_prefix(&session, &queue, &source, 2);
+        let before_calls = adapter.store.kv_fork_calls.load(Ordering::Relaxed);
+        for destination_descriptor in [
+            KvStateDescriptor::new(8, 3).unwrap(),
+            KvStateDescriptor::new_with_storage(7, 3, 2, 256, crate::KvCacheEncoding::Fp16)
+                .unwrap(),
+            KvStateDescriptor::new_with_storage(7, 3, 4, 256, crate::KvCacheEncoding::Fp8E4M3Fn)
+                .unwrap(),
+            KvStateDescriptor::new(7, 1).unwrap(),
+        ] {
+            assert!(
+                session
+                    .fork_kv_state(&source, destination_descriptor)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            adapter.store.kv_fork_calls.load(Ordering::Relaxed),
+            before_calls
+        );
+
+        let (foreign_session, _) = kv_session();
+        let foreign_state = foreign_session
+            .create_kv_state(KvStateDescriptor::new(7, 3).unwrap())
+            .unwrap();
+        assert!(matches!(
+            session.fork_kv_state(&foreign_state, descriptor),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+
+        let (key, value) = valid_kv_bindings(&session, 1);
+        let pending = session
+            .append_kv_state(&source, &queue, key, value, 2, 2)
+            .unwrap();
+        assert!(matches!(
+            session.fork_kv_state(&source, descriptor),
+            Err(ExecutionError::Busy)
+        ));
+        drop(pending);
+    }
+
+    #[test]
+    fn kv_state_fork_adapter_error_and_invalid_audit_do_not_reserve_destination_bytes() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let descriptor = KvStateDescriptor::new(0, 2).unwrap();
+        let source = session.create_kv_state(descriptor).unwrap();
+        publish_kv_prefix(&session, &queue, &source, 1);
+        let source_bytes = kv_state_allocation_bytes(descriptor).unwrap();
+        let baseline = session.memory_snapshot().request_state().current_bytes();
+
+        adapter.store.kv_fork_error.store(true, Ordering::Relaxed);
+        assert!(matches!(
+            session.fork_kv_state(&source, descriptor),
+            Err(ExecutionError::BackendStatus { status: 41, .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
+        adapter.store.kv_fork_error.store(false, Ordering::Relaxed);
+
+        let drops_before = adapter.state_resource_drops.load(Ordering::Relaxed);
+        let owners_before = adapter.store.entries.lock().unwrap().len();
+        adapter
+            .store
+            .kv_fork_invalid_audit
+            .store(true, Ordering::Relaxed);
+        assert!(matches!(
+            session.fork_kv_state(&source, descriptor),
+            Err(ExecutionError::InvalidRequest { .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
+        assert!(
+            adapter.state_resource_drops.load(Ordering::Relaxed) > drops_before,
+            "invalid audit resource must be dropped"
+        );
+        assert_eq!(adapter.store.entries.lock().unwrap().len(), owners_before);
+        assert_eq!(source.snapshot(&session).unwrap().length(), 1);
+        assert_eq!(source_bytes, baseline);
+    }
+
+    #[test]
+    fn linear_state_fork_requires_device_copy_and_preserves_independent_owner() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let descriptor = LinearAttentionStateDescriptor::new(3, 3).unwrap();
+        let source = session.create_linear_attention_state(descriptor).unwrap();
+        publish_linear_prefix(&session, &queue, &source, 1);
+        let source_bytes = linear_state_allocation_bytes(descriptor).unwrap();
+
+        adapter.set_linear_fork_mode(crate::StateForkModeV1::SharedReadOnlyPages);
+        assert!(matches!(
+            session.fork_linear_attention_state(&source, descriptor),
+            Err(ExecutionError::InvalidRequest { .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            source_bytes
+        );
+
+        adapter.set_linear_fork_mode(crate::StateForkModeV1::DeviceCopy);
+        let (destination, audit) = session
+            .fork_linear_attention_state(&source, descriptor)
+            .unwrap();
+        assert_ne!(source.id(), destination.id());
+        assert_eq!(audit.mode(), crate::StateForkModeV1::DeviceCopy);
+        assert_eq!(audit.published_length(), 1);
+        assert_eq!(audit.shared_pages(), 0);
+        assert_eq!(audit.copied_bytes(), source_bytes);
+        assert_eq!(audit.destination_owned_bytes(), source_bytes);
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            source_bytes * 2
+        );
+
+        let next = LinearAttentionDescriptor::new(1, 1, 2).unwrap();
+        let mut destination_transition = session
+            .linear_attention(
+                &destination,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                next,
+            )
+            .unwrap();
+        assert_eq!(
+            destination_transition.wait(Duration::ZERO).unwrap(),
+            ExecutionState::Success
+        );
+        assert_eq!(source.snapshot(&session).unwrap().length(), 1);
+        assert_eq!(destination.snapshot(&session).unwrap().length(), 2);
+        drop(destination_transition);
+        drop(destination);
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            source_bytes
+        );
+    }
+
+    #[test]
+    fn linear_state_fork_rejects_identity_layout_capacity_zero_and_busy() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let descriptor = LinearAttentionStateDescriptor::new(2, 3).unwrap();
+        let source = session.create_linear_attention_state(descriptor).unwrap();
+        assert!(matches!(
+            session.fork_linear_attention_state(&source, descriptor),
+            Err(ExecutionError::InvalidRange { .. })
+        ));
+        publish_linear_prefix(&session, &queue, &source, 2);
+        let before_calls = adapter.store.linear_fork_calls.load(Ordering::Relaxed);
+        let mismatched = [
+            LinearAttentionStateDescriptor::new(3, 3).unwrap(),
+            LinearAttentionStateDescriptor::new_with_layout(2, 3, 1, 16, 128, 4).unwrap(),
+            LinearAttentionStateDescriptor::new(2, 1).unwrap(),
+        ];
+        for destination_descriptor in mismatched {
+            assert!(
+                session
+                    .fork_linear_attention_state(&source, destination_descriptor)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            adapter.store.linear_fork_calls.load(Ordering::Relaxed),
+            before_calls
+        );
+        let pending_descriptor = LinearAttentionDescriptor::new(2, 1, 3).unwrap();
+        let pending = session
+            .linear_attention(
+                &source,
+                &queue,
+                valid_linear_bindings(&session, 1),
+                pending_descriptor,
+            )
+            .unwrap();
+        assert!(matches!(
+            session.fork_linear_attention_state(&source, descriptor),
+            Err(ExecutionError::Busy)
+        ));
+        drop(pending);
+    }
+
+    #[test]
+    fn linear_state_fork_adapter_error_and_invalid_audit_are_fail_closed() {
+        let (session, adapter) = kv_session();
+        let queue = session.create_queue().unwrap();
+        let descriptor = LinearAttentionStateDescriptor::new(0, 2).unwrap();
+        let source = session.create_linear_attention_state(descriptor).unwrap();
+        publish_linear_prefix(&session, &queue, &source, 1);
+        let baseline = session.memory_snapshot().request_state().current_bytes();
+        adapter
+            .store
+            .linear_fork_error
+            .store(true, Ordering::Relaxed);
+        assert!(matches!(
+            session.fork_linear_attention_state(&source, descriptor),
+            Err(ExecutionError::BackendStatus { status: 42, .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
+        adapter
+            .store
+            .linear_fork_error
+            .store(false, Ordering::Relaxed);
+        let drops_before = adapter.state_resource_drops.load(Ordering::Relaxed);
+        let owners_before = adapter.store.linear_entries.lock().unwrap().len();
+        adapter
+            .store
+            .linear_fork_invalid_audit
+            .store(true, Ordering::Relaxed);
+        assert!(matches!(
+            session.fork_linear_attention_state(&source, descriptor),
+            Err(ExecutionError::InvalidRequest { .. })
+        ));
+        assert_eq!(
+            session.memory_snapshot().request_state().current_bytes(),
+            baseline
+        );
+        assert!(
+            adapter.state_resource_drops.load(Ordering::Relaxed) > drops_before,
+            "invalid linear audit resource must be dropped"
+        );
+        assert_eq!(
+            adapter.store.linear_entries.lock().unwrap().len(),
+            owners_before
+        );
+        assert_eq!(source.snapshot(&session).unwrap().length(), 1);
     }
 
     fn qwen_tied_weight_entry() -> crate::WeightLoadEntry {

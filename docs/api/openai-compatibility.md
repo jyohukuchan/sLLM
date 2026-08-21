@@ -382,6 +382,27 @@ HTTP(S) origins—never `*`, paths, queries or userinfo. TLS is disabled by
 default; certificate and private-key paths must be configured together and are
 validated before model/backend startup.
 
+## Phase 41 state extensions
+
+Phase 41 does not add an OpenAI wire field or a new HTTP endpoint. Prefix cache,
+context shifting, stateless prompt checkpointing, and draft-provider selection
+are explicit server-startup controls. Their audit output uses fixed enums and
+numeric counters and never includes checkpoint paths, token IDs, prompt text,
+conversation bytes, KV bytes, seeds, or grammar payloads.
+
+Checkpointing is not an OpenAI conversation/session API. A configured load is
+validated once at backend startup and can continue only a request whose fully
+rendered tokens have the stored token history as an exact prefix with a
+non-empty suffix. Save occurs after fresh prompt prefill and before the first
+visible delta. Load and save names are mutually exclusive. Unsupported
+model/provider combinations and combinations with prefix cache, context shift,
+or draft execution are rejected rather than silently falling back to a fresh
+request. Mid-generation HTTP/SSE resume remains outside this contract.
+
+Assistant history/prefill continues to use the existing typed assistant message
+path. Prefilled assistant bytes initialize decoding and stop matching but are
+not emitted again as completion content and are counted as prompt input.
+
 ## Deferred API surface
 
 The Responses API (`POST /v1/responses`) is planned for a future profile. It is not

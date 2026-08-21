@@ -70,6 +70,11 @@ option(SLLM_ENABLE_GEMMA_ATTENTION_PUBLIC_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_PHASE41_STATE_GPU_TEST
+    "Build the focused real-GPU Phase 41 state fork/image runner"
+    OFF
+)
+
 option(SLLM_SEMANTIC_G1_AUTHORITY
     "Require controller-held sealed compiler authority for semantic G1 only"
     OFF
@@ -116,7 +121,8 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
        SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
        SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
        SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST OR
-       SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST)
+       SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST OR
+       SLLM_ENABLE_PHASE41_STATE_GPU_TEST)
         message(FATAL_ERROR
             "semantic G1 discovery test requires only public HIP runtime authority")
     endif()
@@ -1121,4 +1127,22 @@ if(SLLM_ENABLE_GEMMA_ATTENTION_PUBLIC_GPU_TEST)
     target_link_libraries(sllm_gemma_attention_public_gpu_test PRIVATE
         sllm_hip_stub
     )
+endif()
+
+if(SLLM_ENABLE_PHASE41_STATE_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase 41 state GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_phase41_state_gpu_test
+        tests/phase41_state_gpu_test.cpp
+    )
+    target_compile_features(sllm_phase41_state_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase41_state_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_phase41_state_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_phase41_state_gpu_test PRIVATE sllm_hip_stub)
 endif()

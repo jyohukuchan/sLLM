@@ -164,6 +164,112 @@ sllm_status_t validate_kv_append_info(const sllm_kv_append_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t validate_state_fork_info(const sllm_state_fork_info_t *const info,
+                                       sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state fork info output is null");
+  }
+  if (info->struct_size != sizeof(*info)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state fork info struct size is unsupported");
+  }
+  if (info->abi_version != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "state fork info ABI is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state fork info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "state fork info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_state_chunk(const sllm_state_chunk_t *const chunk,
+                                   sllm_error_sink_t *const sink) noexcept {
+  if (chunk == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state chunk is null");
+  }
+  if (chunk->struct_size != sizeof(*chunk)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state chunk struct size is unsupported");
+  }
+  if (chunk->abi_version != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "state chunk ABI is unsupported");
+  }
+  if (chunk->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION ||
+      chunk->reserved0 != 0U || chunk->reserved1 != 0U) {
+    return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                       "state chunk version or reserved fields are invalid");
+  }
+  for (const uint32_t value : chunk->reserved) {
+    if (value != 0U) {
+      return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "state chunk reserved fields must be zero");
+    }
+  }
+  if (chunk->byte_length > SLLM_HIP_STATE_CHUNK_MAX_BYTES ||
+      chunk->byte_length > chunk->host_capacity ||
+      chunk->byte_offset > UINT64_MAX - chunk->byte_length ||
+      (chunk->byte_length != 0U && chunk->host_pointer == nullptr)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state chunk host range is invalid");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+validate_state_image_info(const sllm_state_image_info_t *const info,
+                          sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state image info output is null");
+  }
+  if (info->struct_size != sizeof(*info)) {
+    return write_error(sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "state image info struct size is unsupported");
+  }
+  if (info->abi_version != SLLM_HIP_ABI_VERSION) {
+    return write_error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
+                       "state image info ABI is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION ||
+      info->reserved0 != 0U) {
+    return write_error(
+        sink, SLLM_STATUS_RESERVED_NONZERO,
+        "state image info version or reserved fields are invalid");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return write_error(sink, SLLM_STATUS_RESERVED_NONZERO,
+                         "state image info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
+void initialize_state_fork_info(sllm_state_fork_info_t *const info) noexcept {
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = sizeof(*info);
+  info->abi_version = SLLM_HIP_ABI_VERSION;
+  info->info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+}
+
+void initialize_state_image_info(sllm_state_image_info_t *const info) noexcept {
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = sizeof(*info);
+  info->abi_version = SLLM_HIP_ABI_VERSION;
+  info->info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+}
+
 sllm_status_t validate_dispatch_info(
     const sllm_attention_preprocess_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -465,9 +571,10 @@ sllm_queue_release(sllm_queue_t **const queue,
   }
 }
 
-extern "C" sllm_status_t sllm_queue_set_completion_mode(
-    const sllm_queue_t *const queue, const sllm_queue_completion_mode_t mode,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_queue_set_completion_mode(const sllm_queue_t *const queue,
+                               const sllm_queue_completion_mode_t mode,
+                               sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -689,6 +796,38 @@ sllm_buffer_copy_d2h(const sllm_queue_t *const queue,
 }
 
 extern "C" sllm_status_t
+sllm_buffer_copy_d2d(const sllm_queue_t *const queue,
+                     const sllm_buffer_t *const source,
+                     const sllm_buffer_t *const destination,
+                     const sllm_buffer_copy_d2d_desc_t *const copy,
+                     sllm_completion_t **const completion,
+                     sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr)
+      *completion = nullptr;
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (copy == nullptr || copy->struct_size != sizeof(*copy) ||
+        copy->abi_version != SLLM_HIP_ABI_VERSION || copy->reserved[0] != 0U ||
+        copy->reserved[1] != 0U || copy->reserved[2] != 0U ||
+        copy->reserved[3] != 0U) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "D2D copy descriptor is invalid");
+    }
+    if (queue == nullptr || source == nullptr || destination == nullptr ||
+        completion == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "D2D copy handle or completion output is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in public D2D copy");
+  }
+}
+
+extern "C" sllm_status_t
 sllm_completion_query(sllm_completion_t *const completion,
                       sllm_completion_result_t *const result,
                       sllm_error_sink_t *const error_sink) noexcept {
@@ -723,10 +862,11 @@ sllm_completion_wait(sllm_completion_t *const completion,
   return sllm_completion_query(completion, result, error_sink);
 }
 
-extern "C" sllm_status_t sllm_completion_finalize_after(
-    sllm_completion_t *const completion, sllm_completion_t *const fence,
-    sllm_completion_result_t *const result,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_completion_finalize_after(sllm_completion_t *const completion,
+                               sllm_completion_t *const fence,
+                               sllm_completion_result_t *const result,
+                               sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -745,8 +885,9 @@ extern "C" sllm_status_t sllm_completion_finalize_after(
     return write_error(error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
                        "completion handle is not owned by the public runtime");
   } catch (...) {
-    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
-                       "unexpected exception finalizing completion after fence");
+    return write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception finalizing completion after fence");
   }
 }
 
@@ -1221,11 +1362,11 @@ sllm_argmax_execute(const sllm_argmax_plan_t *const plan,
   }
 }
 
-extern "C" sllm_status_t sllm_token_selector_prepare(
-    const sllm_context_t *const context,
-    const sllm_token_selector_desc_t *const descriptor,
-    sllm_token_selector_plan_t **const plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_token_selector_prepare(const sllm_context_t *const context,
+                            const sllm_token_selector_desc_t *const descriptor,
+                            sllm_token_selector_plan_t **const plan,
+                            sllm_error_sink_t *const error_sink) noexcept {
   try {
     if (plan != nullptr) {
       *plan = nullptr;
@@ -1252,9 +1393,9 @@ extern "C" sllm_status_t sllm_token_selector_prepare(
   }
 }
 
-extern "C" sllm_status_t sllm_token_selector_plan_release(
-    sllm_token_selector_plan_t **const plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_token_selector_plan_release(sllm_token_selector_plan_t **const plan,
+                                 sllm_error_sink_t *const error_sink) noexcept {
   try {
     const sllm_status_t sink_status = validate_error_sink(error_sink);
     if (sink_status != SLLM_STATUS_OK) {
@@ -1273,8 +1414,7 @@ extern "C" sllm_status_t sllm_token_selector_plan_release(
 
 extern "C" sllm_status_t sllm_token_selector_execute(
     const sllm_token_selector_plan_t *const plan,
-    const sllm_queue_t *const queue,
-    sllm_completion_t **const completion,
+    const sllm_queue_t *const queue, sllm_completion_t **const completion,
     sllm_token_selector_dispatch_info_t *const dispatch_info,
     sllm_error_sink_t *const error_sink) noexcept {
   try {
@@ -1942,6 +2082,189 @@ sllm_kv_state_append_cancel(const sllm_kv_state_t *const state,
   }
 }
 
+extern "C" sllm_status_t
+sllm_kv_state_fork(const sllm_kv_state_t *const source,
+                   const sllm_kv_state_create_info_v2_t *const destination_info,
+                   sllm_kv_state_t **const child,
+                   sllm_state_fork_info_t *const fork_info,
+                   sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (child != nullptr) {
+      *child = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        sllm_kv_state::validate_state_create_info_v2(destination_info,
+                                                     error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    const sllm_status_t fork_status =
+        validate_state_fork_info(fork_info, error_sink);
+    if (fork_status != SLLM_STATUS_OK) {
+      return fork_status;
+    }
+    if (source == nullptr || child == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV fork source or child output is null");
+    }
+    initialize_state_fork_info(fork_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state fork stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_fork_query(const sllm_kv_state_t *const state,
+                         sllm_state_fork_info_t *const fork_info,
+                         sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_state_fork_info(fork_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV fork query state handle is null");
+    }
+    initialize_state_fork_info(fork_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state fork query stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_export(const sllm_kv_state_t *const state,
+                     const sllm_state_chunk_t *const chunk,
+                     sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t chunk_status = validate_state_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK) {
+      return chunk_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV export state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state export stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_import(const sllm_kv_state_t *const state,
+                     const sllm_state_chunk_t *const chunk,
+                     sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t chunk_status = validate_state_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK) {
+      return chunk_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV import state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state import stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_image_query(const sllm_kv_state_t *const state,
+                          sllm_state_image_info_t *const image_info,
+                          sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_state_image_info(image_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV image query state handle is null");
+    }
+    initialize_state_image_info(image_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV state image query stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_image_plane_size(const sllm_kv_state_t *const state,
+                               const uint32_t plane, uint64_t *const size_bytes,
+                               sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (state == nullptr || size_bytes == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV image plane size arguments are null");
+    }
+    (void)plane;
+    *size_bytes = 0U;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV image plane size stub");
+  }
+}
+
+extern "C" sllm_status_t
+sllm_kv_state_import_finalize(const sllm_kv_state_t *const state,
+                              const sllm_state_image_info_t *const image_info,
+                              sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_state_image_info(image_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "KV import finalize state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in KV import finalize stub");
+  }
+}
+
 extern "C" sllm_status_t sllm_causal_attention_execute(
     const sllm_context_t *const context, const sllm_queue_t *const queue,
     const sllm_causal_attention_desc_t *const descriptor,
@@ -2091,6 +2414,162 @@ extern "C" sllm_status_t sllm_linear_attention_state_rewind_last(
                        "linear attention rewind state handle is null");
   }
   return unavailable(error_sink);
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_fork(
+    const sllm_linear_attention_state_t *const source,
+    const sllm_linear_attention_state_create_info_t *const destination_info,
+    sllm_linear_attention_state_t **const child,
+    sllm_state_fork_info_t *const fork_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (child != nullptr) {
+      *child = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        sllm_linear_attention::validate_state_create_info(destination_info,
+                                                          error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    const sllm_status_t fork_status =
+        validate_state_fork_info(fork_info, error_sink);
+    if (fork_status != SLLM_STATUS_OK) {
+      return fork_status;
+    }
+    if (source == nullptr || child == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear fork source or child output is null");
+    }
+    initialize_state_fork_info(fork_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear state fork stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_export(
+    const sllm_linear_attention_state_t *const state,
+    const sllm_state_chunk_t *const chunk,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t chunk_status = validate_state_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK) {
+      return chunk_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear export state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear state export stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_import(
+    const sllm_linear_attention_state_t *const state,
+    const sllm_state_chunk_t *const chunk,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t chunk_status = validate_state_chunk(chunk, error_sink);
+    if (chunk_status != SLLM_STATUS_OK) {
+      return chunk_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear import state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear state import stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_image_query(
+    const sllm_linear_attention_state_t *const state,
+    sllm_state_image_info_t *const image_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_state_image_info(image_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear image query state handle is null");
+    }
+    initialize_state_image_info(image_info);
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear state image query stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_image_plane_size(
+    const sllm_linear_attention_state_t *const state, const uint32_t plane,
+    uint64_t *const size_bytes, sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (state == nullptr || size_bytes == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear image plane size arguments are null");
+    }
+    (void)plane;
+    *size_bytes = 0U;
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear image plane size stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_linear_attention_state_import_finalize(
+    const sllm_linear_attention_state_t *const state,
+    const sllm_state_image_info_t *const image_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    const sllm_status_t info_status =
+        validate_state_image_info(image_info, error_sink);
+    if (info_status != SLLM_STATUS_OK) {
+      return info_status;
+    }
+    if (state == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "linear import finalize state handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in linear import finalize stub");
+  }
 }
 
 extern "C" sllm_status_t sllm_linear_attention_execute(

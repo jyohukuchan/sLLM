@@ -19,9 +19,11 @@ use sllm_core::{
     ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
     ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
     ExecutionQueueFenceAdapter, ExecutionReadbackAdapter, ExecutionSession,
-    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionSubmissionAdapter,
-    ExecutionTransferAdapter, OwnedTensorBinding, PrepareSupport, PreparedOperation,
-    QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport,
+    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1,
+    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvCacheEncoding, OpaqueStatePlane,
+    OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport, StateLayerMetadataV1,
+    StateOwnerKindV1, StatePlaneKindV1,
 };
 
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
@@ -51,6 +53,100 @@ use crate::{
 
 const HIP_BACKEND_NAME: &str = "hip";
 const CLEANUP_ATTEMPT_CAP: usize = 16;
+
+fn image_failure(reason: impl Into<String>) -> ExecutionError {
+    ExecutionError::InvalidRequest {
+        reason: format!("HIP state image contract violation: {}", reason.into()),
+    }
+}
+
+fn kv_image_planes(encoding: KvCacheEncoding, count: u32) -> Vec<(u32, StatePlaneKindV1)> {
+    let mut planes = vec![
+        (sys::SLLM_HIP_KV_STATE_PLANE_KEY, StatePlaneKindV1::KvKey),
+        (
+            sys::SLLM_HIP_KV_STATE_PLANE_VALUE,
+            StatePlaneKindV1::KvValue,
+        ),
+    ];
+    if matches!(encoding, KvCacheEncoding::Fp8E4M3Fn) {
+        planes.extend([
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_KEY_SCALE,
+                StatePlaneKindV1::KvKeyScale,
+            ),
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE,
+                StatePlaneKindV1::KvValueScale,
+            ),
+        ]);
+    }
+    if matches!(encoding, KvCacheEncoding::Nvfp4) {
+        planes.extend([
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_KEY_SCALE,
+                StatePlaneKindV1::KvKeyScale,
+            ),
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE,
+                StatePlaneKindV1::KvValueScale,
+            ),
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE,
+                StatePlaneKindV1::KvKeyOuterScale,
+            ),
+            (
+                sys::SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE,
+                StatePlaneKindV1::KvValueOuterScale,
+            ),
+        ]);
+    }
+    planes.truncate(count as usize);
+    planes
+}
+
+fn linear_image_planes(count: u32) -> Vec<(u32, StatePlaneKindV1)> {
+    let mut planes = vec![
+        (1, StatePlaneKindV1::LinearConvSlot0),
+        (2, StatePlaneKindV1::LinearConvSlot1),
+        (3, StatePlaneKindV1::LinearRecurrentSlot0),
+        (4, StatePlaneKindV1::LinearRecurrentSlot1),
+        (5, StatePlaneKindV1::LinearScratch),
+    ];
+    planes.truncate(count as usize);
+    planes
+}
+
+fn read_native_plane<F>(size: u64, mut export: F) -> Result<Vec<u8>, ExecutionError>
+where
+    F: FnMut(u64, &mut [u8]) -> Result<(), RuntimeError>,
+{
+    let size = usize::try_from(size).map_err(|_| image_failure("plane size exceeds host usize"))?;
+    let mut bytes = vec![0_u8; size];
+    let chunk_max = usize::try_from(sys::SLLM_HIP_STATE_CHUNK_MAX_BYTES)
+        .map_err(|_| image_failure("chunk limit exceeds host usize"))?;
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let end = (offset + chunk_max).min(bytes.len());
+        export(offset as u64, &mut bytes[offset..end]).map_err(map_backend_error)?;
+        offset = end;
+    }
+    Ok(bytes)
+}
+
+fn write_native_plane<F>(bytes: &[u8], mut import: F) -> Result<(), ExecutionError>
+where
+    F: FnMut(u64, &[u8]) -> Result<(), RuntimeError>,
+{
+    let chunk_max = usize::try_from(sys::SLLM_HIP_STATE_CHUNK_MAX_BYTES)
+        .map_err(|_| image_failure("chunk limit exceeds host usize"))?;
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let end = (offset + chunk_max).min(bytes.len());
+        import(offset as u64, &bytes[offset..end]).map_err(map_backend_error)?;
+        offset = end;
+    }
+    Ok(())
+}
 
 pub(crate) fn open_execution_session(
     backend: HipBackend,
@@ -391,6 +487,21 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             .map_err(map_backend_error)
     }
 
+    fn fork_kv_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        source: &sllm_core::KvState,
+        destination_id: sllm_core::KvStateId,
+        destination_descriptor: sllm_core::KvStateDescriptor,
+    ) -> Result<(AdapterResource, sllm_core::StateForkAuditV1), ExecutionError> {
+        self.state.ensure_open()?;
+        let source_resource = access.downcast_kv_state_payload::<KvStateResource>(source)?;
+        let (resource, audit) = source_resource
+            .fork(destination_id, destination_descriptor)
+            .map_err(map_backend_error)?;
+        Ok((AdapterResource::new(resource), audit))
+    }
+
     fn readback_kv_state(
         &self,
         access: &ExecutionAdapterAccess<'_>,
@@ -403,6 +514,163 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         access
             .downcast_kv_state_payload::<KvStateResource>(state)?
             .readback(plane, byte_offset, destination)
+            .map_err(map_backend_error)
+    }
+
+    fn kv_state_fork_query(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+    ) -> Result<sllm_core::StateForkAuditV1, ExecutionError> {
+        self.state.ensure_open()?;
+        access
+            .downcast_kv_state_payload::<KvStateResource>(state)?
+            .fork_query()
+            .map_err(map_backend_error)
+    }
+
+    fn export_kv_state_image(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        self.state.ensure_open()?;
+        let resource = access.downcast_kv_state_payload::<KvStateResource>(state)?;
+        let info = resource.image_query().map_err(map_backend_error)?;
+        let encoding = state.descriptor().cache_encoding();
+        let (dtype, native_encoding, _, _) = match encoding {
+            KvCacheEncoding::Fp16 => (
+                sys::SLLM_TENSOR_DTYPE_F16,
+                sys::SLLM_HIP_KV_ENCODING_FP16_V1,
+                0,
+                0,
+            ),
+            KvCacheEncoding::Fp8E4M3Fn => (
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_FP8_V1,
+                0,
+                0,
+            ),
+            KvCacheEncoding::Fp8E4M3FnStatic => (
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+                0,
+                0,
+            ),
+            KvCacheEncoding::Nvfp4 => (
+                sys::SLLM_TENSOR_DTYPE_U8,
+                sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
+                0,
+                0,
+            ),
+        };
+        if info.session_id != access.session_id().raw()
+            || info.layer_id != state.layer_id()
+            || info.dtype != dtype
+            || info.encoding != native_encoding
+            || info.active_slot != 0
+            || info.capacity_tokens != state.capacity()
+            || info.published_length > info.capacity_tokens
+        {
+            return Err(image_failure(
+                "native KV image metadata does not match descriptor",
+            ));
+        }
+        let planes = kv_image_planes(encoding, info.plane_count);
+        if planes.len() != info.plane_count as usize {
+            return Err(image_failure("native KV image plane count is invalid"));
+        }
+        let mut output = Vec::with_capacity(planes.len());
+        for (native_plane, semantic_plane) in planes {
+            let size = resource
+                .image_plane_size(native_plane)
+                .map_err(map_backend_error)?;
+            let bytes = read_native_plane(size, |offset, destination| {
+                resource.export_chunk(native_plane, offset, destination)
+            })?;
+            output.push(OpaqueStatePlane {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: state.layer_id(),
+                plane: semantic_plane,
+                bytes,
+            });
+        }
+        Ok(ExecutionStateImageV1::new(
+            StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: state.layer_id(),
+                published_length: info.published_length,
+                generation: info.generation,
+                active_slot: None,
+            },
+            output,
+        ))
+    }
+
+    fn import_kv_state_image(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::KvState,
+        image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let resource = access.downcast_kv_state_payload::<KvStateResource>(state)?;
+        let info = resource.image_query().map_err(map_backend_error)?;
+        if info.published_length != 0 {
+            return Err(image_failure("KV image import destination is not empty"));
+        }
+        let encoding = state.descriptor().cache_encoding();
+        let planes = kv_image_planes(encoding, info.plane_count);
+        let expected_dtype = match encoding {
+            KvCacheEncoding::Fp16 => sys::SLLM_TENSOR_DTYPE_F16,
+            KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => {
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN
+            }
+            KvCacheEncoding::Nvfp4 => sys::SLLM_TENSOR_DTYPE_U8,
+        };
+        let expected_encoding = match encoding {
+            KvCacheEncoding::Fp16 => sys::SLLM_HIP_KV_ENCODING_FP16_V1,
+            KvCacheEncoding::Fp8E4M3Fn => sys::SLLM_HIP_KV_ENCODING_FP8_V1,
+            KvCacheEncoding::Fp8E4M3FnStatic => sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
+            KvCacheEncoding::Nvfp4 => sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
+        };
+        if info.session_id != access.session_id().raw()
+            || info.layer_id != state.layer_id()
+            || info.capacity_tokens != state.capacity()
+            || info.dtype != expected_dtype
+            || info.encoding != expected_encoding
+        {
+            return Err(image_failure("native KV import target metadata mismatch"));
+        }
+        if image.metadata().owner != StateOwnerKindV1::Kv
+            || image.metadata().layer_id != state.layer_id()
+            || image.metadata().active_slot.is_some()
+            || image.metadata().published_length > state.capacity()
+            || image.planes().len() != planes.len()
+        {
+            return Err(image_failure("KV image metadata or topology mismatch"));
+        }
+        let mut native_info = info;
+        native_info.published_length = image.metadata().published_length;
+        native_info.generation = image.metadata().generation;
+        for (native_plane, semantic_plane) in planes {
+            let plane = image
+                .planes()
+                .iter()
+                .find(|plane| plane.plane == semantic_plane)
+                .ok_or_else(|| image_failure("KV image is missing a required plane"))?;
+            let expected = resource
+                .image_plane_size(native_plane)
+                .map_err(map_backend_error)?;
+            if plane.bytes.len() as u64 != expected {
+                return Err(image_failure("KV image plane byte length mismatch"));
+            }
+            write_native_plane(&plane.bytes, |offset, bytes| {
+                resource.import_chunk(native_plane, offset, bytes)
+            })?;
+        }
+        resource
+            .import_finalize(&native_info)
             .map_err(map_backend_error)
     }
 
@@ -538,6 +806,122 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         access
             .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?
             .snapshot()
+            .map_err(map_backend_error)
+    }
+
+    fn fork_linear_attention_state(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        source: &sllm_core::LinearAttentionState,
+        destination_id: sllm_core::LinearAttentionStateId,
+        destination_descriptor: sllm_core::LinearAttentionStateDescriptor,
+    ) -> Result<(AdapterResource, sllm_core::StateForkAuditV1), ExecutionError> {
+        self.state.ensure_open()?;
+        let source_resource = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(source)?;
+        let (resource, audit) = source_resource
+            .fork(destination_id, destination_descriptor)
+            .map_err(map_backend_error)?;
+        Ok((AdapterResource::new(resource), audit))
+    }
+
+    fn export_linear_attention_state_image(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+    ) -> Result<ExecutionStateImageV1, ExecutionError> {
+        self.state.ensure_open()?;
+        let resource = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?;
+        let info = resource.image_query().map_err(map_backend_error)?;
+        if info.session_id != access.session_id().raw()
+            || info.layer_id != state.layer_id()
+            || info.dtype != sys::SLLM_TENSOR_DTYPE_BF16
+            || info.encoding != sys::SLLM_TENSOR_ENCODING_UNQUANTIZED
+            || info.capacity_tokens != state.capacity()
+            || info.active_slot > 1
+        {
+            return Err(image_failure(
+                "native linear image metadata does not match descriptor",
+            ));
+        }
+        let planes = linear_image_planes(info.plane_count);
+        if planes.len() != info.plane_count as usize {
+            return Err(image_failure("native linear image plane count is invalid"));
+        }
+        let mut output = Vec::with_capacity(planes.len());
+        for (native_plane, semantic_plane) in planes {
+            let size = resource
+                .image_plane_size(native_plane)
+                .map_err(map_backend_error)?;
+            let bytes = read_native_plane(size, |offset, destination| {
+                resource.export_chunk(native_plane, offset, destination)
+            })?;
+            output.push(OpaqueStatePlane {
+                owner: StateOwnerKindV1::LinearAttention,
+                layer_id: state.layer_id(),
+                plane: semantic_plane,
+                bytes,
+            });
+        }
+        Ok(ExecutionStateImageV1::new(
+            StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::LinearAttention,
+                layer_id: state.layer_id(),
+                published_length: info.published_length,
+                generation: info.generation,
+                active_slot: Some(info.active_slot as u8),
+            },
+            output,
+        ))
+    }
+
+    fn import_linear_attention_state_image(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        state: &sllm_core::LinearAttentionState,
+        image: &ExecutionStateImageV1,
+    ) -> Result<(), ExecutionError> {
+        self.state.ensure_open()?;
+        let resource = access
+            .downcast_linear_attention_state_payload::<LinearAttentionStateResource>(state)?;
+        let info = resource.image_query().map_err(map_backend_error)?;
+        if info.published_length != 0 {
+            return Err(image_failure(
+                "linear image import destination is not empty",
+            ));
+        }
+        let planes = linear_image_planes(info.plane_count);
+        if image.metadata().owner != StateOwnerKindV1::LinearAttention
+            || image.metadata().layer_id != state.layer_id()
+            || image.metadata().active_slot != Some(0) && image.metadata().active_slot != Some(1)
+            || image.metadata().published_length > state.capacity()
+            || image.planes().len() != planes.len()
+        {
+            return Err(image_failure("linear image metadata or topology mismatch"));
+        }
+        let mut native_info = info;
+        native_info.active_slot = image.metadata().active_slot.unwrap() as u32;
+        native_info.published_length = image.metadata().published_length;
+        native_info.generation = image.metadata().generation;
+        for (native_plane, semantic_plane) in planes {
+            let plane = image
+                .planes()
+                .iter()
+                .find(|plane| plane.plane == semantic_plane)
+                .ok_or_else(|| image_failure("linear image is missing a required plane"))?;
+            let expected = resource
+                .image_plane_size(native_plane)
+                .map_err(map_backend_error)?;
+            if plane.bytes.len() as u64 != expected {
+                return Err(image_failure("linear image plane byte length mismatch"));
+            }
+            write_native_plane(&plane.bytes, |offset, bytes| {
+                resource.import_chunk(native_plane, offset, bytes)
+            })?;
+        }
+        resource
+            .import_finalize(&native_info)
             .map_err(map_backend_error)
     }
 
@@ -1111,6 +1495,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         Ok(Box::new(HipTransfer {
             completion,
             _ticket: ticket,
+            _buffers: None,
         }))
     }
 
@@ -1132,6 +1517,42 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         Ok(Box::new(HipReadback {
             completion,
             _ticket: ticket,
+        }))
+    }
+
+    fn copy_device_to_device(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        source: &BufferRange,
+        destination: &BufferRange,
+    ) -> Result<Box<dyn ExecutionTransferAdapter>, ExecutionError> {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let source_buffer = access
+            .downcast_buffer_payload::<Buffer>(source.buffer())?
+            .clone();
+        let destination_buffer = access
+            .downcast_buffer_payload::<Buffer>(destination.buffer())?
+            .clone();
+        let ticket = self.state.acquire_active()?;
+        let completion = match queue.copy_device_to_device(
+            &source_buffer,
+            &destination_buffer,
+            source.offset_bytes(),
+            destination.offset_bytes(),
+            source.size_bytes(),
+        ) {
+            Ok(completion) => completion,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok(Box::new(HipTransfer {
+            completion,
+            _ticket: ticket,
+            _buffers: Some((source_buffer, destination_buffer)),
         }))
     }
 
@@ -1332,6 +1753,7 @@ impl ExecutionSubmissionAdapter for HipSubmission {
 struct HipTransfer {
     completion: Completion,
     _ticket: ActiveOperation,
+    _buffers: Option<(Buffer, Buffer)>,
 }
 
 struct HipQueueFence {

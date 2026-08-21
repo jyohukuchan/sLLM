@@ -183,6 +183,12 @@ validate_descriptor_prefix(const sllm_rotary_desc_t *const descriptor,
         sink, SLLM_STATUS_INVALID_ABI_VERSION,
         "rotary public ABI version is unsupported");
   }
+  if (descriptor->reserved0 != SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1 &&
+      descriptor->reserved0 != SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "rotary position payload mode is unsupported");
+  }
   return SLLM_STATUS_OK;
 }
 
@@ -206,7 +212,7 @@ validate_and_copy_descriptor(const sllm_rotary_desc_t *const descriptor,
   if (struct_status != SLLM_STATUS_OK) {
     return struct_status;
   }
-  if (descriptor->reserved0 != 0U || !all_zero(descriptor->reserved, 2U)) {
+  if (!all_zero(descriptor->reserved, 2U)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "rotary descriptor reserved fields must be zero");
@@ -290,6 +296,7 @@ validate_and_copy_descriptor(const sllm_rotary_desc_t *const descriptor,
   metadata->rotary_dim = descriptor->rotary_dim;
   metadata->theta_bits = descriptor->theta_bits;
   metadata->max_position = descriptor->max_position;
+  metadata->position_payload_mode = descriptor->reserved0;
   return SLLM_STATUS_OK;
 }
 

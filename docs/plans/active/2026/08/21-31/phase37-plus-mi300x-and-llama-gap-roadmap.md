@@ -38,8 +38,8 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 37 | ready-host-prep | gfx942 GDN・Full Attention provider parity | Phase 36 profile。実機baseline/perfはVM再確保待ち |
 | 38 | planned | MI300X residual、FNUZ/GEMM、execution replay、最終peer比較 | Phase 37 fresh profile |
 | 39 | complete | service operability・認証・observability基盤 | 現行profile v1 |
-| 40 | planned | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
-| 41 | planned | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
+| 40 | complete | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
+| 41 | complete | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
 | 42 | planned | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
 | 43 | planned | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
 | 44 | planned | generic template、reasoning control、interactive CLI | Phase 41・43 message/state |
@@ -174,6 +174,9 @@ Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、�
 
 ## Phase 40: token selection・grammar・structured generation
 
+> 状態: complete（2026-08-22）。詳細は
+> [archive plan](../../../../archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)を正とする。
+
 ### Work units
 
 1. samplerをbackend非依存のordered chainへ型付けし、greedy、temperature、top-p、presence/frequency penalty、seedを
@@ -196,6 +199,9 @@ Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、�
 - GPU pathはexact target、fallbackなし、selected token以外の不要なfull-vocabulary D2Hを行わない。
 
 ## Phase 41: prefix/KV・session state・speculation
+
+> 状態: complete（2026-08-22）。詳細なidentity、上限、検証、制約は
+> [Phase 41 archive plan](../../../../archive/2026/08/21-31/phase41-prefix-session-speculation.md)を正とする。
 
 ### Work units
 

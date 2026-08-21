@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use sllm_core::{
     DType, Encoding, ExecutionSessionId, KvCacheEncoding, KvMemoryKind, KvStateAppendRequest,
-    KvStateDescriptor, KvStateId, KvStateSnapshot,
+    KvStateDescriptor, KvStateId, KvStateSnapshot, StateForkAuditV1, StateForkModeV1,
 };
 use sllm_hip_sys as sys;
 
@@ -217,6 +217,206 @@ impl KvStateResource {
         })
     }
 
+    /// Forks the native state while preserving exact encoded planes.  Layout,
+    /// encoding, and scales must match; capacity may grow for a reused prefix.
+    pub(crate) fn fork(
+        &self,
+        state_id: KvStateId,
+        descriptor: KvStateDescriptor,
+    ) -> Result<(Self, StateForkAuditV1), RuntimeError> {
+        if descriptor.layer_id() != self.inner.descriptor.layer_id()
+            || descriptor.layout() != self.inner.descriptor.layout()
+            || descriptor.cache_encoding() != self.inner.descriptor.cache_encoding()
+            || descriptor.static_fp8_scales() != self.inner.descriptor.static_fp8_scales()
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native KV fork requires an identical destination descriptor",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_state_fork_info_t {
+            struct_size: size_of::<sys::sllm_state_fork_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            mode: 0,
+            source_state_identity: 0,
+            child_state_identity: 0,
+            source_owned_bytes: 0,
+            child_owned_bytes: 0,
+            copied_bytes: 0,
+            shared_bytes: 0,
+            published_length: 0,
+            page_bytes: 0,
+            reserved: [0; 4],
+        };
+        let mut raw_child = std::ptr::null_mut();
+        let (dtype, encoding, block_size, scale_dtype) = native_kv_storage(descriptor);
+        let static_scales = descriptor.static_fp8_scales();
+        let mut reserved = [0_u32; 4];
+        if let Some((key, value)) = static_scales {
+            reserved[0] = key.to_bits();
+            reserved[1] = value.to_bits();
+        }
+        let destination_info = sys::sllm_kv_state_create_info_v2_t {
+            struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            create_info_version: if static_scales.is_some() {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
+            } else {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
+            },
+            reserved0: 0,
+            session_id: self.inner.session_id.raw(),
+            layer_id: descriptor.layer_id(),
+            flags: 0,
+            capacity_tokens: descriptor.capacity(),
+            head_count: descriptor.layout().heads() as u32,
+            head_dim: descriptor.layout().head_dim() as u32,
+            memory_kind: selected_memory_kind(&self.inner.context),
+            layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
+            dtype,
+            encoding,
+            block_size,
+            scale_dtype,
+            reserved,
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_fork(
+                self.raw_handle()?.as_ptr(),
+                &destination_info,
+                &mut raw_child,
+                &mut info,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        let raw_child = NonNull::new(raw_child).ok_or_else(|| {
+            RuntimeError::local(
+                RuntimeStatus::InternalError,
+                "native KV fork returned a null child handle on success",
+            )
+        })?;
+        let mode = match info.mode {
+            sys::SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES => {
+                StateForkModeV1::SharedReadOnlyPages
+            }
+            sys::SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY => StateForkModeV1::DeviceCopy,
+            _ => {
+                let mut child_handle = raw_child.as_ptr();
+                let _ = unsafe { sys::sllm_kv_state_release(&mut child_handle, &mut error_sink) };
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "native KV fork returned an unknown mode",
+                ));
+            }
+        };
+        let shared_pages = info
+            .page_bytes
+            .checked_sub(1)
+            .and_then(|_| info.shared_bytes.checked_add(info.page_bytes - 1))
+            .map(|bytes| bytes / info.page_bytes.max(1))
+            .unwrap_or(0);
+        let audit = StateForkAuditV1::new(
+            mode,
+            info.published_length,
+            shared_pages,
+            info.copied_bytes,
+            info.child_owned_bytes,
+        )
+        .map_err(|error| {
+            let mut child_handle = raw_child.as_ptr();
+            let _ = unsafe { sys::sllm_kv_state_release(&mut child_handle, &mut error_sink) };
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("native KV fork audit failed core validation: {error}"),
+            )
+        })?;
+        let resource = Self {
+            inner: Arc::new(KvStateInner {
+                raw: raw_child.as_ptr() as usize,
+                context: self.inner.context.clone(),
+                session_id: self.inner.session_id,
+                state_id,
+                descriptor,
+                last_generation: AtomicU64::new(self.inner.last_generation.load(Ordering::Acquire)),
+            }),
+        };
+        evidence_resources()
+            .lock()
+            .map_err(|_| {
+                RuntimeError::local(
+                    RuntimeStatus::InternalError,
+                    "KV evidence resource registry is poisoned",
+                )
+            })?
+            .insert(
+                (self.inner.session_id.raw(), state_id.raw()),
+                Arc::downgrade(&resource.inner),
+            );
+        Ok((resource, audit))
+    }
+
+    /// Re-query post-COW ownership after a child append. The native query is
+    /// authoritative for shared-page and destination-owned byte accounting.
+    pub(crate) fn fork_query(&self) -> Result<StateForkAuditV1, RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_state_fork_info_t {
+            struct_size: size_of::<sys::sllm_state_fork_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            mode: 0,
+            source_state_identity: 0,
+            child_state_identity: 0,
+            source_owned_bytes: 0,
+            child_owned_bytes: 0,
+            copied_bytes: 0,
+            shared_bytes: 0,
+            published_length: 0,
+            page_bytes: 0,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_fork_query(self.raw_handle()?.as_ptr(), &mut info, &mut error_sink)
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        let mode = match info.mode {
+            sys::SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES => {
+                StateForkModeV1::SharedReadOnlyPages
+            }
+            sys::SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY => StateForkModeV1::DeviceCopy,
+            _ => {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "native KV fork query returned an unknown mode",
+                ));
+            }
+        };
+        let shared_pages = if info.page_bytes == 0 {
+            0
+        } else {
+            info.shared_bytes
+                .saturating_add(info.page_bytes - 1)
+                .checked_div(info.page_bytes)
+                .unwrap_or(0)
+        };
+        StateForkAuditV1::new(
+            mode,
+            info.published_length,
+            shared_pages,
+            info.copied_bytes,
+            info.child_owned_bytes,
+        )
+        .map_err(|error| {
+            RuntimeError::new(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                format!("native KV fork query audit failed core validation: {error}"),
+            )
+        })
+    }
+
     pub(crate) fn snapshot(&self) -> Result<KvStateSnapshot, RuntimeError> {
         let view = NativeKvSnapshotOwner::create(self)?;
         let info = view.query()?;
@@ -291,6 +491,132 @@ impl KvStateResource {
                 rewind_length,
                 &mut error_sink,
             )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn export_chunk(
+        &self,
+        plane: u32,
+        byte_offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), RuntimeError> {
+        if destination.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "KV export chunk must not be empty",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_state_chunk_t {
+            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            plane,
+            reserved0: 0,
+            reserved1: 0,
+            byte_offset,
+            byte_length: destination.len() as u64,
+            host_pointer: destination.as_mut_ptr().cast(),
+            host_capacity: destination.len() as u64,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_export(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn import_chunk(
+        &self,
+        plane: u32,
+        byte_offset: u64,
+        source: &[u8],
+    ) -> Result<(), RuntimeError> {
+        if source.is_empty() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidArgument,
+                "KV import chunk must not be empty",
+            ));
+        }
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let chunk = sys::sllm_state_chunk_t {
+            struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            plane,
+            reserved0: 0,
+            reserved1: 0,
+            byte_offset,
+            byte_length: source.len() as u64,
+            host_pointer: source.as_ptr().cast_mut().cast(),
+            host_capacity: source.len() as u64,
+            reserved: [0; 4],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_import(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)
+    }
+
+    pub(crate) fn image_query(&self) -> Result<sys::sllm_state_image_info_t, RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut info = sys::sllm_state_image_info_t {
+            struct_size: size_of::<sys::sllm_state_image_info_t>() as u32,
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            reserved0: 0,
+            session_id: 0,
+            layer_id: 0,
+            dtype: 0,
+            encoding: 0,
+            active_slot: 0,
+            capacity_tokens: 0,
+            published_length: 0,
+            generation: 0,
+            plane_count: 0,
+            reserved: [0; 7],
+        };
+        let status = unsafe {
+            sys::sllm_kv_state_image_query(self.raw_handle()?.as_ptr(), &mut info, &mut error_sink)
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        Ok(info)
+    }
+
+    pub(crate) fn image_plane_size(&self, plane: u32) -> Result<u64, RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let mut size_bytes = 0_u64;
+        let status = unsafe {
+            sys::sllm_kv_state_image_plane_size(
+                self.raw_handle()?.as_ptr(),
+                plane,
+                &mut size_bytes,
+                &mut error_sink,
+            )
+        };
+        ensure_ok(status, &error_buffer, error_sink.message_length)?;
+        if size_bytes == 0 {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "native KV image plane size is zero",
+            ));
+        }
+        Ok(size_bytes)
+    }
+
+    pub(crate) fn import_finalize(
+        &self,
+        info: &sys::sllm_state_image_info_t,
+    ) -> Result<(), RuntimeError> {
+        let mut error_buffer = [0_u8; ERROR_CAPACITY];
+        let mut error_sink = sink(&mut error_buffer);
+        let status = unsafe {
+            sys::sllm_kv_state_import_finalize(self.raw_handle()?.as_ptr(), info, &mut error_sink)
         };
         ensure_ok(status, &error_buffer, error_sink.message_length)
     }

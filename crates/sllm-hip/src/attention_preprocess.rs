@@ -180,7 +180,19 @@ fn raw_descriptor(
         abi_version: sys::SLLM_HIP_ABI_VERSION,
         op_version: sys::SLLM_HIP_ATTENTION_PREPROCESS_VERSION,
         start_position: contract.start_position(),
-        reserved: [0; 4],
+        reserved: [
+            match contract.position_payload_mode() {
+                sllm_core::AttentionPreprocessPositionPayloadModeV1::Contiguous => {
+                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1
+                }
+                sllm_core::AttentionPreprocessPositionPayloadModeV1::Explicit => {
+                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+                }
+            },
+            0,
+            0,
+            0,
+        ],
         packed_q_gate,
         k,
         q_raw_scale,

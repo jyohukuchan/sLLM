@@ -269,6 +269,24 @@ PASSにしない。Qwen/Gemma sampled-generationの最終統合runは別途継�
 [tracked GPU summary](../../ci/matrix/phase40-token-selector-gpu-summary-v1.json)を正とする。Phase40ではllama.cpp sourceの
 直接reuseはなく、既存provenance lockを変更しない。
 
+### 2026-08-22 Phase41 opaque state fork/image scope
+
+Phase 41はprefix/context/checkpointが共有するopaque KV/linear state fork、COW、全plane export/importをadditive public HIP ABIへ
+実装した。focused real-GPU runnerはmodel-free state contractを独立oracleへ照合し、full-model性能や未実行model/providerへ一般化しない。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| V620 exact `gfx1030` Phase41 state matrix | `experimental` | `project-verified`（state scope） | FP16 VMM fork/COW 63/64/65/127/128/129、FP8 dynamic/static、NVFP4、linear 5 planes、fallback/cleanup 0 |
+| R9700 exact `gfx1201` Phase41 state matrix | `experimental` | `project-verified`（state scope） | V620と同一matrix、source/child byte exact、target-only、fallback/cleanup 0 |
+| MI300X exact `gfx942:sramecc+:xnack-` Phase41 route/compile | `experimental` | `unverified` | ROCm 7.14/LLVM 23、wave64 feature-pinned compile-only PASS。real run deferred |
+
+FP16 child append後もsource K/Vは不変で、encoding別2/4/6 planeとlinear active slot/scratchをbyte/state exactに照合した。
+両実機run後のGPU process、cleanup failure、uncorrectable ECCは0だった。Qwen/Gemma production checkpoint/contextのfull-model
+実機一般対応をこのmodel-free matrixだけから推論しない。詳細は
+[Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)、
+[archive plan](../plans/archive/2026/08/21-31/phase41-prefix-session-speculation.md)、
+[history](../history/2026/08/21-31/phase41-prefix-session-speculation.md)を正とする。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

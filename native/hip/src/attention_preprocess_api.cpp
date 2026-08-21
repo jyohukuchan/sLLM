@@ -207,7 +207,10 @@ sllm_status_t validate_and_copy_descriptor(
   if (struct_status != SLLM_STATUS_OK) {
     return struct_status;
   }
-  if (!all_zero(descriptor->reserved, 4U)) {
+  if ((descriptor->reserved[0] !=
+           SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1 &&
+       descriptor->reserved[0] != SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1) ||
+      !all_zero(descriptor->reserved + 1, 3U)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "attention preprocess descriptor reserved fields must be zero");
@@ -315,6 +318,7 @@ sllm_status_t validate_and_copy_descriptor(
   metadata->k_heads = static_cast<uint32_t>(k_heads);
   metadata->head_dim = static_cast<uint32_t>(head_dim);
   metadata->position_components = metadata->positions.rank == 2U ? 3U : 1U;
+  metadata->position_payload_mode = descriptor->reserved[0];
   return SLLM_STATUS_OK;
 }
 

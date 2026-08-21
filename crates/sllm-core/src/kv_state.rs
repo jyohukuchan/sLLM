@@ -51,6 +51,73 @@ impl KvCacheEncoding {
     }
 }
 
+/// Physical ownership selected by a quiescent opaque-state fork.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum StateForkModeV1 {
+    /// Immutable VMM pages are mapped into both owners. A later append must
+    /// privately copy every shared tail page before it becomes writable.
+    SharedReadOnlyPages,
+    /// The destination owns an exact device-side byte copy. This is used for
+    /// contiguous-resident providers and mutable linear/GDN state.
+    DeviceCopy,
+}
+
+/// Redacted accounting returned by a backend after a state fork. It contains
+/// no pointer, allocation handle, token ID, or state payload.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StateForkAuditV1 {
+    mode: StateForkModeV1,
+    published_length: u64,
+    shared_pages: u64,
+    copied_bytes: u64,
+    destination_owned_bytes: u64,
+}
+
+impl StateForkAuditV1 {
+    pub fn new(
+        mode: StateForkModeV1,
+        published_length: u64,
+        shared_pages: u64,
+        copied_bytes: u64,
+        destination_owned_bytes: u64,
+    ) -> Result<Self, KvStateError> {
+        if published_length == 0
+            || (mode == StateForkModeV1::SharedReadOnlyPages
+                && (copied_bytes != 0 || shared_pages == 0))
+            || (mode == StateForkModeV1::DeviceCopy && shared_pages != 0)
+        {
+            return Err(KvStateError::InvalidForkAudit);
+        }
+        Ok(Self {
+            mode,
+            published_length,
+            shared_pages,
+            copied_bytes,
+            destination_owned_bytes,
+        })
+    }
+
+    pub const fn mode(self) -> StateForkModeV1 {
+        self.mode
+    }
+
+    pub const fn published_length(self) -> u64 {
+        self.published_length
+    }
+
+    pub const fn shared_pages(self) -> u64 {
+        self.shared_pages
+    }
+
+    pub const fn copied_bytes(self) -> u64 {
+        self.copied_bytes
+    }
+
+    pub const fn destination_owned_bytes(self) -> u64 {
+        self.destination_owned_bytes
+    }
+}
+
 /// Backend-neutral KV geometry. Physical dtype and quantization encoding live
 /// on [`KvStateDescriptor`], so geometry-only callers cannot accidentally
 /// infer FP16 storage for a low-bit state.
@@ -155,6 +222,7 @@ pub enum KvStateError {
     LengthMismatch { expected: u64, actual: u64 },
     LengthOutOfBounds { length: u64, capacity: u64 },
     InvalidPhysicalMemory,
+    InvalidForkAudit,
 }
 
 impl fmt::Display for KvStateError {
@@ -181,6 +249,7 @@ impl fmt::Display for KvStateError {
             Self::InvalidPhysicalMemory => formatter.write_str(
                 "KV physical-memory metadata must be page-aligned and within logical capacity",
             ),
+            Self::InvalidForkAudit => formatter.write_str("invalid opaque-state fork audit"),
         }
     }
 }

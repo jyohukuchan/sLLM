@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 pub const MAX_GRAMMAR_BYTES: usize = 64 * 1024;
 pub const MAX_GRAMMAR_RULES: usize = 1024;
@@ -25,6 +26,10 @@ pub const MAX_TOKEN_PIECE_BYTES: usize = 128;
 pub const MAX_TOKEN_TRIE_NODES: usize = 33_554_432;
 pub const MAX_JSON_ENUM: usize = 256;
 pub const MAX_JSON_PROPERTIES: usize = 1024;
+pub const GRAMMAR_RUNTIME_STATE_SCHEMA_V1: &str = "sllm-grammar-runtime-state-v1";
+const GRAMMAR_RUNTIME_MAGIC: [u8; 8] = *b"SLLMGRM1";
+const GRAMMAR_RUNTIME_VERSION: u16 = 1;
+pub const MAX_GRAMMAR_RUNTIME_STATE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GrammarError {
@@ -61,6 +66,10 @@ pub enum GrammarError {
     InvalidSchema(String),
     RemoteReference(String),
     RecursiveReference(String),
+    RuntimeStateTooLarge,
+    RuntimeStateMalformed,
+    RuntimeStateVersionUnsupported { version: u16 },
+    RuntimeStateIdentityMismatch,
 }
 
 impl fmt::Display for GrammarError {
@@ -123,6 +132,16 @@ impl fmt::Display for GrammarError {
                 f,
                 "recursive JSON Schema reference is unsupported: {reference}"
             ),
+            Self::RuntimeStateTooLarge => {
+                f.write_str("grammar runtime state exceeds its bounded size")
+            }
+            Self::RuntimeStateMalformed => f.write_str("grammar runtime state is malformed"),
+            Self::RuntimeStateVersionUnsupported { version } => {
+                write!(f, "unsupported grammar runtime state version {version}")
+            }
+            Self::RuntimeStateIdentityMismatch => {
+                f.write_str("grammar runtime state identity differs from the grammar")
+            }
         }
     }
 }
@@ -259,12 +278,23 @@ impl Utf8State {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GrammarState {
     grammar: CompiledGrammar,
     active: Vec<ActivePath>,
     utf8: Utf8State,
     accepted_bytes: usize,
+}
+
+impl fmt::Debug for GrammarState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GrammarState")
+            .field("active_state_count", &self.active.len())
+            .field("utf8_boundary", &self.is_utf8_boundary())
+            .field("accepted_bytes", &self.accepted_bytes)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -292,6 +322,76 @@ impl GrammarState {
 
     pub fn clone_state(&self) -> Self {
         self.clone()
+    }
+
+    /// Encodes the mutable grammar matcher state with a bounded, versioned
+    /// representation. The compiled grammar identity is included so state
+    /// cannot be restored against a different grammar.
+    pub fn snapshot(&self) -> Result<Vec<u8>, GrammarError> {
+        let repeat_limits = grammar_repeat_limits(&self.grammar);
+        let total_bytes = grammar_snapshot_size(&self.active, self.grammar.states.len())?;
+        if total_bytes > MAX_GRAMMAR_RUNTIME_STATE_BYTES
+            || self.active.is_empty()
+            || self.active.len() > MAX_GRAMMAR_ACTIVE_STATES
+        {
+            return Err(GrammarError::RuntimeStateTooLarge);
+        }
+        let accepted_bytes =
+            u64::try_from(self.accepted_bytes).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+        let mut bytes = Vec::with_capacity(total_bytes);
+        bytes.extend_from_slice(&GRAMMAR_RUNTIME_MAGIC);
+        bytes.extend_from_slice(&GRAMMAR_RUNTIME_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&self.grammar.identity_digest());
+        bytes.extend_from_slice(&accepted_bytes.to_le_bytes());
+        encode_utf8_state(&self.utf8, &mut bytes);
+        bytes.extend_from_slice(&(self.active.len() as u32).to_le_bytes());
+        let mut seen = BTreeSet::new();
+        for path in &self.active {
+            validate_active_path(&self.grammar, path, &repeat_limits)?;
+            if !seen.insert(path) {
+                return Err(GrammarError::RuntimeStateMalformed);
+            }
+            bytes.extend_from_slice(
+                &u32::try_from(path.state)
+                    .map_err(|_| GrammarError::RuntimeStateTooLarge)?
+                    .to_le_bytes(),
+            );
+            bytes.extend_from_slice(&(path.repeats.len() as u32).to_le_bytes());
+            for (&id, &count) in &path.repeats {
+                bytes.extend_from_slice(
+                    &u32::try_from(id)
+                        .map_err(|_| GrammarError::RuntimeStateTooLarge)?
+                        .to_le_bytes(),
+                );
+                bytes.extend_from_slice(
+                    &u32::try_from(count)
+                        .map_err(|_| GrammarError::RuntimeStateTooLarge)?
+                        .to_le_bytes(),
+                );
+            }
+            bytes.extend_from_slice(&(path.returns.len() as u32).to_le_bytes());
+            for &return_state in &path.returns {
+                bytes.extend_from_slice(
+                    &u32::try_from(return_state)
+                        .map_err(|_| GrammarError::RuntimeStateTooLarge)?
+                        .to_le_bytes(),
+                );
+            }
+        }
+        if bytes.len() != total_bytes || bytes.len() > MAX_GRAMMAR_RUNTIME_STATE_BYTES {
+            return Err(GrammarError::RuntimeStateTooLarge);
+        }
+        Ok(bytes)
+    }
+
+    /// Transactionally replaces this matcher state from a snapshot.
+    pub fn restore_snapshot(&mut self, bytes: &[u8]) -> Result<(), GrammarError> {
+        let restored = self.grammar.restore_state(bytes)?;
+        self.active = restored.active;
+        self.utf8 = restored.utf8;
+        self.accepted_bytes = restored.accepted_bytes;
+        Ok(())
     }
 
     pub fn utf8_state(&self) -> &Utf8State {
@@ -412,6 +512,293 @@ impl CompiledGrammar {
 
     pub fn state_count(&self) -> usize {
         self.states.len()
+    }
+
+    /// Stable identity for the compiled grammar topology and byte predicates.
+    pub fn identity_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(GRAMMAR_RUNTIME_STATE_SCHEMA_V1.as_bytes());
+        digest.update((self.states.len() as u64).to_le_bytes());
+        digest.update((self.start as u64).to_le_bytes());
+        digest.update((self.accept as u64).to_le_bytes());
+        for state in &self.states {
+            digest.update([u8::from(state.accept)]);
+            digest.update((state.edges.len() as u64).to_le_bytes());
+            for edge in &state.edges {
+                hash_edge(&mut digest, edge);
+            }
+        }
+        digest.finalize().into()
+    }
+
+    /// Decodes a grammar matcher state after validating identity and all
+    /// bounded NFA stack/state references.
+    pub fn restore_state(&self, bytes: &[u8]) -> Result<GrammarState, GrammarError> {
+        let mut cursor = GrammarRuntimeCursor::new(bytes)?;
+        let version = cursor.u16()?;
+        if version != GRAMMAR_RUNTIME_VERSION {
+            return Err(GrammarError::RuntimeStateVersionUnsupported { version });
+        }
+        if cursor.u16()? != 0 {
+            return Err(GrammarError::RuntimeStateMalformed);
+        }
+        let mut expected_digest = [0u8; 32];
+        expected_digest.copy_from_slice(cursor.take(32)?);
+        if expected_digest != self.identity_digest() {
+            return Err(GrammarError::RuntimeStateIdentityMismatch);
+        }
+        let accepted_bytes =
+            usize::try_from(cursor.u64()?).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+        let utf8 = decode_utf8_state(cursor.take(4)?)?;
+        let active_len =
+            usize::try_from(cursor.u32()?).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+        if active_len == 0 || active_len > MAX_GRAMMAR_ACTIVE_STATES {
+            return Err(GrammarError::RuntimeStateTooLarge);
+        }
+        let repeat_limits = grammar_repeat_limits(self);
+        let mut active = Vec::with_capacity(active_len);
+        let mut seen = BTreeSet::new();
+        for _ in 0..active_len {
+            let state =
+                usize::try_from(cursor.u32()?).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+            let repeat_len =
+                usize::try_from(cursor.u32()?).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+            if repeat_len > MAX_GRAMMAR_STACK {
+                return Err(GrammarError::RuntimeStateTooLarge);
+            }
+            let mut repeats = BTreeMap::new();
+            for _ in 0..repeat_len {
+                let id = usize::try_from(cursor.u32()?)
+                    .map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+                let count = usize::try_from(cursor.u32()?)
+                    .map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+                if repeats.insert(id, count).is_some() {
+                    return Err(GrammarError::RuntimeStateMalformed);
+                }
+            }
+            let returns_len =
+                usize::try_from(cursor.u32()?).map_err(|_| GrammarError::RuntimeStateTooLarge)?;
+            if returns_len > MAX_GRAMMAR_STACK {
+                return Err(GrammarError::RuntimeStateTooLarge);
+            }
+            let mut returns = Vec::with_capacity(returns_len);
+            for _ in 0..returns_len {
+                returns.push(
+                    usize::try_from(cursor.u32()?)
+                        .map_err(|_| GrammarError::RuntimeStateTooLarge)?,
+                );
+            }
+            let path = ActivePath {
+                state,
+                repeats,
+                returns,
+            };
+            validate_active_path(self, &path, &repeat_limits)?;
+            if !seen.insert(path.clone()) {
+                return Err(GrammarError::RuntimeStateMalformed);
+            }
+            active.push(path);
+        }
+        cursor.finish()?;
+        Ok(GrammarState {
+            grammar: self.clone(),
+            active,
+            utf8,
+            accepted_bytes,
+        })
+    }
+}
+
+fn hash_edge(digest: &mut Sha256, edge: &Edge) {
+    match edge {
+        Edge::Epsilon(target) => {
+            digest.update([0]);
+            digest.update((*target as u64).to_le_bytes());
+        }
+        Edge::Bytes(set, target) => {
+            digest.update([1]);
+            for word in set.0 {
+                digest.update(word.to_le_bytes());
+            }
+            digest.update((*target as u64).to_le_bytes());
+        }
+        Edge::Call {
+            target,
+            return_state,
+        } => {
+            digest.update([2]);
+            digest.update((*target as u64).to_le_bytes());
+            digest.update((*return_state as u64).to_le_bytes());
+        }
+        Edge::Return => digest.update([3]),
+        Edge::RepeatEnter { target, id } => {
+            digest.update([4]);
+            digest.update((*target as u64).to_le_bytes());
+            digest.update((*id as u64).to_le_bytes());
+        }
+        Edge::RepeatExit {
+            target,
+            body_start,
+            id,
+            min,
+            max,
+        } => {
+            digest.update([5]);
+            digest.update((*target as u64).to_le_bytes());
+            digest.update((*body_start as u64).to_le_bytes());
+            digest.update((*id as u64).to_le_bytes());
+            digest.update((*min as u64).to_le_bytes());
+            digest.update((*max as u64).to_le_bytes());
+        }
+    }
+}
+
+fn grammar_repeat_limits(grammar: &CompiledGrammar) -> BTreeMap<usize, usize> {
+    let mut limits = BTreeMap::new();
+    for state in &grammar.states {
+        for edge in &state.edges {
+            if let Edge::RepeatExit { id, max, .. } = edge {
+                limits.insert(*id, *max);
+            }
+        }
+    }
+    limits
+}
+
+fn validate_active_path(
+    grammar: &CompiledGrammar,
+    path: &ActivePath,
+    repeat_limits: &BTreeMap<usize, usize>,
+) -> Result<(), GrammarError> {
+    if path.state >= grammar.states.len()
+        || path.returns.len() > MAX_GRAMMAR_STACK
+        || path.repeats.len() > MAX_GRAMMAR_STACK
+        || path
+            .returns
+            .iter()
+            .any(|&state| state >= grammar.states.len())
+    {
+        return Err(GrammarError::RuntimeStateMalformed);
+    }
+    for (&id, &count) in &path.repeats {
+        let Some(&max) = repeat_limits.get(&id) else {
+            return Err(GrammarError::RuntimeStateMalformed);
+        };
+        if count > max || count > MAX_GRAMMAR_REPEAT {
+            return Err(GrammarError::RuntimeStateMalformed);
+        }
+    }
+    Ok(())
+}
+
+fn grammar_snapshot_size(active: &[ActivePath], state_count: usize) -> Result<usize, GrammarError> {
+    if active.len() > MAX_GRAMMAR_ACTIVE_STATES {
+        return Err(GrammarError::RuntimeStateTooLarge);
+    }
+    let mut size = 8usize
+        .checked_add(2 + 2 + 32 + 8 + 4 + 4)
+        .ok_or(GrammarError::RuntimeStateTooLarge)?;
+    for path in active {
+        if path.state >= state_count
+            || path.repeats.len() > MAX_GRAMMAR_STACK
+            || path.returns.len() > MAX_GRAMMAR_STACK
+        {
+            return Err(GrammarError::RuntimeStateMalformed);
+        }
+        size = size
+            .checked_add(8)
+            .and_then(|size| size.checked_add(path.repeats.len().checked_mul(8)?))
+            .and_then(|size| size.checked_add(4))
+            .and_then(|size| size.checked_add(path.returns.len().checked_mul(4)?))
+            .ok_or(GrammarError::RuntimeStateTooLarge)?;
+        if size > MAX_GRAMMAR_RUNTIME_STATE_BYTES {
+            return Err(GrammarError::RuntimeStateTooLarge);
+        }
+    }
+    Ok(size)
+}
+
+fn encode_utf8_state(state: &Utf8State, bytes: &mut Vec<u8>) {
+    match state {
+        Utf8State::Complete => bytes.extend_from_slice(&[0, 0, 0, 0]),
+        Utf8State::Partial { expected, seen } => bytes.extend_from_slice(&[1, *expected, *seen, 0]),
+    }
+}
+
+fn decode_utf8_state(bytes: &[u8]) -> Result<Utf8State, GrammarError> {
+    if bytes.len() != 4 || bytes[3] != 0 {
+        return Err(GrammarError::RuntimeStateMalformed);
+    }
+    match bytes[0] {
+        0 if bytes[1] == 0 && bytes[2] == 0 => Ok(Utf8State::Complete),
+        1 if (2..=4).contains(&bytes[1]) && (1..bytes[1]).contains(&bytes[2]) => {
+            Ok(Utf8State::Partial {
+                expected: bytes[1],
+                seen: bytes[2],
+            })
+        }
+        _ => Err(GrammarError::RuntimeStateMalformed),
+    }
+}
+
+struct GrammarRuntimeCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> GrammarRuntimeCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Result<Self, GrammarError> {
+        if bytes.len() > MAX_GRAMMAR_RUNTIME_STATE_BYTES {
+            return Err(GrammarError::RuntimeStateTooLarge);
+        }
+        if bytes.len() < GRAMMAR_RUNTIME_MAGIC.len()
+            || bytes[..GRAMMAR_RUNTIME_MAGIC.len()] != GRAMMAR_RUNTIME_MAGIC
+        {
+            return Err(GrammarError::RuntimeStateMalformed);
+        }
+        Ok(Self {
+            bytes,
+            offset: GRAMMAR_RUNTIME_MAGIC.len(),
+        })
+    }
+
+    fn take(&mut self, length: usize) -> Result<&'a [u8], GrammarError> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(GrammarError::RuntimeStateTooLarge)?;
+        if end > self.bytes.len() {
+            return Err(GrammarError::RuntimeStateMalformed);
+        }
+        let result = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(result)
+    }
+
+    fn u16(&mut self) -> Result<u16, GrammarError> {
+        let mut bytes = [0u8; 2];
+        bytes.copy_from_slice(self.take(2)?);
+        Ok(u16::from_le_bytes(bytes))
+    }
+
+    fn u32(&mut self) -> Result<u32, GrammarError> {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(self.take(4)?);
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn u64(&mut self) -> Result<u64, GrammarError> {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(self.take(8)?);
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn finish(self) -> Result<(), GrammarError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(GrammarError::RuntimeStateMalformed)
+        }
     }
 }
 
@@ -1770,5 +2157,58 @@ mod tests {
             .accept(b"a,b,{c}")
             .expect("three repeated values with a nested rule");
         assert!(state.is_finished());
+    }
+
+    #[test]
+    fn grammar_snapshot_roundtrip_preserves_utf8_and_active_paths() {
+        let grammar = CompiledGrammar::compile("root ::= \"é\"").unwrap();
+        let mut state = grammar.initial_state();
+        state.accept(&[0xc3]).unwrap();
+        let snapshot = state.snapshot().unwrap();
+        let mut restored = grammar.restore_state(&snapshot).unwrap();
+        assert_eq!(restored.accepted_bytes(), state.accepted_bytes());
+        assert_eq!(restored.utf8_state(), state.utf8_state());
+        assert_eq!(restored.active_state_count(), state.active_state_count());
+        state.accept(&[0xa9]).unwrap();
+        restored.accept(&[0xa9]).unwrap();
+        assert_eq!(restored.is_finished(), state.is_finished());
+        let debug = format!("{restored:?}");
+        assert!(debug.contains("GrammarState"));
+        assert!(!debug.contains("195"));
+    }
+
+    #[test]
+    fn grammar_snapshot_rejects_identity_corruption_and_bounds() {
+        let grammar = CompiledGrammar::compile("root ::= \"a\"").unwrap();
+        let state = grammar.initial_state();
+        let snapshot = state.snapshot().unwrap();
+        let different = CompiledGrammar::compile("root ::= \"b\"").unwrap();
+        assert!(matches!(
+            different.restore_state(&snapshot),
+            Err(GrammarError::RuntimeStateIdentityMismatch)
+        ));
+        assert!(matches!(
+            grammar.restore_state(&snapshot[..snapshot.len() - 1]),
+            Err(GrammarError::RuntimeStateMalformed)
+        ));
+        let mut unsupported = snapshot.clone();
+        unsupported[8] = 2;
+        assert!(matches!(
+            grammar.restore_state(&unsupported),
+            Err(GrammarError::RuntimeStateVersionUnsupported { version: 2 })
+        ));
+        assert!(matches!(
+            grammar.restore_state(&vec![0_u8; MAX_GRAMMAR_RUNTIME_STATE_BYTES + 1]),
+            Err(GrammarError::RuntimeStateTooLarge)
+        ));
+    }
+
+    #[test]
+    fn compiled_grammar_identity_is_stable_and_structure_sensitive() {
+        let first = CompiledGrammar::compile("root ::= \"a\"").unwrap();
+        let same = CompiledGrammar::compile("root ::= \"a\"").unwrap();
+        let different = CompiledGrammar::compile("root ::= \"b\"").unwrap();
+        assert_eq!(first.identity_digest(), same.identity_digest());
+        assert_ne!(first.identity_digest(), different.identity_digest());
     }
 }

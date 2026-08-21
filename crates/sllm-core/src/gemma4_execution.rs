@@ -6,13 +6,17 @@
 //! In particular, decode K/V tails are represented as checked subviews of the
 //! same request-state buffers later consumed as committed attention prefixes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+
+use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::gemma4::Gemma4LayerType;
 use crate::gemma4_graph::{GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphNodeKind, Gemma4NormRole};
+use crate::kv_state::{KvCacheEncoding, KvStateDescriptor};
 use crate::op::TokenSelectorContractV1;
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
 use crate::prepared_execution::{
@@ -20,16 +24,21 @@ use crate::prepared_execution::{
     PreparedDynamicIdentity, PreparedExecutionAudit, PreparedSemanticCache,
     require_terminal_success,
 };
+use crate::session_checkpoint::{
+    CheckpointIdentity, CheckpointPayload, OpaqueStatePlane, SessionCheckpoint,
+    StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
+};
 use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
 use crate::{
     AccessMode, AllocationCategory, BoundSemanticOp, DType, DeviceTokenSelectorRequestV1, Encoding,
-    ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding,
-    PrepareSupport, QuantizedTensorEncoding, SamplingSelectionV1, ScalePlaneRole, TensorDType,
-    TensorView, VerifiedCache, VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar,
-    VerifiedUnslothGemma4Nvfp4, WeightUploadRequest, upload_verified_weight,
+    ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionState, ExecutionStateImageV1,
+    KvState, OwnedTensorBinding, PrepareSupport, QuantizedTensorEncoding, SamplingSelectionV1,
+    ScalePlaneRole, StateForkAuditV1, TensorDType, TensorView, VerifiedCache,
+    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest,
+    upload_verified_weight,
 };
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Gemma4KvPlane {
     Key,
     Value,
@@ -197,6 +206,7 @@ pub struct Gemma4ProvisionedBuffers {
 }
 
 /// Immutable Gemma weights and constants retained across request owners.
+#[derive(Clone)]
 pub struct Gemma4ResidentModel {
     inner: Arc<Gemma4ResidentInner>,
 }
@@ -292,6 +302,429 @@ pub struct Gemma4ExecutionOutput {
     audit: PreparedExecutionAudit,
 }
 
+/// Redacted accounting for the opaque full-attention state forks that make up
+/// one immutable Gemma prefix owner.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Gemma4PrefixForkAuditV1 {
+    kv_states: u32,
+    sliding_layers: u32,
+    sliding_planes: u32,
+    shared_pages: u64,
+    copied_bytes: u64,
+    destination_owned_bytes: u64,
+    cache_resident_bytes: u64,
+}
+
+impl Gemma4PrefixForkAuditV1 {
+    pub const fn kv_states(self) -> u32 {
+        self.kv_states
+    }
+
+    pub const fn shared_pages(self) -> u64 {
+        self.shared_pages
+    }
+
+    /// Number of sliding-attention layers cloned into the immutable owner.
+    pub const fn sliding_layers(self) -> u32 {
+        self.sliding_layers
+    }
+
+    /// Number of sliding-attention K/V planes cloned into the immutable owner.
+    pub const fn sliding_planes(self) -> u32 {
+        self.sliding_planes
+    }
+
+    pub const fn copied_bytes(self) -> u64 {
+        self.copied_bytes
+    }
+
+    pub const fn destination_owned_bytes(self) -> u64 {
+        self.destination_owned_bytes
+    }
+
+    /// Resident bytes attributable to this immutable prefix owner. Shared
+    /// VMM KV pages are charged from backend physical-memory metadata; the
+    /// destination-owned count alone is zero for a read-only fork and is
+    /// therefore not a sufficient cache quota signal.
+    pub const fn cache_resident_bytes(self) -> u64 {
+        self.cache_resident_bytes
+    }
+
+    fn add(
+        &mut self,
+        audit: StateForkAuditV1,
+        cache_resident_bytes: u64,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        self.kv_states = self
+            .kv_states
+            .checked_add(1)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma KV fork count overflowed"))?;
+        self.shared_pages = self
+            .shared_pages
+            .checked_add(audit.shared_pages())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma shared page count overflowed")
+            })?;
+        self.copied_bytes = self
+            .copied_bytes
+            .checked_add(audit.copied_bytes())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma fork copied-byte count overflowed")
+            })?;
+        self.destination_owned_bytes = self
+            .destination_owned_bytes
+            .checked_add(audit.destination_owned_bytes())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma fork owned-byte count overflowed")
+            })?;
+        self.cache_resident_bytes = self
+            .cache_resident_bytes
+            .checked_add(cache_resident_bytes)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma prefix resident-byte count overflowed")
+            })?;
+        Ok(())
+    }
+
+    fn add_sliding_plane(
+        &mut self,
+        is_first_plane_for_layer: bool,
+        audit: crate::DeviceCopyAuditV1,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        self.sliding_planes = self.sliding_planes.checked_add(1).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma sliding KV plane count overflowed")
+        })?;
+        if is_first_plane_for_layer {
+            self.sliding_layers = self.sliding_layers.checked_add(1).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma sliding KV layer count overflowed")
+            })?;
+        }
+        self.copied_bytes = self
+            .copied_bytes
+            .checked_add(audit.copied_bytes())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma sliding copied-byte count overflowed")
+            })?;
+        self.destination_owned_bytes = self
+            .destination_owned_bytes
+            .checked_add(audit.destination_owned_bytes())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma sliding owned-byte count overflowed")
+            })?;
+        self.cache_resident_bytes = self
+            .cache_resident_bytes
+            .checked_add(audit.destination_owned_bytes())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma sliding resident-byte count overflowed")
+            })?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Gemma4SlidingLayerIdentity {
+    heads: u32,
+    head_dim: u32,
+    capacity: u64,
+    retention_window: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Gemma4PrefixIdentityV1 {
+    model_fingerprint: String,
+    plan_digest: [u8; 32],
+    state_capacity: u64,
+    kv_descriptors: BTreeMap<u32, KvStateDescriptor>,
+    sliding_layers: BTreeMap<u32, Gemma4SlidingLayerIdentity>,
+}
+
+/// One encoding-native full-attention KV layer in a Gemma state image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Gemma4KvStateImageV1 {
+    descriptor: KvStateDescriptor,
+    image: ExecutionStateImageV1,
+}
+
+impl Gemma4KvStateImageV1 {
+    pub const fn descriptor(&self) -> KvStateDescriptor {
+        self.descriptor
+    }
+
+    pub const fn image(&self) -> &ExecutionStateImageV1 {
+        &self.image
+    }
+}
+
+/// One exact BF16 sliding-attention K/V layer in a Gemma state image.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Gemma4SlidingStateImageV1 {
+    heads: u32,
+    head_dim: u32,
+    capacity: u64,
+    retention_window: u64,
+    image: ExecutionStateImageV1,
+}
+
+impl Gemma4SlidingStateImageV1 {
+    pub const fn heads(&self) -> u32 {
+        self.heads
+    }
+
+    pub const fn head_dim(&self) -> u32 {
+        self.head_dim
+    }
+
+    pub const fn capacity(&self) -> u64 {
+        self.capacity
+    }
+
+    pub const fn retention_window(&self) -> u64 {
+        self.retention_window
+    }
+
+    pub const fn image(&self) -> &ExecutionStateImageV1 {
+        &self.image
+    }
+
+    const fn identity(&self) -> Gemma4SlidingLayerIdentity {
+        Gemma4SlidingLayerIdentity {
+            heads: self.heads,
+            head_dim: self.head_dim,
+            capacity: self.capacity,
+            retention_window: self.retention_window,
+        }
+    }
+}
+
+/// Complete backend-neutral Gemma request state. Full-attention layers retain
+/// their exact KV encoding planes while sliding-attention layers retain exact
+/// BF16 K/V bytes. Terminal output is optional and is deliberately removed
+/// when flattened into a persistent checkpoint.
+#[derive(Clone, PartialEq)]
+pub struct Gemma4StateImageV1 {
+    session_id: crate::ExecutionSessionId,
+    model_fingerprint: String,
+    plan_digest: [u8; 32],
+    state_capacity: u64,
+    committed_length: u64,
+    rope_position_delta: i64,
+    full_kv_layers: BTreeMap<u32, Gemma4KvStateImageV1>,
+    sliding_layers: BTreeMap<u32, Gemma4SlidingStateImageV1>,
+    cached_terminal_output: Option<Gemma4ExecutionOutput>,
+}
+
+impl fmt::Debug for Gemma4StateImageV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Gemma4StateImageV1")
+            .field("session_id", &self.session_id)
+            .field("model_fingerprint", &"<redacted>")
+            .field("state_capacity", &self.state_capacity)
+            .field("committed_length", &self.committed_length)
+            .field("full_attention_layers", &self.full_kv_layers.len())
+            .field("sliding_attention_layers", &self.sliding_layers.len())
+            .field(
+                "has_cached_terminal_output",
+                &self.cached_terminal_output.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl Gemma4StateImageV1 {
+    pub const fn session_id(&self) -> crate::ExecutionSessionId {
+        self.session_id
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.model_fingerprint
+    }
+
+    pub const fn plan_digest(&self) -> &[u8; 32] {
+        &self.plan_digest
+    }
+
+    pub const fn state_capacity(&self) -> u64 {
+        self.state_capacity
+    }
+
+    pub const fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    pub const fn rope_position_delta(&self) -> i64 {
+        self.rope_position_delta
+    }
+
+    pub fn full_kv_layers(&self) -> &BTreeMap<u32, Gemma4KvStateImageV1> {
+        &self.full_kv_layers
+    }
+
+    pub fn sliding_layers(&self) -> &BTreeMap<u32, Gemma4SlidingStateImageV1> {
+        &self.sliding_layers
+    }
+
+    pub fn cached_terminal_output(&self) -> Option<&Gemma4ExecutionOutput> {
+        self.cached_terminal_output.as_ref()
+    }
+
+    pub fn without_terminal_output(mut self) -> Self {
+        self.cached_terminal_output = None;
+        self
+    }
+
+    pub fn kv_encoding(&self) -> Result<KvCacheEncoding, Gemma4ExecutionLayoutError> {
+        gemma_image_kv_encoding(&self.full_kv_layers)
+    }
+
+    pub fn kv_descriptor_digest(&self) -> Result<[u8; 32], Gemma4ExecutionLayoutError> {
+        gemma_checkpoint_descriptor_digest(&self.full_kv_layers, &self.sliding_layers)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn to_checkpoint(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpoint, Gemma4ExecutionLayoutError> {
+        validate_gemma_state_image(self, false)?;
+        if token_history.len() as u64 != self.committed_length
+            || logical_position != self.committed_length
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint token history or logical position differs from Gemma state",
+            ));
+        }
+        let rope_delta = absolute_position
+            .checked_sub(logical_position)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "checkpoint absolute/logical position delta is invalid",
+                )
+            })?;
+        if rope_delta != self.rope_position_delta
+            || identity.model_lock_fingerprint != self.model_fingerprint
+            || identity.plan_digest != gemma_hex_digest(&self.plan_digest)
+            || identity.kv_encoding != self.kv_encoding()?
+            || identity.kv_descriptor_digest != self.kv_descriptor_digest()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint identity or position differs from Gemma state",
+            ));
+        }
+        let mut state_layers = Vec::with_capacity(
+            self.full_kv_layers
+                .len()
+                .saturating_add(self.sliding_layers.len()),
+        );
+        let mut state_planes = Vec::new();
+        for entry in self.full_kv_layers.values() {
+            state_layers.push(entry.image.metadata().clone());
+            state_planes.extend(entry.image.planes().iter().cloned());
+        }
+        for entry in self.sliding_layers.values() {
+            state_layers.push(entry.image.metadata().clone());
+            state_planes.extend(entry.image.planes().iter().cloned());
+        }
+        SessionCheckpoint::new(
+            identity,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+            CheckpointPayload {
+                token_history: token_history.to_vec(),
+                conversation: conversation.to_vec(),
+                state_layers,
+                state_planes,
+                sampler_state: sampler_state.to_vec(),
+                grammar_state: grammar_state.to_vec(),
+                stop_state: stop_state.to_vec(),
+            },
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+}
+
+/// Immutable, request-independent Gemma prefix owner. It contains only
+/// quiescent full-attention KV forks, exact device-owned sliding K/V ranges,
+/// and terminal metadata; request workspace, queue, prepared operations, and
+/// in-flight completions are not retained.
+pub struct Gemma4PrefixStateV1 {
+    inner: Arc<Gemma4PrefixStateInner>,
+}
+
+struct Gemma4PrefixStateInner {
+    session: Arc<ExecutionSession>,
+    identity: Gemma4PrefixIdentityV1,
+    committed_length: u64,
+    rope_position_delta: i64,
+    kv_states: BTreeMap<u32, KvState>,
+    sliding_buffers: BTreeMap<(u32, Gemma4KvPlane), ExecutionBuffer>,
+    sliding_bytes: BTreeMap<(u32, Gemma4KvPlane), u64>,
+    cached_terminal_output: Gemma4ExecutionOutput,
+    fork_audit: Gemma4PrefixForkAuditV1,
+}
+
+impl fmt::Debug for Gemma4PrefixStateV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Gemma4PrefixStateV1")
+            .field("session", &self.inner.session.id())
+            .field("committed_length", &self.inner.committed_length)
+            .field("state_capacity", &self.inner.identity.state_capacity)
+            .field("fork_audit", &self.inner.fork_audit)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for Gemma4PrefixStateV1 {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl Gemma4PrefixStateV1 {
+    pub fn committed_length(&self) -> u64 {
+        self.inner.committed_length
+    }
+
+    pub fn state_capacity(&self) -> u64 {
+        self.inner.identity.state_capacity
+    }
+
+    /// Absolute RoPE position minus compact logical position for the next
+    /// token in this prefix owner.
+    pub fn rope_position_delta(&self) -> i64 {
+        self.inner.rope_position_delta
+    }
+
+    pub fn fork_audit(&self) -> Gemma4PrefixForkAuditV1 {
+        self.inner.fork_audit
+    }
+
+    pub fn model_fingerprint(&self) -> &str {
+        &self.inner.identity.model_fingerprint
+    }
+
+    pub fn plan_digest(&self) -> &[u8; 32] {
+        &self.inner.identity.plan_digest
+    }
+
+    pub fn cached_terminal_output(&self) -> &Gemma4ExecutionOutput {
+        &self.inner.cached_terminal_output
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Gemma4ExecutionOptions {
     pub binding_generation: u64,
@@ -349,9 +782,12 @@ pub struct Gemma4ExecutionRequest {
     state: crate::Gemma4RequestState,
     completion_timeout: Duration,
     committed_length: u64,
+    rope_position_delta: i64,
+    rotary_position_mode: crate::RotaryPositionModeV1,
     binding_generation: u64,
     audit: Option<Gemma4ExecutionAudit>,
     opaque_kv_states: Option<BTreeMap<u32, crate::KvState>>,
+    last_output: Option<Gemma4ExecutionOutput>,
 }
 
 impl fmt::Debug for Gemma4ResidentModel {
@@ -365,7 +801,435 @@ impl fmt::Debug for Gemma4ResidentModel {
     }
 }
 
+fn gemma_full_kv_state_descriptor(
+    descriptor: &crate::Gemma4KvDescriptor,
+    quantized: Option<&dyn GemmaQuantizedSource>,
+) -> Result<KvStateDescriptor, Gemma4ExecutionLayoutError> {
+    if descriptor.retention_window.is_some() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "sliding-attention layer cannot use opaque full-attention KV state",
+        ));
+    }
+    match quantized {
+        Some(artifact) => {
+            let scales = artifact.kv_scale(descriptor.layer).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("quantized Gemma static KV scale is absent")
+            })?;
+            KvStateDescriptor::new_with_static_fp8(
+                descriptor.layer,
+                descriptor.capacity,
+                descriptor.heads as usize,
+                descriptor.head_dim as usize,
+                scales.key_decode_scale(),
+                scales.value_decode_scale(),
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+        }
+        None => KvStateDescriptor::new_with_storage(
+            descriptor.layer,
+            descriptor.capacity,
+            descriptor.heads as usize,
+            descriptor.head_dim as usize,
+            KvCacheEncoding::Fp16,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string())),
+    }
+}
+
+fn gemma_full_attention_layers(graph: &Gemma4Graph) -> BTreeSet<u32> {
+    graph
+        .kv_descriptors()
+        .iter()
+        .filter(|descriptor| descriptor.retention_window.is_none())
+        .map(|descriptor| descriptor.layer)
+        .collect()
+}
+
+fn gemma_sliding_layer_identities(
+    graph: &Gemma4Graph,
+) -> BTreeMap<u32, Gemma4SlidingLayerIdentity> {
+    graph
+        .kv_descriptors()
+        .iter()
+        .filter_map(|descriptor| {
+            descriptor.retention_window.map(|retention_window| {
+                (
+                    descriptor.layer,
+                    Gemma4SlidingLayerIdentity {
+                        heads: descriptor.heads,
+                        head_dim: descriptor.head_dim,
+                        capacity: descriptor.capacity,
+                        retention_window,
+                    },
+                )
+            })
+        })
+        .collect()
+}
+
+fn gemma_sliding_plane_bytes(
+    identity: Gemma4SlidingLayerIdentity,
+    committed_length: u64,
+) -> Result<u64, Gemma4ExecutionLayoutError> {
+    committed_length
+        .checked_mul(u64::from(identity.heads))
+        .and_then(|bytes| bytes.checked_mul(u64::from(identity.head_dim)))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("Gemma sliding KV byte range overflowed")
+        })
+}
+
+fn gemma_request_kv_tensor(
+    layout: &Gemma4ExecutionLayout,
+    layer: u32,
+    plane: Gemma4KvPlane,
+) -> Result<&Gemma4ExecutionTensor, Gemma4ExecutionLayoutError> {
+    layout
+        .tensors
+        .iter()
+        .find(|tensor| tensor.backing == Gemma4TensorBacking::RequestKv { layer, plane })
+        .ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid(format!(
+                "Gemma sliding request K/V tensor is absent for layer {layer} plane {plane:?}"
+            ))
+        })
+}
+
+fn validate_gemma_sliding_tensor(
+    tensor: &Gemma4ExecutionTensor,
+    identity: Gemma4SlidingLayerIdentity,
+    committed_length: u64,
+    expected_bytes: u64,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let shape = tensor.view.shape();
+    let capacity = usize::try_from(identity.capacity).map_err(|_| {
+        Gemma4ExecutionLayoutError::invalid("Gemma sliding capacity does not fit usize")
+    })?;
+    let committed = usize::try_from(committed_length).map_err(|_| {
+        Gemma4ExecutionLayoutError::invalid("Gemma prefix length does not fit usize")
+    })?;
+    if tensor.view.dtype() != DType::Bf16
+        || tensor.view.encoding() != Encoding::Unquantized
+        || !tensor.view.is_contiguous()
+        || shape.len() != 3
+        || shape[0] != capacity
+        || shape[1] != identity.heads as usize
+        || shape[2] != identity.head_dim as usize
+        || committed > shape[0]
+        || expected_bytes > tensor.view.payload_bytes()
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "Gemma sliding K/V tensor layout differs for layer with {} heads",
+            identity.heads
+        )));
+    }
+    Ok(())
+}
+
+fn gemma_hex_digest(bytes: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(71);
+    output.push_str("sha256:");
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(output, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    output
+}
+
+fn gemma_kv_plane_kinds(encoding: KvCacheEncoding) -> &'static [StatePlaneKindV1] {
+    use StatePlaneKindV1::*;
+    match encoding {
+        KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => &[KvKey, KvValue],
+        KvCacheEncoding::Fp8E4M3Fn => &[KvKey, KvValue, KvKeyScale, KvValueScale],
+        KvCacheEncoding::Nvfp4 => &[
+            KvKey,
+            KvValue,
+            KvKeyScale,
+            KvValueScale,
+            KvKeyOuterScale,
+            KvValueOuterScale,
+        ],
+    }
+}
+
+fn gemma_image_kv_encoding(
+    full_layers: &BTreeMap<u32, Gemma4KvStateImageV1>,
+) -> Result<KvCacheEncoding, Gemma4ExecutionLayoutError> {
+    let encoding = full_layers
+        .values()
+        .next()
+        .map(|entry| entry.descriptor.cache_encoding())
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma state image has no full KV"))?;
+    if full_layers
+        .values()
+        .any(|entry| entry.descriptor.cache_encoding() != encoding)
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma full-attention KV encodings are not uniform",
+        ));
+    }
+    Ok(encoding)
+}
+
+fn gemma_checkpoint_descriptor_digest(
+    full_layers: &BTreeMap<u32, Gemma4KvStateImageV1>,
+    sliding_layers: &BTreeMap<u32, Gemma4SlidingStateImageV1>,
+) -> Result<[u8; 32], Gemma4ExecutionLayoutError> {
+    let encoding = gemma_image_kv_encoding(full_layers)?;
+    let full_descriptors = full_layers
+        .iter()
+        .map(|(&layer, entry)| (layer, entry.descriptor))
+        .collect::<BTreeMap<_, _>>();
+    let sliding_identities = sliding_layers
+        .iter()
+        .map(|(&layer, entry)| (layer, entry.identity()))
+        .collect::<BTreeMap<_, _>>();
+    Ok(gemma_checkpoint_descriptor_digest_from_parts(
+        encoding,
+        &full_descriptors,
+        &sliding_identities,
+    ))
+}
+
+fn gemma_checkpoint_descriptor_digest_from_parts(
+    encoding: KvCacheEncoding,
+    full_layers: &BTreeMap<u32, KvStateDescriptor>,
+    sliding_layers: &BTreeMap<u32, Gemma4SlidingLayerIdentity>,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"sllm-gemma4-checkpoint-descriptors-v1");
+    digest.update([match encoding {
+        KvCacheEncoding::Fp16 => 1,
+        KvCacheEncoding::Fp8E4M3Fn => 2,
+        KvCacheEncoding::Fp8E4M3FnStatic => 3,
+        KvCacheEncoding::Nvfp4 => 4,
+    }]);
+    digest.update((full_layers.len() as u64).to_le_bytes());
+    for (&layer, &descriptor) in full_layers {
+        digest.update([1]);
+        digest.update(layer.to_le_bytes());
+        digest.update(descriptor.layer_id().to_le_bytes());
+        digest.update(descriptor.capacity().to_le_bytes());
+        digest.update((descriptor.layout().heads() as u64).to_le_bytes());
+        digest.update((descriptor.layout().head_dim() as u64).to_le_bytes());
+        match descriptor.static_fp8_scales() {
+            Some((key, value)) => {
+                digest.update([1]);
+                digest.update(key.to_bits().to_le_bytes());
+                digest.update(value.to_bits().to_le_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    digest.update((sliding_layers.len() as u64).to_le_bytes());
+    for (&layer, &entry) in sliding_layers {
+        digest.update([2]);
+        digest.update(layer.to_le_bytes());
+        digest.update(entry.heads.to_le_bytes());
+        digest.update(entry.head_dim.to_le_bytes());
+        digest.update(entry.capacity.to_le_bytes());
+        digest.update(entry.retention_window.to_le_bytes());
+        digest.update(b"bf16-unquantized-key-value");
+    }
+    digest.finalize().into()
+}
+
+fn validate_gemma_layer_image(
+    image: &ExecutionStateImageV1,
+    layer: u32,
+    committed_length: u64,
+    expected_planes: &[StatePlaneKindV1],
+    allow_empty_supplemental_planes: bool,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    let metadata = image.metadata();
+    if metadata.owner != StateOwnerKindV1::Kv
+        || metadata.layer_id != layer
+        || metadata.published_length != committed_length
+        || metadata.active_slot.is_some()
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma state image layer metadata differs",
+        ));
+    }
+    let mut actual = BTreeSet::new();
+    for plane in image.planes() {
+        if plane.owner != StateOwnerKindV1::Kv
+            || plane.layer_id != layer
+            || !actual.insert(plane.plane)
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state image contains a duplicate or mismatched plane",
+            ));
+        }
+        if allow_empty_supplemental_planes
+            && !matches!(
+                plane.plane,
+                StatePlaneKindV1::KvKey | StatePlaneKindV1::KvValue
+            )
+            && !plane.bytes.is_empty()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma sliding supplemental plane must be empty",
+            ));
+        }
+    }
+    if actual != expected_planes.iter().copied().collect() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma state image plane topology differs",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_gemma_state_image(
+    image: &Gemma4StateImageV1,
+    require_terminal_output: bool,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    if image.committed_length == 0 || image.committed_length > image.state_capacity {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma state image length or capacity is invalid",
+        ));
+    }
+    let encoding = image.kv_encoding()?;
+    let expected_full_planes = gemma_kv_plane_kinds(encoding);
+    let full_keys = image
+        .full_kv_layers
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let sliding_keys = image
+        .sliding_layers
+        .keys()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let (expected_full_keys, expected_sliding_keys) = crate::reviewed_layer_schedule()
+        .into_iter()
+        .enumerate()
+        .try_fold(
+            (BTreeSet::new(), BTreeSet::new()),
+            |(mut full, mut sliding), (layer, kind)| {
+                let layer = u32::try_from(layer).map_err(|_| {
+                    Gemma4ExecutionLayoutError::invalid("Gemma layer index does not fit u32")
+                })?;
+                match kind {
+                    Gemma4LayerType::FullAttention => {
+                        full.insert(layer);
+                    }
+                    Gemma4LayerType::SlidingAttention => {
+                        sliding.insert(layer);
+                    }
+                }
+                Ok((full, sliding))
+            },
+        )?;
+    if full_keys != expected_full_keys
+        || sliding_keys != expected_sliding_keys
+        || !full_keys.is_disjoint(&sliding_keys)
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma state image layer topology is invalid",
+        ));
+    }
+    for (&layer, entry) in &image.full_kv_layers {
+        if entry.descriptor.layer_id() != layer
+            || entry.descriptor.capacity() != image.state_capacity
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma full-attention state descriptor differs",
+            ));
+        }
+        validate_gemma_layer_image(
+            &entry.image,
+            layer,
+            image.committed_length,
+            expected_full_planes,
+            false,
+        )?;
+    }
+    let expected_sliding_planes = gemma_kv_plane_kinds(encoding);
+    for (&layer, entry) in &image.sliding_layers {
+        let identity = entry.identity();
+        if identity.capacity != image.state_capacity
+            || identity.heads == 0
+            || identity.head_dim == 0
+            || identity.retention_window == 0
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma sliding-attention state identity differs",
+            ));
+        }
+        validate_gemma_layer_image(
+            &entry.image,
+            layer,
+            image.committed_length,
+            expected_sliding_planes,
+            true,
+        )?;
+        let expected_bytes = gemma_sliding_plane_bytes(identity, image.committed_length)?;
+        for kind in [StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue] {
+            if entry
+                .image
+                .planes()
+                .iter()
+                .find(|plane| plane.plane == kind)
+                .map(|plane| plane.bytes.len() as u64)
+                != Some(expected_bytes)
+            {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "Gemma sliding-attention state byte length differs",
+                ));
+            }
+        }
+    }
+    if let Some(output) = image.cached_terminal_output.as_ref()
+        && output.state().committed_length != image.committed_length
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma cached terminal output length differs from state image",
+        ));
+    }
+    if require_terminal_output && image.cached_terminal_output.is_none() {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma raw state image has no terminal output",
+        ));
+    }
+    Ok(())
+}
+
+fn gemma_checkpoint_layer_image(
+    checkpoint: &SessionCheckpoint,
+    layer: u32,
+) -> Result<ExecutionStateImageV1, Gemma4ExecutionLayoutError> {
+    let metadata = checkpoint
+        .payload
+        .state_layers
+        .iter()
+        .find(|metadata| metadata.owner == StateOwnerKindV1::Kv && metadata.layer_id == layer)
+        .cloned()
+        .ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid(format!(
+                "checkpoint Gemma layer {layer} metadata is absent"
+            ))
+        })?;
+    let planes = checkpoint
+        .payload
+        .state_planes
+        .iter()
+        .filter(|plane| plane.owner == StateOwnerKindV1::Kv && plane.layer_id == layer)
+        .cloned()
+        .collect();
+    Ok(ExecutionStateImageV1::new(metadata, planes))
+}
+
 impl Gemma4ResidentModel {
+    /// Capabilities exposed to the backend-neutral context-window policy.
+    /// The fresh explicit-position factory below is the sole publication
+    /// boundary for a compacted Gemma owner.
+    pub const fn context_adapter_capabilities() -> crate::ContextAdapterCapabilitiesV1 {
+        crate::ContextAdapterCapabilitiesV1::new(1, 1, 1, true, true)
+    }
+
     /// Uploads the immutable BF16 model and derived constants exactly once.
     pub fn new(
         session: Arc<ExecutionSession>,
@@ -530,17 +1394,31 @@ impl Gemma4ResidentModel {
         prefill_token_count: u64,
         state_capacity: u64,
     ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_with_position_mode(
+            prefill_token_count,
+            state_capacity,
+            crate::RotaryPositionModeV1::Contiguous,
+        )
+    }
+
+    fn new_request_with_position_mode(
+        &self,
+        prefill_token_count: u64,
+        state_capacity: u64,
+        position_mode: crate::RotaryPositionModeV1,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
         if prefill_token_count == 0 || state_capacity < prefill_token_count {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "Gemma request token count or capacity is invalid",
             ));
         }
-        let graph = crate::build_gemma4_graph(
+        let graph = crate::build_gemma4_graph_with_position_mode(
             &self.inner.lock,
             &self.inner.plan,
             prefill_token_count,
             0,
             state_capacity,
+            position_mode,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self.inner.quantized_model.as_deref() {
@@ -553,46 +1431,60 @@ impl Gemma4ResidentModel {
                 None => build_gemma4_execution_layout(&graph, &self.inner.plan)?,
             }
         };
+        // A context shift temporarily owns the old request while the fresh
+        // retained owner is materialized. Reject an obviously impossible
+        // second-owner allocation before touching buffers; opaque KV state
+        // creation below remains transactional if the backend reports no
+        // placement telemetry.
+        if let Some(available) = self
+            .inner
+            .session
+            .available_memory_bytes()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?
+        {
+            let required = layout
+                .workspace_bytes()
+                .checked_add(layout.request_state_bytes())
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(
+                        "Gemma request placement byte count overflowed",
+                    )
+                })?;
+            if required > available {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma request placement requires {required} bytes but only {available} bytes are available",
+                )));
+            }
+        }
         let buffers = provision_gemma4_request_buffers(
             Arc::clone(&self.inner.session),
             &layout,
             &self.inner.immutable,
         )?;
-        let opaque_kv_states = self
-            .inner
-            .quantized_model
-            .as_deref()
-            .map(|artifact| {
-                graph
-                    .kv_descriptors()
-                    .iter()
-                    .map(|descriptor| {
-                        let scales = artifact.kv_scale(descriptor.layer).ok_or_else(|| {
-                            Gemma4ExecutionLayoutError::invalid(
-                                "quantized Gemma static KV scale is absent",
-                            )
-                        })?;
-                        let state_descriptor = crate::KvStateDescriptor::new_with_static_fp8(
-                            descriptor.layer,
-                            descriptor.capacity,
-                            descriptor.heads as usize,
-                            descriptor.head_dim as usize,
-                            scales.key_decode_scale(),
-                            scales.value_decode_scale(),
-                        )
-                        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-                        let state = self
-                            .inner
-                            .session
-                            .create_kv_state(state_descriptor)
-                            .map_err(|error| {
-                                Gemma4ExecutionLayoutError::invalid(error.to_string())
-                            })?;
-                        Ok((descriptor.layer, state))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, Gemma4ExecutionLayoutError>>()
+        let opaque_kv_states = graph
+            .kv_descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.retention_window.is_none())
+            .map(|descriptor| {
+                let state_descriptor = gemma_full_kv_state_descriptor(
+                    descriptor,
+                    self.inner.quantized_model.as_deref(),
+                )?;
+                let state = self
+                    .inner
+                    .session
+                    .create_kv_state(state_descriptor)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                Ok((descriptor.layer, state))
             })
-            .transpose()?;
+            .collect::<Result<BTreeMap<_, _>, Gemma4ExecutionLayoutError>>()?;
+        if opaque_kv_states.keys().copied().collect::<BTreeSet<_>>()
+            != gemma_full_attention_layers(&graph)
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma opaque KV layer set differs from full-attention graph layers",
+            ));
+        }
         Ok(Gemma4ExecutionRequest {
             _resident: Arc::clone(&self.inner),
             session: Arc::clone(&self.inner.session),
@@ -605,9 +1497,12 @@ impl Gemma4ResidentModel {
                 .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
             completion_timeout: self.inner.completion_timeout,
             committed_length: 0,
+            rope_position_delta: 0,
+            rotary_position_mode: position_mode,
             binding_generation: 0,
             audit: None,
-            opaque_kv_states,
+            opaque_kv_states: Some(opaque_kv_states),
+            last_output: None,
         })
     }
 
@@ -623,6 +1518,161 @@ impl Gemma4ResidentModel {
             ));
         }
         self.new_request(prefill_token_count, state_capacity)
+    }
+
+    /// Builds a fresh request by transactionally materializing the retained
+    /// prefix/recent token ranges into new device state. The source history is
+    /// only read and remains unchanged; publication is visible only after the
+    /// fresh prefill completes successfully.
+    pub fn new_request_from_context_shift(
+        &self,
+        decision: ContextShiftDecisionV1,
+        state: ContextWindowStateV1,
+        token_history: &[i32],
+        state_capacity: u64,
+    ) -> Result<(Gemma4ExecutionRequest, Gemma4ExecutionOutput), Gemma4ExecutionLayoutError> {
+        if !decision.requires_shift() || decision.old_state() != state {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma context shift decision is stale or does not require a shift",
+            ));
+        }
+        let retained = decision
+            .retained_token_ids(token_history)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let positions = decision
+            .retained_absolute_positions(state.logical_length())
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let retained_len = u64::try_from(retained.len())
+            .map_err(|_| Gemma4ExecutionLayoutError::invalid("retained length overflowed"))?;
+        if retained_len != decision.proposed_state().logical_length()
+            || retained_len == 0
+            || retained_len > state_capacity
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma retained state length differs from the shift decision",
+            ));
+        }
+        let mut request = self.new_request_with_position_mode(
+            retained_len,
+            state_capacity,
+            crate::RotaryPositionModeV1::Explicit,
+        )?;
+        let output = request.prefill_with_absolute_positions(&retained, &positions)?;
+        let delta = state
+            .absolute_position()
+            .checked_sub(retained_len)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma RoPE delta overflowed"))?;
+        request.set_rope_position_delta(delta)?;
+        Ok((request, output))
+    }
+
+    /// Creates a fresh request workspace and transactionally forks every
+    /// published full-attention state from an immutable prefix owner.
+    pub fn new_request_from_prefix(
+        &self,
+        prefix: &Gemma4PrefixStateV1,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        if suffix_token_count == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix request token count must be non-zero",
+            ));
+        }
+        let mut request = self.new_request(suffix_token_count, state_capacity)?;
+        request.install_prefix(prefix)?;
+        Ok(request)
+    }
+
+    pub fn request_from_prefix(
+        &self,
+        prefix: &Gemma4PrefixStateV1,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_from_prefix(prefix, suffix_token_count, state_capacity)
+    }
+
+    /// Creates a fresh request and transactionally imports every full- and
+    /// sliding-attention layer from a same-session state image. A non-empty
+    /// suffix shape is required so the restored owner can only be consumed by
+    /// a continuation transition.
+    pub fn new_request_from_state_image(
+        &self,
+        image: &Gemma4StateImageV1,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        if suffix_token_count == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "state-image restore requires a non-empty suffix",
+            ));
+        }
+        let mut request = self.new_request(suffix_token_count, state_capacity)?;
+        request.restore_state_image(image)?;
+        Ok(request)
+    }
+
+    pub fn restore_request_from_state_image(
+        &self,
+        image: &Gemma4StateImageV1,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_from_state_image(image, suffix_token_count, state_capacity)
+    }
+
+    /// Restores an authenticated backend-neutral checkpoint into a fresh
+    /// request owner. Unlike a raw state image, this path intentionally
+    /// permits a different execution-session owner; native handles are never
+    /// carried across the boundary. Terminal output is not checkpointed, so a
+    /// non-empty suffix is mandatory.
+    pub fn new_request_from_checkpoint(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        expected_identity: &CheckpointIdentity,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        if suffix_token_count == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint restore requires a non-empty suffix",
+            ));
+        }
+        let mut request = self.new_request(suffix_token_count, state_capacity)?;
+        request.restore_checkpoint(checkpoint, expected_identity)?;
+        Ok(request)
+    }
+
+    pub fn restore_request_from_checkpoint(
+        &self,
+        checkpoint: &SessionCheckpoint,
+        expected_identity: &CheckpointIdentity,
+        suffix_token_count: u64,
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionRequest, Gemma4ExecutionLayoutError> {
+        self.new_request_from_checkpoint(
+            checkpoint,
+            expected_identity,
+            suffix_token_count,
+            state_capacity,
+        )
+    }
+
+    /// Runs an exact decode continuation from an immutable prefix. An empty
+    /// suffix is a pure cached-terminal-output lookup and performs no work.
+    pub fn generate_from_prefix(
+        &self,
+        prefix: &Gemma4PrefixStateV1,
+        suffix: &[i32],
+        state_capacity: u64,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if suffix.is_empty() {
+            return Ok(prefix.cached_terminal_output().clone());
+        }
+        let mut request = self.new_request_from_prefix(prefix, 1, state_capacity)?;
+        request.decode_continuation(suffix)
     }
 
     pub fn session_id(&self) -> crate::ExecutionSessionId {
@@ -664,6 +1714,28 @@ impl Gemma4ExecutionRequest {
         self.prefill_impl(token_ids, false, None)
     }
 
+    /// Prefills a fresh explicit-position graph with compact logical rows and
+    /// caller-supplied absolute RoPE positions.
+    pub fn prefill_with_absolute_positions(
+        &mut self,
+        token_ids: &[i32],
+        positions: &[u64],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if self.rotary_position_mode != crate::RotaryPositionModeV1::Explicit {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "absolute positions require an explicit rotary request",
+            ));
+        }
+        let positions = positions
+            .iter()
+            .map(|position| {
+                i32::try_from(*position)
+                    .map_err(|_| Gemma4ExecutionLayoutError::invalid("position does not fit i32"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.prefill_impl_with_positions(token_ids, false, None, Some(&positions))
+    }
+
     pub fn prefill_with_last_logits(
         &mut self,
         token_ids: &[i32],
@@ -688,25 +1760,48 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        if self.committed_length != 0 || token_ids.len() as u64 != layout_token_count(&self.layout)?
+        self.prefill_impl_with_positions(token_ids, include_last_logits, selector, None)
+    }
+
+    fn prefill_impl_with_positions(
+        &mut self,
+        token_ids: &[i32],
+        include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
+        positions: Option<&[i32]>,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if self.committed_length != 0
+            || token_ids.len() as u64 != layout_token_count(&self.layout)?
+            || positions.is_some_and(|positions| positions.len() != token_ids.len())
         {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "Gemma prefill length or lifecycle differs",
             ));
         }
-        self.buffers.upload_transition_inputs(
-            &self.layout,
-            &self.queue,
-            token_ids,
-            self.completion_timeout,
-        )?;
+        if let Some(positions) = positions {
+            self.buffers.upload_transition_inputs_with_positions(
+                &self.layout,
+                &self.queue,
+                token_ids,
+                positions,
+                self.completion_timeout,
+            )?;
+        } else {
+            self.buffers.upload_transition_inputs(
+                &self.layout,
+                &self.queue,
+                token_ids,
+                self.completion_timeout,
+            )?;
+        }
         let state_capacity = self.state_capacity()?;
-        let graph = crate::build_gemma4_graph(
+        let graph = crate::build_gemma4_graph_with_position_mode(
             &self.lock,
             &self.plan,
             token_ids.len() as u64,
             0,
             state_capacity,
+            self.rotary_position_mode,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         self.run_graph(graph, include_last_logits, selector)
@@ -747,12 +1842,18 @@ impl Gemma4ExecutionRequest {
                 "Gemma decode cannot precede prefill",
             ));
         }
-        let graph = crate::build_gemma4_graph(
+        let position_mode = if self.rope_position_delta == 0 {
+            crate::RotaryPositionModeV1::Contiguous
+        } else {
+            crate::RotaryPositionModeV1::Explicit
+        };
+        let graph = crate::build_gemma4_graph_with_position_mode(
             &self.lock,
             &self.plan,
             1,
             self.committed_length,
             self.state_capacity()?,
+            position_mode,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
         let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
@@ -764,12 +1865,31 @@ impl Gemma4ExecutionRequest {
             }
         };
         let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
-        buffers.upload_transition_inputs(
-            &layout,
-            &self.queue,
-            &[token_id],
-            self.completion_timeout,
-        )?;
+        if self.rope_position_delta == 0 {
+            buffers.upload_transition_inputs(
+                &layout,
+                &self.queue,
+                &[token_id],
+                self.completion_timeout,
+            )?;
+        } else {
+            let absolute = i64::try_from(self.committed_length)
+                .ok()
+                .and_then(|position| position.checked_add(self.rope_position_delta))
+                .and_then(|position| i32::try_from(position).ok())
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(
+                        "Gemma absolute RoPE position does not fit I32",
+                    )
+                })?;
+            buffers.upload_transition_inputs_with_positions(
+                &layout,
+                &self.queue,
+                &[token_id],
+                &[absolute],
+                self.completion_timeout,
+            )?;
+        }
         self.layout = layout;
         self.buffers = buffers;
         self.run_graph(graph, include_last_logits, selector)
@@ -779,14 +1899,1017 @@ impl Gemma4ExecutionRequest {
         self.state.cancel();
     }
 
+    /// Exports every quiescent full- and sliding-attention state layer into a
+    /// backend-neutral, encoding-native image. No workspace, queue, prepared
+    /// operation, or native handle is retained.
+    pub fn state_image(&self) -> Result<Gemma4StateImageV1, Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned
+            || self.committed_length == 0
+            || state_snapshot.committed_length != self.committed_length
+            || self.last_output.is_none()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state export requires a completed quiescent transition",
+            ));
+        }
+        let state_capacity = self.state_capacity()?;
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, state_capacity)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_full = gemma_full_attention_layers(&graph);
+        let states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("opaque full-attention KV states are absent")
+        })?;
+        if states.keys().copied().collect::<BTreeSet<_>>() != expected_full {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma export full-attention topology differs",
+            ));
+        }
+        let mut full_kv_layers = BTreeMap::new();
+        for (&layer, state) in states {
+            let image = self
+                .session
+                .export_kv_state_image(state)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if image.metadata().published_length != self.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma exported full-attention layer {layer} length differs"
+                )));
+            }
+            full_kv_layers.insert(
+                layer,
+                Gemma4KvStateImageV1 {
+                    descriptor: state.descriptor(),
+                    image,
+                },
+            );
+        }
+        let encoding = gemma_image_kv_encoding(&full_kv_layers)?;
+        let sliding_identities = gemma_sliding_layer_identities(&graph);
+        let mut sliding_layers = BTreeMap::new();
+        for (&layer, &identity) in &sliding_identities {
+            let byte_count = gemma_sliding_plane_bytes(identity, self.committed_length)?;
+            let mut planes = Vec::with_capacity(gemma_kv_plane_kinds(encoding).len());
+            for (plane, kind) in [
+                (Gemma4KvPlane::Key, StatePlaneKindV1::KvKey),
+                (Gemma4KvPlane::Value, StatePlaneKindV1::KvValue),
+            ] {
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                validate_gemma_sliding_tensor(tensor, identity, self.committed_length, byte_count)?;
+                let range = self
+                    .buffers
+                    .buffer(tensor.id())?
+                    .range(0, byte_count)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                planes.push(OpaqueStatePlane {
+                    owner: StateOwnerKindV1::Kv,
+                    layer_id: layer,
+                    plane: kind,
+                    bytes: read_gemma_buffer_bytes(
+                        &self.session,
+                        &self.queue,
+                        &range,
+                        self.completion_timeout,
+                        "Gemma sliding checkpoint export",
+                    )?,
+                });
+            }
+            for &kind in gemma_kv_plane_kinds(encoding) {
+                if !matches!(kind, StatePlaneKindV1::KvKey | StatePlaneKindV1::KvValue) {
+                    planes.push(OpaqueStatePlane {
+                        owner: StateOwnerKindV1::Kv,
+                        layer_id: layer,
+                        plane: kind,
+                        bytes: Vec::new(),
+                    });
+                }
+            }
+            sliding_layers.insert(
+                layer,
+                Gemma4SlidingStateImageV1 {
+                    heads: identity.heads,
+                    head_dim: identity.head_dim,
+                    capacity: identity.capacity,
+                    retention_window: identity.retention_window,
+                    image: ExecutionStateImageV1::new(
+                        StateLayerMetadataV1 {
+                            owner: StateOwnerKindV1::Kv,
+                            layer_id: layer,
+                            published_length: self.committed_length,
+                            generation: self.binding_generation,
+                            active_slot: None,
+                        },
+                        planes,
+                    ),
+                },
+            );
+        }
+        let image = Gemma4StateImageV1 {
+            session_id: self.session.id(),
+            model_fingerprint: self.lock.fingerprint().to_owned(),
+            plan_digest: *self.plan.digest(),
+            state_capacity,
+            committed_length: self.committed_length,
+            rope_position_delta: self.rope_position_delta,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: self.last_output.clone(),
+        };
+        validate_gemma_state_image(&image, true)?;
+        Ok(image)
+    }
+
+    pub fn export_state_image(&self) -> Result<Gemma4StateImageV1, Gemma4ExecutionLayoutError> {
+        self.state_image()
+    }
+
+    pub fn save_state_image(&self) -> Result<Gemma4StateImageV1, Gemma4ExecutionLayoutError> {
+        self.state_image()
+    }
+
+    /// Captures this request as a persistent checkpoint. Terminal output is
+    /// intentionally omitted, so restore requires a non-empty suffix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checkpoint(
+        &self,
+        identity: CheckpointIdentity,
+        token_history: &[u32],
+        conversation: &[u8],
+        sampler_state: &[u8],
+        grammar_state: &[u8],
+        stop_state: &[u8],
+        absolute_position: u64,
+        logical_position: u64,
+        generation_state_version: u32,
+    ) -> Result<SessionCheckpoint, Gemma4ExecutionLayoutError> {
+        self.state_image()?.to_checkpoint(
+            identity,
+            token_history,
+            conversation,
+            sampler_state,
+            grammar_state,
+            stop_state,
+            absolute_position,
+            logical_position,
+            generation_state_version,
+        )
+    }
+
+    fn restore_state_image(
+        &mut self,
+        image: &Gemma4StateImageV1,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state restore requires a fresh, quiescent request",
+            ));
+        }
+        if image.session_id != self.session.id() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "raw Gemma state image belongs to a different execution session",
+            ));
+        }
+        validate_gemma_state_image(image, true)?;
+        self.restore_validated_state_image(image)
+    }
+
+    fn restore_checkpoint(
+        &mut self,
+        checkpoint: &SessionCheckpoint,
+        expected_identity: &CheckpointIdentity,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma checkpoint restore requires a fresh, quiescent request",
+            ));
+        }
+        checkpoint
+            .validate()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if checkpoint.header.identity != *expected_identity {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint frontend or target identity differs from restore caller",
+            ));
+        }
+
+        let state_capacity = self.state_capacity()?;
+        let logical_position = checkpoint.header.logical_position;
+        if logical_position == 0
+            || logical_position != checkpoint.header.token_count
+            || logical_position > state_capacity
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint logical position differs from token history or request capacity",
+            ));
+        }
+        let rope_position_delta = checkpoint
+            .header
+            .absolute_position
+            .checked_sub(logical_position)
+            .and_then(|delta| i64::try_from(delta).ok())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "checkpoint absolute/logical position delta is invalid",
+                )
+            })?;
+
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, state_capacity)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_sliding = gemma_sliding_layer_identities(&graph);
+        let destination_states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("opaque full-attention KV states are absent")
+        })?;
+        let expected_full = destination_states
+            .iter()
+            .map(|(&layer, state)| (layer, state.descriptor()))
+            .collect::<BTreeMap<_, _>>();
+        if expected_full.keys().copied().collect::<BTreeSet<_>>()
+            != gemma_full_attention_layers(&graph)
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "fresh Gemma full-attention topology differs from graph",
+            ));
+        }
+        let encoding = expected_full
+            .values()
+            .next()
+            .map(|descriptor| descriptor.cache_encoding())
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "fresh Gemma request has no full-attention state",
+                )
+            })?;
+        if expected_full
+            .values()
+            .any(|descriptor| descriptor.cache_encoding() != encoding)
+            || expected_identity.model_lock_fingerprint != self.lock.fingerprint()
+            || expected_identity.plan_digest != self.plan.digest_hex()
+            || expected_identity.kv_encoding != encoding
+            || expected_identity.kv_descriptor_digest
+                != gemma_checkpoint_descriptor_digest_from_parts(
+                    encoding,
+                    &expected_full,
+                    &expected_sliding,
+                )
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint model, plan, encoding, or descriptor identity differs",
+            ));
+        }
+
+        let expected_layer_keys = expected_full
+            .keys()
+            .chain(expected_sliding.keys())
+            .copied()
+            .map(|layer| (StateOwnerKindV1::Kv, layer))
+            .collect::<BTreeSet<_>>();
+        let actual_layer_keys = checkpoint
+            .payload
+            .state_layers
+            .iter()
+            .map(|metadata| (metadata.owner, metadata.layer_id))
+            .collect::<BTreeSet<_>>();
+        if checkpoint.payload.state_layers.len() != expected_layer_keys.len()
+            || actual_layer_keys != expected_layer_keys
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "checkpoint layer topology differs from the fresh Gemma graph",
+            ));
+        }
+
+        let mut full_kv_layers = BTreeMap::new();
+        for (&layer, &descriptor) in &expected_full {
+            let state_image = gemma_checkpoint_layer_image(checkpoint, layer)?;
+            validate_gemma_layer_image(
+                &state_image,
+                layer,
+                logical_position,
+                gemma_kv_plane_kinds(encoding),
+                false,
+            )?;
+            full_kv_layers.insert(
+                layer,
+                Gemma4KvStateImageV1 {
+                    descriptor,
+                    image: state_image,
+                },
+            );
+        }
+        let mut sliding_layers = BTreeMap::new();
+        for (&layer, &identity) in &expected_sliding {
+            let state_image = gemma_checkpoint_layer_image(checkpoint, layer)?;
+            validate_gemma_layer_image(
+                &state_image,
+                layer,
+                logical_position,
+                gemma_kv_plane_kinds(encoding),
+                true,
+            )?;
+            let expected_bytes = gemma_sliding_plane_bytes(identity, logical_position)?;
+            for kind in [StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue] {
+                if state_image
+                    .planes()
+                    .iter()
+                    .find(|plane| plane.plane == kind)
+                    .and_then(|plane| u64::try_from(plane.bytes.len()).ok())
+                    != Some(expected_bytes)
+                {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "checkpoint sliding layer {layer} byte length differs"
+                    )));
+                }
+            }
+            sliding_layers.insert(
+                layer,
+                Gemma4SlidingStateImageV1 {
+                    heads: identity.heads,
+                    head_dim: identity.head_dim,
+                    capacity: identity.capacity,
+                    retention_window: identity.retention_window,
+                    image: state_image,
+                },
+            );
+        }
+        let image = Gemma4StateImageV1 {
+            session_id: self.session.id(),
+            model_fingerprint: self.lock.fingerprint().to_owned(),
+            plan_digest: *self.plan.digest(),
+            state_capacity,
+            committed_length: logical_position,
+            rope_position_delta,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: None,
+        };
+        validate_gemma_state_image(&image, false)?;
+        self.restore_validated_state_image(&image)
+    }
+
+    /// Imports a fully validated image into this fresh request. Publication
+    /// scalars change only after every opaque state and sliding plane succeeds.
+    fn restore_validated_state_image(
+        &mut self,
+        image: &Gemma4StateImageV1,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        if image.model_fingerprint != self.lock.fingerprint()
+            || image.plan_digest != *self.plan.digest()
+            || image.state_capacity != self.state_capacity()?
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state image model, plan, or capacity differs",
+            ));
+        }
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, image.state_capacity)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_sliding = gemma_sliding_layer_identities(&graph);
+        let destination_states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("opaque full-attention KV states are absent")
+        })?;
+        if image.full_kv_layers.keys().ne(destination_states.keys())
+            || image.sliding_layers.keys().ne(expected_sliding.keys())
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state image topology differs from the fresh graph",
+            ));
+        }
+
+        // Complete every descriptor, layout, and byte-length check before the
+        // first device import. This makes malformed input a no-write failure.
+        for (&layer, destination) in destination_states {
+            let entry = image.full_kv_layers.get(&layer).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma full-attention image layer {layer} is absent"
+                ))
+            })?;
+            if entry.descriptor != destination.descriptor() {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma full-attention image layer {layer} descriptor differs"
+                )));
+            }
+        }
+        for (&layer, &identity) in &expected_sliding {
+            let entry = image.sliding_layers.get(&layer).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma sliding image layer {layer} is absent"
+                ))
+            })?;
+            if entry.identity() != identity {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma sliding image layer {layer} identity differs"
+                )));
+            }
+            let bytes = gemma_sliding_plane_bytes(identity, image.committed_length)?;
+            for (plane, kind) in [
+                (Gemma4KvPlane::Key, StatePlaneKindV1::KvKey),
+                (Gemma4KvPlane::Value, StatePlaneKindV1::KvValue),
+            ] {
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                validate_gemma_sliding_tensor(tensor, identity, image.committed_length, bytes)?;
+                let plane_bytes = entry
+                    .image
+                    .planes()
+                    .iter()
+                    .find(|candidate| candidate.plane == kind)
+                    .ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid(format!(
+                            "Gemma sliding image layer {layer} plane is absent"
+                        ))
+                    })?;
+                if u64::try_from(plane_bytes.bytes.len()).ok() != Some(bytes) {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "Gemma sliding image layer {layer} plane length differs"
+                    )));
+                }
+            }
+        }
+
+        for (&layer, destination) in destination_states {
+            let entry = &image.full_kv_layers[&layer];
+            self.session
+                .import_kv_state_image(destination, &entry.image)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            let snapshot = self
+                .session
+                .kv_state_snapshot(destination)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if snapshot.length() != image.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "restored Gemma full-attention layer {layer} length differs"
+                )));
+            }
+        }
+        for (&layer, &identity) in &expected_sliding {
+            let entry = &image.sliding_layers[&layer];
+            let bytes = gemma_sliding_plane_bytes(identity, image.committed_length)?;
+            for (plane, kind) in [
+                (Gemma4KvPlane::Key, StatePlaneKindV1::KvKey),
+                (Gemma4KvPlane::Value, StatePlaneKindV1::KvValue),
+            ] {
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                let destination = self
+                    .buffers
+                    .buffer(tensor.id())?
+                    .range(0, bytes)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let plane_bytes = entry
+                    .image
+                    .planes()
+                    .iter()
+                    .find(|candidate| candidate.plane == kind)
+                    .expect("validated Gemma sliding plane remains present");
+                upload_gemma_buffer_bytes(
+                    &self.session,
+                    &self.queue,
+                    &destination,
+                    &plane_bytes.bytes,
+                    self.completion_timeout,
+                    "Gemma sliding checkpoint restore",
+                )?;
+            }
+        }
+
+        self.state
+            .restore_prefix(image.committed_length)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.committed_length = image.committed_length;
+        self.rope_position_delta = image.rope_position_delta;
+        self.last_output = image.cached_terminal_output.clone();
+        Ok(())
+    }
+
+    /// Publishes a quiescent immutable owner by forking every full-attention
+    /// opaque state. Local destination ownership keeps the source untouched if
+    /// any layer or snapshot validation fails.
+    pub fn publish_prefix(&self) -> Result<Gemma4PrefixStateV1, Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "cannot publish a poisoned Gemma request",
+            ));
+        }
+        if self.committed_length == 0 || self.last_output.is_none() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix publication requires a completed non-empty transition",
+            ));
+        }
+        if state_snapshot.committed_length != self.committed_length {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma request and state publication lengths differ",
+            ));
+        }
+        let states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("opaque full-attention KV states are absent")
+        })?;
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, self.state_capacity()?)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_full_layers = gemma_full_attention_layers(&graph);
+        if states.keys().copied().collect::<BTreeSet<_>>() != expected_full_layers {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma opaque KV layer set differs from full-attention graph layers",
+            ));
+        }
+        let sliding_layers = gemma_sliding_layer_identities(&graph);
+        let mut kv_states = BTreeMap::new();
+        let mut audit = Gemma4PrefixForkAuditV1::default();
+        for (&layer, source) in states {
+            let descriptor = source.descriptor();
+            if descriptor.layer_id() != layer {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "Gemma opaque KV state layer identity differs",
+                ));
+            }
+            let snapshot = self
+                .session
+                .kv_state_snapshot(source)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if snapshot.length() != self.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma source KV layer {layer} length {} differs from committed length {}",
+                    snapshot.length(),
+                    self.committed_length
+                )));
+            }
+            let (forked, fork_audit) = self
+                .session
+                .fork_kv_state(source, descriptor)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            let fork_snapshot = self
+                .session
+                .kv_state_snapshot(&forked)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if fork_snapshot.length() != self.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma forked KV layer {layer} length {} differs from committed length {}",
+                    fork_snapshot.length(),
+                    self.committed_length
+                )));
+            }
+            let fallback_resident_bytes = descriptor
+                .resident_bytes_per_plane()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(
+                        "Gemma KV prefix resident-byte footprint overflowed",
+                    )
+                })?;
+            let cache_resident_bytes = fork_snapshot
+                .physical_memory()
+                .map(|physical| physical.committed_bytes_per_plane())
+                .and_then(|bytes| bytes.checked_mul(2))
+                .unwrap_or(fallback_resident_bytes);
+            audit.add(fork_audit, cache_resident_bytes)?;
+            kv_states.insert(layer, forked);
+        }
+        if kv_states.is_empty() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma prefix has no full-attention KV states",
+            ));
+        }
+        let mut sliding_buffers = BTreeMap::new();
+        let mut sliding_bytes = BTreeMap::new();
+        for (&layer, identity) in &sliding_layers {
+            if identity.capacity < self.committed_length {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "Gemma sliding layer {layer} capacity is below committed length"
+                )));
+            }
+            for (plane_index, plane) in [Gemma4KvPlane::Key, Gemma4KvPlane::Value]
+                .into_iter()
+                .enumerate()
+            {
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                let bytes = gemma_sliding_plane_bytes(*identity, self.committed_length)?;
+                validate_gemma_sliding_tensor(tensor, *identity, self.committed_length, bytes)?;
+                let source = self
+                    .buffers
+                    .buffer(tensor.id())?
+                    .range(0, bytes)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let (destination, mut copy) = self
+                    .session
+                    .clone_device_buffer_range_to_request_state(&self.queue, source)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let completion = copy
+                    .wait(self.completion_timeout)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                if completion != ExecutionState::Success {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "Gemma sliding layer {layer} plane {plane:?} D2D clone did not complete successfully"
+                    )));
+                }
+                audit.add_sliding_plane(plane_index == 0, copy.audit())?;
+                sliding_bytes.insert((layer, plane), bytes);
+                sliding_buffers.insert((layer, plane), destination);
+            }
+        }
+        if sliding_buffers.len() != sliding_layers.len().saturating_mul(2)
+            || sliding_bytes.len() != sliding_buffers.len()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma sliding prefix clone topology is incomplete",
+            ));
+        }
+        let cached_terminal_output = self
+            .last_output
+            .clone()
+            .expect("checked cached terminal output");
+        if cached_terminal_output.state().committed_length != self.committed_length {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "cached Gemma terminal output length differs from request",
+            ));
+        }
+        let identity = Gemma4PrefixIdentityV1 {
+            model_fingerprint: self.lock.fingerprint().to_owned(),
+            plan_digest: *self.plan.digest(),
+            state_capacity: self.state_capacity()?,
+            kv_descriptors: states
+                .iter()
+                .map(|(&layer, state)| (layer, state.descriptor()))
+                .collect(),
+            sliding_layers,
+        };
+        Ok(Gemma4PrefixStateV1 {
+            inner: Arc::new(Gemma4PrefixStateInner {
+                session: Arc::clone(&self.session),
+                identity,
+                committed_length: self.committed_length,
+                rope_position_delta: self.rope_position_delta,
+                kv_states,
+                sliding_buffers,
+                sliding_bytes,
+                cached_terminal_output,
+                fork_audit: audit,
+            }),
+        })
+    }
+
+    pub fn prefix_state(&self) -> Result<Gemma4PrefixStateV1, Gemma4ExecutionLayoutError> {
+        self.publish_prefix()
+    }
+
+    pub fn create_prefix_state(&self) -> Result<Gemma4PrefixStateV1, Gemma4ExecutionLayoutError> {
+        self.publish_prefix()
+    }
+
+    /// Decodes a suffix after a prefix fork. Single-token transitions are used
+    /// as the exact continuation fallback; each step preserves the same
+    /// transactional state and device-side opaque KV owner.
+    pub fn decode_continuation(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if suffix.is_empty() {
+            return self.last_output.clone().ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "empty continuation has no cached terminal output",
+                )
+            });
+        }
+        if self.committed_length == 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "continuation requires an installed non-empty prefix",
+            ));
+        }
+        validate_gemma_input_token_ids(suffix)?;
+        let suffix_len = u64::try_from(suffix.len())
+            .map_err(|_| Gemma4ExecutionLayoutError::invalid("continuation length overflowed"))?;
+        let end = self
+            .committed_length
+            .checked_add(suffix_len)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("continuation length overflowed"))?;
+        if end > self.state_capacity()? {
+            return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                "continuation end {end} exceeds request capacity {}",
+                self.state_capacity()?
+            )));
+        }
+        let mut final_output = None;
+        for &token_id in suffix {
+            final_output = Some(self.decode(token_id)?);
+        }
+        final_output.ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("continuation produced no terminal output")
+        })
+    }
+
+    pub fn continue_from_prefix(
+        &mut self,
+        suffix: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.decode_continuation(suffix)
+    }
+
+    fn install_prefix(
+        &mut self,
+        prefix: &Gemma4PrefixStateV1,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let state_snapshot = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if state_snapshot.poisoned || self.committed_length != 0 || self.last_output.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma prefix installation requires a fresh, quiescent request",
+            ));
+        }
+        if prefix.inner.session.id() != self.session.id() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix state belongs to a different execution session",
+            ));
+        }
+        if prefix.inner.identity.model_fingerprint != self.lock.fingerprint()
+            || prefix.inner.identity.plan_digest != *self.plan.digest()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix model or weight-plan identity differs from request",
+            ));
+        }
+        let destination_states = self.opaque_kv_states.as_ref().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("opaque full-attention KV states are absent")
+        })?;
+        let expected_layers = destination_states.keys().copied().collect::<BTreeSet<_>>();
+        let prefix_layers = prefix
+            .inner
+            .kv_states
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if expected_layers != prefix_layers
+            || expected_layers
+                != prefix
+                    .inner
+                    .identity
+                    .kv_descriptors
+                    .keys()
+                    .copied()
+                    .collect()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix full-attention KV layer set differs from request",
+            ));
+        }
+        if prefix.committed_length() == 0
+            || prefix.committed_length() > self.state_capacity()?
+            || prefix.committed_length() > prefix.inner.identity.state_capacity
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix length exceeds request or source capacity",
+            ));
+        }
+        if prefix.cached_terminal_output().state().committed_length != prefix.committed_length() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "cached prefix terminal output length differs from prefix",
+            ));
+        }
+
+        let graph = crate::build_gemma4_graph(&self.lock, &self.plan, 1, 0, self.state_capacity()?)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let expected_sliding_layers = gemma_sliding_layer_identities(&graph);
+        if prefix.inner.identity.sliding_layers.len() != expected_sliding_layers.len()
+            || prefix.inner.sliding_buffers.len() != expected_sliding_layers.len().saturating_mul(2)
+            || prefix.inner.sliding_bytes.len() != prefix.inner.sliding_buffers.len()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "prefix sliding-attention K/V topology differs from request",
+            ));
+        }
+        for (&layer, expected) in &expected_sliding_layers {
+            let source = prefix
+                .inner
+                .identity
+                .sliding_layers
+                .get(&layer)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(format!(
+                        "prefix sliding layer {layer} identity is absent"
+                    ))
+                })?;
+            if source.heads != expected.heads
+                || source.head_dim != expected.head_dim
+                || source.retention_window != expected.retention_window
+                || source.capacity < prefix.committed_length()
+                || expected.capacity < prefix.committed_length()
+            {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "prefix sliding layer {layer} identity differs"
+                )));
+            }
+            for plane in [Gemma4KvPlane::Key, Gemma4KvPlane::Value] {
+                let key = (layer, plane);
+                let bytes = prefix
+                    .inner
+                    .sliding_bytes
+                    .get(&key)
+                    .copied()
+                    .ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid(format!(
+                            "prefix sliding layer {layer} plane {plane:?} byte range is absent"
+                        ))
+                    })?;
+                let expected_bytes =
+                    gemma_sliding_plane_bytes(*expected, prefix.committed_length())?;
+                if bytes != expected_bytes {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "prefix sliding layer {layer} plane {plane:?} byte range differs"
+                    )));
+                }
+                let source_buffer = prefix.inner.sliding_buffers.get(&key).ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(format!(
+                        "prefix sliding layer {layer} plane {plane:?} buffer is absent"
+                    ))
+                })?;
+                if source_buffer.session_id() != self.session.id()
+                    || source_buffer.size_bytes() != bytes
+                {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "prefix sliding layer {layer} plane {plane:?} buffer identity differs"
+                    )));
+                }
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                validate_gemma_sliding_tensor(tensor, *expected, prefix.committed_length(), bytes)?;
+            }
+        }
+
+        let mut forked_states = BTreeMap::new();
+        for (&layer, destination) in destination_states {
+            let source = prefix.inner.kv_states.get(&layer).ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(format!("prefix KV layer {layer} is absent"))
+            })?;
+            let source_descriptor = source.descriptor();
+            if prefix.inner.identity.kv_descriptors.get(&layer).copied() != Some(source_descriptor)
+            {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "prefix KV layer {layer} identity descriptor differs"
+                )));
+            }
+            let destination_descriptor = destination.descriptor();
+            if source_descriptor.layer_id() != layer
+                || destination_descriptor.layer_id() != layer
+                || source_descriptor.layout() != destination_descriptor.layout()
+                || source_descriptor.cache_encoding() != destination_descriptor.cache_encoding()
+                || source_descriptor.static_fp8_scales()
+                    != destination_descriptor.static_fp8_scales()
+                || source_descriptor.capacity() < prefix.committed_length()
+                || destination_descriptor.capacity() < prefix.committed_length()
+            {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "prefix KV layer {layer} descriptor differs"
+                )));
+            }
+            let (forked, _) = self
+                .session
+                .fork_kv_state(source, destination_descriptor)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            let snapshot = self
+                .session
+                .kv_state_snapshot(&forked)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            if snapshot.length() != prefix.committed_length() {
+                return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                    "installed KV layer {layer} length {} differs from prefix length {}",
+                    snapshot.length(),
+                    prefix.committed_length()
+                )));
+            }
+            forked_states.insert(layer, forked);
+        }
+
+        // Install the immutable sliding ranges through the core D2D contract.
+        // No host staging is permitted, and publication below is delayed until
+        // every plane reports terminal success.
+        for (&layer, identity) in &expected_sliding_layers {
+            for plane in [Gemma4KvPlane::Key, Gemma4KvPlane::Value] {
+                let key = (layer, plane);
+                let bytes = prefix.inner.sliding_bytes[&key];
+                let source = prefix.inner.sliding_buffers[&key]
+                    .range(0, bytes)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let tensor = gemma_request_kv_tensor(&self.layout, layer, plane)?;
+                validate_gemma_sliding_tensor(tensor, *identity, prefix.committed_length(), bytes)?;
+                let destination = self
+                    .buffers
+                    .buffer(tensor.id())?
+                    .range(0, bytes)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let mut copy = self
+                    .session
+                    .copy_device_to_device(&self.queue, source, destination)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                let completion = copy
+                    .wait(self.completion_timeout)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+                if completion != ExecutionState::Success {
+                    return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                        "Gemma sliding layer {layer} plane {plane:?} D2D install did not complete successfully"
+                    )));
+                }
+            }
+        }
+
+        self.state
+            .restore_prefix(prefix.committed_length())
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.opaque_kv_states = Some(forked_states);
+        self.committed_length = prefix.committed_length();
+        self.rope_position_delta = prefix.rope_position_delta();
+        self.last_output = Some(prefix.cached_terminal_output().clone());
+        Ok(())
+    }
+
     pub const fn committed_length(&self) -> u64 {
         self.committed_length
+    }
+
+    pub const fn rope_position_delta(&self) -> i64 {
+        self.rope_position_delta
+    }
+
+    /// Sets the checked absolute-minus-logical RoPE delta used by subsequent
+    /// compacted transitions. This only changes request metadata; the caller
+    /// must have installed a state owner whose cached K/V rows use the same
+    /// absolute position origin.
+    pub fn set_rope_position_delta(
+        &mut self,
+        delta: i64,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        if delta < 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma RoPE position delta must be non-negative",
+            ));
+        }
+        if self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?
+            .poisoned
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "cannot change RoPE position delta on a poisoned request",
+            ));
+        }
+        self.rope_position_delta = delta;
+        Ok(())
     }
 
     pub fn audit_snapshot(&self) -> Result<Gemma4ExecutionAudit, Gemma4ExecutionLayoutError> {
         self.audit
             .clone()
             .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma execution audit is empty"))
+    }
+
+    /// Reconciles post-COW ownership for every KV destination in a prefix
+    /// continuation and returns the aggregate redacted fork audit. A fresh
+    /// request has no fork destinations and therefore returns an explicit
+    /// unsupported error instead of silently omitting accounting.
+    pub fn refresh_prefix_fork_audit(
+        &self,
+    ) -> Result<Gemma4PrefixForkAuditV1, Gemma4ExecutionLayoutError> {
+        let states = self
+            .opaque_kv_states
+            .as_ref()
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma KV states are absent"))?
+            .values()
+            .collect::<Vec<_>>();
+        let queried = self
+            .session
+            .kv_state_fork_query_all(states.iter().copied())
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut aggregate = Gemma4PrefixForkAuditV1::default();
+        for (state, audit) in states.into_iter().zip(queried) {
+            let descriptor = state.descriptor();
+            let fallback_resident_bytes = descriptor
+                .resident_bytes_per_plane()
+                .and_then(|bytes| bytes.checked_mul(2))
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid(
+                        "Gemma KV fork resident-byte footprint overflowed",
+                    )
+                })?;
+            let cache_resident_bytes = self
+                .session
+                .kv_state_snapshot(state)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?
+                .physical_memory()
+                .map(|physical| physical.committed_bytes_per_plane())
+                .and_then(|bytes| bytes.checked_mul(2))
+                .unwrap_or(fallback_resident_bytes);
+            aggregate.add(audit, cache_resident_bytes)?;
+        }
+        Ok(aggregate)
     }
 
     pub fn memory_snapshot(&self) -> crate::AllocationSnapshot {
@@ -835,6 +2958,7 @@ impl Gemma4ExecutionRequest {
         }?;
         self.committed_length = output.state().committed_length;
         self.record_audit(output.audit())?;
+        self.last_output = Some(output.clone());
         Ok(output)
     }
 
@@ -1301,24 +3425,6 @@ impl Gemma4ProvisionedBuffers {
         token_ids: &[i32],
         completion_timeout: Duration,
     ) -> Result<(), Gemma4ExecutionLayoutError> {
-        if token_ids.len() as u64 != layout_token_count(layout)?
-            || completion_timeout.is_zero()
-            || queue.session_id() != self.session.id()
-        {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "transition input length, queue, or timeout differs",
-            ));
-        }
-        let token_tensor = layout
-            .tensors
-            .iter()
-            .find(|tensor| tensor.backing == Gemma4TensorBacking::TokenIds)
-            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("token tensor is absent"))?;
-        let position_tensor = layout
-            .tensors
-            .iter()
-            .find(|tensor| tensor.backing == Gemma4TensorBacking::Positions)
-            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("position tensor is absent"))?;
         let start_position = layout
             .nodes
             .iter()
@@ -1336,6 +3442,90 @@ impl Gemma4ProvisionedBuffers {
                     .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("position does not fit i32"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        self.upload_transition_inputs_with_positions_inner(
+            layout,
+            queue,
+            token_ids,
+            &positions,
+            completion_timeout,
+        )
+    }
+
+    /// Uploads request inputs with caller-supplied absolute positions.  This
+    /// is the context-window compaction path: state remains compactly indexed
+    /// while RoPE consumes the original absolute position for each row.
+    pub fn upload_transition_inputs_with_positions(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        token_ids: &[i32],
+        positions: &[i32],
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        let rotary_contract = layout
+            .nodes
+            .iter()
+            .find_map(|node| node.descriptor.rotary_contract())
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("rotary contract is absent"))?;
+        if rotary_contract.position_mode() != crate::RotaryPositionModeV1::Explicit {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "explicit positions require an explicit rotary graph",
+            ));
+        }
+        self.upload_transition_inputs_with_positions_inner(
+            layout,
+            queue,
+            token_ids,
+            positions,
+            completion_timeout,
+        )
+    }
+
+    fn upload_transition_inputs_with_positions_inner(
+        &self,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        token_ids: &[i32],
+        positions: &[i32],
+        completion_timeout: Duration,
+    ) -> Result<(), Gemma4ExecutionLayoutError> {
+        if token_ids.len() as u64 != layout_token_count(layout)?
+            || positions.len() != token_ids.len()
+            || completion_timeout.is_zero()
+            || queue.session_id() != self.session.id()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "transition input length, queue, or timeout differs",
+            ));
+        }
+        let token_tensor = layout
+            .tensors
+            .iter()
+            .find(|tensor| tensor.backing == Gemma4TensorBacking::TokenIds)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("token tensor is absent"))?;
+        let position_tensor = layout
+            .tensors
+            .iter()
+            .find(|tensor| tensor.backing == Gemma4TensorBacking::Positions)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("position tensor is absent"))?;
+        if positions.iter().any(|&position| position < 0) {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "explicit positions must be non-negative",
+            ));
+        }
+        let max_position = layout
+            .nodes
+            .iter()
+            .find_map(|node| node.descriptor.rotary_contract())
+            .map(|contract| contract.max_position_embeddings())
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("rotary contract is absent"))?;
+        if positions.iter().any(|&position| {
+            u32::try_from(position).map_or(true, |position| position >= max_position)
+        }) {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "explicit position exceeds rotary context range",
+            ));
+        }
         for (label, tensor, bytes) in [
             (
                 "Gemma token upload",
@@ -1522,8 +3712,14 @@ impl Gemma4ProvisionedBuffers {
                     ));
                 }
 
+                let full_attention = matches!(
+                    graph_node.kind(),
+                    Gemma4GraphNodeKind::CausalAttention(contract)
+                        if contract.sliding_window.is_none()
+                );
                 if let Some(states) = opaque_kv_states
                     && node.descriptor.kind() == SemanticOpKind::CausalAttention
+                    && full_attention
                 {
                     if planned.boundary_after().is_some()
                         || node.kv_appends.len() != 2
@@ -2304,6 +4500,123 @@ fn upload_selector_bytes(
     Ok(())
 }
 
+fn read_gemma_buffer_bytes(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    source: &crate::BufferRange,
+    completion_timeout: Duration,
+    stage: &str,
+) -> Result<Vec<u8>, Gemma4ExecutionLayoutError> {
+    if source.size_bytes() == 0 {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "{stage} source is empty"
+        )));
+    }
+    let maximum = session
+        .max_transfer_bytes()
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+    if maximum == 0 {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "backend transfer limit must be non-zero",
+        ));
+    }
+    let total = usize::try_from(source.size_bytes()).map_err(|_| {
+        Gemma4ExecutionLayoutError::invalid(format!("{stage} size does not fit usize"))
+    })?;
+    let mut bytes = Vec::with_capacity(total);
+    let mut offset = 0_u64;
+    while offset < source.size_bytes() {
+        let length = (source.size_bytes() - offset).min(maximum);
+        let absolute = source.offset_bytes().checked_add(offset).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid(format!("{stage} offset overflowed"))
+        })?;
+        let range = source
+            .buffer()
+            .range(absolute, length)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut transfer = session
+            .readback(queue, range)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        require_terminal_success(
+            stage,
+            transfer
+                .wait(completion_timeout)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let chunk = usize::try_from(length).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid(format!("{stage} chunk does not fit usize"))
+        })?;
+        let start = bytes.len();
+        bytes.resize(start.saturating_add(chunk), 0);
+        transfer
+            .read_into(&mut bytes[start..])
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        offset = offset.checked_add(length).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid(format!("{stage} progress overflowed"))
+        })?;
+    }
+    Ok(bytes)
+}
+
+fn upload_gemma_buffer_bytes(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    destination: &crate::BufferRange,
+    bytes: &[u8],
+    completion_timeout: Duration,
+    stage: &str,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    if bytes.is_empty() || bytes.len() as u64 != destination.size_bytes() {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "{stage} bytes do not exactly match destination"
+        )));
+    }
+    let maximum = usize::try_from(
+        session
+            .max_transfer_bytes()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+    )
+    .unwrap_or(usize::MAX);
+    if maximum == 0 {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "backend transfer limit must be non-zero",
+        ));
+    }
+    let mut offset = 0_usize;
+    while offset < bytes.len() {
+        let length = (bytes.len() - offset).min(maximum);
+        let absolute = destination
+            .offset_bytes()
+            .checked_add(offset as u64)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(format!("{stage} offset overflowed"))
+            })?;
+        let range = destination
+            .buffer()
+            .range(absolute, length as u64)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut transfer = session
+            .upload(
+                queue,
+                range,
+                Arc::from(bytes[offset..offset + length].to_vec()),
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        require_terminal_success(
+            stage,
+            transfer
+                .wait(completion_timeout)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        offset = offset.checked_add(length).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid(format!("{stage} progress overflowed"))
+        })?;
+    }
+    Ok(())
+}
+
 fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {
     view.dtype() == DType::U8
         && matches!(
@@ -2534,6 +4847,23 @@ fn layout_token_count(layout: &Gemma4ExecutionLayout) -> Result<u64, Gemma4Execu
         .and_then(|tensor| tensor.view.shape().first().copied())
         .and_then(|count| u64::try_from(count).ok())
         .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("token tensor shape is absent"))
+}
+
+fn validate_gemma_input_token_ids(token_ids: &[i32]) -> Result<(), Gemma4ExecutionLayoutError> {
+    let vocab = i32::try_from(crate::GEMMA4_VOCAB_SIZE)
+        .map_err(|_| Gemma4ExecutionLayoutError::invalid("Gemma vocabulary exceeds i32"))?;
+    if let Some((index, token)) = token_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, token)| *token < 0 || *token >= vocab)
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "input token ID {token} at index {index} is outside [0, {})",
+            crate::GEMMA4_VOCAB_SIZE
+        )));
+    }
+    Ok(())
 }
 
 pub fn build_gemma4_execution_layout(
@@ -3009,7 +5339,11 @@ impl<'a> LayoutBuilder<'a> {
             self.views(&[query, key, self.positions])?,
             self.views(&[query_output, key_output])?,
             rotary
-                .semantic_contract(self.graph.start_position(), self.graph.token_count())
+                .semantic_contract_with_position_mode(
+                    self.graph.start_position(),
+                    self.graph.token_count(),
+                    self.graph.rotary_position_mode(),
+                )
                 .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -3451,6 +5785,91 @@ mod tests {
         (graph, plan)
     }
 
+    fn synthetic_state_image(encoding: KvCacheEncoding) -> Gemma4StateImageV1 {
+        let committed_length = 1;
+        let state_capacity = 2;
+        let mut full_kv_layers = BTreeMap::new();
+        let mut sliding_layers = BTreeMap::new();
+        for (layer, kind) in crate::reviewed_layer_schedule().into_iter().enumerate() {
+            let layer = u32::try_from(layer).unwrap();
+            let metadata = StateLayerMetadataV1 {
+                owner: StateOwnerKindV1::Kv,
+                layer_id: layer,
+                published_length: committed_length,
+                generation: u64::from(layer) + 1,
+                active_slot: None,
+            };
+            let planes = gemma_kv_plane_kinds(encoding)
+                .iter()
+                .copied()
+                .map(|plane| OpaqueStatePlane {
+                    owner: StateOwnerKindV1::Kv,
+                    layer_id: layer,
+                    plane,
+                    bytes: if kind == Gemma4LayerType::SlidingAttention
+                        && !matches!(plane, StatePlaneKindV1::KvKey | StatePlaneKindV1::KvValue)
+                    {
+                        Vec::new()
+                    } else {
+                        vec![layer as u8, plane as u8]
+                    },
+                })
+                .collect();
+            let image = ExecutionStateImageV1::new(metadata, planes);
+            match kind {
+                Gemma4LayerType::FullAttention => {
+                    let descriptor =
+                        KvStateDescriptor::new_with_storage(layer, state_capacity, 1, 1, encoding)
+                            .unwrap();
+                    full_kv_layers.insert(layer, Gemma4KvStateImageV1 { descriptor, image });
+                }
+                Gemma4LayerType::SlidingAttention => {
+                    sliding_layers.insert(
+                        layer,
+                        Gemma4SlidingStateImageV1 {
+                            heads: 1,
+                            head_dim: 1,
+                            capacity: state_capacity,
+                            retention_window: 128,
+                            image,
+                        },
+                    );
+                }
+            }
+        }
+        Gemma4StateImageV1 {
+            session_id: crate::ExecutionSessionId::new(91),
+            model_fingerprint: format!("sha256:{}", "1".repeat(64)),
+            plan_digest: [2; 32],
+            state_capacity,
+            committed_length,
+            rope_position_delta: 4,
+            full_kv_layers,
+            sliding_layers,
+            cached_terminal_output: None,
+        }
+    }
+
+    fn synthetic_checkpoint_identity(
+        image: &Gemma4StateImageV1,
+        tokens: &[u32],
+    ) -> CheckpointIdentity {
+        CheckpointIdentity::for_tokens(
+            image.model_fingerprint(),
+            "derived",
+            "adapter",
+            "renderer",
+            "tokenizer",
+            "gfx942:wave64",
+            gemma_hex_digest(image.plan_digest()),
+            tokens,
+            image.kv_encoding().unwrap(),
+            image.kv_descriptor_digest().unwrap(),
+            [3; 32],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn layout_materializes_every_semantic_descriptor_and_exact_weight_identity() {
         let (graph, plan) = fixture(3, 0, 17);
@@ -3509,5 +5928,152 @@ mod tests {
         let (graph, mut plan) = fixture(1, 0, 1);
         plan.lock_fingerprint.push_str("-different");
         assert!(build_gemma4_execution_layout(&graph, &plan).is_err());
+    }
+
+    #[test]
+    fn full_attention_states_use_opaque_fp16_geometry_only() {
+        let (graph, _) = fixture(1, 0, 17);
+        let full = graph
+            .kv_descriptors()
+            .iter()
+            .filter(|descriptor| descriptor.retention_window.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(full.len(), 8);
+        assert_eq!(gemma_full_attention_layers(&graph).len(), full.len());
+        for descriptor in full {
+            let state = gemma_full_kv_state_descriptor(descriptor, None).unwrap();
+            assert_eq!(state.cache_encoding(), KvCacheEncoding::Fp16);
+            assert_eq!(state.layout().heads(), descriptor.heads as usize);
+            assert_eq!(state.layout().head_dim(), descriptor.head_dim as usize);
+            assert_eq!(state.capacity(), descriptor.capacity);
+        }
+    }
+
+    #[test]
+    fn sliding_prefix_plane_ranges_are_exact_for_non_aligned_window_tail() {
+        let (graph, _) = fixture(1, 0, 257);
+        let sliding = gemma_sliding_layer_identities(&graph);
+        assert!(!sliding.is_empty());
+        assert!(sliding.values().all(|identity| identity.capacity == 257));
+        for identity in sliding.values().copied() {
+            let bytes = gemma_sliding_plane_bytes(identity, 65).unwrap();
+            assert_eq!(
+                bytes,
+                65 * u64::from(identity.heads) * u64::from(identity.head_dim) * 2
+            );
+            assert!(bytes < gemma_sliding_plane_bytes(identity, identity.capacity).unwrap());
+        }
+    }
+
+    #[test]
+    fn prefix_fork_audit_charges_shared_physical_and_sliding_resident_bytes() {
+        let mut audit = Gemma4PrefixForkAuditV1::default();
+        let shared =
+            StateForkAuditV1::new(crate::StateForkModeV1::SharedReadOnlyPages, 257, 2, 0, 0)
+                .unwrap();
+        audit.add(shared, 8192).unwrap();
+        assert_eq!(audit.shared_pages(), 2);
+        assert_eq!(audit.destination_owned_bytes(), 0);
+        assert_eq!(audit.cache_resident_bytes(), 8192);
+    }
+
+    #[test]
+    fn state_image_checkpoint_round_trip_covers_the_real_layer_topology() {
+        let image = synthetic_state_image(KvCacheEncoding::Fp16);
+        assert_eq!(image.full_kv_layers().len(), 8);
+        assert_eq!(image.sliding_layers().len(), 40);
+        let tokens = [7];
+        let identity = synthetic_checkpoint_identity(&image, &tokens);
+        let checkpoint = image
+            .to_checkpoint(
+                identity,
+                &tokens,
+                b"conversation",
+                b"sampler",
+                b"grammar",
+                b"stop",
+                5,
+                1,
+                9,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.payload.state_layers.len(), 48);
+        assert_eq!(checkpoint.payload.state_planes.len(), 96);
+        assert_eq!(checkpoint.payload.token_history, tokens);
+        assert_eq!(checkpoint.payload.conversation, b"conversation");
+        assert_eq!(checkpoint.header.absolute_position, 5);
+        assert_eq!(checkpoint.header.logical_position, 1);
+        let encoded = checkpoint.encode().unwrap();
+        assert_eq!(SessionCheckpoint::decode(&encoded).unwrap(), checkpoint);
+    }
+
+    #[test]
+    fn state_image_keeps_every_encoding_native_plane_generic() {
+        let image = synthetic_state_image(KvCacheEncoding::Nvfp4);
+        let tokens = [11];
+        let checkpoint = image
+            .to_checkpoint(
+                synthetic_checkpoint_identity(&image, &tokens),
+                &tokens,
+                &[],
+                &[],
+                &[],
+                &[],
+                5,
+                1,
+                1,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.payload.state_planes.len(), 48 * 6);
+        assert!(image.sliding_layers().values().all(|layer| {
+            layer.image().planes().iter().all(|plane| {
+                matches!(
+                    plane.plane,
+                    StatePlaneKindV1::KvKey | StatePlaneKindV1::KvValue
+                ) || plane.bytes.is_empty()
+            })
+        }));
+    }
+
+    #[test]
+    fn state_image_rejects_missing_duplicate_and_wrong_identity() {
+        let mut missing = synthetic_state_image(KvCacheEncoding::Fp16);
+        let removed = *missing.full_kv_layers.keys().next().unwrap();
+        missing.full_kv_layers.remove(&removed);
+        assert!(validate_gemma_state_image(&missing, false).is_err());
+
+        let mut duplicate = synthetic_state_image(KvCacheEncoding::Fp16);
+        let layer = *duplicate.full_kv_layers.keys().next().unwrap();
+        let duplicate_plane = duplicate.full_kv_layers[&layer].image.planes()[0].clone();
+        let entry = duplicate.full_kv_layers.get_mut(&layer).unwrap();
+        let mut planes = entry.image.planes().to_vec();
+        planes.push(duplicate_plane);
+        entry.image = ExecutionStateImageV1::new(entry.image.metadata().clone(), planes);
+        assert!(validate_gemma_state_image(&duplicate, false).is_err());
+
+        let image = synthetic_state_image(KvCacheEncoding::Fp16);
+        let tokens = [19];
+        let mut identity = synthetic_checkpoint_identity(&image, &tokens);
+        identity.target_semantics = "gfx1100:wave32".to_owned();
+        identity.kv_descriptor_digest[0] ^= 0xff;
+        assert!(
+            image
+                .to_checkpoint(identity, &tokens, &[], &[], &[], &[], 5, 1, 1)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn descriptor_digest_commits_sliding_layout_and_retention() {
+        let image = synthetic_state_image(KvCacheEncoding::Fp16);
+        let baseline = image.kv_descriptor_digest().unwrap();
+        let mut changed = image.clone();
+        changed
+            .sliding_layers
+            .values_mut()
+            .next()
+            .unwrap()
+            .retention_window += 1;
+        assert_ne!(changed.kv_descriptor_digest().unwrap(), baseline);
     }
 }

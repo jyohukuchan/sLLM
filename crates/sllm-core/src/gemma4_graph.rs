@@ -9,7 +9,7 @@ use crate::gemma4::{
     Gemma4LayerType, Gemma4ModelLock, is_reviewed_gemma4_identity, reviewed_layer_schedule,
 };
 use crate::op::{
-    OpError, RmsNormScaleMode, SemanticOpKind, SplitHalfRotaryContract,
+    OpError, RmsNormScaleMode, RotaryPositionModeV1, SemanticOpKind, SplitHalfRotaryContract,
     WindowedCausalAttentionContract,
 };
 use crate::prepared_execution::{
@@ -78,7 +78,23 @@ impl Gemma4RopeDescriptor {
         start_position: u64,
         token_count: u64,
     ) -> Result<SplitHalfRotaryContract, OpError> {
-        SplitHalfRotaryContract::new(
+        self.semantic_contract_with_position_mode(
+            start_position,
+            token_count,
+            RotaryPositionModeV1::Contiguous,
+        )
+    }
+
+    /// Builds a rotary contract for a compacted request transition. The
+    /// explicit mode keeps logical state indices for attention while consuming
+    /// the caller-provided absolute position tensor for RoPE.
+    pub fn semantic_contract_with_position_mode(
+        self,
+        start_position: u64,
+        token_count: u64,
+        position_mode: RotaryPositionModeV1,
+    ) -> Result<SplitHalfRotaryContract, OpError> {
+        SplitHalfRotaryContract::new_with_position_mode(
             self.q_heads,
             self.kv_heads,
             self.head_dim,
@@ -87,6 +103,7 @@ impl Gemma4RopeDescriptor {
             start_position,
             token_count,
             GEMMA4_RUNTIME_MAX_CONTEXT_TOKENS as u32,
+            position_mode,
         )
     }
 }
@@ -242,6 +259,7 @@ pub struct Gemma4Graph {
     weight_plan_digest: [u8; 32],
     token_count: u64,
     start_position: u64,
+    rotary_position_mode: RotaryPositionModeV1,
     expected_length: u64,
     state_capacity: u64,
     nodes: Vec<Gemma4GraphNode>,
@@ -249,6 +267,14 @@ pub struct Gemma4Graph {
 }
 
 impl Gemma4Graph {
+    /// Capabilities advertised to the backend-neutral context-window policy.
+    /// Gemma text RoPE and windowed attention both consume the explicit
+    /// position tensor, so prefix/recent retention is safe to admit once the
+    /// caller supplies a fresh request owner.
+    pub const fn context_adapter_capabilities(&self) -> crate::ContextAdapterCapabilitiesV1 {
+        crate::ContextAdapterCapabilitiesV1::new(1, 1, 1, true, true)
+    }
+
     pub fn lock_fingerprint(&self) -> &str {
         &self.lock_fingerprint
     }
@@ -263,6 +289,10 @@ impl Gemma4Graph {
 
     pub const fn start_position(&self) -> u64 {
         self.start_position
+    }
+
+    pub const fn rotary_position_mode(&self) -> RotaryPositionModeV1 {
+        self.rotary_position_mode
     }
 
     pub const fn expected_length(&self) -> u64 {
@@ -407,6 +437,30 @@ impl Gemma4RequestState {
         self.transaction.cancel();
     }
 
+    /// Restores a freshly-created request owner to a quiescent, already
+    /// published prefix length.  The opaque KV owner is restored by the
+    /// execution adapter; this method only advances the request publication
+    /// ledger so the next transition starts at the forked state's length.
+    ///
+    /// Publication still goes through the same two-boundary transaction as a
+    /// normal graph transition.  No backend work or request workspace is
+    /// retained by this operation, and a failed boundary leaves the state
+    /// unpublished (or poisoned according to the transaction contract).
+    pub fn restore_prefix(
+        &self,
+        committed_length: u64,
+    ) -> Result<Gemma4RequestStateSnapshot, PreparedExecutionError> {
+        if committed_length == 0 || committed_length > self.capacity {
+            return Err(PreparedExecutionError::InvalidTransition(
+                "Gemma prefix length is outside request-state capacity".to_owned(),
+            ));
+        }
+        let mut transition = self.begin(committed_length, 0, 0)?;
+        transition.complete_boundary(ExecutionBoundaryKind::StatePublication)?;
+        transition.complete_boundary(ExecutionBoundaryKind::TerminalReadback)?;
+        transition.commit()
+    }
+
     pub fn snapshot(&self) -> Result<Gemma4RequestStateSnapshot, PreparedExecutionError> {
         let published = self
             .published
@@ -536,6 +590,27 @@ pub fn build_gemma4_graph(
     token_count: u64,
     start_position: u64,
     state_capacity: u64,
+) -> Result<Gemma4Graph, Gemma4GraphError> {
+    build_gemma4_graph_with_position_mode(
+        lock,
+        plan,
+        token_count,
+        start_position,
+        state_capacity,
+        RotaryPositionModeV1::Contiguous,
+    )
+}
+
+/// Builds a Gemma graph with an explicit absolute-position payload for RoPE.
+/// The graph's `start_position` remains the compact logical state position;
+/// callers upload original absolute positions before executing the transition.
+pub fn build_gemma4_graph_with_position_mode(
+    lock: &Gemma4ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    start_position: u64,
+    state_capacity: u64,
+    rotary_position_mode: RotaryPositionModeV1,
 ) -> Result<Gemma4Graph, Gemma4GraphError> {
     if !is_reviewed_gemma4_identity(lock) {
         return Err(Gemma4GraphError::InvalidModel);
@@ -881,6 +956,7 @@ pub fn build_gemma4_graph(
         weight_plan_digest: *plan.digest(),
         token_count,
         start_position,
+        rotary_position_mode,
         expected_length,
         state_capacity,
         nodes,
@@ -1081,6 +1157,31 @@ mod tests {
     }
 
     #[test]
+    fn graph_explicit_rope_mode_keeps_compact_logical_start() {
+        let (lock, plan) = fixture();
+        let graph = build_gemma4_graph_with_position_mode(
+            &lock,
+            &plan,
+            3,
+            17,
+            257,
+            RotaryPositionModeV1::Explicit,
+        )
+        .unwrap();
+        assert_eq!(graph.start_position(), 17);
+        assert_eq!(graph.expected_length(), 20);
+        assert_eq!(graph.rotary_position_mode(), RotaryPositionModeV1::Explicit);
+        assert_eq!(
+            graph
+                .nodes()
+                .iter()
+                .find(|node| node.label() == "layer.5.rotary")
+                .and_then(|node| node.kind().semantic_kind()),
+            Some(SemanticOpKind::Rotary)
+        );
+    }
+
+    #[test]
     fn graph_records_dual_attention_and_shared_execution_boundaries() {
         let (lock, plan) = fixture();
         let graph = build_gemma4_graph(&lock, &plan, 3, 17, 257).unwrap();
@@ -1250,6 +1351,21 @@ mod tests {
             .unwrap();
         assert_eq!(second.commit().unwrap().committed_length, 20);
         assert_eq!(state.snapshot().unwrap().state_generation, 2);
+    }
+
+    #[test]
+    fn request_state_restores_a_quiescent_prefix_transactionally() {
+        let state = Gemma4RequestState::new(257).unwrap();
+        assert_eq!(state.restore_prefix(31).unwrap().committed_length, 31);
+        let snapshot = state.snapshot().unwrap();
+        assert_eq!(snapshot.committed_length, 31);
+        assert_eq!(snapshot.binding_generation, 0);
+        assert_eq!(snapshot.state_generation, 1);
+        assert!(matches!(
+            state.restore_prefix(0),
+            Err(PreparedExecutionError::InvalidTransition(_))
+        ));
+        assert_eq!(state.snapshot().unwrap().committed_length, 31);
     }
 
     #[test]

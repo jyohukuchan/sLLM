@@ -318,6 +318,34 @@ logprobをfail-closedに監査する。gfx1030/gfx1201のselector contract matri
 gfx942はwave64 feature-pinned compile/routeのみPASSで、MI300X real correctness/performanceはVM再確保後へdeferredする。直接llama.cpp
 source reuseはなく、provenance lockは変更しない。
 
+### Phase 41 prefix・context・checkpoint state
+
+Phase 41はrequest-local ownerを壊さず、公開済みquiescent stateだけをcross-request boundaryへ出す。prefix keyはmodel-lock、
+derived artifact/plan、adapter、renderer/tokenizer、exact tokens、KV encoding/layout、target semantics、context policyを含む。
+bounded longest-prefix indexはimmutable entry、lease、checked reader/LRU/accountingを持ち、workspace、queue、prepared plan、
+terminal selectionをcache ownerへ移さない。
+
+opaque state forkはKV encodingごとのvalue/scale/outer-scale planeとlinear/GDN active stateを一つのtransactionとして扱う。
+VMM pathはcomplete pageをread-only共有し、append対象tailをCOWする。contiguous pathとGemma sliding K/Vはsame-device D2D cloneを使う。
+post-COW queryでchild owned bytesをrequestへ追加予約し、cache quotaはshared physical bytesを一度だけ数える。fork/import/exportは
+additive C ABIであり、partial import、異session raw image、identity/layout/encoding mismatchをpublication前に拒否する。
+
+`keep-prefix-recent-v1`はretained logical rangesとabsolute positionsを分離する。Qwen/Gemma executorはcapacity到達前にretained
+tokensからfresh ownerを作り、RoPE/attentionへexplicit absolute positionを渡し、成功後だけownerとcompact historyを交換する。
+Qwen GDN/linear recurrenceはcompact logical sequenceから再計算する。unsupported model/encoding、prefix/draft/multimodal、
+device-selectorとの組合せはGPU work前にfail closedとする。
+
+checkpoint envelopeはlittle-endian `sllm-session-checkpoint-v1`で、全section digest、全file digest、bounded length/countを検証する。
+Qwen/Gemma productionはstateless prompt checkpointだけを提供する。loadはbackend open時にstrict検証したimmutable snapshotを保持し、
+request tokensがcheckpoint historyをprefixとして持つnonempty suffix continuationだけを許す。saveはfresh prompt prefill後かつ最初の
+visible delta前にatomic replaceする。mid-generation resume、暗黙のglobal conversation、client間state共有はこのcontractに含めない。
+sampler/RNGとgrammarは将来の明示session ownerが利用できるversioned bounded snapshotを持つが、prompt checkpointのfrontend state
+sectionはcanonical emptyである。
+
+assistant prefillはrender/tokenize後のprepared prompt stateとしてdecoder、grammar、stop matcherをprimeし、visible completionへ
+再公開しない。MTP、external、ngramはmodel-neutralなbounded proposal/verification/publication/accountingを共有し、target samplerだけが
+visible tokenとRNGを所有する。external executorがprovisionされていないproduction configは実行可能providerへfallbackせず拒否する。
+
 ### OpenAI serverのadmissionとstreaming境界
 
 Phase 6 A4/A5の初期serverは一つのworkerだけがgeneration backendを呼び、bounded FIFOを超えるrequestを

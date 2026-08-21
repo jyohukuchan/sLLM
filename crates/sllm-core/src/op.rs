@@ -37,6 +37,28 @@ pub enum AttentionPreprocessPositionMode {
     DecodeContinuation,
 }
 
+/// Position payload interpretation for Qwen C3a1 attention preprocessing.
+/// The transition mode (prefill/decode) remains separate from this payload
+/// mode so explicit absolute positions can be used after logical compaction.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum AttentionPreprocessPositionPayloadModeV1 {
+    Contiguous,
+    Explicit,
+}
+
+/// Position payload interpretation for split-half rotary.
+///
+/// `Contiguous` preserves the original contract: the backend validates that
+/// the position tensor is exactly `start_position + [0..token_count)`.  The
+/// `Explicit` variant is used by context-window compaction; the position
+/// tensor carries the original absolute position for each retained token and
+/// is validated by the backend before dispatch.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RotaryPositionModeV1 {
+    Contiguous,
+    Explicit,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AttentionPreprocessTensor {
     PackedQGate,
@@ -426,6 +448,7 @@ pub struct AttentionPreprocessContract {
     head_dim: u32,
     packing: AttentionPreprocessPacking,
     position_mode: AttentionPreprocessPositionMode,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
     start_position: u32,
     token_count: u32,
     epsilon: RmsNormEpsilon,
@@ -465,6 +488,41 @@ impl AttentionPreprocessContract {
         mrope_interleaved: bool,
         mrope_sections: [u32; 3],
         max_position_embeddings: u32,
+    ) -> Result<Self, OpError> {
+        Self::new_with_position_payload_mode(
+            packing,
+            position_mode,
+            start_position,
+            token_count,
+            epsilon,
+            scale_mode,
+            accumulation_dtype,
+            output_dtype,
+            rotary_dim,
+            rope_theta,
+            mrope_interleaved,
+            mrope_sections,
+            max_position_embeddings,
+            AttentionPreprocessPositionPayloadModeV1::Contiguous,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_position_payload_mode(
+        packing: AttentionPreprocessPacking,
+        position_mode: AttentionPreprocessPositionMode,
+        start_position: i64,
+        token_count: u64,
+        epsilon: f32,
+        scale_mode: RmsNormScaleMode,
+        accumulation_dtype: DType,
+        output_dtype: DType,
+        rotary_dim: u32,
+        rope_theta: f32,
+        mrope_interleaved: bool,
+        mrope_sections: [u32; 3],
+        max_position_embeddings: u32,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
     ) -> Result<Self, OpError> {
         if !matches!(packing, AttentionPreprocessPacking::HeadInterleavedQGate) {
             return Err(OpError::AttentionPreprocessInvalidConfig { field: "packing" });
@@ -560,6 +618,7 @@ impl AttentionPreprocessContract {
             head_dim: Self::HEAD_DIM as u32,
             packing,
             position_mode,
+            position_payload_mode,
             start_position,
             token_count,
             epsilon,
@@ -644,6 +703,30 @@ impl AttentionPreprocessContract {
         Ok(contract)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_qwen3_5_with_layout_and_context_and_position_payload_mode(
+        position_mode: AttentionPreprocessPositionMode,
+        start_position: i64,
+        token_count: u64,
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+        runtime_context_tokens: u32,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
+    ) -> Result<Self, OpError> {
+        let mut contract = Self::new_qwen3_5_with_layout_and_context(
+            position_mode,
+            start_position,
+            token_count,
+            q_heads,
+            kv_heads,
+            head_dim,
+            runtime_context_tokens,
+        )?;
+        contract.position_payload_mode = position_payload_mode;
+        Ok(contract)
+    }
+
     pub const fn packing(self) -> AttentionPreprocessPacking {
         self.packing
     }
@@ -662,6 +745,10 @@ impl AttentionPreprocessContract {
 
     pub const fn position_mode(self) -> AttentionPreprocessPositionMode {
         self.position_mode
+    }
+
+    pub const fn position_payload_mode(self) -> AttentionPreprocessPositionPayloadModeV1 {
+        self.position_payload_mode
     }
 
     pub const fn start_position(self) -> u32 {
@@ -730,6 +817,7 @@ pub struct SplitHalfRotaryContract {
     start_position: u32,
     token_count: u32,
     max_position_embeddings: u32,
+    position_mode: RotaryPositionModeV1,
     accumulation_dtype: DType,
     output_dtype: DType,
 }
@@ -745,6 +833,31 @@ impl SplitHalfRotaryContract {
         start_position: u64,
         token_count: u64,
         max_position_embeddings: u32,
+    ) -> Result<Self, OpError> {
+        Self::new_with_position_mode(
+            q_heads,
+            kv_heads,
+            head_dim,
+            rotary_dim,
+            theta,
+            start_position,
+            token_count,
+            max_position_embeddings,
+            RotaryPositionModeV1::Contiguous,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_position_mode(
+        q_heads: u32,
+        kv_heads: u32,
+        head_dim: u32,
+        rotary_dim: u32,
+        theta: f32,
+        start_position: u64,
+        token_count: u64,
+        max_position_embeddings: u32,
+        position_mode: RotaryPositionModeV1,
     ) -> Result<Self, OpError> {
         if q_heads == 0 || kv_heads == 0 || q_heads % kv_heads != 0 {
             return Err(OpError::RotaryInvalidConfig {
@@ -800,6 +913,7 @@ impl SplitHalfRotaryContract {
             start_position,
             token_count,
             max_position_embeddings,
+            position_mode,
             accumulation_dtype: DType::F32,
             output_dtype: DType::Bf16,
         })
@@ -839,6 +953,10 @@ impl SplitHalfRotaryContract {
 
     pub const fn max_position_embeddings(self) -> u32 {
         self.max_position_embeddings
+    }
+
+    pub const fn position_mode(self) -> RotaryPositionModeV1 {
+        self.position_mode
     }
 
     pub const fn accumulation_dtype(self) -> DType {

@@ -27,8 +27,11 @@ pub use metrics::{
     RequestOutcomeV1, ServerMetricsV1,
 };
 pub use production::{
-    Gemma4BackendConfigV1, Gemma4ChatBackendV1, ProductionRequestAuditV1,
-    ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
+    CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
+    Gemma4BackendConfigV1, Gemma4ChatBackendV1, Phase41ProductionConfigV1,
+    PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1, ProductionCheckpointResultV1,
+    ProductionDraftProviderV1, ProductionPhase41AuditV1, ProductionPrefixCacheResultV1,
+    ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenBackendConfigV1, QwenChatBackendV1,
 };
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{
