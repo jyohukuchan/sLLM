@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use sllm_frontend::GenerationCancellationV1;
-use tokio::sync::mpsc;
+use sllm_frontend::{
+    ApplyTemplateResultV1, DecodeModeV1, FimTemplateV1, GenerationCancellationV1,
+    Qwen35ChatMessageV1, Qwen35RenderOptionsV1, TokenizeOptionsV1, TokenizeResultV1,
+};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::api::{ApiErrorV1, ChatCompletionRequestV1, FinishReasonV1, TokenUsageV1};
 
@@ -52,6 +55,177 @@ pub struct BackendTokenLogprobV1 {
     pub top_logprobs: Vec<BackendTopLogprobV1>,
 }
 
+/// One validated input to the transport-independent embedding mode.
+///
+/// Text is tokenized by the exact verified tokenizer owned by the selected
+/// backend. Pretokenized input is accepted only after the backend has checked
+/// every ID against that same tokenizer/model vocabulary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BackendEmbeddingInputV1 {
+    Text(String),
+    TokenIds(Vec<u32>),
+}
+
+/// A bounded batch submitted through the same single-owner scheduler as text
+/// generation. Pooling, normalization, and public dtype are fixed by the
+/// Phase 42 embedding profile rather than selected by an untrusted request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackendEmbeddingRequestV1 {
+    inputs: Vec<BackendEmbeddingInputV1>,
+}
+
+impl BackendEmbeddingRequestV1 {
+    /// Includes one query plus 256 documents for the rerank profile. The
+    /// embeddings HTTP adapter retains its stricter 256-input public bound.
+    pub const MAX_INPUTS: usize = 257;
+
+    pub fn new(inputs: Vec<BackendEmbeddingInputV1>) -> Result<Self, BackendErrorV1> {
+        if inputs.is_empty() || inputs.len() > Self::MAX_INPUTS {
+            return Err(BackendErrorV1::new(format!(
+                "embedding input count must be in [1,{}]",
+                Self::MAX_INPUTS
+            )));
+        }
+        if inputs.iter().any(|input| match input {
+            BackendEmbeddingInputV1::Text(text) => text.is_empty(),
+            BackendEmbeddingInputV1::TokenIds(tokens) => tokens.is_empty(),
+        }) {
+            return Err(BackendErrorV1::new(
+                "embedding inputs must not contain an empty text or token sequence",
+            ));
+        }
+        Ok(Self { inputs })
+    }
+
+    pub fn inputs(&self) -> &[BackendEmbeddingInputV1] {
+        &self.inputs
+    }
+}
+
+/// One finite, L2-normalized public f32 embedding and its exact token usage.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendEmbeddingVectorV1 {
+    values: Vec<f32>,
+    prompt_tokens: u64,
+}
+
+impl BackendEmbeddingVectorV1 {
+    pub fn new(values: Vec<f32>, prompt_tokens: u64) -> Result<Self, BackendErrorV1> {
+        if values.is_empty() || prompt_tokens == 0 || values.iter().any(|value| !value.is_finite())
+        {
+            return Err(BackendErrorV1::new(
+                "embedding vector must be nonempty and finite with nonzero token usage",
+            ));
+        }
+        let squared_norm = values
+            .iter()
+            .map(|&value| f64::from(value) * f64::from(value))
+            .sum::<f64>();
+        if !squared_norm.is_finite() || (squared_norm - 1.0).abs() > 1.0e-4 {
+            return Err(BackendErrorV1::new(
+                "embedding vector must be L2-normalized within the public profile tolerance",
+            ));
+        }
+        Ok(Self {
+            values,
+            prompt_tokens,
+        })
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values
+    }
+
+    pub const fn prompt_tokens(&self) -> u64 {
+        self.prompt_tokens
+    }
+}
+
+/// Ordered output for one embedding batch. Duplicate inputs remain duplicate
+/// rows and are never deduplicated by the scheduler or backend.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendEmbeddingBatchV1 {
+    dimension: u32,
+    vectors: Vec<BackendEmbeddingVectorV1>,
+}
+
+/// Model-lock-bound FIM capability. Production backends return one only when
+/// marker identity, provider support, and context bound were verified
+/// together; a boolean alone cannot accidentally enable the route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BackendInfillCapabilityV1 {
+    template: FimTemplateV1,
+    max_context_tokens: u32,
+    provider: String,
+}
+
+impl BackendInfillCapabilityV1 {
+    pub fn new(
+        template: FimTemplateV1,
+        max_context_tokens: u32,
+        provider: impl Into<String>,
+    ) -> Result<Self, BackendErrorV1> {
+        let provider = provider.into();
+        if max_context_tokens == 0 || provider.is_empty() || provider.len() > 256 {
+            return Err(BackendErrorV1::new(
+                "FIM capability requires a nonzero context and bounded provider identity",
+            ));
+        }
+        Ok(Self {
+            template,
+            max_context_tokens,
+            provider,
+        })
+    }
+
+    pub const fn template(&self) -> &FimTemplateV1 {
+        &self.template
+    }
+
+    pub const fn max_context_tokens(&self) -> u32 {
+        self.max_context_tokens
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+}
+
+impl BackendEmbeddingBatchV1 {
+    pub fn new(
+        dimension: u32,
+        vectors: Vec<BackendEmbeddingVectorV1>,
+    ) -> Result<Self, BackendErrorV1> {
+        if dimension == 0
+            || vectors.is_empty()
+            || vectors
+                .iter()
+                .any(|vector| vector.values.len() != dimension as usize)
+        {
+            return Err(BackendErrorV1::new(
+                "embedding batch dimension or row shape is invalid",
+            ));
+        }
+        Ok(Self { dimension, vectors })
+    }
+
+    pub const fn dimension(&self) -> u32 {
+        self.dimension
+    }
+
+    pub fn vectors(&self) -> &[BackendEmbeddingVectorV1] {
+        &self.vectors
+    }
+
+    pub fn total_prompt_tokens(&self) -> Result<u64, BackendErrorV1> {
+        self.vectors.iter().try_fold(0_u64, |total, vector| {
+            total
+                .checked_add(vector.prompt_tokens)
+                .ok_or_else(|| BackendErrorV1::new("embedding token usage overflowed u64"))
+        })
+    }
+}
+
 /// One redacted, bounded memory-accounting category exposed to operational
 /// observers.  It contains no allocation identity, prompt, token, or
 /// credential data.
@@ -92,6 +266,81 @@ pub trait ChatGenerationBackendV1: Send + Sync + 'static {
         cancellation: &GenerationCancellationV1,
         sink: &mut dyn GenerationDeltaSinkV1,
     ) -> Result<BackendCompletionV1, BackendErrorV1>;
+
+    /// Executes the Phase 42 embedding profile. Backends must override this
+    /// only when they expose final-normalized hidden rows with exact model and
+    /// tokenizer identity. The default is intentionally fail-closed.
+    fn embed(
+        &self,
+        _request: &BackendEmbeddingRequestV1,
+        _cancellation: &GenerationCancellationV1,
+    ) -> Result<BackendEmbeddingBatchV1, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "embedding mode is not supported by this model backend",
+        ))
+    }
+
+    fn embedding_dimension(&self) -> Option<u32> {
+        None
+    }
+
+    /// CPU-only admission check for one embedding input. It validates exact
+    /// tokenizer IDs and model context before the bounded GPU scheduler is
+    /// entered, and returns the token usage expected from execution.
+    fn validate_embedding_input(
+        &self,
+        _input: &BackendEmbeddingInputV1,
+    ) -> Result<u64, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "embedding input validation is not supported by this model backend",
+        ))
+    }
+
+    fn tokenize_utility(
+        &self,
+        _text: &str,
+        _options: TokenizeOptionsV1,
+    ) -> Result<TokenizeResultV1, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "tokenize utility is not supported by this model backend",
+        ))
+    }
+
+    fn detokenize_utility(
+        &self,
+        _token_ids: &[u32],
+        _mode: DecodeModeV1,
+    ) -> Result<String, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "detokenize utility is not supported by this model backend",
+        ))
+    }
+
+    fn apply_template_utility(
+        &self,
+        _messages: &[Qwen35ChatMessageV1],
+        _options: Qwen35RenderOptionsV1,
+    ) -> Result<ApplyTemplateResultV1, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "reviewed chat template is not supported by this model backend",
+        ))
+    }
+
+    fn reviewed_chat_template_available(&self) -> bool {
+        false
+    }
+
+    /// Tokenizes FIM content without injecting BOS/EOS. Marker tokens are
+    /// added only by the capability-bound [`FimTemplateV1`].
+    fn tokenize_infill_content(&self, _text: &str) -> Result<Vec<u32>, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "infill content tokenization is not supported by this model backend",
+        ))
+    }
+
+    fn infill_capability(&self) -> Option<BackendInfillCapabilityV1> {
+        None
+    }
 
     /// Returns redacted, bounded runtime accounting for operational metrics.
     /// Fixture and third-party backends remain safe by inheriting zeroes.
@@ -158,6 +407,53 @@ impl ModelRegistryEntryV1 {
 
     pub fn observability_snapshot(&self) -> BackendObservabilitySnapshotV1 {
         self.backend.observability_snapshot()
+    }
+
+    pub(crate) fn tokenize_utility(
+        &self,
+        text: &str,
+        options: TokenizeOptionsV1,
+    ) -> Result<TokenizeResultV1, BackendErrorV1> {
+        self.backend.tokenize_utility(text, options)
+    }
+
+    pub(crate) fn detokenize_utility(
+        &self,
+        token_ids: &[u32],
+        mode: DecodeModeV1,
+    ) -> Result<String, BackendErrorV1> {
+        self.backend.detokenize_utility(token_ids, mode)
+    }
+
+    pub(crate) fn apply_template_utility(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<ApplyTemplateResultV1, BackendErrorV1> {
+        self.backend.apply_template_utility(messages, options)
+    }
+
+    pub(crate) fn reviewed_chat_template_available(&self) -> bool {
+        self.backend.reviewed_chat_template_available()
+    }
+
+    pub(crate) fn tokenize_infill_content(&self, text: &str) -> Result<Vec<u32>, BackendErrorV1> {
+        self.backend.tokenize_infill_content(text)
+    }
+
+    pub(crate) fn infill_capability(&self) -> Option<BackendInfillCapabilityV1> {
+        self.backend.infill_capability()
+    }
+
+    pub(crate) fn embedding_dimension(&self) -> Option<u32> {
+        self.backend.embedding_dimension()
+    }
+
+    pub(crate) fn validate_embedding_input(
+        &self,
+        input: &BackendEmbeddingInputV1,
+    ) -> Result<u64, BackendErrorV1> {
+        self.backend.validate_embedding_input(input)
     }
 }
 
@@ -275,12 +571,41 @@ pub struct SchedulerV1 {
     slots: Arc<Mutex<SlotRegistryV1>>,
 }
 
-struct JobV1 {
+enum JobV1 {
+    Generation(Box<GenerationJobV1>),
+    Embedding(EmbeddingJobV1),
+}
+
+struct GenerationJobV1 {
     slot_id: u64,
     model: Arc<ModelRegistryEntryV1>,
     request: ChatCompletionRequestV1,
     events: mpsc::Sender<SchedulerEventV1>,
     cancellation: GenerationCancellationV1,
+}
+
+struct EmbeddingJobV1 {
+    slot_id: u64,
+    model: Arc<ModelRegistryEntryV1>,
+    request: BackendEmbeddingRequestV1,
+    result: oneshot::Sender<Result<BackendEmbeddingBatchV1, ApiErrorV1>>,
+    cancellation: GenerationCancellationV1,
+}
+
+impl JobV1 {
+    const fn slot_id(&self) -> u64 {
+        match self {
+            Self::Generation(job) => job.slot_id,
+            Self::Embedding(job) => job.slot_id,
+        }
+    }
+
+    fn cancellation(&self) -> &GenerationCancellationV1 {
+        match self {
+            Self::Generation(job) => &job.cancellation,
+            Self::Embedding(job) => &job.cancellation,
+        }
+    }
 }
 
 struct SlotRecordV1 {
@@ -308,6 +633,37 @@ pub(crate) struct GenerationReceiverV1 {
     pub(crate) slot_id: u64,
     receiver: mpsc::Receiver<SchedulerEventV1>,
     cancellation: GenerationCancellationV1,
+}
+
+pub(crate) struct EmbeddingReceiverV1 {
+    pub(crate) slot_id: u64,
+    receiver: oneshot::Receiver<Result<BackendEmbeddingBatchV1, ApiErrorV1>>,
+    cancellation: Option<GenerationCancellationV1>,
+}
+
+impl EmbeddingReceiverV1 {
+    #[allow(dead_code)]
+    pub const fn slot_id(&self) -> u64 {
+        self.slot_id
+    }
+
+    pub async fn recv(mut self) -> Result<BackendEmbeddingBatchV1, ApiErrorV1> {
+        let result = (&mut self.receiver).await.map_err(|_| {
+            ApiErrorV1::generation_failed("embedding ended without a terminal result")
+        })?;
+        // A completed receiver must not cancel the already-finished slot when
+        // its Drop implementation runs.
+        self.cancellation = None;
+        result
+    }
+}
+
+impl Drop for EmbeddingReceiverV1 {
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
+    }
 }
 
 impl GenerationReceiverV1 {
@@ -383,13 +739,13 @@ impl SchedulerV1 {
                 executing: false,
             },
         );
-        let job = JobV1 {
+        let job = JobV1::Generation(Box::new(GenerationJobV1 {
             slot_id,
             model,
             request,
             events,
             cancellation: cancellation.clone(),
-        };
+        }));
         if let Err(error) = self.sender.try_send(job) {
             slots.records.remove(&slot_id);
             return Err(match error {
@@ -402,6 +758,57 @@ impl SchedulerV1 {
             slot_id,
             receiver,
             cancellation,
+        })
+    }
+
+    pub(crate) fn submit_embedding(
+        &self,
+        model: Arc<ModelRegistryEntryV1>,
+        request: BackendEmbeddingRequestV1,
+    ) -> Result<EmbeddingReceiverV1, ApiErrorV1> {
+        let slot_id = self.allocate_slot_id();
+        let cancellation = GenerationCancellationV1::new();
+        let (result, receiver) = oneshot::channel();
+        let model_alias = model.alias().to_owned();
+        let mut slots = self
+            .slots
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(ApiErrorV1::server_shutdown());
+        }
+        if slots.records.len() >= slots.capacity {
+            return Err(ApiErrorV1::rate_limited());
+        }
+        slots.records.insert(
+            slot_id,
+            SlotRecordV1 {
+                model_alias,
+                state: SchedulerSlotStateV1::Queued,
+                cancellation: cancellation.clone(),
+                in_queue: true,
+                executing: false,
+            },
+        );
+        let job = JobV1::Embedding(EmbeddingJobV1 {
+            slot_id,
+            model,
+            request,
+            result,
+            cancellation: cancellation.clone(),
+        });
+        if let Err(error) = self.sender.try_send(job) {
+            slots.records.remove(&slot_id);
+            return Err(match error {
+                mpsc::error::TrySendError::Full(_) => ApiErrorV1::rate_limited(),
+                mpsc::error::TrySendError::Closed(_) => ApiErrorV1::server_shutdown(),
+            });
+        }
+        drop(slots);
+        Ok(EmbeddingReceiverV1 {
+            slot_id,
+            receiver,
+            cancellation: Some(cancellation),
         })
     }
 
@@ -502,102 +909,200 @@ async fn worker_loop(
     slots: Arc<Mutex<SlotRegistryV1>>,
 ) {
     while let Some(job) = receiver.recv().await {
-        let slot_id = job.slot_id;
+        let slot_id = job.slot_id();
         if shutdown.load(Ordering::Acquire) {
-            job.cancellation.cancel();
+            job.cancellation().cancel();
             mark_slot_cancelled(&slots, slot_id);
-            let _ = job
-                .events
-                .send(SchedulerEventV1::Failed(ApiErrorV1::server_shutdown()))
-                .await;
+            send_job_failure(job, ApiErrorV1::server_shutdown()).await;
             remove_slot(&slots, slot_id);
             continue;
         }
-        if job.cancellation.is_cancelled() {
+        if job.cancellation().is_cancelled() {
             mark_slot_cancelled(&slots, slot_id);
-            let _ = job
-                .events
-                .send(SchedulerEventV1::Failed(ApiErrorV1::request_cancelled()))
-                .await;
+            send_job_failure(job, ApiErrorV1::request_cancelled()).await;
             remove_slot(&slots, slot_id);
             continue;
         }
         if !mark_slot_active(&slots, slot_id) {
-            let _ = job
-                .events
-                .send(SchedulerEventV1::Failed(ApiErrorV1::request_cancelled()))
-                .await;
+            send_job_failure(job, ApiErrorV1::request_cancelled()).await;
             remove_slot(&slots, slot_id);
             continue;
         }
+        let job_cancellation = job.cancellation().clone();
         {
             let mut guard = active
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            *guard = Some(job.cancellation.clone());
+            *guard = Some(job_cancellation);
         }
-        let cancellation = job.cancellation.clone();
-        let events = job.events.clone();
-        let backend = Arc::clone(&job.model.backend);
-        let request = job.request;
-        let mut task = tokio::task::spawn_blocking(move || {
-            let mut sink = ChannelDeltaSinkV1 {
-                events: events.clone(),
-                cancellation: cancellation.clone(),
-            };
-            let result = backend.generate(&request, &cancellation, &mut sink);
-            (events, cancellation, result)
-        });
-        let outcome = match tokio::time::timeout(timeout, &mut task).await {
-            Ok(joined) => joined,
-            Err(_) => {
-                job.cancellation.cancel();
-                task.await
+        match job {
+            JobV1::Generation(job) => {
+                run_generation_job(*job, timeout, &shutdown, &slots).await;
             }
-        };
+            JobV1::Embedding(job) => {
+                run_embedding_job(job, timeout, &shutdown, &slots).await;
+            }
+        }
         {
             let mut guard = active
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *guard = None;
         }
-        match outcome {
-            Ok((events, cancellation, Ok(completion))) => {
-                if !cancellation.is_cancelled() {
-                    let _ = events.send(SchedulerEventV1::Finished(completion)).await;
-                } else {
-                    let terminal_error = if shutdown.load(Ordering::Acquire) {
-                        ApiErrorV1::server_shutdown()
-                    } else if slot_is_cancelled(&slots, slot_id) {
-                        ApiErrorV1::request_cancelled()
-                    } else {
-                        ApiErrorV1::generation_failed("generation timed out")
-                    };
-                    let _ = events.send(SchedulerEventV1::Failed(terminal_error)).await;
-                }
-            }
-            Ok((events, cancellation, Err(error))) => {
-                if !cancellation.is_cancelled() || !events.is_closed() {
-                    let terminal_error = if shutdown.load(Ordering::Acquire) {
-                        ApiErrorV1::server_shutdown()
-                    } else if slot_is_cancelled(&slots, slot_id) {
-                        ApiErrorV1::request_cancelled()
-                    } else {
-                        ApiErrorV1::generation_failed(error.to_string())
-                    };
-                    let _ = events.send(SchedulerEventV1::Failed(terminal_error)).await;
-                }
-            }
-            Err(error) => {
-                let _ = job
-                    .events
-                    .send(SchedulerEventV1::Failed(ApiErrorV1::generation_failed(
-                        format!("generation worker failed: {error}"),
+        remove_slot(&slots, slot_id);
+    }
+}
+
+async fn send_job_failure(job: JobV1, error: ApiErrorV1) {
+    match job {
+        JobV1::Generation(job) => {
+            let _ = job.events.send(SchedulerEventV1::Failed(error)).await;
+        }
+        JobV1::Embedding(job) => {
+            let _ = job.result.send(Err(error));
+        }
+    }
+}
+
+async fn run_generation_job(
+    job: GenerationJobV1,
+    timeout: Duration,
+    shutdown: &AtomicBool,
+    slots: &Arc<Mutex<SlotRegistryV1>>,
+) {
+    let GenerationJobV1 {
+        slot_id,
+        model,
+        request,
+        events,
+        cancellation,
+    } = job;
+    let timeout_cancellation = cancellation.clone();
+    let fallback_events = events.clone();
+    let backend = Arc::clone(&model.backend);
+    let mut task = tokio::task::spawn_blocking(move || {
+        let mut sink = ChannelDeltaSinkV1 {
+            events: events.clone(),
+            cancellation: cancellation.clone(),
+        };
+        let result = backend.generate(&request, &cancellation, &mut sink);
+        (events, cancellation, result)
+    });
+    let outcome = match tokio::time::timeout(timeout, &mut task).await {
+        Ok(joined) => joined,
+        Err(_) => {
+            timeout_cancellation.cancel();
+            let _ = fallback_events
+                .send(SchedulerEventV1::Failed(cancelled_or_timeout_error(
+                    shutdown,
+                    slots,
+                    slot_id,
+                    "generation timed out",
+                )))
+                .await;
+            // The client receives its bounded terminal response immediately,
+            // but the single-owner worker does not release the slot or start
+            // another model operation until the backend proves completion.
+            let _ = task.await;
+            return;
+        }
+    };
+    match outcome {
+        Ok((events, cancellation, Ok(completion))) => {
+            if !cancellation.is_cancelled() {
+                let _ = events.send(SchedulerEventV1::Finished(completion)).await;
+            } else {
+                let _ = events
+                    .send(SchedulerEventV1::Failed(cancelled_or_timeout_error(
+                        shutdown,
+                        slots,
+                        slot_id,
+                        "generation timed out",
                     )))
                     .await;
             }
         }
-        remove_slot(&slots, slot_id);
+        Ok((events, cancellation, Err(error))) => {
+            if !cancellation.is_cancelled() || !events.is_closed() {
+                let terminal_error = if cancellation.is_cancelled() {
+                    cancelled_or_timeout_error(shutdown, slots, slot_id, "generation timed out")
+                } else {
+                    ApiErrorV1::generation_failed(error.to_string())
+                };
+                let _ = events.send(SchedulerEventV1::Failed(terminal_error)).await;
+            }
+        }
+        Err(error) => {
+            let _ = fallback_events
+                .send(SchedulerEventV1::Failed(ApiErrorV1::generation_failed(
+                    format!("generation worker failed: {error}"),
+                )))
+                .await;
+        }
+    }
+}
+
+async fn run_embedding_job(
+    job: EmbeddingJobV1,
+    timeout: Duration,
+    shutdown: &AtomicBool,
+    slots: &Arc<Mutex<SlotRegistryV1>>,
+) {
+    let EmbeddingJobV1 {
+        slot_id,
+        model,
+        request,
+        result,
+        cancellation,
+    } = job;
+    let timeout_cancellation = cancellation.clone();
+    let backend = Arc::clone(&model.backend);
+    let mut task = tokio::task::spawn_blocking(move || {
+        let output = backend.embed(&request, &cancellation);
+        (cancellation, output)
+    });
+    let outcome = match tokio::time::timeout(timeout, &mut task).await {
+        Ok(joined) => joined,
+        Err(_) => {
+            timeout_cancellation.cancel();
+            let terminal =
+                cancelled_or_timeout_error(shutdown, slots, slot_id, "embedding timed out");
+            let _ = result.send(Err(terminal));
+            // Preserve backend ownership until cleanup completion even though
+            // the requester has already received the timeout response.
+            let _ = task.await;
+            return;
+        }
+    };
+    let terminal = match outcome {
+        Ok((cancellation, Ok(output))) if !cancellation.is_cancelled() => Ok(output),
+        Ok((cancellation, Ok(_))) if cancellation.is_cancelled() => Err(
+            cancelled_or_timeout_error(shutdown, slots, slot_id, "embedding timed out"),
+        ),
+        Ok((cancellation, Err(_error))) if cancellation.is_cancelled() => Err(
+            cancelled_or_timeout_error(shutdown, slots, slot_id, "embedding timed out"),
+        ),
+        Ok((_, Err(error))) => Err(ApiErrorV1::generation_failed(error.to_string())),
+        Err(error) => Err(ApiErrorV1::generation_failed(format!(
+            "embedding worker failed: {error}"
+        ))),
+        Ok((_, Ok(_))) => unreachable!("embedding cancellation guards are exhaustive"),
+    };
+    let _ = result.send(terminal);
+}
+
+fn cancelled_or_timeout_error(
+    shutdown: &AtomicBool,
+    slots: &Arc<Mutex<SlotRegistryV1>>,
+    slot_id: u64,
+    timeout_message: &str,
+) -> ApiErrorV1 {
+    if shutdown.load(Ordering::Acquire) {
+        ApiErrorV1::server_shutdown()
+    } else if slot_is_cancelled(slots, slot_id) {
+        ApiErrorV1::request_cancelled()
+    } else {
+        ApiErrorV1::generation_failed(timeout_message)
     }
 }
 
@@ -746,6 +1251,19 @@ mod tests {
         assert!(!encoded.to_string().contains("prompt"));
         assert!(!encoded.to_string().contains("token"));
         assert!(!encoded.to_string().contains("credential"));
+        assert!(entry.infill_capability().is_none());
+    }
+
+    #[test]
+    fn infill_capability_requires_template_context_and_provider_identity() {
+        let template = FimTemplateV1::new(100, 101, 102).unwrap();
+        let capability =
+            BackendInfillCapabilityV1::new(template.clone(), 4096, "synthetic-fixture").unwrap();
+        assert_eq!(capability.template(), &template);
+        assert_eq!(capability.max_context_tokens(), 4096);
+        assert_eq!(capability.provider(), "synthetic-fixture");
+        assert!(BackendInfillCapabilityV1::new(template.clone(), 0, "provider").is_err());
+        assert!(BackendInfillCapabilityV1::new(template, 1, "").is_err());
     }
 
     struct CountingBackend {
@@ -891,6 +1409,13 @@ mod tests {
                 if error.code() == crate::api::ErrorCodeV1::GenerationFailed
         ));
         assert_eq!(started.load(Ordering::Acquire), 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !cancelled.load(Ordering::Acquire) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("backend observes timeout cancellation");
         assert!(cancelled.load(Ordering::Acquire));
         scheduler.shutdown();
     }
@@ -1037,5 +1562,170 @@ mod tests {
         assert!(cancelled.load(Ordering::Acquire));
         scheduler.shutdown();
         assert!(!scheduler.is_accepting());
+    }
+
+    struct EmbeddingBackend;
+
+    impl ChatGenerationBackendV1 for EmbeddingBackend {
+        fn generate(
+            &self,
+            _: &ChatCompletionRequestV1,
+            _: &GenerationCancellationV1,
+            _: &mut dyn GenerationDeltaSinkV1,
+        ) -> Result<BackendCompletionV1, BackendErrorV1> {
+            Err(BackendErrorV1::new("generation is not used"))
+        }
+
+        fn embed(
+            &self,
+            request: &BackendEmbeddingRequestV1,
+            cancellation: &GenerationCancellationV1,
+        ) -> Result<BackendEmbeddingBatchV1, BackendErrorV1> {
+            if cancellation.is_cancelled() {
+                return Err(BackendErrorV1::new("cancelled"));
+            }
+            let vectors = request
+                .inputs()
+                .iter()
+                .map(|input| {
+                    let tokens = match input {
+                        BackendEmbeddingInputV1::Text(text) => text.len() as u64,
+                        BackendEmbeddingInputV1::TokenIds(tokens) => tokens.len() as u64,
+                    };
+                    BackendEmbeddingVectorV1::new(vec![0.6, 0.8], tokens)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            BackendEmbeddingBatchV1::new(2, vectors)
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_jobs_share_bounded_scheduler_and_preserve_order_usage() {
+        let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(EmbeddingBackend);
+        let entry = ModelRegistryEntryV1::new(
+            "embed",
+            1,
+            "sllm",
+            format!("sha256:{}", "0".repeat(64)),
+            backend,
+        )
+        .unwrap();
+        let registry = ModelRegistryV1::new(vec![entry]).unwrap();
+        let scheduler =
+            SchedulerV1::new(SchedulerConfigV1::new(1, 1, Duration::from_secs(2)).unwrap());
+        let request = BackendEmbeddingRequestV1::new(vec![
+            BackendEmbeddingInputV1::Text("abc".to_owned()),
+            BackendEmbeddingInputV1::TokenIds(vec![1, 2, 3, 4]),
+        ])
+        .unwrap();
+        let receiver = scheduler
+            .submit_embedding(registry.get("embed").unwrap(), request)
+            .unwrap();
+        let output = receiver.recv().await.unwrap();
+        assert_eq!(output.dimension(), 2);
+        assert_eq!(output.vectors().len(), 2);
+        assert_eq!(output.vectors()[0].prompt_tokens(), 3);
+        assert_eq!(output.vectors()[1].prompt_tokens(), 4);
+        assert_eq!(output.total_prompt_tokens().unwrap(), 7);
+        assert!(scheduler.snapshot().slots.is_empty());
+        scheduler.shutdown();
+    }
+
+    #[test]
+    fn embedding_vector_rejects_non_normalized_public_output() {
+        assert!(BackendEmbeddingVectorV1::new(vec![1.0, 1.0], 1).is_err());
+        assert!(BackendEmbeddingVectorV1::new(vec![0.0, 0.0], 1).is_err());
+        assert!(BackendEmbeddingVectorV1::new(vec![0.6, 0.8], 1).is_ok());
+    }
+
+    #[tokio::test]
+    async fn embedding_backend_capability_is_fail_closed() {
+        let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(NeverBackend);
+        let entry = ModelRegistryEntryV1::new(
+            "chat-only",
+            1,
+            "sllm",
+            format!("sha256:{}", "0".repeat(64)),
+            backend,
+        )
+        .unwrap();
+        let registry = ModelRegistryV1::new(vec![entry]).unwrap();
+        let scheduler =
+            SchedulerV1::new(SchedulerConfigV1::new(1, 1, Duration::from_secs(2)).unwrap());
+        let request =
+            BackendEmbeddingRequestV1::new(vec![BackendEmbeddingInputV1::Text("x".to_owned())])
+                .unwrap();
+        let error = scheduler
+            .submit_embedding(registry.get("chat-only").unwrap(), request)
+            .unwrap()
+            .recv()
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), crate::api::ErrorCodeV1::GenerationFailed);
+        assert!(error.to_string().contains("not supported"));
+        scheduler.shutdown();
+    }
+
+    struct NonCooperativeEmbeddingBackend;
+
+    impl ChatGenerationBackendV1 for NonCooperativeEmbeddingBackend {
+        fn generate(
+            &self,
+            _: &ChatCompletionRequestV1,
+            _: &GenerationCancellationV1,
+            _: &mut dyn GenerationDeltaSinkV1,
+        ) -> Result<BackendCompletionV1, BackendErrorV1> {
+            unreachable!("generation is not used")
+        }
+
+        fn embed(
+            &self,
+            _: &BackendEmbeddingRequestV1,
+            _: &GenerationCancellationV1,
+        ) -> Result<BackendEmbeddingBatchV1, BackendErrorV1> {
+            std::thread::sleep(Duration::from_millis(150));
+            BackendEmbeddingBatchV1::new(1, vec![BackendEmbeddingVectorV1::new(vec![1.0], 1)?])
+        }
+    }
+
+    #[tokio::test]
+    async fn embedding_timeout_responds_before_noncooperative_backend_cleanup() {
+        let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(NonCooperativeEmbeddingBackend);
+        let entry = ModelRegistryEntryV1::new(
+            "stubborn",
+            1,
+            "sllm",
+            format!("sha256:{}", "0".repeat(64)),
+            backend,
+        )
+        .unwrap();
+        let registry = ModelRegistryV1::new(vec![entry]).unwrap();
+        let scheduler =
+            SchedulerV1::new(SchedulerConfigV1::new(1, 1, Duration::from_millis(20)).unwrap());
+        let request =
+            BackendEmbeddingRequestV1::new(vec![BackendEmbeddingInputV1::Text("x".to_owned())])
+                .unwrap();
+        let started = std::time::Instant::now();
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            scheduler
+                .submit_embedding(registry.get("stubborn").unwrap(), request)
+                .unwrap()
+                .recv(),
+        )
+        .await
+        .expect("timeout response is bounded")
+        .unwrap_err();
+        assert_eq!(error.code(), crate::api::ErrorCodeV1::GenerationFailed);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        assert_eq!(scheduler.snapshot().active_requests, 1);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !scheduler.snapshot().slots.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("backend cleanup eventually releases the slot");
+        scheduler.shutdown();
     }
 }

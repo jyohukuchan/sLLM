@@ -349,3 +349,41 @@ Qwen/Gemma checkpointは保存された全state planeのdescriptor metadataとpa
 同じmodel familyでもcapacity、static FP8 scale、full/sliding topology、linear/GDN layoutが異なる場合は同一identityではない。
 checkpoint filenameとdirectoryはlookup locatorにすぎず、identity比較を代替しない。Phase 41 productionのstateless prompt checkpointは
 token historyのnonempty suffix continuationだけを許し、mid-generation session identityやwire session IDをmodel lockへ暗黙追加しない。
+
+## Phase 42 frontend and inference capability identity
+
+Phase 42のpublic endpointは、model aliasだけでfrontend capabilityを推測
+しない。lockまたはderived verified manifestは、少なくとも次のcapability
+identityを提供し、欠落・不一致をload/request前にfail closedする。
+
+The profile reference identity is OpenAI OpenAPI `2.3.0`, commit
+`117ce5680e4269f6656a4fd70d28f9755630d938`, and the technical llama.cpp
+reference is `b10453`, commit
+`3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`. These are API/adapter pins, not
+model bytes and not evidence that a model supports every referenced endpoint.
+
+- tokenizer identity: tokenizer filesのfingerprint、special-token IDs、byte
+  fallback policy、normalization、utility version、最大input bytes/tokens;
+- renderer identity: verified template kind/version、template digest/size、
+  supported roles、assistant-prefill policy。任意Jinjaやcustom kwargsは
+  capabilityにならない;
+- embedding identity: final-hidden-row source、pooling `arithmetic-mean`、
+  L2 normalization、F64 accumulator/F32 output、model-lock hidden dimension;
+- rerank identity: cosine embedding profile、query/document dimension、
+  higher-score ordering、stable original-index tie break、bounded `top_n`;
+- FIM identity: prefix/suffix/middle token IDs、verified template digest、
+  context limit、extra-context policy、production status。未検証FIMは
+  `unsupported`であり、generic completion fallbackを許可しない;
+- target/provider identity: exact target semantics、weight/KV encoding、
+  provider and plan digest. MI300X `gfx942` capability is deferred until a
+  fresh exact-runtime evidence row exists; compile-only evidence cannot be
+  recorded as a model capability.
+
+The Phase 42 fixture and schema pin these semantics in
+[`phase42_profiles_v1.json`](../../tests/fixtures/phase42_profiles_v1.json) and
+[`phase42-profile-v1.schema.json`](../../ci/schema/phase42-profile-v1.schema.json).
+The fixture is an API boundary/identity artifact, not a model lock and not a
+claim that a model has passed production inference. A lock may advertise a
+Phase 42 capability only after the corresponding verified tokenizer/template,
+model execution path, numerical oracle, and exact target evidence are all
+bound to the same immutable identity.

@@ -5,6 +5,7 @@ use std::borrow::Borrow;
 
 mod chat;
 mod generation;
+mod inference;
 mod tokenizer;
 mod vision;
 
@@ -22,6 +23,12 @@ pub use generation::{
     MAX_STOP_STRINGS_V1, PreparedGenerationInputV1, QwenMtpGenerationExecutorV1,
     SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenUsageV1,
     derive_choice_seed_v1, gemma4_generation_stop_policy,
+};
+pub use inference::{
+    ApplyTemplateResultV1, FIM_TEMPLATE_VERSION_V1, FimTemplateErrorV1, FimTemplateV1,
+    InputTokenCountInputV1, MAX_TOKENIZER_UTILITY_INPUT_BYTES_V1, TOKENIZER_UTILITY_VERSION_V1,
+    TemplateIdentityV1, TokenPieceV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerUtilityErrorV1,
+    TokenizerUtilityServiceV1,
 };
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, MAX_TOKEN_PIECE_BYTES_V1,

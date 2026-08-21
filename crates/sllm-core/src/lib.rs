@@ -19,6 +19,7 @@ mod gguf_convert;
 mod gguf_writer;
 mod grammar;
 mod handles;
+mod inference_embedding;
 mod kv_state;
 mod linear_attention;
 mod model;
@@ -134,6 +135,11 @@ pub use grammar::{
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
+};
+pub use inference_embedding::{
+    COSINE_EMBEDDING_RERANK_PROFILE_V1, CosineEmbeddingRerankV1, EMBEDDING_POOL_PROFILE_V1,
+    EmbeddingPoolError, EmbeddingPoolV1, EmbeddingRerankError, EmbeddingRerankResultV1,
+    EmbeddingRowsV1, EmbeddingVectorV1,
 };
 pub use kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvMemoryKind, KvPhysicalMemorySnapshot,

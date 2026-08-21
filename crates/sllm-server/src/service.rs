@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,19 +12,33 @@ use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
+use base64::Engine;
 use futures_util::stream::{self, Stream};
 use serde::Serialize;
+use sllm_core::{CosineEmbeddingRerankV1, EmbeddingVectorV1};
+use sllm_frontend::{
+    DecodeModeV1, Qwen35ChatMessageV1, Qwen35RenderOptionsV1, ThinkingModeV1, TokenPieceV1,
+    TokenizeOptionsV1,
+};
 use tower_http::cors::CorsLayer;
 
 use crate::api::{
-    ApiErrorV1, ChatCompatibilityProfileV1, ErrorCodeV1, FinishReasonV1, MAX_REQUEST_BODY_BYTES,
-    ReasoningOptionsV1, TokenUsageV1, parse_chat_completion_request_for_profile,
+    ApiErrorV1, ChatCompatibilityProfileV1, ChatCompletionRequestV1, ErrorCodeV1, FinishReasonV1,
+    GenerationRequestInputV1, MAX_REQUEST_BODY_BYTES, ReasoningOptionsV1, TokenUsageV1,
+    parse_chat_completion_request_for_profile,
 };
 use crate::lifecycle::ServerLifecycleV1;
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1, ServerMetricsV1};
+use crate::phase42_api::{
+    self as phase42, ApplyTemplateRequestV1, CompletionRequestV1, DetokenizeRequestV1,
+    EmbeddingEncodingFormatV1, EmbeddingRequestV1, InfillRequestV1, InputTokensInputV1,
+    InputTokensRequestV1, PromptV1, RerankRequestV1, TemplateMessageV1, TemplateRoleV1,
+    TokenizeRequestV1,
+};
 use crate::resume::{ReplayErrorV1, ResumableStoreV1};
 use crate::runtime::{
-    BackendTokenLogprobV1, GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1,
+    BackendEmbeddingInputV1, BackendEmbeddingRequestV1, BackendTokenLogprobV1,
+    GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1,
 };
 use crate::security::CredentialStoreV1;
 
@@ -166,6 +180,14 @@ pub fn build_router_v1(
         .route("/admin/keys/reload", post(reload_keys))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(create_chat_completion))
+        .route("/v1/completions", post(create_completion))
+        .route("/v1/embeddings", post(create_embeddings))
+        .route("/v1/rerank", post(create_rerank))
+        .route("/v1/tokenize", post(tokenize))
+        .route("/v1/detokenize", post(detokenize))
+        .route("/v1/apply-template", post(apply_template))
+        .route("/v1/input-tokens", post(input_tokens))
+        .route("/v1/infill", post(create_infill))
         .route(
             "/v1/chat/completions/{id}/events",
             get(resume_chat_completion),
@@ -476,6 +498,1177 @@ async fn create_chat_completion(
     };
     record_http(&state, HttpEndpointV1::ChatCompletions, &response);
     response
+}
+
+async fn read_phase42_body(
+    request: Request<Body>,
+    config: &ServerConfigV1,
+) -> Result<Vec<u8>, ApiErrorV1> {
+    authorize_user(request.headers(), config)?;
+    validate_content_type(request.headers())?;
+    if request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_REQUEST_BODY_BYTES as u64)
+    {
+        return Err(request_too_large_error());
+    }
+    to_bytes(request.into_body(), MAX_REQUEST_BODY_BYTES)
+        .await
+        .map(|body| body.to_vec())
+        .map_err(|_| request_too_large_error())
+}
+
+fn request_too_large_error() -> ApiErrorV1 {
+    ApiErrorV1::new(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "request body exceeds 100663296 bytes",
+        "invalid_request_error",
+        None,
+        ErrorCodeV1::RequestTooLarge,
+    )
+}
+
+fn phase42_error(error: phase42::ApiErrorV1) -> ApiErrorV1 {
+    let code = match error.code().as_str() {
+        "invalid_json" => ErrorCodeV1::InvalidJson,
+        "invalid_value" => ErrorCodeV1::InvalidValue,
+        "unsupported_parameter" => ErrorCodeV1::UnsupportedParameter,
+        "request_too_large" => ErrorCodeV1::RequestTooLarge,
+        _ => ErrorCodeV1::InvalidValue,
+    };
+    ApiErrorV1::new(
+        error.status(),
+        error.message().to_owned(),
+        "invalid_request_error",
+        error.param().map(str::to_owned),
+        code,
+    )
+}
+
+async fn create_completion(
+    State(state): State<Arc<AppStateV1>>,
+    request: Request<Body>,
+) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_completion_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_completion(&state, request).await,
+        },
+    };
+    record_http(&state, HttpEndpointV1::Completions, &response);
+    response
+}
+
+async fn handle_completion(state: &AppStateV1, request: CompletionRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let inputs = match completion_inputs(request.prompt()) {
+        Ok(inputs) => inputs,
+        Err(error) => return error.into_response(),
+    };
+    let mut receivers = Vec::new();
+    let mut index = 0_u32;
+    for (prompt_index, input) in inputs.into_iter().enumerate() {
+        let prompt_index =
+            u32::try_from(prompt_index).expect("bounded completion prompt count fits u32");
+        for choice in 0..request.n() {
+            let expected_prompt_tokens = match &input {
+                GenerationRequestInputV1::TokenIds(tokens) => {
+                    Some(u64::try_from(tokens.len()).expect("bounded token input fits u64"))
+                }
+                _ => None,
+            };
+            let generated = match ChatCompletionRequestV1::from_completion(&request, input.clone())
+                .and_then(|request| request.for_choice(choice))
+            {
+                Ok(request) => request,
+                Err(error) => return error.into_response(),
+            };
+            match state.scheduler.submit(Arc::clone(&model), generated) {
+                Ok(receiver) => receivers.push(IndexedTextGenerationReceiverV1 {
+                    index,
+                    prompt_index,
+                    expected_prompt_tokens,
+                    receiver,
+                }),
+                Err(error) => {
+                    drop(receivers);
+                    return error.into_response();
+                }
+            }
+            index = index.saturating_add(1);
+        }
+    }
+    let context = TextResponseContextV1::new(model.alias());
+    let metrics = state
+        .config
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.admit(model.alias(), request.stream()));
+    if request.stream() {
+        stream_text_completion(receivers, context, metrics).into_response()
+    } else {
+        non_stream_text_completion(receivers, context, metrics).await
+    }
+}
+
+fn completion_inputs(prompt: &PromptV1) -> Result<Vec<GenerationRequestInputV1>, ApiErrorV1> {
+    match prompt {
+        PromptV1::Text(value) => Ok(vec![GenerationRequestInputV1::RawText(value.clone())]),
+        PromptV1::Texts(values) => Ok(values
+            .iter()
+            .cloned()
+            .map(GenerationRequestInputV1::RawText)
+            .collect()),
+        PromptV1::Tokens(values) => Ok(vec![GenerationRequestInputV1::TokenIds(values.clone())]),
+        PromptV1::TokenSequences(values) => Ok(values
+            .iter()
+            .cloned()
+            .map(GenerationRequestInputV1::TokenIds)
+            .collect()),
+    }
+}
+
+async fn create_embeddings(
+    State(state): State<Arc<AppStateV1>>,
+    request: Request<Body>,
+) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_embedding_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_embeddings(Arc::clone(&state), request).await,
+        },
+    };
+    record_http(&state, HttpEndpointV1::Embeddings, &response);
+    response
+}
+
+async fn handle_embeddings(state: Arc<AppStateV1>, request: EmbeddingRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let Some(model_dimension) = model.embedding_dimension() else {
+        return ApiErrorV1::new(
+            StatusCode::BAD_REQUEST,
+            "embeddings are not supported by this model lock",
+            "invalid_request_error",
+            Some("model".to_owned()),
+            ErrorCodeV1::UnsupportedParameter,
+        )
+        .into_response();
+    };
+    let inputs = match embedding_inputs(request.input()) {
+        Ok(inputs) => inputs,
+        Err(error) => return error.into_response(),
+    };
+    let backend_request = match BackendEmbeddingRequestV1::new(inputs) {
+        Ok(request) => request,
+        Err(error) => return ApiErrorV1::invalid_value("input", error.to_string()).into_response(),
+    };
+    let expected_token_counts = match backend_request
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            model.validate_embedding_input(input).map_err(|error| {
+                ApiErrorV1::invalid_value(format!("input[{index}]"), error.to_string())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(counts) => counts,
+        Err(error) => return error.into_response(),
+    };
+    let expected_dimensions = request.dimensions();
+    let encoding = request.encoding_format();
+    if expected_dimensions.is_some_and(|dimensions| dimensions != model_dimension) {
+        return ApiErrorV1::invalid_value(
+            "dimensions",
+            format!("only the model hidden dimension {model_dimension} is supported"),
+        )
+        .into_response();
+    }
+    let receiver = match state
+        .scheduler
+        .submit_embedding(model.clone(), backend_request)
+    {
+        Ok(receiver) => receiver,
+        Err(error) => return error.into_response(),
+    };
+    let batch = match receiver.recv().await {
+        Ok(batch) => batch,
+        Err(error) => return error.into_response(),
+    };
+    if batch.dimension() != model_dimension || batch.vectors().len() != expected_token_counts.len()
+    {
+        return ApiErrorV1::generation_failed(
+            "embedding backend output dimension or row count differed from its model contract",
+        )
+        .into_response();
+    }
+    if batch
+        .vectors()
+        .iter()
+        .zip(&expected_token_counts)
+        .any(|(vector, expected)| vector.prompt_tokens() != *expected)
+    {
+        return ApiErrorV1::generation_failed(
+            "embedding backend token usage differed from CPU admission",
+        )
+        .into_response();
+    }
+    let mut data = Vec::with_capacity(batch.vectors().len());
+    for (index, vector) in batch.vectors().iter().enumerate() {
+        let embedding = match encoding {
+            EmbeddingEncodingFormatV1::Float => serde_json::Value::Array(
+                vector
+                    .values()
+                    .iter()
+                    .map(|value| serde_json::json!(value))
+                    .collect(),
+            ),
+            EmbeddingEncodingFormatV1::Base64 => {
+                let mut bytes = Vec::with_capacity(vector.values().len() * 4);
+                for value in vector.values() {
+                    bytes.extend_from_slice(&value.to_le_bytes());
+                }
+                serde_json::json!(base64::engine::general_purpose::STANDARD.encode(bytes))
+            }
+        };
+        data.push(serde_json::json!({
+            "object": "embedding",
+            "index": index,
+            "embedding": embedding,
+        }));
+    }
+    let total_tokens = match batch.total_prompt_tokens() {
+        Ok(tokens) => tokens,
+        Err(error) => return ApiErrorV1::generation_failed(error.to_string()).into_response(),
+    };
+    axum::Json(serde_json::json!({
+        "object": "list",
+        "data": data,
+        "model": request.model(),
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+    }))
+    .into_response()
+}
+
+fn embedding_inputs(prompt: &PromptV1) -> Result<Vec<BackendEmbeddingInputV1>, ApiErrorV1> {
+    let values = match prompt {
+        PromptV1::Text(value) => vec![BackendEmbeddingInputV1::Text(value.clone())],
+        PromptV1::Texts(values) => values
+            .iter()
+            .cloned()
+            .map(BackendEmbeddingInputV1::Text)
+            .collect(),
+        PromptV1::Tokens(values) => vec![BackendEmbeddingInputV1::TokenIds(values.clone())],
+        PromptV1::TokenSequences(values) => values
+            .iter()
+            .cloned()
+            .map(BackendEmbeddingInputV1::TokenIds)
+            .collect(),
+    };
+    if values.len() > 256 {
+        return Err(ApiErrorV1::invalid_value(
+            "input",
+            "too many embedding inputs",
+        ));
+    }
+    Ok(values)
+}
+
+async fn create_rerank(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_rerank_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_rerank(Arc::clone(&state), request).await,
+        },
+    };
+    record_http(&state, HttpEndpointV1::Rerank, &response);
+    response
+}
+
+async fn handle_rerank(state: Arc<AppStateV1>, request: RerankRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    if model.embedding_dimension().is_none() {
+        return ApiErrorV1::new(
+            StatusCode::BAD_REQUEST,
+            "rerank is not supported by this model lock",
+            "invalid_request_error",
+            Some("model".to_owned()),
+            ErrorCodeV1::UnsupportedParameter,
+        )
+        .into_response();
+    }
+    let mut inputs = Vec::with_capacity(request.documents().len() + 1);
+    inputs.push(BackendEmbeddingInputV1::Text(request.query().to_owned()));
+    inputs.extend(
+        request
+            .documents()
+            .iter()
+            .cloned()
+            .map(BackendEmbeddingInputV1::Text),
+    );
+    let request_input = match BackendEmbeddingRequestV1::new(inputs) {
+        Ok(request) => request,
+        Err(error) => return ApiErrorV1::invalid_value("input", error.to_string()).into_response(),
+    };
+    let expected_token_counts = match request_input
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(index, input)| {
+            model.validate_embedding_input(input).map_err(|error| {
+                ApiErrorV1::invalid_value(format!("input[{index}]"), error.to_string())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(counts) => counts,
+        Err(error) => return error.into_response(),
+    };
+    let receiver = match state
+        .scheduler
+        .submit_embedding(model.clone(), request_input)
+    {
+        Ok(receiver) => receiver,
+        Err(error) => return error.into_response(),
+    };
+    let batch = match receiver.recv().await {
+        Ok(batch) => batch,
+        Err(error) => return error.into_response(),
+    };
+    if batch.dimension() != model.embedding_dimension().expect("checked above")
+        || batch.vectors().len() != expected_token_counts.len()
+        || batch
+            .vectors()
+            .iter()
+            .zip(&expected_token_counts)
+            .any(|(vector, expected)| vector.prompt_tokens() != *expected)
+    {
+        return ApiErrorV1::generation_failed(
+            "rerank embedding output differed from its admitted model contract",
+        )
+        .into_response();
+    }
+    let vectors = match batch
+        .vectors()
+        .iter()
+        .map(|vector| EmbeddingVectorV1::from_finite_f32(vector.values().to_vec()))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(vectors) => vectors,
+        Err(error) => return ApiErrorV1::generation_failed(error.to_string()).into_response(),
+    };
+    let rerank = CosineEmbeddingRerankV1::new();
+    let ranked = match rerank.rank(
+        &vectors[0],
+        &vectors[1..],
+        request.top_n().map(|value| value as usize),
+    ) {
+        Ok(ranked) => ranked,
+        Err(error) => return ApiErrorV1::generation_failed(error.to_string()).into_response(),
+    };
+    let total_tokens = match batch.total_prompt_tokens() {
+        Ok(tokens) => tokens,
+        Err(error) => return ApiErrorV1::generation_failed(error.to_string()).into_response(),
+    };
+    let results = ranked
+        .into_iter()
+        .map(|entry| {
+            let mut result = serde_json::json!({
+                "index": entry.index(),
+                "relevance_score": entry.relevance_score(),
+            });
+            if request.return_documents() {
+                result["document"] = serde_json::json!(request.documents()[entry.index()]);
+            }
+            result
+        })
+        .collect::<Vec<_>>();
+    axum::Json(serde_json::json!({
+        "id": format!("rerank-sllm-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)),
+        "object": "rerank",
+        "profile": "cosine-embedding-v1",
+        "model": request.model(),
+        "results": results,
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+    }))
+    .into_response()
+}
+
+async fn tokenize(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_tokenize_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_tokenize(&state, request),
+        },
+    };
+    record_http(&state, HttpEndpointV1::Tokenize, &response);
+    response
+}
+
+fn handle_tokenize(state: &AppStateV1, request: TokenizeRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let options = if request.with_pieces() {
+        TokenizeOptionsV1::with_pieces()
+    } else {
+        TokenizeOptionsV1::default()
+    };
+    let result = match model.tokenize_utility(request.text(), options) {
+        Ok(result) => result,
+        Err(error) => return utility_error("text", error.to_string()),
+    };
+    let pieces = result.pieces().map(|pieces| {
+        pieces
+            .iter()
+            .map(|piece| match piece {
+                TokenPieceV1::Utf8(value) => serde_json::json!({"kind": "utf8", "value": value}),
+                TokenPieceV1::Bytes(value) => serde_json::json!({
+                    "kind": "bytes",
+                    "base64": base64::engine::general_purpose::STANDARD.encode(value),
+                }),
+            })
+            .collect::<Vec<_>>()
+    });
+    axum::Json(serde_json::json!({
+        "version": result.version(),
+        "tokens": result.token_ids().as_slice(),
+        "count": result.count(),
+        "pieces": pieces,
+        "model": request.model(),
+        "model_lock_fingerprint": model.lock_fingerprint(),
+    }))
+    .into_response()
+}
+
+async fn detokenize(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_detokenize_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_detokenize(&state, request),
+        },
+    };
+    record_http(&state, HttpEndpointV1::Detokenize, &response);
+    response
+}
+
+fn handle_detokenize(state: &AppStateV1, request: DetokenizeRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let mode = if request.skip_special_tokens() {
+        DecodeModeV1::SkipSpecialTokens
+    } else {
+        DecodeModeV1::PreserveSpecialTokens
+    };
+    let text = match model.detokenize_utility(request.tokens(), mode) {
+        Ok(text) => text,
+        Err(error) => return utility_error("tokens", error.to_string()),
+    };
+    axum::Json(serde_json::json!({
+        "text": text,
+        "tokens": request.tokens(),
+        "count": request.tokens().len(),
+        "model": request.model(),
+        "model_lock_fingerprint": model.lock_fingerprint(),
+    }))
+    .into_response()
+}
+
+async fn apply_template(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_apply_template_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_apply_template(&state, request),
+        },
+    };
+    record_http(&state, HttpEndpointV1::ApplyTemplate, &response);
+    response
+}
+
+fn handle_apply_template(state: &AppStateV1, request: ApplyTemplateRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    if !model.reviewed_chat_template_available() {
+        return ApiErrorV1::new(
+            StatusCode::BAD_REQUEST,
+            "reviewed chat template is not supported by this model lock",
+            "invalid_request_error",
+            Some("model".to_owned()),
+            ErrorCodeV1::UnsupportedParameter,
+        )
+        .into_response();
+    }
+    let messages = match template_messages(request.messages()) {
+        Ok(messages) => messages,
+        Err(error) => return error.into_response(),
+    };
+    let options = render_options(request.add_generation_prompt(), request.thinking());
+    let result = match model.apply_template_utility(&messages, options) {
+        Ok(result) => result,
+        Err(error) => return utility_error("model", error.to_string()),
+    };
+    axum::Json(serde_json::json!({
+        "version": result.version(),
+        "prompt": result.rendered(),
+        "tokens": result.token_ids().as_slice(),
+        "count": result.count(),
+        "template": {
+            "kind": result.identity().kind(),
+            "version": result.identity().version(),
+            "digest": result.identity().digest(),
+            "size_bytes": result.identity().size_bytes(),
+            "consistency_label": result.identity().consistency_label(),
+        },
+        "model": request.model(),
+        "model_lock_fingerprint": model.lock_fingerprint(),
+    }))
+    .into_response()
+}
+
+async fn input_tokens(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_input_tokens_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_input_tokens(&state, request),
+        },
+    };
+    record_http(&state, HttpEndpointV1::InputTokens, &response);
+    response
+}
+
+fn handle_input_tokens(state: &AppStateV1, request: InputTokensRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let tokens = match request.input() {
+        InputTokensInputV1::Text(text) => {
+            match model.tokenize_utility(text, TokenizeOptionsV1::default()) {
+                Ok(result) => result.token_ids().as_slice().to_vec(),
+                Err(error) => return utility_error("text", error.to_string()),
+            }
+        }
+        InputTokensInputV1::Messages(messages) => {
+            if !model.reviewed_chat_template_available() {
+                return ApiErrorV1::new(
+                    StatusCode::BAD_REQUEST,
+                    "reviewed chat template is not supported by this model lock",
+                    "invalid_request_error",
+                    Some("model".to_owned()),
+                    ErrorCodeV1::UnsupportedParameter,
+                )
+                .into_response();
+            }
+            let messages = match template_messages(messages) {
+                Ok(messages) => messages,
+                Err(error) => return error.into_response(),
+            };
+            let result = match model.apply_template_utility(
+                &messages,
+                render_options(request.add_generation_prompt(), request.thinking()),
+            ) {
+                Ok(result) => result,
+                Err(error) => return utility_error("model", error.to_string()),
+            };
+            result.token_ids().as_slice().to_vec()
+        }
+    };
+    axum::Json(serde_json::json!({
+        "count": tokens.len(),
+        "tokens": tokens,
+        "model": request.model(),
+        "model_lock_fingerprint": model.lock_fingerprint(),
+    }))
+    .into_response()
+}
+
+async fn create_infill(State(state): State<Arc<AppStateV1>>, request: Request<Body>) -> Response {
+    let response = match read_phase42_body(request, &state.config).await {
+        Err(error) => error.into_response(),
+        Ok(body) => match phase42::parse_infill_request(&body) {
+            Err(error) => phase42_error(error).into_response(),
+            Ok(request) => handle_infill(&state, request).await,
+        },
+    };
+    record_http(&state, HttpEndpointV1::Infill, &response);
+    response
+}
+
+async fn handle_infill(state: &AppStateV1, request: InfillRequestV1) -> Response {
+    let model = match state.registry.get(request.model()) {
+        Some(model) => model,
+        None => return ApiErrorV1::model_not_found(request.model()).into_response(),
+    };
+    let Some(capability) = model.infill_capability() else {
+        return ApiErrorV1::new(
+            StatusCode::BAD_REQUEST,
+            "infill is not supported by this model lock",
+            "invalid_request_error",
+            Some("model".to_owned()),
+            ErrorCodeV1::UnsupportedParameter,
+        )
+        .into_response();
+    };
+    let tokenize = |text: &str, param: &str| {
+        model.tokenize_infill_content(text).map_err(|error| {
+            ApiErrorV1::new(
+                StatusCode::BAD_REQUEST,
+                error.to_string(),
+                "invalid_request_error",
+                Some(param.to_owned()),
+                ErrorCodeV1::InvalidValue,
+            )
+        })
+    };
+    let prefix = match tokenize(request.prefix(), "prefix") {
+        Ok(tokens) => tokens,
+        Err(error) => return error.into_response(),
+    };
+    let suffix = match tokenize(request.suffix(), "suffix") {
+        Ok(tokens) => tokens,
+        Err(error) => return error.into_response(),
+    };
+    let prompt = match request.prompt() {
+        Some(text) => match tokenize(text, "prompt") {
+            Ok(tokens) => Some(tokens),
+            Err(error) => return error.into_response(),
+        },
+        None => None,
+    };
+    let rendered = match capability
+        .template()
+        .render(&prefix, &suffix, prompt.as_deref())
+    {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            return ApiErrorV1::invalid_value("prefix", error.to_string()).into_response();
+        }
+    };
+    let required_context = match u64::try_from(rendered.len())
+        .ok()
+        .and_then(|tokens| tokens.checked_add(u64::from(request.max_tokens())))
+    {
+        Some(tokens) => tokens,
+        None => {
+            return ApiErrorV1::invalid_value("max_tokens", "infill context size overflowed")
+                .into_response();
+        }
+    };
+    if required_context > u64::from(capability.max_context_tokens()) {
+        return ApiErrorV1::invalid_value(
+            "max_tokens",
+            format!(
+                "rendered FIM input plus output requires {required_context} tokens, maximum is {}",
+                capability.max_context_tokens()
+            ),
+        )
+        .into_response();
+    }
+    let base = match ChatCompletionRequestV1::from_infill(
+        &request,
+        rendered.as_slice().to_vec(),
+        capability.template().digest().to_owned(),
+    ) {
+        Ok(request) => request,
+        Err(error) => return error.into_response(),
+    };
+    let mut receivers = Vec::new();
+    for index in 0..request.n() {
+        let choice = match base.for_choice(index) {
+            Ok(request) => request,
+            Err(error) => return error.into_response(),
+        };
+        match state.scheduler.submit(Arc::clone(&model), choice) {
+            Ok(receiver) => receivers.push(IndexedTextGenerationReceiverV1 {
+                index,
+                prompt_index: 0,
+                expected_prompt_tokens: Some(
+                    u64::try_from(rendered.len()).expect("bounded FIM token count fits u64"),
+                ),
+                receiver,
+            }),
+            Err(error) => {
+                drop(receivers);
+                return error.into_response();
+            }
+        }
+    }
+    let context = TextResponseContextV1::new(model.alias());
+    let metrics = state
+        .config
+        .metrics
+        .as_ref()
+        .and_then(|metrics| metrics.admit(model.alias(), request.stream()));
+    if request.stream() {
+        stream_text_completion(receivers, context, metrics).into_response()
+    } else {
+        non_stream_text_completion(receivers, context, metrics).await
+    }
+}
+
+fn template_messages(
+    messages: &[TemplateMessageV1],
+) -> Result<Vec<Qwen35ChatMessageV1>, ApiErrorV1> {
+    messages
+        .iter()
+        .map(|message| match message.role() {
+            TemplateRoleV1::System => Ok(Qwen35ChatMessageV1::system(message.content())),
+            TemplateRoleV1::User => Ok(Qwen35ChatMessageV1::user(message.content())),
+            TemplateRoleV1::Assistant => {
+                Ok(Qwen35ChatMessageV1::assistant(message.content(), None))
+            }
+        })
+        .collect()
+}
+
+fn render_options(add_generation_prompt: bool, thinking: bool) -> Qwen35RenderOptionsV1 {
+    Qwen35RenderOptionsV1 {
+        add_generation_prompt,
+        thinking: if thinking {
+            ThinkingModeV1::Enabled
+        } else {
+            ThinkingModeV1::Disabled
+        },
+    }
+}
+
+fn utility_error(param: &str, message: String) -> Response {
+    let code = if message.contains("not supported") || message.contains("unavailable") {
+        ErrorCodeV1::UnsupportedParameter
+    } else {
+        ErrorCodeV1::InvalidValue
+    };
+    ApiErrorV1::new(
+        StatusCode::BAD_REQUEST,
+        message,
+        "invalid_request_error",
+        Some(param.to_owned()),
+        code,
+    )
+    .into_response()
+}
+
+#[derive(Clone, Debug)]
+struct TextResponseContextV1 {
+    id: String,
+    created: u64,
+    model: String,
+}
+
+impl TextResponseContextV1 {
+    fn new(model: &str) -> Self {
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        Self {
+            id: format!("cmpl-sllm-{created:016x}{counter:016x}"),
+            created,
+            model: model.to_owned(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct TextCompletionResponseV1 {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+    choices: Vec<TextCompletionChoiceV1>,
+    usage: TokenUsageV1,
+}
+
+#[derive(Serialize)]
+struct TextCompletionChoiceV1 {
+    text: String,
+    index: u32,
+    logprobs: Option<CompletionLogprobsV1>,
+    finish_reason: FinishReasonV1,
+}
+
+async fn non_stream_text_completion(
+    receivers: Vec<IndexedTextGenerationReceiverV1>,
+    context: TextResponseContextV1,
+    mut metrics: Option<MetricsRequestHandleV1>,
+) -> Response {
+    let mut choices = Vec::with_capacity(receivers.len());
+    let mut usage = TextUsageAccumulatorV1::default();
+    for IndexedTextGenerationReceiverV1 {
+        index,
+        prompt_index,
+        expected_prompt_tokens,
+        mut receiver,
+    } in receivers
+    {
+        let mut text = String::new();
+        let mut logprobs = None;
+        let mut completed = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                SchedulerEventV1::Delta(delta) => {
+                    text.push_str(&delta);
+                    if let Some(metrics) = &mut metrics {
+                        metrics.observe_ttft_since_start();
+                    }
+                }
+                SchedulerEventV1::Logprobs(values) => {
+                    logprobs = match CompletionLogprobsV1::from_backend(values) {
+                        Ok(values) => Some(values),
+                        Err(error) => return error.into_response(),
+                    };
+                }
+                SchedulerEventV1::Finished(completion) => {
+                    if usage
+                        .merge(prompt_index, expected_prompt_tokens, completion.usage)
+                        .is_err()
+                    {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        return ApiErrorV1::generation_failed(
+                            "inconsistent completion token usage",
+                        )
+                        .into_response();
+                    }
+                    choices.push(TextCompletionChoiceV1 {
+                        text,
+                        index,
+                        logprobs,
+                        finish_reason: completion.finish_reason,
+                    });
+                    completed = true;
+                    break;
+                }
+                SchedulerEventV1::Failed(error) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
+                    return error.into_response();
+                }
+            }
+        }
+        if !completed {
+            if let Some(metrics) = &mut metrics {
+                metrics.finish(RequestOutcomeV1::Error);
+            }
+            return ApiErrorV1::generation_failed("generation ended without a terminal event")
+                .into_response();
+        }
+    }
+    let usage = match usage.finish() {
+        Ok(usage) => usage,
+        Err(error) => return error.into_response(),
+    };
+    if let Some(metrics) = &mut metrics {
+        metrics.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+        metrics.finish(RequestOutcomeV1::Success);
+    }
+    axum::Json(TextCompletionResponseV1 {
+        id: context.id,
+        object: "text_completion",
+        created: context.created,
+        model: context.model,
+        choices,
+        usage,
+    })
+    .into_response()
+}
+
+struct TextStreamStateV1 {
+    current: Option<IndexedTextGenerationReceiverV1>,
+    receivers: VecDeque<IndexedTextGenerationReceiverV1>,
+    context: TextResponseContextV1,
+    metrics: Option<MetricsRequestHandleV1>,
+    usage: TextUsageAccumulatorV1,
+    logprobs: Option<CompletionLogprobsV1>,
+    done: bool,
+}
+
+#[derive(Serialize)]
+struct TextStreamChunkV1<'a> {
+    id: &'a str,
+    object: &'static str,
+    created: u64,
+    model: &'a str,
+    choices: [TextStreamChoiceV1<'a>; 1],
+}
+
+#[derive(Serialize)]
+struct TextStreamChoiceV1<'a> {
+    text: &'a str,
+    index: u32,
+    logprobs: Option<CompletionLogprobsV1>,
+    finish_reason: Option<FinishReasonV1>,
+}
+
+fn stream_text_completion(
+    receivers: Vec<IndexedTextGenerationReceiverV1>,
+    context: TextResponseContextV1,
+    metrics: Option<MetricsRequestHandleV1>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let mut receivers = VecDeque::from(receivers);
+    let state = TextStreamStateV1 {
+        current: receivers.pop_front(),
+        receivers,
+        context,
+        metrics,
+        usage: TextUsageAccumulatorV1::default(),
+        logprobs: None,
+        done: false,
+    };
+    Sse::new(stream::unfold(state, |mut state| async move {
+        loop {
+            if state.done {
+                return None;
+            }
+            let Some(current) = state.current.as_mut() else {
+                state.done = true;
+                if let Some(metrics) = &mut state.metrics {
+                    metrics.finish(RequestOutcomeV1::Success);
+                }
+                return Some((Ok(Event::default().data("[DONE]")), state));
+            };
+            let index = current.index;
+            let prompt_index = current.prompt_index;
+            let expected_prompt_tokens = current.expected_prompt_tokens;
+            match current.receiver.recv().await {
+                Some(SchedulerEventV1::Delta(delta)) => {
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.observe_ttft_since_start();
+                    }
+                    let chunk = TextStreamChunkV1 {
+                        id: &state.context.id,
+                        object: "text_completion",
+                        created: state.context.created,
+                        model: &state.context.model,
+                        choices: [TextStreamChoiceV1 {
+                            text: &delta,
+                            index,
+                            logprobs: None,
+                            finish_reason: None,
+                        }],
+                    };
+                    return Some((Ok(json_event(&chunk)), state));
+                }
+                Some(SchedulerEventV1::Logprobs(values)) => {
+                    state.logprobs = match CompletionLogprobsV1::from_backend(values) {
+                        Ok(values) => Some(values),
+                        Err(error) => {
+                            state.done = true;
+                            if let Some(metrics) = &mut state.metrics {
+                                metrics.finish(RequestOutcomeV1::Error);
+                            }
+                            return Some((Ok(json_event(&error.envelope())), state));
+                        }
+                    };
+                    continue;
+                }
+                Some(SchedulerEventV1::Finished(completion)) => {
+                    if state
+                        .usage
+                        .merge(prompt_index, expected_prompt_tokens, completion.usage)
+                        .is_err()
+                    {
+                        state.done = true;
+                        if let Some(metrics) = &mut state.metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        let error =
+                            ApiErrorV1::generation_failed("inconsistent completion token usage");
+                        return Some((Ok(json_event(&error.envelope())), state));
+                    }
+                    let chunk = TextStreamChunkV1 {
+                        id: &state.context.id,
+                        object: "text_completion",
+                        created: state.context.created,
+                        model: &state.context.model,
+                        choices: [TextStreamChoiceV1 {
+                            text: "",
+                            index,
+                            logprobs: state.logprobs.take(),
+                            finish_reason: Some(completion.finish_reason),
+                        }],
+                    };
+                    if state.receivers.is_empty() {
+                        if let Some(metrics) = &mut state.metrics {
+                            match state.usage.finish() {
+                                Ok(usage) => metrics
+                                    .record_tokens(usage.prompt_tokens, usage.completion_tokens),
+                                Err(error) => {
+                                    state.done = true;
+                                    metrics.finish(RequestOutcomeV1::Error);
+                                    return Some((Ok(json_event(&error.envelope())), state));
+                                }
+                            }
+                        }
+                        state.current = None;
+                    } else {
+                        state.current = state.receivers.pop_front();
+                    }
+                    return Some((Ok(json_event(&chunk)), state));
+                }
+                Some(SchedulerEventV1::Failed(error)) => {
+                    state.done = true;
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
+                    return Some((Ok(json_event(&error.envelope())), state));
+                }
+                None => {
+                    state.done = true;
+                    if let Some(metrics) = &mut state.metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
+                    let error =
+                        ApiErrorV1::generation_failed("generation ended without a terminal event");
+                    return Some((Ok(json_event(&error.envelope())), state));
+                }
+            }
+        }
+    }))
+}
+
+struct IndexedTextGenerationReceiverV1 {
+    index: u32,
+    prompt_index: u32,
+    expected_prompt_tokens: Option<u64>,
+    receiver: GenerationReceiverV1,
+}
+
+/// Legacy Completions logprob envelope from the pinned OpenAI OpenAPI 2.3.0
+/// schema. Chat Completions deliberately retains its distinct token-object
+/// representation below.
+#[derive(Clone, Debug, Serialize)]
+struct CompletionLogprobsV1 {
+    text_offset: Vec<u64>,
+    token_logprobs: Vec<f64>,
+    tokens: Vec<String>,
+    top_logprobs: Vec<BTreeMap<String, f64>>,
+}
+
+impl CompletionLogprobsV1 {
+    fn from_backend(values: Vec<BackendTokenLogprobV1>) -> Result<Self, ApiErrorV1> {
+        let mut text_offset = Vec::with_capacity(values.len());
+        let mut token_logprobs = Vec::with_capacity(values.len());
+        let mut tokens = Vec::with_capacity(values.len());
+        let mut top_logprobs = Vec::with_capacity(values.len());
+        let mut offset = 0_u64;
+        for value in values {
+            if !value.logprob.is_finite()
+                || value
+                    .top_logprobs
+                    .iter()
+                    .any(|candidate| !candidate.logprob.is_finite())
+            {
+                return Err(ApiErrorV1::generation_failed(
+                    "completion logprob output contained a non-finite value",
+                ));
+            }
+            text_offset.push(offset);
+            let token_chars = u64::try_from(value.token.chars().count()).map_err(|_| {
+                ApiErrorV1::generation_failed("completion logprob text offset overflowed")
+            })?;
+            offset = offset.checked_add(token_chars).ok_or_else(|| {
+                ApiErrorV1::generation_failed("completion logprob text offset overflowed")
+            })?;
+            token_logprobs.push(value.logprob);
+            tokens.push(value.token);
+            let mut candidates = BTreeMap::new();
+            for candidate in value.top_logprobs {
+                if candidates
+                    .insert(candidate.token, candidate.logprob)
+                    .is_some()
+                {
+                    return Err(ApiErrorV1::generation_failed(
+                        "completion top_logprobs contained duplicate token text",
+                    ));
+                }
+            }
+            top_logprobs.push(candidates);
+        }
+        Ok(Self {
+            text_offset,
+            token_logprobs,
+            tokens,
+            top_logprobs,
+        })
+    }
+}
+
+#[derive(Default)]
+struct TextUsageAccumulatorV1 {
+    prompt_tokens: BTreeMap<u32, u64>,
+    completion_tokens: u64,
+}
+
+impl TextUsageAccumulatorV1 {
+    fn merge(
+        &mut self,
+        prompt_index: u32,
+        expected_prompt_tokens: Option<u64>,
+        usage: TokenUsageV1,
+    ) -> Result<(), ApiErrorV1> {
+        if expected_prompt_tokens.is_some_and(|expected| expected != usage.prompt_tokens) {
+            return Err(ApiErrorV1::generation_failed(
+                "completion prompt token usage differed from admitted input",
+            ));
+        }
+        match self.prompt_tokens.get(&prompt_index) {
+            Some(&tokens) if tokens != usage.prompt_tokens => {
+                return Err(ApiErrorV1::generation_failed(
+                    "choice prompt token accounting is inconsistent",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                self.prompt_tokens.insert(prompt_index, usage.prompt_tokens);
+            }
+        }
+        self.completion_tokens = self
+            .completion_tokens
+            .checked_add(usage.completion_tokens)
+            .ok_or_else(|| ApiErrorV1::generation_failed("completion token usage overflowed"))?;
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<TokenUsageV1, ApiErrorV1> {
+        let prompt_tokens = self
+            .prompt_tokens
+            .values()
+            .try_fold(0_u64, |total, value| {
+                total
+                    .checked_add(*value)
+                    .ok_or_else(|| ApiErrorV1::generation_failed("prompt token usage overflowed"))
+            })?;
+        TokenUsageV1::new(prompt_tokens, self.completion_tokens)
+    }
 }
 
 fn request_too_large() -> Response {

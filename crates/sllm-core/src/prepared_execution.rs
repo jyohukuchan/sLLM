@@ -494,8 +494,9 @@ impl ExecutionSegment {
         let Some((session, queue, timeout)) = &self.deferred else {
             let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
             require_terminal_success(label, terminal.wait(timeout)?)?;
-            self.flush(boundary, audit)?;
+            self.flush_without_boundary(audit)?;
             audit.record_labeled(label, terminal.dispatch())?;
+            audit.record_boundary(boundary, true)?;
             return Ok(());
         };
         let mut fence = session.create_queue_fence(queue)?;

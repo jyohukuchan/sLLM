@@ -40,7 +40,7 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 39 | complete | service operability・認証・observability基盤 | 現行profile v1 |
 | 40 | complete | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
 | 41 | complete | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
-| 42 | planned | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
+| 42 | complete | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
 | 43 | planned | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
 | 44 | planned | generic template、reasoning control、interactive CLI | Phase 41・43 message/state |
 | 45 | planned | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
@@ -224,6 +224,10 @@ Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、�
 - speculation disabled時の既存経路を変えず、有効時はaccepted/rejected/proposed accountingと逐次同一性を示す。
 
 ## Phase 42: inference modeと基本public endpoint
+
+状態: 2026-08-22完了。実装・検証の正本は
+[archive plan](../../../../archive/2026/08/21-31/phase42-inference-modes-public-endpoints.md)と
+[history](../../../../../history/2026/08/21-31/phase42-inference-modes-public-endpoints.md)に移した。
 
 ### Scope
 

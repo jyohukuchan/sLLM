@@ -379,17 +379,19 @@ impl KvStateDescriptor {
         })
     }
 
-    /// Resident bytes for K or V, including separately owned scale planes.
-    /// The complete state owns two such composites.
+    /// Resident bytes for K or V, including separately owned dynamic scale
+    /// planes. Static FP8 scales are descriptor scalars and own no device
+    /// scale plane. The complete state owns two such composites.
     pub fn resident_bytes_per_plane(self) -> Option<u64> {
         let capacity = self.capacity();
         let heads = u64::try_from(self.layout.heads()).ok()?;
         let head_dim = u64::try_from(self.layout.head_dim()).ok()?;
         let bytes_per_token = match self.cache_encoding {
             KvCacheEncoding::Fp16 => heads.checked_mul(head_dim)?.checked_mul(2)?,
-            KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => heads
+            KvCacheEncoding::Fp8E4M3Fn => heads
                 .checked_mul(head_dim)?
                 .checked_add(heads.checked_mul(4)?)?,
+            KvCacheEncoding::Fp8E4M3FnStatic => heads.checked_mul(head_dim)?,
             KvCacheEncoding::Nvfp4 => heads
                 .checked_mul(head_dim.div_ceil(2))?
                 .checked_add(heads.checked_mul(head_dim.div_ceil(16))?)?
@@ -673,10 +675,12 @@ mod tests {
             KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp16).unwrap();
         let fp8 = KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp8E4M3Fn)
             .unwrap();
+        let fp8_static = KvStateDescriptor::new_with_static_fp8(0, 257, 4, 256, 0.5, 0.25).unwrap();
         let nvfp4 =
             KvStateDescriptor::new_with_storage(0, 257, 4, 257, KvCacheEncoding::Nvfp4).unwrap();
         assert_eq!(fp16.resident_bytes_per_plane(), Some(257 * 2048));
         assert_eq!(fp8.resident_bytes_per_plane(), Some(257 * 1040));
+        assert_eq!(fp8_static.resident_bytes_per_plane(), Some(257 * 1024));
         assert_eq!(nvfp4.resident_bytes_per_plane(), Some(257 * 600));
         assert_eq!(fp8.dtype(), DType::F8E4M3Fn);
         assert_eq!(nvfp4.dtype(), DType::U8);

@@ -498,3 +498,39 @@ synthetic caseによるsemantic G1の後、固定model lockから抽出した実
 - backend 外へ公開する kernel plugin ABI
 
 これらのための実装や不完全な ABI は先行追加しない。一方で、opaque handle、capability query、非同期 event、op/KV descriptor により、将来の追加で上位の model/scheduler API を破壊しない境界を保つ。
+
+## Phase 42 transport-independent inference modes
+
+Phase 42のpublic endpoint adapterは、既存のChat Completions runtimeや
+Phase 40のchoice/sampler stateを複製しない。HTTPとCLIは同じ
+transport-independent frontend serviceへlowerし、そのserviceがverified
+tokenizer、renderer、model-lock identityを一度だけ解決する。`/v1/tokenize`、
+`/v1/detokenize`、`/v1/apply-template`、`/v1/input-tokens`はmodel
+execution/GPU executionを起動せず、model-default special-token policyを
+使う。templateを使う場合はrenderer version・digest・sizeを結果identityへ
+含める。未検証template、任意Jinja、custom kwargsは
+`unsupported_parameter`で拒否する。
+
+`/v1/completions`と`/v1/infill`のwire requestは共通のbounded generation subsetへlower
+する。stop、usage、streaming、`n` choiceは既存の共通state machineを使い、
+endpointごとに別のsamplerやchoice accountを作らない。infillだけが追加で
+model-lock capabilityを要求し、verified FIM prefix/suffix/middle token IDs、
+template digest、context limitが揃わなければ生成前に拒否する。productionで
+未確認モデルをgeneric completionへfallbackしない。
+
+Embedding executionはfinal hidden rowsをhost-sideの固定profileへ渡す。
+Phase 42 v1のpoolingは算術平均、accumulatorはF64、出力は有限F32、
+normalizationはL2のみであり、dimensionはmodel lockのhidden sizeに結合する。
+multimodal rows、client-selected pooling/normalization、non-finite値、
+dimension mismatchはprofile boundaryでrejectする。Rerankは同じL2-normalized
+vectorのdot productをscoreとし、高いscoreを先に、完全tieは元のdocument
+index順に並べる。`top_n`は範囲外をclampせずrejectし、空文書・dimension mismatch・
+non-finite scoreを生成経路へ渡さない。
+
+The fixed public-reference pins are OpenAI OpenAPI `2.3.0`, commit
+`117ce5680e4269f6656a4fd70d28f9755630d938` and llama.cpp `b10453` commit
+`3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`. They constrain adapter tests and
+semantic comparison only; llama.cpp aliases and implementation-specific
+options do not become sLLM runtime contracts. Exact MI300X `gfx942` execution
+is deferred until a fresh runtime is available. Host tests or compile-only
+evidence never promote a production GPU capability.

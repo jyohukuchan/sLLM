@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase42-profile-v1.schema.json",
+  "title": "sLLM Phase 42 inference endpoint profiles v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile_version", "spec_pins", "semantic_identity", "profiles", "cases"],
+  "properties": {
+    "schema_version": {"const": "sllm-phase42-profile-fixture-v1"},
+    "profile_version": {"const": "sllm-inference-endpoints-v1"},
+    "spec_pins": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["openai_openapi_version", "openai_openapi_commit", "llama_cpp_commit", "llama_cpp_release"],
+      "properties": {
+        "openai_openapi_version": {"const": "2.3.0"},
+        "openai_openapi_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "llama_cpp_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "llama_cpp_release": {"type": "string", "minLength": 1}
+      }
+    },
+    "semantic_identity": {"$ref": "#/$defs/semantic_identity"},
+    "profiles": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {"$ref": "#/$defs/profile"}
+    },
+    "cases": {"$ref": "#/$defs/cases"}
+  },
+  "$defs": {
+    "semantic_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokenizer", "template", "embedding", "rerank", "infill"],
+      "properties": {
+        "tokenizer": {
+          "type": "object", "additionalProperties": false,
+          "required": ["utility_version", "special_token_policy", "byte_fallback", "unicode", "empty_input", "max_input_bytes", "max_tokens"],
+          "properties": {
+            "utility_version": {"const": "tokenizer-utility-v1"},
+            "special_token_policy": {"type": "string", "minLength": 1},
+            "byte_fallback": {"const": "lossless-byte-array"},
+            "unicode": {"const": "utf8-preserving"},
+            "empty_input": {"const": "accepted"},
+            "max_input_bytes": {"type": "integer", "const": 16777216},
+            "max_tokens": {"type": "integer", "const": 1048576}
+          }
+        },
+        "template": {
+          "type": "object", "additionalProperties": false,
+          "required": ["renderer", "template_digest_required", "arbitrary_jinja", "custom_kwargs", "unsupported_model"],
+          "properties": {
+            "renderer": {"const": "verified-model-template-only"},
+            "template_digest_required": {"const": true},
+            "arbitrary_jinja": {"const": false},
+            "custom_kwargs": {"const": false},
+            "unsupported_model": {"const": "unsupported_parameter"}
+          }
+        },
+        "embedding": {
+          "type": "object", "additionalProperties": false,
+          "required": ["pooling", "normalization", "accumulator", "output_dtype", "dimension", "nonfinite", "multimodal"],
+          "properties": {
+            "pooling": {"const": "arithmetic-mean-over-final-hidden-rows"},
+            "normalization": {"const": "l2"},
+            "accumulator": {"const": "f64-then-f32"},
+            "output_dtype": {"const": "float32"},
+            "dimension": {"const": "model-lock-hidden-size"},
+            "nonfinite": {"const": "reject"},
+            "multimodal": {"const": false}
+          }
+        },
+        "rerank": {
+          "type": "object", "additionalProperties": false,
+          "required": ["profile", "score", "higher_is_better", "tie_break", "top_n", "empty_documents", "nonfinite"],
+          "properties": {
+            "profile": {"const": "sllm-cosine-embedding-rerank-v1"},
+            "score": {"const": "l2-normalized-query-document-dot-product"},
+            "higher_is_better": {"const": true},
+            "tie_break": {"const": "original_document_index"},
+            "top_n": {"const": "1..=document_count-no-clamp"},
+            "empty_documents": {"const": "reject"},
+            "nonfinite": {"const": "reject"}
+          }
+        },
+        "infill": {
+          "type": "object", "additionalProperties": false,
+          "required": ["capability", "production_status", "fallback", "visible_fim_markers", "mi300x"],
+          "properties": {
+            "capability": {"const": "verified-fim-template-and-model-lock"},
+            "production_status": {"const": "unsupported-until-verified-template"},
+            "fallback": {"const": "none"},
+            "visible_fim_markers": {"const": false},
+            "mi300x": {"const": "deferred-until-exact-gfx942-runtime"}
+          }
+        }
+      }
+    },
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "endpoint", "method", "compatibility", "normative_pin", "request", "response", "limits", "rejections", "non_goals"],
+      "properties": {
+        "id": {"enum": ["openai-completions-v1", "openai-embeddings-v1", "sllm-rerank-v1", "sllm-token-utilities-v1", "sllm-infill-v1"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "method": {"const": "POST"},
+        "compatibility": {"enum": ["openai-subset", "sllm-native", "sllm-native-not-openai"]},
+        "normative_pin": {"type": "string", "minLength": 1},
+        "request": {"type": "object"},
+        "response": {"type": "object"},
+        "limits": {"type": "object", "minProperties": 1},
+        "rejections": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "non_goals": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "profile", "request"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "profile": {"enum": ["openai-completions-v1", "openai-embeddings-v1", "sllm-rerank-v1", "sllm-token-utilities-v1", "sllm-infill-v1"]},
+        "request": {"type": "object"},
+        "oracle": {"type": "object"},
+        "error": {"$ref": "#/$defs/error"}
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "code", "param"],
+      "properties": {
+        "status": {"enum": [400, 413]},
+        "code": {"enum": ["invalid_json", "invalid_value", "unsupported_parameter", "request_too_large"]},
+        "param": {"type": "string", "minLength": 1}
+      }
+    },
+    "cases": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positive", "negative"],
+      "properties": {
+        "positive": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}},
+        "negative": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/case"},
+              {"required": ["error"]}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

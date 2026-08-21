@@ -43,7 +43,8 @@ hipError_t launch(const uint16_t *query, const void *key, const void *value,
                   uint32_t query_count, uint64_t capacity_tokens,
                   uint64_t start_position, uint64_t committed_kv_length,
                   uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
-                  uint32_t encoding, bool use_gfx1201_wave_provider,
+                  uint32_t encoding, float static_key_scale,
+                  float static_value_scale, bool use_gfx1201_wave_provider,
                   bool use_decode_wave_split, bool use_prefill_gqa4,
                   bool use_prefill_gqa4_qtile4, hipStream_t stream) noexcept;
 

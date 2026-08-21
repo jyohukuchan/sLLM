@@ -25,8 +25,9 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         // `benchmark` is an internal evidence command. Keep it accepted for the
         // repository-owned harnesses without advertising it as a product CLI.
         Some(
-            command
-            @ ("verify-model" | "tokenize" | "render" | "decode" | "generate" | "benchmark"),
+            command @ ("verify-model" | "tokenize" | "detokenize" | "render" | "apply-template"
+            | "input-tokens" | "completions" | "embeddings" | "rerank" | "infill"
+            | "decode" | "generate" | "benchmark"),
         ) => {
             let output = model::run(command, arguments)?;
             println!("{output}");
@@ -46,8 +47,15 @@ fn print_help() {
     println!("  doctor   Probe the Phase 1 host backend boundary");
     println!("  verify-model  Verify a derived GGUF artifact");
     println!("  tokenize      Encode text with the verified tokenizer");
+    println!("  detokenize    Decode token IDs with the verified tokenizer");
     println!("  render        Render Qwen3.5 chat messages");
+    println!("  apply-template Apply and tokenize the reviewed chat template");
+    println!("  input-tokens  Count raw or rendered input tokens (CPU only)");
     println!("  decode        Decode token IDs with the verified tokenizer");
+    println!("  completions   OpenAI Completions CLI surface (backend-dependent)");
+    println!("  embeddings    Produce final-normalized hidden embeddings");
+    println!("  rerank        Rank documents with cosine-embedding-v1");
+    println!("  infill        FIM/infill (fails closed without a verified capability)");
     println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
     println!();
     println!("model source: --gguf PATH --derived-lock PATH");

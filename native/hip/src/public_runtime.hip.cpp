@@ -288,7 +288,8 @@ launch(const uint16_t *const query, const void *const key,
        const uint32_t query_count, const uint64_t capacity_tokens,
        const uint64_t start_position, const uint64_t committed_kv_length,
        const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-       const uint32_t encoding, const bool use_gfx1201_wave_provider,
+       const uint32_t encoding, const float static_key_scale,
+       const float static_value_scale, const bool use_gfx1201_wave_provider,
        const bool use_decode_wave_split, const bool use_prefill_gqa4,
        const bool use_prefill_gqa4_qtile4, const hipStream_t stream) noexcept {
   (void)key_scales;
@@ -298,6 +299,8 @@ launch(const uint16_t *const query, const void *const key,
   (void)q_heads;
   (void)kv_heads;
   (void)head_dim;
+  (void)static_key_scale;
+  (void)static_value_scale;
   (void)use_gfx1201_wave_provider;
   (void)use_decode_wave_split;
   (void)use_prefill_gqa4;

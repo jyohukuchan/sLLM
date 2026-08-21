@@ -1,0 +1,177 @@
+{
+  "schema_version": "sllm-phase42-profile-fixture-v1",
+  "profile_version": "sllm-inference-endpoints-v1",
+  "spec_pins": {
+    "openai_openapi_version": "2.3.0",
+    "openai_openapi_commit": "117ce5680e4269f6656a4fd70d28f9755630d938",
+    "llama_cpp_commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+    "llama_cpp_release": "b10453"
+  },
+  "semantic_identity": {
+    "tokenizer": {
+      "utility_version": "tokenizer-utility-v1",
+      "special_token_policy": "model-default-no-client-override",
+      "byte_fallback": "lossless-byte-array",
+      "unicode": "utf8-preserving",
+      "empty_input": "accepted",
+      "max_input_bytes": 16777216,
+      "max_tokens": 1048576
+    },
+    "template": {
+      "renderer": "verified-model-template-only",
+      "template_digest_required": true,
+      "arbitrary_jinja": false,
+      "custom_kwargs": false,
+      "unsupported_model": "unsupported_parameter"
+    },
+    "embedding": {
+      "pooling": "arithmetic-mean-over-final-hidden-rows",
+      "normalization": "l2",
+      "accumulator": "f64-then-f32",
+      "output_dtype": "float32",
+      "dimension": "model-lock-hidden-size",
+      "nonfinite": "reject",
+      "multimodal": false
+    },
+    "rerank": {
+      "profile": "sllm-cosine-embedding-rerank-v1",
+      "score": "l2-normalized-query-document-dot-product",
+      "higher_is_better": true,
+      "tie_break": "original_document_index",
+      "top_n": "1..=document_count-no-clamp",
+      "empty_documents": "reject",
+      "nonfinite": "reject"
+    },
+    "infill": {
+      "capability": "verified-fim-template-and-model-lock",
+      "production_status": "unsupported-until-verified-template",
+      "fallback": "none",
+      "visible_fim_markers": false,
+      "mi300x": "deferred-until-exact-gfx942-runtime"
+    }
+  },
+  "profiles": [
+    {
+      "id": "openai-completions-v1",
+      "endpoint": "/v1/completions",
+      "method": "POST",
+      "compatibility": "openai-subset",
+      "normative_pin": "openai-openapi-117ce5680e4269f6656a4fd70d28f9755630d938",
+      "request": {
+        "required": ["model", "prompt"],
+        "optional": ["max_tokens", "temperature", "top_p", "stop", "presence_penalty", "frequency_penalty", "seed", "stream", "n", "logit_bias", "logprobs"],
+        "prompt_shapes": ["string", "string_array", "token_array", "token_array_array"],
+        "max_tokens": {"min": 1, "max": 4096, "default": 256},
+        "temperature": {"min": 0.0, "max": 2.0, "default": 1.0},
+        "top_p": {"min": 0.0, "max": 1.0, "default": 1.0},
+        "penalties": {"min": -2.0, "max": 2.0, "default": 0.0},
+        "stop": {"max_items": 4, "unique": true, "nonempty": true},
+        "n": {"min": 1, "max": 8, "default": 1},
+        "logit_bias": {"max_items": 4096, "token_id_max": 4294967295, "value_min": -100.0, "value_max": 100.0},
+        "logprobs": {"min": 0, "max": 5}
+      },
+      "response": {"stream": "sse-data-json-done", "usage": "prompt-completion-total", "choices": "n-choice-state-from-phase40", "post_header_error": "single-json-error-no-done"},
+      "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "input_tokens": 1048576},
+      "rejections": ["unknown_field", "known_unsupported_field", "wrong_type", "nonfinite", "range", "mixed_prompt_array", "oversize"],
+      "non_goals": ["responses", "tools", "chat_messages", "arbitrary_openai_fields"]
+    },
+    {
+      "id": "openai-embeddings-v1",
+      "endpoint": "/v1/embeddings",
+      "method": "POST",
+      "compatibility": "openai-subset",
+      "normative_pin": "openai-openapi-117ce5680e4269f6656a4fd70d28f9755630d938",
+      "request": {
+        "required": ["model", "input"],
+        "optional": ["encoding_format", "dimensions"],
+        "input_shapes": ["string", "string_array", "token_array", "token_array_array"],
+        "encoding_format": ["float", "base64"],
+        "dimensions": {"model_lock_dimension": true, "match_required": true},
+        "pooling": "mean",
+        "normalization": "l2",
+        "output_dtype": "float32",
+        "usage": "prompt-tokens-total"
+      },
+      "response": {"ordering": "input-order", "dimension": "model-lock-hidden-size", "finite_values": true},
+      "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "input_items": 256, "input_tokens": 1048576},
+      "rejections": ["unknown_field", "known_unsupported_field", "wrong_type", "nonfinite", "mixed_input_array", "empty_input_array", "unsupported_encoding", "invalid_dimensions", "oversize"],
+      "non_goals": ["multimodal_input", "client_selected_pooling", "client_selected_normalization"]
+    },
+    {
+      "id": "sllm-rerank-v1",
+      "endpoint": "/v1/rerank",
+      "method": "POST",
+      "compatibility": "sllm-native-not-openai",
+      "normative_pin": "sllm-cosine-embedding-rerank-v1",
+      "request": {
+        "required": ["model", "query", "documents"],
+        "optional": ["top_n", "return_documents"],
+        "documents": {"min_items": 1, "max_items": 256, "nonempty_strings": true},
+        "top_n": {"min": 1, "max": "document_count", "clamp": false},
+        "return_documents_default": false
+      },
+      "response": {"score": "l2-normalized-dot-product", "higher_is_better": true, "tie_break": "original_document_index", "finite_scores": true},
+      "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "document_bytes": 16777216},
+      "rejections": ["unknown_field", "known_unsupported_field", "wrong_type", "empty_documents", "empty_document", "invalid_top_n", "dimension_mismatch", "nonfinite_score", "oversize"],
+      "non_goals": ["openai-compatibility-claim", "llama-alias-reranking", "score-clamp"]
+    },
+    {
+      "id": "sllm-token-utilities-v1",
+      "endpoint": "/v1/tokenize|/v1/detokenize|/v1/apply-template|/v1/input-tokens",
+      "method": "POST",
+      "compatibility": "sllm-native",
+      "normative_pin": "tokenizer-utility-v1",
+      "request": {
+        "tokenize": ["model", "text"],
+        "detokenize": ["model", "tokens", "skip_special_tokens"],
+        "apply_template": ["model", "messages", "renderer_options"],
+        "input_tokens": ["model", "text_or_messages"],
+        "special_defaults": "model-default-no-client-override",
+        "byte_fallback": "piece-byte-array",
+        "template": "verified-template-only",
+        "gpu_execution": false
+      },
+      "response": {"tokenize": "tokens-and-optional-pieces", "detokenize": "content", "apply_template": "prompt-and-template-digest", "input_tokens": "input_tokens"},
+      "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "input_bytes": 16777216, "tokens": 1048576, "messages": 1024},
+      "rejections": ["unknown_field", "wrong_type", "mixed_messages", "unsupported_template", "oversize", "invalid_token_id"],
+      "non_goals": ["arbitrary_jinja", "custom_template_kwargs", "model_execution", "gpu_execution"]
+    },
+    {
+      "id": "sllm-infill-v1",
+      "endpoint": "/v1/infill",
+      "method": "POST",
+      "compatibility": "sllm-native-not-openai",
+      "normative_pin": "sllm-fim-capability-v1",
+      "request": {
+        "required": ["model", "prefix", "suffix"],
+        "optional": ["max_tokens", "temperature", "top_p", "stop", "seed", "stream", "n"],
+        "capability": ["fim_prefix_token", "fim_suffix_token", "fim_middle_token", "verified_template_digest", "max_context"],
+        "max_tokens": {"min": 1, "max": 4096, "default": 256},
+        "n": {"min": 1, "max": 8, "default": 1}
+      },
+      "response": {"stream": "completion-sse", "usage": "prompt-completion-total", "visible_fim_markers": false, "fallback": "none"},
+      "limits": {"body_bytes": 100663296, "model_alias_bytes": 256, "text_bytes": 16777216},
+      "rejections": ["unknown_field", "known_unsupported_field", "wrong_type", "unsupported_model_capability", "unsupported_template", "oversize", "context_overflow"],
+      "non_goals": ["openai-compatibility-claim", "generic-completion-fallback", "arbitrary-fim-markers", "production-multimodal", "mi300x-runtime-until-fresh-evidence"]
+    }
+  ],
+  "cases": {
+    "positive": [
+      {"id": "completion-string", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "hello"}},
+      {"id": "completion-token-array", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": [[1, 2], [3]]}},
+      {"id": "embedding-base64-dimension", "profile": "openai-embeddings-v1", "request": {"model": "qwen", "input": ["a", "b"], "encoding_format": "base64", "dimensions": 128}, "oracle": {"pooling": "arithmetic-mean-over-final-hidden-rows", "normalization": "l2", "dtype": "float32"}},
+      {"id": "rerank-stable-contract", "profile": "sllm-rerank-v1", "request": {"model": "ranker", "query": "q", "documents": ["a", "b"], "top_n": 2, "return_documents": true}, "oracle": {"scores": [1.0, 1.0], "order": [0, 1], "tie_break": "original_document_index"}},
+      {"id": "tokenize-empty", "profile": "sllm-token-utilities-v1", "request": {"model": "qwen", "text": ""}},
+      {"id": "infill-supported-shape", "profile": "sllm-infill-v1", "request": {"model": "fim-model", "prefix": "a", "suffix": "b", "max_tokens": 4}}
+    ],
+    "negative": [
+      {"id": "completion-unknown-field", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "x", "mystery": 1}, "error": {"status": 400, "code": "invalid_value", "param": "mystery"}},
+      {"id": "completion-nonfinite", "profile": "openai-completions-v1", "request": {"model": "qwen", "prompt": "x", "temperature": 3}, "error": {"status": 400, "code": "invalid_value", "param": "temperature"}},
+      {"id": "embedding-mixed-input", "profile": "openai-embeddings-v1", "request": {"model": "qwen", "input": ["x", 1]}, "error": {"status": 400, "code": "invalid_value", "param": "input"}},
+      {"id": "rerank-empty-documents", "profile": "sllm-rerank-v1", "request": {"model": "ranker", "query": "q", "documents": []}, "error": {"status": 400, "code": "invalid_value", "param": "documents"}},
+      {"id": "template-unverified-model", "profile": "sllm-token-utilities-v1", "request": {"model": "raw-jinja", "messages": [{"role": "user", "content": "x"}], "template": "{{ arbitrary }}"}, "error": {"status": 400, "code": "unsupported_parameter", "param": "template"}},
+      {"id": "infill-production-unsupported", "profile": "sllm-infill-v1", "request": {"model": "qwen", "prefix": "a", "suffix": "b"}, "error": {"status": 400, "code": "unsupported_parameter", "param": "model"}},
+      {"id": "mi300x-deferred", "profile": "sllm-infill-v1", "request": {"model": "gfx942-unverified", "prefix": "a", "suffix": "b"}, "error": {"status": 400, "code": "unsupported_parameter", "param": "model"}}
+    ]
+  }
+}

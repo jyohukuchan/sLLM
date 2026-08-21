@@ -24,7 +24,7 @@ const HISTOGRAM_BUCKET_COUNT: usize = 15;
 const OUTCOME_COUNT: usize = 6;
 const TOKEN_DIRECTION_COUNT: usize = 2;
 const CANCELLATION_REASON_COUNT: usize = 4;
-const HTTP_ENDPOINT_COUNT: usize = 10;
+const HTTP_ENDPOINT_COUNT: usize = 18;
 const STATUS_CLASS_COUNT: usize = 6;
 
 // Shared latency buckets in seconds.  They are fixed at compile time so a
@@ -63,6 +63,14 @@ const HTTP_ENDPOINTS: [HttpEndpointV1; HTTP_ENDPOINT_COUNT] = [
     HttpEndpointV1::SlotCancel,
     HttpEndpointV1::ChatReplay,
     HttpEndpointV1::KeysReload,
+    HttpEndpointV1::Completions,
+    HttpEndpointV1::Embeddings,
+    HttpEndpointV1::Rerank,
+    HttpEndpointV1::Tokenize,
+    HttpEndpointV1::Detokenize,
+    HttpEndpointV1::ApplyTemplate,
+    HttpEndpointV1::InputTokens,
+    HttpEndpointV1::Infill,
 ];
 
 const STATUS_CLASSES: [StatusClassV1; STATUS_CLASS_COUNT] = [
@@ -214,6 +222,14 @@ pub enum HttpEndpointV1 {
     SlotCancel,
     ChatReplay,
     KeysReload,
+    Completions,
+    Embeddings,
+    Rerank,
+    Tokenize,
+    Detokenize,
+    ApplyTemplate,
+    InputTokens,
+    Infill,
 }
 
 impl HttpEndpointV1 {
@@ -229,6 +245,14 @@ impl HttpEndpointV1 {
             Self::SlotCancel => 7,
             Self::ChatReplay => 8,
             Self::KeysReload => 9,
+            Self::Completions => 10,
+            Self::Embeddings => 11,
+            Self::Rerank => 12,
+            Self::Tokenize => 13,
+            Self::Detokenize => 14,
+            Self::ApplyTemplate => 15,
+            Self::InputTokens => 16,
+            Self::Infill => 17,
         }
     }
 
@@ -244,6 +268,14 @@ impl HttpEndpointV1 {
             Self::SlotCancel => "slot_cancel",
             Self::ChatReplay => "chat_replay",
             Self::KeysReload => "keys_reload",
+            Self::Completions => "completions",
+            Self::Embeddings => "embeddings",
+            Self::Rerank => "rerank",
+            Self::Tokenize => "tokenize",
+            Self::Detokenize => "detokenize",
+            Self::ApplyTemplate => "apply_template",
+            Self::InputTokens => "input_tokens",
+            Self::Infill => "infill",
         }
     }
 }

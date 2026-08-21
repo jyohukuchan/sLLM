@@ -64,6 +64,10 @@ pub struct QwenExecutionOutput {
     selection: Option<SamplingSelectionV1>,
     logits_bf16: Option<Vec<u16>>,
     hidden_states_bf16: Option<Vec<u16>>,
+    /// Final-RMSNorm output rows used by the explicit embedding execution
+    /// mode.  This is deliberately separate from the MTP pre-final hidden
+    /// rows above; callers must not confuse the two representations.
+    embeddings_bf16: Option<Vec<u16>>,
     committed_length: u64,
 }
 
@@ -766,6 +770,19 @@ impl QwenExecutionOutput {
     /// This is published only by the explicit MTP hook methods.
     pub fn hidden_states_bf16(&self) -> Option<&[u16]> {
         self.hidden_states_bf16.as_deref()
+    }
+
+    /// Final-normalized hidden rows in row-major BF16, published only by the
+    /// explicit embedding prefill route.  These rows are the input to the LM
+    /// head and are distinct from the pre-final MTP hidden rows.
+    pub fn embeddings_bf16(&self) -> Option<&[u16]> {
+        self.embeddings_bf16.as_deref()
+    }
+
+    /// Descriptive alias for callers that name the representation by its
+    /// graph boundary rather than by the embedding endpoint.
+    pub fn final_hidden_states_bf16(&self) -> Option<&[u16]> {
+        self.embeddings_bf16()
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -1550,6 +1567,16 @@ impl QwenExecutionRequest {
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.prefill_with_mtp_state(token_ids)
+    }
+
+    /// Runs the verified Qwen prefill route in explicit embedding mode.  The
+    /// final normalized hidden rows are read back in BF16; LM-head/Argmax
+    /// output is not read back and no generation token is published.
+    pub fn prefill_with_embeddings(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.prefill_with_embeddings(token_ids)
     }
 
     /// Runs a typed multimodal prefill with complete prompt embeddings and
@@ -3956,6 +3983,97 @@ impl QwenExecutionCore {
         self.prefill_impl(token_ids, true, true, None, None, None)
     }
 
+    fn prefill_with_embeddings(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.prefill_embeddings_impl(token_ids)
+    }
+
+    fn prefill_embeddings_impl(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.lifecycle.is_poisoned() {
+            return Err(QwenExecutionError::Poisoned);
+        }
+        if self.committed_length != 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefill is only valid before the first committed transition".to_owned(),
+            ));
+        }
+        let chunk_capacity = usize::try_from(self.graph.token_count()).map_err(|_| {
+            QwenExecutionError::InvalidGraph("graph token count does not fit usize".to_owned())
+        })?;
+        if chunk_capacity == 0 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "embedding prefill graph token capacity is zero".to_owned(),
+            ));
+        }
+        if token_ids.is_empty() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "prefill requires at least one token".to_owned(),
+            ));
+        }
+        if u64::try_from(token_ids.len())
+            .ok()
+            .is_none_or(|tokens| tokens > self.graph.state_capacity())
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "prefill token count {} exceeds request state capacity {}",
+                token_ids.len(),
+                self.graph.state_capacity()
+            )));
+        }
+
+        let chunk_count = token_ids.len().div_ceil(chunk_capacity);
+        let mut all_embeddings = Vec::new();
+        let expected_words = token_ids.len().checked_mul(2_560).ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("embedding output size overflowed".to_owned())
+        })?;
+        all_embeddings.try_reserve(expected_words).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "embedding output allocation is too large".to_owned(),
+            )
+        })?;
+        let mut final_output = None;
+        for (index, chunk) in token_ids.chunks(chunk_capacity).enumerate() {
+            let output = self.run_transition(
+                chunk,
+                if index == 0 {
+                    AttentionPreprocessPositionMode::Prefill
+                } else {
+                    AttentionPreprocessPositionMode::DecodeContinuation
+                },
+                false,
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+                None,
+            )?;
+            let rows =
+                self.read_final_hidden_states(u64::try_from(chunk.len()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "embedding chunk token count does not fit u64".to_owned(),
+                    )
+                })?)?;
+            all_embeddings.extend(rows);
+            final_output = Some(output);
+        }
+        let mut output = final_output.ok_or_else(|| {
+            QwenExecutionError::InvalidRequest("embedding prefill produced no output".to_owned())
+        })?;
+        output.embeddings_bf16 = Some(all_embeddings);
+        self.last_output = Some(output.clone());
+        self.prefill_chunk_count = u64::try_from(chunk_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest("prefill chunk count does not fit u64".to_owned())
+        })?;
+        Ok(output)
+    }
+
     fn prefill_multimodal(
         &mut self,
         token_ids: &[i32],
@@ -4576,6 +4694,7 @@ impl QwenExecutionCore {
             selection: output.selection,
             logits_bf16,
             hidden_states_bf16,
+            embeddings_bf16: None,
             committed_length: expected_length,
         };
         guard.commit()?;
@@ -4995,6 +5114,86 @@ impl QwenExecutionCore {
             .chunks_exact(2)
             .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
             .collect())
+    }
+
+    fn read_final_hidden_states(&self, token_count: u64) -> Result<Vec<u16>, QwenExecutionError> {
+        if token_count == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "embedding readback requires at least one token".to_owned(),
+            ));
+        }
+        let mut matches = self
+            .graph
+            .nodes()
+            .iter()
+            .filter(|node| node.label() == "final_rmsnorm")
+            .collect::<Vec<_>>();
+        let final_norm = matches.pop().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("final RMSNorm node is absent".to_owned())
+        })?;
+        if !matches.is_empty()
+            || !matches!(
+                final_norm.kind(),
+                QwenGraphNodeKind::Semantic(SemanticOpKind::RmsNorm)
+            )
+            || final_norm.inputs().len() != 2
+            || final_norm.outputs().len() != 1
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "embedding final RMSNorm node identity is invalid".to_owned(),
+            ));
+        }
+        let output_id = final_norm.outputs()[0];
+        let rows = usize::try_from(token_count).map_err(|_| {
+            QwenExecutionError::InvalidRequest(
+                "embedding token count does not fit usize".to_owned(),
+            )
+        })?;
+        let view = self.view(output_id, token_count)?;
+        if view.dtype() != DType::Bf16
+            || view.encoding() != Encoding::Unquantized
+            || view.shape() != [rows, 2_560]
+            || !view.is_contiguous()
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "embedding final RMSNorm output must be contiguous BF16 [tokens,2560]".to_owned(),
+            ));
+        }
+        let expected_bytes = rows
+            .checked_mul(2_560)
+            .and_then(|words| words.checked_mul(2))
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest("embedding readback size overflowed".to_owned())
+            })?;
+        let allocation = self.tensors.get(output_id).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("embedding output allocation is absent".to_owned())
+        })?;
+        let bytes = read_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &allocation.buffer,
+            &view,
+            self.completion_timeout,
+            "embedding final-hidden readback",
+        )?;
+        if bytes.len() != expected_bytes || bytes.len() % 2 != 0 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "embedding final-hidden readback size differs".to_owned(),
+            ));
+        }
+        let values = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        if values
+            .iter()
+            .any(|bits| !f32::from_bits(u32::from(*bits) << 16).is_finite())
+        {
+            return Err(QwenExecutionError::InvalidGraph(
+                "embedding final-hidden readback contains non-finite BF16".to_owned(),
+            ));
+        }
+        Ok(values)
     }
 
     fn execute_semantic(
@@ -7582,9 +7781,23 @@ fn read_exact_bytes(
 ) -> Result<Vec<u8>, QwenExecutionError> {
     let total = view.payload_bytes();
     let maximum = session.max_transfer_bytes()?;
-    let mut bytes = Vec::with_capacity(usize::try_from(total).map_err(|_| {
+    if total == 0 {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "{stage} source is empty"
+        )));
+    }
+    if maximum == 0 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "backend transfer limit must be non-zero".to_owned(),
+        ));
+    }
+    let total_usize = usize::try_from(total).map_err(|_| {
         QwenExecutionError::InvalidRequest(format!("{stage} byte count does not fit usize"))
-    })?);
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve(total_usize).map_err(|_| {
+        QwenExecutionError::InvalidRequest(format!("{stage} allocation is too large"))
+    })?;
     let mut relative = 0_u64;
     while relative < total {
         let length = (total - relative).min(maximum);
@@ -7603,7 +7816,12 @@ fn read_exact_bytes(
                 })?,
             0,
         );
-        transfer.read_into(&mut bytes[start..])?;
+        let copied = transfer.read_into(&mut bytes[start..])?;
+        if copied != length {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{stage} returned a short or long read"
+            )));
+        }
         relative = relative.checked_add(length).ok_or_else(|| {
             QwenExecutionError::InvalidRequest(format!("{stage} progress overflowed"))
         })?;
@@ -9200,6 +9418,71 @@ mod tests {
                 .len(),
             3 * 2_560
         );
+    }
+
+    #[test]
+    fn embedding_prefill_reads_final_normalized_rows_for_boundary_token_counts() {
+        for token_count in [1_u64, 3, 17] {
+            let (graph, plan) =
+                crate::qwen_graph::qwen35_execution_fixture_with_token_count(token_count);
+            let recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+                vec![31; usize::try_from(token_count).unwrap()],
+            ]));
+            let session = Arc::new(ExecutionSession::new("recorder", recorder.clone()));
+            let mut core = QwenExecutionCore::provision(
+                session,
+                graph.clone(),
+                plan.clone(),
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("embedding fixture provisions");
+            let output = core
+                .prefill_with_embeddings(&vec![1; usize::try_from(token_count).unwrap()])
+                .expect("embedding prefill succeeds");
+            assert!(output.token_ids().is_empty());
+            assert_eq!(output.last_logits(), None);
+            assert_eq!(output.hidden_states_bf16(), None);
+            assert_eq!(
+                output.embeddings_bf16().map(|rows| rows.len()),
+                Some(usize::try_from(token_count).unwrap() * 2_560)
+            );
+            assert!(
+                !recorder
+                    .events()
+                    .iter()
+                    .any(|event| event == "argmax-readback-start"),
+                "embedding mode must not read back generation tokens"
+            );
+            let final_nodes = graph
+                .nodes()
+                .iter()
+                .filter(|node| node.label() == "final_rmsnorm")
+                .collect::<Vec<_>>();
+            assert_eq!(final_nodes.len(), 1);
+            assert_eq!(final_nodes[0].outputs().len(), 1);
+
+            let normal_recorder = Arc::new(ExecutionRecorder::with_argmax_sequences([
+                vec![31; usize::try_from(token_count).unwrap()],
+            ]));
+            let normal_session =
+                Arc::new(ExecutionSession::new("recorder", normal_recorder.clone()));
+            let mut normal = QwenExecutionCore::provision(
+                normal_session,
+                graph,
+                plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("normal fixture provisions");
+            let normal_output = normal
+                .prefill(&vec![1; usize::try_from(token_count).unwrap()])
+                .expect("normal prefill succeeds");
+            assert_eq!(
+                normal_output.token_ids(),
+                vec![31; usize::try_from(token_count).unwrap()].as_slice()
+            );
+        }
     }
 
     #[test]

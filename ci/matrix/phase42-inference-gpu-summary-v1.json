@@ -1,0 +1,121 @@
+{
+  "schema": "sllm-phase42-inference-gpu-summary-v1",
+  "date": "2026-08-22",
+  "software": {
+    "os": "Ubuntu 24.04.4",
+    "kernel": "6.17.0-35-generic",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "llvm": "23"
+  },
+  "scope": {
+    "command": "sllm embeddings",
+    "input": "Phase 42 exact embedding oracle.",
+    "input_tokens": 8,
+    "pooling": "arithmetic-mean-over-final-hidden-rows",
+    "normalization": "l2",
+    "accumulator": "f64-then-f32",
+    "fallback_allowed": false,
+    "cleanup_failures_allowed": 0
+  },
+  "models": {
+    "qwen": {
+      "source": "Qwen/Qwen3.5-4B",
+      "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "lock_fingerprint": "f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+      "derived_lock_fingerprint": "12b720aa35693cb607b3e138590b856ce1493dfbdd827ced6e37b54061505790",
+      "hidden_dimension": 2560
+    },
+    "gemma": {
+      "source": "google/gemma-4-12B-it",
+      "revision": "707f0a3fb7766d9671258670116b128c86fdd0f7",
+      "lock_fingerprint": "381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d",
+      "derived_lock_fingerprint": "c18daa0ec430ed96cfaa7fc14ca8e60d36c3215bfe7462a34707bd45d7b59bec",
+      "hidden_dimension": 3840
+    }
+  },
+  "rows": [
+    {
+      "device": "V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "target": "gfx1030",
+      "model": "qwen",
+      "binary_sha256": "31b3926014b1e2d5b0e9b90c48300ebb0d2948a9481f6ee959d1f43e326f1b4a",
+      "rows": 1,
+      "dimension": 2560,
+      "finite": true,
+      "l2_norm": 0.9999999983354233,
+      "prompt_tokens": 8,
+      "total_tokens": 8,
+      "target_only": true,
+      "fallback_used": false,
+      "result": "PASS"
+    },
+    {
+      "device": "R9700",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "target": "gfx1201",
+      "model": "qwen",
+      "binary_sha256": "2077af97c629998a72dac8b7840248ccb1c5b3c0d941f6a765d6e5fc8d69d9a6",
+      "rows": 1,
+      "dimension": 2560,
+      "finite": true,
+      "l2_norm": 0.9999999983354233,
+      "prompt_tokens": 8,
+      "total_tokens": 8,
+      "target_only": true,
+      "fallback_used": false,
+      "result": "PASS"
+    },
+    {
+      "device": "V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "target": "gfx1030",
+      "model": "gemma",
+      "binary_sha256": "31b3926014b1e2d5b0e9b90c48300ebb0d2948a9481f6ee959d1f43e326f1b4a",
+      "rows": 1,
+      "dimension": 3840,
+      "finite": true,
+      "l2_norm": 1.0000000008340038,
+      "prompt_tokens": 8,
+      "total_tokens": 8,
+      "target_only": true,
+      "fallback_used": false,
+      "result": "PASS"
+    },
+    {
+      "device": "R9700",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "target": "gfx1201",
+      "model": "gemma",
+      "binary_sha256": "2077af97c629998a72dac8b7840248ccb1c5b3c0d941f6a765d6e5fc8d69d9a6",
+      "rows": 1,
+      "dimension": 3840,
+      "finite": true,
+      "l2_norm": 1.000000001293041,
+      "prompt_tokens": 8,
+      "total_tokens": 8,
+      "target_only": true,
+      "fallback_used": false,
+      "result": "PASS"
+    }
+  ],
+  "regressions": [
+    {
+      "id": "gemma-static-fp8-scale-plane",
+      "symptom": "static FP8 append and causal attention dereferenced absent dynamic scale planes",
+      "resolution": "use checked descriptor scalars for static FP8 and keep dynamic per-row scale planes exclusive to dynamic FP8",
+      "coverage": "Gemma full-model embedding PASS on gfx1030 and gfx1201"
+    }
+  ],
+  "postconditions": {
+    "cleanup_failures": 0
+  },
+  "gfx942": {
+    "target": "gfx942:sramecc+:xnack-",
+    "wavefront": 64,
+    "binary_sha256": "9b58e97e9bf2925263d10f011a094ef917fecfb68f6f328f325a9466c3887a13",
+    "result": "compile-only PASS",
+    "real_gpu_result": "deferred"
+  }
+}

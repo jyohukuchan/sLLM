@@ -1008,7 +1008,7 @@ candidateを再確認した。
 | 完了 | Phase 39 | service operability・認証・observability | health/readiness、bounded metrics・memory、redacted slots、opt-in resumable SSE、TLS/CORS、複数user/admin keyをhost integrationで固定した |
 | 完了 | Phase 40 | token selection・grammar・structured generation | host/API/HIP/Qwen/Gemmaへ統合。V620/R9700 selector matrixとV620 Qwen/Gemma model integrationをPASS、gfx942 realのみdeferred |
 | 完了 | Phase 41 | prefix/KV・session state・speculation | identity-safe prefix fork/COW、stateless prompt checkpoint、context shift、assistant prefill、model-neutral draftをQwen/Gemmaへ統合し、両RDNA実機state matrixをPASSした |
-| planned | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、infillを公開する |
+| 完了 | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、capability-gated infillを共通frontend/runtime/HTTP/CLIへ実装。V620/R9700のQwen/Gemma embeddingをPASSし、MI300X実機のみdeferred |
 | planned | Phase 43 | Responses・Anthropic・function/tool protocol | 別仕様pinと共通internal itemでAPI/event/tool callを実装し、tool実行とは分離する |
 | planned | Phase 44 | template・reasoning・interactive UX | sandboxed generic template、reasoning control、interactive/reverse prompt/prompt fileを実装する |
 | planned | Phase 45 | adapter・dynamic model lifecycle | LoRA/control vector、multi-model registry、router load/unload/cacheをmodel identityへ結合する |
@@ -1171,6 +1171,22 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
   [history](../history/2026/08/21-31/phase41-prefix-session-speculation.md)、
   [GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。llama.cpp sourceの直接reuseはない。
 
+### Phase 42: inference mode・基本public endpoint（完了）
+
+- OpenAI-subset Completions/Embeddings、sLLM-native Rerank、tokenize/detokenize/apply-template/input-tokens、
+  capability-gated FIM/infillを、共通frontend、bounded scheduler、HTTP、CLIへ実装した。strict parserはunknownと
+  known-unsupported field、type/range/nonfinite/size/capability errorをGPU admission前に拒否する。
+- Embeddingはfinal RMSNorm後の全hidden rowをF64算術平均し、L2正規化したfinite F32を公開する。Rerankは同じ
+  normalized vectorのdot product、score降順、original-index tie breakを正本とする。current production Qwen/Gemma lockは
+  verified FIM templateを持たないためinfillをfail closedにし、generic completionへfallbackしない。
+- V620 `gfx1030` / R9700 `gfx1201`でQwen3.5-4BとGemma-4-12Bのexact full-model embeddingをPASSした。
+  4行すべてdimension、finite、L2、usage、target-only、fallback 0を確認した。検証中に判明したGemma static-FP8の
+  scale-plane誤参照とresident-byte過大計上もtwo-plane static contractへ修正した。gfx942は
+  `sramecc+:xnack-` feature-pinned compileのみPASSし、MI300X realはユーザー指示どおりdeferredである。詳細は
+  [archive plan](archive/2026/08/21-31/phase42-inference-modes-public-endpoints.md)、
+  [history](../history/2026/08/21-31/phase42-inference-modes-public-endpoints.md)、
+  [GPU summary](../../ci/matrix/phase42-inference-gpu-summary-v1.json)を正とする。llama.cpp sourceの直接reuseはない。
+
 ### llama.cppとの差分（機能・運用の未割当棚卸し）
 
 - 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
@@ -1185,10 +1201,10 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 
 | 分類 | 固定llama.cppにある主な機能 | 現行sLLMの状態と未割当範囲 |
 | --- | --- | --- |
-| 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | HTTPは`/v1/models`と`/v1/chat/completions`だけを公開し、Chat CompletionsはPhase 40で`n=1..=8`へ拡張した。Responsesは既存deferred、その他のHTTP endpoint/runtime modeは未割当。CLIのtokenize/render/decodeとinternal embedding opを、対応するHTTP APIのsupportとは数えない |
+| 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | Phase 42でCompletions、Embeddings、sLLM-native Rerank、4 utility endpoint、capability-gated InfillをHTTP/CLI共通runtimeへ実装した。current Qwen/Gemmaはverified FIM capabilityがないためInfillをfail closedにする。ResponsesとAnthropic MessagesはPhase 43に残る |
 | 制約生成・tool | GBNF/JSON Schema constrained decoding、structured output、function/tool calling、組込みtool/MCP実行、logit bias、logprobs | Phase 40でbounded GBNF/JSON Schema、structured `response_format`、logit bias、post-mask logprobsをprofile v1へ実装した。tools/function、tool result parser、組込みtool/MCP実行は未割当で、実行権限は別のsecurity判断とする |
 | sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | Phase 40でversioned ordered sampler chainと追加samplerを実装済み。GPU TokenSelectは対応subsetだけを明示routeし、高度な全候補filterはhost pathへ残す。既存performance backlogのGPU sampling移行とは分ける |
-| prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | Phase 41でidentity-safe prefix/KV reuse、stateless prompt checkpoint、keep-prefix/recent context shift、assistant prefill、MTP/external/ngram共通contractを実装した。mid-generation/wire session resume、external executor provisioning、FIM/infillは後続範囲に残る |
+| prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | Phase 41でidentity-safe prefix/KV reuse、stateless prompt checkpoint、keep-prefix/recent context shift、assistant prefill、MTP/external/ngram共通contractを実装した。Phase 42でverified capability限定FIM/infill modeを追加した。mid-generation/wire session resumeとexternal executor provisioningは残る |
 | adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
 | template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
 | service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | Phase 39でhealth/readiness、bounded metrics/runtime memory、redacted props/slots・admin cancel、opt-in resumable SSE、exact CORS、Rustls、複数user/admin keyとrotationを実装済み。server UIだけをPhase 48に残す |
@@ -1347,10 +1363,13 @@ LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り�
   [history](../history/2026/08/21-31/phase39-service-operability.md)を正とする。
 - MI300X性能laneの次はPhase 37だが、VMは削除済みなので再確保前はgfx942 compile/selector/oracle準備までをdraftとし、
   GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、Phase 38で
-  fresh residualを閉じる。機能laneはPhase 40/41を完了した。MI300X待ちの間もhost/RDNA側を独立して進め、
-  Phase 37/38のGPU完了はPhase 41以降の開始・merge gateにしない。Phase 41の詳細は
-  [archive plan](archive/2026/08/21-31/phase41-prefix-session-speculation.md)、全体の詳細、依存、受入条件、
+  fresh residualを閉じる。機能laneはPhase 42まで完了した。MI300X待ちの間もhost/RDNA側を独立して進め、
+  Phase 37/38のGPU完了はPhase 41以降の開始・merge gateにしない。Phase 42までの機能laneを完了した。Phase 42の詳細は
+  [archive plan](archive/2026/08/21-31/phase42-inference-modes-public-endpoints.md)、全体の詳細、依存、受入条件、
   intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
+- Phase 42はCompletions、Embeddings、sLLM-native Rerank、4 token/template utility、capability-gated FIM/infillを完了した。
+  V620/R9700のQwen/Gemma exact embeddingとgfx942 feature-pinned compileをPASSし、MI300X実機だけをdeferredした。詳細は
+  [Phase 42 archive plan](archive/2026/08/21-31/phase42-inference-modes-public-endpoints.md)を正とする。
 - Phase 41はidentity-safe prefix fork/COW、Qwen/Gemma stateless prompt checkpoint、context shift、assistant prefill、
   model-neutral MTP/external/ngram contractを完了した。V620/R9700の実GPU state matrixとgfx942 feature-pinned compileをPASSし、
   MI300X実機だけをdeferredした。詳細は

@@ -8,6 +8,7 @@ mod api;
 mod batching;
 mod lifecycle;
 mod metrics;
+mod phase42_api;
 mod production;
 mod resume;
 mod runtime;
@@ -26,6 +27,12 @@ pub use metrics::{
     CancellationReasonV1, HttpEndpointV1, MetricsConfigError, MetricsRequestHandleV1,
     RequestOutcomeV1, ServerMetricsV1,
 };
+pub use phase42_api::{
+    ApplyTemplateRequestV1, CompletionRequestV1, DetokenizeRequestV1, EmbeddingEncodingFormatV1,
+    EmbeddingRequestV1, InfillRequestV1, InputTokensInputV1, InputTokensRequestV1,
+    PHASE42_PROFILE_VERSION, PromptV1, RerankRequestV1, TemplateMessageV1, TemplateRoleV1,
+    TokenizeRequestV1,
+};
 pub use production::{
     CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
     Gemma4BackendConfigV1, Gemma4ChatBackendV1, Phase41ProductionConfigV1,
@@ -35,11 +42,12 @@ pub use production::{
 };
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{
-    BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
-    BackendObservabilitySnapshotV1, BackendTokenLogprobV1, BackendTopLogprobV1,
-    ChatGenerationBackendV1, GenerationDeltaSinkV1, ModelRegistryEntryV1, ModelRegistryV1,
-    SchedulerConfigV1, SchedulerSlotSnapshotV1, SchedulerSlotStateV1, SchedulerSnapshotV1,
-    SchedulerV1,
+    BackendCompletionV1, BackendEmbeddingBatchV1, BackendEmbeddingInputV1,
+    BackendEmbeddingRequestV1, BackendEmbeddingVectorV1, BackendErrorV1, BackendInfillCapabilityV1,
+    BackendMemoryCategorySnapshotV1, BackendObservabilitySnapshotV1, BackendTokenLogprobV1,
+    BackendTopLogprobV1, ChatGenerationBackendV1, GenerationDeltaSinkV1, ModelRegistryEntryV1,
+    ModelRegistryV1, SchedulerConfigV1, SchedulerSlotSnapshotV1, SchedulerSlotStateV1,
+    SchedulerSnapshotV1, SchedulerV1,
 };
 pub use security::{CredentialErrorV1, CredentialRoleV1, CredentialStoreV1};
 pub use service::{ServerConfigV1, build_router_v1};

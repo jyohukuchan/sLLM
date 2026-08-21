@@ -219,7 +219,9 @@ extern "C" __global__ __launch_bounds__(
       static_mode != 0U
           ? fixed_value_scale
           : (value_maxima[0] == 0.0F ? 1.0F : value_maxima[0] / 448.0F);
-  if (dimension == 0U) {
+  // Static FP8 keeps one checked scale pair in the state descriptor and has
+  // no per-row scale planes. Dynamic FP8 alone publishes row scales here.
+  if (dimension == 0U && static_mode == 0U) {
     key_scales[output_row] = key_scale;
     value_scales[output_row] = value_scale;
   }

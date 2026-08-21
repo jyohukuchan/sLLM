@@ -481,7 +481,8 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         output_pointer, static_cast<uint32_t>(metadata.query_count),
         state->capacity_tokens, metadata.start_position,
         metadata.expected_kv_length, metadata.query.q_heads, state->head_count,
-        state->head_dim, state->encoding, selection.use_gfx1201_wave_provider,
+        state->head_dim, state->encoding, state->static_key_scale,
+        state->static_value_scale, selection.use_gfx1201_wave_provider,
         selection.use_decode_wave_split, selection.use_prefill_gqa4,
         selection.use_prefill_gqa4_qtile4, queue->stream);
     if (launch_status != hipSuccess) {

@@ -15,7 +15,9 @@ use sha2::{Digest, Sha256};
 
 use crate::context_window::{ContextShiftDecisionV1, ContextWindowStateV1};
 use crate::gemma4::Gemma4LayerType;
-use crate::gemma4_graph::{GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphNodeKind, Gemma4NormRole};
+use crate::gemma4_graph::{
+    GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphBindingClass, Gemma4GraphNodeKind, Gemma4NormRole,
+};
 use crate::kv_state::{KvCacheEncoding, KvStateDescriptor};
 use crate::op::TokenSelectorContractV1;
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
@@ -298,6 +300,9 @@ pub struct Gemma4ExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
     selection: Option<SamplingSelectionV1>,
+    /// Final-RMSNorm output rows used by the explicit embedding execution
+    /// mode. This remains separate from generation logits and token output.
+    embeddings_bf16: Option<Vec<u16>>,
     state: crate::Gemma4RequestStateSnapshot,
     audit: PreparedExecutionAudit,
 }
@@ -1733,7 +1738,7 @@ impl Gemma4ExecutionRequest {
                     .map_err(|_| Gemma4ExecutionLayoutError::invalid("position does not fit i32"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.prefill_impl_with_positions(token_ids, false, None, Some(&positions))
+        self.prefill_impl_with_positions(token_ids, false, None, Some(&positions), false)
     }
 
     pub fn prefill_with_last_logits(
@@ -1741,6 +1746,16 @@ impl Gemma4ExecutionRequest {
         token_ids: &[i32],
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.prefill_impl(token_ids, true, None)
+    }
+
+    /// Runs the verified Gemma prefill route in explicit embedding mode. The
+    /// final normalized hidden rows are read back in BF16; no generation token
+    /// or full-logit row is read back as the embedding result.
+    pub fn prefill_with_embeddings(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.prefill_impl_with_positions(token_ids, false, None, None, true)
     }
 
     /// Runs prefill with the bounded device token-selector subset.  The
@@ -1760,7 +1775,7 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.prefill_impl_with_positions(token_ids, include_last_logits, selector, None)
+        self.prefill_impl_with_positions(token_ids, include_last_logits, selector, None, false)
     }
 
     fn prefill_impl_with_positions(
@@ -1769,6 +1784,7 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
         positions: Option<&[i32]>,
+        include_embeddings: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if self.committed_length != 0
             || token_ids.len() as u64 != layout_token_count(&self.layout)?
@@ -1804,7 +1820,7 @@ impl Gemma4ExecutionRequest {
             self.rotary_position_mode,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        self.run_graph(graph, include_last_logits, selector)
+        self.run_graph(graph, include_last_logits, selector, include_embeddings)
     }
 
     pub fn decode(
@@ -1892,7 +1908,7 @@ impl Gemma4ExecutionRequest {
         }
         self.layout = layout;
         self.buffers = buffers;
-        self.run_graph(graph, include_last_logits, selector)
+        self.run_graph(graph, include_last_logits, selector, false)
     }
 
     pub fn cancel(&self) {
@@ -2921,6 +2937,7 @@ impl Gemma4ExecutionRequest {
         graph: Gemma4Graph,
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
+        include_embeddings: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.binding_generation = self
             .binding_generation
@@ -2936,7 +2953,16 @@ impl Gemma4ExecutionRequest {
                 "device token selector cannot be combined with full logits readback",
             ));
         }
-        let output = if include_last_logits {
+        let output = if include_embeddings {
+            self.buffers.execute_transition_with_embeddings_and_kv(
+                &graph,
+                &self.layout,
+                &self.queue,
+                &self.state,
+                self.opaque_kv_states.as_ref(),
+                options,
+            )
+        } else if include_last_logits {
             self.buffers.execute_transition_with_last_logits_and_kv(
                 &graph,
                 &self.layout,
@@ -3036,6 +3062,18 @@ impl Gemma4ExecutionOutput {
     /// legacy Argmax and explicit host-logits paths leave this absent.
     pub fn selection(&self) -> Option<&SamplingSelectionV1> {
         self.selection.as_ref()
+    }
+
+    /// Final-normalized hidden rows in row-major BF16, published only by the
+    /// explicit embedding prefill route.
+    pub fn embeddings_bf16(&self) -> Option<&[u16]> {
+        self.embeddings_bf16.as_deref()
+    }
+
+    /// Descriptive alias for callers that name the representation by its
+    /// graph boundary.
+    pub fn final_hidden_states_bf16(&self) -> Option<&[u16]> {
+        self.embeddings_bf16()
     }
 
     pub const fn state(&self) -> crate::Gemma4RequestStateSnapshot {
@@ -3593,6 +3631,28 @@ impl Gemma4ProvisionedBuffers {
         )
     }
 
+    fn execute_transition_with_embeddings_and_kv(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+        options: Gemma4ExecutionOptions,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.execute_transition_impl(
+            graph,
+            layout,
+            queue,
+            request_state,
+            opaque_kv_states,
+            options,
+            false,
+            None,
+            true,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn execute_transition_with_selector_and_kv(
         &self,
@@ -3613,6 +3673,7 @@ impl Gemma4ProvisionedBuffers {
             options,
             false,
             selector,
+            false,
         )
     }
 
@@ -3652,6 +3713,7 @@ impl Gemma4ProvisionedBuffers {
             options,
             true,
             None,
+            false,
         )
     }
 
@@ -3666,12 +3728,14 @@ impl Gemma4ProvisionedBuffers {
         options: Gemma4ExecutionOptions,
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
+        include_embeddings: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if options.completion_timeout.is_zero()
             || queue.session_id() != self.session.id()
             || graph.lock_fingerprint() != layout.model_fingerprint
             || graph.weight_plan_digest() != &layout.plan_digest
             || graph.nodes().len() != layout.nodes.len()
+            || (include_embeddings && (include_last_logits || selector.is_some()))
         {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "execution graph, layout, queue, or timeout differs",
@@ -3693,6 +3757,7 @@ impl Gemma4ProvisionedBuffers {
         let mut terminal_bytes = None;
         let mut selector_logits = None;
         let mut selector_terminal_seen = false;
+        let mut embedding_terminal = None;
 
         execution_plan
             .execute(prepared_transition, |planned, current| {
@@ -3710,6 +3775,17 @@ impl Gemma4ProvisionedBuffers {
                     return Err(Gemma4ExecutionLayoutError::invalid(
                         "prepared graph and execution layout differ",
                     ));
+                }
+
+                // Embedding mode terminates immediately after the final RMSNorm
+                // and intentionally does not submit LM-head, softcap, or
+                // Argmax nodes. The pending segment is closed below with the
+                // same audited terminal boundary, so no generation token or
+                // full-vocabulary row is copied to the host.
+                if include_embeddings
+                    && graph_node.binding_class() == Gemma4GraphBindingClass::TerminalOutput
+                {
+                    return Ok(());
                 }
 
                 let full_attention = matches!(
@@ -3855,7 +3931,26 @@ impl Gemma4ProvisionedBuffers {
                         })?;
                 let boundary = planned.boundary_after();
                 if boundary.is_none() {
-                    pending.retain_semantic(graph_node.label(), submission);
+                    let final_embedding_norm = include_embeddings
+                        && matches!(
+                            graph_node.kind(),
+                            Gemma4GraphNodeKind::RmsNorm {
+                                role: Gemma4NormRole::Final,
+                                ..
+                            }
+                        );
+                    if final_embedding_norm {
+                        if embedding_terminal
+                            .replace((graph_node.label().to_owned(), submission))
+                            .is_some()
+                        {
+                            return Err(Gemma4ExecutionLayoutError::invalid(
+                                "embedding execution found duplicate final RMSNorm work",
+                            ));
+                        }
+                    } else {
+                        pending.retain_semantic(graph_node.label(), submission);
+                    }
                     return Ok(());
                 }
                 let boundary = boundary.expect("checked boundary presence");
@@ -3868,7 +3963,7 @@ impl Gemma4ProvisionedBuffers {
                         ))
                     })?;
 
-                if boundary == ExecutionBoundaryKind::TerminalReadback {
+                if boundary == ExecutionBoundaryKind::TerminalReadback && !include_embeddings {
                     if node.descriptor.kind() != SemanticOpKind::Argmax || node.outputs.len() != 1 {
                         return Err(Gemma4ExecutionLayoutError::invalid(
                             "terminal boundary is not one Argmax output",
@@ -3936,12 +4031,31 @@ impl Gemma4ProvisionedBuffers {
             None
         };
 
-        if !pending.is_empty() {
+        if include_embeddings {
+            let (label, mut terminal) = embedding_terminal.ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "embedding execution ended before final RMSNorm work",
+                )
+            })?;
+            pending
+                .flush_with_semantic(
+                    &label,
+                    &mut terminal,
+                    ExecutionBoundaryKind::TerminalReadback,
+                    &mut audit,
+                )
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            transition
+                .complete_boundary(ExecutionBoundaryKind::TerminalReadback)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        } else if !pending.is_empty() {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "execution ended with an unclosed segment",
             ));
         }
-        let token_ids = if let Some(selection) = &selection {
+        let token_ids = if include_embeddings {
+            Vec::new()
+        } else if let Some(selection) = &selection {
             vec![i32::try_from(selection.token_id).map_err(|_| {
                 Gemma4ExecutionLayoutError::invalid("selected token ID does not fit i32")
             })?]
@@ -3967,6 +4081,11 @@ impl Gemma4ProvisionedBuffers {
         } else {
             None
         };
+        let embeddings_bf16 = if include_embeddings {
+            Some(self.read_final_hidden_states(graph, layout, queue, options.completion_timeout)?)
+        } else {
+            None
+        };
         let state = transition
             .commit()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -3974,6 +4093,7 @@ impl Gemma4ProvisionedBuffers {
             token_ids,
             last_logits,
             selection,
+            embeddings_bf16,
             state,
             audit,
         })
@@ -4304,6 +4424,99 @@ impl Gemma4ProvisionedBuffers {
             .collect())
     }
 
+    fn read_final_hidden_states(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        completion_timeout: Duration,
+    ) -> Result<Vec<u16>, Gemma4ExecutionLayoutError> {
+        let mut final_nodes = graph
+            .nodes()
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    Gemma4GraphNodeKind::RmsNorm {
+                        role: Gemma4NormRole::Final,
+                        ..
+                    }
+                )
+            })
+            .collect::<Vec<_>>();
+        let final_node = final_nodes.pop().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("final Gemma RMSNorm node is absent")
+        })?;
+        if !final_nodes.is_empty() || final_node.label() != "final_norm" {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "embedding final Gemma RMSNorm node identity is invalid",
+            ));
+        }
+        let execution_node = layout.nodes.get(final_node.id()).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("final norm layout node is absent")
+        })?;
+        if execution_node.graph_node_id != final_node.id()
+            || execution_node.descriptor.kind() != SemanticOpKind::RmsNorm
+            || execution_node.outputs.len() != 1
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "embedding final norm execution node identity is invalid",
+            ));
+        }
+        let output_id = execution_node.outputs[0];
+        let output = layout
+            .tensors
+            .get(output_id)
+            .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("final norm output is absent"))?;
+        let rows = usize::try_from(graph.token_count()).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("embedding token count is too large")
+        })?;
+        if output.view.dtype() != DType::Bf16
+            || output.view.encoding() != Encoding::Unquantized
+            || output.view.shape() != [rows, GEMMA4_HIDDEN_SIZE as usize]
+            || !output.view.is_contiguous()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "embedding final norm output must be contiguous BF16 [tokens,3840]",
+            ));
+        }
+        let expected_bytes = rows
+            .checked_mul(GEMMA4_HIDDEN_SIZE as usize)
+            .and_then(|words| words.checked_mul(2))
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("embedding readback size overflowed")
+            })?;
+        let buffer = self.buffer(output_id)?;
+        let source = buffer
+            .range(output.view.byte_offset(), output.view.payload_bytes())
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let bytes = read_gemma_buffer_bytes(
+            self.session.as_ref(),
+            queue,
+            &source,
+            completion_timeout,
+            "embedding final-hidden readback",
+        )?;
+        if bytes.len() != expected_bytes || bytes.len() % 2 != 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "embedding final-hidden readback size differs",
+            ));
+        }
+        let values = bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect::<Vec<_>>();
+        if values
+            .iter()
+            .any(|bits| !f32::from_bits(u32::from(*bits) << 16).is_finite())
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "embedding final-hidden readback contains non-finite BF16",
+            ));
+        }
+        Ok(values)
+    }
+
     fn submit_bound(
         &self,
         operation: Arc<BoundSemanticOp>,
@@ -4523,7 +4736,10 @@ fn read_gemma_buffer_bytes(
     let total = usize::try_from(source.size_bytes()).map_err(|_| {
         Gemma4ExecutionLayoutError::invalid(format!("{stage} size does not fit usize"))
     })?;
-    let mut bytes = Vec::with_capacity(total);
+    let mut bytes = Vec::new();
+    bytes.try_reserve(total).map_err(|_| {
+        Gemma4ExecutionLayoutError::invalid(format!("{stage} allocation is too large"))
+    })?;
     let mut offset = 0_u64;
     while offset < source.size_bytes() {
         let length = (source.size_bytes() - offset).min(maximum);
@@ -4549,9 +4765,14 @@ fn read_gemma_buffer_bytes(
         })?;
         let start = bytes.len();
         bytes.resize(start.saturating_add(chunk), 0);
-        transfer
+        let copied = transfer
             .read_into(&mut bytes[start..])
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if copied != length {
+            return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                "{stage} returned a short or long read"
+            )));
+        }
         offset = offset.checked_add(length).ok_or_else(|| {
             Gemma4ExecutionLayoutError::invalid(format!("{stage} progress overflowed"))
         })?;
@@ -5894,6 +6115,40 @@ mod tests {
             })
             .count();
         assert_eq!(tied, 1);
+    }
+
+    #[test]
+    fn embedding_layout_keeps_final_norm_output_rows_for_boundaries() {
+        for token_count in [1_u64, 3, 17] {
+            let (graph, plan) = fixture(token_count, 0, token_count);
+            let layout = build_gemma4_execution_layout(&graph, &plan).unwrap();
+            let final_nodes = graph
+                .nodes()
+                .iter()
+                .filter(|node| {
+                    matches!(
+                        node.kind(),
+                        Gemma4GraphNodeKind::RmsNorm {
+                            role: Gemma4NormRole::Final,
+                            ..
+                        }
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(final_nodes.len(), 1);
+            assert_eq!(final_nodes[0].label(), "final_norm");
+            let execution_node = &layout.nodes()[final_nodes[0].id()];
+            assert_eq!(execution_node.descriptor().kind(), SemanticOpKind::RmsNorm);
+            assert_eq!(execution_node.outputs().len(), 1);
+            let output = &layout.tensors()[execution_node.outputs()[0]];
+            assert_eq!(
+                output.view().shape(),
+                [token_count as usize, GEMMA4_HIDDEN_SIZE as usize]
+            );
+            assert_eq!(output.view().dtype(), DType::Bf16);
+            assert_eq!(output.view().encoding(), Encoding::Unquantized);
+            assert!(output.view().is_contiguous());
+        }
     }
 
     #[test]

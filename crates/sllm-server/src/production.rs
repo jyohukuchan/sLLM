@@ -11,20 +11,20 @@ use sha2::{Digest, Sha256};
 use sllm_core::{
     AllocationSnapshot, Backend, CheckpointIdentity, CheckpointStore, CompiledGrammar,
     ContextPositionPolicyV1, ContextWindowStateV1, DraftProposalV1,
-    DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, ExecutionSession,
-    ExecutionSessionRequest, GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock,
-    Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding,
-    LogitBiasV1 as CoreLogitBiasV1, MirostatModeV1,
-    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, NgramDraftProviderV1,
-    OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1, PrefixCacheValueV1,
-    PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind, PrefixStateIdentityV1,
-    QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection, QwenExecutionRequest, QwenGraph,
-    QwenGraphStateDescriptor, QwenMultimodalImageEmbedding, QwenMultimodalPrompt,
-    QwenPrefixForkAuditV1, QwenPrefixStateV1, QwenResidentModel, QwenVisionExecutionInput,
-    QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock, SamplerChainConfigV1,
-    SessionCheckpoint, VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufGemmaSource,
-    VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe,
-    WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
+    DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, EmbeddingPoolV1,
+    ExecutionSession, ExecutionSessionRequest, GEMMA4_HIDDEN_SIZE,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4PrefixForkAuditV1,
+    Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding, LogitBiasV1 as CoreLogitBiasV1,
+    MirostatModeV1, MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock,
+    NgramDraftProviderV1, OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1,
+    PrefixCacheValueV1, PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind,
+    PrefixStateIdentityV1, QWEN35_HIDDEN_SIZE, QWEN35_RECOMMENDED_CONTEXT_TOKENS,
+    QwenComponentSelection, QwenExecutionRequest, QwenGraph, QwenGraphStateDescriptor,
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenPrefixForkAuditV1, QwenPrefixStateV1,
+    QwenResidentModel, QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel,
+    ReviewedModelLock, SamplerChainConfigV1, SessionCheckpoint, VerifiedCache, VerifiedFp8Sidecar,
+    VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource, VerifiedNvfp4Sidecar,
+    VerifiedQwen35Moe, WeightLoadPlan, XtcSamplingConfigV1 as CoreXtcSamplingConfigV1,
     assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
     build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
     build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
@@ -37,25 +37,319 @@ use sllm_core::{
     verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
-    GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
-    GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1,
-    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1,
-    SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenizerFrontendV1,
-    gemma4_generation_stop_policy,
+    ApplyTemplateResultV1, DecodeModeV1, GenerationCancellationV1, GenerationExecutorV1,
+    GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError, GenerationServiceV1,
+    GenerationStepV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
+    Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1,
+    SpeculativeGenerationExecutorV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerFrontendV1,
+    TokenizerUtilityServiceV1, gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
-use crate::api::{ChatContentPartV1, ResponseFormatV1};
+use crate::api::{ChatContentPartV1, GenerationRequestInputV1, ResponseFormatV1};
 use crate::{
-    BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
-    BackendObservabilitySnapshotV1, BackendTokenLogprobV1, BackendTopLogprobV1,
-    ChatCompletionRequestV1, ChatGenerationBackendV1, FinishReasonV1, GenerationDeltaSinkV1,
-    TokenUsageV1,
+    BackendCompletionV1, BackendEmbeddingBatchV1, BackendEmbeddingInputV1,
+    BackendEmbeddingRequestV1, BackendEmbeddingVectorV1, BackendErrorV1,
+    BackendMemoryCategorySnapshotV1, BackendObservabilitySnapshotV1, BackendTokenLogprobV1,
+    BackendTopLogprobV1, ChatCompletionRequestV1, ChatGenerationBackendV1, FinishReasonV1,
+    GenerationDeltaSinkV1, TokenUsageV1,
 };
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
+
+fn validate_generation_token_ids(
+    tokenizer: &TokenizerFrontendV1,
+    token_ids: &[u32],
+    field: &str,
+) -> Result<Vec<u32>, BackendErrorV1> {
+    if token_ids.is_empty() {
+        return Err(BackendErrorV1::new(format!(
+            "{field} must contain at least one token"
+        )));
+    }
+    for &token_id in token_ids {
+        if tokenizer.token_byte_table().entry(token_id).is_none() {
+            return Err(BackendErrorV1::new(format!(
+                "{field} contains token ID {token_id} outside the verified vocabulary"
+            )));
+        }
+    }
+    Ok(token_ids.to_vec())
+}
+
+fn qwen_generation_prompt(
+    request: &ChatCompletionRequestV1,
+    service: &GenerationServiceV1<'_>,
+    tokenizer: &TokenizerFrontendV1,
+) -> Result<Vec<u32>, BackendErrorV1> {
+    match request.input() {
+        GenerationRequestInputV1::Chat => service
+            .prepare_input(&GenerationInputV1::Messages {
+                messages: request
+                    .messages()
+                    .iter()
+                    .map(|message| message.inner().clone())
+                    .collect(),
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: request.reasoning().thinking(),
+                },
+            })
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
+        GenerationRequestInputV1::RawText(text) => service
+            .prepare_input(&GenerationInputV1::Prompt(text.clone()))
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
+        GenerationRequestInputV1::TokenIds(token_ids) => {
+            validate_generation_token_ids(tokenizer, token_ids, "token_ids")
+        }
+        GenerationRequestInputV1::Infill { .. } => Err(BackendErrorV1::new(
+            "infill is not supported by the current Qwen model lock (FIM capability absent)",
+        )),
+    }
+}
+
+fn gemma_generation_prompt(
+    request: &ChatCompletionRequestV1,
+    service: &GenerationServiceV1<'_>,
+    tokenizer: &TokenizerFrontendV1,
+) -> Result<Vec<u32>, BackendErrorV1> {
+    match request.input() {
+        GenerationRequestInputV1::Chat => {
+            let rendered = render_gemma4_raw_messages(request.messages())?;
+            service
+                .prepare_input(&GenerationInputV1::Prompt(rendered))
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+                })
+        }
+        GenerationRequestInputV1::RawText(text) => service
+            .prepare_input(&GenerationInputV1::Prompt(text.clone()))
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
+        GenerationRequestInputV1::TokenIds(token_ids) => {
+            validate_generation_token_ids(tokenizer, token_ids, "token_ids")
+        }
+        GenerationRequestInputV1::Infill { .. } => Err(BackendErrorV1::new(
+            "infill is not supported by the current Gemma model lock (FIM capability absent)",
+        )),
+    }
+}
+
+fn qwen_embedding_graph_for_rows(
+    state: &QwenBackendStateV1,
+    target_rows: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, BackendErrorV1> {
+    if let Some(artifact) = &state.moe_artifact {
+        build_qwen35_moe_execution_graph(artifact, &state.plan, target_rows, state_capacity)
+            .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+    } else if let Some(source) = &state.gguf_moe {
+        build_qwen35_gguf_moe_execution_graph(source, &state.plan, target_rows, state_capacity)
+            .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+    } else if let Some(sidecar) = &state.nvfp4_sidecar {
+        let lock = state.lock.as_ref().ok_or_else(|| {
+            BackendErrorV1::new("NVFP4 embedding requires the reviewed dense Qwen lock")
+        })?;
+        build_qwen35_nvfp4_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
+            .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+    } else if let Some(source) = state
+        .gguf_source
+        .as_ref()
+        .filter(|source| source.has_fp8_recipe())
+    {
+        let lock = state.lock.as_ref().ok_or_else(|| {
+            BackendErrorV1::new("GGUF FP8 embedding requires the reviewed dense Qwen lock")
+        })?;
+        build_qwen35_gguf_fp8_graph(
+            lock,
+            &state.plan,
+            source,
+            target_rows,
+            state_capacity,
+            gguf_fp8_dtype(
+                state
+                    .fp8_provider
+                    .as_deref()
+                    .ok_or_else(|| BackendErrorV1::new("GGUF FP8 provider is absent"))?,
+            ),
+            state.kv_cache_encoding,
+        )
+        .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+    } else {
+        let lock = state.lock.as_ref().ok_or_else(|| {
+            BackendErrorV1::new("dense embedding requires the reviewed Qwen lock")
+        })?;
+        match (&state.sidecar, state.fp8_provider.as_deref()) {
+            (Some(_), Some("converted-bf16")) | (None, None) => {
+                build_qwen35_graph_with_kv_cache_encoding(
+                    lock,
+                    &state.plan,
+                    target_rows,
+                    state_capacity,
+                    state.kv_cache_encoding,
+                )
+                .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+            }
+            (Some(sidecar), Some("native-fnuz")) => {
+                build_qwen35_fp8_fnuz_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("embedding graph failed: {error}"))
+                    })
+            }
+            (Some(sidecar), Some(_)) => {
+                build_qwen35_fp8_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("embedding graph failed: {error}"))
+                    })
+            }
+            _ => Err(BackendErrorV1::new(
+                "validated Qwen embedding state has no supported weight source",
+            )),
+        }
+    }
+}
+
+fn qwen_embedding_graph(
+    state: &QwenBackendStateV1,
+    token_count: u64,
+) -> Result<QwenGraph, BackendErrorV1> {
+    let total_memory = state
+        .session
+        .total_memory_bytes()
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        .ok_or_else(|| BackendErrorV1::new("backend omitted total device memory"))?;
+    let available_memory = state
+        .session
+        .available_memory_bytes()
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?
+        .ok_or_else(|| BackendErrorV1::new("backend omitted available device memory"))?;
+    let candidates = qwen_prefill_chunk_candidates(total_memory, token_count)
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+    let mut rejected = Vec::new();
+    for target_rows in candidates {
+        let graph = qwen_embedding_graph_for_rows(state, target_rows, token_count)?;
+        let estimate = qwen_graph_memory_estimate(&graph, &state.plan, total_memory)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+        let incremental = estimate
+            .required_bytes()
+            .checked_sub(estimate.model_resident_bytes())
+            .ok_or_else(|| BackendErrorV1::new("embedding placement estimate underflowed"))?;
+        if incremental <= available_memory {
+            return Ok(graph);
+        }
+        rejected.push(format!("{target_rows}:{incremental}"));
+    }
+    Err(BackendErrorV1::new(format!(
+        "no embedding prefill chunk fits available device memory {available_memory}; candidates chunk:incremental-required [{}]",
+        rejected.join(",")
+    )))
+}
+
+fn qwen_embed_one(
+    state: &QwenBackendStateV1,
+    token_ids: &[u32],
+    cancellation: &GenerationCancellationV1,
+) -> Result<BackendEmbeddingVectorV1, BackendErrorV1> {
+    if cancellation.is_cancelled() {
+        return Err(BackendErrorV1::new("embedding cancelled"));
+    }
+    let token_count = u64::try_from(token_ids.len())
+        .map_err(|_| BackendErrorV1::new("embedding token count overflowed u64"))?;
+    let graph = qwen_embedding_graph(state, token_count)?;
+    let mut owner = state
+        .resident
+        .new_request_for_session(Arc::clone(&state.session), graph)
+        .map_err(|error| {
+            BackendErrorV1::new(format!("embedding request provisioning failed: {error}"))
+        })?;
+    let token_ids_i32 = token_ids
+        .iter()
+        .map(|&token_id| {
+            i32::try_from(token_id)
+                .map_err(|_| BackendErrorV1::new("embedding token ID does not fit i32"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = owner
+        .prefill_with_embeddings(&token_ids_i32)
+        .map_err(|error| BackendErrorV1::new(format!("embedding execution failed: {error}")))?;
+    let audit = owner
+        .audit_snapshot()
+        .map_err(|error| BackendErrorV1::new(format!("embedding audit failed: {error}")))?;
+    if audit.selected_backend() != "hip"
+        || audit.target() != state.target
+        || audit.fallback_used()
+        || !audit.all_dispatches_hip()
+    {
+        return Err(BackendErrorV1::new(
+            "embedding dispatch audit is not exact HIP/no-fallback",
+        ));
+    }
+    let rows = output
+        .embeddings_bf16()
+        .ok_or_else(|| BackendErrorV1::new("embedding execution omitted final hidden rows"))?;
+    let pooled = EmbeddingPoolV1::new()
+        .pool_bf16(rows, token_ids.len(), QWEN35_HIDDEN_SIZE)
+        .map_err(|error| BackendErrorV1::new(format!("embedding pooling failed: {error}")))?;
+    if cancellation.is_cancelled() {
+        owner.cancel();
+        return Err(BackendErrorV1::new("embedding cancelled"));
+    }
+    BackendEmbeddingVectorV1::new(pooled.as_slice().to_vec(), token_count)
+}
+
+fn gemma_embed_one(
+    state: &Gemma4BackendStateV1,
+    token_ids: &[u32],
+    cancellation: &GenerationCancellationV1,
+) -> Result<BackendEmbeddingVectorV1, BackendErrorV1> {
+    if cancellation.is_cancelled() {
+        return Err(BackendErrorV1::new("embedding cancelled"));
+    }
+    let token_count = u64::try_from(token_ids.len())
+        .map_err(|_| BackendErrorV1::new("embedding token count overflowed u64"))?;
+    let mut owner = state
+        .resident
+        .new_request_for_session(Arc::clone(&state.session), token_count, token_count)
+        .map_err(|error| {
+            BackendErrorV1::new(format!("embedding request provisioning failed: {error}"))
+        })?;
+    let token_ids_i32 = token_ids
+        .iter()
+        .map(|&token_id| {
+            i32::try_from(token_id)
+                .map_err(|_| BackendErrorV1::new("embedding token ID does not fit i32"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let output = owner
+        .prefill_with_embeddings(&token_ids_i32)
+        .map_err(|error| BackendErrorV1::new(format!("embedding execution failed: {error}")))?;
+    let audit = owner
+        .audit_snapshot()
+        .map_err(|error| BackendErrorV1::new(format!("embedding audit failed: {error}")))?;
+    if audit.target() != state.target || audit.fallback_used() {
+        return Err(BackendErrorV1::new(
+            "embedding dispatch audit is not exact HIP/no-fallback",
+        ));
+    }
+    let rows = output
+        .embeddings_bf16()
+        .ok_or_else(|| BackendErrorV1::new("embedding execution omitted final hidden rows"))?;
+    let pooled = EmbeddingPoolV1::new()
+        .pool_bf16(rows, token_ids.len(), GEMMA4_HIDDEN_SIZE as usize)
+        .map_err(|error| BackendErrorV1::new(format!("embedding pooling failed: {error}")))?;
+    if cancellation.is_cancelled() {
+        owner.cancel();
+        return Err(BackendErrorV1::new("embedding cancelled"));
+    }
+    BackendEmbeddingVectorV1::new(pooled.as_slice().to_vec(), token_count)
+}
 
 fn generation_config_for_request(
     request: &ChatCompletionRequestV1,
@@ -2061,6 +2355,182 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         QwenChatBackendV1::observability_snapshot(self)
     }
 
+    fn embedding_dimension(&self) -> Option<u32> {
+        Some(QWEN35_HIDDEN_SIZE as u32)
+    }
+
+    fn reviewed_chat_template_available(&self) -> bool {
+        true
+    }
+
+    fn validate_embedding_input(
+        &self,
+        input: &BackendEmbeddingInputV1,
+    ) -> Result<u64, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        let tokens = match input {
+            BackendEmbeddingInputV1::Text(text) => state
+                .tokenizer
+                .encode(text)
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?
+                .len(),
+            BackendEmbeddingInputV1::TokenIds(tokens) => {
+                validate_generation_token_ids(&state.tokenizer, tokens, "input")?.len()
+            }
+        };
+        let tokens = u64::try_from(tokens)
+            .map_err(|_| BackendErrorV1::new("embedding token count overflowed u64"))?;
+        if tokens == 0 || tokens > u64::from(self.identity.context_length) {
+            return Err(BackendErrorV1::new(format!(
+                "embedding input token count {tokens} must be in [1,{}]",
+                self.identity.context_length
+            )));
+        }
+        Ok(tokens)
+    }
+
+    fn tokenize_utility(
+        &self,
+        text: &str,
+        options: TokenizeOptionsV1,
+    ) -> Result<TokenizeResultV1, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        TokenizerUtilityServiceV1::new(&state.tokenizer, Some(&state.renderer))
+            .tokenize(text, options)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn detokenize_utility(
+        &self,
+        token_ids: &[u32],
+        mode: DecodeModeV1,
+    ) -> Result<String, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        TokenizerUtilityServiceV1::new(&state.tokenizer, Some(&state.renderer))
+            .detokenize_ids(token_ids, mode)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn apply_template_utility(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<ApplyTemplateResultV1, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        TokenizerUtilityServiceV1::new(&state.tokenizer, Some(&state.renderer))
+            .apply_template(messages, options)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn tokenize_infill_content(&self, text: &str) -> Result<Vec<u32>, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        state
+            .tokenizer
+            .encode_without_special_tokens(text)
+            .map(|tokens| tokens.as_slice().to_vec())
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn embed(
+        &self,
+        request: &BackendEmbeddingRequestV1,
+        cancellation: &GenerationCancellationV1,
+    ) -> Result<BackendEmbeddingBatchV1, BackendErrorV1> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Qwen backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Qwen backend is shut down"))?;
+        let ready = state.session.memory_snapshot();
+        require_request_memory_baseline(
+            ready,
+            state.prefix_cache.baseline_bytes()?,
+            "Qwen embedding admission",
+        )?;
+        if ready.model_resident().current_bytes() != state.model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "model-resident accounting changed before embedding admission",
+            ));
+        }
+        let mut vectors = Vec::with_capacity(request.inputs().len());
+        for input in request.inputs() {
+            if cancellation.is_cancelled() {
+                return Err(BackendErrorV1::new("embedding cancelled"));
+            }
+            let token_ids = match input {
+                BackendEmbeddingInputV1::Text(text) => state
+                    .tokenizer
+                    .encode(text)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("embedding tokenization failed: {error}"))
+                    })?
+                    .as_slice()
+                    .to_vec(),
+                BackendEmbeddingInputV1::TokenIds(token_ids) => {
+                    validate_generation_token_ids(&state.tokenizer, token_ids, "input")?
+                }
+            };
+            if u64::try_from(token_ids.len()).unwrap_or(u64::MAX)
+                > u64::from(self.identity.context_length)
+            {
+                return Err(BackendErrorV1::new(format!(
+                    "embedding input exceeds the configured context length {}",
+                    self.identity.context_length
+                )));
+            }
+            let vector = qwen_embed_one(state, &token_ids, cancellation);
+            let cleanup = state.session.memory_snapshot();
+            require_request_memory_baseline(
+                cleanup,
+                state.prefix_cache.baseline_bytes()?,
+                "Qwen embedding cleanup",
+            )
+            .and_then(|()| {
+                if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
+                    Ok(())
+                } else {
+                    Err(BackendErrorV1::new(
+                        "model-resident accounting changed after Qwen embedding cleanup",
+                    ))
+                }
+            })?;
+            vectors.push(vector?);
+        }
+        BackendEmbeddingBatchV1::new(QWEN35_HIDDEN_SIZE as u32, vectors)
+    }
+
     fn generate(
         &self,
         request: &ChatCompletionRequestV1,
@@ -2111,20 +2581,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         if let Some(seed) = resolved_sampling_seed {
             generation = generation.with_device_selector_seed(seed);
         }
-        let input = GenerationInputV1::Messages {
-            messages: request
-                .messages()
-                .iter()
-                .map(|message| message.inner().clone())
-                .collect(),
-            options: Qwen35RenderOptionsV1 {
-                add_generation_prompt: true,
-                thinking: request.reasoning().thinking(),
-            },
-        };
-        let prompt = service.prepare_input(&input).map_err(|error| {
-            BackendErrorV1::new(format!("generation input preparation failed: {error}"))
-        })?;
+        let prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()
@@ -2942,6 +3399,171 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         Gemma4ChatBackendV1::observability_snapshot(self)
     }
 
+    fn embedding_dimension(&self) -> Option<u32> {
+        Some(GEMMA4_HIDDEN_SIZE as u32)
+    }
+
+    fn validate_embedding_input(
+        &self,
+        input: &BackendEmbeddingInputV1,
+    ) -> Result<u64, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        let tokens = match input {
+            BackendEmbeddingInputV1::Text(text) => state
+                .tokenizer
+                .encode(text)
+                .map_err(|error| BackendErrorV1::new(error.to_string()))?
+                .len(),
+            BackendEmbeddingInputV1::TokenIds(tokens) => {
+                validate_generation_token_ids(&state.tokenizer, tokens, "input")?.len()
+            }
+        };
+        let tokens = u64::try_from(tokens)
+            .map_err(|_| BackendErrorV1::new("embedding token count overflowed u64"))?;
+        if tokens == 0 || tokens > u64::from(self.identity.context_length) {
+            return Err(BackendErrorV1::new(format!(
+                "embedding input token count {tokens} must be in [1,{}]",
+                self.identity.context_length
+            )));
+        }
+        Ok(tokens)
+    }
+
+    fn tokenize_utility(
+        &self,
+        text: &str,
+        options: TokenizeOptionsV1,
+    ) -> Result<TokenizeResultV1, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        TokenizerUtilityServiceV1::new(&state.tokenizer, None)
+            .tokenize(text, options)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn detokenize_utility(
+        &self,
+        token_ids: &[u32],
+        mode: DecodeModeV1,
+    ) -> Result<String, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        TokenizerUtilityServiceV1::new(&state.tokenizer, None)
+            .detokenize_ids(token_ids, mode)
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn apply_template_utility(
+        &self,
+        _messages: &[Qwen35ChatMessageV1],
+        _options: Qwen35RenderOptionsV1,
+    ) -> Result<ApplyTemplateResultV1, BackendErrorV1> {
+        Err(BackendErrorV1::new(
+            "Gemma 4 has no reviewed chat template in the model lock",
+        ))
+    }
+
+    fn tokenize_infill_content(&self, text: &str) -> Result<Vec<u32>, BackendErrorV1> {
+        let state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        state
+            .tokenizer
+            .encode_without_special_tokens(text)
+            .map(|tokens| tokens.as_slice().to_vec())
+            .map_err(|error| BackendErrorV1::new(error.to_string()))
+    }
+
+    fn embed(
+        &self,
+        request: &BackendEmbeddingRequestV1,
+        cancellation: &GenerationCancellationV1,
+    ) -> Result<BackendEmbeddingBatchV1, BackendErrorV1> {
+        let mut state_guard = self
+            .state
+            .lock()
+            .map_err(|_| BackendErrorV1::new("Gemma backend state is poisoned"))?;
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| BackendErrorV1::new("Gemma backend is shut down"))?;
+        let ready = state.session.memory_snapshot();
+        require_request_memory_baseline(
+            ready,
+            state.prefix_cache.baseline_bytes()?,
+            "Gemma embedding admission",
+        )?;
+        if ready.model_resident().current_bytes() != state.model_ready_current_bytes {
+            return Err(BackendErrorV1::new(
+                "model-resident accounting changed before Gemma embedding admission",
+            ));
+        }
+        let mut vectors = Vec::with_capacity(request.inputs().len());
+        for input in request.inputs() {
+            if cancellation.is_cancelled() {
+                return Err(BackendErrorV1::new("embedding cancelled"));
+            }
+            let token_ids = match input {
+                BackendEmbeddingInputV1::Text(text) => state
+                    .tokenizer
+                    .encode(text)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("embedding tokenization failed: {error}"))
+                    })?
+                    .as_slice()
+                    .to_vec(),
+                BackendEmbeddingInputV1::TokenIds(token_ids) => {
+                    validate_generation_token_ids(&state.tokenizer, token_ids, "input")?
+                }
+            };
+            if u64::try_from(token_ids.len()).unwrap_or(u64::MAX)
+                > u64::from(self.identity.context_length)
+            {
+                return Err(BackendErrorV1::new(format!(
+                    "embedding input exceeds the configured context length {}",
+                    self.identity.context_length
+                )));
+            }
+            let vector = gemma_embed_one(state, &token_ids, cancellation);
+            let cleanup = state.session.memory_snapshot();
+            require_request_memory_baseline(
+                cleanup,
+                state.prefix_cache.baseline_bytes()?,
+                "Gemma embedding cleanup",
+            )
+            .and_then(|()| {
+                if cleanup.model_resident().current_bytes() == state.model_ready_current_bytes {
+                    Ok(())
+                } else {
+                    Err(BackendErrorV1::new(
+                        "model-resident accounting changed after Gemma embedding cleanup",
+                    ))
+                }
+            })?;
+            vectors.push(vector?);
+        }
+        BackendEmbeddingBatchV1::new(GEMMA4_HIDDEN_SIZE as u32, vectors)
+    }
+
     fn generate(
         &self,
         request: &ChatCompletionRequestV1,
@@ -2993,12 +3615,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         if let Some(seed) = resolved_sampling_seed {
             generation = generation.with_device_selector_seed(seed);
         }
-        let rendered = render_gemma4_raw_messages(request.messages())?;
-        let prompt = service
-            .prepare_input(&GenerationInputV1::Prompt(rendered))
-            .map_err(|error| {
-                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
-            })?;
+        let prompt = gemma_generation_prompt(request, &service, &state.tokenizer)?;
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()

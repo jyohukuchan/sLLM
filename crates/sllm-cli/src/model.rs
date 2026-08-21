@@ -25,10 +25,10 @@ use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
     GenerationExecutorV1, GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopControllerV1,
-    GenerationStopPolicyV1, ProcessedVisionInputV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, Qwen35VisionProcessorV1, QwenMtpGenerationExecutorV1,
-    SpeculativeGenerationAdapterV1, ThinkingModeV1, TokenIdsV1, TokenizerFrontendV1,
-    gemma4_generation_stop_policy,
+    GenerationStopPolicyV1, InputTokenCountInputV1, ProcessedVisionInputV1, Qwen35ChatMessageV1,
+    Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, Qwen35VisionProcessorV1,
+    QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1, ThinkingModeV1, TokenIdsV1,
+    TokenPieceV1, TokenizerFrontendV1, TokenizerUtilityServiceV1, gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -44,6 +44,8 @@ use crate::benchmark::{
 const REPORT_SCHEMA: &str = "model-frontend-cli-report-v1";
 const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOKEN_IDS: usize = 1_048_576;
+const MAX_EMBEDDING_INPUTS: usize = 256;
+const MAX_PHASE42_AGGREGATE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_NEW_TOKENS: u32 = 4096;
 const MAX_PREFILL_CHUNK_TOKENS: u64 = 16_384;
 const MAX_MTP_DRAFT_WIDTH: u8 = QwenMtpGenerationExecutorV1::MAX_DRAFT_WIDTH as u8;
@@ -443,6 +445,7 @@ enum Operation {
     Verify,
     Tokenize {
         text: String,
+        pieces: bool,
     },
     Render {
         messages: Vec<Qwen35ChatMessageV1>,
@@ -451,6 +454,32 @@ enum Operation {
     Decode {
         ids: TokenIdsV1,
         mode: DecodeModeV1,
+    },
+    ApplyTemplate {
+        messages: Vec<Qwen35ChatMessageV1>,
+        options: Qwen35RenderOptionsV1,
+    },
+    InputTokens {
+        text: Option<String>,
+        messages: Vec<Qwen35ChatMessageV1>,
+        options: Qwen35RenderOptionsV1,
+    },
+    Embeddings {
+        texts: Vec<String>,
+        token_inputs: Vec<TokenIdsV1>,
+        device_index: u32,
+        target: String,
+    },
+    Rerank {
+        query: String,
+        documents: Vec<String>,
+        top_n: Option<usize>,
+        device_index: u32,
+        target: String,
+    },
+    Infill {
+        prefix: String,
+        suffix: String,
     },
     Generate(GenerateRequest),
     Benchmark(BenchmarkRequest),
@@ -470,16 +499,360 @@ struct ModelIdentity {
     lock_fingerprint: String,
 }
 
+fn utility_tokenize(
+    tokenizer: &TokenizerFrontendV1,
+    text: &str,
+    include_pieces: bool,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, None);
+    let result = if include_pieces {
+        utility.tokenize_with_pieces(text)
+    } else {
+        utility.tokenize_default(text)
+    }
+    .map_err(|error| error.to_string())?;
+    let pieces = result.pieces().map(|pieces| {
+        pieces
+            .iter()
+            .map(|piece| match piece {
+                TokenPieceV1::Utf8(value) => json!({"kind":"utf8", "text":value}),
+                TokenPieceV1::Bytes(value) => json!({"kind":"bytes", "bytes":value}),
+            })
+            .collect::<Vec<_>>()
+    });
+    Ok(json!({
+        "kind": "tokenize",
+        "version": result.version(),
+        "count": result.count(),
+        "token_ids": result.token_ids().as_slice(),
+        "pieces": pieces,
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+    }))
+}
+
+fn utility_detokenize(
+    tokenizer: &TokenizerFrontendV1,
+    ids: &TokenIdsV1,
+    mode: DecodeModeV1,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, None);
+    let text = utility
+        .detokenize(ids, mode)
+        .map_err(|error| error.to_string())?;
+    Ok(json!({
+        "kind": "detokenize",
+        "text": text,
+        "token_count": ids.len(),
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+    }))
+}
+
+fn utility_apply_template(
+    tokenizer: &TokenizerFrontendV1,
+    renderer: &Qwen35ChatTemplateV1,
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, Some(renderer));
+    let result = utility
+        .apply_template(messages, options)
+        .map_err(|error| error.to_string())?;
+    let identity = result.identity();
+    Ok(json!({
+        "kind": "apply-template",
+        "version": result.version(),
+        "text": result.rendered(),
+        "prompt": result.rendered(),
+        "count": result.count(),
+        "token_ids": result.token_ids().as_slice(),
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+        "template": {
+            "kind": identity.kind(),
+            "version": identity.version(),
+            "consistency_label": identity.consistency_label(),
+            "digest": identity.digest(),
+            "size_bytes": identity.size_bytes(),
+        }
+    }))
+}
+
+fn utility_input_tokens(
+    tokenizer: &TokenizerFrontendV1,
+    renderer: Option<&Qwen35ChatTemplateV1>,
+    text: Option<&str>,
+    messages: &[Qwen35ChatMessageV1],
+    options: Qwen35RenderOptionsV1,
+) -> Result<Value, String> {
+    let utility = TokenizerUtilityServiceV1::new(tokenizer, renderer);
+    let (count, input_kind) = if let Some(text) = text {
+        (
+            utility
+                .input_token_count(InputTokenCountInputV1::RawText(text))
+                .map_err(|error| error.to_string())?,
+            "raw",
+        )
+    } else {
+        (
+            utility
+                .input_token_count(InputTokenCountInputV1::Messages { messages, options })
+                .map_err(|error| error.to_string())?,
+            "messages",
+        )
+    };
+    Ok(json!({
+        "kind": "input-tokens",
+        "count": count,
+        "input_kind": input_kind,
+        "tokenizer_fingerprint": tokenizer.snapshot().fingerprint(),
+    }))
+}
+
+fn prepare_embedding_inputs(
+    tokenizer: &TokenizerFrontendV1,
+    texts: &[String],
+    token_inputs: &[TokenIdsV1],
+    max_context_tokens: u64,
+) -> Result<Vec<Vec<i32>>, String> {
+    if texts.is_empty() == token_inputs.is_empty() {
+        return Err("embedding input must contain either text or token IDs".to_owned());
+    }
+    let vocab_size = tokenizer.snapshot().vocab_size();
+    let mut result = Vec::with_capacity(texts.len().max(token_inputs.len()));
+    if !texts.is_empty() {
+        for text in texts {
+            if text.is_empty() {
+                return Err("embedding text must not be empty".to_owned());
+            }
+            let ids = tokenizer
+                .encode(text)
+                .map_err(|error| format!("embedding text could not be tokenized: {error}"))?;
+            if ids.is_empty() {
+                return Err("embedding text produced an empty token sequence".to_owned());
+            }
+            if u64::try_from(ids.len()).unwrap_or(u64::MAX) > max_context_tokens {
+                return Err(format!(
+                    "embedding input exceeds the model context limit {max_context_tokens}"
+                ));
+            }
+            result.push(
+                ids.as_slice()
+                    .iter()
+                    .map(|id| {
+                        i32::try_from(*id).map_err(|_| "token ID does not fit i32".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+    } else {
+        for ids in token_inputs {
+            if ids.is_empty() {
+                return Err("embedding token sequence must not be empty".to_owned());
+            }
+            if u64::try_from(ids.len()).unwrap_or(u64::MAX) > max_context_tokens {
+                return Err(format!(
+                    "embedding input exceeds the model context limit {max_context_tokens}"
+                ));
+            }
+            for id in ids.as_slice() {
+                if u64::from(*id) >= vocab_size {
+                    return Err(format!(
+                        "embedding token ID {id} is outside the tokenizer vocabulary"
+                    ));
+                }
+            }
+            result.push(
+                ids.as_slice()
+                    .iter()
+                    .map(|id| {
+                        i32::try_from(*id).map_err(|_| "token ID does not fit i32".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn embedding_response(vectors: Vec<Vec<f32>>, token_counts: &[usize]) -> Result<Value, String> {
+    if vectors.len() != token_counts.len() {
+        return Err("embedding result count differs from input count".to_owned());
+    }
+    let mut total_tokens = 0_u64;
+    let mut data = Vec::with_capacity(vectors.len());
+    for (index, (vector, tokens)) in vectors.into_iter().zip(token_counts).enumerate() {
+        total_tokens = total_tokens
+            .checked_add(
+                u64::try_from(*tokens)
+                    .map_err(|_| "embedding token count overflowed".to_owned())?,
+            )
+            .ok_or_else(|| "embedding usage overflowed".to_owned())?;
+        if vector.is_empty() || vector.iter().any(|value| !value.is_finite()) {
+            return Err("embedding output was empty or non-finite".to_owned());
+        }
+        let squared_norm = vector
+            .iter()
+            .map(|&value| f64::from(value) * f64::from(value))
+            .sum::<f64>();
+        if !squared_norm.is_finite() || (squared_norm - 1.0).abs() > 1.0e-4 {
+            return Err("embedding output was not L2-normalized".to_owned());
+        }
+        data.push(json!({"index": index, "embedding": vector, "object": "embedding"}));
+    }
+    Ok(json!({
+        "kind": "embeddings",
+        "profile": sllm_core::EMBEDDING_POOL_PROFILE_V1,
+        "object": "list",
+        "data": data,
+        "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+    }))
+}
+
+fn rerank_from_embedding_response(
+    response: &Value,
+    query: &str,
+    documents: &[String],
+    top_n: Option<usize>,
+) -> Result<Value, String> {
+    let data = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "embedding response omitted data".to_owned())?;
+    if data.len() != documents.len() + 1 {
+        return Err("rerank embedding count differs from input count".to_owned());
+    }
+    let query_vector = data[0]
+        .get("embedding")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "rerank query embedding was malformed".to_owned())?
+        .iter()
+        .map(|value| {
+            value
+                .as_f64()
+                .ok_or_else(|| "rerank embedding was non-numeric".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut scored = Vec::with_capacity(documents.len());
+    for (index, _document) in documents.iter().enumerate() {
+        let values = data[index + 1]
+            .get("embedding")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "rerank document embedding was malformed".to_owned())?;
+        if values.len() != query_vector.len() {
+            return Err("rerank embedding dimensions differed".to_owned());
+        }
+        let score = query_vector
+            .iter()
+            .zip(values)
+            .map(|(left, right)| {
+                right
+                    .as_f64()
+                    .map(|right| left * right)
+                    .ok_or_else(|| "rerank embedding was non-numeric".to_owned())
+            })
+            .try_fold(0.0_f64, |sum, value| value.map(|value| sum + value))?;
+        if !score.is_finite() {
+            return Err("rerank score was non-finite".to_owned());
+        }
+        scored.push((index, score as f32));
+    }
+    scored.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left_index.cmp(right_index))
+    });
+    if let Some(top_n) = top_n {
+        scored.truncate(top_n);
+    }
+    let usage = response.get("usage").cloned().unwrap_or_else(|| json!({}));
+    Ok(json!({
+        "kind": "rerank",
+        "profile": sllm_core::COSINE_EMBEDDING_RERANK_PROFILE_V1,
+        "results": scored.into_iter().map(|(index, score)| json!({
+            "index": index,
+            "relevance_score": score,
+            "document": documents[index],
+        })).collect::<Vec<_>>(),
+        "query": query,
+        "usage": usage,
+    }))
+}
+
 trait ModelFrontendBackend {
     fn identity(&self) -> ModelIdentity;
     fn verify(&self) -> Result<Value, String>;
     fn tokenize(&self, text: &str) -> Result<Value, String>;
+    fn tokenize_with_pieces(&self, text: &str) -> Result<Value, String> {
+        self.tokenize(text)
+    }
     fn render(
         &self,
         messages: &[Qwen35ChatMessageV1],
         options: Qwen35RenderOptionsV1,
     ) -> Result<Value, String>;
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String>;
+    fn apply_template(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        self.render(messages, options)
+    }
+    fn input_tokens(
+        &self,
+        text: Option<&str>,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        if let Some(text) = text {
+            let result = self.tokenize(text)?;
+            let count = result
+                .get("count")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| "tokenizer result omitted count".to_owned())?;
+            return Ok(json!({"kind":"input-tokens", "count":count}));
+        }
+        let result = self.apply_template(messages, options)?;
+        let rendered = result
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "template result omitted text".to_owned())?;
+        let tokenized = self.tokenize(rendered)?;
+        let count = tokenized
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| "tokenizer result omitted count".to_owned())?;
+        Ok(json!({"kind":"input-tokens", "count":count}))
+    }
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        self.decode(ids, mode)
+    }
+    fn embeddings(
+        &self,
+        _texts: &[String],
+        _token_inputs: &[TokenIdsV1],
+        _device_index: u32,
+        _target: &str,
+    ) -> Result<Value, String> {
+        Err("embedding execution is unavailable for this CLI model/backend".to_owned())
+    }
+    fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_n: Option<usize>,
+        device_index: u32,
+        target: &str,
+    ) -> Result<Value, String> {
+        let mut texts = Vec::with_capacity(documents.len() + 1);
+        texts.push(query.to_owned());
+        texts.extend(documents.iter().cloned());
+        let response = self.embeddings(&texts, &[], device_index, target)?;
+        rerank_from_embedding_response(&response, query, documents, top_n)
+    }
+    fn infill(&self, _prefix: &str, _suffix: &str) -> Result<Value, String> {
+        Err("infill is unavailable: no verified production FIM capability".to_owned())
+    }
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String>;
     fn benchmark(
         &self,
@@ -580,15 +953,12 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let ids = tokenizer
-            .encode(text)
-            .map_err(|_| "text could not be tokenized".to_owned())?;
-        Ok(json!({
-            "kind": "tokenize",
-            "prompt_mode": self.lock.model.tokenizer_contract.prompt_mode,
-            "count": ids.len(),
-            "token_ids": ids.as_slice(),
-        }))
+        utility_tokenize(&tokenizer, text, false)
+    }
+
+    fn tokenize_with_pieces(&self, text: &str) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_tokenize(&tokenizer, text, true)
     }
 
     fn render(&self, _: &[Qwen35ChatMessageV1], _: Qwen35RenderOptionsV1) -> Result<Value, String> {
@@ -597,10 +967,100 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let text = tokenizer
-            .decode(ids, mode)
-            .map_err(|_| "token IDs could not be decoded".to_owned())?;
-        Ok(json!({"kind": "decode", "text": text}))
+        let mut result = utility_detokenize(&tokenizer, ids, mode)?;
+        result["kind"] = Value::from("decode");
+        Ok(result)
+    }
+
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_detokenize(&tokenizer, ids, mode)
+    }
+
+    fn embeddings(
+        &self,
+        texts: &[String],
+        token_inputs: &[TokenIdsV1],
+        device_index: u32,
+        target: &str,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let inputs = prepare_embedding_inputs(
+            &tokenizer,
+            texts,
+            token_inputs,
+            self.lock.model.architecture.text.max_position_embeddings,
+        )?;
+        let token_counts = inputs.iter().map(Vec::len).collect::<Vec<_>>();
+        let max_tokens = token_counts.iter().copied().max().unwrap_or(0);
+        let token_count =
+            u64::try_from(max_tokens).map_err(|_| "embedding token count overflowed".to_owned())?;
+        let plan = self
+            .source
+            .build_weight_load_plan(&self.lock)
+            .map_err(|error| format!("embedding load plan is unavailable: {error}"))?;
+        let _graph = sllm_core::build_gemma4_graph(&self.lock, &plan, token_count, 0, token_count)
+            .map_err(|error| format!("embedding graph is unavailable: {error}"))?;
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(device_index, target.to_owned())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let execution = (|| -> Result<Vec<Vec<f32>>, String> {
+            let resident = Gemma4ResidentModel::new_gguf_quantized(
+                Arc::clone(&session),
+                self.lock.clone(),
+                plan.clone(),
+                Arc::clone(&self.source),
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("embedding resident provisioning failed: {error}"))?;
+            let mut vectors = Vec::with_capacity(inputs.len());
+            for input in &inputs {
+                let mut owner = resident
+                    .new_request(u64::try_from(input.len()).unwrap_or(0), token_count)
+                    .map_err(|error| format!("embedding request provisioning failed: {error}"))?;
+                let output = owner
+                    .prefill_with_embeddings(input)
+                    .map_err(|error| format!("embedding execution failed: {error}"))?;
+                let audit = owner
+                    .audit_snapshot()
+                    .map_err(|_| "embedding dispatch audit was empty or invalid".to_owned())?;
+                if audit.target() != target || audit.fallback_used() {
+                    return Err(
+                        "embedding dispatch audit differs from the exact HIP target".to_owned()
+                    );
+                }
+                let rows = output.final_hidden_states_bf16().ok_or_else(|| {
+                    "embedding execution did not publish final-normalized hidden rows".to_owned()
+                })?;
+                let hidden = self.lock.model.architecture.text.hidden_size as usize;
+                let expected = input
+                    .len()
+                    .checked_mul(hidden)
+                    .ok_or_else(|| "embedding hidden shape overflowed".to_owned())?;
+                if rows.len() != expected {
+                    return Err(
+                        "embedding hidden readback shape differed from the model contract"
+                            .to_owned(),
+                    );
+                }
+                let vector = sllm_core::EmbeddingPoolV1::new()
+                    .pool_bf16(rows, input.len(), hidden)
+                    .map_err(|error| format!("embedding pooling failed: {error}"))?;
+                vectors.push(vector.as_slice().to_vec());
+            }
+            Ok(vectors)
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "HIP session cleanup failed".to_owned())?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        embedding_response(execution?, &token_counts)
     }
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
@@ -843,8 +1303,12 @@ impl ModelFrontendBackend for MoeProductionBackend {
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let ids = tokenizer.encode(text).map_err(|error| error.to_string())?;
-        Ok(json!({"kind":"tokenize","count":ids.len(),"token_ids":ids.as_slice()}))
+        utility_tokenize(&tokenizer, text, false)
+    }
+
+    fn tokenize_with_pieces(&self, text: &str) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_tokenize(&tokenizer, text, true)
     }
 
     fn render(
@@ -859,12 +1323,123 @@ impl ModelFrontendBackend for MoeProductionBackend {
         Ok(json!({"kind":"render","text":text}))
     }
 
+    fn apply_template(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        utility_apply_template(&tokenizer, &renderer, messages, options)
+    }
+
+    fn input_tokens(
+        &self,
+        text: Option<&str>,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer().ok();
+        utility_input_tokens(&tokenizer, renderer.as_ref(), text, messages, options)
+    }
+
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let text = tokenizer
-            .decode(ids, mode)
-            .map_err(|error| error.to_string())?;
-        Ok(json!({"kind":"decode","text":text}))
+        let mut result = utility_detokenize(&tokenizer, ids, mode)?;
+        result["kind"] = Value::from("decode");
+        Ok(result)
+    }
+
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_detokenize(&tokenizer, ids, mode)
+    }
+
+    fn embeddings(
+        &self,
+        texts: &[String],
+        token_inputs: &[TokenIdsV1],
+        device_index: u32,
+        target: &str,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let inputs = prepare_embedding_inputs(
+            &tokenizer,
+            texts,
+            token_inputs,
+            QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        )?;
+        let token_counts = inputs.iter().map(Vec::len).collect::<Vec<_>>();
+        let token_count = u64::try_from(token_counts.iter().copied().max().unwrap_or(0))
+            .map_err(|_| "embedding token count overflowed".to_owned())?;
+        let plan = self.plan()?;
+        let graph = self
+            .graph(&plan, token_count, token_count)
+            .map_err(|error| format!("embedding graph is unavailable: {error}"))?;
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(device_index, target.to_owned())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let execution = (|| -> Result<Vec<Vec<f32>>, String> {
+            let resident = QwenResidentModel::new_gguf_moe(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                Arc::clone(&self.source),
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("embedding resident provisioning failed: {error}"))?;
+            let mut vectors = Vec::with_capacity(inputs.len());
+            for input in &inputs {
+                let mut owner = resident
+                    .new_request(graph.clone())
+                    .map_err(|error| format!("embedding request provisioning failed: {error}"))?;
+                let output = owner
+                    .prefill_with_embeddings(input)
+                    .map_err(|error| format!("embedding execution failed: {error}"))?;
+                let audit = owner
+                    .audit_snapshot()
+                    .map_err(|error| format!("embedding dispatch audit failed: {error}"))?;
+                if audit.target() != target || audit.fallback_used() || !audit.all_dispatches_hip()
+                {
+                    return Err("embedding dispatch audit is not exact HIP/no-fallback".to_owned());
+                }
+                let rows = output.final_hidden_states_bf16().ok_or_else(|| {
+                    "embedding execution did not publish final-normalized hidden rows".to_owned()
+                })?;
+                let hidden = sllm_core::QWEN35_HIDDEN_SIZE;
+                if rows.len()
+                    != input
+                        .len()
+                        .checked_mul(hidden)
+                        .ok_or_else(|| "embedding hidden shape overflowed".to_owned())?
+                {
+                    return Err(
+                        "embedding hidden readback shape differed from the model contract"
+                            .to_owned(),
+                    );
+                }
+                vectors.push(
+                    sllm_core::EmbeddingPoolV1::new()
+                        .pool_bf16(rows, input.len(), hidden)
+                        .map_err(|error| format!("embedding pooling failed: {error}"))?
+                        .as_slice()
+                        .to_vec(),
+                );
+            }
+            Ok(vectors)
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "HIP session cleanup failed".to_owned())?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        embedding_response(execution?, &token_counts)
     }
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
@@ -1171,10 +1746,12 @@ impl ModelFrontendBackend for ProductionBackend {
 
     fn tokenize(&self, text: &str) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let ids = tokenizer
-            .encode(text)
-            .map_err(|_| "text could not be tokenized".to_owned())?;
-        Ok(json!({"kind": "tokenize", "count": ids.len(), "token_ids": ids.as_slice()}))
+        utility_tokenize(&tokenizer, text, false)
+    }
+
+    fn tokenize_with_pieces(&self, text: &str) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_tokenize(&tokenizer, text, true)
     }
 
     fn render(
@@ -1189,12 +1766,132 @@ impl ModelFrontendBackend for ProductionBackend {
         Ok(json!({"kind": "render", "text": text}))
     }
 
+    fn apply_template(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        utility_apply_template(&tokenizer, &renderer, messages, options)
+    }
+
+    fn input_tokens(
+        &self,
+        text: Option<&str>,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer().ok();
+        utility_input_tokens(&tokenizer, renderer.as_ref(), text, messages, options)
+    }
+
     fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
         let tokenizer = self.tokenizer()?;
-        let text = tokenizer
-            .decode(ids, mode)
-            .map_err(|_| "token IDs could not be decoded".to_owned())?;
-        Ok(json!({"kind": "decode", "text": text}))
+        let mut result = utility_detokenize(&tokenizer, ids, mode)?;
+        result["kind"] = Value::from("decode");
+        Ok(result)
+    }
+
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        utility_detokenize(&tokenizer, ids, mode)
+    }
+
+    fn embeddings(
+        &self,
+        texts: &[String],
+        token_inputs: &[TokenIdsV1],
+        device_index: u32,
+        target: &str,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let inputs = prepare_embedding_inputs(
+            &tokenizer,
+            texts,
+            token_inputs,
+            QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        )?;
+        let token_counts = inputs.iter().map(Vec::len).collect::<Vec<_>>();
+        let max_tokens = token_counts.iter().copied().max().unwrap_or(0);
+        let token_count =
+            u64::try_from(max_tokens).map_err(|_| "embedding token count overflowed".to_owned())?;
+        let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
+        let graph = self
+            .build_plain_graph(
+                &plan,
+                token_count,
+                token_count,
+                target,
+                KvCacheEncoding::Fp16,
+            )
+            .map_err(|error| format!("embedding graph is unavailable: {error}"))?;
+        let source = match &self.source {
+            QwenDenseSource::Gguf(source) => Arc::clone(source),
+            QwenDenseSource::Cache(_) => {
+                return Err("embedding requires a verified GGUF source".to_owned());
+            }
+        };
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(device_index, target.to_owned())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let execution = (|| -> Result<Vec<Vec<f32>>, String> {
+            let resident = QwenResidentModel::new_gguf(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                source,
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("embedding resident provisioning failed: {error}"))?;
+            let mut vectors = Vec::with_capacity(inputs.len());
+            for input in &inputs {
+                let mut owner = resident
+                    .new_request(graph.clone())
+                    .map_err(|error| format!("embedding request provisioning failed: {error}"))?;
+                let output = owner
+                    .prefill_with_embeddings(input)
+                    .map_err(|error| format!("embedding execution failed: {error}"))?;
+                let audit = owner
+                    .audit_snapshot()
+                    .map_err(|error| format!("embedding dispatch audit failed: {error}"))?;
+                if audit.target() != target || audit.fallback_used() || !audit.all_dispatches_hip()
+                {
+                    return Err("embedding dispatch audit is not exact HIP/no-fallback".to_owned());
+                }
+                let rows = output.final_hidden_states_bf16().ok_or_else(|| {
+                    "embedding execution did not publish final-normalized hidden rows".to_owned()
+                })?;
+                let hidden = sllm_core::QWEN35_HIDDEN_SIZE;
+                let expected = input
+                    .len()
+                    .checked_mul(hidden)
+                    .ok_or_else(|| "embedding hidden shape overflowed".to_owned())?;
+                if rows.len() != expected {
+                    return Err(
+                        "embedding hidden readback shape differed from the model contract"
+                            .to_owned(),
+                    );
+                }
+                let vector = sllm_core::EmbeddingPoolV1::new()
+                    .pool_bf16(rows, input.len(), hidden)
+                    .map_err(|error| format!("embedding pooling failed: {error}"))?;
+                vectors.push(vector.as_slice().to_vec());
+            }
+            Ok(vectors)
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|_| "HIP session cleanup failed".to_owned())?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        embedding_response(execution?, &token_counts)
     }
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
@@ -2566,9 +3263,43 @@ fn execute_with_timing(
 ) -> Result<String, String> {
     let result = match operation {
         Operation::Verify => backend.verify()?,
-        Operation::Tokenize { text } => backend.tokenize(&text)?,
+        Operation::Tokenize { text, pieces } => {
+            if pieces {
+                backend.tokenize_with_pieces(&text)?
+            } else {
+                backend.tokenize(&text)?
+            }
+        }
         Operation::Render { messages, options } => backend.render(&messages, options)?,
-        Operation::Decode { ids, mode } => backend.decode(&ids, mode)?,
+        Operation::Decode { ids, mode } => {
+            if command == "detokenize" {
+                backend.detokenize(&ids, mode)?
+            } else {
+                backend.decode(&ids, mode)?
+            }
+        }
+        Operation::ApplyTemplate { messages, options } => {
+            backend.apply_template(&messages, options)?
+        }
+        Operation::InputTokens {
+            text,
+            messages,
+            options,
+        } => backend.input_tokens(text.as_deref(), &messages, options)?,
+        Operation::Embeddings {
+            texts,
+            token_inputs,
+            device_index,
+            target,
+        } => backend.embeddings(&texts, &token_inputs, device_index, &target)?,
+        Operation::Rerank {
+            query,
+            documents,
+            top_n,
+            device_index,
+            target,
+        } => backend.rerank(&query, &documents, top_n, device_index, &target)?,
+        Operation::Infill { prefix, suffix } => backend.infill(&prefix, &suffix)?,
         Operation::Generate(request) => backend.generate(&request)?,
         Operation::Benchmark(request) => backend.benchmark(
             &request,
@@ -2588,7 +3319,8 @@ fn serialize_report(
     identity: &ModelIdentity,
     result: Value,
 ) -> Result<String, String> {
-    let generation = command == "generate";
+    let generation = command == "generate" || command == "completions" || command == "infill";
+    let model_execution = generation || command == "embeddings" || command == "rerank";
     serde_json::to_string(&json!({
         "schema_version": REPORT_SCHEMA,
         "command": command,
@@ -2600,8 +3332,8 @@ fn serialize_report(
         },
         "scope": {
             "offline": true,
-            "gpu_execution": generation,
-            "model_execution": generation,
+            "gpu_execution": model_execution,
+            "model_execution": model_execution,
             "generation": generation,
         },
         "result": result,
@@ -2610,14 +3342,25 @@ fn serialize_report(
 }
 
 fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Request, String> {
+    // The CLI keeps one generation state machine for the legacy `generate`
+    // command and the Phase 42 Completions alias.  The report still retains
+    // the user-facing command name in the caller.
+    let command = if command == "completions" {
+        "generate"
+    } else {
+        command
+    };
     let mut gguf = None;
     let mut derived_lock = None;
     let mut text = None;
+    let mut embedding_texts = Vec::new();
     let mut token_ids = None;
+    let mut embedding_token_inputs = Vec::new();
     let mut messages = Vec::new();
     let mut thinking = None;
     let mut no_generation_prompt = false;
     let mut skip_special_tokens = false;
+    let mut include_pieces = false;
     let mut prompt = None;
     let mut max_new_tokens = None;
     let mut prefill_chunk_tokens = None;
@@ -2642,7 +3385,14 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let fp8_artifact: Option<PathBuf> = None;
     let fp8_provider: Option<CliFp8Provider> = None;
     let mut image_paths = Vec::new();
+    let mut query = None;
+    let mut documents = Vec::new();
+    let mut top_n = None;
+    let mut infill_prefix = None;
+    let mut infill_suffix = None;
     let mut message_bytes = 0_usize;
+    let mut phase42_aggregate_bytes = 0_usize;
+    let mut rerank_document_bytes = 0_usize;
     let mut arguments = arguments.peekable();
 
     while let Some(argument) = arguments.next() {
@@ -2653,16 +3403,53 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 take_value(&mut arguments, "--derived-lock")?,
                 "--derived-lock",
             )?,
-            "--text" if command == "tokenize" => {
+            "--text"
+                if command == "tokenize"
+                    || command == "input-tokens"
+                    || command == "embeddings" =>
+            {
                 let value = take_value(&mut arguments, "--text")?;
                 if value.len() > MAX_TEXT_BYTES {
                     return Err("--text exceeds the 16 MiB input limit".to_owned());
                 }
-                set_once(&mut text, value, "--text")?;
+                if command == "embeddings" {
+                    if value.is_empty() {
+                        return Err("embedding --text must not be empty".to_owned());
+                    }
+                    if embedding_texts.len() == MAX_EMBEDDING_INPUTS {
+                        return Err(format!(
+                            "embeddings accepts at most {MAX_EMBEDDING_INPUTS} --text values"
+                        ));
+                    }
+                    phase42_aggregate_bytes = phase42_aggregate_bytes
+                        .checked_add(value.len())
+                        .ok_or_else(|| "embedding input size overflow".to_owned())?;
+                    if phase42_aggregate_bytes > MAX_PHASE42_AGGREGATE_BYTES {
+                        return Err("embedding inputs exceed the 96 MiB aggregate limit".to_owned());
+                    }
+                    embedding_texts.push(value);
+                } else {
+                    set_once(&mut text, value, "--text")?;
+                }
             }
-            "--tokens" if command == "decode" => {
+            "--tokens" if command == "decode" || command == "detokenize" => {
                 let value = take_value(&mut arguments, "--tokens")?;
                 set_once(&mut token_ids, parse_token_ids(&value)?, "--tokens")?;
+            }
+            "--tokens" if command == "embeddings" => {
+                let value = take_value(&mut arguments, "--tokens")?;
+                if embedding_token_inputs.len() == MAX_EMBEDDING_INPUTS {
+                    return Err(format!(
+                        "embeddings accepts at most {MAX_EMBEDDING_INPUTS} --tokens values"
+                    ));
+                }
+                phase42_aggregate_bytes = phase42_aggregate_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| "embedding input size overflow".to_owned())?;
+                if phase42_aggregate_bytes > MAX_PHASE42_AGGREGATE_BYTES {
+                    return Err("embedding inputs exceed the 96 MiB aggregate limit".to_owned());
+                }
+                embedding_token_inputs.push(parse_token_ids(&value)?);
             }
             "--input-token-ids" if command == "benchmark" => {
                 let value = take_value(&mut arguments, "--input-token-ids")?;
@@ -2672,11 +3459,17 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "--input-token-ids",
                 )?;
             }
-            "--skip-special-tokens" if command == "decode" => {
+            "--skip-special-tokens" if command == "decode" || command == "detokenize" => {
                 if skip_special_tokens {
                     return Err("duplicate --skip-special-tokens".to_owned());
                 }
                 skip_special_tokens = true;
+            }
+            "--pieces" if command == "tokenize" => {
+                if include_pieces {
+                    return Err("duplicate --pieces".to_owned());
+                }
+                include_pieces = true;
             }
             "--prompt" if command == "generate" => {
                 let value = take_value(&mut arguments, "--prompt")?;
@@ -2738,7 +3531,12 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 }
                 set_once(&mut mtp_draft_width, parsed, "--mtp-draft-width")?;
             }
-            "--device-index" if command == "generate" || command == "benchmark" => {
+            "--device-index"
+                if command == "generate"
+                    || command == "benchmark"
+                    || command == "embeddings"
+                    || command == "rerank" =>
+            {
                 let value = take_value(&mut arguments, "--device-index")?;
                 if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
                     return Err("--device-index must be an unsigned decimal U32".to_owned());
@@ -2748,7 +3546,12 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     .map_err(|_| "--device-index must be an unsigned decimal U32".to_owned())?;
                 set_once(&mut device_index, parsed, "--device-index")?;
             }
-            "--target" if command == "generate" || command == "benchmark" => {
+            "--target"
+                if command == "generate"
+                    || command == "benchmark"
+                    || command == "embeddings"
+                    || command == "rerank" =>
+            {
                 let value = take_value(&mut arguments, "--target")?;
                 if value != "gfx1030" && value != "gfx1201" && value != "gfx942" {
                     return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
@@ -2868,19 +3671,32 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 set_once(&mut benchmark_measured, parsed, "--measured")?;
             }
             "--message"
-                if command == "render" || command == "generate" || command == "benchmark" =>
+                if command == "render"
+                    || command == "apply-template"
+                    || command == "input-tokens"
+                    || command == "generate"
+                    || command == "benchmark" =>
             {
                 let value = take_value(&mut arguments, "--message")?;
                 message_bytes = message_bytes
                     .checked_add(value.len())
                     .ok_or_else(|| "--message input size overflow".to_owned())?;
-                if message_bytes > MAX_TEXT_BYTES || messages.len() == 4096 {
+                let max_messages = if command == "apply-template" || command == "input-tokens" {
+                    1_024
+                } else {
+                    4_096
+                };
+                if message_bytes > MAX_TEXT_BYTES || messages.len() == max_messages {
                     return Err("render message input exceeds the bounded CLI limit".to_owned());
                 }
                 messages.push(parse_message(&value)?);
             }
             "--thinking"
-                if command == "render" || command == "generate" || command == "benchmark" =>
+                if command == "render"
+                    || command == "apply-template"
+                    || command == "input-tokens"
+                    || command == "generate"
+                    || command == "benchmark" =>
             {
                 let value = match take_value(&mut arguments, "--thinking")?.as_str() {
                     "default" => ThinkingModeV1::TemplateDefault,
@@ -2890,11 +3706,59 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 };
                 set_once(&mut thinking, value, "--thinking")?;
             }
-            "--no-generation-prompt" if command == "render" => {
+            "--no-generation-prompt" if command == "render" || command == "apply-template" => {
                 if no_generation_prompt {
                     return Err("duplicate --no-generation-prompt".to_owned());
                 }
                 no_generation_prompt = true;
+            }
+            "--query" if command == "rerank" => {
+                let value = take_value(&mut arguments, "--query")?;
+                if value.is_empty() || value.len() > MAX_TEXT_BYTES {
+                    return Err(
+                        "--query must be non-empty and within the 16 MiB input limit".to_owned(),
+                    );
+                }
+                set_once(&mut query, value, "--query")?;
+            }
+            "--document" if command == "rerank" => {
+                let value = take_value(&mut arguments, "--document")?;
+                if value.is_empty() || value.len() > MAX_TEXT_BYTES {
+                    return Err(
+                        "--document must be non-empty and within the 16 MiB input limit".to_owned(),
+                    );
+                }
+                if documents.len() == 256 {
+                    return Err("rerank accepts at most 256 --document values".to_owned());
+                }
+                rerank_document_bytes = rerank_document_bytes
+                    .checked_add(value.len())
+                    .ok_or_else(|| "rerank input size overflow".to_owned())?;
+                if rerank_document_bytes > MAX_TEXT_BYTES {
+                    return Err("rerank documents exceed the 16 MiB aggregate limit".to_owned());
+                }
+                documents.push(value);
+            }
+            "--top-n" if command == "rerank" => {
+                let value = take_value(&mut arguments, "--top-n")?;
+                let parsed = value
+                    .parse::<usize>()
+                    .map_err(|_| "--top-n must be an unsigned decimal".to_owned())?;
+                set_once(&mut top_n, parsed, "--top-n")?;
+            }
+            "--prefix" if command == "infill" => {
+                let value = take_value(&mut arguments, "--prefix")?;
+                if value.len() > MAX_TEXT_BYTES {
+                    return Err("--prefix exceeds the 16 MiB input limit".to_owned());
+                }
+                set_once(&mut infill_prefix, value, "--prefix")?;
+            }
+            "--suffix" if command == "infill" => {
+                let value = take_value(&mut arguments, "--suffix")?;
+                if value.len() > MAX_TEXT_BYTES {
+                    return Err("--suffix exceeds the 16 MiB input limit".to_owned());
+                }
+                set_once(&mut infill_suffix, value, "--suffix")?;
             }
             value => return Err(format!("unexpected argument `{value}` for `{command}`")),
         }
@@ -2911,6 +3775,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
         "verify-model" => Operation::Verify,
         "tokenize" => Operation::Tokenize {
             text: text.ok_or_else(|| "missing required --text TEXT".to_owned())?,
+            pieces: include_pieces,
         },
         "render" => {
             if messages.is_empty() {
@@ -2924,13 +3789,80 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 },
             }
         }
-        "decode" => Operation::Decode {
+        "apply-template" => {
+            if messages.is_empty() {
+                return Err(
+                    "apply-template requires at least one --message ROLE:CONTENT".to_owned(),
+                );
+            }
+            Operation::ApplyTemplate {
+                messages,
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: !no_generation_prompt,
+                    thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
+                },
+            }
+        }
+        "input-tokens" => {
+            if (text.is_some() && !messages.is_empty()) || (text.is_none() && messages.is_empty()) {
+                return Err(
+                    "input-tokens requires exactly one --text or at least one --message".to_owned(),
+                );
+            }
+            Operation::InputTokens {
+                text,
+                messages,
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: !no_generation_prompt,
+                    thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
+                },
+            }
+        }
+        "decode" | "detokenize" => Operation::Decode {
             ids: token_ids.ok_or_else(|| "missing required --tokens IDS".to_owned())?,
             mode: if skip_special_tokens {
                 DecodeModeV1::SkipSpecialTokens
             } else {
                 DecodeModeV1::PreserveSpecialTokens
             },
+        },
+        "embeddings" => {
+            if embedding_texts.is_empty() && embedding_token_inputs.is_empty() {
+                return Err("embeddings requires at least one --text or --tokens".to_owned());
+            }
+            if !embedding_texts.is_empty() && !embedding_token_inputs.is_empty() {
+                return Err("embeddings does not mix --text and --tokens inputs".to_owned());
+            }
+            Operation::Embeddings {
+                texts: embedding_texts,
+                token_inputs: embedding_token_inputs,
+                device_index: device_index
+                    .ok_or_else(|| "embeddings requires --device-index".to_owned())?,
+                target: target.ok_or_else(|| "embeddings requires --target".to_owned())?,
+            }
+        }
+        "rerank" => {
+            let query = query.ok_or_else(|| "rerank requires --query TEXT".to_owned())?;
+            if documents.is_empty() {
+                return Err("rerank requires at least one --document TEXT".to_owned());
+            }
+            if let Some(top_n) = top_n {
+                if top_n == 0 || top_n > documents.len() {
+                    return Err("--top-n must be in 1..=document count".to_owned());
+                }
+            }
+            Operation::Rerank {
+                query,
+                documents,
+                top_n,
+                device_index: device_index
+                    .ok_or_else(|| "rerank requires --device-index".to_owned())?,
+                target: target.ok_or_else(|| "rerank requires --target".to_owned())?,
+            }
+        }
+        "infill" => Operation::Infill {
+            prefix: infill_prefix.ok_or_else(|| "infill requires --prefix TEXT".to_owned())?,
+            suffix: infill_suffix.ok_or_else(|| "infill requires --suffix TEXT".to_owned())?,
         },
         "generate" => {
             if greedy && temperature.is_some() {
@@ -4585,6 +5517,22 @@ mod tests {
             assert_eq!(document["state"], "PASS");
             assert_eq!(document["result"]["kind"], command);
             assert_eq!(document["scope"]["gpu_execution"], command == "generate");
+        }
+    }
+
+    #[test]
+    fn embedding_and_rerank_reports_mark_model_execution_scope() {
+        let identity = ModelIdentity {
+            repo_id: "model".to_owned(),
+            resolved_revision: "revision".to_owned(),
+            lock_fingerprint: "fingerprint".to_owned(),
+        };
+        for command in ["embeddings", "rerank"] {
+            let output = serialize_report(command, &identity, json!({"kind": command})).unwrap();
+            let document: Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(document["scope"]["gpu_execution"], true);
+            assert_eq!(document["scope"]["model_execution"], true);
+            assert_eq!(document["scope"]["generation"], false);
         }
     }
 

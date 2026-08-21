@@ -13,6 +13,8 @@ use sllm_frontend::{
     Qwen35ChatMessageV1, Qwen35VisionProcessorV1, ThinkingModeV1,
 };
 
+use crate::phase42_api::{CompletionRequestV1, InfillRequestV1};
+
 pub const MAX_REQUEST_BODY_BYTES: usize = 96 * 1024 * 1024;
 pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 256;
 pub const MAX_COMPLETION_TOKENS: u32 = 4_096;
@@ -574,6 +576,7 @@ impl LogprobOptionsV1 {
 pub struct ChatCompletionRequestV1 {
     model: String,
     messages: Vec<ChatMessageV1>,
+    input: GenerationRequestInputV1,
     generation: GenerationConfigV1,
     seed: Option<i64>,
     stream: bool,
@@ -586,6 +589,22 @@ pub struct ChatCompletionRequestV1 {
     sampler: Option<SamplerExtensionConfigV1>,
 }
 
+/// Backend-neutral input carried by the shared generation scheduler.
+///
+/// Chat remains the public default. Phase 42 raw completion and FIM requests
+/// use explicit variants so neither wire contract is disguised as a chat
+/// message and production backends can fail closed on unsupported FIM locks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum GenerationRequestInputV1 {
+    Chat,
+    RawText(String),
+    TokenIds(Vec<u32>),
+    Infill {
+        token_ids: Vec<u32>,
+        template_digest: String,
+    },
+}
+
 impl ChatCompletionRequestV1 {
     pub fn model(&self) -> &str {
         &self.model
@@ -593,6 +612,22 @@ impl ChatCompletionRequestV1 {
 
     pub fn messages(&self) -> &[ChatMessageV1] {
         &self.messages
+    }
+
+    pub(crate) const fn input(&self) -> &GenerationRequestInputV1 {
+        &self.input
+    }
+
+    /// Returns the capability-rendered FIM token sequence and bound template
+    /// digest for backends that advertise an infill capability.
+    pub fn prepared_infill(&self) -> Option<(&[u32], &str)> {
+        match &self.input {
+            GenerationRequestInputV1::Infill {
+                token_ids,
+                template_digest,
+            } => Some((token_ids, template_digest)),
+            _ => None,
+        }
     }
 
     pub const fn generation(&self) -> &GenerationConfigV1 {
@@ -664,6 +699,89 @@ impl ChatCompletionRequestV1 {
             request.seed = derive_choice_seed_v1(self.seed, index);
         }
         Ok(request)
+    }
+
+    pub(crate) fn from_completion(
+        request: &CompletionRequestV1,
+        input: GenerationRequestInputV1,
+    ) -> Result<Self, ApiErrorV1> {
+        if matches!(
+            input,
+            GenerationRequestInputV1::Chat | GenerationRequestInputV1::Infill { .. }
+        ) {
+            return Err(ApiErrorV1::invalid_value(
+                "prompt",
+                "completion input must be raw text or token IDs",
+            ));
+        }
+        let sampling = SamplingParametersV1::new(
+            request.temperature(),
+            request.top_p(),
+            request.presence_penalty(),
+            request.frequency_penalty(),
+        )
+        .map_err(|error| ApiErrorV1::invalid_value("sampling", error.to_string()))?;
+        let generation =
+            GenerationConfigV1::new(request.max_tokens(), sampling, request.stop().to_vec())
+                .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
+        let logit_bias = (!request.logit_bias().is_empty()).then(|| LogitBiasV1 {
+            entries: request.logit_bias().clone(),
+        });
+        let logprobs = request.logprobs().map(|top_logprobs| LogprobOptionsV1 {
+            enabled: true,
+            top_logprobs: Some(top_logprobs),
+        });
+        Ok(Self {
+            model: request.model().to_owned(),
+            messages: Vec::new(),
+            input,
+            generation,
+            seed: request.seed(),
+            stream: request.stream(),
+            reasoning: ReasoningOptionsV1::disabled(),
+            resumable: false,
+            choice_count: request.n(),
+            logit_bias,
+            logprobs,
+            response_format: None,
+            sampler: None,
+        })
+    }
+
+    pub(crate) fn from_infill(
+        request: &InfillRequestV1,
+        token_ids: Vec<u32>,
+        template_digest: String,
+    ) -> Result<Self, ApiErrorV1> {
+        if token_ids.is_empty() || template_digest.is_empty() {
+            return Err(ApiErrorV1::invalid_value(
+                "prefix",
+                "infill requires a rendered FIM token sequence and template identity",
+            ));
+        }
+        let sampling = SamplingParametersV1::new(request.temperature(), request.top_p(), 0.0, 0.0)
+            .map_err(|error| ApiErrorV1::invalid_value("sampling", error.to_string()))?;
+        let generation =
+            GenerationConfigV1::new(request.max_tokens(), sampling, request.stop().to_vec())
+                .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
+        Ok(Self {
+            model: request.model().to_owned(),
+            messages: Vec::new(),
+            input: GenerationRequestInputV1::Infill {
+                token_ids,
+                template_digest,
+            },
+            generation,
+            seed: request.seed(),
+            stream: request.stream(),
+            reasoning: ReasoningOptionsV1::disabled(),
+            resumable: false,
+            choice_count: request.n(),
+            logit_bias: None,
+            logprobs: None,
+            response_format: None,
+            sampler: None,
+        })
     }
 }
 
@@ -1590,6 +1708,7 @@ pub(crate) fn parse_chat_completion_request_for_profile(
     Ok(ChatCompletionRequestV1 {
         model: wire.model,
         messages,
+        input: GenerationRequestInputV1::Chat,
         generation,
         seed: wire.seed,
         stream,

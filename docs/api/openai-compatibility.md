@@ -412,3 +412,54 @@ against a separately pinned official schema.
 
 Other OpenAI endpoints are unsupported unless a later compatibility document
 explicitly adds them.
+
+## Phase 42 inference profiles
+
+Phase 42 adds separate, versioned wire contracts for inference modes. The
+machine-readable source is [`phase42_profiles_v1.json`](../../tests/fixtures/phase42_profiles_v1.json)
+and its closed Draft 2020-12 schema is
+[`phase42-profile-v1.schema.json`](../../ci/schema/phase42-profile-v1.schema.json).
+The dependency-free identity and boundary validator is
+[`validate_phase42_profiles.py`](../../ci/tools/validate_phase42_profiles.py).
+These artifacts describe the completed host contract and exact V620/R9700 GPU
+acceptance. The feature-pinned gfx942 build passes, while MI300X runtime
+execution remains deferred and is not implied by compile-only evidence.
+
+The official OpenAI OpenAPI `2.3.0` operation subset remains pinned to commit
+[`117ce5680e4269f6656a4fd70d28f9755630d938`](https://github.com/openai/openai-openapi/tree/117ce5680e4269f6656a4fd70d28f9755630d938).
+The implementation reference is the detached llama.cpp `b10453` commit
+[`3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`](https://github.com/ggml-org/llama.cpp/tree/3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70).
+llama.cpp is a technical reference, not the sLLM API specification. Moving
+either pin requires a new profile/schema version and an explicit field and
+error-diff review.
+
+| profile | endpoint | compatibility claim | fixed semantics |
+| --- | --- | --- | --- |
+| `openai-completions-v1` | `POST /v1/completions` | OpenAI subset only | Four prompt shapes (string, string array, token array, token-array array); `max_tokens` 1–4,096; `n` 1–8; stop strings 1–4, unique and nonempty; `logprobs` 0–5; strict SSE/usage/error framing shared with the transport adapter. |
+| `openai-embeddings-v1` | `POST /v1/embeddings` | OpenAI subset only | Four input shapes; `float` or `base64` output; arithmetic mean over final hidden rows, L2 normalization, finite F32 output, model-lock dimension and input ordering. Pooling and normalization are not client-selectable. |
+| `sllm-rerank-v1` | `POST /v1/rerank` | sLLM-native, not OpenAI | L2-normalized query/document dot product; higher score wins; ties retain original document order; 1–256 documents; `top_n` is 1 through document count and is never silently clamped. |
+| `sllm-token-utilities-v1` | `POST /v1/tokenize`, `/v1/detokenize`, `/v1/apply-template`, `/v1/input-tokens` | sLLM-native | Shared frontend tokenizer/renderer; model-default special-token policy; lossless byte fallback; verified template digest; no model execution or GPU execution. |
+| `sllm-infill-v1` | `POST /v1/infill` | sLLM-native, not OpenAI | Prefix/suffix FIM mode with the common generation subset; model-lock capability and verified template are mandatory; unsupported capability rejects and never falls back to generic completion. |
+
+All profiles use the existing bounded body limit (96 MiB), 256-byte model
+alias limit, fail-closed unknown fields, and no silent type coercion. Invalid
+JSON, wrong type/range/non-finite/empty or mixed inputs, unsupported model
+capability, and oversize inputs map to the versioned `ApiErrorV1` matrix. The
+standard status/code pairs are 400 `invalid_json`, 400 `invalid_value`, 400
+`unsupported_parameter`, and 413 `request_too_large`; the parameter path is
+included whenever one exists. Token and template utility requests are checked
+before model or GPU execution. No prompt, token, vector, or secret is emitted
+to logs, metrics, or props.
+
+The embedding and rerank contracts deliberately pin hidden semantics rather
+than inheriting llama.cpp's future-changing aliases. The initial production
+FIM route is unsupported until a reviewed model lock records FIM prefix,
+suffix, middle token IDs, context limit, and verified template digest. Exact
+`gfx942`/MI300X execution evidence is deferred until a fresh runtime is
+available; compile-only or host evidence cannot promote that capability.
+
+Phase 42 does not expose Responses, Anthropic Messages, tools/MCP, arbitrary
+Jinja or template kwargs, multimodal embedding/rerank/infill, wire session
+resume, or llama.cpp endpoint aliases. It also does not alter the existing
+Chat Completions profile-v1 fields, reject matrix, response envelopes, or SSE
+terminal behavior.
