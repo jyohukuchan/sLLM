@@ -177,9 +177,18 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     if (dimension == 0U) {
       float q_sum = 0.0F;
       float k_sum = 0.0F;
+      // Phase 29 approved the wave32 tree only for gfx1030/gfx1201. Preserve
+      // the Phase 28 sequential order in the exact wave64/gfx942 build so the
+      // RDNA optimization does not silently widen its numerical scope.
+#if defined(SLLM_HIP_COMPILE_WAVE64) && SLLM_HIP_COMPILE_WAVE64 == 1
+      for (uint32_t index = 0U; index != head_dim; ++index) {
+        q_sum += q_values[index] * q_values[index];
+        k_sum += k_values[index] * k_values[index];
+#else
       for (uint32_t index = 0U; index != 4U; ++index) {
         q_sum += q_wave_sums[index];
         k_sum += k_wave_sums[index];
+#endif
       }
       q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
       k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
@@ -243,8 +252,13 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
     __syncthreads();
     if (dimension == 0U) {
       float sum = 0.0F;
+#if defined(SLLM_HIP_COMPILE_WAVE64) && SLLM_HIP_COMPILE_WAVE64 == 1
+      for (uint32_t index = 0U; index != head_dim; ++index) {
+        sum += output_values[index] * output_values[index];
+#else
       for (uint32_t index = 0U; index != 4U; ++index) {
         sum += output_wave_sums[index];
+#endif
       }
       output_inverse_rms =
           1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);

@@ -362,7 +362,10 @@ impl<E: SpeculativeGenerationExecutorV1> GenerationExecutorV1
 }
 
 /// Qwen3.5 target+MTP owner for exact greedy speculation.
-/// The target graph must have row capacity `draft_width + 1`.
+///
+/// `draft_width` is the number of MTP proposal tokens in one speculative
+/// block. The target verify block contains one additional row for the pending
+/// token, so its required row capacity is `draft_width + 1`.
 pub struct QwenMtpGenerationExecutorV1 {
     target: QwenExecutionRequest,
     mtp: QwenExecutionRequest,
@@ -376,6 +379,11 @@ pub struct QwenMtpGenerationExecutorV1 {
 
 impl QwenMtpGenerationExecutorV1 {
     const HIDDEN_WIDTH: usize = 2_560;
+    /// Maximum number of MTP proposal tokens in one generation block.
+    ///
+    /// This keeps the public generation transaction aligned with the largest
+    /// width supported by the serial-equivalent Qwen target graph path.
+    pub const MAX_DRAFT_WIDTH: usize = 8;
 
     pub fn new(target: QwenExecutionRequest, mtp: QwenExecutionRequest) -> Self {
         Self {
@@ -395,15 +403,7 @@ impl QwenMtpGenerationExecutorV1 {
         mtp: QwenExecutionRequest,
         draft_width: usize,
     ) -> Result<Self, GenerationServiceError> {
-        // The recurrent linear-attention state keeps exactly one prior slot,
-        // so one speculative call may discard at most one proposal row. A
-        // wider target block remains available to the numerical evidence
-        // seam, but is not a safe generation transaction yet.
-        if !(1..=2).contains(&draft_width) {
-            return Err(GenerationServiceError::Execution(
-                "MTP generation draft width must be in 1..=2".to_owned(),
-            ));
-        }
+        Self::validate_draft_width(draft_width)?;
         Ok(Self {
             target,
             mtp,
@@ -414,6 +414,27 @@ impl QwenMtpGenerationExecutorV1 {
             accepted_draft_tokens: 0,
             committed_target_rows: 0,
         })
+    }
+
+    fn validate_draft_width(draft_width: usize) -> Result<(), GenerationServiceError> {
+        if Self::target_block_rows_for_draft_width(draft_width).is_none() {
+            return Err(GenerationServiceError::Execution(
+                "MTP generation draft width must be in 1..=8".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns the target verify row count for a draft-token width.
+    ///
+    /// The first row consumes the pending token and each remaining row
+    /// verifies one proposed draft token.
+    pub const fn target_block_rows_for_draft_width(draft_width: usize) -> Option<usize> {
+        if draft_width == 0 || draft_width > Self::MAX_DRAFT_WIDTH {
+            None
+        } else {
+            Some(draft_width + 1)
+        }
     }
 
     pub const fn draft_width(&self) -> usize {
@@ -1364,6 +1385,37 @@ mod tests {
             budget_boundary: BudgetBoundary::StopTokenWins,
             max_new_tokens_zero: MaxNewTokensZero::MaxNewTokensBeforeDecode,
             reason_version: 1,
+        }
+    }
+
+    #[test]
+    fn qwen_mtp_draft_width_accepts_supported_boundaries_and_maps_to_target_rows() {
+        for draft_width in [1, 2, 3, 4, 7, 8] {
+            QwenMtpGenerationExecutorV1::validate_draft_width(draft_width)
+                .expect("supported draft width");
+            assert_eq!(
+                QwenMtpGenerationExecutorV1::target_block_rows_for_draft_width(draft_width),
+                Some(draft_width + 1)
+            );
+        }
+        assert_eq!(QwenMtpGenerationExecutorV1::MAX_DRAFT_WIDTH, 8);
+    }
+
+    #[test]
+    fn qwen_mtp_draft_width_rejects_values_above_supported_graph_limit() {
+        for draft_width in [9, usize::MAX] {
+            let error = QwenMtpGenerationExecutorV1::validate_draft_width(draft_width)
+                .expect_err("draft width exceeds supported graph limit");
+            assert_eq!(
+                QwenMtpGenerationExecutorV1::target_block_rows_for_draft_width(draft_width),
+                None
+            );
+            assert_eq!(
+                error,
+                GenerationServiceError::Execution(
+                    "MTP generation draft width must be in 1..=8".to_owned()
+                )
+            );
         }
     }
 

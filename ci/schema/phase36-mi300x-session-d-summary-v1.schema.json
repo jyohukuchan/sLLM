@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase36-mi300x-session-d-summary-v1.schema.json",
+  "title": "Phase 36 MI300X Session D summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "recorded_at", "target", "identity", "protocol", "sllm", "llama", "profile", "comparisons", "historical", "raw_artifacts", "raw_manifest_sha256"],
+  "properties": {
+    "schema_version": {"const": "phase36-mi300x-session-d-summary-v1"},
+    "state": {"const": "PASS"},
+    "recorded_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "target": {"const": "gfx942"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "protocol": {"$ref": "#/$defs/protocol"},
+    "sllm": {"$ref": "#/$defs/sllm_engine_rows"},
+    "llama": {"$ref": "#/$defs/llama_engine_rows"},
+    "profile": {"$ref": "#/$defs/profile"},
+    "comparisons": {"$ref": "#/$defs/comparisons"},
+    "historical": {"$ref": "#/$defs/historical"},
+    "raw_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}},
+    "raw_manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "path", "size_bytes", "sha256"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "path": {"type": "string", "minLength": 1}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}, "member_count": {"type": "integer", "minimum": 1}}
+    },
+    "identity_fact": {"$ref": "#/$defs/artifact"},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "llama_binary", "bf16_model", "bf16_lock", "fp8_model", "fp8_lock", "llama_bf16_model", "source", "rocm", "gpu"],
+      "properties": {
+        "binary": {"$ref": "#/$defs/identity_fact"},
+        "llama_binary": {"$ref": "#/$defs/identity_fact"},
+        "bf16_model": {"$ref": "#/$defs/identity_fact"},
+        "bf16_lock": {"$ref": "#/$defs/identity_fact"},
+        "fp8_model": {"$ref": "#/$defs/identity_fact"},
+        "fp8_lock": {"$ref": "#/$defs/identity_fact"},
+        "llama_bf16_model": {"$ref": "#/$defs/identity_fact"},
+        "llama_model_manifest": {"$ref": "#/$defs/identity_fact"},
+        "source": {"$ref": "#/$defs/identity_fact"},
+        "rocm": {"type": "object", "additionalProperties": false, "required": ["root", "version"], "properties": {"root": {"type": "string", "minLength": 1}, "version": {"type": "string", "minLength": 1}}},
+        "gpu": {"type": "object", "additionalProperties": false, "required": ["target", "uuid"], "properties": {"target": {"const": "gfx942"}, "uuid": {"type": "string", "minLength": 1}}}
+      }
+    },
+    "protocol": {
+      "type": "object", "additionalProperties": false,
+      "required": ["warmups", "measured", "cases", "sllm_rows", "llama_rows", "input_output", "kv_cache_encoding", "greedy"],
+      "properties": {
+        "warmups": {"const": 3}, "measured": {"const": 10}, "cases": {"const": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]}, "sllm_rows": {"const": 10}, "llama_rows": {"const": 5}, "input_output": {"type": "string", "minLength": 1}, "kv_cache_encoding": {"const": "fp16"}, "greedy": {"const": true}
+      }
+    },
+    "distribution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["count", "min", "p10", "median", "p90", "max", "mad"],
+      "properties": {"count": {"const": 10}, "min": {"type": "number", "exclusiveMinimum": 0}, "p10": {"type": "number", "exclusiveMinimum": 0}, "median": {"type": "number", "exclusiveMinimum": 0}, "p90": {"type": "number", "exclusiveMinimum": 0}, "max": {"type": "number", "exclusiveMinimum": 0}, "mad": {"type": "number", "minimum": 0}}
+    },
+    "metric_map": {"type": "object", "additionalProperties": false, "required": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "tpot_ns", "decode_tokens_per_second", "e2e_ns"], "properties": {"ttft_ns": {"$ref": "#/$defs/distribution"}, "prefill_ns": {"$ref": "#/$defs/distribution"}, "prefill_tokens_per_second": {"$ref": "#/$defs/distribution"}, "tpot_ns": {"$ref": "#/$defs/distribution"}, "decode_tokens_per_second": {"$ref": "#/$defs/distribution"}, "e2e_ns": {"$ref": "#/$defs/distribution"}}},
+    "metric": {"type": "object", "additionalProperties": false, "required": ["state"], "properties": {"state": {"enum": ["available", "unavailable"]}, "value": {"type": "number", "minimum": 0}, "reason": {"type": "string", "minLength": 1}}, "allOf": [{"if": {"properties": {"state": {"const": "available"}}}, "then": {"required": ["value"], "not": {"required": ["reason"]}}}, {"if": {"properties": {"state": {"const": "unavailable"}}}, "then": {"required": ["reason"], "not": {"required": ["value"]}}}]},
+    "memory": {"type": "object", "additionalProperties": false, "required": ["internal_resident_hbm_bytes", "internal_peak_hbm_bytes", "monitor_external_peak_hbm_bytes", "monitor_external_baseline_hbm_bytes", "monitor_external_settled_hbm_bytes"], "properties": {"internal_resident_hbm_bytes": {"$ref": "#/$defs/metric"}, "internal_peak_hbm_bytes": {"$ref": "#/$defs/metric"}, "monitor_external_peak_hbm_bytes": {"$ref": "#/$defs/metric"}, "monitor_external_baseline_hbm_bytes": {"$ref": "#/$defs/metric"}, "monitor_external_settled_hbm_bytes": {"$ref": "#/$defs/metric"}}},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "weight", "case_id", "input_tokens", "output_tokens", "input_ids_sha256", "output_ids", "metrics", "memory", "raw_artifacts"],
+      "properties": {"row_id": {"type": "string", "minLength": 1}, "weight": {"enum": ["bf16", "fp8"]}, "case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]}, "input_tokens": {"type": "integer", "minimum": 1}, "output_tokens": {"type": "integer", "minimum": 1}, "input_ids_sha256": {"$ref": "#/$defs/sha256"}, "output_ids": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}, "metrics": {"$ref": "#/$defs/metric_map"}, "memory": {"$ref": "#/$defs/memory"}, "raw_artifacts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/artifact"}}}
+    },
+    "sllm_engine_rows": {"type": "object", "additionalProperties": false, "required": ["rows", "row_count"], "properties": {"rows": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"$ref": "#/$defs/row"}}, "row_count": {"const": 10}}},
+    "llama_engine_rows": {"type": "object", "additionalProperties": false, "required": ["rows", "row_count"], "properties": {"rows": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/row"}}, "row_count": {"const": 5}}},
+    "profile_category": {"type": "object", "additionalProperties": false, "required": ["category", "calls", "total_duration_ns", "device_time_share", "kernel_names"], "properties": {"category": {"enum": ["projection", "full_attention", "gdn", "mtp_or_other"]}, "calls": {"type": "integer", "minimum": 1}, "total_duration_ns": {"type": "integer", "minimum": 1}, "device_time_share": {"type": "number", "exclusiveMinimum": 0}, "kernel_names": {"type": "array", "items": {"type": "string"}}}},
+    "profile": {"type": "object", "additionalProperties": false, "required": ["schema_version", "raw_manifest_sha256", "categories", "kernel_external", "raw_artifacts"], "properties": {"schema_version": {"const": "phase36-session-d-profile-v1"}, "raw_manifest_sha256": {"$ref": "#/$defs/sha256"}, "categories": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/profile_category"}}, "kernel_external": {"type": "object", "additionalProperties": false, "required": ["state", "kernel_interval_union_ns"], "properties": {"state": {"enum": ["available", "unavailable"]}, "host_wall_ns": {"type": "integer", "minimum": 0}, "kernel_interval_union_ns": {"type": "integer", "minimum": 1}, "external_ns": {"type": "integer", "minimum": 0}, "external_share_of_host_wall": {"type": "number", "minimum": 0}, "reason": {"type": "string", "minLength": 1}}}, "raw_artifacts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/artifact"}}}},
+    "ratio": {"type": "object", "additionalProperties": false, "required": ["metric", "direction", "sllm_over_llama_ratio"], "properties": {"metric": {"enum": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "tpot_ns", "decode_tokens_per_second", "e2e_ns"]}, "direction": {"enum": ["lower_is_better", "higher_is_better"]}, "sllm_over_llama_ratio": {"type": "number", "exclusiveMinimum": 0}}},
+    "fp8_ratio": {"type": "object", "additionalProperties": false, "required": ["metric", "direction", "fp8_over_bf16_ratio"], "properties": {"metric": {"enum": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "tpot_ns", "decode_tokens_per_second", "e2e_ns"]}, "direction": {"enum": ["lower_is_better", "higher_is_better"]}, "fp8_over_bf16_ratio": {"type": "number", "exclusiveMinimum": 0}}},
+    "comparison_row": {"type": "object", "additionalProperties": false, "required": ["case_id", "metrics"], "properties": {"case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]}, "metrics": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/ratio"}}}},
+    "fp8_comparison_row": {"type": "object", "additionalProperties": false, "required": ["case_id", "metrics"], "properties": {"case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]}, "metrics": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/fp8_ratio"}}}},
+    "comparisons": {"type": "object", "additionalProperties": false, "required": ["e1_bf16", "fp8_vs_bf16"], "properties": {"e1_bf16": {"type": "object", "additionalProperties": false, "required": ["classification", "strict_identical", "artifact_differences", "rows"], "properties": {"classification": {"const": "E1_SYSTEM_EQUIVALENT"}, "strict_identical": {"const": false}, "artifact_differences": {"type": "object", "additionalProperties": false, "required": ["engine", "sllm_binary", "llama_wrapper", "sllm_bf16_model", "llama_bf16_model", "same_upstream_repo_id_revision", "different_gguf_tensor_set_converter", "strict_identical"], "properties": {"engine": {"type": "string", "minLength": 1}, "sllm_binary": {"type": "string", "minLength": 1}, "llama_wrapper": {"type": "string", "minLength": 1}, "sllm_bf16_model": {"type": "object", "additionalProperties": false, "required": ["name", "size_bytes", "sha256"], "properties": {"name": {"type": "string", "minLength": 1}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}}, "llama_bf16_model": {"type": "object", "additionalProperties": false, "required": ["name", "size_bytes", "sha256"], "properties": {"name": {"type": "string", "minLength": 1}, "size_bytes": {"type": "integer", "minimum": 0}, "sha256": {"$ref": "#/$defs/sha256"}}}, "same_upstream_repo_id_revision": {"type": "object", "additionalProperties": false, "required": ["repo_id", "revision"], "properties": {"repo_id": {"type": "string", "minLength": 1}, "revision": {"type": "string", "minLength": 1}}}, "different_gguf_tensor_set_converter": {"type": "string", "minLength": 1}, "strict_identical": {"const": false}}}, "rows": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/comparison_row"}}}}, "fp8_vs_bf16": {"type": "object", "additionalProperties": false, "required": ["llama_comparison", "rows"], "properties": {"llama_comparison": {"const": "not_applicable"}, "rows": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"$ref": "#/$defs/fp8_comparison_row"}}}}}},
+    "historical_ref": {"type": "object", "additionalProperties": false, "required": ["state", "reason"], "properties": {"state": {"enum": ["available", "unavailable"]}, "reason": {"type": "string", "minLength": 1}, "summary_sha256": {"$ref": "#/$defs/sha256"}, "rows": {"type": ["array", "object"]}}},
+    "phase12_metric_change": {
+      "type": "object", "additionalProperties": false,
+      "required": ["metric", "direction", "current_value", "phase12_value", "ratio_current_over_phase12", "percent_change"],
+      "properties": {
+        "metric": {"enum": ["ttft_ns", "e2e_ns", "prefill_tokens_per_second", "decode_tokens_per_second", "resident_hbm_bytes", "peak_hbm_bytes"]},
+        "direction": {"enum": ["lower_is_better", "higher_is_better"]},
+        "current_value": {"type": "number", "exclusiveMinimum": 0},
+        "phase12_value": {"type": "number", "exclusiveMinimum": 0},
+        "ratio_current_over_phase12": {"type": "number", "exclusiveMinimum": 0},
+        "percent_change": {"type": "number"}
+      }
+    },
+    "phase12_change_available": {
+      "type": "object", "additionalProperties": false,
+      "required": ["weight", "case_id", "state", "metrics"],
+      "properties": {
+        "weight": {"enum": ["bf16", "fp8"]},
+        "case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]},
+        "state": {"const": "available"},
+        "metrics": {"type": "array", "minItems": 6, "maxItems": 6, "items": {"$ref": "#/$defs/phase12_metric_change"}}
+      }
+    },
+    "phase12_change_unavailable": {
+      "type": "object", "additionalProperties": false,
+      "required": ["weight", "case_id", "state", "reason"],
+      "properties": {
+        "weight": {"enum": ["bf16", "fp8"]},
+        "case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001"]},
+        "state": {"const": "unavailable"},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "phase35_change_available": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "state", "metric", "direction", "current_mi300x_value", "phase35_value", "ratio_current_over_phase35", "percent_change"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "state": {"const": "available"},
+        "metric": {"const": "e2e_ns"},
+        "direction": {"const": "lower_is_better"},
+        "current_mi300x_value": {"type": "number", "exclusiveMinimum": 0},
+        "phase35_value": {"type": "number", "exclusiveMinimum": 0},
+        "ratio_current_over_phase35": {"type": "number", "exclusiveMinimum": 0},
+        "percent_change": {"type": "number"}
+      }
+    },
+    "phase35_change_unavailable": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "state", "reason"],
+      "properties": {
+        "target": {"enum": ["gfx1030", "gfx1201"]},
+        "state": {"const": "unavailable"},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "historical": {"type": "object", "additionalProperties": false, "required": ["phase12", "phase35_current_v620_r9700", "phase12_changes", "phase35_changes"], "properties": {"phase12": {"$ref": "#/$defs/historical_ref"}, "phase35_current_v620_r9700": {"$ref": "#/$defs/historical_ref"}, "phase12_changes": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"oneOf": [{"$ref": "#/$defs/phase12_change_available"}, {"$ref": "#/$defs/phase12_change_unavailable"}]}}, "phase35_changes": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"oneOf": [{"$ref": "#/$defs/phase35_change_available"}, {"$ref": "#/$defs/phase35_change_unavailable"}]}}}}
+  }
+}

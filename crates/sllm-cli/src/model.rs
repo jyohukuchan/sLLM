@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
-    ModelLock, OsSamplingRandom, QwenComponentSelection, QwenExecutionRequest,
-    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
+    ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenComponentSelection,
+    QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
     QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock, SamplingParametersV1,
     VerifiedCache, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
     WeightClassification, assemble_gguf_qwen35_multimodal_prompt,
@@ -33,17 +33,20 @@ use sllm_frontend::{
 use sllm_hip::HipBackend;
 
 use crate::benchmark::{
-    BenchmarkEvent, BenchmarkSampleInput, BenchmarkTimeline, BenchmarkTiming, MonotonicClock,
-    RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION, allocation_snapshot_value, compare_control_sample,
-    control_comparison_contract, validate_fixed_input_token_ids, validate_model_ready_snapshot,
-    validate_peak_vram_snapshot, validate_request_cleanup_snapshot,
-    validate_resident_drop_snapshot, validate_sample_count, validate_snapshot_accounting,
+    BenchmarkEvent, BenchmarkSampleInput, BenchmarkTimeline, BenchmarkTiming,
+    DIRECT_BENCHMARK_SCHEMA_VERSION, MonotonicClock, RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
+    allocation_snapshot_value, compare_control_sample, control_comparison_contract,
+    validate_fixed_input_token_ids, validate_model_ready_snapshot, validate_peak_vram_snapshot,
+    validate_request_cleanup_snapshot, validate_resident_drop_snapshot, validate_sample_count,
+    validate_snapshot_accounting,
 };
 
 const REPORT_SCHEMA: &str = "model-frontend-cli-report-v1";
 const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOKEN_IDS: usize = 1_048_576;
 const MAX_NEW_TOKENS: u32 = 4096;
+const MAX_PREFILL_CHUNK_TOKENS: u64 = 16_384;
+const MAX_MTP_DRAFT_WIDTH: u8 = QwenMtpGenerationExecutorV1::MAX_DRAFT_WIDTH as u8;
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -126,6 +129,46 @@ impl CliFp8Provider {
     }
 }
 
+fn select_cli_gguf_fp8_provider(target: &str) -> Result<CliFp8Provider, String> {
+    match target {
+        "gfx1201" => Ok(CliFp8Provider::Native),
+        "gfx942" => Ok(CliFp8Provider::NativeFnuz),
+        _ => Err(format!(
+            "embedded E4M3FN GGUF recipe requires exact gfx1201 native or gfx942 native-fnuz provider; exact target {target} is unsupported"
+        )),
+    }
+}
+
+fn cli_gguf_fp8_provider_label(provider: CliFp8Provider) -> &'static str {
+    match provider {
+        CliFp8Provider::Native => "gguf-native",
+        CliFp8Provider::NativeFnuz => "native-fnuz",
+        CliFp8Provider::ConvertedBf16 | CliFp8Provider::Nvfp4PackedDequant => {
+            unreachable!("GGUF embedded FP8 uses a native provider")
+        }
+    }
+}
+
+fn cli_fp8_dtype(provider: CliFp8Provider) -> sllm_core::DType {
+    match provider {
+        CliFp8Provider::Native => sllm_core::DType::F8E4M3Fn,
+        CliFp8Provider::NativeFnuz => sllm_core::DType::F8E4M3FnuZ,
+        CliFp8Provider::ConvertedBf16 | CliFp8Provider::Nvfp4PackedDequant => {
+            unreachable!("GGUF embedded FP8 uses a native provider")
+        }
+    }
+}
+
+const fn cli_fp8_weight_encoding(provider: Option<CliFp8Provider>) -> &'static str {
+    match provider {
+        Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn",
+        Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+        Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32",
+        Some(CliFp8Provider::Native) => "ocp-e4m3fn-outer-f32",
+        None => "bf16",
+    }
+}
+
 fn select_cli_fp8_provider(
     has_sidecar: bool,
     requested: Option<CliFp8Provider>,
@@ -172,6 +215,8 @@ struct GenerateRequest {
     input: GenerationInput,
     image_paths: Vec<PathBuf>,
     max_new_tokens: u32,
+    prefill_chunk_tokens: Option<u64>,
+    mtp_draft_width: Option<u8>,
     sampling: SamplingParametersV1,
     seed: Option<u64>,
     stop_strings: Vec<String>,
@@ -252,17 +297,22 @@ fn multimodal_step(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkLane {
+    Direct,
     RenderTokenize,
 }
 
 impl BenchmarkLane {
     fn schema_version(self) -> &'static str {
-        RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION
+        match self {
+            Self::Direct => DIRECT_BENCHMARK_SCHEMA_VERSION,
+            Self::RenderTokenize => RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
+        }
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 enum BenchmarkInput {
+    TokenIds(TokenIdsV1),
     Messages {
         messages: Vec<Qwen35ChatMessageV1>,
         options: Qwen35RenderOptionsV1,
@@ -282,6 +332,7 @@ struct BenchmarkRequest {
     greedy: bool,
     warmups: u32,
     measured: u32,
+    kv_cache_encoding: KvCacheEncoding,
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<CliFp8Provider>,
@@ -554,6 +605,12 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
+        if request.prefill_chunk_tokens.is_some() || request.mtp_draft_width.is_some() {
+            return Err(
+                "--prefill-chunk-tokens and --mtp-draft-width are supported only for dense Qwen generation"
+                    .to_owned(),
+            );
+        }
         if !request.image_paths.is_empty() {
             return Err("--image is supported only by Qwen3.5 vision models".to_owned());
         }
@@ -812,6 +869,12 @@ impl ModelFrontendBackend for MoeProductionBackend {
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
+        if request.prefill_chunk_tokens.is_some() || request.mtp_draft_width.is_some() {
+            return Err(
+                "--prefill-chunk-tokens and --mtp-draft-width are supported only for dense Qwen generation"
+                    .to_owned(),
+            );
+        }
         if !request.image_paths.is_empty() {
             return Err("Qwen3.5 MoE production path is text-only".to_owned());
         }
@@ -987,6 +1050,30 @@ impl ProductionBackend {
         .map_err(|error| format!("verified tensors do not form the fixed model load plan: {error}"))
     }
 
+    fn validate_cli_mtp_weight_plan(
+        &self,
+        plan: &sllm_core::WeightLoadPlan,
+        state_capacity: u64,
+    ) -> Result<(), String> {
+        if let QwenDenseSource::Gguf(source) = &self.source {
+            let mtp_prefix = &self.lock.model().architecture.mtp.tensor_prefix;
+            if let Some(entry) = plan.entries.iter().find(|entry| {
+                entry.tensor_name.starts_with(mtp_prefix)
+                    && source.recipe_binding(&entry.tensor_name).is_some()
+            }) {
+                return Err(format!(
+                    "MTP draft tensor {} is recipe-backed; the reviewed draft path requires BF16 MTP weights",
+                    entry.tensor_name
+                ));
+            }
+        }
+        build_qwen35_mtp_graph(&self.lock, plan, state_capacity)
+            .map(|_| ())
+            .map_err(|error| {
+                format!("MTP weight plan is incompatible with the fixed graph: {error}")
+            })
+    }
+
     fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
         match &self.source {
             QwenDenseSource::Cache(cache) => {
@@ -1021,19 +1108,15 @@ impl ProductionBackend {
     ) -> Result<sllm_core::QwenGraph, sllm_core::QwenGraphError> {
         match &self.source {
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe() => {
-                if target != "gfx1201" {
-                    return Err(sllm_core::QwenGraphError::InvalidModel(
-                        "the embedded E4M3FN GGUF recipe currently requires the native gfx1201 provider"
-                            .to_owned(),
-                    ));
-                }
+                let provider = select_cli_gguf_fp8_provider(target)
+                    .map_err(sllm_core::QwenGraphError::InvalidModel)?;
                 build_qwen35_gguf_fp8_graph(
                     &self.lock,
                     plan,
                     source,
                     token_count,
                     state_capacity,
-                    sllm_core::DType::F8E4M3Fn,
+                    cli_fp8_dtype(provider),
                     kv_cache_encoding,
                 )
             }
@@ -1118,16 +1201,15 @@ impl ModelFrontendBackend for ProductionBackend {
         let started = Instant::now();
         let (effective_input, processed_images) =
             prepare_qwen_cli_images(&request.input, &request.image_paths)?;
-        if matches!(self.source, QwenDenseSource::Gguf(_)) {
-            if request.fp8_manifest.is_some()
+        if matches!(self.source, QwenDenseSource::Gguf(_))
+            && (request.fp8_manifest.is_some()
                 || request.fp8_artifact.is_some()
-                || request.fp8_provider.is_some()
-            {
-                return Err(
-                    "GGUF carries its own quantization recipe and cannot be combined with legacy sidecar flags"
-                        .to_owned(),
-                );
-            }
+                || request.fp8_provider.is_some())
+        {
+            return Err(
+                "GGUF carries its own quantization recipe and cannot be combined with legacy sidecar flags"
+                    .to_owned(),
+            );
         }
         let tokenizer = self.tokenizer()?;
         let renderer = match &effective_input {
@@ -1160,7 +1242,7 @@ impl ModelFrontendBackend for ProductionBackend {
             .map_err(|error| format!("generation input preparation failed: {error}"))?;
         let input_len = u64::try_from(input.len())
             .map_err(|_| "generation input token count overflowed".to_owned())?;
-        let state_capacity = input_len
+        let logical_state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
         let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
@@ -1168,6 +1250,9 @@ impl ModelFrontendBackend for ProductionBackend {
             &self.source,
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
         );
+        let embedded_fp8_provider = embedded_fp8
+            .then(|| select_cli_gguf_fp8_provider(&request.target))
+            .transpose()?;
         let nvfp4_requested = request.fp8_provider == Some(CliFp8Provider::Nvfp4PackedDequant);
         let nvfp4_sidecar = match (
             nvfp4_requested,
@@ -1209,13 +1294,42 @@ impl ModelFrontendBackend for ProductionBackend {
         }
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
-        let mtp_candidate = processed_images.is_empty()
-            && !has_sidecar
-            && !embedded_fp8
-            && request.target == "gfx1201"
-            && request.kv_cache_encoding == KvCacheEncoding::Fp16
-            && !request.sampling.requires_logits()
-            && self.lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT;
+        let mtp_plan = resolve_cli_mtp_plan(
+            request.mtp_draft_width,
+            !processed_images.is_empty(),
+            has_sidecar,
+            embedded_fp8,
+            &request.target,
+            request.kv_cache_encoding,
+            request.sampling,
+            self.lock.fingerprint(),
+        )?;
+        let (state_capacity, mtp_state_slack_tokens) =
+            cli_state_capacity_with_mtp_slack(logical_state_capacity, mtp_plan.effective_width)?;
+        let mut mtp_weight_plan = if mtp_plan.enabled {
+            let plan = self
+                .load_plan(QwenComponentSelection::MTP_ONLY)
+                .map_err(|error| {
+                    if mtp_plan.selection == "forced" {
+                        format!(
+                            "forced MTP is unavailable: verified MTP weight plan could not be loaded: {error}"
+                        )
+                    } else {
+                        error
+                    }
+                })?;
+            self.validate_cli_mtp_weight_plan(&plan, state_capacity)
+                .map_err(|error| {
+                    if mtp_plan.selection == "forced" {
+                        format!("forced MTP is unavailable: {error}")
+                    } else {
+                        error
+                    }
+                })?;
+            Some(plan)
+        } else {
+            None
+        };
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
         let session_request =
             ExecutionSessionRequest::new(request.device_index, request.target.clone())
@@ -1231,15 +1345,27 @@ impl ModelFrontendBackend for ProductionBackend {
             .available_memory_bytes()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "HIP backend omitted available device memory".to_owned())?;
+        if request.prefill_chunk_tokens.is_some() && !processed_images.is_empty() {
+            return Err(
+                "--prefill-chunk-tokens is supported only for text-only Qwen generation".to_owned(),
+            );
+        }
         let chunk_candidates = if processed_images.is_empty() {
-            qwen_prefill_chunk_candidates(placement_total_memory_bytes, input_len)
-                .map_err(|error| error.to_string())?
+            cli_prefill_chunk_candidates(
+                request.prefill_chunk_tokens,
+                placement_total_memory_bytes,
+                input_len,
+            )?
         } else {
             vec![input_len]
         };
         let build_graph = |chunk_rows: u64| {
-            let text_rows = if mtp_candidate {
-                chunk_rows.max(2)
+            let text_rows = if mtp_plan.enabled {
+                let target_block_rows = mtp_plan
+                    .effective_width
+                    .map(|width| u64::from(width) + 1)
+                    .unwrap_or(2);
+                chunk_rows.max(target_block_rows)
             } else {
                 chunk_rows
             };
@@ -1473,76 +1599,91 @@ impl ModelFrontendBackend for ProductionBackend {
             let mut random =
                 OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
                     .map_err(|error| format!("sampling random source failed: {error}"))?;
-            let (report, audit, prefill_chunk_count) = if let Some((_, prompt)) =
-                vision_bundle.as_ref()
-            {
-                let mut executor = CliQwenMultimodalExecutor {
-                    inner: &mut owner,
-                    prompt,
-                    prefilled: false,
-                };
-                let report = service.generate_tokens(
-                    &mut executor,
-                    &input,
-                    &config,
-                    &cancellation,
-                    &mut random,
-                );
-                let audit = owner.audit_snapshot();
-                let prefill_chunk_count = owner.prefill_chunk_count();
-                (report, audit, prefill_chunk_count)
-            } else if mtp_candidate {
-                let mtp_plan = self.load_plan(QwenComponentSelection::MTP_ONLY)?;
-                let mtp_graph = build_qwen35_mtp_graph(&self.lock, &mtp_plan, state_capacity)
-                    .map_err(|error| format!("MTP request graph failed: {error}"))?;
-                let mtp_resident = match &self.source {
-                    QwenDenseSource::Cache(cache) => QwenResidentModel::new(
-                        Arc::clone(&session),
-                        mtp_graph.clone(),
-                        mtp_plan,
-                        Arc::clone(cache),
-                        COMPLETION_TIMEOUT,
-                    ),
-                    QwenDenseSource::Gguf(source) => QwenResidentModel::new_gguf(
-                        Arc::clone(&session),
-                        mtp_graph.clone(),
-                        mtp_plan,
-                        Arc::clone(source),
-                        COMPLETION_TIMEOUT,
-                    ),
-                }
-                .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
-                let mtp_owner = mtp_resident
-                    .new_request(mtp_graph)
-                    .map_err(|error| format!("MTP request provisioning failed: {error}"))?;
-                let mut executor = SpeculativeGenerationAdapterV1::new(
-                    QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
+            let mut mtp_proposal_blocks = None;
+            let mut mtp_proposed_draft_tokens = None;
+            let mut mtp_accepted_draft_tokens = None;
+            let (report, audit, prefill_chunk_count) =
+                if let Some((_, prompt)) = vision_bundle.as_ref() {
+                    let mut executor = CliQwenMultimodalExecutor {
+                        inner: &mut owner,
+                        prompt,
+                        prefilled: false,
+                    };
+                    let report = service.generate_tokens(
+                        &mut executor,
+                        &input,
+                        &config,
+                        &cancellation,
+                        &mut random,
+                    );
+                    let audit = owner.audit_snapshot();
+                    let prefill_chunk_count = owner.prefill_chunk_count();
+                    (report, audit, prefill_chunk_count)
+                } else if mtp_plan.enabled {
+                    let mtp_weight_plan = mtp_weight_plan.take().ok_or_else(|| {
+                        "MTP selection omitted its verified weight plan".to_owned()
+                    })?;
+                    let mtp_graph =
+                        build_qwen35_mtp_graph(&self.lock, &mtp_weight_plan, state_capacity)
+                            .map_err(|error| format!("MTP request graph failed: {error}"))?;
+                    let mtp_resident = match &self.source {
+                        QwenDenseSource::Cache(cache) => QwenResidentModel::new(
+                            Arc::clone(&session),
+                            mtp_graph.clone(),
+                            mtp_weight_plan,
+                            Arc::clone(cache),
+                            COMPLETION_TIMEOUT,
+                        ),
+                        QwenDenseSource::Gguf(source) => QwenResidentModel::new_gguf(
+                            Arc::clone(&session),
+                            mtp_graph.clone(),
+                            mtp_weight_plan,
+                            Arc::clone(source),
+                            COMPLETION_TIMEOUT,
+                        ),
+                    }
+                    .map_err(|error| format!("MTP resident provisioning failed: {error}"))?;
+                    let mtp_owner = mtp_resident
+                        .new_request(mtp_graph)
+                        .map_err(|error| format!("MTP request provisioning failed: {error}"))?;
+                    let draft_width = usize::from(mtp_plan.effective_width.ok_or_else(|| {
+                        "MTP selection omitted an effective draft width".to_owned()
+                    })?);
+                    let mut executor = SpeculativeGenerationAdapterV1::new(
+                        QwenMtpGenerationExecutorV1::new_with_draft_width(
+                            owner,
+                            mtp_owner,
+                            draft_width,
+                        )
                         .map_err(|error| error.to_string())?,
-                );
-                let report = service.generate_tokens(
-                    &mut executor,
-                    &input,
-                    &config,
-                    &cancellation,
-                    &mut random,
-                );
-                let audit = executor.inner().target().audit_snapshot();
-                let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
-                drop(executor);
-                drop(mtp_resident);
-                (report, audit, prefill_chunk_count)
-            } else {
-                let report = service.generate_tokens(
-                    &mut owner,
-                    &input,
-                    &config,
-                    &cancellation,
-                    &mut random,
-                );
-                let audit = owner.audit_snapshot();
-                let prefill_chunk_count = owner.prefill_chunk_count();
-                (report, audit, prefill_chunk_count)
-            };
+                    );
+                    let report = service.generate_tokens(
+                        &mut executor,
+                        &input,
+                        &config,
+                        &cancellation,
+                        &mut random,
+                    );
+                    let audit = executor.inner().target().audit_snapshot();
+                    let prefill_chunk_count = executor.inner().target().prefill_chunk_count();
+                    mtp_proposal_blocks = Some(executor.inner().proposal_blocks());
+                    mtp_proposed_draft_tokens = Some(executor.inner().proposed_draft_tokens());
+                    mtp_accepted_draft_tokens = Some(executor.inner().accepted_draft_tokens());
+                    drop(executor);
+                    drop(mtp_resident);
+                    (report, audit, prefill_chunk_count)
+                } else {
+                    let report = service.generate_tokens(
+                        &mut owner,
+                        &input,
+                        &config,
+                        &cancellation,
+                        &mut random,
+                    );
+                    let audit = owner.audit_snapshot();
+                    let prefill_chunk_count = owner.prefill_chunk_count();
+                    (report, audit, prefill_chunk_count)
+                };
             let report = report.map_err(|error| format!("generation service failed: {error}"))?;
             let audit = audit.map_err(|_| "Qwen dispatch audit was empty or invalid".to_owned())?;
             if audit.target() != request.target {
@@ -1550,6 +1691,80 @@ impl ModelFrontendBackend for ProductionBackend {
                     "Qwen dispatch audit target differs from the requested target".to_owned(),
                 );
             }
+            let mtp_rejected_draft_tokens =
+                match (mtp_proposed_draft_tokens, mtp_accepted_draft_tokens) {
+                    (Some(proposed), Some(accepted)) => Some(proposed.saturating_sub(accepted)),
+                    _ => None,
+                };
+            let mut execution_report = json!({
+                "selected_backend": audit.selected_backend(),
+                "target": audit.target(),
+                "device_index": request.device_index,
+                "model_fingerprint": model_fingerprint,
+                "plan_digest": plan_digest,
+                "prefill_tokens": input.len(),
+                "logical_state_capacity_tokens": logical_state_capacity,
+                "allocated_state_capacity_tokens": state_capacity,
+                "mtp_state_slack_tokens": mtp_state_slack_tokens,
+                "prefill_chunk_requested_tokens": request.prefill_chunk_tokens,
+                "prefill_chunk_selection": if request.prefill_chunk_tokens.is_some() {
+                    "explicit"
+                } else {
+                    "auto"
+                },
+                "prefill_chunk_capacity_tokens": prefill_chunk_capacity_tokens,
+                "prefill_chunk_count": prefill_chunk_count,
+                "mtp_selection": mtp_plan.selection,
+                "mtp_draft_width_requested": mtp_plan.requested_width,
+                "mtp_draft_width_effective": mtp_plan.effective_width,
+                "mtp_target_block_rows": mtp_plan
+                    .effective_width
+                    .map(|width| u64::from(width) + 1),
+                "mtp_proposal_blocks": mtp_proposal_blocks,
+                "mtp_proposed_draft_tokens": mtp_proposed_draft_tokens,
+                "mtp_accepted_draft_tokens": mtp_accepted_draft_tokens,
+                "mtp_rejected_draft_tokens": mtp_rejected_draft_tokens,
+                "placement_total_memory_bytes": placement_total_memory_bytes,
+                "placement_available_memory_bytes": placement_available_memory_bytes,
+                "placement_required_bytes": placement.required_bytes(),
+                "placement_model_resident_bytes": placement.model_resident_bytes(),
+                "placement_request_state_bytes": placement.request_state_bytes(),
+                "placement_safety_reserve_bytes": placement.safety_reserve_bytes(),
+                "workspace_separate_allocation_bytes": placement.workspace_baseline_bytes(),
+                "workspace_arena_bytes": placement.workspace_arena_bytes(),
+                "decode_steps": report.decode_steps(),
+                "fallback_used": audit.fallback_used(),
+                "submission_count": audit.submission_count(),
+                "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                "segment_count": audit.segment_count(),
+                "boundary_count": audit.boundary_count(),
+                "all_dispatches_hip": audit.all_dispatches_hip(),
+                "weight_encoding": cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider)),
+                "kv_cache_encoding": match request.kv_cache_encoding { KvCacheEncoding::Fp16 => "fp16", KvCacheEncoding::Fp8E4M3Fn => "fp8", KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static", KvCacheEncoding::Nvfp4 => "nvfp4" },
+                "fp8_provider": embedded_fp8_provider
+                    .map(cli_gguf_fp8_provider_label)
+                    .or_else(|| fp8_provider.map(CliFp8Provider::label)),
+                "image_count": processed_images.len(),
+            });
+            let execution_object = execution_report
+                .as_object_mut()
+                .ok_or_else(|| "execution report was not an object".to_owned())?;
+            execution_object.insert(
+                "mtp_weight_encoding".to_owned(),
+                if mtp_plan.enabled {
+                    Value::from("bf16")
+                } else {
+                    Value::Null
+                },
+            );
+            execution_object.insert(
+                "mtp_kv_cache_encoding".to_owned(),
+                if mtp_plan.enabled {
+                    Value::from("fp16")
+                } else {
+                    Value::Null
+                },
+            );
             Ok(json!({
                 "kind": "generate",
                 "input_kind": input_kind,
@@ -1577,35 +1792,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "presence_penalty": request.sampling.presence_penalty(),
                     "frequency_penalty": request.sampling.frequency_penalty(),
                 },
-                "execution": {
-                    "selected_backend": audit.selected_backend(),
-                    "target": audit.target(),
-                    "device_index": request.device_index,
-                    "model_fingerprint": model_fingerprint,
-                    "plan_digest": plan_digest,
-                    "prefill_tokens": input.len(),
-                    "prefill_chunk_capacity_tokens": prefill_chunk_capacity_tokens,
-                    "prefill_chunk_count": prefill_chunk_count,
-                    "placement_total_memory_bytes": placement_total_memory_bytes,
-                    "placement_available_memory_bytes": placement_available_memory_bytes,
-                    "placement_required_bytes": placement.required_bytes(),
-                    "placement_model_resident_bytes": placement.model_resident_bytes(),
-                    "placement_request_state_bytes": placement.request_state_bytes(),
-                    "placement_safety_reserve_bytes": placement.safety_reserve_bytes(),
-                    "workspace_separate_allocation_bytes": placement.workspace_baseline_bytes(),
-                    "workspace_arena_bytes": placement.workspace_arena_bytes(),
-                    "decode_steps": report.decode_steps(),
-                    "fallback_used": audit.fallback_used(),
-                    "submission_count": audit.submission_count(),
-                    "kernel_dispatch_count": audit.kernel_dispatch_count(),
-                    "segment_count": audit.segment_count(),
-                    "boundary_count": audit.boundary_count(),
-                    "all_dispatches_hip": audit.all_dispatches_hip(),
-                    "weight_encoding": if embedded_fp8 { "ocp-e4m3fn-outer-f32" } else { match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" } },
-                    "kv_cache_encoding": match request.kv_cache_encoding { KvCacheEncoding::Fp16 => "fp16", KvCacheEncoding::Fp8E4M3Fn => "fp8", KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static", KvCacheEncoding::Nvfp4 => "nvfp4" },
-                    "fp8_provider": if embedded_fp8 { Some("gguf-native") } else { fp8_provider.map(CliFp8Provider::label) },
-                    "image_count": processed_images.len(),
-                },
+                "execution": execution_report,
             }))
         })();
         let cleanup = session
@@ -1666,15 +1853,24 @@ impl ModelFrontendBackend for ProductionBackend {
             return Err("benchmark row and case identities must not be empty".to_owned());
         }
 
-        let tokenizer = self.tokenizer()?;
-        let renderer = self.renderer()?;
-        let BenchmarkInput::Messages { messages, options } = &request.input;
-        let rendered = renderer
-            .render(messages, *options)
-            .map_err(|_| "chat messages could not be rendered".to_owned())?;
-        let seed_input = tokenizer
-            .encode(&rendered)
-            .map_err(|_| "benchmark input could not be tokenized")?;
+        let tokenizer = matches!(&request.input, BenchmarkInput::Messages { .. })
+            .then(|| self.tokenizer())
+            .transpose()?;
+        let renderer = matches!(&request.input, BenchmarkInput::Messages { .. })
+            .then(|| self.renderer())
+            .transpose()?;
+        let seed_input = match (&request.input, &renderer, &tokenizer) {
+            (BenchmarkInput::TokenIds(ids), None, None) => ids.clone(),
+            (BenchmarkInput::Messages { messages, options }, Some(renderer), Some(tokenizer)) => {
+                let rendered = renderer
+                    .render(messages, *options)
+                    .map_err(|_| "chat messages could not be rendered".to_owned())?;
+                tokenizer
+                    .encode(&rendered)
+                    .map_err(|_| "benchmark input could not be tokenized")?
+            }
+            _ => return Err("benchmark lane and input shape do not match".to_owned()),
+        };
         if seed_input.is_empty() {
             return Err("benchmark input token IDs must not be empty".to_owned());
         }
@@ -1685,6 +1881,13 @@ impl ModelFrontendBackend for ProductionBackend {
             .ok_or_else(|| "benchmark state capacity overflowed".to_owned())?;
         let model_load_start_ns = timing.model_load_start_ns();
         let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
+        let embedded_fp8 = matches!(
+            &self.source,
+            QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
+        );
+        let embedded_fp8_provider = embedded_fp8
+            .then(|| select_cli_gguf_fp8_provider(&request.target))
+            .transpose()?;
         let nvfp4_requested = request.fp8_provider == Some(CliFp8Provider::Nvfp4PackedDequant);
         let nvfp4_sidecar = match (
             nvfp4_requested,
@@ -1741,7 +1944,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     input_len,
                     state_capacity,
                     &request.target,
-                    KvCacheEncoding::Fp16,
+                    request.kv_cache_encoding,
                 ),
                 _ => unreachable!("quantized provider selection validated sidecar state"),
             }
@@ -1858,7 +2061,7 @@ impl ModelFrontendBackend for ProductionBackend {
                         input_len,
                         state_capacity,
                         &request.target,
-                        KvCacheEncoding::Fp16,
+                        request.kv_cache_encoding,
                     ),
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
@@ -1958,13 +2161,22 @@ impl ModelFrontendBackend for ProductionBackend {
 
             let run_sample = |sample_index: u32| -> Result<Value, String> {
                 let request_start_ns = timing.now_ns();
-                let BenchmarkInput::Messages { messages, options } = &request.input;
-                let rendered = renderer
-                    .render(messages, *options)
-                    .map_err(|_| "chat messages could not be rendered".to_owned())?;
-                let input = tokenizer
-                    .encode(&rendered)
-                    .map_err(|_| "benchmark input could not be tokenized".to_owned())?;
+                let input = match (&request.input, &renderer, &tokenizer) {
+                    (BenchmarkInput::TokenIds(ids), None, None) => ids.clone(),
+                    (
+                        BenchmarkInput::Messages { messages, options },
+                        Some(renderer),
+                        Some(tokenizer),
+                    ) => {
+                        let rendered = renderer
+                            .render(messages, *options)
+                            .map_err(|_| "chat messages could not be rendered".to_owned())?;
+                        tokenizer
+                            .encode(&rendered)
+                            .map_err(|_| "benchmark input could not be tokenized".to_owned())?
+                    }
+                    _ => return Err("benchmark lane and input shape do not match".to_owned()),
+                };
                 validate_fixed_input_token_ids(seed_input.as_slice(), input.as_slice())?;
                 let graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
                     build_qwen35_nvfp4_graph(
@@ -1995,9 +2207,13 @@ impl ModelFrontendBackend for ProductionBackend {
                             input_len,
                             state_capacity,
                         ),
-                        (None, None) => {
-                            build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                        }
+                        (None, None) => self.build_plain_graph(
+                            &plan,
+                            input_len,
+                            state_capacity,
+                            &request.target,
+                            request.kv_cache_encoding,
+                        ),
                         _ => unreachable!("quantized provider selection validated sidecar state"),
                     }
                 }
@@ -2160,12 +2376,63 @@ impl ModelFrontendBackend for ProductionBackend {
             let final_memory = allocation_snapshot_value(final_snapshot);
             validate_resident_drop_snapshot(&final_memory)?;
             validate_peak_vram_snapshot(&final_memory, model_resident_high_water_bytes)?;
-            let lane_definition =
-                "CLI end-to-end: request start includes chat render and tokenizer encode";
+            let (lane, lane_definition, tokenizer_enabled, render_enabled) = match request.lane {
+                BenchmarkLane::Direct => (
+                    "direct",
+                    "pretokenized direct engine: request start excludes render/tokenize",
+                    false,
+                    false,
+                ),
+                BenchmarkLane::RenderTokenize => (
+                    "render-tokenize",
+                    "CLI end-to-end: request start includes chat render and tokenizer encode",
+                    true,
+                    true,
+                ),
+            };
+            let kv_cache_encoding = match request.kv_cache_encoding {
+                KvCacheEncoding::Fp16 => "fp16",
+                KvCacheEncoding::Fp8E4M3Fn => "fp8",
+                KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static",
+                KvCacheEncoding::Nvfp4 => "nvfp4",
+            };
+            let config = if request.lane == BenchmarkLane::Direct {
+                json!({
+                    "input_token_ids": seed_input.as_slice(),
+                    "input_token_count": seed_input.len(),
+                    "max_new_tokens": request.max_new_tokens,
+                    "greedy": request.greedy,
+                    "warmups": request.warmups,
+                    "measured": request.measured,
+                    "lane": lane,
+                    "tokenizer": tokenizer_enabled,
+                    "render": render_enabled,
+                    "kv_cache_encoding": kv_cache_encoding,
+                    "stop_policy": {
+                        "stop_token_ids": [248046, 248044],
+                        "visible_stop_tokens": false,
+                    },
+                })
+            } else {
+                json!({
+                    "input_token_ids": seed_input.as_slice(),
+                    "input_token_count": seed_input.len(),
+                    "max_new_tokens": request.max_new_tokens,
+                    "greedy": request.greedy,
+                    "warmups": request.warmups,
+                    "measured": request.measured,
+                    "tokenizer": tokenizer_enabled,
+                    "render": render_enabled,
+                    "stop_policy": {
+                        "stop_token_ids": [248046, 248044],
+                        "visible_stop_tokens": false,
+                    },
+                })
+            };
             Ok(json!({
                 "benchmark_schema_version": request.lane.schema_version(),
                 "state": "PASS",
-                "lane": "render-tokenize",
+                "lane": lane,
                 "lane_definition": lane_definition,
                 "row": {
                     "row_id": request.row_id,
@@ -2200,20 +2467,7 @@ impl ModelFrontendBackend for ProductionBackend {
                         .ok_or_else(|| "model load duration underflowed".to_owned())?,
                     "load_count": 1,
                 },
-                "config": {
-                    "input_token_ids": seed_input.as_slice(),
-                    "input_token_count": seed_input.len(),
-                    "max_new_tokens": request.max_new_tokens,
-                    "greedy": request.greedy,
-                    "warmups": request.warmups,
-                    "measured": request.measured,
-                    "tokenizer": true,
-                    "render": true,
-                    "stop_policy": {
-                        "stop_token_ids": [248046, 248044],
-                        "visible_stop_tokens": false,
-                    },
-                },
+                "config": config,
                 "memory": {
                     "model_ready": model_ready_memory,
                     "after_model_drop": final_memory,
@@ -2234,8 +2488,10 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
-                    "weight_encoding": match fp8_provider { Some(CliFp8Provider::ConvertedBf16) => "bf16-converted-from-ocp-e4m3fn", Some(CliFp8Provider::NativeFnuz) => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", Some(CliFp8Provider::Nvfp4PackedDequant) => "nvfp4-e2m1-block16-e4m3fn-tensor-f32", Some(_) => "ocp-e4m3fn-outer-f32", None => "bf16" },
-                    "fp8_provider": fp8_provider.map(CliFp8Provider::label),
+                    "weight_encoding": cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider)),
+                    "fp8_provider": embedded_fp8_provider
+                        .map(cli_gguf_fp8_provider_label)
+                        .or_else(|| fp8_provider.map(CliFp8Provider::label)),
                     "request_model_load_count": 0,
                     "model_reused": true,
                     "sample_count": request.warmups + request.measured,
@@ -2364,6 +2620,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut skip_special_tokens = false;
     let mut prompt = None;
     let mut max_new_tokens = None;
+    let mut prefill_chunk_tokens = None;
+    let mut mtp_draft_width = None;
     let mut device_index = None;
     let mut target = None;
     let mut kv_cache_encoding = None;
@@ -2406,6 +2664,14 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 let value = take_value(&mut arguments, "--tokens")?;
                 set_once(&mut token_ids, parse_token_ids(&value)?, "--tokens")?;
             }
+            "--input-token-ids" if command == "benchmark" => {
+                let value = take_value(&mut arguments, "--input-token-ids")?;
+                set_once(
+                    &mut token_ids,
+                    parse_token_ids(&value)?,
+                    "--input-token-ids",
+                )?;
+            }
             "--skip-special-tokens" if command == "decode" => {
                 if skip_special_tokens {
                     return Err("duplicate --skip-special-tokens".to_owned());
@@ -2442,6 +2708,36 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 }
                 set_once(&mut max_new_tokens, parsed, "--max-new-tokens")?;
             }
+            "--prefill-chunk-tokens" if command == "generate" => {
+                let value = take_value(&mut arguments, "--prefill-chunk-tokens")?;
+                if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
+                    return Err("--prefill-chunk-tokens must be an unsigned decimal U64".to_owned());
+                }
+                let parsed = value.parse::<u64>().map_err(|_| {
+                    "--prefill-chunk-tokens must be an unsigned decimal U64".to_owned()
+                })?;
+                if parsed == 0 || parsed > MAX_PREFILL_CHUNK_TOKENS {
+                    return Err(format!(
+                        "--prefill-chunk-tokens must be in [1,{MAX_PREFILL_CHUNK_TOKENS}]"
+                    ));
+                }
+                set_once(&mut prefill_chunk_tokens, parsed, "--prefill-chunk-tokens")?;
+            }
+            "--mtp-draft-width" if command == "generate" => {
+                let value = take_value(&mut arguments, "--mtp-draft-width")?;
+                if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
+                    return Err("--mtp-draft-width must be an unsigned decimal U8".to_owned());
+                }
+                let parsed = value
+                    .parse::<u8>()
+                    .map_err(|_| "--mtp-draft-width must be an unsigned decimal U8".to_owned())?;
+                if parsed > MAX_MTP_DRAFT_WIDTH {
+                    return Err(format!(
+                        "--mtp-draft-width must be in [0,{MAX_MTP_DRAFT_WIDTH}]"
+                    ));
+                }
+                set_once(&mut mtp_draft_width, parsed, "--mtp-draft-width")?;
+            }
             "--device-index" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--device-index")?;
                 if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
@@ -2459,7 +2755,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 }
                 set_once(&mut target, value, "--target")?;
             }
-            "--kv-cache-encoding" if command == "generate" => {
+            "--kv-cache-encoding" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--kv-cache-encoding")?;
                 let parsed = match value.as_str() {
                     "fp16" => KvCacheEncoding::Fp16,
@@ -2532,8 +2828,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             "--lane" if command == "benchmark" => {
                 let value = take_value(&mut arguments, "--lane")?;
                 let parsed = match value.as_str() {
+                    "direct" => BenchmarkLane::Direct,
                     "render-tokenize" => BenchmarkLane::RenderTokenize,
-                    _ => return Err("--lane must be render-tokenize".to_owned()),
+                    _ => return Err("--lane must be direct or render-tokenize".to_owned()),
                 };
                 set_once(&mut benchmark_lane, parsed, "--lane")?;
             }
@@ -2665,6 +2962,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 image_paths,
                 max_new_tokens: max_new_tokens
                     .ok_or_else(|| "generate requires --max-new-tokens".to_owned())?,
+                prefill_chunk_tokens,
+                mtp_draft_width,
                 sampling: SamplingParametersV1::new(
                     if greedy {
                         0.0
@@ -2703,19 +3002,54 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             }
             let model_size =
                 benchmark_model_size.ok_or_else(|| "benchmark requires --model-size".to_owned())?;
-            let row_id = benchmark_row_id.unwrap_or_else(|| "cli-render-tokenize".to_owned());
-            let case_id = benchmark_case_id.unwrap_or_else(|| "render-tokenize".to_owned());
-            if messages.is_empty() {
+            if lane == BenchmarkLane::RenderTokenize
+                && kv_cache_encoding.is_some()
+                && kv_cache_encoding != Some(KvCacheEncoding::Fp16)
+            {
                 return Err(
-                    "benchmark render-tokenize lane requires --message ROLE:CONTENT".to_owned(),
+                    "benchmark render-tokenize lane requires --kv-cache-encoding fp16".to_owned(),
                 );
             }
-            let input = BenchmarkInput::Messages {
-                messages,
-                options: Qwen35RenderOptionsV1 {
-                    add_generation_prompt: true,
-                    thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
-                },
+            let row_id = benchmark_row_id.unwrap_or_else(|| match lane {
+                BenchmarkLane::Direct => "cli-direct".to_owned(),
+                BenchmarkLane::RenderTokenize => "cli-render-tokenize".to_owned(),
+            });
+            let case_id = benchmark_case_id.unwrap_or_else(|| match lane {
+                BenchmarkLane::Direct => "direct".to_owned(),
+                BenchmarkLane::RenderTokenize => "render-tokenize".to_owned(),
+            });
+            let input = match lane {
+                BenchmarkLane::Direct => {
+                    if !messages.is_empty() || thinking.is_some() {
+                        return Err(
+                            "benchmark direct lane accepts only --input-token-ids".to_owned()
+                        );
+                    }
+                    BenchmarkInput::TokenIds(token_ids.ok_or_else(|| {
+                        "benchmark direct lane requires --input-token-ids IDS".to_owned()
+                    })?)
+                }
+                BenchmarkLane::RenderTokenize => {
+                    if token_ids.is_some() {
+                        return Err(
+                            "benchmark render-tokenize lane does not accept --input-token-ids"
+                                .to_owned(),
+                        );
+                    }
+                    if messages.is_empty() {
+                        return Err(
+                            "benchmark render-tokenize lane requires --message ROLE:CONTENT"
+                                .to_owned(),
+                        );
+                    }
+                    BenchmarkInput::Messages {
+                        messages,
+                        options: Qwen35RenderOptionsV1 {
+                            add_generation_prompt: true,
+                            thinking: thinking.unwrap_or(ThinkingModeV1::TemplateDefault),
+                        },
+                    }
+                }
             };
             Operation::Benchmark(BenchmarkRequest {
                 lane,
@@ -2731,6 +3065,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 greedy,
                 warmups,
                 measured,
+                kv_cache_encoding: kv_cache_encoding.unwrap_or(KvCacheEncoding::Fp16),
                 fp8_manifest,
                 fp8_artifact,
                 fp8_provider,
@@ -2756,6 +3091,122 @@ fn parse_bounded_count(value: &str, flag: &str) -> Result<u32, String> {
         return Err(format!("{flag} must be in [0,100]"));
     }
     Ok(parsed)
+}
+
+fn cli_prefill_chunk_candidates(
+    explicit_tokens: Option<u64>,
+    total_memory_bytes: u64,
+    input_tokens: u64,
+) -> Result<Vec<u64>, String> {
+    if input_tokens == 0 {
+        return Err("prefill chunk selection requires non-zero prompt tokens".to_owned());
+    }
+    if let Some(tokens) = explicit_tokens {
+        if tokens == 0 || tokens > MAX_PREFILL_CHUNK_TOKENS {
+            return Err(format!(
+                "--prefill-chunk-tokens must be in [1,{MAX_PREFILL_CHUNK_TOKENS}]"
+            ));
+        }
+        // Keep short prompts unpadded, matching the automatic selector's
+        // effective-row policy. The explicit path still has exactly one
+        // candidate, so placement failure cannot fall back to another size.
+        return Ok(vec![input_tokens.min(tokens)]);
+    }
+    qwen_prefill_chunk_candidates(total_memory_bytes, input_tokens)
+        .map_err(|error| error.to_string())
+}
+
+fn cli_state_capacity_with_mtp_slack(
+    logical_state_capacity: u64,
+    effective_width: Option<u8>,
+) -> Result<(u64, u64), String> {
+    let slack_tokens = effective_width.map(u64::from).unwrap_or(0);
+    let allocated_state_capacity = logical_state_capacity
+        .checked_add(slack_tokens)
+        .ok_or_else(|| "MTP state capacity overflowed".to_owned())?;
+    if allocated_state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(format!(
+            "MTP state capacity {allocated_state_capacity} exceeds runtime context limit {QWEN_RUNTIME_MAX_CONTEXT_TOKENS}"
+        ));
+    }
+    Ok((allocated_state_capacity, slack_tokens))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CliMtpPlan {
+    selection: &'static str,
+    enabled: bool,
+    requested_width: Option<u8>,
+    effective_width: Option<u8>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_cli_mtp_plan(
+    requested_width: Option<u8>,
+    has_images: bool,
+    has_sidecar: bool,
+    embedded_fp8: bool,
+    target: &str,
+    kv_cache_encoding: KvCacheEncoding,
+    sampling: SamplingParametersV1,
+    model_fingerprint: &str,
+) -> Result<CliMtpPlan, String> {
+    match requested_width {
+        Some(0) => Ok(CliMtpPlan {
+            selection: "target-only",
+            enabled: false,
+            requested_width,
+            effective_width: None,
+        }),
+        Some(width) => {
+            if width > MAX_MTP_DRAFT_WIDTH {
+                return Err(format!(
+                    "--mtp-draft-width must be in [0,{MAX_MTP_DRAFT_WIDTH}]"
+                ));
+            }
+            let incompatibility = if has_images {
+                Some("vision requests have no verified Qwen MTP executor path")
+            } else if has_sidecar {
+                Some("FP8/NVFP4 sidecar weights have no verified Qwen MTP executor path")
+            } else if target != "gfx1201" && target != "gfx942" {
+                Some("forced MTP is reviewed only for exact gfx1201 or gfx942")
+            } else if embedded_fp8 && kv_cache_encoding != KvCacheEncoding::Fp8E4M3Fn {
+                Some("embedded FP8 forced MTP requires the dynamic FP8 target KV cache encoding")
+            } else if !embedded_fp8 && kv_cache_encoding != KvCacheEncoding::Fp16 {
+                Some("BF16 forced MTP requires the FP16 KV cache encoding")
+            } else if sampling.requires_logits() {
+                Some("forced MTP requires greedy sampling without logits")
+            } else if model_fingerprint != sllm_core::QWEN35_4B_FINGERPRINT {
+                Some("forced MTP requires the reviewed fixed Qwen3.5-4B model")
+            } else {
+                None
+            };
+            if let Some(reason) = incompatibility {
+                return Err(format!("forced MTP is incompatible: {reason}"));
+            }
+            Ok(CliMtpPlan {
+                selection: "forced",
+                enabled: true,
+                requested_width,
+                effective_width: Some(width),
+            })
+        }
+        None => {
+            let enabled = !has_images
+                && !has_sidecar
+                && !embedded_fp8
+                && target == "gfx1201"
+                && kv_cache_encoding == KvCacheEncoding::Fp16
+                && !sampling.requires_logits()
+                && model_fingerprint == sllm_core::QWEN35_4B_FINGERPRINT;
+            Ok(CliMtpPlan {
+                selection: "auto",
+                enabled,
+                requested_width: None,
+                effective_width: enabled.then_some(1),
+            })
+        }
+    }
 }
 
 fn parse_f32(value: &str, flag: &str) -> Result<f32, String> {
@@ -2834,6 +3285,35 @@ mod tests {
             select_cli_fp8_provider(true, None, "gfx942").unwrap(),
             Some(CliFp8Provider::NativeFnuz)
         );
+    }
+
+    #[test]
+    fn embedded_gguf_fp8_provider_accepts_only_verified_native_targets() {
+        assert_eq!(
+            select_cli_gguf_fp8_provider("gfx1201").unwrap(),
+            CliFp8Provider::Native
+        );
+        assert_eq!(
+            select_cli_gguf_fp8_provider("gfx942").unwrap(),
+            CliFp8Provider::NativeFnuz
+        );
+        assert_eq!(
+            cli_fp8_dtype(select_cli_gguf_fp8_provider("gfx1201").unwrap()),
+            sllm_core::DType::F8E4M3Fn
+        );
+        assert_eq!(
+            cli_fp8_dtype(select_cli_gguf_fp8_provider("gfx942").unwrap()),
+            sllm_core::DType::F8E4M3FnuZ
+        );
+    }
+
+    #[test]
+    fn embedded_gguf_fp8_provider_rejects_rdna2_and_non_exact_targets() {
+        for target in ["gfx1030", "gfx1200", "gfx942:sramecc+:xnack-", "unknown"] {
+            let error = select_cli_gguf_fp8_provider(target).unwrap_err();
+            assert!(error.contains(target), "{error}");
+            assert!(error.contains("native-fnuz"), "{error}");
+        }
     }
     use sllm_core::{SamplingError, SamplingRandomSource};
     use sllm_frontend::{
@@ -3010,23 +3490,46 @@ mod tests {
             request: &BenchmarkRequest,
             timing: BenchmarkTiming,
         ) -> Result<Value, String> {
-            assert_eq!(request.lane, BenchmarkLane::RenderTokenize);
-            assert!(matches!(request.input, BenchmarkInput::Messages { .. }));
             assert_eq!(request.row_id, "host-test");
             assert_eq!(request.model_size, "4B");
             assert_eq!(request.case_id, "host-test");
             assert_eq!(request.max_new_tokens, 3);
             assert_eq!(request.warmups, 3);
             assert_eq!(request.measured, 10);
+            let (lane, lane_definition, tokenizer, render) = match request.lane {
+                BenchmarkLane::Direct => {
+                    assert!(matches!(request.input, BenchmarkInput::TokenIds(_)));
+                    (
+                        "direct",
+                        "pretokenized direct engine: request start excludes render/tokenize",
+                        false,
+                        false,
+                    )
+                }
+                BenchmarkLane::RenderTokenize => {
+                    assert!(matches!(request.input, BenchmarkInput::Messages { .. }));
+                    (
+                        "render-tokenize",
+                        "CLI end-to-end: request start includes chat render and tokenizer encode",
+                        true,
+                        true,
+                    )
+                }
+            };
+            let config = if request.lane == BenchmarkLane::Direct {
+                json!({"lane": lane, "warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render, "kv_cache_encoding": "fp16"})
+            } else {
+                json!({"warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render})
+            };
             Ok(json!({
-                "benchmark_schema_version": RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION,
+                "benchmark_schema_version": request.lane.schema_version(),
                 "state": "PASS",
-                "lane": "render-tokenize",
-                "lane_definition": "pretokenized direct engine: request start excludes render/tokenize",
+                "lane": lane,
+                "lane_definition": lane_definition,
                 "row": {"row_id": request.row_id, "model_size": request.model_size, "case_id": request.case_id, "input_token_ids": [1, 3, 17], "input_token_count": 3, "requested_output_tokens": 3},
                 "identities": {"target": request.target, "device_index": request.device_index},
                 "model_load": {"event": "model_load", "start_ns": timing.model_load_start_ns(), "model_ready_ns": 1, "duration_ns": 1, "load_count": 1},
-                "config": {"warmups": request.warmups, "measured": request.measured, "tokenizer": false, "render": false},
+                "config": config,
                 "memory": {},
                 "audit": {"model_load_count": 1, "request_model_load_count": 0, "model_reused": true},
                 "cleanup": {},
@@ -3266,6 +3769,247 @@ mod tests {
     }
 
     #[test]
+    fn prefill_chunk_override_is_bounded_and_preserves_auto_selection() {
+        let common = [
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--prompt",
+            "abc",
+            "--max-new-tokens",
+            "3",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--greedy",
+        ];
+        let omitted = parse_args("generate", &common).unwrap();
+        assert!(matches!(
+            omitted.operation,
+            Operation::Generate(GenerateRequest {
+                prefill_chunk_tokens: None,
+                ..
+            })
+        ));
+        for value in [512_u64, 2_048, 4_096, 8_192, 16_384] {
+            let mut args = common.to_vec();
+            let value_string = value.to_string();
+            args.extend(["--prefill-chunk-tokens", value_string.as_str()]);
+            let request = parse_args("generate", &args).unwrap();
+            assert!(matches!(
+                request.operation,
+                Operation::Generate(GenerateRequest {
+                    prefill_chunk_tokens: Some(parsed),
+                    ..
+                }) if parsed == value
+            ));
+        }
+        for value in ["0", "16385", "-1", "not-a-number"] {
+            let mut args = common.to_vec();
+            args.extend(["--prefill-chunk-tokens", value]);
+            assert!(parse_args("generate", &args).is_err(), "value {value}");
+        }
+        assert_eq!(
+            cli_prefill_chunk_candidates(Some(512), 32 * 1024 * 1024 * 1024, 10_001).unwrap(),
+            [512]
+        );
+        assert_eq!(
+            cli_prefill_chunk_candidates(None, 32 * 1024 * 1024 * 1024, 10_001).unwrap(),
+            qwen_prefill_chunk_candidates(32 * 1024 * 1024 * 1024, 10_001).unwrap()
+        );
+    }
+
+    #[test]
+    fn mtp_draft_width_parse_and_admission_are_fail_closed() {
+        let common = [
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--prompt",
+            "abc",
+            "--max-new-tokens",
+            "3",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--greedy",
+        ];
+        let omitted = parse_args("generate", &common).unwrap();
+        assert!(matches!(
+            omitted.operation,
+            Operation::Generate(GenerateRequest {
+                mtp_draft_width: None,
+                ..
+            })
+        ));
+        for value in [0_u8, 1, 8] {
+            let mut args = common.to_vec();
+            let value_string = value.to_string();
+            args.extend(["--mtp-draft-width", value_string.as_str()]);
+            let request = parse_args("generate", &args).unwrap();
+            assert!(matches!(
+                request.operation,
+                Operation::Generate(GenerateRequest {
+                    mtp_draft_width: Some(parsed),
+                    ..
+                }) if parsed == value
+            ));
+        }
+        for value in ["9", "255", "-1", "not-a-number"] {
+            let mut args = common.to_vec();
+            args.extend(["--mtp-draft-width", value]);
+            assert!(parse_args("generate", &args).is_err(), "value {value}");
+        }
+
+        let sampling = SamplingParametersV1::new(0.0, 1.0, 0.0, 0.0).unwrap();
+        let auto = resolve_cli_mtp_plan(
+            None,
+            false,
+            false,
+            false,
+            "gfx1201",
+            KvCacheEncoding::Fp16,
+            sampling,
+            sllm_core::QWEN35_4B_FINGERPRINT,
+        )
+        .unwrap();
+        assert_eq!(auto.selection, "auto");
+        assert!(auto.enabled);
+        assert_eq!(auto.effective_width, Some(1));
+        let auto_gfx942 = resolve_cli_mtp_plan(
+            None,
+            false,
+            false,
+            false,
+            "gfx942",
+            KvCacheEncoding::Fp16,
+            sampling,
+            sllm_core::QWEN35_4B_FINGERPRINT,
+        )
+        .unwrap();
+        assert_eq!(auto_gfx942.selection, "auto");
+        assert!(!auto_gfx942.enabled);
+        assert_eq!(auto_gfx942.effective_width, None);
+
+        let forced = resolve_cli_mtp_plan(
+            Some(8),
+            false,
+            false,
+            false,
+            "gfx942",
+            KvCacheEncoding::Fp16,
+            sampling,
+            sllm_core::QWEN35_4B_FINGERPRINT,
+        )
+        .unwrap();
+        assert_eq!(forced.selection, "forced");
+        assert!(forced.enabled);
+        assert_eq!(forced.effective_width, Some(8));
+
+        for target in ["gfx1201", "gfx942"] {
+            let embedded_fp8_forced = resolve_cli_mtp_plan(
+                Some(2),
+                false,
+                false,
+                true,
+                target,
+                KvCacheEncoding::Fp8E4M3Fn,
+                sampling,
+                sllm_core::QWEN35_4B_FINGERPRINT,
+            )
+            .unwrap();
+            assert_eq!(embedded_fp8_forced.selection, "forced");
+            assert!(embedded_fp8_forced.enabled);
+            assert_eq!(embedded_fp8_forced.effective_width, Some(2));
+        }
+
+        let target_only = resolve_cli_mtp_plan(
+            Some(0),
+            true,
+            true,
+            true,
+            "unsupported",
+            KvCacheEncoding::Nvfp4,
+            SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap(),
+            "unreviewed",
+        )
+        .unwrap();
+        assert_eq!(target_only.selection, "target-only");
+        assert!(!target_only.enabled);
+        assert_eq!(target_only.effective_width, None);
+
+        for (target, kv, expected) in [
+            ("gfx1030", KvCacheEncoding::Fp16, "exact gfx1201 or gfx942"),
+            ("gfx942", KvCacheEncoding::Fp8E4M3Fn, "FP16 KV"),
+        ] {
+            let error = resolve_cli_mtp_plan(
+                Some(1),
+                false,
+                false,
+                false,
+                target,
+                kv,
+                sampling,
+                sllm_core::QWEN35_4B_FINGERPRINT,
+            )
+            .unwrap_err();
+            assert!(error.contains(expected), "{error}");
+        }
+        for kv in [
+            KvCacheEncoding::Fp16,
+            KvCacheEncoding::Fp8E4M3FnStatic,
+            KvCacheEncoding::Nvfp4,
+        ] {
+            let error = resolve_cli_mtp_plan(
+                Some(1),
+                false,
+                false,
+                true,
+                "gfx942",
+                kv,
+                sampling,
+                sllm_core::QWEN35_4B_FINGERPRINT,
+            )
+            .unwrap_err();
+            assert!(error.contains("dynamic FP8"), "{error}");
+        }
+        let error = resolve_cli_mtp_plan(
+            Some(1),
+            false,
+            true,
+            true,
+            "gfx942",
+            KvCacheEncoding::Fp8E4M3Fn,
+            sampling,
+            sllm_core::QWEN35_4B_FINGERPRINT,
+        )
+        .unwrap_err();
+        assert!(error.contains("sidecar"), "{error}");
+    }
+
+    #[test]
+    fn mtp_state_capacity_adds_bounded_slack_without_truncating_budget() {
+        for width in [1_u8, 2, 8] {
+            assert_eq!(
+                cli_state_capacity_with_mtp_slack(17, Some(width)).unwrap(),
+                (17 + u64::from(width), u64::from(width))
+            );
+        }
+        assert_eq!(
+            cli_state_capacity_with_mtp_slack(17, None).unwrap(),
+            (17, 0)
+        );
+        assert!(cli_state_capacity_with_mtp_slack(u64::MAX, Some(1)).is_err());
+        assert!(
+            cli_state_capacity_with_mtp_slack(QWEN_RUNTIME_MAX_CONTEXT_TOKENS, Some(1)).is_err()
+        );
+    }
+
+    #[test]
     fn greedy_controller_excludes_stop_tokens_and_stops_exactly_at_budget() {
         let policy = qwen_stop_policy();
 
@@ -3416,14 +4160,60 @@ mod tests {
                     "--greedy",
                 ],
             ),
+            (
+                "benchmark",
+                vec![
+                    "--gguf",
+                    "x",
+                    "--derived-lock",
+                    "y",
+                    "--lane",
+                    "direct",
+                    "--row-id",
+                    "host-test",
+                    "--model-size",
+                    "4B",
+                    "--case-id",
+                    "host-test",
+                    "--input-token-ids",
+                    "1,3,17",
+                    "--max-new-tokens",
+                    "3",
+                    "--device-index",
+                    "0",
+                    "--target",
+                    "gfx1030",
+                    "--greedy",
+                ],
+            ),
         ];
         for (command, args) in cases {
             let request = parse_args(command, &args).unwrap();
-            let output = execute(command, request.operation, &TinyBackend).unwrap();
+            let output = if command == "benchmark" {
+                execute_with_timing(
+                    command,
+                    request.operation,
+                    &TinyBackend,
+                    Some(BenchmarkTiming::start()),
+                )
+                .unwrap()
+            } else {
+                execute(command, request.operation, &TinyBackend).unwrap()
+            };
             let document: Value = serde_json::from_str(&output).unwrap();
-            assert_eq!(document["command"], command);
-            assert_eq!(document["result"]["kind"], command);
-            assert_eq!(document["state"], "PASS");
+            if command == "benchmark" {
+                assert_eq!(document["lane"], "direct");
+                assert_eq!(
+                    document["benchmark_schema_version"],
+                    "engine-performance-direct-v1"
+                );
+                assert_eq!(document["config"]["lane"], "direct");
+                assert_eq!(document["config"]["kv_cache_encoding"], "fp16");
+            } else {
+                assert_eq!(document["command"], command);
+                assert_eq!(document["result"]["kind"], command);
+                assert_eq!(document["state"], "PASS");
+            }
         }
     }
 
@@ -3463,6 +4253,145 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn benchmark_direct_lane_accepts_large_pretokenized_input_and_kv_encoding() {
+        assert_eq!(
+            BenchmarkLane::Direct.schema_version(),
+            "engine-performance-direct-v1"
+        );
+        let input_ids = std::iter::repeat_n("23066", 10_001)
+            .collect::<Vec<_>>()
+            .join(",");
+        let request = parse_args(
+            "benchmark",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--lane",
+                "direct",
+                "--model-size",
+                "4B",
+                "--case-id",
+                "long-10001",
+                "--input-token-ids",
+                input_ids.as_str(),
+                "--max-new-tokens",
+                "2",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx942",
+                "--kv-cache-encoding",
+                "fp8",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::Benchmark(BenchmarkRequest {
+                lane: BenchmarkLane::Direct,
+                input: BenchmarkInput::TokenIds(ref ids),
+                kv_cache_encoding: KvCacheEncoding::Fp8E4M3Fn,
+                ..
+            }) if ids.len() == 10_001 && ids.as_slice().iter().all(|id| *id == 23_066)
+        ));
+    }
+
+    #[test]
+    fn benchmark_lanes_reject_cross_input_shapes_and_missing_direct_ids() {
+        let common = ["--gguf", "model.gguf", "--derived-lock", "model.lock.json"];
+        let direct_with_message = [
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--lane",
+            "direct",
+            "--model-size",
+            "4B",
+            "--message",
+            "user:abc",
+            "--input-token-ids",
+            "1,3,17",
+            "--max-new-tokens",
+            "2",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--greedy",
+        ];
+        assert!(parse_args("benchmark", &direct_with_message).is_err());
+
+        let render_with_ids = [
+            common[0],
+            common[1],
+            common[2],
+            common[3],
+            "--lane",
+            "render-tokenize",
+            "--model-size",
+            "4B",
+            "--message",
+            "user:abc",
+            "--input-token-ids",
+            "1,3,17",
+            "--max-new-tokens",
+            "2",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--greedy",
+        ];
+        assert!(parse_args("benchmark", &render_with_ids).is_err());
+
+        let render_with_low_bit_kv = [
+            common[0],
+            common[1],
+            common[2],
+            common[3],
+            "--lane",
+            "render-tokenize",
+            "--model-size",
+            "4B",
+            "--message",
+            "user:abc",
+            "--max-new-tokens",
+            "2",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--kv-cache-encoding",
+            "fp8",
+            "--greedy",
+        ];
+        assert!(parse_args("benchmark", &render_with_low_bit_kv).is_err());
+
+        let direct_without_ids = [
+            common[0],
+            common[1],
+            common[2],
+            common[3],
+            "--lane",
+            "direct",
+            "--model-size",
+            "4B",
+            "--max-new-tokens",
+            "2",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--greedy",
+        ];
+        assert!(parse_args("benchmark", &direct_without_ids).is_err());
     }
 
     #[test]

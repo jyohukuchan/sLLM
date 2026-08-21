@@ -1170,6 +1170,28 @@ trait QwenProvisionSource {
         completion_timeout: Duration,
     ) -> Result<(), QwenExecutionError>;
 
+    #[allow(clippy::too_many_arguments)]
+    fn upload_weight_for_resident_dtype(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        resident_dtype: DType,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
+        let _ = resident_dtype;
+        self.upload_weight(
+            plan,
+            binding,
+            session,
+            queue,
+            destination,
+            completion_timeout,
+        )
+    }
+
     fn read_scale_bytes(
         &self,
         tensor_name: &str,
@@ -1648,7 +1670,33 @@ impl QwenProvisionSource for GgufProvisionSource {
         destination: crate::BufferRange,
         completion_timeout: Duration,
     ) -> Result<(), QwenExecutionError> {
+        self.upload_weight_for_resident_dtype(
+            plan,
+            binding,
+            session,
+            queue,
+            destination,
+            DType::F8E4M3Fn,
+            completion_timeout,
+        )
+    }
+
+    fn upload_weight_for_resident_dtype(
+        &self,
+        plan: &WeightLoadPlan,
+        binding: &QwenGraphWeightBinding,
+        session: &ExecutionSession,
+        queue: &ExecutionQueue,
+        destination: crate::BufferRange,
+        resident_dtype: DType,
+        completion_timeout: Duration,
+    ) -> Result<(), QwenExecutionError> {
         if let Some(recipe) = self.source.recipe_binding(binding.tensor_name()) {
+            if !matches!(resident_dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ) {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "GGUF FP8 recipe requires an OCP E4M3FN or FNUZ resident dtype".to_owned(),
+                ));
+            }
             let value = self
                 .source
                 .gguf()
@@ -1661,7 +1709,7 @@ impl QwenProvisionSource for GgufProvisionSource {
             let value_len = usize::try_from(value.byte_length()).map_err(|_| {
                 QwenExecutionError::InvalidRequest("GGUF FP8 value is too large".to_owned())
             })?;
-            let mut combined = self
+            let values = self
                 .source
                 .gguf()
                 .read_tensor_range(&recipe.value_tensor, 0, value_len)
@@ -1687,29 +1735,8 @@ impl QwenProvisionSource for GgufProvisionSource {
                 .gguf()
                 .read_tensor_range(&scale.tensor, 0, scale_len)
                 .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
-            match recipe.encoding {
-                crate::GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale => {
-                    combined.extend_from_slice(&scale_bytes);
-                }
-                crate::GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale => {
-                    if scale_bytes.len() % 2 != 0 {
-                        return Err(QwenExecutionError::InvalidRequest(
-                            "GGUF FP8 BF16 scale byte count is odd".to_owned(),
-                        ));
-                    }
-                    for chunk in scale_bytes.chunks_exact(2) {
-                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-                        combined.extend_from_slice(
-                            &f32::from_bits(u32::from(bits) << 16).to_le_bytes(),
-                        );
-                    }
-                }
-                _ => {
-                    return Err(QwenExecutionError::InvalidRequest(
-                        "GGUF Qwen recipe is not FP8".to_owned(),
-                    ));
-                }
-            }
+            let normalized_scales = normalize_gguf_fp8_scales(recipe.encoding, &scale_bytes)?;
+            let combined = gguf_fp8_resident_payload(&values, &normalized_scales, resident_dtype)?;
             if u64::try_from(combined.len()).ok() != Some(destination.size_bytes()) {
                 return Err(QwenExecutionError::InvalidRequest(format!(
                     "GGUF FP8 resident allocation differs for {}",
@@ -1788,6 +1815,51 @@ impl QwenProvisionSource for GgufProvisionSource {
             )));
         }
         Ok(Arc::from(bytes))
+    }
+}
+
+fn gguf_fp8_resident_payload(
+    values: &[u8],
+    normalized_scales: &[u8],
+    resident_dtype: DType,
+) -> Result<Vec<u8>, QwenExecutionError> {
+    if !matches!(resident_dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ) {
+        return Err(QwenExecutionError::InvalidRequest(
+            "GGUF FP8 recipe requires an OCP E4M3FN or FNUZ resident dtype".to_owned(),
+        ));
+    }
+    let (values, scales) = if resident_dtype == DType::F8E4M3FnuZ {
+        rebase_e4m3fn_outer_rows_to_fnuz(values, normalized_scales)?
+    } else {
+        (values.to_vec(), normalized_scales.to_vec())
+    };
+    let mut combined = values;
+    combined.extend_from_slice(&scales);
+    Ok(combined)
+}
+
+fn normalize_gguf_fp8_scales(
+    encoding: crate::GgufRecipeEncoding,
+    scale_bytes: &[u8],
+) -> Result<Vec<u8>, QwenExecutionError> {
+    match encoding {
+        crate::GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale => Ok(scale_bytes.to_vec()),
+        crate::GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale => {
+            if scale_bytes.len() % 2 != 0 {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "GGUF FP8 BF16 scale byte count is odd".to_owned(),
+                ));
+            }
+            let mut normalized = Vec::with_capacity(scale_bytes.len() * 2);
+            for chunk in scale_bytes.chunks_exact(2) {
+                let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                normalized.extend_from_slice(&f32::from_bits(u32::from(bits) << 16).to_le_bytes());
+            }
+            Ok(normalized)
+        }
+        _ => Err(QwenExecutionError::InvalidRequest(
+            "GGUF Qwen recipe is not FP8".to_owned(),
+        )),
     }
 }
 
@@ -2194,12 +2266,13 @@ impl QwenResidentInner {
                 allocation.graph_view.byte_offset(),
                 resident_weight_bytes(&allocation.graph_view)?,
             )?;
-            source.upload_weight(
+            source.upload_weight_for_resident_dtype(
                 &plan,
                 binding,
                 session.as_ref(),
                 &queue,
                 destination,
+                allocation.graph_view.dtype(),
                 completion_timeout,
             )?;
         }
@@ -2354,12 +2427,13 @@ impl QwenExecutionCore {
                 allocation.graph_view.byte_offset(),
                 resident_weight_bytes(&allocation.graph_view)?,
             )?;
-            source.upload_weight(
+            source.upload_weight_for_resident_dtype(
                 &plan,
                 binding,
                 session.as_ref(),
                 &queue,
                 destination,
+                allocation.graph_view.dtype(),
                 completion_timeout,
             )?;
         }
@@ -5936,6 +6010,43 @@ mod tests {
         }
         assert!(rebase_e4m3fn_outer_rows_to_fnuz(&[0x7f], &1.0_f32.to_le_bytes()).is_err());
         assert!(rebase_e4m3fn_outer_rows_to_fnuz(&[0], &(-1.0_f32).to_le_bytes()).is_err());
+    }
+
+    #[test]
+    fn gguf_fp8_resident_payload_selects_ocp_or_fnuz_by_resident_dtype() {
+        let values = [0x00, 0x01, 0x7e, 0x80, 0xfe];
+        let source_scale = 1.25_f32;
+        let f32_scales = normalize_gguf_fp8_scales(
+            crate::GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale,
+            &source_scale.to_le_bytes(),
+        )
+        .unwrap();
+        let bf16_bits = (source_scale.to_bits() >> 16) as u16;
+        let bf16_scales = normalize_gguf_fp8_scales(
+            crate::GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale,
+            &bf16_bits.to_le_bytes(),
+        )
+        .unwrap();
+        assert_eq!(f32_scales, bf16_scales);
+
+        let ocp = gguf_fp8_resident_payload(&values, &f32_scales, DType::F8E4M3Fn).unwrap();
+        assert_eq!(ocp, [&values[..], &f32_scales[..]].concat());
+
+        let fnuz = gguf_fp8_resident_payload(&values, &bf16_scales, DType::F8E4M3FnuZ).unwrap();
+        let (fnuz_values, fnuz_scales) = fnuz.split_at(values.len());
+        let fnuz_scale = f32::from_le_bytes(fnuz_scales.try_into().unwrap());
+        assert_eq!(fnuz_scale, 2.5);
+        for (&source, &destination) in values.iter().zip(fnuz_values) {
+            assert_eq!(
+                decode_e4m3fn(source) * source_scale,
+                crate::decode_e4m3fnuz(destination) * fnuz_scale,
+                "OCP byte 0x{source:02x}",
+            );
+        }
+        assert!(
+            gguf_fp8_resident_payload(&values, &f32_scales, DType::Bf16).is_err(),
+            "GGUF FP8 must reject non-FP8 resident dtypes"
+        );
     }
 
     /// Host-only source for the structural fixture. It deliberately does not

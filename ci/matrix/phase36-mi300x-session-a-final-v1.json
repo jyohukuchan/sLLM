@@ -1,0 +1,235 @@
+{
+  "schema_version": "phase36-mi300x-session-a-final-v1",
+  "state": "PASS",
+  "recorded_at": "2026-08-21",
+  "identity": {
+    "source_base_commit": "faf39339d42c837c1ff899f90b03632ac5fe57af",
+    "initial_semantic_digest": "fa2c82c936f61c897c87cee82cb92b0aa100cb0b0c766734e42d24c8df2bc892",
+    "initial_semantic_digest_scope": "historical initial-99-operator-run",
+    "final_semantic_digest": "8836bd3ec07464904a657b846c79e21f3ffb8c975b55a65dca7ea720e993a57a",
+    "final_semantic_digest_scope": "10 sorted sha256 path lines",
+    "final_native_source_sha256": "360a9e3330104bae4bed7164f105c8c51ea644a1ad779a7a03746f59669623ef",
+    "operator_summary_sha256": "5daa5869932513490c50cbb9ff330cf47fb581aa333fc1133fc0261a1192222d",
+    "operator_summary_path": "/home/hotaisle/phase36-session-a/final/operator/phase36-mi300x-session-a-summary-v1.json"
+  },
+  "hardware": {
+    "gpu": "MI300X VF x1",
+    "gpu_count": 1,
+    "uuid": "GPU-1228c84fe776f2f4",
+    "bdf": "0000:ff:00.0",
+    "actual_arch": "gfx942:sramecc+:xnack-",
+    "logical_arch": "gfx942",
+    "wavefront_size": 64,
+    "compute_units": 304,
+    "hbm_bytes": 205822885888,
+    "nps_mode": "NPS1",
+    "partition_mode": "SPX",
+    "vmm": true,
+    "vm": {
+      "hostname": "enc1-gpuvm015",
+      "region": "enc1",
+      "virtualization": "KVM",
+      "cpu_vcpus": 8,
+      "cpu_model": "Intel Xeon Platinum 8462Y+",
+      "ram_bytes": 236439953408,
+      "disk_bytes": 13194136387584
+    }
+  },
+  "software": {
+    "os": "Ubuntu 24.04.4",
+    "kernel": "6.8.0-124",
+    "amdgpu": "6.16.13",
+    "provider_path": "/opt/rocm",
+    "provider_link_target": "/etc/alternatives/rocm -> /opt/rocm-7.2.4",
+    "execution_amd_smi_metric_available": false,
+    "execution_amd_smi_metric_error": "Namespace.partition",
+    "provider_restored": true,
+    "execution": {
+      "rocm_root": "/opt/rocm",
+      "rocm_version": "7.14.0",
+      "hip_version": "7.14.60850",
+      "llvm_version": "23",
+      "temporary_bind_source": "/opt/rocm-7.2.4/core-7.14",
+      "temporary_bind_target": "/opt/rocm-7.2.4",
+      "post_provider_root": "/opt/rocm -> /opt/rocm-7.2.4"
+    }
+  },
+  "build": {
+    "build_rs_sha256": "4d65b53923a5b98df050599da768a6e9ff34f1d82ef57ff67b3779f7aaf78847",
+    "cmake_sha256": "e436c8ce2db62146c792603d1f6128c6c3b04eabc1c4a02d9cbf8e36d0068c10",
+    "gdn_source_sha256": "360a9e3330104bae4bed7164f105c8c51ea644a1ad779a7a03746f59669623ef",
+    "runner_sha256": "f2b56b03c0a7f9d2a550055cd670d76e11e3de58e2b02961aa528f8e4b274bb6",
+    "hip_architecture": "gfx942:sramecc+:xnack-",
+    "codegen_features": ["co_v6", "wave64", "xnack=off", "sramecc=on", "generic_processor_version=0"],
+    "compile_target": "gfx942",
+    "hip_target": "gfx942"
+  },
+  "artifacts": {
+    "sllm": {"sha256": "8faaeb9a4996626e8af049e9ccbbdb717e43e46a5b240ea5b98eee0e7bc0b052", "size_bytes": 12518264},
+    "server": {"sha256": "385922c556659e6c6341a41edfb4f94b7fbe97ed358f272103d5d5819bfcad20", "size_bytes": 13965224},
+    "fp8": {"sha256": "0f21cd88996f55b682ff42bb438d3309e5e3a53166797ca22d7f3c4075b1afd8", "size_bytes": 2147432},
+    "matmul": {"sha256": "9fe539d63f6e832c397cdc5505d96752d61d3d2c5be7a633924d7a4821de1b37", "size_bytes": 2127968},
+    "elementwise": {"sha256": "c7729850bb48e80344f62755260e9badff9a9801373ecdaeb30b731c4bfcf652", "size_bytes": 2084392},
+    "preprocess": {"sha256": "621472a2d7f1dcd883be467a5c8ecff419595a74d11b0f50eaace0469f4baead", "size_bytes": 2128936},
+    "kv": {"sha256": "79a7a10bc650e2dc02b50308e36980a73b0bd22a922d4cace117a409ce77a04b", "size_bytes": 2106728},
+    "full_attention": {"sha256": "bc5700ed08aa239b4d61bc4d6d788e4dc0034b98d61f9366d30c8642f4447e69", "size_bytes": 2149152},
+    "output": {"sha256": "b785359c3daec7d3328740289478dfd54e381ac24da252097415bbde4bb2b284", "size_bytes": 2087152},
+    "rmsnorm": {"sha256": "a0e02039ad686dd244cde73b59bc715085c67597022b4f9e25e1ceb1fe976b1e", "size_bytes": 2064336},
+    "gdn": {"sha256": "11a251c6603d78370f9e27c4409494fcd73828d3419d01acb82db36787563314", "size_bytes": 2131120}
+  },
+  "artifact_contract": {
+    "device_bundle": "hipv4-amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-",
+    "host_bundle": "host-x86_64-unknown-linux-gnu-",
+    "abi_version": 4,
+    "code_object_version": 6,
+    "e_flags": "0xE4C",
+    "wavefront_size": 64,
+    "logical_target": "gfx942",
+    "other_device_bundles": [],
+    "generic_targets": []
+  },
+  "wrong_target_negative": {
+    "requested_target": "gfx1201",
+    "exit_code": 1,
+    "dispatch_started": false,
+    "stderr": "matmul-g1 evidence failed: owned HIP execution-session open failed: backend status 259: requested device gcnArchName does not match exactly"
+  },
+  "stages": {
+    "A0": {"state": "PASS", "scope": "VM, hardware, and target identity"},
+    "A1": {"state": "PASS", "scope": "ROCm root and exact artifact build/load"},
+    "A2": {"state": "PASS", "scope": "tiny runtime, library probe, and profiler"},
+    "A3": {"state": "PASS", "scope": "99-case native operator matrix"},
+    "A4": {"state": "PASS", "scope": "BF16/FP8 model verify, load, reuse, and generation smoke"},
+    "A5": {"state": "PASS", "scope": "cleanup, provider restoration, and retention"}
+  },
+  "a2": {
+    "preflight": {
+      "sha256": "5ca09f19e28f0b2c0ada7e8b9bba3e2e832c5ce7c67763c19d4ef0aebd8ff149",
+      "state": "PASS",
+      "tiny_runtime": {"input": 41, "output": 42, "allocation_count": 1, "copy_count": 2, "dispatch_count": 1}
+    },
+    "fnuz_probe": {
+      "sha256": "aa371e30308ae07907af2c45f75a0f8a7a5b962e950f28b3dba4a64906fca033",
+      "state": "PASS",
+      "solution_count": 8,
+      "workspace_bytes": 0
+    },
+    "rocprof": {
+      "kernel_csv_sha256": "c07de8f1f72cd72ebbc3a0f02c65ed0097bc86ec0f17805ede5c22c305d04bf9",
+      "allocation_csv_sha256": "a411f69b5724dd55d4cce4dd0a5093b4125d00dbddf7387bbeb69833b47d2b77",
+      "increment_captured": true
+    },
+    "host_fp8_conversion_oracle": {"state": "PASS", "evidence": "relevant core tests"}
+  },
+  "operator": {
+    "state": "PASS",
+    "summary_sha256": "5daa5869932513490c50cbb9ff330cf47fb581aa333fc1133fc0261a1192222d",
+    "summary_path": "/home/hotaisle/phase36-session-a/final/operator/phase36-mi300x-session-a-summary-v1.json",
+    "expected_cases": 99,
+    "family_case_counts": [2, 17, 21, 8, 19, 16, 6, 7, 3],
+    "dispatch_counts": [4, 17, 21, 8, 19, 16, 6, 7, 6],
+    "hip_only": true,
+    "fallback_used": false,
+    "cleanup_retryable": 0,
+    "cleanup_durable": 0,
+    "all_cleanup_zero": true
+  },
+  "models": {
+    "bf16": {
+      "format": "GGUF",
+      "encoding": "BF16",
+      "sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+      "size_bytes": 9343583936,
+      "lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+      "lock_size_bytes": 1492,
+      "target": "gfx942",
+      "hip_only": true,
+      "fallback_used": false,
+      "partial": false,
+      "cleanup_retryable": 0,
+      "cleanup_durable": 0,
+      "verify": {"state": "PASS", "plan_digest": "5e6d31c89da0c6eb6c5dbc187740dc87e44194e01d4549d95a2f68586490fb28", "loadable_entries": 426, "weight_entries": 738},
+      "smoke": {
+        "hello": {"tokens": [11, 353, 2688, 4313, 310], "output": ", I'm trying to", "sha256": "62048dfa430f7b6fe53a8c5702c7c36d36a78ffc6cde396e2d465ac7cbe0ecc0"},
+        "unicode": {"tokens": [90700, 8340, 25, 271, 16], "sha256": "1fcc8ca58519a7b2e8cad33ba954ea3ac819ca6beed714129fe2cc9c995021ed"},
+        "stop": {"tokens": [11], "visible": [], "stop_match": ",", "sha256": "a8444fcf373b4bc5ffda72c043eecef9decf12ac73e03c652216930c5f2bcaa2"}
+      },
+      "benchmark": {
+        "state": "PASS", "sha256": "9dc379e3f89a29db6f040b6c17bda4c919ee0799f72e86574bf0191cab110f59", "warmups": 3, "measured": 10,
+        "total_requests": 14, "correctness_control_requests": 1, "model_load_count": 1, "model_reused": true,
+        "model_load_ns": 10826068306, "resident_bytes": 8411592192, "peak_bytes": 8477011968, "after_model_drop_bytes": 0,
+        "cleanup_retryable": 0, "cleanup_durable": 0, "hip_only": true, "target": "gfx942"
+      }
+    },
+    "fp8": {
+      "format": "GGUF",
+      "encoding": "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+      "sha256": "cf143f6c138f0e4a6372959bf348568159278202eca6081ce29346fdef1cfe0d",
+      "size_bytes": 5779142720,
+      "lock_sha256": "21b4fed31b6cf00e79e74b464f7ff8422d02292872c43d84924fa47e228e68d1",
+      "lock_size_bytes": 1770,
+      "target": "gfx942",
+      "hip_only": true,
+      "fallback_used": false,
+      "partial": false,
+      "cleanup_retryable": 0,
+      "cleanup_durable": 0,
+      "verify": {"state": "PASS", "plan_digest": "8628cf4100f54254939fa483eb8f53036b2cce4ecbf46f20f3b4e4d86fcc156f", "loadable_entries": 426, "weight_entries": 738},
+      "smoke": {
+        "hello": {"tokens": [11, 353, 1044, 4313, 310], "output": ", I am trying to", "sha256": "e36940e2ad31a40e50c7c38f51e1e8f66e3de0fe6dd142f77c563dca58336fd2"},
+        "unicode": {"tokens": [90700, 8340, 25, 271, 16], "sha256": "94dfb9233016768a4f287db6e34efb22d8b2104a0d15eac0c8a042e3c35186bf"},
+        "stop": {"tokens": [11], "visible": [], "stop_match": ",", "sha256": "30757e4ca3e3c0ebdce2ead48282926740f20e055893663c0fd948766a29896a"}
+      },
+      "benchmark": {
+        "state": "PASS", "sha256": "f80fa8ed3a68448a3eb1a59c07290fbec6df59627e28e1596a4642233c71c0db", "warmups": 3, "measured": 10,
+        "total_requests": 14, "correctness_control_requests": 1, "model_load_count": 1, "model_reused": true,
+        "model_load_ns": 16937844619, "resident_bytes": 4847029760, "peak_bytes": 4912449536, "after_model_drop_bytes": 0,
+        "cleanup_retryable": 0, "cleanup_durable": 0, "hip_only": true, "target": "gfx942"
+      }
+    },
+    "hello_difference": {
+      "classification": "N1_NUMERICAL_DIFFERENCE",
+      "bf16_tokens": [11, 353, 2688, 4313, 310],
+      "fp8_tokens": [11, 353, 1044, 4313, 310],
+      "explanation": "The BF16 and FP8 Hello prompts differ only in the target-specific N1 numerical path; Unicode and stop smoke remain identical and both paths are HIP-only with no fallback."
+    }
+  },
+  "cleanup": {
+    "state": "PASS",
+    "process_count": 0,
+    "model_handles": 0,
+    "provider_rocm_smi_gpu_processes": 0,
+    "provider_rocm_smi_vram_percent": 0,
+    "provider_amd_smi_used_vram_mb": 285,
+    "provider_amd_smi_gfx_activity_percent": 0,
+    "ecc": {"scope": "all sysfs blocks", "correctable_total": 0, "uncorrectable_total": 0},
+    "execution_amd_smi_metric_available": false,
+    "execution_amd_smi_metric_error": "Namespace.partition",
+    "post_provider_metric_available": true,
+    "provider_restored": true,
+    "cleanup_retryable": 0,
+    "cleanup_durable": 0,
+    "raw_sha256": {
+      "process": "103b5abc1190fd28e82bbd5b037a8061cd6a4b4be101f70b0d8141db2878b9d5",
+      "metric": "d0f1281d7225021e68473584c3018864d604bfc6cdcca4a8869495642dc16f72",
+      "static": "969f82968f85a5fe9259cedcc5f417e0167d43d9276071c28d6372a6c2e0f832",
+      "rocm_smi": "bac8965ba15e83ef353a92b0442556b66a06b4ccd6b0c73a6d1a08b536359dde",
+      "ras": "714b9a9f6ba5e1d1ef37cbfcb9933eafc071f924b916bc43a9fbedf13af3828f"
+    }
+  },
+  "artifact_store": {
+    "identifier": "/home/homelab1/.local/share/sllm-evidence/phase36/session-a/enc1-gpuvm015-2026-08-21/final",
+    "scope": "local VM-external"
+  },
+  "retention": {
+    "owner": "hotaisle account / local operator",
+    "purpose": "Session B",
+    "review_or_expiry_at": "2026-08-28T23:59:59+09:00",
+    "unless_extended": true,
+    "automatic_deletion_claim": false
+  },
+  "unexecuted_scope": {
+    "sessions": ["Session B", "Session C", "Session D", "Session E"],
+    "session_a_exclusions": ["9B", "10k+", "low-bit KV full matrix", "chunked prefill", "MTP", "vision", "service", "repeated performance", "multiGPU", "multiSKU", "Infinity Fabric", "P2P", "RCCL", "tensor parallel", "expert parallel", "pipeline parallel", "RDMA-RoCE", "other cloud", "other ROCm", "broad provider exploration", "TurboQuant", "Paged Attention", "DeepSeek V4", "Responses API", "Gemma", "MoE"]
+  }
+}

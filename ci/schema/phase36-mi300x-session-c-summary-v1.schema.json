@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase36-mi300x-session-c-summary-v1.schema.json",
+  "title": "Phase 36 MI300X Session C summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "recorded_at", "target", "device_index", "dry_run", "identity", "mtp", "vision_cli", "vision_lazy_residency", "openai_a6", "cleanup", "raw_outputs", "failure_count"],
+  "properties": {
+    "schema_version": {"const": "phase36-mi300x-session-c-summary-v1"},
+    "state": {"enum": ["PASS", "FAIL", "DRY_RUN"]},
+    "recorded_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "target": {"const": "gfx942"},
+    "device_index": {"type": "integer", "minimum": 0, "maximum": 255},
+    "dry_run": {"type": "boolean"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "model_fingerprint": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "mtp": {"$ref": "#/$defs/mtp"},
+    "vision_cli": {"$ref": "#/$defs/vision_cli"},
+    "vision_lazy_residency": {"$ref": "#/$defs/lazy"},
+    "openai_a6": {"$ref": "#/$defs/openai"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "raw_outputs": {"const": "raw/"},
+    "failure_count": {"type": "integer", "minimum": 0, "maximum": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity_fact": {
+      "type": "object", "additionalProperties": false, "required": ["sha256", "size_bytes"],
+      "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": ["integer", "null"], "minimum": 0}}
+    },
+    "lock_identity_fact": {
+      "type": "object", "additionalProperties": false, "required": ["sha256", "size_bytes"],
+      "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": ["integer", "null"], "minimum": 0}, "output_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false, "required": ["binary", "cli_binary", "server_binary", "model", "lock", "bf16_model", "bf16_lock", "fp8_model", "fp8_lock", "source"],
+      "properties": {"binary": {"$ref": "#/$defs/identity_fact"}, "cli_binary": {"$ref": "#/$defs/identity_fact"}, "server_binary": {"$ref": "#/$defs/identity_fact"}, "model": {"$ref": "#/$defs/identity_fact"}, "lock": {"$ref": "#/$defs/lock_identity_fact"}, "bf16_model": {"$ref": "#/$defs/identity_fact"}, "bf16_lock": {"$ref": "#/$defs/lock_identity_fact"}, "fp8_model": {"$ref": "#/$defs/identity_fact"}, "fp8_lock": {"$ref": "#/$defs/lock_identity_fact"}, "source": {"$ref": "#/$defs/identity_fact"}}
+    },
+    "metric": {
+      "type": "object", "additionalProperties": false, "required": ["state"],
+      "properties": {"state": {"enum": ["available", "unavailable"]}, "value": {"type": "number", "minimum": 0}, "reason": {"type": "string", "minLength": 1}},
+      "allOf": [
+        {"if": {"properties": {"state": {"const": "available"}}}, "then": {"required": ["value"], "not": {"required": ["reason"]}}},
+        {"if": {"properties": {"state": {"const": "unavailable"}}}, "then": {"required": ["reason"], "not": {"required": ["value"]}}}
+      ]
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["retryable_cleanup", "durable_quarantine", "terminal_zero"],
+      "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}, "terminal_zero": {"type": "boolean"}}
+    },
+    "mtp_row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "target_dtype", "target_kv", "mtp_width", "mtp_weight_dtype", "mtp_kv_dtype", "visible_output_sha256", "accepted_prefix_count", "rejected_prefix_count", "numerical_match", "state_publication_match", "rewind_replay_match", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable"],
+      "properties": {
+        "mode": {"enum": ["bf16-fp16", "fp8-fp8"]}, "target_dtype": {"enum": ["bf16", "fp8"]}, "target_kv": {"enum": ["fp16", "fp8"]}, "mtp_width": {"type": "integer", "minimum": 0, "maximum": 8}, "mtp_weight_dtype": {"anyOf": [{"const": "bf16"}, {"type": "null"}]}, "mtp_kv_dtype": {"anyOf": [{"const": "fp16"}, {"type": "null"}]}, "visible_output_sha256": {"$ref": "#/$defs/sha256"}, "accepted_prefix_count": {"type": "integer", "minimum": 0}, "rejected_prefix_count": {"type": "integer", "minimum": 0}, "numerical_match": {"const": true}, "state_publication_match": {"const": true}, "rewind_replay_match": {"const": true}, "hip_only": {"const": true}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}
+      }
+    },
+    "mtp": {
+      "type": "object", "additionalProperties": false, "required": ["expected_rows", "selected_rows", "rows", "raw_sha256", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable", "amd_smi_metric"],
+      "properties": {"expected_rows": {"const": 8}, "selected_rows": {"type": "integer", "minimum": 0, "maximum": 8}, "rows": {"type": "array", "maxItems": 8, "items": {"$ref": "#/$defs/mtp_row"}}, "raw_sha256": {"$ref": "#/$defs/sha256"}, "hip_only": {"type": "boolean"}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "amd_smi_metric": {"$ref": "#/$defs/metric"}, "model_fingerprint": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}}
+    },
+    "vision_row": {
+      "type": "object", "additionalProperties": false, "required": ["format", "asset_sha256", "image_pad_tokens", "output_sha256", "numerical_match", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable"],
+      "properties": {"format": {"enum": ["png", "jpeg", "webp"]}, "asset_sha256": {"$ref": "#/$defs/sha256"}, "image_pad_tokens": {"const": 64}, "output_sha256": {"$ref": "#/$defs/sha256"}, "numerical_match": {"const": true}, "hip_only": {"const": true}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}}
+    },
+    "vision_cli": {
+      "type": "object", "additionalProperties": false, "required": ["expected_formats", "selected_formats", "image_pad_tokens", "rows", "asset_sha256", "identical_outputs", "raw_sha256", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable", "amd_smi_metric"],
+      "properties": {"expected_formats": {"const": ["png", "jpeg", "webp"]}, "selected_formats": {"type": "integer", "minimum": 0, "maximum": 3}, "image_pad_tokens": {"const": 64}, "rows": {"type": "array", "maxItems": 3, "items": {"$ref": "#/$defs/vision_row"}}, "asset_sha256": {"type": "object", "additionalProperties": false, "properties": {"png": {"$ref": "#/$defs/sha256"}, "jpeg": {"$ref": "#/$defs/sha256"}, "webp": {"$ref": "#/$defs/sha256"}}, "maxProperties": 3}, "identical_outputs": {"type": "boolean"}, "raw_sha256": {"$ref": "#/$defs/sha256"}, "hip_only": {"type": "boolean"}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "amd_smi_metric": {"$ref": "#/$defs/metric"}, "model_fingerprint": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}}
+    },
+    "lazy_memory": {
+      "type": "object", "additionalProperties": false, "required": ["before_image_bytes", "during_image_bytes", "after_shutdown_bytes", "gtt_before_image_bytes", "gtt_peak_bytes", "gtt_after_shutdown_bytes"],
+      "properties": {"before_image_bytes": {"type": "integer", "minimum": 0}, "during_image_bytes": {"type": "integer", "minimum": 0}, "after_shutdown_bytes": {"const": 0}, "gtt_before_image_bytes": {"type": "integer", "minimum": 0}, "gtt_peak_bytes": {"type": "integer", "minimum": 0}, "gtt_after_shutdown_bytes": {"type": "integer", "minimum": 0}}
+    },
+    "lazy": {
+      "type": "object", "additionalProperties": false, "required": ["server_started", "lazy_residency", "initial_model_without_vision", "vision_resident_after_image", "vision_released_after_request", "graceful_shutdown", "memory", "raw_sha256", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable", "amd_smi_metric"],
+      "properties": {"server_started": {"type": "boolean"}, "lazy_residency": {"type": "boolean"}, "initial_model_without_vision": {"type": "boolean"}, "vision_resident_after_image": {"type": "boolean"}, "vision_released_after_request": {"type": "boolean"}, "graceful_shutdown": {"type": "boolean"}, "memory": {"$ref": "#/$defs/lazy_memory"}, "raw_sha256": {"$ref": "#/$defs/sha256"}, "hip_only": {"type": "boolean"}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "amd_smi_metric": {"$ref": "#/$defs/metric"}}
+    },
+    "openai_checks": {
+      "type": "object", "additionalProperties": false, "required": ["non_stream", "sse", "cancel", "recovery", "official_client", "reasoning_split", "stop", "seeded_sampling", "disconnect", "continuous_requests", "parallel_requests", "graceful_shutdown"],
+      "properties": {"non_stream": {"type": "boolean"}, "sse": {"type": "boolean"}, "cancel": {"type": "boolean"}, "recovery": {"type": "boolean"}, "official_client": {"type": "boolean"}, "reasoning_split": {"type": "boolean"}, "stop": {"type": "boolean"}, "seeded_sampling": {"type": "boolean"}, "disconnect": {"type": "boolean"}, "continuous_requests": {"type": "boolean"}, "parallel_requests": {"type": "boolean"}, "graceful_shutdown": {"type": "boolean"}}
+    },
+    "openai": {
+      "type": "object", "additionalProperties": false, "required": ["checks", "raw_sha256", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable", "amd_smi_metric"],
+      "properties": {"checks": {"$ref": "#/$defs/openai_checks"}, "raw_sha256": {"$ref": "#/$defs/sha256"}, "hip_only": {"type": "boolean"}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "amd_smi_metric": {"$ref": "#/$defs/metric"}, "model_fingerprint": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]}}
+    }
+  }
+}

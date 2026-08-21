@@ -16,6 +16,7 @@ use sllm_core::{
 use sllm_hip::HipBackend;
 
 const CASE_TOKENS: [usize; 6] = [1, 3, 17, 127, 128, 129];
+const PHASE12_CASE_TOKENS: [usize; 3] = [1, 3, 17];
 const QK_HEADS: usize = 16;
 const VALUE_HEADS: usize = 32;
 const HEAD_DIM: usize = 128;
@@ -28,6 +29,7 @@ const WAIT: Duration = Duration::from_secs(30);
 struct Config {
     device_index: u32,
     target: String,
+    phase12_subset: bool,
 }
 
 #[derive(Serialize)]
@@ -59,16 +61,22 @@ struct Report {
     cleanup_durable: usize,
 }
 
-fn parse_config() -> Result<Config, String> {
+fn parse_config_from<I, S>(arguments: I) -> Result<Config, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut device_index = None;
     let mut target = None;
-    let mut args = env::args().skip(1);
+    let mut phase12_subset = false;
+    let mut args = arguments.into_iter();
     while let Some(arg) = args.next() {
-        match arg.as_str() {
+        match arg.as_ref() {
             "--device-index" => {
                 device_index = Some(
                     args.next()
                         .ok_or_else(|| "--device-index requires a value".to_owned())?
+                        .as_ref()
                         .parse::<u32>()
                         .map_err(|_| "--device-index must be a u32".to_owned())?,
                 );
@@ -77,10 +85,16 @@ fn parse_config() -> Result<Config, String> {
                 let value = args
                     .next()
                     .ok_or_else(|| "--target requires a value".to_owned())?;
-                if !matches!(value.as_str(), "gfx1030" | "gfx1201" | "gfx942") {
+                if !matches!(value.as_ref(), "gfx1030" | "gfx1201" | "gfx942") {
                     return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
                 }
-                target = Some(value);
+                target = Some(value.as_ref().to_owned());
+            }
+            "--phase12-subset" => {
+                if phase12_subset {
+                    return Err("duplicate --phase12-subset".to_owned());
+                }
+                phase12_subset = true;
             }
             other => return Err(format!("unexpected argument `{other}`")),
         }
@@ -88,7 +102,20 @@ fn parse_config() -> Result<Config, String> {
     Ok(Config {
         device_index: device_index.ok_or_else(|| "missing --device-index".to_owned())?,
         target: target.ok_or_else(|| "missing --target".to_owned())?,
+        phase12_subset,
     })
+}
+
+fn parse_config() -> Result<Config, String> {
+    parse_config_from(env::args().skip(1))
+}
+
+fn selected_case_tokens(phase12_subset: bool) -> &'static [usize] {
+    if phase12_subset {
+        &PHASE12_CASE_TOKENS
+    } else {
+        &CASE_TOKENS
+    }
 }
 
 fn f32_to_bf16(value: f32) -> u16 {
@@ -517,8 +544,9 @@ fn run(config: &Config) -> Result<Report, String> {
         let queue = session
             .create_queue()
             .map_err(|error| format!("queue creation failed: {error}"))?;
-        let cases = CASE_TOKENS
-            .into_iter()
+        let cases = selected_case_tokens(config.phase12_subset)
+            .iter()
+            .copied()
             .map(|tokens| run_case(&session, &queue, tokens, &config.target))
             .collect::<Result<Vec<_>, _>>();
         drop(queue);
@@ -586,6 +614,43 @@ mod tests {
         assert_eq!(layout.qkv_width(), QKV_WIDTH);
         assert_eq!(layout.output_width(), OUTPUT_WIDTH);
         assert_eq!(CASE_TOKENS, [1, 3, 17, 127, 128, 129]);
+    }
+
+    #[test]
+    fn phase12_subset_has_exact_token_membership_and_count() {
+        assert_eq!(selected_case_tokens(true), &[1, 3, 17]);
+        assert_eq!(selected_case_tokens(true).len(), 3);
+        assert_eq!(selected_case_tokens(false), &CASE_TOKENS);
+        assert_eq!(selected_case_tokens(false).len(), CASE_TOKENS.len());
+    }
+
+    #[test]
+    fn parser_accepts_phase12_subset_and_defaults_to_full_matrix() {
+        let full = parse_config_from(["--device-index", "0", "--target", "gfx942"]).unwrap();
+        assert!(!full.phase12_subset);
+        let subset = parse_config_from([
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--phase12-subset",
+        ])
+        .unwrap();
+        assert!(subset.phase12_subset);
+    }
+
+    #[test]
+    fn parser_rejects_duplicate_phase12_subset() {
+        let error = parse_config_from([
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--phase12-subset",
+            "--phase12-subset",
+        ])
+        .unwrap_err();
+        assert_eq!(error, "duplicate --phase12-subset");
     }
 
     #[test]

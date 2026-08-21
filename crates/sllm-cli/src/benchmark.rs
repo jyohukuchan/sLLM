@@ -5,9 +5,12 @@ use sllm_core::AllocationSnapshot;
 
 pub(crate) const RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION: &str = "engine-performance-render-v1";
 
-// Keep the historical name as the direct-lane default for the existing
-// production and host-test call sites.  The model layer selects the
-// lane-accurate constant when it serializes a benchmark result.
+pub(crate) const DIRECT_BENCHMARK_SCHEMA_VERSION: &str = "engine-performance-direct-v1";
+
+// Keep the historical default for code paths and host fixtures that model the
+// pre-tokenized lane. The model layer emits the lane-specific schema version.
+#[allow(dead_code)]
+pub(crate) const BENCHMARK_SCHEMA_VERSION: &str = DIRECT_BENCHMARK_SCHEMA_VERSION;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BenchmarkEvent {

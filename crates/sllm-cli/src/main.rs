@@ -22,6 +22,8 @@ fn run(mut arguments: impl Iterator<Item = String>) -> Result<(), String> {
         }
         Some("version") | Some("--version") | Some("-V") => print_version(),
         Some("doctor") => print_doctor(),
+        // `benchmark` is an internal evidence command. Keep it accepted for the
+        // repository-owned harnesses without advertising it as a product CLI.
         Some(
             command
             @ ("verify-model" | "tokenize" | "render" | "decode" | "generate" | "benchmark"),
@@ -47,19 +49,15 @@ fn print_help() {
     println!("  render        Render Qwen3.5 chat messages");
     println!("  decode        Decode token IDs with the verified tokenizer");
     println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
-    println!("  benchmark     Run the bounded Phase 5 engine benchmark lanes");
     println!();
     println!("model source: --gguf PATH --derived-lock PATH");
-    println!("benchmark lane: --lane render-tokenize --model-size 2B|4B|9B");
-    println!("  --case-id ID --message ROLE:CONTENT --max-new-tokens N --device-index N");
-    println!("  --target gfx1030|gfx1201|gfx942 --greedy [--warmups N] [--measured N]");
-    println!("  requires exactly 3 warmup and 10 measured requests");
-    println!();
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
     println!(
         "  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32] [--seed U64]"
     );
     println!("  [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] (default: fp16)");
+    println!("  [--prefill-chunk-tokens 1..16384] (dense Qwen text only; default: auto)");
+    println!("  [--mtp-draft-width 0..8] (default: auto; 0 target-only; 1..8 forced MTP)");
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");

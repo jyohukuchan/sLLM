@@ -41,6 +41,24 @@ const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
 
+fn select_gguf_fp8_provider(target: &str) -> Result<&'static str, String> {
+    match target {
+        "gfx1201" => Ok("gguf-native"),
+        "gfx942" => Ok("native-fnuz"),
+        _ => Err(format!(
+            "embedded E4M3FN GGUF recipe requires exact gfx1201 native or gfx942 native-fnuz provider; exact target {target} is unsupported"
+        )),
+    }
+}
+
+fn gguf_fp8_dtype(provider: &str) -> sllm_core::DType {
+    match provider {
+        "gguf-native" => sllm_core::DType::F8E4M3Fn,
+        "native-fnuz" => sllm_core::DType::F8E4M3FnuZ,
+        _ => unreachable!("validated GGUF FP8 provider"),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct QwenBackendConfigV1 {
     pub gguf_path: PathBuf,
@@ -257,11 +275,11 @@ impl QwenChatBackendV1 {
                     "verified chat renderer construction failed: {error}"
                 ))
             })?;
-        if source.has_fp8_recipe() && config.target != "gfx1201" {
-            return Err(BackendErrorV1::new(
-                "the embedded E4M3FN GGUF recipe currently requires the native gfx1201 provider",
-            ));
-        }
+        let gguf_fp8_provider = source
+            .has_fp8_recipe()
+            .then(|| select_gguf_fp8_provider(&config.target))
+            .transpose()
+            .map_err(BackendErrorV1::new)?;
         let seed_graph = if source.has_fp8_recipe() {
             build_qwen35_gguf_fp8_graph(
                 &lock,
@@ -269,7 +287,7 @@ impl QwenChatBackendV1 {
                 &source,
                 1,
                 1,
-                sllm_core::DType::F8E4M3Fn,
+                gguf_fp8_dtype(gguf_fp8_provider.expect("validated GGUF FP8 provider")),
                 config.kv_cache_encoding,
             )
         } else {
@@ -339,7 +357,7 @@ impl QwenChatBackendV1 {
                 "model-ready allocation accounting is not resident-only",
             ));
         }
-        let fp8_provider = source.has_fp8_recipe().then(|| "gguf-native".to_owned());
+        let fp8_provider = gguf_fp8_provider.map(str::to_owned);
         let identity = BackendIdentityV1 {
             target: config.target.clone(),
             model_fingerprint: lock.fingerprint().to_owned(),
@@ -934,7 +952,12 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     source,
                     chunk_rows,
                     state_capacity,
-                    sllm_core::DType::F8E4M3Fn,
+                    gguf_fp8_dtype(
+                        state
+                            .fp8_provider
+                            .as_deref()
+                            .expect("GGUF FP8 state has a selected provider"),
+                    ),
                     state.kv_cache_encoding,
                 )
             } else {
@@ -1501,6 +1524,29 @@ fn require_clean_request_memory(
 mod tests {
     use super::*;
     use crate::ChatMessageV1;
+
+    #[test]
+    fn embedded_gguf_fp8_provider_accepts_native_and_fnuz_targets() {
+        assert_eq!(select_gguf_fp8_provider("gfx1201").unwrap(), "gguf-native");
+        assert_eq!(select_gguf_fp8_provider("gfx942").unwrap(), "native-fnuz");
+        assert_eq!(
+            gguf_fp8_dtype(select_gguf_fp8_provider("gfx1201").unwrap()),
+            sllm_core::DType::F8E4M3Fn
+        );
+        assert_eq!(
+            gguf_fp8_dtype(select_gguf_fp8_provider("gfx942").unwrap()),
+            sllm_core::DType::F8E4M3FnuZ
+        );
+    }
+
+    #[test]
+    fn embedded_gguf_fp8_provider_rejects_unsupported_exact_targets() {
+        for target in ["gfx1030", "gfx1200", "gfx942:sramecc+:xnack-", "unknown"] {
+            let error = select_gguf_fp8_provider(target).unwrap_err();
+            assert!(error.contains(target), "{error}");
+            assert!(error.contains("native-fnuz"), "{error}");
+        }
+    }
 
     fn message(inner: Qwen35ChatMessageV1) -> ChatMessageV1 {
         let content = match &inner {

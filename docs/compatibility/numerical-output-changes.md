@@ -55,6 +55,55 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-21-P36-MTP: gfx942 MTP width/state/admission拡張（N0）
+
+- scope: Qwen3.5-4B、公開CLI、exact `gfx942`、greedy MTP draft width 1〜8。BF16 targetはFP16 KV、FP8 targetは
+  dynamic FP8 target KVを使い、MTP side modelは既存どおりBF16 weights＋FP16 KVとする。
+- baseline: 公開CLIはforced MTPをgfx1201、width 1へ固定し、request stateをvisible token budgetだけで確保していた。
+  quantized GGUF plan schemaもMTP graph validationで拒否していた。
+- candidate: proposal widthを1〜8へ一般化し、target verify rowsを`width+1`、allocated state capacityを
+  `logical+width`へboundedにする。quantized GGUFは同じmodel fingerprint、tied embedding、MTP component/recipeを検証して
+  admissionする。target側とMTP側のweight/KV encodingを別fieldでreportする。
+- 分類: **N0**。targetが選んだtokenだけを既存順でpublishし、不一致draftはrewind/replayする。target equation、dtype、
+  round stage、sampling、stop、visible-token budgetを変えず、追加capacityは未公開の投機stateだけを保持する。
+- correctness/output影響: BF16 off/width 2/3/4/7/8とFP8 target off/width 3は、それぞれoffと同じ16 visible tokenへ一致した。
+  proposal accountingは全rowでaccepted+rejected=proposed、fallback/cleanup 0、HIP-onlyだった。初回width 2のcapacity overflowと
+  FP8 plan schema拒否は修正後のfocused rerunで解消した。
+- performance/resource: Session Cはcorrectness runであり性能claimを行わない。追加state slackは最大8 tokenにboundedである。
+  rollbackはforced gfx942/width拡張とquantized-plan admissionを除去し、target-onlyまたは従来width 1へ戻す。
+- evidence: [Session C summary](../../ci/matrix/phase36-mi300x-session-c-summary-v1.json)。
+
+### OUT-2026-08-21-P36-CHUNK: 公開prefill chunk overrideとMI300X partition確認（N0）
+
+- scope: Qwen3.5 dense公開CLIの`--prefill-chunk-tokens 1..16384`、exact gfx942、BF16 targetのFP16/dynamic FP8 KV。
+- change: auto selectorを維持しつつ、明示指定時は一つの候補だけを選び、resource fallbackで別chunkへ黙って変更しない。
+  absolute position、KV/GDN state継続、terminal行だけのLM head/Argmax、量子化recipeは既存Phase 31 contractを維持する。
+- 分類: **N0**。演算対象、dtype、round stage、terminal visible outputを変えないscheduling/resource指定である。
+- correctness/output影響: auto/512/2K/4K/8K/16K × 上記2 KV encodingの12/12 rowで、入力ID`23066`×10,001から
+  生成ID`[23066,23066]`へ一致した。全rowはHIP-only、fallbackなし、cleanup 0で、終了後HBM/GTT baselineへ復帰した。
+- evidence: [Session B summary](../../ci/matrix/phase36-mi300x-session-b-summary-v1.json)。
+- resource: arena high-waterはauto/16K `5,278,049,280` bytes、512 `270,209,024` bytes。これはmemory feasibility
+  evidenceであり、single-run timingを性能claimへ使わない。rollbackは明示overrideを除去して既存auto selectorだけへ戻す。
+
+### OUT-2026-08-21-P36-G: gfx942 GDN normのPhase 29 scope修復（N0）
+
+- scope: exact `gfx942` / wave64、Qwen3.5 GDNの短いbaseline provider（token count 128未満）。
+  Phase 29で承認したwave32 treeは引き続きexact `gfx1030`/`gfx1201`だけを対象とする。
+- baseline: Phase 28までのgfx942はQ/K L2 normとoutput RMSNormを128項のindex順FP32逐次和で計算した。
+  Phase 29の共通source変更により、文書化したtarget scope外のgfx942にも4個のwave32 partialを足すtree順が漏れていた。
+- candidate: `SLLM_HIP_COMPILE_WAVE64=1`のbuildだけ128項の逐次和を維持し、wave32 buildはPhase 29のtreeを変更しない。
+  real-number式、入力集合、dtype、BF16 round stage、recurrent state、kernel symbol、dispatch数、ABIは不変である。
+- 分類: **N0**。新しい数値順序の採用ではなく、gfx942を承認済みのPhase 28順序へ戻すtarget-scope修復である。
+  gfx1030/gfx1201のPhase 29 N1最適化と、gfx942の既存wave64 matmul providerは変更しない。
+- correctness: gfx942のtoken 1/3/17 GDN独立oracleは3/3 PASSし、最大絶対/相対誤差は
+  `0.00390625`/`0.014705882`、state publication一致、fallback/cleanup 0だった。Qwen BF16 `Hello`の5-tokenは
+  修復前後とも`[11,353,2688,4313,310]`で、同一provider repeatも一致した。診断用wave32 matmul controlではGDN順序との
+  組合せだけがreviewed RDNA token `[11,353,1044,4313,310]`への分岐を説明した。
+- output影響: final gfx942 BF16とFNUZ FP8は3番目のtokenだけ`2688`/`1044`へ分岐した。BF16はwave64 BF16 reduction、
+  FP8はhipBLASLt FNUZを使うため、このcross-dtype/cross-provider差をbit-exact gateにはしない。Unicodeとstop rowは一致した。
+- performance/resource: 未測定。短GDNのdispatch、scratch、allocationを変更せず、Phase 29/35のRDNA performance scopeへ
+  影響しない。rollbackはwave64条件分岐の除去だが、Phase 29の承認scopeを再びgfx942へ拡張するため採用しない。
+
 ### OUT-2026-08-20-P35-A: Full Attention Q_TILE=4 query-row共有（N1・限定採用）
 
 - scope: exact `gfx1030`/`gfx1201`、Qwen系causal/full attention、`M>=128`、Q heads 16、KV heads 4、

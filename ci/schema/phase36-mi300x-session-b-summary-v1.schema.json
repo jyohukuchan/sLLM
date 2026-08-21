@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase36-mi300x-session-b-summary-v1.schema.json",
+  "title": "Phase 36 MI300X Session B summary",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "recorded_at", "target", "device_index", "dry_run", "identity", "full_attention_reports", "kv_state", "lowbit_oracle", "model_rows", "comparisons", "memory", "cleanup", "raw_outputs", "failure_count"],
+  "properties": {
+    "schema_version": {"const": "phase36-mi300x-session-b-summary-v1"},
+    "state": {"enum": ["PASS", "FAIL", "DRY_RUN"]},
+    "recorded_at": {"type": "string", "minLength": 1, "maxLength": 64},
+    "target": {"const": "gfx942"},
+    "device_index": {"type": "integer", "minimum": 0, "maximum": 255},
+    "dry_run": {"type": "boolean"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "full_attention_reports": {"type": "array", "minItems": 0, "maxItems": 4, "items": {"$ref": "#/$defs/full_attention"}},
+    "kv_state": {"$ref": "#/$defs/kv_state"},
+    "lowbit_oracle": {"$ref": "#/$defs/oracle"},
+    "model_rows": {"$ref": "#/$defs/model_rows"},
+    "comparisons": {"$ref": "#/$defs/comparisons"},
+    "memory": {"$ref": "#/$defs/memory"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "raw_outputs": {"const": "raw/"},
+    "failure_count": {"type": "integer", "minimum": 0, "maximum": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "positive_integer": {"type": "integer", "minimum": 1},
+    "identity_fact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sha256", "size_bytes"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": ["integer", "null"], "minimum": 0},
+        "fingerprint": {"$ref": "#/$defs/sha256"},
+        "output_sha256": {"$ref": "#/$defs/sha256"},
+        "source_lock_fingerprints": {"type": "array", "items": {"$ref": "#/$defs/sha256"}, "minItems": 1, "maxItems": 8}
+      }
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["binary", "model", "lock", "source"],
+      "properties": {
+        "binary": {"$ref": "#/$defs/identity_fact"},
+        "model": {"$ref": "#/$defs/identity_fact"},
+        "lock": {"$ref": "#/$defs/identity_fact"},
+        "source": {"$ref": "#/$defs/identity_fact"},
+        "bf16_model": {"$ref": "#/$defs/identity_fact"},
+        "fp8_model": {"$ref": "#/$defs/identity_fact"},
+        "bf16_lock": {"$ref": "#/$defs/identity_fact"},
+        "fp8_lock": {"$ref": "#/$defs/identity_fact"}
+      }
+    },
+    "full_attention": {
+      "type": "object", "additionalProperties": false,
+      "required": ["encoding", "raw_sha256", "case_count", "contiguous_resident", "numerical_match", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable"],
+      "properties": {
+        "encoding": {"enum": ["fp16-v1", "kv-fp8-v1", "kv-fp8-static-v1", "kv-nvfp4-v1"]},
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "case_count": {"const": 29},
+        "contiguous_resident": {"type": "boolean"},
+        "numerical_match": {"type": "boolean"},
+        "hip_only": {"type": "boolean"},
+        "fallback_used": {"const": false},
+        "cleanup_retryable": {"const": 0},
+        "cleanup_durable": {"const": 0}
+      }
+    },
+    "kv_state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_sha256", "case_count", "hip_only", "fallback_used", "exact_fp16_storage", "cleanup_retryable", "cleanup_durable"],
+      "properties": {"raw_sha256": {"$ref": "#/$defs/sha256"}, "case_count": {"const": 19}, "hip_only": {"type": "boolean"}, "fallback_used": {"const": false}, "exact_fp16_storage": {"type": "boolean"}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}}
+    },
+    "oracle": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_sha256", "case_count", "implementation", "encodings", "independent"],
+      "properties": {
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "case_count": {"anyOf": [{"const": 0}, {"const": 17}, {"const": 28}]},
+        "attention_cases": {"const": 8},
+        "quantization_cases": {"const": 12},
+        "nonfinite_cases": {"const": 2},
+        "padding_cases": {"const": 6},
+        "implementation": {"const": "numpy"},
+        "encodings": {"const": ["kv-fp8-v1", "kv-fp8-static-v1", "kv-nvfp4-v1"]},
+        "independent": {"type": "boolean"}
+      }
+    },
+    "model_row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "encoding", "weight_dtype", "weight_encoding", "chunk_setting", "selected_chunk_tokens", "chunk_count", "input_ids_sha256", "input_ids_count", "output_ids", "committed_bytes", "available_bytes", "request_state_bytes", "arena_high_water_bytes", "arena_separate_allocation_bytes", "raw_sha256", "sysfs_tsv_sha256", "sysfs_hbm_peak_bytes", "sysfs_gtt_baseline_bytes", "sysfs_gtt_peak_bytes", "sysfs_gtt_incremental_bytes", "settled_hbm_bytes", "settled_gtt_bytes", "cleanup_retryable", "cleanup_durable"],
+      "properties": {
+        "row_id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "encoding": {"enum": ["fp16-v1", "kv-fp8-v1"]},
+        "weight_dtype": {"enum": ["bf16", "fp8"]},
+        "weight_encoding": {"type": "string", "minLength": 1, "maxLength": 128},
+        "fp8_provider": {"type": "string", "minLength": 1, "maxLength": 64},
+        "model_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "model_lock_fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "chunk_setting": {"enum": ["auto", "512", "2048", "4096", "8192", "16384"]},
+        "selected_chunk_tokens": {"type": "integer", "minimum": 1},
+        "chunk_count": {"type": "integer", "minimum": 1},
+        "input_ids_sha256": {"$ref": "#/$defs/sha256"},
+        "input_ids_count": {"const": 10001},
+        "output_ids": {"const": [23066, 23066]},
+        "committed_bytes": {"$ref": "#/$defs/positive_integer"},
+        "available_bytes": {"$ref": "#/$defs/positive_integer"},
+        "request_state_bytes": {"$ref": "#/$defs/positive_integer"},
+        "arena_high_water_bytes": {"$ref": "#/$defs/positive_integer"},
+        "arena_separate_allocation_bytes": {"$ref": "#/$defs/positive_integer"},
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "sysfs_tsv_sha256": {"$ref": "#/$defs/sha256"},
+        "sysfs_hbm_peak_bytes": {"type": "integer", "minimum": 0},
+        "sysfs_gtt_baseline_bytes": {"type": "integer", "minimum": 0},
+        "sysfs_gtt_peak_bytes": {"type": "integer", "minimum": 0},
+        "sysfs_gtt_incremental_bytes": {"const": 0},
+        "settled_hbm_bytes": {"type": "integer", "minimum": 0},
+        "settled_gtt_bytes": {"type": "integer", "minimum": 0},
+        "cleanup_retryable": {"const": 0},
+        "cleanup_durable": {"const": 0}
+      }
+    },
+    "model_rows": {
+      "type": "object", "additionalProperties": false,
+      "required": ["expected_rows", "selected_rows", "rows", "raw_sha256"],
+      "properties": {"expected_rows": {"const": 12}, "selected_rows": {"type": "integer", "minimum": 0, "maximum": 12}, "rows": {"type": "array", "minItems": 0, "maxItems": 12, "items": {"$ref": "#/$defs/model_row"}}, "raw_sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "comparisons": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_ids_sha256", "input_ids_count", "output_ids", "cross_setting_token_equality", "chunk_partition_valid"],
+      "properties": {"input_ids_sha256": {"$ref": "#/$defs/sha256"}, "input_ids_count": {"const": 10001}, "output_ids": {"const": [23066, 23066]}, "cross_setting_token_equality": {"type": "boolean"}, "chunk_partition_valid": {"type": "boolean"}}
+    },
+    "baseline": {
+      "type": "object", "additionalProperties": false,
+      "required": ["settled", "hbm_used_bytes", "gtt_used_bytes"],
+      "properties": {"settled": {"type": "boolean"}, "hbm_used_bytes": {"type": "integer", "minimum": 0}, "gtt_used_bytes": {"type": "integer", "minimum": 0}}
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["fp16_request_state_bytes", "fp8_request_state_bytes", "fp8_request_state_reduction_percent", "separate_allocation_bytes", "arena_high_water_bytes", "arena_reduction_percent", "intermediate_chunk_terminal_fence", "intermediate_lm_head_or_argmax", "contiguous_resident", "gtt_spill_bytes", "no_gtt_spill", "settled_baseline"],
+      "properties": {"fp16_request_state_bytes": {"$ref": "#/$defs/positive_integer"}, "fp8_request_state_bytes": {"$ref": "#/$defs/positive_integer"}, "fp8_request_state_reduction_percent": {"type": "number", "exclusiveMinimum": 0, "maximum": 100}, "separate_allocation_bytes": {"$ref": "#/$defs/positive_integer"}, "arena_high_water_bytes": {"$ref": "#/$defs/positive_integer"}, "arena_reduction_percent": {"type": "number", "exclusiveMinimum": 0, "maximum": 100}, "intermediate_chunk_terminal_fence": {"type": "boolean"}, "intermediate_lm_head_or_argmax": {"type": "boolean"}, "contiguous_resident": {"type": "boolean"}, "gtt_spill_bytes": {"const": 0}, "no_gtt_spill": {"type": "boolean"}, "settled_baseline": {"$ref": "#/$defs/baseline"}}
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retryable_cleanup", "durable_quarantine", "terminal_zero"],
+      "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}, "terminal_zero": {"type": "boolean"}}
+    }
+  }
+}

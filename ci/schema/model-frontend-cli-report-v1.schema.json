@@ -31,26 +31,52 @@
     "result": {
       "oneOf": [
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["kind", "locked_files", "verified_files", "tensor_count", "weight_entries", "loadable_entries", "known_unconsumed_entries", "total_destination_bytes", "plan_digest"],
-          "properties": {
-            "kind": {"const": "verify-model"},
-            "locked_files": {"type": "integer", "minimum": 1},
-            "verified_files": {"type": "integer", "minimum": 1},
-            "tensor_count": {"type": "integer", "minimum": 1},
-            "weight_entries": {"type": "integer", "minimum": 1},
-            "loadable_entries": {"type": "integer", "minimum": 1},
-            "known_unconsumed_entries": {"type": "integer", "minimum": 0},
-            "total_destination_bytes": {"type": "integer", "minimum": 1},
-            "plan_digest": {"$ref": "#/$defs/fingerprint"}
-          }
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "locked_files", "verified_files", "tensor_count", "weight_entries", "loadable_entries", "known_unconsumed_entries", "total_destination_bytes", "plan_digest"],
+              "properties": {
+                "kind": {"const": "verify-model"},
+                "architecture": {"type": "string", "minLength": 1},
+                "model_kind": {"type": "string", "minLength": 1},
+                "source_kind": {"enum": ["development-cache", "gguf"]},
+                "prompt_mode": {"enum": ["raw-text-only", "chat-template"]},
+                "chat_template": {"type": "boolean"},
+                "locked_files": {"type": "integer", "minimum": 1},
+                "verified_files": {"type": "integer", "minimum": 1},
+                "tensor_count": {"type": "integer", "minimum": 1},
+                "weight_entries": {"type": "integer", "minimum": 1},
+                "loadable_entries": {"type": "integer", "minimum": 1},
+                "known_unconsumed_entries": {"type": "integer", "minimum": 0},
+                "total_destination_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "plan_digest": {"$ref": "#/$defs/fingerprint"},
+                "weight_encoding": {"$ref": "#/$defs/weight_encoding"},
+                "recipe_digest": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/fingerprint"}]}
+              }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "architecture", "tensor_count", "source_kind", "weight_entries", "total_destination_bytes", "plan_digest", "weight_encoding"],
+              "properties": {
+                "kind": {"const": "verify-model"},
+                "architecture": {"type": "string", "minLength": 1},
+                "tensor_count": {"type": "integer", "minimum": 1},
+                "source_kind": {"const": "gguf"},
+                "weight_entries": {"type": "integer", "minimum": 1},
+                "total_destination_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+                "plan_digest": {"$ref": "#/$defs/fingerprint"},
+                "weight_encoding": {"$ref": "#/$defs/weight_encoding"}
+              }
+            }
+          ]
         },
         {
           "type": "object", "additionalProperties": false,
           "required": ["kind", "count", "token_ids"],
           "properties": {
             "kind": {"const": "tokenize"},
-            "count": {"type": "integer", "minimum": 0},
+            "prompt_mode": {"enum": ["raw-text-only", "chat-template"]},
+            "count": {"type": "integer", "minimum": 0, "maximum": 1048576},
             "token_ids": {"$ref": "#/$defs/token_ids"}
           }
         },
@@ -65,53 +91,62 @@
           "properties": {"kind": {"const": "decode"}, "text": {"type": "string"}}
         },
         {
-          "type": "object", "additionalProperties": false,
-          "required": ["kind", "input_kind", "input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "stop_reason", "execution", "timing_ns", "cleanup"],
-          "properties": {
-            "kind": {"const": "generate"},
-            "input_kind": {"enum": ["prompt", "messages"]},
-            "input_token_ids": {"$ref": "#/$defs/token_ids"},
-            "generated_token_ids": {"$ref": "#/$defs/token_ids"},
-            "visible_token_ids": {"$ref": "#/$defs/token_ids"},
-            "decode_input_token_ids": {"$ref": "#/$defs/token_ids"},
-            "output_text": {"type": "string", "maxLength": 16777216},
-            "stop_reason": {
+          "oneOf": [
+            {
               "type": "object", "additionalProperties": false,
-              "required": ["version", "reason_version", "kind", "token_id"],
+              "required": ["kind", "input_kind", "input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "finish_reason", "usage", "stop_reason", "execution", "timing_ns", "cleanup"],
               "properties": {
-                "version": {"const": 1}, "reason_version": {"const": 1},
-                "kind": {"enum": ["stop_token", "max_new_tokens"]},
-                "token_id": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/token_id"}]}
+                "kind": {"const": "generate"},
+                "input_kind": {"enum": ["prompt", "messages"]},
+                "input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "generated_token_ids": {"$ref": "#/$defs/token_ids"},
+                "visible_token_ids": {"$ref": "#/$defs/token_ids"},
+                "decode_input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "output_text": {"type": "string", "maxLength": 16777216},
+                "finish_reason": {"enum": ["stop", "length"]},
+                "stop_reason": {"$ref": "#/$defs/stop_reason"},
+                "usage": {"$ref": "#/$defs/usage"},
+                "sampling": {"$ref": "#/$defs/sampling"},
+                "execution": {"$ref": "#/$defs/dense_execution"},
+                "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+                "cleanup": {"$ref": "#/$defs/cleanup"}
               }
             },
-            "execution": {
+            {
               "type": "object", "additionalProperties": false,
-              "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "prefill_tokens", "decode_steps", "fallback_used", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count", "all_dispatches_hip", "weight_encoding", "fp8_provider"],
+              "required": ["kind", "input_kind", "input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "finish_reason", "usage", "execution", "timing_ns"],
               "properties": {
-                "selected_backend": {"const": "hip"},
-                "target": {"enum": ["gfx1030", "gfx1201"]},
-                "device_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-                "model_fingerprint": {"$ref": "#/$defs/fingerprint"},
-                "plan_digest": {"$ref": "#/$defs/fingerprint"},
-                "prefill_tokens": {"type": "integer", "minimum": 1, "maximum": 1048576},
-                "decode_steps": {"type": "integer", "minimum": 0, "maximum": 1048576},
-                "fallback_used": {"const": false},
-                "submission_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
-                "kernel_dispatch_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
-                "segment_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
-                "boundary_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
-                "all_dispatches_hip": {"const": true},
-                "weight_encoding": {"enum": ["bf16", "bf16-converted-from-ocp-e4m3fn", "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", "ocp-e4m3fn-outer-f32"]},
-                "fp8_provider": {"type": ["string", "null"], "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16"]}
+                "kind": {"const": "generate"},
+                "input_kind": {"enum": ["prompt", "messages"]},
+                "input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "generated_token_ids": {"$ref": "#/$defs/token_ids"},
+                "visible_token_ids": {"$ref": "#/$defs/token_ids"},
+                "decode_input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "output_text": {"type": "string", "maxLength": 16777216},
+                "finish_reason": {"enum": ["stop", "length"]},
+                "usage": {"$ref": "#/$defs/usage"},
+                "execution": {"$ref": "#/$defs/execution"},
+                "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
               }
             },
-            "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-            "cleanup": {
+            {
               "type": "object", "additionalProperties": false,
-              "required": ["retryable_cleanup", "durable_quarantine"],
-              "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+              "required": ["kind", "input_kind", "input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids", "output_text", "stop_reason", "execution", "timing_ns", "cleanup"],
+              "properties": {
+                "kind": {"const": "generate"},
+                "input_kind": {"enum": ["prompt", "messages"]},
+                "input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "generated_token_ids": {"$ref": "#/$defs/token_ids"},
+                "visible_token_ids": {"$ref": "#/$defs/token_ids"},
+                "decode_input_token_ids": {"$ref": "#/$defs/token_ids"},
+                "output_text": {"type": "string", "maxLength": 16777216},
+                "stop_reason": {"$ref": "#/$defs/legacy_stop_reason"},
+                "execution": {"$ref": "#/$defs/legacy_execution"},
+                "timing_ns": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+                "cleanup": {"$ref": "#/$defs/cleanup"}
+              }
             }
-          }
+          ]
         }
       ]
     }
@@ -128,6 +163,263 @@
   "$defs": {
     "fingerprint": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "token_id": {"type": "integer", "minimum": 0, "maximum": 4294967295},
-    "token_ids": {"type": "array", "maxItems": 1048576, "items": {"$ref": "#/$defs/token_id"}}
+    "token_ids": {"type": "array", "maxItems": 1048576, "items": {"$ref": "#/$defs/token_id"}},
+    "weight_encoding": {
+      "enum": [
+        "bf16",
+        "bf16-converted-from-ocp-e4m3fn",
+        "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+        "nvfp4-e2m1-block16-e4m3fn-tensor-f32",
+        "ocp-e4m3fn-outer-f32",
+        "ocp-mxfp4-e2m1-block32-e8m0-mixed",
+        "mixed-nvfp4-w4a4-fp8-w8a8"
+      ]
+    },
+    "stop_reason": {
+      "type": "object", "additionalProperties": false,
+      "required": ["version", "reason_version", "kind", "token_id"],
+      "properties": {
+        "version": {"const": 1},
+        "reason_version": {"const": 1},
+        "kind": {"enum": ["stop", "length", "stop_token", "max_new_tokens"]},
+        "token_id": {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/token_id"}]},
+        "matched_string": {"type": ["string", "null"], "maxLength": 16777216}
+      }
+    },
+    "legacy_stop_reason": {
+      "allOf": [
+        {"$ref": "#/$defs/stop_reason"},
+        {"type": "object", "properties": {"kind": {"enum": ["stop_token", "max_new_tokens"]}}}
+      ]
+    },
+    "usage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["prompt_tokens", "completion_tokens", "total_tokens"],
+      "properties": {
+        "prompt_tokens": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "completion_tokens": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "total_tokens": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}
+      }
+    },
+    "sampling": {
+      "type": "object", "additionalProperties": false,
+      "required": ["temperature", "top_p", "presence_penalty", "frequency_penalty"],
+      "properties": {
+        "temperature": {"type": "number", "minimum": 0},
+        "top_p": {"type": "number", "minimum": 0, "maximum": 1},
+        "presence_penalty": {"type": "number"},
+        "frequency_penalty": {"type": "number"}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retryable_cleanup", "durable_quarantine"],
+      "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "selected_backend", "target", "device_index", "model_fingerprint", "plan_digest",
+        "fallback_used", "submission_count", "kernel_dispatch_count", "all_dispatches_hip",
+        "weight_encoding", "fp8_provider"
+      ],
+      "properties": {
+        "selected_backend": {"const": "hip"},
+        "target": {"enum": ["gfx1030", "gfx1201", "gfx942"]},
+        "device_index": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "model_fingerprint": {"$ref": "#/$defs/fingerprint"},
+        "plan_digest": {"$ref": "#/$defs/fingerprint"},
+        "prefill_tokens": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "logical_state_capacity_tokens": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "allocated_state_capacity_tokens": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "mtp_state_slack_tokens": {"type": "integer", "minimum": 0, "maximum": 8},
+        "decode_steps": {"type": "integer", "minimum": 0, "maximum": 4294967295},
+        "fallback_used": {"const": false},
+        "submission_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "kernel_dispatch_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "segment_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "boundary_count": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "all_dispatches_hip": {"const": true},
+        "weight_encoding": {"$ref": "#/$defs/weight_encoding"},
+        "fp8_provider": {
+          "type": ["string", "null"],
+          "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16", "nvfp4-packed-dequant", "gguf-native"]
+        },
+        "prefill_chunk_requested_tokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 16384},
+        "prefill_chunk_selection": {"enum": ["explicit", "auto"]},
+        "prefill_chunk_capacity_tokens": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "prefill_chunk_count": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "placement_total_memory_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "placement_available_memory_bytes": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "placement_required_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "placement_model_resident_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "placement_request_state_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "placement_safety_reserve_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+        "workspace_separate_allocation_bytes": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "workspace_arena_bytes": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4"]},
+        "image_count": {"type": "integer", "minimum": 0, "maximum": 2},
+        "mtp_selection": {"enum": ["target-only", "forced", "auto"]},
+        "mtp_draft_width_requested": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
+        "mtp_draft_width_effective": {"type": ["integer", "null"], "minimum": 1, "maximum": 8},
+        "mtp_target_block_rows": {"type": ["integer", "null"], "minimum": 2, "maximum": 9},
+        "mtp_proposal_blocks": {"type": ["integer", "null"], "minimum": 0, "maximum": 18446744073709551615},
+        "mtp_proposed_draft_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 18446744073709551615},
+        "mtp_accepted_draft_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 18446744073709551615},
+        "mtp_rejected_draft_tokens": {"type": ["integer", "null"], "minimum": 0, "maximum": 18446744073709551615},
+        "mtp_weight_encoding": {"type": ["string", "null"], "enum": [null, "bf16"]},
+        "mtp_kv_cache_encoding": {"type": ["string", "null"], "enum": [null, "fp16"]}
+      },
+      "allOf": [
+        {
+          "if": {"anyOf": [
+            {"required": ["prefill_chunk_requested_tokens"]},
+            {"required": ["prefill_chunk_selection"]},
+            {"required": ["prefill_chunk_capacity_tokens"]},
+            {"required": ["prefill_chunk_count"]}
+          ]},
+          "then": {"required": ["prefill_chunk_requested_tokens", "prefill_chunk_selection", "prefill_chunk_capacity_tokens", "prefill_chunk_count"]}
+        },
+        {
+          "if": {"required": ["prefill_chunk_requested_tokens"], "properties": {"prefill_chunk_requested_tokens": {"type": "null"}}},
+          "then": {"properties": {"prefill_chunk_selection": {"const": "auto"}}}
+        },
+        {
+          "if": {"required": ["prefill_chunk_requested_tokens"], "properties": {"prefill_chunk_requested_tokens": {"type": "integer"}}},
+          "then": {"properties": {"prefill_chunk_selection": {"const": "explicit"}}}
+        },
+        {
+          "if": {"anyOf": [
+            {"required": ["mtp_selection"]},
+            {"required": ["mtp_draft_width_requested"]},
+            {"required": ["mtp_draft_width_effective"]},
+            {"required": ["mtp_target_block_rows"]},
+            {"required": ["mtp_proposal_blocks"]},
+            {"required": ["mtp_proposed_draft_tokens"]},
+            {"required": ["mtp_accepted_draft_tokens"]},
+            {"required": ["mtp_rejected_draft_tokens"]},
+            {"required": ["mtp_weight_encoding"]},
+            {"required": ["mtp_kv_cache_encoding"]}
+          ]},
+          "then": {"required": [
+            "mtp_selection", "mtp_draft_width_requested", "mtp_draft_width_effective", "mtp_target_block_rows",
+            "mtp_proposal_blocks", "mtp_proposed_draft_tokens", "mtp_accepted_draft_tokens", "mtp_rejected_draft_tokens",
+            "mtp_weight_encoding", "mtp_kv_cache_encoding"
+          ]}
+        },
+        {
+          "if": {"required": ["mtp_selection"], "properties": {"mtp_selection": {"const": "target-only"}}},
+          "then": {
+            "properties": {
+              "mtp_draft_width_requested": {"const": 0},
+              "mtp_draft_width_effective": {"type": "null"},
+              "mtp_target_block_rows": {"type": "null"},
+              "mtp_proposal_blocks": {"type": "null"},
+              "mtp_proposed_draft_tokens": {"type": "null"},
+              "mtp_accepted_draft_tokens": {"type": "null"},
+              "mtp_rejected_draft_tokens": {"type": "null"},
+              "mtp_weight_encoding": {"type": "null"},
+              "mtp_kv_cache_encoding": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["mtp_selection"], "properties": {"mtp_selection": {"const": "forced"}}},
+          "then": {
+            "properties": {
+              "mtp_draft_width_requested": {"type": "integer", "minimum": 1, "maximum": 8},
+              "mtp_draft_width_effective": {"type": "integer", "minimum": 1, "maximum": 8},
+              "mtp_target_block_rows": {"type": "integer", "minimum": 2, "maximum": 9},
+              "mtp_proposal_blocks": {"type": "integer", "minimum": 0},
+              "mtp_proposed_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_accepted_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_rejected_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_weight_encoding": {"const": "bf16"},
+              "mtp_kv_cache_encoding": {"const": "fp16"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["mtp_selection"], "properties": {"mtp_selection": {"const": "auto"}}},
+          "then": {"properties": {"mtp_draft_width_requested": {"type": "null"}}}
+        },
+        {
+          "if": {"required": ["mtp_selection", "mtp_draft_width_effective"], "properties": {"mtp_selection": {"const": "auto"}, "mtp_draft_width_effective": {"type": "null"}}},
+          "then": {
+            "properties": {
+              "mtp_target_block_rows": {"type": "null"},
+              "mtp_proposal_blocks": {"type": "null"},
+              "mtp_proposed_draft_tokens": {"type": "null"},
+              "mtp_accepted_draft_tokens": {"type": "null"},
+              "mtp_rejected_draft_tokens": {"type": "null"},
+              "mtp_weight_encoding": {"type": "null"},
+              "mtp_kv_cache_encoding": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"required": ["mtp_selection", "mtp_draft_width_effective"], "properties": {"mtp_selection": {"const": "auto"}, "mtp_draft_width_effective": {"type": "integer"}}},
+          "then": {
+            "properties": {
+              "mtp_target_block_rows": {"type": "integer", "minimum": 2, "maximum": 9},
+              "mtp_proposal_blocks": {"type": "integer", "minimum": 0},
+              "mtp_proposed_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_accepted_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_rejected_draft_tokens": {"type": "integer", "minimum": 0},
+              "mtp_weight_encoding": {"const": "bf16"},
+              "mtp_kv_cache_encoding": {"const": "fp16"}
+            }
+          }
+        }
+      ]
+    },
+    "dense_execution": {
+      "allOf": [
+        {"$ref": "#/$defs/execution"},
+        {
+          "type": "object",
+          "required": [
+            "prefill_tokens", "decode_steps", "segment_count", "boundary_count"
+          ]
+        },
+        {
+          "if": {
+            "required": ["weight_encoding"],
+            "properties": {
+              "weight_encoding": {
+                "enum": [
+                  "bf16",
+                  "bf16-converted-from-ocp-e4m3fn",
+                  "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32",
+                  "nvfp4-e2m1-block16-e4m3fn-tensor-f32",
+                  "ocp-e4m3fn-outer-f32"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "logical_state_capacity_tokens", "allocated_state_capacity_tokens", "mtp_state_slack_tokens",
+              "prefill_chunk_requested_tokens", "prefill_chunk_selection", "prefill_chunk_capacity_tokens", "prefill_chunk_count",
+              "placement_total_memory_bytes", "placement_available_memory_bytes", "placement_required_bytes",
+              "placement_model_resident_bytes", "placement_request_state_bytes", "placement_safety_reserve_bytes",
+              "workspace_separate_allocation_bytes", "workspace_arena_bytes", "kv_cache_encoding", "image_count",
+              "mtp_selection", "mtp_draft_width_requested", "mtp_draft_width_effective", "mtp_target_block_rows",
+              "mtp_proposal_blocks", "mtp_proposed_draft_tokens", "mtp_accepted_draft_tokens", "mtp_rejected_draft_tokens",
+              "mtp_weight_encoding", "mtp_kv_cache_encoding"
+            ]
+          }
+        }
+      ]
+    },
+    "legacy_execution": {
+      "allOf": [
+        {"$ref": "#/$defs/execution"},
+        {
+          "type": "object",
+          "required": ["prefill_tokens", "decode_steps", "segment_count", "boundary_count"]
+        }
+      ]
+    }
   }
 }

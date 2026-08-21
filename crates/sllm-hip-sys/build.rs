@@ -516,6 +516,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", cmake_file.display());
     println!("cargo:rerun-if-env-changed=ROCM_PATH");
     println!("cargo:rerun-if-env-changed=CMAKE_HIP_ARCHITECTURES");
+    println!("cargo:rerun-if-env-changed=SLLM_HIP_TARGET");
     println!("cargo:rerun-if-env-changed=SLLM_HIP_CODEGEN_FEATURES");
     println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_COMPILE_PROBE");
     println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_RUNTIME");
@@ -629,8 +630,9 @@ fn main() {
             ))
             .arg(format!(
                 "-DCMAKE_HIP_ARCHITECTURES={}",
-                configuration.target
+                configuration.codegen_target
             ))
+            .arg(format!("-DSLLM_HIP_TARGET={}", configuration.target))
             .arg(format!(
                 "-DSLLM_HIP_COMPILE_TARGET={}",
                 configuration.target
@@ -727,6 +729,7 @@ struct HipConfiguration {
     rocm_path: PathBuf,
     compiler: PinnedCompiler,
     target: String,
+    codegen_target: String,
     codegen_features: String,
 }
 
@@ -760,6 +763,7 @@ impl PinnedCompiler {
                 "ROCM_PATH",
                 "HIP_PATH",
                 "SLLM_HIP_COMPILER",
+                "SLLM_HIP_TARGET",
                 "CMAKE_HIP_ARCHITECTURES",
                 "SLLM_HIP_CODEGEN_FEATURES",
                 "SLLM_ENABLE_HIP_RUNTIME",
@@ -918,8 +922,26 @@ fn validate_hip_environment(
         );
     }
 
-    let target = env::var("CMAKE_HIP_ARCHITECTURES")
-        .unwrap_or_else(|_| panic!("H3 requires CMAKE_HIP_ARCHITECTURES"));
+    let target = match (
+        env::var("SLLM_HIP_TARGET"),
+        env::var("CMAKE_HIP_ARCHITECTURES"),
+    ) {
+        (Ok(logical), Ok(architecture)) => {
+            assert_eq!(
+                logical, architecture,
+                "SLLM_HIP_TARGET and CMAKE_HIP_ARCHITECTURES must name the same logical target"
+            );
+            logical
+        }
+        (Ok(logical), Err(env::VarError::NotPresent)) => logical,
+        (Err(env::VarError::NotPresent), Ok(logical)) => logical,
+        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
+            panic!("H3 requires SLLM_HIP_TARGET or CMAKE_HIP_ARCHITECTURES")
+        }
+        (Err(error), _) | (_, Err(error)) => {
+            panic!("cannot read HIP target environment: {error}")
+        }
+    };
     assert!(
         matches!(target.as_str(), "gfx1030" | "gfx1201" | "gfx942"),
         "{purpose} requires exactly one exact gfx1030, gfx1201, or gfx942 target"
@@ -940,10 +962,20 @@ fn validate_hip_environment(
         codegen_features, expected_features,
         "HIP codegen features are not the pinned tuple"
     );
+    let codegen_target = if target == "gfx942" {
+        "gfx942:sramecc+:xnack-".to_owned()
+    } else {
+        target.clone()
+    };
     HipConfiguration {
-        rocm_path: canonical_rocm,
+        // Preserve the required logical entry point for CMake.  The
+        // canonical path above is used to validate the compiler and release,
+        // but replacing /opt/rocm with its symlink destination would violate
+        // CMake's logical-root contract on standard ROCm installations.
+        rocm_path,
         compiler,
         target,
+        codegen_target,
         codegen_features,
     }
 }

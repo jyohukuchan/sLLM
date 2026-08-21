@@ -1607,7 +1607,9 @@ fn validate_mtp_plan(
     lock: &ModelLock,
     plan: &WeightLoadPlan,
 ) -> Result<(Vec<QwenGraphWeightBinding>, BTreeSet<String>), QwenGraphError> {
-    if (plan.schema_version != lock.schema_version && plan.schema_version != "gguf-model-plan-v1")
+    if (plan.schema_version != lock.schema_version
+        && plan.schema_version != "gguf-model-plan-v1"
+        && plan.schema_version != "gguf-quantized-model-plan-v1")
         || plan.repo_id != lock.model.repo_id
         || plan.resolved_revision != lock.model.resolved_revision
         || plan.lock_fingerprint != lock.fingerprint()
@@ -4314,6 +4316,21 @@ mod tests {
         )
         .expect("GGUF MTP plan digest builds");
         build_qwen35_mtp_graph(&lock, &gguf_plan, 257).expect("GGUF MTP graph builds");
+        let quantized_gguf_plan = WeightLoadPlan::from_verified_entries(
+            VerifiedWeightPlanMetadata {
+                schema_version: "gguf-quantized-model-plan-v1".to_owned(),
+                repo_id: plan.repo_id.clone(),
+                resolved_revision: plan.resolved_revision.clone(),
+                lock_fingerprint: plan.lock_fingerprint.clone(),
+                tied_embeddings: plan.tied_embeddings,
+                chunk_size: plan.chunk_size,
+                total_destination_bytes: plan.total_destination_bytes,
+            },
+            plan.entries.clone(),
+        )
+        .expect("quantized GGUF MTP plan digest builds");
+        build_qwen35_mtp_graph(&lock, &quantized_gguf_plan, 257)
+            .expect("quantized GGUF MTP graph builds from BF16 component entries");
         gguf_plan.entries[0].source_range[0] += 1;
         assert!(build_qwen35_mtp_graph(&lock, &gguf_plan, 257).is_err());
     }

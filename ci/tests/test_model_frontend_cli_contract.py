@@ -41,11 +41,24 @@ def generate_report() -> dict[str, object]:
             "visible_token_ids": [220, 220],
             "decode_input_token_ids": [220],
             "output_text": "Hello",
+            "finish_reason": "length",
             "stop_reason": {
                 "version": 1,
                 "reason_version": 1,
-                "kind": "max_new_tokens",
+                "kind": "length",
                 "token_id": None,
+                "matched_string": None,
+            },
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 2,
+                "total_tokens": 3,
+            },
+            "sampling": {
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "presence_penalty": 0.0,
+                "frequency_penalty": 0.0,
             },
             "execution": {
                 "selected_backend": "hip",
@@ -54,6 +67,9 @@ def generate_report() -> dict[str, object]:
                 "model_fingerprint": "sha256:" + "3" * 64,
                 "plan_digest": "sha256:" + "9" * 64,
                 "prefill_tokens": 1,
+                "logical_state_capacity_tokens": 3,
+                "allocated_state_capacity_tokens": 3,
+                "mtp_state_slack_tokens": 0,
                 "decode_steps": 1,
                 "fallback_used": False,
                 "submission_count": 42,
@@ -63,6 +79,30 @@ def generate_report() -> dict[str, object]:
                 "all_dispatches_hip": True,
                 "weight_encoding": "bf16",
                 "fp8_provider": None,
+                "prefill_chunk_requested_tokens": None,
+                "prefill_chunk_selection": "auto",
+                "prefill_chunk_capacity_tokens": 1,
+                "prefill_chunk_count": 1,
+                "placement_total_memory_bytes": 64 * 1024 * 1024 * 1024,
+                "placement_available_memory_bytes": 60 * 1024 * 1024 * 1024,
+                "placement_required_bytes": 8 * 1024 * 1024 * 1024,
+                "placement_model_resident_bytes": 7 * 1024 * 1024 * 1024,
+                "placement_request_state_bytes": 256 * 1024 * 1024,
+                "placement_safety_reserve_bytes": 1024 * 1024 * 1024,
+                "workspace_separate_allocation_bytes": 0,
+                "workspace_arena_bytes": 64 * 1024 * 1024,
+                "kv_cache_encoding": "fp16",
+                "image_count": 0,
+                "mtp_selection": "auto",
+                "mtp_draft_width_requested": None,
+                "mtp_draft_width_effective": None,
+                "mtp_target_block_rows": None,
+                "mtp_proposal_blocks": None,
+                "mtp_proposed_draft_tokens": None,
+                "mtp_accepted_draft_tokens": None,
+                "mtp_rejected_draft_tokens": None,
+                "mtp_weight_encoding": None,
+                "mtp_kv_cache_encoding": None,
             },
             "timing_ns": 123,
             "cleanup": {"retryable_cleanup": 0, "durable_quarantine": 0},
@@ -143,6 +183,101 @@ class ModelFrontendCliSchemaTests(unittest.TestCase):
         closed_result = copy.deepcopy(generate_report())
         closed_result["result"]["unexpected"] = True
         self.assert_invalid(closed_result)
+
+    def test_current_backend_specific_report_shapes_are_valid(self) -> None:
+        gemma_verify = base_report("verify-model", {
+            "kind": "verify-model",
+            "model_kind": "gemma4-dense",
+            "prompt_mode": "raw-text-only",
+            "chat_template": False,
+            "locked_files": 3,
+            "verified_files": 1,
+            "tensor_count": 17,
+            "weight_entries": 17,
+            "loadable_entries": 17,
+            "known_unconsumed_entries": 0,
+            "total_destination_bytes": 17,
+            "plan_digest": "sha256:" + "9" * 64,
+            "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+            "recipe_digest": "sha256:" + "4" * 64,
+        })
+        moe_verify = base_report("verify-model", {
+            "kind": "verify-model",
+            "architecture": "Qwen3_5MoeForConditionalGeneration",
+            "tensor_count": 17,
+            "source_kind": "gguf",
+            "weight_entries": 17,
+            "total_destination_bytes": 17,
+            "plan_digest": "sha256:" + "9" * 64,
+            "weight_encoding": "ocp-mxfp4-e2m1-block32-e8m0-mixed",
+        })
+        self.assert_valid(gemma_verify)
+        self.assert_valid(moe_verify)
+
+        moe_generate = generate_report()
+        moe_generate["result"]["stop_reason"] = None
+        moe_generate["result"].pop("stop_reason")
+        moe_generate["result"].pop("sampling")
+        moe_generate["result"].pop("cleanup")
+        execution = moe_generate["result"]["execution"]
+        for field in (
+            "prefill_tokens", "logical_state_capacity_tokens", "allocated_state_capacity_tokens",
+            "mtp_state_slack_tokens", "decode_steps", "segment_count", "boundary_count",
+            "prefill_chunk_requested_tokens", "prefill_chunk_selection", "prefill_chunk_capacity_tokens",
+            "prefill_chunk_count", "placement_total_memory_bytes", "placement_available_memory_bytes",
+            "placement_required_bytes", "placement_model_resident_bytes", "placement_request_state_bytes",
+            "placement_safety_reserve_bytes", "workspace_separate_allocation_bytes", "workspace_arena_bytes",
+            "kv_cache_encoding", "image_count", "mtp_selection", "mtp_draft_width_requested",
+            "mtp_draft_width_effective", "mtp_target_block_rows", "mtp_proposal_blocks",
+            "mtp_proposed_draft_tokens", "mtp_accepted_draft_tokens", "mtp_rejected_draft_tokens",
+            "mtp_weight_encoding", "mtp_kv_cache_encoding",
+        ):
+            execution.pop(field)
+        execution["weight_encoding"] = "ocp-mxfp4-e2m1-block32-e8m0-mixed"
+        self.assert_valid(moe_generate)
+
+    def test_prefill_and_mtp_conditional_shapes_are_enforced(self) -> None:
+        gfx942 = copy.deepcopy(generate_report())
+        gfx942["result"]["execution"]["target"] = "gfx942"
+        self.assert_valid(gfx942)
+
+        missing_qwen_audit = copy.deepcopy(generate_report())
+        missing_qwen_audit["result"]["execution"].pop("kv_cache_encoding")
+        self.assert_invalid(missing_qwen_audit)
+
+        explicit_chunk = copy.deepcopy(generate_report())
+        explicit_chunk["result"]["execution"]["prefill_chunk_requested_tokens"] = 512
+        explicit_chunk["result"]["execution"]["prefill_chunk_selection"] = "explicit"
+        self.assert_valid(explicit_chunk)
+        explicit_chunk["result"]["execution"]["prefill_chunk_selection"] = "auto"
+        self.assert_invalid(explicit_chunk)
+
+        forced_mtp = copy.deepcopy(generate_report())
+        forced = forced_mtp["result"]["execution"]
+        forced.update({
+            "mtp_selection": "forced",
+            "mtp_draft_width_requested": 2,
+            "mtp_draft_width_effective": 2,
+            "mtp_target_block_rows": 3,
+            "mtp_proposal_blocks": 0,
+            "mtp_proposed_draft_tokens": 0,
+            "mtp_accepted_draft_tokens": 0,
+            "mtp_rejected_draft_tokens": 0,
+            "mtp_weight_encoding": "bf16",
+            "mtp_kv_cache_encoding": "fp16",
+        })
+        self.assert_valid(forced_mtp)
+        forced["mtp_weight_encoding"] = None
+        self.assert_invalid(forced_mtp)
+
+        target_only = copy.deepcopy(generate_report())
+        target_only["result"]["execution"].update({
+            "mtp_selection": "target-only",
+            "mtp_draft_width_requested": 0,
+        })
+        self.assert_valid(target_only)
+        target_only["result"]["execution"]["mtp_draft_width_requested"] = None
+        self.assert_invalid(target_only)
 
 
 if __name__ == "__main__":

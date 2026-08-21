@@ -214,42 +214,58 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
                 "HIP build requires LLVM major 23 from ROCm amdclang++; compiler output=${SLLM_HIP_COMPILER_VERSION}; error=${SLLM_HIP_COMPILER_ERROR}")
         endif()
     endif()
-    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR
-       CMAKE_HIP_ARCHITECTURES STREQUAL "" OR
-       CMAKE_HIP_ARCHITECTURES MATCHES ";" OR
-       NOT CMAKE_HIP_ARCHITECTURES MATCHES "^(gfx1030|gfx1201|gfx942)$")
-        message(FATAL_ERROR "HIP build requires exactly one exact gfx1030, gfx1201, or gfx942 target")
+    # SLLM_HIP_TARGET is the public logical target name.  Keep the older
+    # SLLM_HIP_COMPILE_TARGET spelling as the source-level compatibility alias
+    # for direct CMake callers, but never use either logical name as the HIP
+    # architecture when a feature suffix is required.
+    if(NOT DEFINED SLLM_HIP_COMPILE_TARGET AND DEFINED SLLM_HIP_TARGET)
+        set(SLLM_HIP_COMPILE_TARGET "${SLLM_HIP_TARGET}")
     endif()
     if(NOT DEFINED SLLM_HIP_COMPILE_TARGET OR
-       NOT SLLM_HIP_COMPILE_TARGET STREQUAL CMAKE_HIP_ARCHITECTURES)
+       SLLM_HIP_COMPILE_TARGET STREQUAL "" OR
+       SLLM_HIP_COMPILE_TARGET MATCHES ":" OR
+       NOT SLLM_HIP_COMPILE_TARGET MATCHES "^(gfx1030|gfx1201|gfx942)$")
         message(FATAL_ERROR
-            "HIP build requires SLLM_HIP_COMPILE_TARGET to equal the exact CMAKE_HIP_ARCHITECTURES target")
+            "HIP build requires exactly one logical gfx1030, gfx1201, or gfx942 target")
     endif()
-    if(CMAKE_HIP_ARCHITECTURES STREQUAL "gfx942")
+    if(DEFINED SLLM_HIP_TARGET AND
+       NOT SLLM_HIP_TARGET STREQUAL SLLM_HIP_COMPILE_TARGET)
+        message(FATAL_ERROR
+            "SLLM_HIP_TARGET must equal the logical SLLM_HIP_COMPILE_TARGET target")
+    endif()
+    set(SLLM_HIP_TARGET "${SLLM_HIP_COMPILE_TARGET}")
+    if(SLLM_HIP_TARGET STREQUAL "gfx942")
+        set(SLLM_EXPECTED_HIP_ARCHITECTURE "gfx942:sramecc+:xnack-")
         set(SLLM_EXPECTED_CODEGEN_FEATURES
             "co_v6,wave64,xnack=off,sramecc=on,generic_processor_version=0")
         set(SLLM_WAVEFRONT_FLAG -mwavefrontsize64)
         set(SLLM_COMPILE_WAVE64 1)
     else()
+        set(SLLM_EXPECTED_HIP_ARCHITECTURE "${SLLM_HIP_TARGET}")
         set(SLLM_EXPECTED_CODEGEN_FEATURES
             "co_v6,wave32,xnack=unsupported,sramecc=unsupported,generic_processor_version=0")
         set(SLLM_WAVEFRONT_FLAG -mno-wavefrontsize64)
         set(SLLM_COMPILE_WAVE64 0)
+    endif()
+    if(NOT DEFINED CMAKE_HIP_ARCHITECTURES OR
+       CMAKE_HIP_ARCHITECTURES STREQUAL "" OR
+       CMAKE_HIP_ARCHITECTURES MATCHES ";" OR
+       NOT CMAKE_HIP_ARCHITECTURES STREQUAL SLLM_EXPECTED_HIP_ARCHITECTURE)
+        message(FATAL_ERROR
+            "HIP build requires codegen architecture ${SLLM_EXPECTED_HIP_ARCHITECTURE} for logical target ${SLLM_HIP_TARGET}")
     endif()
     if(NOT DEFINED SLLM_HIP_CODEGEN_FEATURES OR
        NOT SLLM_HIP_CODEGEN_FEATURES STREQUAL SLLM_EXPECTED_CODEGEN_FEATURES)
         message(FATAL_ERROR "HIP codegen features are not the pinned tuple")
     endif()
     # ROCm 7.14 / AMD clang 23 accepts the two code-object/wave32 driver
-    # options below.  Its --help exposes neither -mno-xnack nor -mno-sramecc,
-    # and target
-    # IDs with :xnack- or :sramecc- are rejected for exact gfx1030/gfx1201
-    # because those processors report both features as unsupported.  Therefore
-    # the exact target (without a feature suffix) is the source-level encoding
-    # of xnack=unsupported,sramecc=unsupported; adding guessed disable flags
-    # would make the pinned tuple less reproducible.  Exact targets also carry
-    # generic_processor_version=0; no generic processor target is accepted by
-    # this CMake path.
+    # options below. Its --help exposes neither -mno-xnack nor -mno-sramecc,
+    # and target IDs with :xnack- or :sramecc- are rejected for exact
+    # gfx1030/gfx1201 because those processors report both features as
+    # unsupported. Therefore those logical targets intentionally keep their
+    # unsuffixed exact architecture. CDNA3 is different: its exact codegen
+    # architecture is pinned to gfx942:sramecc+:xnack-, while the logical
+    # runtime/compile target remains gfx942. No generic target is accepted.
     if(NOT SLLM_SEMANTIC_G1_AUTHORITY)
         execute_process(
             COMMAND "${CMAKE_HIP_COMPILER}" --help
@@ -265,8 +281,16 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
                 "ROCm AMD clang does not expose the pinned HIP flags: ${SLLM_HIP_HELP_ERROR}")
         endif()
     endif()
-    if(CMAKE_HIP_ARCHITECTURES MATCHES ":" OR
-       SLLM_HIP_CODEGEN_FEATURES MATCHES "generic_processor_version=[1-9]")
+    if(SLLM_HIP_TARGET STREQUAL "gfx942" AND
+       NOT CMAKE_HIP_ARCHITECTURES STREQUAL "gfx942:sramecc+:xnack-")
+        message(FATAL_ERROR
+            "gfx942 requires the exact gfx942:sramecc+:xnack- codegen tuple")
+    elseif(NOT SLLM_HIP_TARGET STREQUAL "gfx942" AND
+           CMAKE_HIP_ARCHITECTURES MATCHES ":")
+        message(FATAL_ERROR
+            "gfx1030/gfx1201 do not accept feature-suffixed HIP architectures")
+    endif()
+    if(SLLM_HIP_CODEGEN_FEATURES MATCHES "generic_processor_version=[1-9]")
         message(FATAL_ERROR
             "public HIP build requires an exact target with generic_processor_version=0")
     endif()
@@ -682,7 +706,7 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE)
         CXX_EXTENSIONS OFF
         LINKER_LANGUAGE HIP
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-        OUTPUT_NAME "hip-compile-probe-${CMAKE_HIP_ARCHITECTURES}"
+        OUTPUT_NAME "hip-compile-probe-${SLLM_HIP_COMPILE_TARGET}"
         SUFFIX ".elf"
     )
     target_link_options(sllm_hip_compile_probe_link PRIVATE
@@ -697,7 +721,7 @@ if(SLLM_ENABLE_HIP_COMPILE_PROBE)
     )
 
     set(SLLM_HIP_PROBE_OBJECT_OUTPUT
-        "${CMAKE_BINARY_DIR}/hip-compile-probe-${CMAKE_HIP_ARCHITECTURES}.o"
+        "${CMAKE_BINARY_DIR}/hip-compile-probe-${SLLM_HIP_COMPILE_TARGET}.o"
     )
     add_custom_command(
         OUTPUT "${SLLM_HIP_PROBE_OBJECT_OUTPUT}"
@@ -833,7 +857,7 @@ if(SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST)
     )
     target_compile_features(sllm_linear_attention_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_linear_attention_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_linear_attention_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
@@ -853,7 +877,7 @@ if(SLLM_ENABLE_ARGMAX_GPU_TEST)
     )
     target_compile_features(sllm_argmax_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_argmax_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_argmax_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
@@ -871,7 +895,7 @@ if(SLLM_ENABLE_MOE_ROUTE_GPU_TEST)
     )
     target_compile_features(sllm_moe_route_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_moe_route_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_moe_route_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
@@ -887,7 +911,7 @@ if(SLLM_ENABLE_MOE_EXPERT_GPU_TEST)
     add_executable(sllm_moe_expert_gpu_test tests/moe_expert_gpu_test.cpp)
     target_compile_features(sllm_moe_expert_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_moe_expert_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}")
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}")
     target_compile_options(sllm_moe_expert_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror)
     target_link_libraries(sllm_moe_expert_gpu_test PRIVATE sllm_hip_stub)
@@ -903,7 +927,7 @@ if(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST)
     )
     target_compile_features(sllm_rmsnorm_direct_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_rmsnorm_direct_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_rmsnorm_direct_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
@@ -923,7 +947,7 @@ if(SLLM_ENABLE_ROTARY_GPU_TEST)
     )
     target_compile_features(sllm_rotary_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_rotary_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
         __HIP_PLATFORM_AMD__=1
     )
     target_compile_options(sllm_rotary_gpu_test PRIVATE
@@ -952,7 +976,7 @@ if(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST)
     )
     target_compile_features(sllm_rotary_public_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_rotary_public_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_rotary_public_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
@@ -972,7 +996,7 @@ if(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST)
     )
     target_compile_features(sllm_gemma_attention_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_gemma_attention_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
         __HIP_PLATFORM_AMD__=1
     )
     target_compile_options(sllm_gemma_attention_gpu_test PRIVATE
@@ -1001,7 +1025,7 @@ if(SLLM_ENABLE_GEMMA_ATTENTION_PUBLIC_GPU_TEST)
     )
     target_compile_features(sllm_gemma_attention_public_gpu_test PRIVATE cxx_std_17)
     target_compile_definitions(sllm_gemma_attention_public_gpu_test PRIVATE
-        SLLM_TEST_EXPECTED_TARGET="${CMAKE_HIP_ARCHITECTURES}"
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
     )
     target_compile_options(sllm_gemma_attention_public_gpu_test PRIVATE
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror

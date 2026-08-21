@@ -69,6 +69,119 @@ def request_payload(max_tokens: int, *, stream: bool = False, stop: str | None =
     return payload
 
 
+def reasoning_payload(max_tokens: int, *, stream: bool = False) -> dict[str, object]:
+    """Build the bounded raw request for the opt-in separated reasoning extension."""
+    payload = request_payload(max_tokens, stream=stream)
+    payload["sllm"] = {"thinking": "enabled", "separate_reasoning": True}
+    return payload
+
+
+def seeded_sampling_payload(
+    max_tokens: int, *, seed: int, stream: bool = False
+) -> dict[str, object]:
+    """Build a non-greedy request whose explicit seed must replay exactly."""
+    payload = request_payload(max_tokens, stream=stream)
+    payload.update({"temperature": 0.8, "top_p": 0.9, "seed": seed})
+    return payload
+
+
+def validate_reasoning_response(response: object) -> tuple[str, str]:
+    """Return separated reasoning/content, rejecting malformed or leaked tags."""
+    if not isinstance(response, dict) or response.get("object") != "chat.completion":
+        raise RuntimeError("reasoning non-stream response object differs")
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        raise RuntimeError("reasoning non-stream choices differ")
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        raise RuntimeError("reasoning non-stream assistant message differs")
+    if "reasoning_content" not in message:
+        raise RuntimeError("reasoning non-stream response omitted reasoning_content")
+    reasoning = message.get("reasoning_content")
+    content = message.get("content")
+    if not isinstance(reasoning, str) or not isinstance(content, str):
+        raise RuntimeError("reasoning non-stream fields are not strings")
+    if "<think>" in reasoning or "</think>" in reasoning or "<think>" in content or "</think>" in content:
+        raise RuntimeError("reasoning tags leaked into separated response")
+    if not reasoning and not content:
+        raise RuntimeError("reasoning response contains neither reasoning nor content")
+    finish_reason = choices[0].get("finish_reason")
+    if finish_reason not in {"stop", "length"}:
+        raise RuntimeError("reasoning non-stream finish reason differs")
+    return reasoning, content
+
+
+def parse_reasoning_sse(chunks: list[dict[str, object]]) -> tuple[str, str]:
+    """Validate SSE delta separation and return concatenated reasoning/content."""
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+    for chunk in chunks:
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+            raise RuntimeError("reasoning SSE choices differ")
+        delta = choices[0].get("delta")
+        if not isinstance(delta, dict):
+            raise RuntimeError("reasoning SSE delta differs")
+        reasoning = delta.get("reasoning_content")
+        content = delta.get("content")
+        if reasoning is not None and not isinstance(reasoning, str):
+            raise RuntimeError("reasoning SSE field is not a string")
+        if content is not None and not isinstance(content, str):
+            raise RuntimeError("content SSE field is not a string")
+        if reasoning and content:
+            raise RuntimeError("reasoning and content share one SSE delta")
+        if reasoning:
+            reasoning_parts.append(reasoning)
+        if content:
+            content_parts.append(content)
+        if any(tag in value for value in (reasoning or "", content or "") for tag in ("<think>", "</think>")):
+            raise RuntimeError("reasoning tags leaked into separated SSE")
+    reasoning = "".join(reasoning_parts)
+    content = "".join(content_parts)
+    if not reasoning and not content:
+        raise RuntimeError("reasoning SSE contains neither reasoning nor content")
+    return reasoning, content
+
+
+def validate_seeded_response(response: object) -> tuple[str, object]:
+    """Validate the public response shape used by the seeded replay probe."""
+    if not isinstance(response, dict) or response.get("object") != "chat.completion":
+        raise RuntimeError("seeded response object differs")
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        raise RuntimeError("seeded response choices differ")
+    message = choices[0].get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        raise RuntimeError("seeded assistant message differs")
+    content = message.get("content")
+    usage = response.get("usage")
+    if not isinstance(content, str) or not content or not isinstance(usage, dict):
+        raise RuntimeError("seeded response content or usage differs")
+    if choices[0].get("finish_reason") not in {"stop", "length"}:
+        raise RuntimeError("seeded finish reason differs")
+    return content, usage
+
+
+def build_server_command(
+    binary: Path,
+    gguf: Path,
+    derived_lock: Path,
+    device_index: int,
+    target: str,
+    port: int,
+) -> list[str]:
+    """Construct the public GGUF server invocation used by the lifecycle probe."""
+    return [
+        str(binary),
+        "--gguf", str(gguf),
+        "--derived-lock", str(derived_lock),
+        "--device-index", str(device_index),
+        "--target", target,
+        "--listen", f"127.0.0.1:{port}",
+        "--model", "qwen3.5-4b",
+    ]
+
+
 def phase5_render_payload() -> dict[str, object]:
     """Return the exact Phase 5 render/tokenize baseline request identity."""
     return {
@@ -187,8 +300,8 @@ def wait_ready(process: subprocess.Popen[str], timeout: float) -> dict[str, obje
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--lock", type=Path, required=True)
-    parser.add_argument("--cache", type=Path, required=True)
+    parser.add_argument("--gguf", type=Path, required=True)
+    parser.add_argument("--derived-lock", type=Path, required=True)
     parser.add_argument("--device-index", type=int, required=True)
     parser.add_argument("--amd-smi-index", type=int, required=True)
     parser.add_argument("--gpu-uuid", required=True)
@@ -206,15 +319,14 @@ def main() -> int:
     env["LD_LIBRARY_PATH"] = "/opt/rocm/lib:/opt/rocm/lib64" + (
         ":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else ""
     )
-    command = [
-        str(args.binary),
-        "--lock", str(args.lock),
-        "--cache", str(args.cache),
-        "--device-index", str(args.device_index),
-        "--target", args.target,
-        "--listen", f"127.0.0.1:{args.port}",
-        "--model", "qwen3.5-4b",
-    ]
+    command = build_server_command(
+        args.binary,
+        args.gguf,
+        args.derived_lock,
+        args.device_index,
+        args.target,
+        args.port,
+    )
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -237,6 +349,18 @@ def main() -> int:
         visible = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
         if visible != text or chunks[-1]["usage"] != non_stream["usage"]:
             raise RuntimeError("stream/non-stream text or usage differs")
+        reasoning_body, reasoning_http_ns = post(base_url, reasoning_payload(17))
+        reasoning_response = json.loads(reasoning_body)
+        reasoning, reasoning_content = validate_reasoning_response(reasoning_response)
+        reasoning_stream_body, reasoning_stream_http_ns = post(
+            base_url, reasoning_payload(17, stream=True), stream=True
+        )
+        reasoning_chunks = parse_sse(reasoning_stream_body)
+        reasoning_stream, reasoning_stream_content = parse_reasoning_sse(reasoning_chunks)
+        if (reasoning_stream, reasoning_stream_content) != (reasoning, reasoning_content):
+            raise RuntimeError("reasoning stream/non-stream split differs")
+        if reasoning_chunks[-1].get("usage") != reasoning_response.get("usage"):
+            raise RuntimeError("reasoning stream/non-stream usage differs")
         phase5_body, phase5_http_ns = post(base_url, phase5_render_payload())
         phase5_response = json.loads(phase5_body)
         if phase5_response["usage"]["prompt_tokens"] != 13:
@@ -256,6 +380,19 @@ def main() -> int:
                 raise RuntimeError("page-boundary stop request did not terminate immediately")
             boundary_capacities.append(capacity)
         client = official_client_smoke(args.client_python, base_url)
+        sampling_seed = 1902
+        seeded_body, seeded_http_ns = post(
+            base_url, seeded_sampling_payload(17, seed=sampling_seed)
+        )
+        seeded_response = json.loads(seeded_body)
+        seeded_text, seeded_usage = validate_seeded_response(seeded_response)
+        seeded_replay_body, seeded_replay_http_ns = post(
+            base_url, seeded_sampling_payload(17, seed=sampling_seed)
+        )
+        seeded_replay_response = json.loads(seeded_replay_body)
+        seeded_replay_text, seeded_replay_usage = validate_seeded_response(seeded_replay_response)
+        if (seeded_replay_text, seeded_replay_usage) != (seeded_text, seeded_usage):
+            raise RuntimeError("explicit seeded sampling did not replay exactly")
         disconnect_after_content("127.0.0.1", args.port)
         recovery_body, recovery_ns = post(base_url, request_payload(1))
         if json.loads(recovery_body)["object"] != "chat.completion":
@@ -263,14 +400,20 @@ def main() -> int:
 
         first_elapsed: dict[str, int] = {}
         second_elapsed: dict[str, int] = {}
+        queue_errors: list[BaseException] = []
         barrier = threading.Barrier(3)
         def queued(name: str, destination: dict[str, int]) -> None:
-            barrier.wait()
-            _, elapsed = post(base_url, request_payload(1))
-            destination[name] = elapsed
+            try:
+                barrier.wait()
+                _, elapsed = post(base_url, request_payload(1))
+                destination[name] = elapsed
+            except BaseException as error:
+                queue_errors.append(error)
         one = threading.Thread(target=queued, args=("one", first_elapsed))
         two = threading.Thread(target=queued, args=("two", second_elapsed))
         one.start(); two.start(); barrier.wait(); one.join(); two.join()
+        if queue_errors or set(first_elapsed) != {"one"} or set(second_elapsed) != {"two"}:
+            raise RuntimeError("two-concurrent request probe failed")
         queue_pair = sorted([first_elapsed["one"], second_elapsed["two"]])
         queue_wait_residual_ns = max(0, queue_pair[1] - queue_pair[0])
     finally:
@@ -307,10 +450,17 @@ def main() -> int:
     post_processes = process_count(amd_smi("process"), args.amd_smi_index)
     if post_processes != pre_processes:
         raise RuntimeError("GPU process count did not return to pre-run value")
-    # Request order is fixed up to the final two concurrent queue probes.
+    # The first two completed audits are the raw non-stream/SSE probes; the
+    # fifth is the fixed render/tokenize baseline (reasoning probes occupy
+    # slots three and four).  Validate its prompt identity before accounting.
+    if len(completed) < 5:
+        raise RuntimeError("service completed-audit sequence is incomplete")
     non_stream_backend_ns = completed[0]["elapsed_ns"]
     stream_backend_ns = completed[1]["elapsed_ns"]
-    phase5_backend_ns = completed[2]["elapsed_ns"]
+    phase5_audit = completed[4]
+    if phase5_audit["prompt_tokens"] != phase5_response["usage"]["prompt_tokens"]:
+        raise RuntimeError("Phase 5 render audit identity differs")
+    phase5_backend_ns = phase5_audit["elapsed_ns"]
     report = {
         "schema_version": "openai-a6-gpu-evidence-v1",
         "result": "PASS",
@@ -323,11 +473,28 @@ def main() -> int:
         "plan_digest": shutdown["plan_digest"],
         "official_client": client,
         "raw_sse_chunks": len(chunks),
+        "reasoning": {
+            "non_stream_reasoning_chars": len(reasoning),
+            "non_stream_content_chars": len(reasoning_content),
+            "stream_reasoning_chars": len(reasoning_stream),
+            "stream_content_chars": len(reasoning_stream_content),
+            "sse_chunks": len(reasoning_chunks),
+        },
+        "seeded_sampling": {
+            "seed": sampling_seed,
+            "temperature": 0.8,
+            "top_p": 0.9,
+            "replays": 2,
+            "completion_chars": len(seeded_text),
+        },
         "boundary_capacities": boundary_capacities,
         "disconnect": disconnected,
         "overhead": {
             "non_stream_json_residual_ns": max(0, non_stream_ns - non_stream_backend_ns),
             "stream_sse_residual_ns": max(0, stream_ns - stream_backend_ns),
+            "reasoning_non_stream_http_ns": reasoning_http_ns,
+            "reasoning_stream_http_ns": reasoning_stream_http_ns,
+            "seeded_sampling_http_ns": seeded_http_ns + seeded_replay_http_ns,
             "queue_wait_residual_ns": queue_wait_residual_ns,
             "post_disconnect_recovery_http_ns": recovery_ns,
             "phase5_render_case": {

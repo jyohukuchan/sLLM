@@ -1,0 +1,157 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/phase36-mi300x-session-a-final-v1.schema.json",
+  "title": "Phase 36 MI300X Session A final evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "recorded_at", "identity", "hardware", "software", "build", "artifacts", "artifact_contract", "wrong_target_negative", "stages", "a2", "operator", "models", "cleanup", "artifact_store", "retention", "unexecuted_scope"],
+  "properties": {
+    "schema_version": {"const": "phase36-mi300x-session-a-final-v1"},
+    "state": {"const": "PASS"},
+    "recorded_at": {"const": "2026-08-21"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "hardware": {"$ref": "#/$defs/hardware"},
+    "software": {"$ref": "#/$defs/software"},
+    "build": {"$ref": "#/$defs/build"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "artifact_contract": {"$ref": "#/$defs/artifact_contract"},
+    "wrong_target_negative": {"$ref": "#/$defs/wrong_target_negative"},
+    "stages": {"$ref": "#/$defs/stages"},
+    "a2": {"$ref": "#/$defs/a2"},
+    "operator": {"$ref": "#/$defs/operator"},
+    "models": {"$ref": "#/$defs/models"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "artifact_store": {"$ref": "#/$defs/artifact_store"},
+    "retention": {"$ref": "#/$defs/retention"},
+    "unexecuted_scope": {"$ref": "#/$defs/unexecuted_scope"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_base_commit", "initial_semantic_digest", "initial_semantic_digest_scope", "final_semantic_digest", "final_semantic_digest_scope", "final_native_source_sha256", "operator_summary_sha256", "operator_summary_path"],
+      "properties": {
+        "source_base_commit": {"const": "faf39339d42c837c1ff899f90b03632ac5fe57af"},
+        "initial_semantic_digest": {"const": "fa2c82c936f61c897c87cee82cb92b0aa100cb0b0c766734e42d24c8df2bc892"},
+        "initial_semantic_digest_scope": {"const": "historical initial-99-operator-run"},
+        "final_semantic_digest": {"const": "8836bd3ec07464904a657b846c79e21f3ffb8c975b55a65dca7ea720e993a57a"},
+        "final_semantic_digest_scope": {"const": "10 sorted sha256 path lines"},
+        "final_native_source_sha256": {"const": "360a9e3330104bae4bed7164f105c8c51ea644a1ad779a7a03746f59669623ef"},
+        "operator_summary_sha256": {"const": "5daa5869932513490c50cbb9ff330cf47fb581aa333fc1133fc0261a1192222d"},
+        "operator_summary_path": {"const": "/home/hotaisle/phase36-session-a/final/operator/phase36-mi300x-session-a-summary-v1.json"}
+      }
+    },
+    "hardware": {
+      "type": "object", "additionalProperties": false,
+      "required": ["gpu", "gpu_count", "uuid", "bdf", "actual_arch", "logical_arch", "wavefront_size", "compute_units", "hbm_bytes", "nps_mode", "partition_mode", "vmm", "vm"],
+      "properties": {
+        "gpu": {"const": "MI300X VF x1"}, "gpu_count": {"const": 1}, "uuid": {"const": "GPU-1228c84fe776f2f4"}, "bdf": {"const": "0000:ff:00.0"},
+        "actual_arch": {"const": "gfx942:sramecc+:xnack-"}, "logical_arch": {"const": "gfx942"}, "wavefront_size": {"const": 64}, "compute_units": {"const": 304}, "hbm_bytes": {"const": 205822885888}, "nps_mode": {"const": "NPS1"}, "partition_mode": {"const": "SPX"}, "vmm": {"const": true},
+        "vm": {
+          "type": "object", "additionalProperties": false,
+          "required": ["hostname", "region", "virtualization", "cpu_vcpus", "cpu_model", "ram_bytes", "disk_bytes"],
+          "properties": {"hostname": {"const": "enc1-gpuvm015"}, "region": {"const": "enc1"}, "virtualization": {"const": "KVM"}, "cpu_vcpus": {"const": 8}, "cpu_model": {"const": "Intel Xeon Platinum 8462Y+"}, "ram_bytes": {"const": 236439953408}, "disk_bytes": {"const": 13194136387584}}
+        }
+      }
+    },
+    "software": {
+      "type": "object", "additionalProperties": false,
+      "required": ["os", "kernel", "amdgpu", "provider_path", "provider_link_target", "execution_amd_smi_metric_available", "execution_amd_smi_metric_error", "provider_restored", "execution"],
+      "properties": {
+        "os": {"const": "Ubuntu 24.04.4"}, "kernel": {"const": "6.8.0-124"}, "amdgpu": {"const": "6.16.13"}, "provider_path": {"const": "/opt/rocm"}, "provider_link_target": {"const": "/etc/alternatives/rocm -> /opt/rocm-7.2.4"}, "execution_amd_smi_metric_available": {"const": false}, "execution_amd_smi_metric_error": {"const": "Namespace.partition"}, "provider_restored": {"const": true},
+        "execution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["rocm_root", "rocm_version", "hip_version", "llvm_version", "temporary_bind_source", "temporary_bind_target", "post_provider_root"],
+          "properties": {"rocm_root": {"const": "/opt/rocm"}, "rocm_version": {"const": "7.14.0"}, "hip_version": {"const": "7.14.60850"}, "llvm_version": {"const": "23"}, "temporary_bind_source": {"const": "/opt/rocm-7.2.4/core-7.14"}, "temporary_bind_target": {"const": "/opt/rocm-7.2.4"}, "post_provider_root": {"const": "/opt/rocm -> /opt/rocm-7.2.4"}}
+        }
+      }
+    },
+    "build": {
+      "type": "object", "additionalProperties": false,
+      "required": ["build_rs_sha256", "cmake_sha256", "gdn_source_sha256", "runner_sha256", "hip_architecture", "codegen_features", "compile_target", "hip_target"],
+      "properties": {
+        "build_rs_sha256": {"const": "4d65b53923a5b98df050599da768a6e9ff34f1d82ef57ff67b3779f7aaf78847"}, "cmake_sha256": {"const": "e436c8ce2db62146c792603d1f6128c6c3b04eabc1c4a02d9cbf8e36d0068c10"}, "gdn_source_sha256": {"const": "360a9e3330104bae4bed7164f105c8c51ea644a1ad779a7a03746f59669623ef"}, "runner_sha256": {"const": "f2b56b03c0a7f9d2a550055cd670d76e11e3de58e2b02961aa528f8e4b274bb6"}, "hip_architecture": {"const": "gfx942:sramecc+:xnack-"}, "codegen_features": {"const": ["co_v6", "wave64", "xnack=off", "sramecc=on", "generic_processor_version=0"]}, "compile_target": {"const": "gfx942"}, "hip_target": {"const": "gfx942"}
+      }
+    },
+    "artifact": {
+      "type": "object", "additionalProperties": false, "required": ["sha256", "size_bytes"],
+      "properties": {"sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 1}}
+    },
+    "artifacts": {
+      "type": "object", "additionalProperties": false, "required": ["sllm", "server", "fp8", "matmul", "elementwise", "preprocess", "kv", "full_attention", "output", "rmsnorm", "gdn"],
+      "properties": {"sllm": {"$ref": "#/$defs/artifact"}, "server": {"$ref": "#/$defs/artifact"}, "fp8": {"$ref": "#/$defs/artifact"}, "matmul": {"$ref": "#/$defs/artifact"}, "elementwise": {"$ref": "#/$defs/artifact"}, "preprocess": {"$ref": "#/$defs/artifact"}, "kv": {"$ref": "#/$defs/artifact"}, "full_attention": {"$ref": "#/$defs/artifact"}, "output": {"$ref": "#/$defs/artifact"}, "rmsnorm": {"$ref": "#/$defs/artifact"}, "gdn": {"$ref": "#/$defs/artifact"}}
+    },
+    "artifact_contract": {
+      "type": "object", "additionalProperties": false, "required": ["device_bundle", "host_bundle", "abi_version", "code_object_version", "e_flags", "wavefront_size", "logical_target", "other_device_bundles", "generic_targets"],
+      "properties": {"device_bundle": {"const": "hipv4-amdgcn-amd-amdhsa--gfx942:sramecc+:xnack-"}, "host_bundle": {"const": "host-x86_64-unknown-linux-gnu-"}, "abi_version": {"const": 4}, "code_object_version": {"const": 6}, "e_flags": {"const": "0xE4C"}, "wavefront_size": {"const": 64}, "logical_target": {"const": "gfx942"}, "other_device_bundles": {"const": []}, "generic_targets": {"const": []}}
+    },
+    "wrong_target_negative": {
+      "type": "object", "additionalProperties": false, "required": ["requested_target", "exit_code", "dispatch_started", "stderr"],
+      "properties": {"requested_target": {"const": "gfx1201"}, "exit_code": {"const": 1}, "dispatch_started": {"const": false}, "stderr": {"const": "matmul-g1 evidence failed: owned HIP execution-session open failed: backend status 259: requested device gcnArchName does not match exactly"}}
+    },
+    "stage": {"type": "object", "additionalProperties": false, "required": ["state", "scope"], "properties": {"state": {"const": "PASS"}, "scope": {"type": "string", "minLength": 1}}},
+    "stages": {
+      "type": "object", "additionalProperties": false, "required": ["A0", "A1", "A2", "A3", "A4", "A5"],
+      "properties": {
+        "A0": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "VM, hardware, and target identity"}}}]},
+        "A1": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "ROCm root and exact artifact build/load"}}}]},
+        "A2": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "tiny runtime, library probe, and profiler"}}}]},
+        "A3": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "99-case native operator matrix"}}}]},
+        "A4": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "BF16/FP8 model verify, load, reuse, and generation smoke"}}}]},
+        "A5": {"allOf": [{"$ref": "#/$defs/stage"}, {"properties": {"scope": {"const": "cleanup, provider restoration, and retention"}}}]}
+      }
+    },
+    "a2": {
+      "type": "object", "additionalProperties": false, "required": ["preflight", "fnuz_probe", "rocprof", "host_fp8_conversion_oracle"],
+      "properties": {
+        "preflight": {"type": "object", "additionalProperties": false, "required": ["sha256", "state", "tiny_runtime"], "properties": {"sha256": {"const": "5ca09f19e28f0b2c0ada7e8b9bba3e2e832c5ce7c67763c19d4ef0aebd8ff149"}, "state": {"const": "PASS"}, "tiny_runtime": {"type": "object", "additionalProperties": false, "required": ["input", "output", "allocation_count", "copy_count", "dispatch_count"], "properties": {"input": {"const": 41}, "output": {"const": 42}, "allocation_count": {"const": 1}, "copy_count": {"const": 2}, "dispatch_count": {"const": 1}}}}},
+        "fnuz_probe": {"type": "object", "additionalProperties": false, "required": ["sha256", "state", "solution_count", "workspace_bytes"], "properties": {"sha256": {"const": "aa371e30308ae07907af2c45f75a0f8a7a5b962e950f28b3dba4a64906fca033"}, "state": {"const": "PASS"}, "solution_count": {"const": 8}, "workspace_bytes": {"const": 0}}},
+        "rocprof": {"type": "object", "additionalProperties": false, "required": ["kernel_csv_sha256", "allocation_csv_sha256", "increment_captured"], "properties": {"kernel_csv_sha256": {"const": "c07de8f1f72cd72ebbc3a0f02c65ed0097bc86ec0f17805ede5c22c305d04bf9"}, "allocation_csv_sha256": {"const": "a411f69b5724dd55d4cce4dd0a5093b4125d00dbddf7387bbeb69833b47d2b77"}, "increment_captured": {"const": true}}},
+        "host_fp8_conversion_oracle": {"type": "object", "additionalProperties": false, "required": ["state", "evidence"], "properties": {"state": {"const": "PASS"}, "evidence": {"const": "relevant core tests"}}}
+      }
+    },
+    "operator": {
+      "type": "object", "additionalProperties": false, "required": ["state", "summary_sha256", "summary_path", "expected_cases", "family_case_counts", "dispatch_counts", "hip_only", "fallback_used", "cleanup_retryable", "cleanup_durable", "all_cleanup_zero"],
+      "properties": {"state": {"const": "PASS"}, "summary_sha256": {"const": "5daa5869932513490c50cbb9ff330cf47fb581aa333fc1133fc0261a1192222d"}, "summary_path": {"const": "/home/hotaisle/phase36-session-a/final/operator/phase36-mi300x-session-a-summary-v1.json"}, "expected_cases": {"const": 99}, "family_case_counts": {"const": [2, 17, 21, 8, 19, 16, 6, 7, 3]}, "dispatch_counts": {"const": [4, 17, 21, 8, 19, 16, 6, 7, 6]}, "hip_only": {"const": true}, "fallback_used": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "all_cleanup_zero": {"const": true}}
+    },
+    "tokens": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0, "maximum": 4294967295}},
+    "smoke": {
+      "type": "object", "additionalProperties": false, "required": ["hello", "unicode", "stop"],
+      "properties": {
+        "hello": {"type": "object", "additionalProperties": false, "required": ["tokens", "output", "sha256"], "properties": {"tokens": {"$ref": "#/$defs/tokens"}, "output": {"type": "string"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+        "unicode": {"type": "object", "additionalProperties": false, "required": ["tokens", "sha256"], "properties": {"tokens": {"$ref": "#/$defs/tokens"}, "sha256": {"$ref": "#/$defs/sha256"}}},
+        "stop": {"type": "object", "additionalProperties": false, "required": ["tokens", "visible", "stop_match", "sha256"], "properties": {"tokens": {"$ref": "#/$defs/tokens"}, "visible": {"const": []}, "stop_match": {"const": ","}, "sha256": {"$ref": "#/$defs/sha256"}}}
+      }
+    },
+    "benchmark": {
+      "type": "object", "additionalProperties": false, "required": ["state", "sha256", "warmups", "measured", "total_requests", "correctness_control_requests", "model_load_count", "model_reused", "model_load_ns", "resident_bytes", "peak_bytes", "after_model_drop_bytes", "cleanup_retryable", "cleanup_durable", "hip_only", "target"],
+      "properties": {"state": {"const": "PASS"}, "sha256": {"$ref": "#/$defs/sha256"}, "warmups": {"const": 3}, "measured": {"const": 10}, "total_requests": {"const": 14}, "correctness_control_requests": {"const": 1}, "model_load_count": {"const": 1}, "model_reused": {"const": true}, "model_load_ns": {"type": "integer", "minimum": 1}, "resident_bytes": {"type": "integer", "minimum": 1}, "peak_bytes": {"type": "integer", "minimum": 1}, "after_model_drop_bytes": {"const": 0}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0}, "hip_only": {"const": true}, "target": {"const": "gfx942"}}
+    },
+    "model": {
+      "type": "object", "additionalProperties": false, "required": ["format", "encoding", "sha256", "size_bytes", "lock_sha256", "lock_size_bytes", "target", "hip_only", "fallback_used", "partial", "cleanup_retryable", "cleanup_durable", "verify", "smoke", "benchmark"],
+      "properties": {
+        "format": {"const": "GGUF"}, "encoding": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}, "size_bytes": {"type": "integer", "minimum": 1}, "lock_sha256": {"$ref": "#/$defs/sha256"}, "lock_size_bytes": {"type": "integer", "minimum": 1}, "target": {"const": "gfx942"}, "hip_only": {"const": true}, "fallback_used": {"const": false}, "partial": {"const": false}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0},
+        "verify": {"type": "object", "additionalProperties": false, "required": ["state", "plan_digest", "loadable_entries", "weight_entries"], "properties": {"state": {"const": "PASS"}, "plan_digest": {"$ref": "#/$defs/sha256"}, "loadable_entries": {"const": 426}, "weight_entries": {"const": 738}}},
+        "smoke": {"$ref": "#/$defs/smoke"}, "benchmark": {"$ref": "#/$defs/benchmark"}
+      }
+    },
+    "models": {
+      "type": "object", "additionalProperties": false, "required": ["bf16", "fp8", "hello_difference"],
+      "properties": {
+        "bf16": {"allOf": [{"$ref": "#/$defs/model"}, {"properties": {"sha256": {"const": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675"}, "size_bytes": {"const": 9343583936}, "lock_sha256": {"const": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318"}, "lock_size_bytes": {"const": 1492}, "verify": {"properties": {"plan_digest": {"const": "5e6d31c89da0c6eb6c5dbc187740dc87e44194e01d4549d95a2f68586490fb28"}}}, "benchmark": {"properties": {"sha256": {"const": "9dc379e3f89a29db6f040b6c17bda4c919ee0799f72e86574bf0191cab110f59"}, "model_load_ns": {"const": 10826068306}, "resident_bytes": {"const": 8411592192}, "peak_bytes": {"const": 8477011968}}}}}, {"required": ["format", "encoding", "sha256", "size_bytes", "lock_sha256", "lock_size_bytes", "target", "hip_only", "fallback_used", "partial", "cleanup_retryable", "cleanup_durable", "verify", "smoke", "benchmark"]}]},
+        "fp8": {"allOf": [{"$ref": "#/$defs/model"}, {"properties": {"sha256": {"const": "cf143f6c138f0e4a6372959bf348568159278202eca6081ce29346fdef1cfe0d"}, "size_bytes": {"const": 5779142720}, "lock_sha256": {"const": "21b4fed31b6cf00e79e74b464f7ff8422d02292872c43d84924fa47e228e68d1"}, "lock_size_bytes": {"const": 1770}, "verify": {"properties": {"plan_digest": {"const": "8628cf4100f54254939fa483eb8f53036b2cce4ecbf46f20f3b4e4d86fcc156f"}}}, "benchmark": {"properties": {"sha256": {"const": "f80fa8ed3a68448a3eb1a59c07290fbec6df59627e28e1596a4642233c71c0db"}, "model_load_ns": {"const": 16937844619}, "resident_bytes": {"const": 4847029760}, "peak_bytes": {"const": 4912449536}}}}}, {"required": ["format", "encoding", "sha256", "size_bytes", "lock_sha256", "lock_size_bytes", "target", "hip_only", "fallback_used", "partial", "cleanup_retryable", "cleanup_durable", "verify", "smoke", "benchmark"]}]},
+        "hello_difference": {"type": "object", "additionalProperties": false, "required": ["classification", "bf16_tokens", "fp8_tokens", "explanation"], "properties": {"classification": {"const": "N1_NUMERICAL_DIFFERENCE"}, "bf16_tokens": {"const": [11, 353, 2688, 4313, 310]}, "fp8_tokens": {"const": [11, 353, 1044, 4313, 310]}, "explanation": {"type": "string", "minLength": 1}}}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["state", "process_count", "model_handles", "provider_rocm_smi_gpu_processes", "provider_rocm_smi_vram_percent", "provider_amd_smi_used_vram_mb", "provider_amd_smi_gfx_activity_percent", "ecc", "execution_amd_smi_metric_available", "execution_amd_smi_metric_error", "post_provider_metric_available", "provider_restored", "cleanup_retryable", "cleanup_durable", "raw_sha256"],
+      "properties": {
+        "state": {"const": "PASS"}, "process_count": {"const": 0}, "model_handles": {"const": 0}, "provider_rocm_smi_gpu_processes": {"const": 0}, "provider_rocm_smi_vram_percent": {"const": 0}, "provider_amd_smi_used_vram_mb": {"const": 285}, "provider_amd_smi_gfx_activity_percent": {"const": 0}, "ecc": {"type": "object", "additionalProperties": false, "required": ["scope", "correctable_total", "uncorrectable_total"], "properties": {"scope": {"const": "all sysfs blocks"}, "correctable_total": {"const": 0}, "uncorrectable_total": {"const": 0}}}, "execution_amd_smi_metric_available": {"const": false}, "execution_amd_smi_metric_error": {"const": "Namespace.partition"}, "post_provider_metric_available": {"const": true}, "provider_restored": {"const": true}, "cleanup_retryable": {"const": 0}, "cleanup_durable": {"const": 0},
+        "raw_sha256": {"type": "object", "additionalProperties": false, "required": ["process", "metric", "static", "rocm_smi", "ras"], "properties": {"process": {"const": "103b5abc1190fd28e82bbd5b037a8061cd6a4b4be101f70b0d8141db2878b9d5"}, "metric": {"const": "d0f1281d7225021e68473584c3018864d604bfc6cdcca4a8869495642dc16f72"}, "static": {"const": "969f82968f85a5fe9259cedcc5f417e0167d43d9276071c28d6372a6c2e0f832"}, "rocm_smi": {"const": "bac8965ba15e83ef353a92b0442556b66a06b4ccd6b0c73a6d1a08b536359dde"}, "ras": {"const": "714b9a9f6ba5e1d1ef37cbfcb9933eafc071f924b916bc43a9fbedf13af3828f"}}}
+      }
+    },
+    "artifact_store": {"type": "object", "additionalProperties": false, "required": ["identifier", "scope"], "properties": {"identifier": {"const": "/home/homelab1/.local/share/sllm-evidence/phase36/session-a/enc1-gpuvm015-2026-08-21/final"}, "scope": {"const": "local VM-external"}}},
+    "retention": {"type": "object", "additionalProperties": false, "required": ["owner", "purpose", "review_or_expiry_at", "unless_extended", "automatic_deletion_claim"], "properties": {"owner": {"const": "hotaisle account / local operator"}, "purpose": {"const": "Session B"}, "review_or_expiry_at": {"const": "2026-08-28T23:59:59+09:00"}, "unless_extended": {"const": true}, "automatic_deletion_claim": {"const": false}}},
+    "unexecuted_scope": {"type": "object", "additionalProperties": false, "required": ["sessions", "session_a_exclusions"], "properties": {"sessions": {"const": ["Session B", "Session C", "Session D", "Session E"]}, "session_a_exclusions": {"const": ["9B", "10k+", "low-bit KV full matrix", "chunked prefill", "MTP", "vision", "service", "repeated performance", "multiGPU", "multiSKU", "Infinity Fabric", "P2P", "RCCL", "tensor parallel", "expert parallel", "pipeline parallel", "RDMA-RoCE", "other cloud", "other ROCm", "broad provider exploration", "TurboQuant", "Paged Attention", "DeepSeek V4", "Responses API", "Gemma", "MoE"]}}}
+  }
+}

@@ -184,11 +184,97 @@ const CASES: [Case; 29] = [
     },
 ];
 
+// Phase 12's original 16-case matrix, retained as an explicit subset for
+// current-main regression runs. The default matrix above remains unchanged.
+const PHASE12_CASES: [Case; 16] = [
+    Case {
+        id: "prefill-m1",
+        m: 1,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m3",
+        m: 3,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m17",
+        m: 17,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m37",
+        m: 37,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m255",
+        m: 255,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m256",
+        m: 256,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m257",
+        m: 257,
+        start_position: 0,
+    },
+    Case {
+        id: "decode-prefix3",
+        m: 1,
+        start_position: 3,
+    },
+    Case {
+        id: "decode-prefix255",
+        m: 1,
+        start_position: 255,
+    },
+    Case {
+        id: "decode-prefix256",
+        m: 1,
+        start_position: 256,
+    },
+    Case {
+        id: "decode-prefix257",
+        m: 1,
+        start_position: 257,
+    },
+    Case {
+        id: "decode-kv1023",
+        m: 1,
+        start_position: 1022,
+    },
+    Case {
+        id: "decode-kv1024",
+        m: 1,
+        start_position: 1023,
+    },
+    Case {
+        id: "decode-kv1025",
+        m: 1,
+        start_position: 1024,
+    },
+    Case {
+        id: "special-query-nan",
+        m: 1,
+        start_position: 0,
+    },
+    Case {
+        id: "special-value-pos-inf",
+        m: 1,
+        start_position: 0,
+    },
+];
+
 #[derive(Debug)]
 struct Config {
     device_index: u32,
     target: String,
     kv_encoding: KvCacheEncoding,
+    phase12_subset: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -253,10 +339,18 @@ struct Report {
 }
 
 fn parse_config() -> Result<Config, String> {
+    parse_config_from(env::args().skip(1))
+}
+
+fn parse_config_from<I>(arguments: I) -> Result<Config, String>
+where
+    I: IntoIterator<Item = String>,
+{
     let mut device_index = None;
     let mut target = None;
     let mut kv_encoding = KvCacheEncoding::Fp16;
-    let mut arguments = env::args().skip(1);
+    let mut phase12_subset = false;
+    let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--device-index" => {
@@ -299,6 +393,12 @@ fn parse_config() -> Result<Config, String> {
                     }
                 };
             }
+            "--phase12-subset" => {
+                if phase12_subset {
+                    return Err("duplicate --phase12-subset".to_owned());
+                }
+                phase12_subset = true;
+            }
             other => return Err(format!("unexpected argument {other}")),
         }
     }
@@ -306,7 +406,16 @@ fn parse_config() -> Result<Config, String> {
         device_index: device_index.ok_or_else(|| "missing --device-index".to_owned())?,
         target: target.ok_or_else(|| "missing --target".to_owned())?,
         kv_encoding,
+        phase12_subset,
     })
+}
+
+fn selected_cases(phase12_subset: bool) -> &'static [Case] {
+    if phase12_subset {
+        &PHASE12_CASES
+    } else {
+        &CASES
+    }
 }
 
 fn kv_encoding_name(encoding: KvCacheEncoding) -> &'static str {
@@ -1112,7 +1221,11 @@ fn run(config: &Config) -> Report {
     };
     let mut cases = Vec::new();
     let operation = (|| {
-        for (index, case) in CASES.into_iter().enumerate() {
+        for (index, case) in selected_cases(config.phase12_subset)
+            .iter()
+            .copied()
+            .enumerate()
+        {
             cases.push(run_case(&session, &queue, config, case, index as u64)?);
         }
         Ok::<(), String>(())
@@ -1277,6 +1390,84 @@ mod tests {
                 .any(|case| case.id == "special-prefill64-value-pos-inf")
         );
         assert!(CASES.iter().all(|case| case.m > 0));
+    }
+
+    #[test]
+    fn phase12_subset_selects_the_original_sixteen_cases() {
+        let ids = selected_cases(true)
+            .iter()
+            .map(|case| case.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "prefill-m1",
+                "prefill-m3",
+                "prefill-m17",
+                "prefill-m37",
+                "prefill-m255",
+                "prefill-m256",
+                "prefill-m257",
+                "decode-prefix3",
+                "decode-prefix255",
+                "decode-prefix256",
+                "decode-prefix257",
+                "decode-kv1023",
+                "decode-kv1024",
+                "decode-kv1025",
+                "special-query-nan",
+                "special-value-pos-inf",
+            ]
+        );
+        assert_eq!(selected_cases(true).len(), 16);
+        assert_eq!(selected_cases(false).len(), CASES.len());
+        assert_eq!(selected_cases(false)[0].id, CASES[0].id);
+        assert_eq!(selected_cases(false)[28].id, CASES[28].id);
+    }
+
+    #[test]
+    fn phase12_subset_flag_is_parsed_without_changing_defaults() {
+        let default = parse_config_from(
+            vec!["--device-index", "0", "--target", "gfx942"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert!(!default.phase12_subset);
+
+        let subset = parse_config_from(
+            vec![
+                "--device-index",
+                "0",
+                "--target",
+                "gfx942",
+                "--phase12-subset",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(subset.phase12_subset);
+        assert_eq!(subset.device_index, default.device_index);
+        assert_eq!(subset.target, default.target);
+        assert_eq!(subset.kv_encoding, default.kv_encoding);
+
+        let duplicate = parse_config_from(
+            vec![
+                "--device-index",
+                "0",
+                "--target",
+                "gfx942",
+                "--phase12-subset",
+                "--phase12-subset",
+            ]
+            .into_iter()
+            .map(String::from),
+        );
+        assert_eq!(
+            duplicate.unwrap_err(),
+            "duplicate --phase12-subset".to_owned()
+        );
     }
 
     #[test]
