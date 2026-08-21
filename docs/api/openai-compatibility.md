@@ -403,15 +403,55 @@ Assistant history/prefill continues to use the existing typed assistant message
 path. Prefilled assistant bytes initialize decoding and stop matching but are
 not emitted again as completion content and are counted as prompt input.
 
-## Deferred API surface
+## Phase 43 Responses profile
 
-The Responses API (`POST /v1/responses`) is planned for a future profile. It is not
-an alias for Chat Completions and must not be exposed until its request items,
-streaming events, tool behavior, multimodal behavior, and errors are implemented
-against a separately pinned official schema.
+Phase 43 exposes `POST /v1/responses` as a separate strict profile. Its normative
+OpenAI OpenAPI `2.3.0` pin is commit
+[`010421dcbd0475277ea8c3e6c1e1cbca4659c4bd`](https://github.com/openai/openai-openapi/tree/010421dcbd0475277ea8c3e6c1e1cbca4659c4bd).
+It is not an alias for Chat Completions. The checked-in machine contract is
+[`phase43_protocol_profiles_v1.json`](../../tests/fixtures/phase43_protocol_profiles_v1.json).
 
-Other OpenAI endpoints are unsupported unless a later compatibility document
-explicitly adds them.
+The request accepts a served `model`, string or ordered typed `input`, optional
+`instructions`, `max_output_tokens`, `temperature`, `top_p`, `stream`, bounded
+metadata, `store: false`, client function definitions, `tool_choice`,
+`parallel_tool_calls`, `reasoning.effort`, and `sllm.resumable`. Typed input is
+limited to text messages, `function_call`, and `function_call_output`. Leading
+system/developer messages retain their order and are combined for the fixed Qwen
+renderer; a system/developer item after an ordinary message is rejected rather
+than silently reordered. Images, audio, files, hosted tools, MCP, stateful
+`previous_response_id`, and `store: true` are unsupported.
+
+Non-stream output has `object: "response"`, a request-local `resp_` ID,
+nonzero Unix `created_at`, selected `model`, status, typed output items,
+`output_text`, incomplete/error fields, and input/output/total usage. Streaming
+uses named Responses events, including content-part and function-argument
+added/delta/done events, and ends once with `response.completed`; a failure uses
+one `error` event. It never emits `[DONE]`. Visible deltas are split at UTF-8
+boundaries to at most 16 KiB.
+
+Client functions are protocol-only. Names, descriptions, schemas, calls and
+client-owned results are validated and rendered as untrusted data. The server
+does not execute a call or resolve a URL, path, process, network, filesystem,
+environment, credential, MCP endpoint, hosted tool, worker, or sandbox. Tool
+definitions are limited to 128, names to 64 ASCII bytes, descriptions to 16 KiB,
+schemas to 1 MiB, call IDs to 256 bytes, arguments/results to 16 MiB, and one or
+16 generated calls according to the parallel policy. The generated envelope is
+JSON-Schema grammar constrained before scheduler/GPU admission.
+
+`sllm.resumable` requires `stream: true`, `max_output_tokens <= 40`, and an
+enabled Phase 39 replay store.
+Replay retains exact named events within its configured event count, 64 KiB per
+serialized event, and 256 KiB per session. The 40-token admission bound combines
+the 128-byte token-piece cap with worst-case JSON escaping and bounded metadata,
+so every admitted snapshot event fits. A defensive batch preflight still emits
+one bounded error terminal instead of publishing a
+partial success sequence if an invariant is violated. The replay GET endpoint
+uses the deployment's normal bearer policy and does not require a content-type
+header.
+
+Authentication is deployment policy: an open server accepts no Authorization
+header; a protected server requires its standard bearer header. Other OpenAI
+endpoints remain unsupported unless a later compatibility document adds them.
 
 ## Phase 42 inference profiles
 
@@ -458,7 +498,7 @@ suffix, middle token IDs, context limit, and verified template digest. Exact
 `gfx942`/MI300X execution evidence is deferred until a fresh runtime is
 available; compile-only or host evidence cannot promote that capability.
 
-Phase 42 does not expose Responses, Anthropic Messages, tools/MCP, arbitrary
+Phase 42 itself does not expose Responses, Anthropic Messages, tools/MCP, arbitrary
 Jinja or template kwargs, multimodal embedding/rerank/infill, wire session
 resume, or llama.cpp endpoint aliases. It also does not alter the existing
 Chat Completions profile-v1 fields, reject matrix, response envelopes, or SSE

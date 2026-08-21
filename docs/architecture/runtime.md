@@ -534,3 +534,34 @@ semantic comparison only; llama.cpp aliases and implementation-specific
 options do not become sLLM runtime contracts. Exact MI300X `gfx942` execution
 is deferred until a fresh runtime is available. Host tests or compile-only
 evidence never promote a production GPU capability.
+
+## Phase 43 protocol adapters and tool boundary
+
+Responses and Anthropic Messages lower into the same bounded scheduler and
+`ChatCompletionRequestV1`; they do not create provider-specific generation
+loops. Tool definitions, choice, ordered message/call/result items and parallel
+policy live in `sllm-frontend`. A fixed Qwen renderer escapes the complete
+untrusted history and definitions, emits a thinking-disabled assistant prefix,
+and couples the request to a Phase 40 JSON-Schema grammar for the canonical
+message-or-tool-call envelope. Grammar compilation and all count/byte/capability
+checks happen before scheduler/GPU admission. The Qwen production backend
+advertises the capability explicitly; an unadvertised backend such as the
+current Gemma path rejects tool requests without fallback.
+
+The server adapter owns only wire parsing, profile-specific IDs/events/errors,
+usage and stop mapping. Responses and Anthropic serializers are separate closed
+state machines, while cancellation, timeout, single-owner model execution and
+replay storage remain the Phase 39 runtime. Assistant prefill is accepted only
+by the Responses no-tool subset and primes grammar/stop state without
+republishing the prefix. Anthropic prefill and thinking blocks are rejected.
+Generated deltas are UTF-8-safe 16 KiB fragments. A resumable request is
+admitted only through 40 output tokens, derived from the 128-byte token-piece
+bound and worst-case JSON escaping, and preflights
+the complete named-event batch against the configured event count and Phase 39
+64 KiB/event and 256 KiB/session limits before publishing success events.
+
+No executor is reachable from this path. A generated call is serialized to the
+client, and a later client request may return its result as untrusted history.
+The server does not resolve tool names or touch process, network, filesystem,
+environment, credentials, MCP, hosted tools, workers or sandboxes. Any such
+execution remains the separately approval-required Phase 47 boundary.

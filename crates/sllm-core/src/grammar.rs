@@ -26,6 +26,8 @@ pub const MAX_TOKEN_PIECE_BYTES: usize = 128;
 pub const MAX_TOKEN_TRIE_NODES: usize = 33_554_432;
 pub const MAX_JSON_ENUM: usize = 256;
 pub const MAX_JSON_PROPERTIES: usize = 1024;
+pub const MAX_JSON_ARRAY_ITEMS: usize = 16;
+pub const MAX_JSON_SCHEMA_BYTES: usize = 1024 * 1024;
 pub const GRAMMAR_RUNTIME_STATE_SCHEMA_V1: &str = "sllm-grammar-runtime-state-v1";
 const GRAMMAR_RUNTIME_MAGIC: [u8; 8] = *b"SLLMGRM1";
 const GRAMMAR_RUNTIME_VERSION: u16 = 1;
@@ -1775,9 +1777,9 @@ impl<'a> JsonSchemaLowerer<'a> {
     pub fn new(schema: &'a Value) -> Result<Self, GrammarError> {
         let bytes = serde_json::to_vec(schema)
             .map_err(|error| GrammarError::InvalidSchema(error.to_string()))?;
-        if bytes.len() > MAX_GRAMMAR_BYTES {
+        if bytes.len() > MAX_JSON_SCHEMA_BYTES {
             return Err(GrammarError::JsonTooLarge {
-                limit: MAX_GRAMMAR_BYTES,
+                limit: MAX_JSON_SCHEMA_BYTES,
             });
         }
         let object = schema.as_object().ok_or(GrammarError::JsonNotObject)?;
@@ -1997,10 +1999,56 @@ impl<'a> JsonSchemaLowerer<'a> {
             .get("items")
             .ok_or_else(|| GrammarError::InvalidSchema("array requires items".to_owned()))?;
         let lowered = self.lower_schema(items, depth + 1, refs)?;
-        Ok(format!(
-            "\"[\" ws ({lowered} (ws \",\" ws {lowered}){{0,{JSON_REPEAT_LIMIT}}})? ws \"]\""
-        ))
+        let default_max = JSON_REPEAT_LIMIT + 1;
+        let minimum = schema_array_bound(object, "minItems")?.unwrap_or(0);
+        let maximum = schema_array_bound(object, "maxItems")?.unwrap_or(default_max);
+        if minimum > maximum {
+            return Err(GrammarError::InvalidSchema(
+                "minItems must not exceed maxItems".to_owned(),
+            ));
+        }
+        if maximum > MAX_JSON_ARRAY_ITEMS {
+            return Err(GrammarError::InvalidSchema(format!(
+                "maxItems exceeds bounded limit {MAX_JSON_ARRAY_ITEMS}"
+            )));
+        }
+        let mut branches = Vec::with_capacity(maximum - minimum + 1);
+        for count in minimum..=maximum {
+            if count == 0 {
+                branches.push(String::new());
+                continue;
+            }
+            let mut branch = lowered.clone();
+            for _ in 1..count {
+                branch.push_str(" ws \",\" ws ");
+                branch.push_str(&lowered);
+            }
+            branches.push(branch);
+        }
+        let contents = if branches.len() == 1 {
+            branches.remove(0)
+        } else {
+            format!("({})", branches.join(" | "))
+        };
+        Ok(format!("\"[\" ws {contents} ws \"]\""))
     }
+}
+
+fn schema_array_bound(
+    object: &Map<String, Value>,
+    keyword: &'static str,
+) -> Result<Option<usize>, GrammarError> {
+    object
+        .get(keyword)
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    GrammarError::InvalidSchema(format!("{keyword} must be a nonnegative integer"))
+                })
+        })
+        .transpose()
 }
 
 fn validate_schema_keyword(keyword: &str) -> Result<(), GrammarError> {
@@ -2012,6 +2060,8 @@ fn validate_schema_keyword(keyword: &str) -> Result<(), GrammarError> {
         "required",
         "additionalProperties",
         "items",
+        "minItems",
+        "maxItems",
         "enum",
         "const",
         "anyOf",
@@ -2107,6 +2157,37 @@ mod tests {
         assert!(
             matches!(CompiledGrammar::from_json_schema(&schema), Err(GrammarError::UnsupportedSchemaKeyword(keyword)) if keyword == "pattern")
         );
+    }
+
+    #[test]
+    fn json_schema_array_bounds_accept_both_sides_and_reject_invalid_limits() {
+        let schema = serde_json::json!({
+            "type": "array",
+            "items": {"type": "integer"},
+            "minItems": 2,
+            "maxItems": 3
+        });
+        let grammar = CompiledGrammar::from_json_schema(&schema).expect("bounded array schema");
+        for value in [b"[1,2]".as_slice(), b"[1,2,3]"] {
+            let mut state = grammar.initial_state();
+            state.accept(value).expect("array within bounds");
+            assert!(state.is_finished());
+        }
+        for value in [b"[]".as_slice(), b"[1]", b"[1,2,3,4]"] {
+            let mut state = grammar.initial_state();
+            assert!(
+                state.accept(value).is_err() || !state.is_finished(),
+                "out-of-range array was accepted: {}",
+                String::from_utf8_lossy(value)
+            );
+        }
+        for invalid in [
+            serde_json::json!({"type":"array","items":{"type":"integer"},"minItems":3,"maxItems":2}),
+            serde_json::json!({"type":"array","items":{"type":"integer"},"maxItems":17}),
+            serde_json::json!({"type":"array","items":{"type":"integer"},"minItems":-1}),
+        ] {
+            assert!(CompiledGrammar::from_json_schema(&invalid).is_err());
+        }
     }
 
     #[test]

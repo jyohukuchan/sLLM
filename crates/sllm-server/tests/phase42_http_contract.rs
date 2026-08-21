@@ -169,6 +169,7 @@ impl ChatGenerationBackendV1 for Phase42Backend {
         Ok(BackendCompletionV1 {
             finish_reason: FinishReasonV1::Stop,
             usage: TokenUsageV1::new(prompt_tokens, 1).unwrap(),
+            matched_stop: None,
         })
     }
 

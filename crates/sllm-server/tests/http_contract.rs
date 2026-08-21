@@ -63,6 +63,7 @@ impl ChatGenerationBackendV1 for ScriptBackend {
         Ok(BackendCompletionV1 {
             finish_reason: self.finish_reason,
             usage: self.usage,
+            matched_stop: None,
         })
     }
 }
@@ -102,6 +103,7 @@ impl ChatGenerationBackendV1 for BlockingBackend {
         Ok(BackendCompletionV1 {
             finish_reason: FinishReasonV1::Stop,
             usage: TokenUsageV1::new(1, 1).unwrap(),
+            matched_stop: None,
         })
     }
 }
@@ -128,6 +130,7 @@ impl ChatGenerationBackendV1 for FailOnceBackend {
         Ok(BackendCompletionV1 {
             finish_reason: FinishReasonV1::Stop,
             usage: TokenUsageV1::new(1, 1).unwrap(),
+            matched_stop: None,
         })
     }
 }

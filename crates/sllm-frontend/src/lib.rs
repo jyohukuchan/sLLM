@@ -7,6 +7,7 @@ mod chat;
 mod generation;
 mod inference;
 mod tokenizer;
+mod tool_protocol;
 mod vision;
 
 pub use chat::{
@@ -34,6 +35,16 @@ pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, MAX_TOKEN_PIECE_BYTES_V1,
     SpecialTokenSnapshotV1, TokenByteEntryV1, TokenByteTableV1, TokenIdContextV1, TokenIdsV1,
     TokenPieceClassV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
+};
+pub use tool_protocol::{
+    CanonicalGenerationEnvelopeV1, CanonicalToolCallV1, MAX_QWEN_TOOL_PROMPT_BYTES_V1,
+    MAX_TOOL_ARGUMENT_BYTES_V1, MAX_TOOL_CALL_ID_BYTES_V1, MAX_TOOL_CALLS_V1,
+    MAX_TOOL_DEFINITIONS_V1, MAX_TOOL_DESCRIPTION_BYTES_V1, MAX_TOOL_GENERATION_ENVELOPE_BYTES_V1,
+    MAX_TOOL_HISTORY_ITEMS_V1, MAX_TOOL_NAME_BYTES_V1, MAX_TOOL_REASONING_BYTES_V1,
+    MAX_TOOL_RESULT_BYTES_V1, MAX_TOOL_SCHEMA_BYTES_V1, MAX_TOOL_SCHEMA_DEPTH_V1,
+    QWEN_TOOL_PROTOCOL_CLOSE_V1, QWEN_TOOL_PROTOCOL_OPEN_V1, TOOL_PROTOCOL_VERSION_V1,
+    ToolCallPolicyV1, ToolCallV1, ToolChoiceV1, ToolDefinitionV1, ToolMessageRoleV1,
+    ToolProtocolError, ToolProtocolItemV1, ToolProtocolV1, ToolResultV1,
 };
 pub use vision::{
     BoundedImageBytesV1, DecodedRgbImageV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,

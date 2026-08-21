@@ -49,11 +49,11 @@ const MAX_CORS_ORIGINS: usize = 32;
 
 #[derive(Clone)]
 pub struct ServerConfigV1 {
-    credentials: CredentialStoreV1,
+    pub(crate) credentials: CredentialStoreV1,
     compatibility_profile: ChatCompatibilityProfileV1,
     lifecycle: ServerLifecycleV1,
-    metrics: Option<ServerMetricsV1>,
-    replay: Option<ResumableStoreV1>,
+    pub(crate) metrics: Option<ServerMetricsV1>,
+    pub(crate) replay: Option<ResumableStoreV1>,
     cors_origins: Vec<HeaderValue>,
 }
 
@@ -147,10 +147,10 @@ impl Default for ServerConfigV1 {
 }
 
 #[derive(Clone)]
-struct AppStateV1 {
-    registry: ModelRegistryV1,
-    scheduler: SchedulerV1,
-    config: ServerConfigV1,
+pub(crate) struct AppStateV1 {
+    pub(crate) registry: ModelRegistryV1,
+    pub(crate) scheduler: SchedulerV1,
+    pub(crate) config: ServerConfigV1,
 }
 
 pub fn build_router_v1(
@@ -189,6 +189,22 @@ pub fn build_router_v1(
         .route("/v1/input-tokens", post(input_tokens))
         .route("/v1/infill", post(create_infill))
         .route(
+            "/v1/responses",
+            post(crate::phase43_service::create_response),
+        )
+        .route(
+            "/v1/responses/{id}/events",
+            get(crate::phase43_service::resume_response),
+        )
+        .route(
+            "/v1/messages",
+            post(crate::phase43_service::create_anthropic_message),
+        )
+        .route(
+            "/v1/messages/{id}/events",
+            get(crate::phase43_service::resume_anthropic_message),
+        )
+        .route(
             "/v1/chat/completions/{id}/events",
             get(resume_chat_completion),
         )
@@ -200,7 +216,12 @@ pub fn build_router_v1(
             CorsLayer::new()
                 .allow_origin(cors_origins)
                 .allow_methods([Method::GET, Method::POST])
-                .allow_headers([AUTHORIZATION, CONTENT_TYPE, LAST_EVENT_ID]),
+                .allow_headers([
+                    AUTHORIZATION,
+                    CONTENT_TYPE,
+                    LAST_EVENT_ID,
+                    HeaderName::from_static("anthropic-version"),
+                ]),
         )
     }
 }

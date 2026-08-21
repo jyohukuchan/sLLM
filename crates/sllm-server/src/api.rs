@@ -88,6 +88,13 @@ impl ReasoningOptionsV1 {
         }
     }
 
+    pub(crate) const fn protocol_enabled() -> Self {
+        Self {
+            thinking: ThinkingModeV1::Enabled,
+            separate_reasoning: true,
+        }
+    }
+
     pub const fn thinking(self) -> ThinkingModeV1 {
         self.thinking
     }
@@ -597,7 +604,12 @@ pub struct ChatCompletionRequestV1 {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum GenerationRequestInputV1 {
     Chat,
+    ChatWithAssistantPrefill(String),
     RawText(String),
+    RawTextWithAssistantPrefill {
+        prompt: String,
+        assistant_prefill: String,
+    },
     TokenIds(Vec<u32>),
     Infill {
         token_ids: Vec<u32>,
@@ -777,6 +789,158 @@ impl ChatCompletionRequestV1 {
             reasoning: ReasoningOptionsV1::disabled(),
             resumable: false,
             choice_count: request.n(),
+            logit_bias: None,
+            logprobs: None,
+            response_format: None,
+            sampler: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_protocol_text(
+        model: String,
+        prompt: String,
+        assistant_prefill: Option<String>,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        stop: Vec<String>,
+        stream: bool,
+        resumable: bool,
+        reasoning: bool,
+        response_schema: Option<Value>,
+    ) -> Result<Self, ApiErrorV1> {
+        if model.is_empty() || model.len() > MAX_MODEL_ALIAS_BYTES {
+            return Err(ApiErrorV1::invalid_value(
+                "model",
+                "model must be a nonempty alias of at most 256 bytes",
+            ));
+        }
+        if prompt.is_empty() {
+            return Err(ApiErrorV1::invalid_value(
+                "input",
+                "protocol prompt must not be empty",
+            ));
+        }
+        if !(1..=MAX_COMPLETION_TOKENS).contains(&max_tokens) {
+            return Err(ApiErrorV1::invalid_value(
+                "max_output_tokens",
+                "max output tokens must be in [1,4096]",
+            ));
+        }
+        if resumable && !stream {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.resumable",
+                "resumable protocol requests require stream=true",
+            ));
+        }
+        let sampling = SamplingParametersV1::new(temperature, top_p, 0.0, 0.0)
+            .map_err(|error| ApiErrorV1::invalid_value("sampling", error.to_string()))?;
+        let generation = GenerationConfigV1::new(max_tokens, sampling, stop)
+            .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
+        let response_format = response_schema.map(|schema| {
+            ResponseFormatV1::JsonSchema(JsonSchemaFormatV1 {
+                name: "sllm_phase43_tool_envelope_v1".to_owned(),
+                description: Some("transport-independent tool-call generation envelope".to_owned()),
+                schema,
+                strict: Some(true),
+            })
+        });
+        let input = match assistant_prefill.filter(|value| !value.is_empty()) {
+            Some(assistant_prefill) => GenerationRequestInputV1::RawTextWithAssistantPrefill {
+                prompt,
+                assistant_prefill,
+            },
+            None => GenerationRequestInputV1::RawText(prompt),
+        };
+        Ok(Self {
+            model,
+            messages: Vec::new(),
+            input,
+            generation,
+            seed: None,
+            stream,
+            reasoning: if reasoning {
+                ReasoningOptionsV1::protocol_enabled()
+            } else {
+                ReasoningOptionsV1::disabled()
+            },
+            resumable,
+            choice_count: 1,
+            logit_bias: None,
+            logprobs: None,
+            response_format,
+            sampler: None,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_protocol_messages(
+        model: String,
+        messages: Vec<Qwen35ChatMessageV1>,
+        assistant_prefill: Option<String>,
+        max_tokens: u32,
+        temperature: f32,
+        top_p: f32,
+        stop: Vec<String>,
+        stream: bool,
+        resumable: bool,
+        reasoning: bool,
+    ) -> Result<Self, ApiErrorV1> {
+        if model.is_empty() || model.len() > MAX_MODEL_ALIAS_BYTES {
+            return Err(ApiErrorV1::invalid_value(
+                "model",
+                "model must be a nonempty alias of at most 256 bytes",
+            ));
+        }
+        if messages.is_empty() || messages.len() > MAX_MESSAGES {
+            return Err(ApiErrorV1::invalid_value(
+                "input",
+                "protocol messages must contain between 1 and 1024 entries",
+            ));
+        }
+        if !(1..=MAX_COMPLETION_TOKENS).contains(&max_tokens) {
+            return Err(ApiErrorV1::invalid_value(
+                "max_output_tokens",
+                "max output tokens must be in [1,4096]",
+            ));
+        }
+        if resumable && !stream {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.resumable",
+                "resumable protocol requests require stream=true",
+            ));
+        }
+        let sampling = SamplingParametersV1::new(temperature, top_p, 0.0, 0.0)
+            .map_err(|error| ApiErrorV1::invalid_value("sampling", error.to_string()))?;
+        let generation = GenerationConfigV1::new(max_tokens, sampling, stop)
+            .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
+        let input = match assistant_prefill.filter(|value| !value.is_empty()) {
+            Some(assistant_prefill) => {
+                GenerationRequestInputV1::ChatWithAssistantPrefill(assistant_prefill)
+            }
+            None => GenerationRequestInputV1::Chat,
+        };
+        Ok(Self {
+            model,
+            messages: messages
+                .into_iter()
+                .map(|inner| ChatMessageV1 {
+                    inner,
+                    parts: Vec::new(),
+                })
+                .collect(),
+            input,
+            generation,
+            seed: None,
+            stream,
+            reasoning: if reasoning {
+                ReasoningOptionsV1::protocol_enabled()
+            } else {
+                ReasoningOptionsV1::disabled()
+            },
+            resumable,
+            choice_count: 1,
             logit_bias: None,
             logprobs: None,
             response_format: None,

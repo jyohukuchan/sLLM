@@ -1624,6 +1624,7 @@ pub enum GenerationServiceError {
     Render,
     Tokenize,
     EmptyPromptTokens,
+    InvalidAssistantPrefill,
     Decode,
     NonPrefixDecode,
     TokenIdOverflow,
@@ -1666,6 +1667,9 @@ impl fmt::Display for GenerationServiceError {
             Self::EmptyPromptTokens => {
                 formatter.write_str("generation input produced no token IDs")
             }
+            Self::InvalidAssistantPrefill => formatter.write_str(
+                "assistant prefill must be a nonempty proper suffix of the generation input",
+            ),
             Self::Decode => formatter.write_str("generated token IDs could not be decoded"),
             Self::NonPrefixDecode => formatter
                 .write_str("incremental tokenizer output changed an already decoded prefix"),
@@ -1896,6 +1900,42 @@ impl<'a> GenerationServiceV1<'a> {
             executor,
             input_token_ids,
             &[],
+            config,
+            cancellation,
+            random,
+            sink,
+        );
+        if result.is_err() {
+            executor.cancel();
+        }
+        result
+    }
+
+    /// Generate from a complete prompt while preserving the suffix that is an
+    /// assistant continuation. The suffix is already in model context and is
+    /// never republished, but it primes stop and grammar state before the
+    /// first generated token.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_tokens_with_assistant_prefill_sink(
+        &self,
+        executor: &mut impl GenerationExecutorV1,
+        input_token_ids: &[u32],
+        assistant_prefill_token_ids: &[u32],
+        config: &GenerationConfigV1,
+        cancellation: &GenerationCancellationV1,
+        random: &mut impl SamplingRandomSource,
+        sink: &mut impl GenerationOutputSinkV1,
+    ) -> Result<GenerationResultV1, GenerationServiceError> {
+        if input_token_ids.is_empty()
+            || assistant_prefill_token_ids.len() >= input_token_ids.len()
+            || !input_token_ids.ends_with(assistant_prefill_token_ids)
+        {
+            return Err(GenerationServiceError::InvalidAssistantPrefill);
+        }
+        let result = self.generate_tokens_inner(
+            executor,
+            input_token_ids,
+            assistant_prefill_token_ids,
             config,
             cancellation,
             random,

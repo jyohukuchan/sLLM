@@ -38,11 +38,12 @@ use sllm_core::{
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, GenerationCancellationV1, GenerationExecutorV1,
-    GenerationInputV1, GenerationOutputSinkV1, GenerationServiceError, GenerationServiceV1,
-    GenerationStepV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1,
-    SpeculativeGenerationExecutorV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerFrontendV1,
-    TokenizerUtilityServiceV1, gemma4_generation_stop_policy,
+    GenerationInputV1, GenerationOutputSinkV1, GenerationResultV1, GenerationServiceError,
+    GenerationServiceV1, GenerationStepV1, GenerationStopPolicyV1, PreparedGenerationInputV1,
+    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, QwenMtpGenerationExecutorV1,
+    SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1, TokenizeOptionsV1,
+    TokenizeResultV1, TokenizerFrontendV1, TokenizerUtilityServiceV1,
+    gemma4_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -83,10 +84,10 @@ fn qwen_generation_prompt(
     request: &ChatCompletionRequestV1,
     service: &GenerationServiceV1<'_>,
     tokenizer: &TokenizerFrontendV1,
-) -> Result<Vec<u32>, BackendErrorV1> {
+) -> Result<PreparedGenerationInputV1, BackendErrorV1> {
     match request.input() {
         GenerationRequestInputV1::Chat => service
-            .prepare_input(&GenerationInputV1::Messages {
+            .prepare_input_plan(&GenerationInputV1::Messages {
                 messages: request
                     .messages()
                     .iter()
@@ -100,13 +101,42 @@ fn qwen_generation_prompt(
             .map_err(|error| {
                 BackendErrorV1::new(format!("generation input preparation failed: {error}"))
             }),
+        GenerationRequestInputV1::ChatWithAssistantPrefill(assistant_prefill) => service
+            .prepare_input_plan(&GenerationInputV1::MessagesWithAssistantPrefill {
+                messages: request
+                    .messages()
+                    .iter()
+                    .map(|message| message.inner().clone())
+                    .collect(),
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: request.reasoning().thinking(),
+                },
+                assistant_prefill: assistant_prefill.clone(),
+            })
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
         GenerationRequestInputV1::RawText(text) => service
-            .prepare_input(&GenerationInputV1::Prompt(text.clone()))
+            .prepare_input_plan(&GenerationInputV1::Prompt(text.clone()))
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
+        GenerationRequestInputV1::RawTextWithAssistantPrefill {
+            prompt,
+            assistant_prefill,
+        } => service
+            .prepare_input_plan(&GenerationInputV1::PromptWithAssistantPrefill {
+                prompt: prompt.clone(),
+                assistant_prefill: assistant_prefill.clone(),
+            })
             .map_err(|error| {
                 BackendErrorV1::new(format!("generation input preparation failed: {error}"))
             }),
         GenerationRequestInputV1::TokenIds(token_ids) => {
-            validate_generation_token_ids(tokenizer, token_ids, "token_ids")
+            let token_ids = validate_generation_token_ids(tokenizer, token_ids, "token_ids")?;
+            PreparedGenerationInputV1::from_token_ids(token_ids, Vec::new())
+                .map_err(|error| BackendErrorV1::new(error.to_string()))
         }
         GenerationRequestInputV1::Infill { .. } => Err(BackendErrorV1::new(
             "infill is not supported by the current Qwen model lock (FIM capability absent)",
@@ -118,27 +148,84 @@ fn gemma_generation_prompt(
     request: &ChatCompletionRequestV1,
     service: &GenerationServiceV1<'_>,
     tokenizer: &TokenizerFrontendV1,
-) -> Result<Vec<u32>, BackendErrorV1> {
+) -> Result<PreparedGenerationInputV1, BackendErrorV1> {
     match request.input() {
         GenerationRequestInputV1::Chat => {
             let rendered = render_gemma4_raw_messages(request.messages())?;
             service
-                .prepare_input(&GenerationInputV1::Prompt(rendered))
+                .prepare_input_plan(&GenerationInputV1::Prompt(rendered))
+                .map_err(|error| {
+                    BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+                })
+        }
+        GenerationRequestInputV1::ChatWithAssistantPrefill(assistant_prefill) => {
+            let rendered = render_gemma4_raw_messages(request.messages())?;
+            service
+                .prepare_input_plan(&GenerationInputV1::PromptWithAssistantPrefill {
+                    prompt: rendered,
+                    assistant_prefill: assistant_prefill.clone(),
+                })
                 .map_err(|error| {
                     BackendErrorV1::new(format!("generation input preparation failed: {error}"))
                 })
         }
         GenerationRequestInputV1::RawText(text) => service
-            .prepare_input(&GenerationInputV1::Prompt(text.clone()))
+            .prepare_input_plan(&GenerationInputV1::Prompt(text.clone()))
+            .map_err(|error| {
+                BackendErrorV1::new(format!("generation input preparation failed: {error}"))
+            }),
+        GenerationRequestInputV1::RawTextWithAssistantPrefill {
+            prompt,
+            assistant_prefill,
+        } => service
+            .prepare_input_plan(&GenerationInputV1::PromptWithAssistantPrefill {
+                prompt: prompt.clone(),
+                assistant_prefill: assistant_prefill.clone(),
+            })
             .map_err(|error| {
                 BackendErrorV1::new(format!("generation input preparation failed: {error}"))
             }),
         GenerationRequestInputV1::TokenIds(token_ids) => {
-            validate_generation_token_ids(tokenizer, token_ids, "token_ids")
+            let token_ids = validate_generation_token_ids(tokenizer, token_ids, "token_ids")?;
+            PreparedGenerationInputV1::from_token_ids(token_ids, Vec::new())
+                .map_err(|error| BackendErrorV1::new(error.to_string()))
         }
         GenerationRequestInputV1::Infill { .. } => Err(BackendErrorV1::new(
             "infill is not supported by the current Gemma model lock (FIM capability absent)",
         )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_with_optional_assistant_prefill(
+    service: &GenerationServiceV1<'_>,
+    executor: &mut impl GenerationExecutorV1,
+    input_token_ids: &[u32],
+    assistant_prefill_token_ids: &[u32],
+    generation: &sllm_frontend::GenerationConfigV1,
+    cancellation: &GenerationCancellationV1,
+    random: &mut OsSamplingRandom,
+    sink: &mut OutputSinkAdapterV1<'_>,
+) -> Result<GenerationResultV1, GenerationServiceError> {
+    if assistant_prefill_token_ids.is_empty() {
+        service.generate_tokens_with_sink(
+            executor,
+            input_token_ids,
+            generation,
+            cancellation,
+            random,
+            sink,
+        )
+    } else {
+        service.generate_tokens_with_assistant_prefill_sink(
+            executor,
+            input_token_ids,
+            assistant_prefill_token_ids,
+            generation,
+            cancellation,
+            random,
+            sink,
+        )
     }
 }
 
@@ -2363,6 +2450,10 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         true
     }
 
+    fn tool_protocol_v1_available(&self) -> bool {
+        true
+    }
+
     fn validate_embedding_input(
         &self,
         input: &BackendEmbeddingInputV1,
@@ -2581,11 +2672,18 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         if let Some(seed) = resolved_sampling_seed {
             generation = generation.with_device_selector_seed(seed);
         }
-        let prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
+        let prepared_prompt = qwen_generation_prompt(request, &service, &state.tokenizer)?;
+        let assistant_prefill_tokens = prepared_prompt.assistant_prefill_token_ids().to_vec();
+        let prompt = prepared_prompt.token_ids().to_vec();
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()
             .and_then(|runtime| runtime.loaded.clone());
+        if loaded_checkpoint.is_some() && !assistant_prefill_tokens.is_empty() {
+            return Err(BackendErrorV1::new(
+                "assistant prefill cannot be combined with a loaded Qwen checkpoint",
+            ));
+        }
         let checkpoint_suffix = loaded_checkpoint
             .as_ref()
             .map(|checkpoint| {
@@ -2964,6 +3062,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             PrefixCacheStartupConfigV1::Disabled
         );
         let prefix_cache_eligible = prefix_cache_enabled
+            && assistant_prefill_tokens.is_empty()
             && !requires_logits
             && multimodal_prompt.is_none()
             && match state.phase41.prefix_cache {
@@ -3074,9 +3173,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     prompt: multimodal_prompt,
                     prefilled: false,
                 };
-                let outcome = service.generate_tokens_with_sink(
+                let outcome = generate_with_optional_assistant_prefill(
+                    &service,
                     &mut executor,
                     execution_prompt,
+                    &assistant_prefill_tokens,
                     &generation,
                     cancellation,
                     &mut random,
@@ -3108,9 +3209,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     QwenMtpGenerationExecutorV1::new_with_draft_width(owner, mtp_owner, 1)
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
                 );
-                let outcome = service.generate_tokens_with_sink(
+                let outcome = generate_with_optional_assistant_prefill(
+                    &service,
                     &mut executor,
                     execution_prompt,
+                    &assistant_prefill_tokens,
                     &generation,
                     cancellation,
                     &mut random,
@@ -3145,9 +3248,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     usize::from(*width),
                 )
                 .map_err(|error| BackendErrorV1::new(error.to_string()))?;
-                let outcome = service.generate_tokens_with_sink(
+                let outcome = generate_with_optional_assistant_prefill(
+                    &service,
                     &mut executor,
                     execution_prompt,
+                    &assistant_prefill_tokens,
                     &generation,
                     cancellation,
                     &mut random,
@@ -3212,9 +3317,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         state_capacity,
                     );
                 }
-                let outcome = service.generate_tokens_with_sink(
+                let outcome = generate_with_optional_assistant_prefill(
+                    &service,
                     &mut executor,
                     execution_prompt,
+                    &assistant_prefill_tokens,
                     &generation,
                     cancellation,
                     &mut random,
@@ -3310,6 +3417,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     finish_reason,
                     usage: TokenUsageV1::new(usage.prompt_tokens(), usage.completion_tokens())
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                    matched_stop: result.matched_stop().map(str::to_owned),
                 })
             });
         let result = match (post_cow_error, generation_result, cleanup_result) {
@@ -3615,11 +3723,18 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         if let Some(seed) = resolved_sampling_seed {
             generation = generation.with_device_selector_seed(seed);
         }
-        let prompt = gemma_generation_prompt(request, &service, &state.tokenizer)?;
+        let prepared_prompt = gemma_generation_prompt(request, &service, &state.tokenizer)?;
+        let assistant_prefill_tokens = prepared_prompt.assistant_prefill_token_ids().to_vec();
+        let prompt = prepared_prompt.token_ids().to_vec();
         let loaded_checkpoint = state
             .checkpoint
             .as_ref()
             .and_then(|runtime| runtime.loaded.clone());
+        if loaded_checkpoint.is_some() && !assistant_prefill_tokens.is_empty() {
+            return Err(BackendErrorV1::new(
+                "assistant prefill cannot be combined with a loaded Gemma checkpoint",
+            ));
+        }
         let checkpoint_suffix = loaded_checkpoint
             .as_ref()
             .map(|checkpoint| {
@@ -3699,6 +3814,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             PrefixCacheStartupConfigV1::Disabled
         );
         let prefix_cache_eligible = prefix_cache_enabled
+            && assistant_prefill_tokens.is_empty()
             && !requires_logits
             && match state.phase41.prefix_cache {
                 PrefixCacheStartupConfigV1::Disabled => false,
@@ -3843,9 +3959,11 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
         let mut post_cow_error = None;
-        let outcome = service.generate_tokens_with_sink(
+        let outcome = generate_with_optional_assistant_prefill(
+            &service,
             &mut executor,
             checkpoint_suffix.as_deref().unwrap_or(&prompt),
+            &assistant_prefill_tokens,
             &generation,
             cancellation,
             &mut random,
@@ -3923,6 +4041,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                     finish_reason,
                     usage: TokenUsageV1::new(usage.prompt_tokens(), usage.completion_tokens())
                         .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+                    matched_stop: result.matched_stop().map(str::to_owned),
                 })
             });
         let result = match (post_cow_error, generation_result, cleanup_result) {

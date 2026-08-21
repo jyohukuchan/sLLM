@@ -41,7 +41,7 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 40 | complete | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
 | 41 | complete | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
 | 42 | complete | Completions・Embeddings・Rerank・token utility・infill endpoint | transport-independent modes |
-| 43 | planned | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
+| 43 | complete | Responses・Anthropic Messages・function/tool protocol | Phase 40・42 |
 | 44 | planned | generic template、reasoning control、interactive CLI | Phase 41・43 message/state |
 | 45 | planned | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
 | 46 | planned | conversion、quantization、benchmark、quality/debug tools | stable GGUF/model identities |
@@ -246,6 +246,10 @@ Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、�
 
 ## Phase 43: Responses・Anthropic Messages・function/tool protocol
 
+> 状態: complete（2026-08-22、host-only。GPU provider変更なし、MI300X実機claimなし）。詳細は
+> [archive plan](../../../../archive/2026/08/21-31/phase43-responses-anthropic-tool-protocol.md)と
+> [history](../../../../../history/2026/08/21-31/phase43-responses-anthropic-tool-protocol.md)を正とする。
+
 ### Work units
 
 1. official Responses schemaを実装開始時のfull commit/versionへpinし、request item、output item、usage、error、stream eventの
@@ -262,6 +266,15 @@ Rustls TLS、opt-in metrics、nonblocking runtime allocator memory snapshot、�
   unsupported multimodal typeを検証する。
 - transport間で同じinternal generation requestとvisible token順序を使い、API固有eventへ変換する。
 - このPhaseはtool callを生成・受理するが、任意のtool/MCPをserver process内で実行しない。実行はPhase 47まで明示的に無効。
+
+### Closeout
+
+OpenAI Responses `2.3.0` commit `010421dcbd0475277ea8c3e6c1e1cbca4659c4bd`とAnthropic
+`2023-06-01`を別profileへ固定し、strict request、non-stream、named SSE、bounded replay、stable ID、usage/stop/errorを
+共通schedulerへ接続した。tool definition/choice/call/resultとparallel policyはfrontendのordered internal protocolへ集約し、Qwenだけが
+grammar-constrained capabilityを広告する。generated callはclientへ返すdataであり、実行・MCP・外部I/Oは一切追加していない。
+machine contract、host grammar/frontend/server unit、raw HTTP/SSE、tool roundtrip、no-execution、redaction、replayとlegacy回帰をPASSした。
+Resumable requestは40 output token以下だけをadmitし、成功event batchをPhase 39の64 KiB/event・256 KiB/sessionへ事前適合確認する。
 
 ## Phase 44: template・reasoning control・interactive UX
 

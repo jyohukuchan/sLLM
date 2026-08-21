@@ -1,0 +1,204 @@
+{
+  "$schema": "https://sllm.dev/schema/phase43-protocol-profile-v1.schema.json",
+  "schema_version": "phase43-protocol-profile-v1",
+  "profile_version": "sllm-phase43-protocol-profiles-v1",
+  "recorded_at": "2026-08-22",
+  "spec_pins": {
+    "openai": {
+      "repository": "https://github.com/openai/openai-openapi",
+      "openapi_version": "2.3.0",
+      "commit": "010421dcbd0475277ea8c3e6c1e1cbca4659c4bd",
+      "operation": "POST /v1/responses",
+      "docs": [
+        "https://developers.openai.com/api/docs/guides/function-calling",
+        "https://developers.openai.com/api/docs/guides/streaming-responses"
+      ]
+    },
+    "anthropic": {
+      "api_version": "2023-06-01",
+      "docs": [
+        "https://docs.anthropic.com/en/api/messages",
+        "https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/overview"
+      ]
+    },
+    "llama_cpp": {
+      "release": "b10453",
+      "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70"
+    }
+  },
+  "limits": {
+    "request_body_bytes": 100663296,
+    "tool_definitions": {"min": 1, "max": 128},
+    "tool_name": {"pattern": "^[A-Za-z0-9_-]{1,64}$", "max_bytes": 64},
+    "tool_description_bytes": 16384,
+    "tool_schema_bytes": 1048576,
+    "call_id_bytes": 256,
+    "arguments_bytes": 16777216,
+    "result_bytes": 16777216,
+    "input_items": 2048,
+    "messages": 1024,
+    "content_blocks_per_message": 256,
+    "text_bytes": 16777216,
+    "completion_tokens": 4096,
+    "resumable_completion_tokens": 40,
+    "stop_sequences": {"min": 1, "max": 4},
+    "stream_delta_bytes": 16384,
+    "replay_event_bytes": 65536,
+    "replay_session_bytes": 262144,
+    "parallel_calls": {"min": 1, "max": 16}
+  },
+  "common_tool_protocol": {
+    "tool_choice": ["auto", "none", "required", "specific"],
+    "parallel_policy": {
+      "default_max_calls": 16,
+      "false_max_calls": 1,
+      "disable_parallel_tool_use_max_calls": 1
+    },
+    "canonical_envelope": {
+      "message": {"type": "message", "text": "string"},
+      "tool_calls": {
+        "type": "tool_calls",
+        "calls": [{"name": "tool-name", "arguments": "JSON object"}]
+      },
+      "arguments_are_grammar_constrained": true
+    },
+    "execution": "client-owned-result-roundtrip-only"
+  },
+  "no_execution_boundary": {
+    "status": "protocol-only",
+    "phase47_approval_required": true,
+    "allowed": [
+      "parse_and_validate_wire_request",
+      "lower_ordered_protocol_items",
+      "compile_tool_argument_json_schema",
+      "generate_tool_call_or_message",
+      "accept_client_tool_result",
+      "resume_client_owned_generation"
+    ],
+    "forbidden": [
+      "process_spawn",
+      "network_io",
+      "filesystem_io",
+      "environment_or_secret_lookup",
+      "credential_resolution",
+      "shell_execution",
+      "mcp_request",
+      "builtin_or_hosted_tool_execution",
+      "worker_or_sandbox_creation"
+    ]
+  },
+  "profiles": [
+    {
+      "id": "openai-responses-v1",
+      "endpoint": "/v1/responses",
+      "method": "POST",
+      "spec_pin": "openai-openapi-010421dcbd0475277ea8c3e6c1e1cbca4659c4bd",
+      "required_headers": ["content-type"],
+      "optional_headers": ["authorization"],
+      "request": {
+        "required": ["model", "input"],
+        "optional": ["instructions", "max_output_tokens", "temperature", "top_p", "stream", "tools", "tool_choice", "parallel_tool_calls", "reasoning.effort", "metadata", "store", "sllm.resumable"],
+        "input_item_types": ["message", "function_call", "function_call_output"],
+        "content_types": ["input_text", "output_text"],
+        "tool_choice": ["auto", "none", "required", "specific"],
+        "parallel_tool_calls": [true, false],
+        "store": {"accepted": [false], "rejected": [true]}
+      },
+      "response": {
+        "object": "response",
+        "required_fields": ["id", "object", "created_at", "model", "status", "output", "output_text", "error", "incomplete_details", "usage"],
+        "usage_fields": ["input_tokens", "output_tokens", "total_tokens"],
+        "stop_reasons": ["completed", "incomplete", "tool_calls"],
+        "terminal_events": ["response.completed", "error"]
+      },
+      "events": {
+        "initial": "idle",
+        "terminal": ["completed", "failed"],
+        "transitions": [
+          {"from": "idle", "event": "response.created", "to": "created"},
+          {"from": "created", "event": "response.in_progress", "to": "in_progress"},
+          {"from": "in_progress", "event": "response.output_item.added", "to": "item_open"},
+          {"from": "item_open", "event": "response.content_part.added", "to": "content_open"},
+          {"from": "content_open", "event": "response.output_text.delta", "to": "content_open"},
+          {"from": "content_open", "event": "response.output_text.done", "to": "content_done"},
+          {"from": "content_done", "event": "response.content_part.done", "to": "item_done_pending"},
+          {"from": "item_open", "event": "response.function_call_arguments.delta", "to": "item_open"},
+          {"from": "item_open", "event": "response.function_call_arguments.done", "to": "item_done_pending"},
+          {"from": "item_done_pending", "event": "response.output_item.done", "to": "in_progress"},
+          {"from": "in_progress", "event": "response.completed", "to": "completed"},
+          {"from": "idle", "event": "error", "to": "failed"},
+          {"from": "in_progress", "event": "error", "to": "failed"},
+          {"from": "item_open", "event": "error", "to": "failed"},
+          {"from": "content_open", "event": "error", "to": "failed"}
+        ],
+        "forbidden": ["terminal_after_terminal", "success_after_error", "DONE_sentinel"]
+      }
+    },
+    {
+      "id": "anthropic-messages-v1",
+      "endpoint": "/v1/messages",
+      "method": "POST",
+      "spec_pin": "anthropic-2023-06-01",
+      "required_headers": ["content-type", "anthropic-version"],
+      "optional_headers": ["authorization"],
+      "request": {
+        "required": ["model", "max_tokens", "messages"],
+        "optional": ["system", "stream", "stop_sequences", "tools", "tool_choice", "sllm.resumable"],
+        "message_roles": ["user", "assistant"],
+        "content_types": ["text", "tool_use", "tool_result"],
+        "tool_choice": ["auto", "none", "any", "specific"],
+        "anthropic_version": "2023-06-01"
+      },
+      "response": {
+        "object": "message",
+        "required_fields": ["id", "type", "role", "model", "content", "stop_reason", "stop_sequence", "usage"],
+        "usage_fields": ["input_tokens", "output_tokens"],
+        "stop_reasons": ["end_turn", "max_tokens", "stop_sequence", "tool_use"],
+        "terminal_events": ["message_stop", "error"]
+      },
+      "events": {
+        "initial": "idle",
+        "terminal": ["stopped", "failed"],
+        "transitions": [
+          {"from": "idle", "event": "message_start", "to": "message_open"},
+          {"from": "message_open", "event": "content_block_start", "to": "block_open"},
+          {"from": "block_open", "event": "content_block_delta", "to": "block_open"},
+          {"from": "block_open", "event": "content_block_stop", "to": "message_open"},
+          {"from": "message_open", "event": "message_delta", "to": "message_open"},
+          {"from": "message_open", "event": "message_stop", "to": "stopped"},
+          {"from": "idle", "event": "error", "to": "failed"},
+          {"from": "message_open", "event": "error", "to": "failed"}
+        ],
+        "forbidden": ["terminal_after_terminal", "success_after_error", "DONE_sentinel"]
+      }
+    }
+  ],
+  "cases": {
+    "positive": [
+      {"id": "responses-text-non-stream", "profile": "openai-responses-v1", "kind": "non_stream", "request": {"model": "qwen", "input": "hello", "stream": false}, "expected": {"object": "response", "status": "completed"}},
+      {"id": "responses-tool-auto", "profile": "openai-responses-v1", "kind": "tool_call", "request": {"model": "qwen", "input": "weather", "tools": [{"type": "function", "name": "weather", "parameters": {"type": "object"}}], "tool_choice": "auto"}, "expected": {"type": "tool_calls", "max_calls": 16}},
+      {"id": "responses-tool-specific-single", "profile": "openai-responses-v1", "kind": "tool_call", "request": {"model": "qwen", "input": "weather", "tools": [{"type": "function", "name": "weather", "parameters": {"type": "object"}}], "tool_choice": {"type": "function", "name": "weather"}, "parallel_tool_calls": false}, "expected": {"specific_tool": "weather", "max_calls": 1}},
+      {"id": "responses-tool-result-roundtrip", "profile": "openai-responses-v1", "kind": "tool_result", "request": {"model": "qwen", "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "weather"}]}, {"type": "function_call", "call_id": "call_1", "name": "weather", "arguments": "{}"}, {"type": "function_call_output", "call_id": "call_1", "output": "client-owned"}], "tools": [{"type": "function", "name": "weather", "parameters": {"type": "object"}}]}, "expected": {"execution": "not-performed"}},
+      {"id": "responses-sse-closed-sequence", "profile": "openai-responses-v1", "kind": "stream", "request": {"model": "qwen", "input": "hello", "stream": true}, "expected": {"events": ["response.created", "response.in_progress", "response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done", "response.content_part.done", "response.output_item.done", "response.completed"]}},
+      {"id": "anthropic-text-non-stream", "profile": "anthropic-messages-v1", "kind": "non_stream", "request": {"model": "qwen", "max_tokens": 32, "messages": [{"role": "user", "content": "hello"}]}, "expected": {"object": "message", "stop_reason": "end_turn"}},
+      {"id": "anthropic-tool-use-roundtrip", "profile": "anthropic-messages-v1", "kind": "tool_result", "request": {"model": "qwen", "max_tokens": 32, "messages": [{"role": "user", "content": "weather"}, {"role": "assistant", "content": [{"type": "tool_use", "id": "call_1", "name": "weather", "input": {}}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "client-owned"}]}], "tools": [{"name": "weather", "input_schema": {"type": "object"}}]}, "expected": {"execution": "not-performed"}},
+      {"id": "anthropic-parallel-tool-choice", "profile": "anthropic-messages-v1", "kind": "tool_call", "request": {"model": "qwen", "max_tokens": 32, "messages": [{"role": "user", "content": "weather"}], "tools": [{"name": "weather", "input_schema": {"type": "object"}}], "tool_choice": {"type": "any", "disable_parallel_tool_use": false}}, "expected": {"max_calls": 16}},
+      {"id": "anthropic-sse-closed-sequence", "profile": "anthropic-messages-v1", "kind": "stream", "request": {"model": "qwen", "max_tokens": 32, "messages": [{"role": "user", "content": "hello"}], "stream": true}, "expected": {"events": ["message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop"]}},
+      {"id": "execution-payload-is-data", "profile": "anthropic-messages-v1", "kind": "tool_call", "request": {"model": "qwen", "max_tokens": 32, "messages": [{"role": "user", "content": "do not execute"}], "tools": [{"name": "shell", "description": "touch /tmp/never", "input_schema": {"type": "object"}}]}, "expected": {"execution": "not-performed"}}
+    ],
+    "rejection": [
+      {"id": "responses-unknown-field", "profile": "openai-responses-v1", "body": {"mystery": true}, "expected": {"status": 400, "code": "invalid_value", "admission": "before_gpu_admission"}},
+      {"id": "responses-duplicate-field", "profile": "openai-responses-v1", "raw_json": "{\"model\":\"qwen\",\"model\":\"other\"}", "expected": {"status": 400, "code": "invalid_json", "admission": "before_gpu_admission"}},
+      {"id": "responses-nonfinite", "profile": "openai-responses-v1", "body": {"temperature": "NaN"}, "expected": {"status": 400, "code": "invalid_value", "admission": "before_gpu_admission"}},
+      {"id": "responses-unsupported-state", "profile": "openai-responses-v1", "body": {"previous_response_id": "resp_1"}, "expected": {"status": 400, "code": "unsupported_parameter", "admission": "before_gpu_admission"}},
+      {"id": "responses-unknown-input-item", "profile": "openai-responses-v1", "body": {"input": [{"type": "image"}]}, "expected": {"status": 400, "code": "invalid_value", "admission": "before_gpu_admission"}},
+      {"id": "anthropic-version-missing", "profile": "anthropic-messages-v1", "headers": {}, "expected": {"status": 400, "code": "invalid_value", "param": "anthropic-version", "admission": "before_gpu_admission"}},
+      {"id": "anthropic-version-mismatch", "profile": "anthropic-messages-v1", "headers": {"anthropic-version": "2024-01-01"}, "expected": {"status": 400, "code": "invalid_value", "param": "anthropic-version", "admission": "before_gpu_admission"}},
+      {"id": "anthropic-tool-result-order", "profile": "anthropic-messages-v1", "body": {"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1"}]}]}, "expected": {"status": 400, "code": "invalid_value", "param": "messages", "admission": "before_gpu_admission"}},
+      {"id": "anthropic-duplicate-tool-result", "profile": "anthropic-messages-v1", "body": {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "call_1"}]}, {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1"}, {"type": "tool_result", "tool_use_id": "call_1"}]}]}, "expected": {"status": 400, "code": "invalid_value", "param": "tool_use_id", "admission": "before_gpu_admission"}},
+      {"id": "parallel-call-limit", "profile": "openai-responses-v1", "body": {"tools": [{"name": "too-many"}], "parallel_tool_calls": 17}, "expected": {"status": 400, "code": "invalid_value", "param": "parallel_tool_calls", "admission": "before_gpu_admission"}},
+      {"id": "request-body-limit", "profile": "openai-responses-v1", "body_bytes": 100663297, "expected": {"status": 413, "code": "request_too_large", "admission": "before_gpu_admission"}},
+      {"id": "empty-tools", "profile": "anthropic-messages-v1", "body": {"model": "qwen", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}], "tools": []}, "expected": {"status": 400, "code": "invalid_value", "param": "tools", "admission": "before_gpu_admission"}}
+    ]
+  }
+}

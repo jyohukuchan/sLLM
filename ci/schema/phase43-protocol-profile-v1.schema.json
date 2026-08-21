@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase43-protocol-profile-v1.schema.json",
+  "title": "sLLM Phase 43 protocol compatibility profiles",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "profile_version", "recorded_at", "spec_pins", "limits", "common_tool_protocol", "no_execution_boundary", "profiles", "cases"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase43-protocol-profile-v1.schema.json"},
+    "schema_version": {"const": "phase43-protocol-profile-v1"},
+    "profile_version": {"const": "sllm-phase43-protocol-profiles-v1"},
+    "recorded_at": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "spec_pins": {
+      "type": "object", "additionalProperties": false, "required": ["openai", "anthropic", "llama_cpp"],
+      "properties": {
+        "openai": {
+          "type": "object", "additionalProperties": false, "required": ["repository", "openapi_version", "commit", "operation", "docs"],
+          "properties": {
+            "repository": {"const": "https://github.com/openai/openai-openapi"}, "openapi_version": {"const": "2.3.0"},
+            "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "operation": {"const": "POST /v1/responses"},
+            "docs": {"type": "array", "minItems": 2, "items": {"type": "string", "format": "uri"}}
+          }
+        },
+        "anthropic": {
+          "type": "object", "additionalProperties": false, "required": ["api_version", "docs"],
+          "properties": {"api_version": {"const": "2023-06-01"}, "docs": {"type": "array", "minItems": 2, "items": {"type": "string", "format": "uri"}}}
+        },
+        "llama_cpp": {
+          "type": "object", "additionalProperties": false, "required": ["release", "commit"],
+          "properties": {"release": {"const": "b10453"}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}
+        }
+      }
+    },
+    "limits": {"$ref": "#/$defs/limits"},
+    "common_tool_protocol": {
+      "type": "object", "additionalProperties": false, "required": ["tool_choice", "parallel_policy", "canonical_envelope", "execution"],
+      "properties": {
+        "tool_choice": {"type": "array", "const": ["auto", "none", "required", "specific"]},
+        "parallel_policy": {
+          "type": "object", "additionalProperties": false, "required": ["default_max_calls", "false_max_calls", "disable_parallel_tool_use_max_calls"],
+          "properties": {"default_max_calls": {"const": 16}, "false_max_calls": {"const": 1}, "disable_parallel_tool_use_max_calls": {"const": 1}}
+        },
+        "canonical_envelope": {"type": "object", "additionalProperties": false, "required": ["message", "tool_calls", "arguments_are_grammar_constrained"], "properties": {"message": {"type": "object"}, "tool_calls": {"type": "object"}, "arguments_are_grammar_constrained": {"const": true}}},
+        "execution": {"const": "client-owned-result-roundtrip-only"}
+      }
+    },
+    "no_execution_boundary": {
+      "type": "object", "additionalProperties": false, "required": ["status", "phase47_approval_required", "allowed", "forbidden"],
+      "properties": {
+        "status": {"const": "protocol-only"}, "phase47_approval_required": {"const": true},
+        "allowed": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "forbidden": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "profiles": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/profile"}},
+    "cases": {
+      "type": "object", "additionalProperties": false, "required": ["positive", "rejection"],
+      "properties": {
+        "positive": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/positive_case"}},
+        "rejection": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/rejection_case"}}
+      }
+    }
+  },
+  "$defs": {
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_body_bytes", "tool_definitions", "tool_name", "tool_description_bytes", "tool_schema_bytes", "call_id_bytes", "arguments_bytes", "result_bytes", "input_items", "messages", "content_blocks_per_message", "text_bytes", "completion_tokens", "resumable_completion_tokens", "stop_sequences", "stream_delta_bytes", "replay_event_bytes", "replay_session_bytes", "parallel_calls"],
+      "properties": {
+        "request_body_bytes": {"const": 100663296},
+        "tool_definitions": {"type": "object", "additionalProperties": false, "required": ["min", "max"], "properties": {"min": {"const": 1}, "max": {"const": 128}}},
+        "tool_name": {"type": "object", "additionalProperties": false, "required": ["pattern", "max_bytes"], "properties": {"pattern": {"const": "^[A-Za-z0-9_-]{1,64}$"}, "max_bytes": {"const": 64}}},
+        "tool_description_bytes": {"const": 16384}, "tool_schema_bytes": {"const": 1048576}, "call_id_bytes": {"const": 256}, "arguments_bytes": {"const": 16777216}, "result_bytes": {"const": 16777216},
+        "input_items": {"const": 2048}, "messages": {"const": 1024}, "content_blocks_per_message": {"const": 256}, "text_bytes": {"const": 16777216}, "completion_tokens": {"const": 4096}, "resumable_completion_tokens": {"const": 40},
+        "stop_sequences": {"type": "object", "additionalProperties": false, "required": ["min", "max"], "properties": {"min": {"const": 1}, "max": {"const": 4}}},
+        "stream_delta_bytes": {"const": 16384}, "replay_event_bytes": {"const": 65536}, "replay_session_bytes": {"const": 262144},
+        "parallel_calls": {"type": "object", "additionalProperties": false, "required": ["min", "max"], "properties": {"min": {"const": 1}, "max": {"const": 16}}}
+      }
+    },
+    "profile": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "endpoint", "method", "spec_pin", "required_headers", "request", "response", "events"],
+      "properties": {
+        "id": {"enum": ["openai-responses-v1", "anthropic-messages-v1"]}, "endpoint": {"enum": ["/v1/responses", "/v1/messages"]}, "method": {"const": "POST"}, "spec_pin": {"type": "string", "minLength": 1},
+        "required_headers": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "optional_headers": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "request": {"type": "object", "additionalProperties": false, "required": ["required", "optional", "content_types"], "properties": {"required": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "optional": {"type": "array", "items": {"type": "string"}}, "input_item_types": {"type": "array", "items": {"type": "string"}}, "message_roles": {"type": "array", "items": {"type": "string"}}, "content_types": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "tool_choice": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "parallel_tool_calls": {"type": "array", "items": {"type": "boolean"}}, "store": {"type": "object"}, "anthropic_version": {"const": "2023-06-01"}}},
+        "response": {"type": "object", "additionalProperties": false, "required": ["object", "required_fields", "usage_fields", "stop_reasons", "terminal_events"], "properties": {"object": {"type": "string"}, "required_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "usage_fields": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "stop_reasons": {"type": "array", "minItems": 1, "items": {"type": "string"}}, "terminal_events": {"type": "array", "minItems": 1, "items": {"type": "string"}}}},
+        "events": {"$ref": "#/$defs/events"}
+      }
+    },
+    "events": {
+      "type": "object", "additionalProperties": false, "required": ["initial", "terminal", "transitions", "forbidden"],
+      "properties": {
+        "initial": {"type": "string", "minLength": 1}, "terminal": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "transitions": {"type": "array", "minItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["from", "event", "to"], "properties": {"from": {"type": "string"}, "event": {"type": "string"}, "to": {"type": "string"}}}},
+        "forbidden": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "positive_case": {
+      "type": "object", "additionalProperties": false, "required": ["id", "profile", "kind", "request", "expected"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "profile": {"enum": ["openai-responses-v1", "anthropic-messages-v1"]}, "kind": {"enum": ["non_stream", "stream", "tool_call", "tool_result"]}, "request": {"type": "object"}, "expected": {"type": "object"}}
+    },
+    "rejection_case": {
+      "type": "object", "additionalProperties": false, "required": ["id", "profile", "expected"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "profile": {"enum": ["openai-responses-v1", "anthropic-messages-v1"]}, "body": {"type": "object"}, "body_bytes": {"type": "integer", "minimum": 0}, "raw_json": {"type": "string", "minLength": 1}, "headers": {"type": "object"}, "expected": {"$ref": "#/$defs/expected_rejection"}},
+      "anyOf": [{"required": ["body"]}, {"required": ["body_bytes"]}, {"required": ["raw_json"]}, {"required": ["headers"]}]
+    },
+    "expected_rejection": {
+      "type": "object", "additionalProperties": false, "required": ["status", "code", "admission"],
+      "properties": {"status": {"enum": [400, 413]}, "code": {"enum": ["invalid_json", "invalid_value", "unsupported_parameter", "request_too_large"]}, "param": {"type": "string"}, "admission": {"const": "before_gpu_admission"}, "execution": {"const": "not-performed"}}
+    }
+  }
+}

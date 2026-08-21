@@ -9,6 +9,9 @@ mod batching;
 mod lifecycle;
 mod metrics;
 mod phase42_api;
+mod phase43_api;
+mod phase43_service;
+mod phase43_transport;
 mod production;
 mod resume;
 mod runtime;
@@ -32,6 +35,21 @@ pub use phase42_api::{
     EmbeddingRequestV1, InfillRequestV1, InputTokensInputV1, InputTokensRequestV1,
     PHASE42_PROFILE_VERSION, PromptV1, RerankRequestV1, TemplateMessageV1, TemplateRoleV1,
     TokenizeRequestV1,
+};
+pub use phase43_api::{
+    ANTHROPIC_API_VERSION_V1, AnthropicContentBlockV1, AnthropicMessageV1,
+    AnthropicMessagesRequestV1, AnthropicRoleV1, AnthropicSystemV1,
+    PHASE43_ANTHROPIC_PROFILE_VERSION, PHASE43_RESPONSES_PROFILE_VERSION, Phase43ApiErrorV1,
+    Phase43ErrorCodeV1, ResponsesInputItemV1, ResponsesInputV1, ResponsesMessageRoleV1,
+    ResponsesReasoningEffortV1, ResponsesRequestV1, ResponsesTextPartKindV1, ResponsesTextPartV1,
+    SllmExtensionsV1, ToolChoiceV1 as Phase43ToolChoiceV1,
+    ToolDefinitionV1 as Phase43ToolDefinitionV1, parse_anthropic_request_v1,
+    parse_responses_request_v1, validate_anthropic_version_header,
+};
+pub use phase43_transport::{
+    AnthropicStreamBuilderV1, Phase43CompletedOutputV1, Phase43FinishReasonV1, Phase43SseEventV1,
+    Phase43ToolCallV1, Phase43TransportError, Phase43UsageV1, ResponsesStreamBuilderV1,
+    anthropic_non_stream_v1, responses_non_stream_v1,
 };
 pub use production::{
     CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,

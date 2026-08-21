@@ -100,6 +100,22 @@ impl ResumableStoreV1 {
         Ok(())
     }
 
+    pub(crate) fn can_retain_batch(&self, event_lengths: &[usize]) -> bool {
+        if event_lengths.is_empty() || event_lengths.len() > self.max_events_per_session {
+            return false;
+        }
+        let Some(total) = event_lengths
+            .iter()
+            .try_fold(0_usize, |total, length| total.checked_add(*length))
+        else {
+            return false;
+        };
+        event_lengths
+            .iter()
+            .all(|length| *length <= MAX_REPLAY_EVENT_BYTES)
+            && total <= MAX_REPLAY_SESSION_BYTES
+    }
+
     pub fn append(&self, id: &str, data: String, terminal: bool) -> Result<u64, ReplayErrorV1> {
         let mut inner = self
             .inner
@@ -271,6 +287,26 @@ mod tests {
         let session = inner.sessions.get("bytes").unwrap();
         assert_eq!(session.retained_bytes, MAX_REPLAY_SESSION_BYTES);
         assert_eq!(session.events.len(), 4);
+    }
+
+    #[test]
+    fn batch_preflight_checks_event_count_and_both_byte_limits() {
+        let store = ResumableStoreV1::new(1, 8).unwrap();
+        assert!(store.can_retain_batch(&[1, MAX_REPLAY_EVENT_BYTES]));
+        assert!(!store.can_retain_batch(&[]));
+        assert!(
+            !ResumableStoreV1::new(1, 4)
+                .unwrap()
+                .can_retain_batch(&[1, 1, 1, 1, 1])
+        );
+        assert!(!store.can_retain_batch(&[MAX_REPLAY_EVENT_BYTES + 1]));
+        assert!(!store.can_retain_batch(&[
+            MAX_REPLAY_EVENT_BYTES,
+            MAX_REPLAY_EVENT_BYTES,
+            MAX_REPLAY_EVENT_BYTES,
+            MAX_REPLAY_EVENT_BYTES,
+            1,
+        ]));
     }
 
     #[test]

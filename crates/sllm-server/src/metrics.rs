@@ -24,7 +24,7 @@ const HISTOGRAM_BUCKET_COUNT: usize = 15;
 const OUTCOME_COUNT: usize = 6;
 const TOKEN_DIRECTION_COUNT: usize = 2;
 const CANCELLATION_REASON_COUNT: usize = 4;
-const HTTP_ENDPOINT_COUNT: usize = 18;
+const HTTP_ENDPOINT_COUNT: usize = 22;
 const STATUS_CLASS_COUNT: usize = 6;
 
 // Shared latency buckets in seconds.  They are fixed at compile time so a
@@ -71,6 +71,10 @@ const HTTP_ENDPOINTS: [HttpEndpointV1; HTTP_ENDPOINT_COUNT] = [
     HttpEndpointV1::ApplyTemplate,
     HttpEndpointV1::InputTokens,
     HttpEndpointV1::Infill,
+    HttpEndpointV1::Responses,
+    HttpEndpointV1::ResponsesReplay,
+    HttpEndpointV1::AnthropicMessages,
+    HttpEndpointV1::AnthropicReplay,
 ];
 
 const STATUS_CLASSES: [StatusClassV1; STATUS_CLASS_COUNT] = [
@@ -230,6 +234,10 @@ pub enum HttpEndpointV1 {
     ApplyTemplate,
     InputTokens,
     Infill,
+    Responses,
+    ResponsesReplay,
+    AnthropicMessages,
+    AnthropicReplay,
 }
 
 impl HttpEndpointV1 {
@@ -253,6 +261,10 @@ impl HttpEndpointV1 {
             Self::ApplyTemplate => 15,
             Self::InputTokens => 16,
             Self::Infill => 17,
+            Self::Responses => 18,
+            Self::ResponsesReplay => 19,
+            Self::AnthropicMessages => 20,
+            Self::AnthropicReplay => 21,
         }
     }
 
@@ -276,6 +288,10 @@ impl HttpEndpointV1 {
             Self::ApplyTemplate => "apply_template",
             Self::InputTokens => "input_tokens",
             Self::Infill => "infill",
+            Self::Responses => "responses",
+            Self::ResponsesReplay => "responses_replay",
+            Self::AnthropicMessages => "anthropic_messages",
+            Self::AnthropicReplay => "anthropic_replay",
         }
     }
 }

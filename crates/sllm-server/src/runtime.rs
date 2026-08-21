@@ -34,10 +34,11 @@ impl fmt::Display for BackendErrorV1 {
 
 impl std::error::Error for BackendErrorV1 {}
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackendCompletionV1 {
     pub finish_reason: FinishReasonV1,
     pub usage: TokenUsageV1,
+    pub matched_stop: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -330,6 +331,13 @@ pub trait ChatGenerationBackendV1: Send + Sync + 'static {
         false
     }
 
+    /// Reports whether this backend has a reviewed Phase 43 typed protocol
+    /// prompt and grammar path. This capability never implies permission to
+    /// execute a generated tool call.
+    fn tool_protocol_v1_available(&self) -> bool {
+        false
+    }
+
     /// Tokenizes FIM content without injecting BOS/EOS. Marker tokens are
     /// added only by the capability-bound [`FimTemplateV1`].
     fn tokenize_infill_content(&self, _text: &str) -> Result<Vec<u32>, BackendErrorV1> {
@@ -435,6 +443,10 @@ impl ModelRegistryEntryV1 {
 
     pub(crate) fn reviewed_chat_template_available(&self) -> bool {
         self.backend.reviewed_chat_template_available()
+    }
+
+    pub(crate) fn tool_protocol_v1_available(&self) -> bool {
+        self.backend.tool_protocol_v1_available()
     }
 
     pub(crate) fn tokenize_infill_content(&self, text: &str) -> Result<Vec<u32>, BackendErrorV1> {
@@ -1292,6 +1304,7 @@ mod tests {
             Ok(BackendCompletionV1 {
                 finish_reason: FinishReasonV1::Length,
                 usage: TokenUsageV1::new(1, 100).unwrap(),
+                matched_stop: None,
             })
         }
     }

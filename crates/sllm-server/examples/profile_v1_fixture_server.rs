@@ -31,6 +31,7 @@ impl ChatGenerationBackendV1 for FixtureBackend {
             finish_reason: FinishReasonV1::Stop,
             usage: TokenUsageV1::new(3, 2)
                 .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+            matched_stop: None,
         })
     }
 }
