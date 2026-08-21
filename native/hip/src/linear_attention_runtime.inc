@@ -143,7 +143,7 @@ void fill_linear_attention_dispatch_info(
     sllm_linear_attention_dispatch_info_t *const info,
     const uint64_t dispatch_id,
     const sllm_linear_attention::DescriptorMetadata &metadata,
-    const char *const arch_name) noexcept {
+    const char *const arch_name, const bool use_column_provider) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -152,7 +152,7 @@ void fill_linear_attention_dispatch_info(
   info->info_version = SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  info->dispatch_count = 2U;
+  info->dispatch_count = use_column_provider ? 4U : 2U;
   info->conv_kernel_id =
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
   info->recurrent_kernel_id =
@@ -164,7 +164,9 @@ void fill_linear_attention_dispatch_info(
   info->conv_grid_size_x = static_cast<uint32_t>(
       (conv_elements + SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE - 1U) /
       SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
-  info->recurrent_grid_size_x = metadata.value_heads;
+  info->recurrent_grid_size_x =
+      use_column_provider ? metadata.value_heads * metadata.head_dim / 4U
+                          : metadata.value_heads;
   info->token_count = metadata.token_count;
   info->start_position = metadata.start_position;
   info->expected_length = metadata.expected_length;
@@ -175,14 +177,18 @@ void fill_linear_attention_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX,
-      ::sllm_linear_attention_kernel::kLogicalKernelId);
+      use_column_provider
+          ? ::sllm_linear_attention_kernel::kColumnLogicalKernelId
+          : ::sllm_linear_attention_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->conv_device_symbol, SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
       ::sllm_linear_attention_kernel::kConvDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(
       info->recurrent_device_symbol,
       SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
-      ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
+      use_column_provider
+          ? ::sllm_linear_attention_kernel::kColumnRecurrentDeviceSymbol
+          : ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -735,9 +741,33 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     if (device_status != SLLM_STATUS_OK) {
       return device_status;
     }
-    const uint64_t required_scratch = metadata.token_count *
-                                      metadata.qkv_width *
-                                      sizeof(uint16_t);
+    const char *const force_baseline = std::getenv("SLLM_GDN_FORCE_BASELINE");
+    const bool column_candidate_by_shape =
+        metadata.token_count >= 128U &&
+        (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0);
+    constexpr uint64_t kMaxU64 = std::numeric_limits<uint64_t>::max();
+    if (metadata.qkv_width == 0U || metadata.value_heads == 0U ||
+        metadata.token_count >
+            kMaxU64 / metadata.qkv_width / sizeof(uint16_t) ||
+        (column_candidate_by_shape &&
+         metadata.token_count >
+             kMaxU64 / metadata.value_heads / sizeof(float) / 2U)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "linear attention scratch size overflowed");
+    }
+    const uint64_t convolved_scratch =
+        metadata.token_count * metadata.qkv_width * sizeof(uint16_t);
+    const uint64_t scalar_scratch =
+        column_candidate_by_shape
+            ? metadata.token_count * metadata.value_heads * sizeof(float) * 2U
+            : 0U;
+    if (convolved_scratch > kMaxU64 - scalar_scratch) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "linear attention scratch planes overflowed");
+    }
+    const uint64_t required_scratch = convolved_scratch + scalar_scratch;
     if (required_scratch > state->scratch_bytes) {
       void *new_scratch = nullptr;
       const hipError_t allocation_status =
@@ -781,6 +811,9 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           "target");
     }
 #endif
+    const bool use_column_provider =
+        column_candidate_by_shape && (std::strcmp(arch_name, "gfx1030") == 0 ||
+                                      std::strcmp(arch_name, "gfx1201") == 0);
     try {
       candidate = std::make_unique<Completion>(context, queue, nullptr, 0U,
                                                false, std::vector<uint8_t>{});
@@ -877,19 +910,61 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        "linear attention convolution launch",
                                        queue, error_sink);
     }
-    const hipError_t recurrent_status =
-        ::sllm_linear_attention_kernel::launch_recurrent(
-            static_cast<const uint16_t *>(state->scratch), z, b_input, a_input,
-            a_log, dt_bias, norm_weight,
-            static_cast<const float *>(state->recurrent_state[active_slot]),
-            static_cast<float *>(state->recurrent_state[inactive_slot]), output,
-            static_cast<uint32_t>(metadata.token_count), metadata.qk_heads,
-            metadata.value_heads, metadata.head_dim, metadata.qkv_width,
-            metadata.output_width, queue->stream);
-    if (recurrent_status != hipSuccess) {
-      return cleanup_failed_submission(candidate, token, recurrent_status,
-                                       "linear attention recurrent launch",
-                                       queue, error_sink);
+    if (use_column_provider) {
+      auto *const scalar_base = reinterpret_cast<float *>(
+          static_cast<char *>(state->scratch) + convolved_scratch);
+      float *const beta = scalar_base;
+      float *const decay =
+          scalar_base + metadata.token_count * metadata.value_heads;
+      const hipError_t preprocess_status =
+          ::sllm_linear_attention_kernel::launch_column_preprocess(
+              static_cast<uint16_t *>(state->scratch), b_input, a_input, a_log,
+              dt_bias, beta, decay, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, queue->stream);
+      if (preprocess_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, preprocess_status,
+            "linear attention column preprocess launch", queue, error_sink);
+      }
+      const hipError_t recurrent_status =
+          ::sllm_linear_attention_kernel::launch_column_recurrent(
+              static_cast<const uint16_t *>(state->scratch), beta, decay,
+              static_cast<const float *>(state->recurrent_state[active_slot]),
+              static_cast<float *>(state->recurrent_state[inactive_slot]),
+              output, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, metadata.output_width, queue->stream);
+      if (recurrent_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, recurrent_status,
+            "linear attention column recurrent launch", queue, error_sink);
+      }
+      const hipError_t postprocess_status =
+          ::sllm_linear_attention_kernel::launch_column_postprocess(
+              z, norm_weight, output,
+              static_cast<uint32_t>(metadata.token_count), metadata.value_heads,
+              metadata.head_dim, metadata.output_width, queue->stream);
+      if (postprocess_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, postprocess_status,
+            "linear attention column postprocess launch", queue, error_sink);
+      }
+    } else {
+      const hipError_t recurrent_status =
+          ::sllm_linear_attention_kernel::launch_recurrent(
+              static_cast<const uint16_t *>(state->scratch), z, b_input,
+              a_input, a_log, dt_bias, norm_weight,
+              static_cast<const float *>(state->recurrent_state[active_slot]),
+              static_cast<float *>(state->recurrent_state[inactive_slot]),
+              output, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, metadata.output_width, queue->stream);
+      if (recurrent_status != hipSuccess) {
+        return cleanup_failed_submission(candidate, token, recurrent_status,
+                                         "linear attention recurrent launch",
+                                         queue, error_sink);
+      }
     }
     const hipError_t record_status =
         candidate->event != nullptr
@@ -901,7 +976,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        error_sink);
     }
     fill_linear_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
-                                        arch_name);
+                                        arch_name, use_column_provider);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

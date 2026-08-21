@@ -15,7 +15,7 @@ use sllm_core::{
 };
 use sllm_hip::HipBackend;
 
-const CASE_TOKENS: [usize; 3] = [1, 3, 17];
+const CASE_TOKENS: [usize; 6] = [1, 3, 17, 127, 128, 129];
 const QK_HEADS: usize = 16;
 const VALUE_HEADS: usize = 32;
 const HEAD_DIM: usize = 128;
@@ -411,16 +411,34 @@ fn run_case(
         .linear_attention(&state, queue, bindings, descriptor)
         .map_err(|error| format!("GDN submission failed: {error}"))?;
     let dispatch = submission.dispatch().clone();
-    if dispatch.dispatch_count != 2
+    let force_baseline = env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
+    let use_column_provider =
+        tokens >= 128 && !force_baseline && matches!(target, "gfx1030" | "gfx1201");
+    if dispatch.dispatch_count != if use_column_provider { 4 } else { 2 }
         || dispatch.kernel_id != 2
         || dispatch.workgroup_size_x != 128
-        || dispatch.grid_size_x != VALUE_HEADS as u32
+        || dispatch.grid_size_x
+            != if use_column_provider {
+                (VALUE_HEADS * HEAD_DIM / 4) as u32
+            } else {
+                VALUE_HEADS as u32
+            }
         || dispatch.row_count != tokens as u64
         || dispatch.normalized_size != HEAD_DIM as u64
         || dispatch.fallback_allowed
         || dispatch.fallback_used
-        || dispatch.kernel_symbol != "linear_attention.gdn.v1"
-        || dispatch.device_symbol != "sllm_linear_attention_recurrent_gated_norm_v1"
+        || dispatch.kernel_symbol
+            != if use_column_provider {
+                "linear_attention.gdn.column_state.v2"
+            } else {
+                "linear_attention.gdn.v1"
+            }
+        || dispatch.device_symbol
+            != if use_column_provider {
+                "sllm_linear_attention_recurrent_column_state_v2"
+            } else {
+                "sllm_linear_attention_recurrent_gated_norm_v1"
+            }
         || dispatch.target != target
     {
         return Err(format!(
@@ -567,7 +585,7 @@ mod tests {
             LinearAttentionLayout::new(QK_HEADS, VALUE_HEADS, HEAD_DIM, CONV_KERNEL).unwrap();
         assert_eq!(layout.qkv_width(), QKV_WIDTH);
         assert_eq!(layout.output_width(), OUTPUT_WIDTH);
-        assert_eq!(CASE_TOKENS, [1, 3, 17]);
+        assert_eq!(CASE_TOKENS, [1, 3, 17, 127, 128, 129]);
     }
 
     #[test]

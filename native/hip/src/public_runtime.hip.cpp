@@ -278,16 +278,17 @@ hipError_t launch(const uint16_t *const key_input,
 } // namespace sllm_kv_state_kernel
 
 namespace sllm_causal_attention_kernel {
-hipError_t launch(const uint16_t *const query, const void *const key,
-                  const void *const value, const void *const key_scales,
-                  const void *const value_scales,
-                  const float *const key_outer_scales,
-                  const float *const value_outer_scales, uint16_t *const output,
-                  const uint32_t query_count, const uint64_t capacity_tokens,
-                  const uint64_t start_position,
-                  const uint64_t committed_kv_length, const uint32_t q_heads,
-                  const uint32_t kv_heads, const uint32_t head_dim,
-                  const uint32_t encoding, const hipStream_t stream) noexcept {
+hipError_t
+launch(const uint16_t *const query, const void *const key,
+       const void *const value, const void *const key_scales,
+       const void *const value_scales, const float *const key_outer_scales,
+       const float *const value_outer_scales, uint16_t *const output,
+       const uint32_t query_count, const uint64_t capacity_tokens,
+       const uint64_t start_position, const uint64_t committed_kv_length,
+       const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+       const uint32_t encoding, const bool use_gfx1201_wave_provider,
+       const bool use_decode_wave_split, const bool use_prefill_gqa4,
+       const bool use_prefill_gqa4_qtile4, const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
   (void)key_outer_scales;
@@ -295,6 +296,10 @@ hipError_t launch(const uint16_t *const query, const void *const key,
   (void)q_heads;
   (void)kv_heads;
   (void)head_dim;
+  (void)use_gfx1201_wave_provider;
+  (void)use_decode_wave_split;
+  (void)use_prefill_gqa4;
+  (void)use_prefill_gqa4_qtile4;
   if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
     return hipErrorInvalidValue;
   }
@@ -321,6 +326,34 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
                             const uint32_t, const uint32_t, const uint32_t,
                             const uint32_t, const uint32_t,
                             const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_column_preprocess(uint16_t *const, const uint16_t *const,
+                                    const uint16_t *const, const float *const,
+                                    const uint16_t *const, float *const,
+                                    float *const, const uint32_t,
+                                    const uint32_t, const uint32_t,
+                                    const uint32_t, const uint32_t,
+                                    const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_column_recurrent(const uint16_t *const, const float *const,
+                                   const float *const, const float *const,
+                                   float *const, uint16_t *const,
+                                   const uint32_t, const uint32_t,
+                                   const uint32_t, const uint32_t,
+                                   const uint32_t, const uint32_t,
+                                   const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_column_postprocess(const uint16_t *const, const float *const,
+                                     uint16_t *const, const uint32_t,
+                                     const uint32_t, const uint32_t,
+                                     const uint32_t,
+                                     const hipStream_t) noexcept {
   return hipSuccess;
 }
 } // namespace sllm_linear_attention_kernel

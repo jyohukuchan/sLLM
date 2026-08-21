@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase35-attention-gdn-summary-v1.schema.json",
+  "type": "object",
+  "required": ["schema_version", "state", "recorded_at", "identity", "decisions", "routing", "numerical", "performance", "resources", "service", "verification", "provenance", "limitations"],
+  "properties": {
+    "schema_version": {"const": "phase35-attention-gdn-summary-v1"},
+    "state": {"const": "COMPLETE"},
+    "recorded_at": {"type": "string", "format": "date"},
+    "identity": {"type": "object", "required": ["attention_kernel_source_sha256", "gdn_kernel_source_sha256", "gfx1030_cli_sha256", "gfx1201_cli_sha256", "gfx1030_server_sha256", "gfx942_compile_binary_sha256", "rocm", "model_fingerprint", "gguf_sha256", "derived_lock_sha256", "gfx1030_uuid", "gfx1201_uuid"]},
+    "decisions": {"type": "object", "required": ["attention", "gdn", "performance_authority", "attention_reason", "gdn_reason", "combined_reason"]},
+    "routing": {"type": "object", "required": ["targets", "attention", "gdn", "runtime_failure_fallback"]},
+    "numerical": {"type": "object", "required": ["attention_classification", "gdn_classification", "generated_token_ids", "attention_g1", "gdn_g2", "fallbacks", "cleanup_failures"]},
+    "performance": {"type": "object", "required": ["full_model_protocol", "attention_only", "gdn_only", "combined_final_source", "gfx1030_profile_seconds", "fixed_llama_gfx1030_peer_seconds"]},
+    "resources": {"type": "object", "required": ["attention_global_scratch_bytes_added", "attention_dispatches_added_per_layer", "gdn_scalar_scratch_bytes_per_layer_at_10001_tokens", "gdn_scalar_scratch_bytes_all_24_layers_at_10001_tokens", "gdn_dispatches_added_per_layer", "full_model_kernel_dispatches_before", "full_model_kernel_dispatches_after", "workspace_arena_bytes_before", "workspace_arena_bytes_after", "gdn_scratch_owner", "state_layout_migration", "weight_repack"]},
+    "service": {"type": "object", "required": ["target", "kv_cache_encoding", "prompt_tokens", "completion_tokens", "non_stream_content", "sse_content", "sse_done", "usage_equal", "all_dispatches_hip", "fallbacks", "completed_requests", "shutdown_current_bytes", "shutdown_request_state_bytes", "shutdown_workspace_bytes", "retryable_cleanup", "durable_quarantine"]},
+    "verification": {"type": "object", "required": ["cargo_fmt_check", "git_diff_check", "sllm_core_unit_tests_passed", "sllm_hip_unit_tests_passed", "sllm_server_tests_passed", "package_test_commands_passed", "gfx1030_release_build", "gfx1201_release_build", "gfx942_compile_only", "wrong_target_load_rejected", "wrong_target_exit_code", "wrong_target_error", "final_full_model_hip_only", "final_full_model_fallback", "final_full_model_cleanup_zero", "gfx1030_openai_non_stream_sse_lifecycle", "integration_review"]},
+    "provenance": {"type": "object", "required": ["attention", "gdn_notice", "upstream_commit", "import_identity", "release_action"]},
+    "limitations": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+  },
+  "additionalProperties": false
+}

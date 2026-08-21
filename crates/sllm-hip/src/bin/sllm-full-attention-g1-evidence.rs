@@ -713,9 +713,14 @@ fn metadata_matches(
     expected_target: &str,
     encoding: KvCacheEncoding,
 ) -> bool {
+    let use_phase33_common_provider = is_phase33_common_target(expected_target);
     let use_gfx1201_wave_provider = expected_target == "gfx1201" && (case.m == 1 || case.m >= 32);
-    let use_decode_wave_split = case.m == 1 && case.start_position + 1 >= 1024;
-    let use_prefill_gqa4 = case.m >= 64;
+    let use_decode_wave_split =
+        use_phase33_common_provider && case.m == 1 && case.start_position + 1 >= 1024;
+    let use_prefill_gqa4 = use_phase33_common_provider && case.m >= 64;
+    let force_baseline =
+        env::var_os("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE").is_some_and(|value| value == "1");
+    let use_prefill_gqa4_qtile4 = use_prefill_gqa4 && case.m >= 128 && !force_baseline;
     let (kernel_id, baseline_kernel_symbol, baseline_device_symbol) =
         if encoding == KvCacheEncoding::Fp16 {
             (
@@ -734,6 +739,11 @@ fn metadata_matches(
         (
             "causal_attention.decode.wave8_split.v5",
             "sllm_causal_attention_decode_wave8_split_v5",
+        )
+    } else if use_prefill_gqa4_qtile4 {
+        (
+            "causal_attention.prefill.gqa4_qtile4.v7",
+            "sllm_causal_attention_prefill_gqa4_qtile4_v7",
         )
     } else if use_prefill_gqa4 {
         (
@@ -762,7 +772,9 @@ fn metadata_matches(
         && dispatch.kernel_id == kernel_id
         && dispatch.workgroup_size_x == WORKGROUP_SIZE
         && dispatch.grid_size_x
-            == if use_prefill_gqa4 {
+            == if use_prefill_gqa4_qtile4 {
+                (case.m.div_ceil(4) * KV_HEADS) as u32
+            } else if use_prefill_gqa4 {
                 (case.m * KV_HEADS) as u32
             } else {
                 (case.m * Q_HEADS) as u32
@@ -775,6 +787,10 @@ fn metadata_matches(
         && dispatch.kernel_symbol == kernel_symbol
         && dispatch.device_symbol == device_symbol
         && dispatch.target == expected_target
+}
+
+fn is_phase33_common_target(target: &str) -> bool {
+    matches!(target, "gfx1030" | "gfx1201")
 }
 
 fn run_case(
@@ -1261,6 +1277,13 @@ mod tests {
                 .any(|case| case.id == "special-prefill64-value-pos-inf")
         );
         assert!(CASES.iter().all(|case| case.m > 0));
+    }
+
+    #[test]
+    fn phase33_and_phase35_prefill_providers_remain_rdna_scoped() {
+        assert!(is_phase33_common_target("gfx1030"));
+        assert!(is_phase33_common_target("gfx1201"));
+        assert!(!is_phase33_common_target("gfx942"));
     }
 
     #[test]

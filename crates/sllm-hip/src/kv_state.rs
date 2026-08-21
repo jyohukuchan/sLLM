@@ -1223,6 +1223,8 @@ fn validate_causal_attention_info(
     let use_gfx1201_wave_provider =
         expected_target == Some("gfx1201") && (query_count == 1 || query_count >= 32);
     let use_phase33_common_provider = matches!(expected_target, Some("gfx1030" | "gfx1201"));
+    let force_baseline =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE").is_some_and(|value| value == "1");
     let use_decode_wave_split = use_phase33_common_provider
         && query_count == 1
         && committed_kv_length >= 1024
@@ -1231,6 +1233,7 @@ fn validate_causal_attention_info(
         && query_count >= 64
         && query_heads as usize / descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256;
+    let use_prefill_gqa4_qtile4 = use_prefill_gqa4 && query_count >= 128 && !force_baseline;
     let (expected_kernel_id, baseline_kernel, baseline_device) =
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
@@ -1249,6 +1252,11 @@ fn validate_causal_attention_info(
         (
             "causal_attention.decode.wave8_split.v5",
             "sllm_causal_attention_decode_wave8_split_v5",
+        )
+    } else if use_prefill_gqa4_qtile4 {
+        (
+            "causal_attention.prefill.gqa4_qtile4.v7",
+            "sllm_causal_attention_prefill_gqa4_qtile4_v7",
         )
     } else if use_prefill_gqa4 {
         (
@@ -1279,7 +1287,12 @@ fn validate_causal_attention_info(
         || info.kernel_id != expected_kernel_id
         || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
         || Some(info.grid_size_x)
-            != if use_prefill_gqa4 {
+            != if use_prefill_gqa4_qtile4 {
+                query_count
+                    .checked_add(3)
+                    .and_then(|value| (value / 4).checked_mul(descriptor.layout().heads() as u64))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_prefill_gqa4 {
                 query_count
                     .checked_mul(descriptor.layout().heads() as u64)
                     .and_then(|value| u32::try_from(value).ok())

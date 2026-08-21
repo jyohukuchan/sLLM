@@ -1,0 +1,177 @@
+{
+  "schema_version": "phase35-attention-gdn-summary-v1",
+  "state": "COMPLETE",
+  "recorded_at": "2026-08-20",
+  "identity": {
+    "source_base_commit": "40f1215249bda93acca5d31c5ab27c4c33af2d68",
+    "attention_kernel_source_sha256": "3eb692e5950044d31011f0ffd64b44dc8561d96ca59ef8d305e0614e58790938",
+    "attention_runtime_source_sha256": "151f0c0b5411ff181b5d2c7ba4a953e228b636f1fff032447290a9f85b33d734",
+    "gdn_kernel_source_sha256": "cf8e8aafa5e7e64c8fe5bc082912b5b8a328d0a9ed407965d6782cad72b3bc4a",
+    "gdn_runtime_source_sha256": "70764bf65a01b4a5e0dd76f14ede474914d81531136b15c800a5fbfa16d520c6",
+    "gfx1030_cli_sha256": "daaa6694719f0fa532a746fcaddaf5db1965b7117fea6363fd15a79cf38771d1",
+    "gfx1201_cli_sha256": "39f261b5ef51636064c0f84b409038284b84b295643d95370ad15ddcbf765350",
+    "gfx1030_server_sha256": "14c4ef170cffe2cd4db5c15aff5f27f5ee9a69d3c86b717d39d96f649c6b0acb",
+    "gfx942_compile_binary_sha256": "8f67cc19504ea1ea3e4e765150f130ba39a91267689da75ea899f0188ddb37bf",
+    "rocm": "7.14.0",
+    "llvm": "AMD clang 23.0.0git 46fcb339fb61119b337f973c7ca9e710a319fdd0",
+    "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "derived_lock_sha256": "425151d06832347a01b946b27336ceffac074eb7f6932af61e8c9821edc1e318",
+    "gfx1030_uuid": "GPU-76a08c022586fed6",
+    "gfx1201_uuid": "GPU-a8e9ddefa2d60f55"
+  },
+  "decisions": {
+    "attention": "ADOPTED_SHARED_SHAPE_SCOPED",
+    "gdn": "ADOPTED_SHARED_SHAPE_SCOPED",
+    "performance_authority": "assigned-ai-contextual-judgment",
+    "attention_reason": "The common Q_TILE=4 provider materially reduces operator and full-model time on both exact targets, preserves all four KV encodings, adds no global scratch or dispatch, and leaves the slower M<=127 range on the Phase 33 provider.",
+    "gdn_reason": "The column-owned provider raises the recurrent grid from 32 to 1024 workgroups, reaches fixed-llama GDN family parity on V620, materially improves both exact targets, and retains short/decode behavior with only two checked FP32 scalar planes.",
+    "combined_reason": "The final source reduces 10001-input/2-output E2E by 34.93% on gfx1030 and 13.45% on gfx1201 while preserving generated tokens, projection timing, arena high-water, HIP-only execution, and zero cleanup."
+  },
+  "routing": {
+    "targets": ["gfx1030", "gfx1201"],
+    "attention": {
+      "minimum_query_count": 128,
+      "q_heads": 16,
+      "kv_heads": 4,
+      "head_dim": 256,
+      "provider": "causal_attention.prefill.gqa4_qtile4.v7",
+      "device_symbol": "sllm_causal_attention_prefill_gqa4_qtile4_v7",
+      "complement": "Phase 33 decode wave8, prefill GQA4 shared, Phase 30 wave, or baseline selected before launch",
+      "force_baseline_seam": "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE=1"
+    },
+    "gdn": {
+      "minimum_token_count": 128,
+      "qk_heads": 16,
+      "value_heads": 32,
+      "head_dim": 128,
+      "provider": "linear_attention.gdn.column_state.v2",
+      "device_symbol": "sllm_linear_attention_recurrent_column_state_v2",
+      "recurrent_grid_size": 1024,
+      "complement": "Phase 28/29 two-dispatch row-owned provider",
+      "force_baseline_seam": "SLLM_GDN_FORCE_BASELINE=1"
+    },
+    "runtime_failure_fallback": false
+  },
+  "numerical": {
+    "attention_classification": "N1_SAME_TERMS_FIXED_BALANCED_TREE_NONINCREASING_BOUND",
+    "gdn_classification": "N1_SAME_TERMS_REDUCED_REDUCTION_DEPTH",
+    "generated_token_ids": [2064, 5686],
+    "attention_g1": {
+      "targets": 2,
+      "kv_encodings": 4,
+      "cases_per_target_encoding": 29,
+      "total_cases_passed": 232,
+      "fp16_max_abs_error": 2.384185791015625e-7,
+      "fp8_max_abs_error": 4.76837158203125e-7,
+      "nvfp4_max_abs_error": 1.1641532182693481e-9
+    },
+    "gdn_g2": {
+      "targets": 2,
+      "cases_per_target": 6,
+      "token_counts": [1, 3, 17, 127, 128, 129],
+      "max_abs_error": 0.00390625,
+      "max_rel_error": 0.014705882,
+      "state_publication_exact": true
+    },
+    "fallbacks": 0,
+    "cleanup_failures": 0
+  },
+  "performance": {
+    "full_model_protocol": "fresh process; Qwen3.5-4B BF16; FP16 KV; messages; thinking disabled; exact 10001 input tokens; greedy 2 output tokens; one prefill chunk",
+    "attention_only": {
+      "gfx1030": {"baseline_ns": 34860543559, "candidate_ns": 28130184128, "reduction_percent": 19.30652463754373},
+      "gfx1201": {"baseline_ns": 75348556986, "candidate_ns": 68879296075, "reduction_percent": 8.585779435964525}
+    },
+    "gdn_only": {
+      "gfx1030": {"baseline_ns": 34860543559, "candidate_ns": 27945246384, "reduction_percent": 19.837031982292963},
+      "gfx1201": {"baseline_ns": 75348556986, "candidate_ns": 69949205596, "reduction_percent": 7.1658325069227535}
+    },
+    "combined_final_source": {
+      "gfx1030": {"baseline_ns": 34860543559, "candidate_ns": 22683165076, "reduction_percent": 34.931694230155365},
+      "gfx1201": {"baseline_ns": 75348556986, "candidate_ns": 65214329776, "reduction_percent": 13.449796008545956}
+    },
+    "gfx1030_profile_seconds": {
+      "phase34_projection": 11.683135,
+      "phase35_projection": 11.626944,
+      "phase34_full_attention": 10.819552,
+      "phase35_full_attention": 4.109614,
+      "full_attention_reduction_percent": 62.016782210575826,
+      "phase34_gdn_family": 7.67157,
+      "phase35_gdn_family": 0.6176,
+      "gdn_reduction_percent": 91.94949664801338
+    },
+    "fixed_llama_gfx1030_peer_seconds": {
+      "comparison_class": "E1_SYSTEM_EQUIVALENT_DIFFERENT_GGUF_BYTES",
+      "projection": 12.772,
+      "full_attention": 0.462,
+      "gdn": 0.622,
+      "phase35_to_peer_ratio": {"projection": 0.9103463827121829, "full_attention": 8.895268398268398, "gdn": 0.9929260450160773}
+    }
+  },
+  "resources": {
+    "attention_global_scratch_bytes_added": 0,
+    "attention_dispatches_added_per_layer": 0,
+    "gdn_scalar_scratch_bytes_per_layer_at_10001_tokens": 2560256,
+    "gdn_scalar_scratch_bytes_all_24_layers_at_10001_tokens": 61446144,
+    "gdn_dispatches_added_per_layer": 2,
+    "full_model_kernel_dispatches_before": 984,
+    "full_model_kernel_dispatches_after": 1032,
+    "workspace_arena_bytes_before": 5278049280,
+    "workspace_arena_bytes_after": 5278049280,
+    "gdn_scratch_owner": "existing checked request-owned linear-attention state scratch",
+    "state_layout_migration": false,
+    "weight_repack": false
+  },
+  "service": {
+    "target": "gfx1030",
+    "kv_cache_encoding": "fp16",
+    "prompt_tokens": 10001,
+    "completion_tokens": 1,
+    "non_stream_content": "It",
+    "sse_content": "It",
+    "sse_done": true,
+    "usage_equal": true,
+    "all_dispatches_hip": true,
+    "fallbacks": 0,
+    "completed_requests": 2,
+    "shutdown_current_bytes": 0,
+    "shutdown_request_state_bytes": 0,
+    "shutdown_workspace_bytes": 0,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  },
+  "verification": {
+    "cargo_fmt_check": true,
+    "git_diff_check": true,
+    "sllm_core_unit_tests_passed": 185,
+    "sllm_hip_unit_tests_passed": 96,
+    "sllm_server_tests_passed": 32,
+    "package_test_commands_passed": true,
+    "gfx1030_release_build": true,
+    "gfx1201_release_build": true,
+    "gfx942_compile_only": true,
+    "wrong_target_load_rejected": true,
+    "wrong_target_exit_code": 2,
+    "wrong_target_error": "requested device gcnArchName does not match exactly",
+    "final_full_model_hip_only": true,
+    "final_full_model_fallback": false,
+    "final_full_model_cleanup_zero": true,
+    "gfx1030_openai_non_stream_sse_lifecycle": true,
+    "integration_review": "PASS_NO_BLOCKING_FINDINGS"
+  },
+  "provenance": {
+    "attention": "sLLM existing Phase 33 provider structure; no new external source expression",
+    "gdn_notice": "llama-cpp-phase35-gdn-column-state-001",
+    "upstream_commit": "f5919bf458ef190468b5c329bb293f8a54a1e69c",
+    "import_identity": "pending-phase35-import-commit",
+    "release_action": "replace pending import commit and imported SHA-256 before release or distribution"
+  },
+  "limitations": [
+    "Performance evidence is bounded to ROCm 7.14, one exact V620, one exact R9700, and the fixed Qwen3.5-4B BF16 long-context shape.",
+    "The final R9700 profile includes an existing token-by-token MTP target lane; Phase 35 does not claim that residual as Full Attention or GDN prefill time.",
+    "Full Attention remains about 8.9x the fixed llama.cpp V620 device family and is the primary remaining peer gap; GDN is at approximate parity.",
+    "The diagnostic force-baseline seams are private environment controls, not public API or automatic failure fallback.",
+    "OpenAI transport behavior, default FP16 KV, vAttention layout, model lock, GGUF format, and public ABI were unchanged and were not expanded into a new service matrix."
+  ]
+}

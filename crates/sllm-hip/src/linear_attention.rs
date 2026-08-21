@@ -28,6 +28,8 @@ const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "linear_attention.gdn.v1";
 const CONV_DEVICE_SYMBOL: &str = "sllm_linear_attention_causal_conv_silu_v1";
 const RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_gated_norm_v1";
+const COLUMN_KERNEL_SYMBOL: &str = "linear_attention.gdn.column_state.v2";
+const COLUMN_RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_column_state_v2";
 
 struct LinearAttentionStateInner {
     raw: usize,
@@ -487,19 +489,32 @@ fn validate_dispatch(
     let conv_device_symbol = read_c_string(&info.conv_device_symbol);
     let recurrent_device_symbol = read_c_string(&info.recurrent_device_symbol);
     let expected_conv_grid = convolution_grid_size(descriptor.token_count(), layout);
+    let force_baseline =
+        std::env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
+    let use_column_provider = descriptor.token_count() >= 128
+        && !force_baseline
+        && matches!(
+            logical_gcn_arch_name(&observed_target),
+            "gfx1030" | "gfx1201"
+        );
     let valid = info.struct_size as usize
         == size_of::<sys::sllm_linear_attention_dispatch_info_t>()
         && info.abi_version == sys::SLLM_HIP_ABI_VERSION
         && info.info_version == sys::SLLM_HIP_LINEAR_ATTENTION_DISPATCH_INFO_VERSION
         && info.backend == sys::SLLM_BACKEND_HIP
         && info.dispatch_id != 0
-        && info.dispatch_count == 2
+        && info.dispatch_count == if use_column_provider { 4 } else { 2 }
         && info.conv_kernel_id == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1
         && info.recurrent_kernel_id
             == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
         && info.workgroup_size_x == sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
         && expected_conv_grid == Some(info.conv_grid_size_x)
-        && info.recurrent_grid_size_x == layout.value_heads() as u32
+        && info.recurrent_grid_size_x
+            == if use_column_provider {
+                (layout.value_heads() * layout.head_dim() / 4) as u32
+            } else {
+                layout.value_heads() as u32
+            }
         && info.token_count == descriptor.token_count()
         && info.start_position == descriptor.start_position()
         && info.expected_length == descriptor.expected_length()
@@ -508,9 +523,19 @@ fn validate_dispatch(
         && info.head_dim == layout.head_dim() as u32
         && info.fallback_allowed == 0
         && info.fallback_used == 0
-        && kernel_symbol == KERNEL_SYMBOL
+        && kernel_symbol
+            == if use_column_provider {
+                COLUMN_KERNEL_SYMBOL
+            } else {
+                KERNEL_SYMBOL
+            }
         && conv_device_symbol == CONV_DEVICE_SYMBOL
-        && recurrent_device_symbol == RECURRENT_DEVICE_SYMBOL
+        && recurrent_device_symbol
+            == if use_column_provider {
+                COLUMN_RECURRENT_DEVICE_SYMBOL
+            } else {
+                RECURRENT_DEVICE_SYMBOL
+            }
         && expected_target.is_none_or(|expected| gcn_arch_matches(expected, &observed_target))
         && info.reserved.iter().all(|value| *value == 0);
     if !valid {
@@ -612,22 +637,41 @@ mod tests {
         let mut info = empty_dispatch_info();
         info.backend = sys::SLLM_BACKEND_HIP;
         info.dispatch_id = 7;
-        info.dispatch_count = 2;
+        let use_column_provider = descriptor.token_count() >= 128;
+        info.dispatch_count = if use_column_provider { 4 } else { 2 };
         info.conv_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
         info.recurrent_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
         info.workgroup_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
         let layout = LinearAttentionLayout::default();
         info.conv_grid_size_x = convolution_grid_size(descriptor.token_count(), layout).unwrap();
-        info.recurrent_grid_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
+        info.recurrent_grid_size_x = if use_column_provider {
+            sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS * sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM / 4
+        } else {
+            sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+        };
         info.token_count = descriptor.token_count();
         info.start_position = descriptor.start_position();
         info.expected_length = descriptor.expected_length();
         info.qk_heads = sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS;
         info.value_heads = sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS;
         info.head_dim = sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
-        put(&mut info.kernel_symbol, KERNEL_SYMBOL);
+        put(
+            &mut info.kernel_symbol,
+            if use_column_provider {
+                COLUMN_KERNEL_SYMBOL
+            } else {
+                KERNEL_SYMBOL
+            },
+        );
         put(&mut info.conv_device_symbol, CONV_DEVICE_SYMBOL);
-        put(&mut info.recurrent_device_symbol, RECURRENT_DEVICE_SYMBOL);
+        put(
+            &mut info.recurrent_device_symbol,
+            if use_column_provider {
+                COLUMN_RECURRENT_DEVICE_SYMBOL
+            } else {
+                RECURRENT_DEVICE_SYMBOL
+            },
+        );
         put(&mut info.gcn_arch_name, "gfx1201");
         info
     }
@@ -658,6 +702,18 @@ mod tests {
                 ),
             }
             assert!(validate_dispatch(&wrong_symbol, descriptor, layout, Some("gfx1201")).is_err());
+        }
+    }
+
+    #[test]
+    fn column_provider_starts_at_the_long_prefill_boundary() {
+        let layout = LinearAttentionLayout::default();
+        for token_count in [127_u64, 128, 129] {
+            let descriptor =
+                sllm_core::LinearAttentionDescriptor::new(0, token_count, token_count).unwrap();
+            let info = valid_dispatch(descriptor);
+            assert!(validate_dispatch(&info, descriptor, layout, Some("gfx1201")).is_ok());
+            assert_eq!(info.dispatch_count, if token_count >= 128 { 4 } else { 2 });
         }
     }
 

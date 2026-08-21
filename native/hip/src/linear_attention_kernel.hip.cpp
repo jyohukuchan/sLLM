@@ -1,5 +1,6 @@
 // Portions derived from llama.cpp.
 // Provenance: THIRD_PARTY_NOTICES.md#llama-cpp-phase9-gdn-layout-001
+// Provenance: THIRD_PARTY_NOTICES.md#llama-cpp-phase35-gdn-column-state-001
 // Upstream: https://github.com/ggml-org/llama.cpp @
 // f5919bf458ef190468b5c329bb293f8a54a1e69c,
 // ggml/src/ggml-cuda/gated_delta_net.cu
@@ -263,6 +264,220 @@ __launch_bounds__(128, 1) void sllm_linear_attention_recurrent_gated_norm_v1(
   }
 }
 
+// Normalize each shared Q/K head once, then materialize the per-value-head
+// scalar gates used by the column-owned recurrent kernel. The normalized Q/K
+// BF16 stages are identical to the one-row provider and replace their input
+// slots in the request-local convolution scratch.
+#pragma clang fp contract(off)
+extern "C" __global__
+__launch_bounds__(128, 1) void sllm_linear_attention_column_preprocess_v2(
+    uint16_t *const convolved_qkv, const uint16_t *const b_input,
+    const uint16_t *const a_input, const float *const a_log,
+    const uint16_t *const dt_bias, float *const beta, float *const decay,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width) {
+  const uint64_t flat = blockIdx.x;
+  const uint32_t token = static_cast<uint32_t>(flat / qk_heads);
+  const uint32_t qk_head = static_cast<uint32_t>(flat % qk_heads);
+  const uint32_t dimension = threadIdx.x;
+  if (token >= token_count || dimension >= head_dim) {
+    return;
+  }
+  const uint32_t lane = dimension & 31U;
+  const uint32_t wave = dimension >> 5U;
+  const uint64_t row = static_cast<uint64_t>(token) * qkv_width;
+  const uint64_t q_index =
+      row + static_cast<uint64_t>(qk_head) * head_dim + dimension;
+  const uint64_t k_index =
+      row + static_cast<uint64_t>(qk_heads + qk_head) * head_dim + dimension;
+  const float q_value = bf16_to_float(convolved_qkv[q_index]);
+  const float k_value = bf16_to_float(convolved_qkv[k_index]);
+  const float q_wave_sum = wave_sum<32U>(q_value * q_value);
+  const float k_wave_sum = wave_sum<32U>(k_value * k_value);
+  __shared__ float q_wave_sums[4];
+  __shared__ float k_wave_sums[4];
+  __shared__ float q_inverse_norm;
+  __shared__ float k_inverse_norm;
+  if (lane == 0U) {
+    q_wave_sums[wave] = q_wave_sum;
+    k_wave_sums[wave] = k_wave_sum;
+  }
+  __syncthreads();
+  if (dimension == 0U) {
+    float q_sum = 0.0F;
+    float k_sum = 0.0F;
+#pragma unroll
+    for (uint32_t index = 0U; index != 4U; ++index) {
+      q_sum += q_wave_sums[index];
+      k_sum += k_wave_sums[index];
+    }
+    q_inverse_norm = 1.0F / sqrtf(q_sum + 1.0e-6F);
+    k_inverse_norm = 1.0F / sqrtf(k_sum + 1.0e-6F);
+  }
+  __syncthreads();
+  convolved_qkv[q_index] = float_to_bf16_rne_bits(q_value * q_inverse_norm);
+  convolved_qkv[k_index] = float_to_bf16_rne_bits(k_value * k_inverse_norm);
+
+  const uint32_t value_heads_per_qk = value_heads / qk_heads;
+  if (dimension < value_heads_per_qk) {
+    const uint32_t value_head = qk_head * value_heads_per_qk + dimension;
+    const uint64_t scalar_index =
+        static_cast<uint64_t>(token) * value_heads + value_head;
+    const float b_value = bf16_to_float(b_input[scalar_index]);
+    beta[scalar_index] =
+        bf16_to_float(float_to_bf16_rne_bits(1.0F / (1.0F + expf(-b_value))));
+    const float a_value = bf16_to_float(a_input[scalar_index]) +
+                          bf16_to_float(dt_bias[value_head]);
+    decay[scalar_index] = expf(-expf(a_log[value_head]) * softplus(a_value));
+  }
+}
+
+// Each wave owns one output column. Its lanes keep the complete recurrent
+// column in registers across the token loop, reducing S^T*k and S^T*q within
+// the wave and publishing the transactional state only once at the end.
+#pragma clang fp contract(off)
+extern "C" __global__
+__launch_bounds__(128, 1) void sllm_linear_attention_recurrent_column_state_v2(
+    const uint16_t *const convolved_qkv, const float *const beta,
+    const float *const decay, const float *const previous_recurrent_state,
+    float *const next_recurrent_state, uint16_t *const output,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kWavesPerBlock = 4U;
+  constexpr uint32_t kRowsPerLane =
+      sllm_linear_attention_kernel::kHeadDim / kWaveSize;
+  const uint32_t column_groups = head_dim / kWavesPerBlock;
+  const uint32_t value_head = blockIdx.x / column_groups;
+  const uint32_t column_group = blockIdx.x % column_groups;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t column = column_group * kWavesPerBlock + wave;
+  if (value_head >= value_heads || column >= head_dim) {
+    return;
+  }
+  const uint32_t qk_head = value_head / (value_heads / qk_heads);
+  const uint64_t state_base =
+      static_cast<uint64_t>(value_head) * head_dim * head_dim;
+  float state_values[kRowsPerLane];
+#pragma unroll
+  for (uint32_t index = 0U; index < kRowsPerLane; ++index) {
+    const uint32_t row_dimension = lane + index * kWaveSize;
+    const uint64_t state_index =
+        recurrent_state_index(state_base, column, row_dimension, head_dim);
+    state_values[index] = previous_recurrent_state[state_index];
+  }
+
+  const float q_scale = rsqrtf(static_cast<float>(head_dim));
+  for (uint32_t token = 0U; token != token_count; ++token) {
+    const uint64_t qkv_row = static_cast<uint64_t>(token) * qkv_width;
+    float q_values[kRowsPerLane];
+    float k_values[kRowsPerLane];
+#pragma unroll
+    for (uint32_t index = 0U; index < kRowsPerLane; ++index) {
+      const uint32_t row_dimension = lane + index * kWaveSize;
+      q_values[index] =
+          bf16_to_float(
+              convolved_qkv[qkv_row +
+                            static_cast<uint64_t>(qk_head) * head_dim +
+                            row_dimension]) *
+          q_scale;
+      k_values[index] = bf16_to_float(
+          convolved_qkv[qkv_row +
+                        static_cast<uint64_t>(qk_heads + qk_head) * head_dim +
+                        row_dimension]);
+    }
+    const uint64_t scalar_index =
+        static_cast<uint64_t>(token) * value_heads + value_head;
+    const float current_decay = decay[scalar_index];
+    float previous_partial = 0.0F;
+#pragma unroll
+    for (uint32_t index = 0U; index < kRowsPerLane; ++index) {
+      state_values[index] *= current_decay;
+      previous_partial += state_values[index] * k_values[index];
+    }
+    const float previous_projection = wave_sum<kWaveSize>(previous_partial);
+    float delta = 0.0F;
+    if (lane == 0U) {
+      const float value = bf16_to_float(
+          convolved_qkv[qkv_row +
+                        static_cast<uint64_t>(2U * qk_heads + value_head) *
+                            head_dim +
+                        column]);
+      delta = beta[scalar_index] * (value - previous_projection);
+    }
+    delta = __shfl(delta, 0U, kWaveSize);
+    float current_partial = 0.0F;
+#pragma unroll
+    for (uint32_t index = 0U; index < kRowsPerLane; ++index) {
+      state_values[index] += delta * k_values[index];
+      current_partial += state_values[index] * q_values[index];
+    }
+    const float current_projection = wave_sum<kWaveSize>(current_partial);
+    if (lane == 0U) {
+      const uint64_t output_index =
+          static_cast<uint64_t>(token) * output_width +
+          static_cast<uint64_t>(value_head) * head_dim + column;
+      output[output_index] = float_to_bf16_rne_bits(current_projection);
+    }
+  }
+
+#pragma unroll
+  for (uint32_t index = 0U; index < kRowsPerLane; ++index) {
+    const uint32_t row_dimension = lane + index * kWaveSize;
+    const uint64_t state_index =
+        recurrent_state_index(state_base, column, row_dimension, head_dim);
+    next_recurrent_state[state_index] = state_values[index];
+  }
+}
+
+#pragma clang fp contract(off)
+extern "C" __global__
+__launch_bounds__(128, 1) void sllm_linear_attention_column_postprocess_v2(
+    const uint16_t *const z, const float *const norm_weight,
+    uint16_t *const output, const uint32_t token_count,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t output_width) {
+  const uint64_t flat = blockIdx.x;
+  const uint32_t token = static_cast<uint32_t>(flat / value_heads);
+  const uint32_t value_head = static_cast<uint32_t>(flat % value_heads);
+  const uint32_t dimension = threadIdx.x;
+  if (token >= token_count || dimension >= head_dim) {
+    return;
+  }
+  const uint32_t lane = dimension & 31U;
+  const uint32_t wave = dimension >> 5U;
+  const uint64_t output_index = static_cast<uint64_t>(token) * output_width +
+                                static_cast<uint64_t>(value_head) * head_dim +
+                                dimension;
+  const float output_value = bf16_to_float(output[output_index]);
+  const float output_wave_sum = wave_sum<32U>(output_value * output_value);
+  __shared__ float output_wave_sums[4];
+  __shared__ float output_inverse_rms;
+  if (lane == 0U) {
+    output_wave_sums[wave] = output_wave_sum;
+  }
+  __syncthreads();
+  if (dimension == 0U) {
+    float sum = 0.0F;
+#pragma unroll
+    for (uint32_t index = 0U; index != 4U; ++index) {
+      sum += output_wave_sums[index];
+    }
+    output_inverse_rms =
+        1.0F / sqrtf(sum / static_cast<float>(head_dim) + 1.0e-6F);
+  }
+  __syncthreads();
+  const float normalized =
+      bf16_to_float(float_to_bf16_rne_bits(output_value * output_inverse_rms));
+  const float z_value = bf16_to_float(z[output_index]);
+  const float z_silu = z_value / (1.0F + expf(-z_value));
+  output[output_index] =
+      float_to_bf16_rne_bits(normalized * norm_weight[dimension] * z_silu);
+}
+
 namespace sllm_linear_attention_kernel {
 
 hipError_t
@@ -320,6 +535,80 @@ launch_recurrent(const uint16_t *const convolved_qkv, const uint16_t *const z,
                      norm_weight, previous_recurrent_state,
                      next_recurrent_state, output, token_count, qk_heads,
                      value_heads, head_dim, qkv_width, output_width);
+  return hipGetLastError();
+}
+
+hipError_t launch_column_preprocess(
+    uint16_t *const convolved_qkv, const uint16_t *const b_input,
+    const uint16_t *const a_input, const float *const a_log,
+    const uint16_t *const dt_bias, float *const beta, float *const decay,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const hipStream_t stream) noexcept {
+  if (convolved_qkv == nullptr || b_input == nullptr || a_input == nullptr ||
+      a_log == nullptr || dt_bias == nullptr || beta == nullptr ||
+      decay == nullptr || token_count == 0U || qk_heads == 0U ||
+      value_heads == 0U || value_heads % qk_heads != 0U ||
+      head_dim != kHeadDim) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t blocks = static_cast<uint64_t>(token_count) * qk_heads;
+  if (blocks > std::numeric_limits<uint32_t>::max()) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_linear_attention_column_preprocess_v2,
+                     dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
+                     0U, stream, convolved_qkv, b_input, a_input, a_log,
+                     dt_bias, beta, decay, token_count, qk_heads, value_heads,
+                     head_dim, qkv_width);
+  return hipGetLastError();
+}
+
+hipError_t launch_column_recurrent(
+    const uint16_t *const convolved_qkv, const float *const beta,
+    const float *const decay, const float *const previous_recurrent_state,
+    float *const next_recurrent_state, uint16_t *const output,
+    const uint32_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t qkv_width, const uint32_t output_width,
+    const hipStream_t stream) noexcept {
+  if (convolved_qkv == nullptr || beta == nullptr || decay == nullptr ||
+      previous_recurrent_state == nullptr || next_recurrent_state == nullptr ||
+      output == nullptr || token_count == 0U || qk_heads == 0U ||
+      value_heads == 0U || value_heads % qk_heads != 0U ||
+      head_dim != kHeadDim || head_dim % 4U != 0U) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t blocks = static_cast<uint64_t>(value_heads) * head_dim / 4U;
+  if (blocks > std::numeric_limits<uint32_t>::max()) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_linear_attention_recurrent_column_state_v2,
+                     dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
+                     0U, stream, convolved_qkv, beta, decay,
+                     previous_recurrent_state, next_recurrent_state, output,
+                     token_count, qk_heads, value_heads, head_dim, qkv_width,
+                     output_width);
+  return hipGetLastError();
+}
+
+hipError_t launch_column_postprocess(
+    const uint16_t *const z, const float *const norm_weight,
+    uint16_t *const output, const uint32_t token_count,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const uint32_t output_width, const hipStream_t stream) noexcept {
+  if (z == nullptr || norm_weight == nullptr || output == nullptr ||
+      token_count == 0U || value_heads == 0U || head_dim != kHeadDim) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t blocks = static_cast<uint64_t>(token_count) * value_heads;
+  if (blocks > std::numeric_limits<uint32_t>::max()) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_linear_attention_column_postprocess_v2,
+                     dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
+                     0U, stream, z, norm_weight, output, token_count,
+                     value_heads, head_dim, output_width);
   return hipGetLastError();
 }
 
