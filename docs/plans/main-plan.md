@@ -811,8 +811,9 @@ candidateを再確認した。
 - Phase 20の範囲はGGUF converter、loader/runtime、standard/extension metadataとtensor type、model lock、
   移行・互換性の検証とcloseoutだけとする。その他の残機能をPhase 20へ混ぜない。
 - bounded GGUF v3 reader、deterministic writer、`derived-gguf-lock-v1`、BF16/FP8/NVFP4/MXFP4 converterを実装し、
-  公開CLI/serverを`--gguf`と`--derived-lock`だけの単一経路へ移行した。旧cache/sidecar/provider引数とdirect benchmark laneは
-  公開parserから削除し、source importerはconverter・開発用に限定した。
+  公開CLI/serverを`--gguf`と`--derived-lock`だけの単一経路へ移行した。旧cache/sidecar/provider引数と旧direct benchmark laneは
+  公開parserから削除し、source importerはconverter・開発用に限定した。Phase 36以降のGGUF-only direct laneは
+  repository-owned evidence専用のhidden commandであり、公開product CLIではない。
 - canonical V620 `gfx1030`とR9700 `gfx1201`でQwen BF16、Gemma mixed NVFP4、Qwen MoE MXFP4をsource経路と同じtop-1へ照合し、
   R9700ではQwen FP8も実行した。全実行はHIP-only、fallbackなし、cleanup 0で、MoE OpenAI server lifecycleもPASSした。
 - 完了監査で検出したrank-5 tensor、GGUF公開経路のQwen vision/MTP、A5 timing evidence、旧help表記を修正した。
@@ -1001,7 +1002,19 @@ candidateを再確認した。
 | 完了・限定採用 | Phase 33 | Full Attention構造最適化 | C1 decode wave8 splitとC2 GQA4 K/V共有を共通限定採用。C1はN2としてユーザー承認、C3 matrixは棄却 |
 | 完了・限定採用 | Phase 34 | V620長行prefill BF16 matmul provider比較・最適化 | exact gfx1030の長行6 shapeをexisting hipBLASへ限定routeし、10,001-token full modelを61.14%短縮。MTP verify row不具合も限定修正 |
 | 完了・限定採用 | Phase 35 | long-context Full Attention・GDN構造最適化 | Q_TILE=4 attentionと1,024-workgroup GDNを両targetへ限定採用し、10,001-token E2EをV620 34.93%、R9700 13.45%短縮 |
-| 計画済み | Phase 36 | MI300X latest-main実機再検証 | Session Aでidentity、exact gfx942、99 operator、Qwen 4B短生成を固定し、B以降でlow-bit KV、long context、MTP/vision/API、performance/peer、conditional Gemma/MoEを段階実行する |
+| 完了 | Phase 36 | MI300X latest-main実機再検証 | Sessions A〜DをPASS。feature-pinned gfx942、99 operator、4B BF16/FNUZ FP8、low-bit KV、10,001/2、MTP/vision/OpenAI、反復性能、fixed llama.cpp、rocprofv3を実機確認し、ユーザー決定で当初のconditional extensionをscopeから削除してclose |
+| ready-host-prep | Phase 37 | gfx942 GDN・Full Attention provider parity | Phase 36でdevice timeの73.95%/25.12%を占めた二familyのgfx942 baseline routeをwave64最適化providerへ置換する。実機baseline/perfはVM再確保までdeferred |
+| planned | Phase 38 | MI300X residual closure・peer比較 | Phase 37後のfresh profileからFNUZ/GEMM、execution replay、KV provider等をAmdahl順に限定評価する |
+| planned | Phase 39 | service operability・認証・observability | health/readiness、metrics、slots、resumable stream、TLS/CORS、複数keyを先に固定する |
+| planned | Phase 40 | token selection・grammar・structured generation | sampler chain、GPU sampling、logit bias/logprobs、GBNF/JSON Schema、`n>1`を共通化する |
+| planned | Phase 41 | prefix/KV・session state・speculation | prefix reuse、checkpoint、context shift、assistant prefill、external draft/ngramをidentity-safeに実装する |
+| planned | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、infillを公開する |
+| planned | Phase 43 | Responses・Anthropic・function/tool protocol | 別仕様pinと共通internal itemでAPI/event/tool callを実装し、tool実行とは分離する |
+| planned | Phase 44 | template・reasoning・interactive UX | sandboxed generic template、reasoning control、interactive/reverse prompt/prompt fileを実装する |
+| planned | Phase 45 | adapter・dynamic model lifecycle | LoRA/control vector、multi-model registry、router load/unload/cacheをmodel identityへ結合する |
+| planned | Phase 46 | conversion・benchmark・quality tool | supported dtypeのconverter/quantize/imatrix、split/merge、LoRA変換、bench/eval/debugを整備する |
+| approval-required | Phase 47 | 組込みtool・MCP実行 | tool protocol後に別worker/sandboxで実装する。trust modelの明示承認前は開始しない |
+| planned | Phase 48 | minimal WebUI/server UI | 公開APIだけを使う管理・chat UIを構築し、hidden runtime pathを作らない |
 | 完了 | Phase X | Qwen3.5系GDNのllama.cpp AMD性能調査・修正・sLLM還元 | Q5_1 HIP Flash Attention build coverageを修正し、local subagentへ採用 |
 
 Phase 23は残る性能候補を実装せず、既存engineとのmatched comparisonと細粒度計測から再評価して完了した。
@@ -1070,17 +1083,58 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 詳細は[Phase 35 archive](archive/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)および
 [bounded summary](../../ci/matrix/phase35-attention-gdn-summary-v1.json)を正とする。
 
-### Phase 36: MI300X latest-main実機再検証（計画済み）
+### Phase 36: MI300X latest-main実機再検証（完了）
 
 - Phase 12でproject-verifiedとなったHot Aisle MI300X VF x1、exact `gfx942`経路を、Phase 35後のlatest mainで再検証する。
-- GPU sessionをA〜Eへ分ける。Session Aはidentity、ROCm/artifact、Phase 12相当99 operator、Qwen3.5-4B
+- GPU sessionをA〜Dへ分ける。Session Aはidentity、ROCm/artifact、Phase 12相当99 operator、Qwen3.5-4B
   BF16/FNUZ FP8短生成を2〜3時間、上限4時間でfail-closedに実行する。
 - Session BはFP8/NVFP4 KV、chunked prefill、10k+ context、CはMTP、vision、OpenAI service、Dはrepeated performance、
-  fixed llama.cpp、rocprofv3を扱う。Session EはGemma mixed NVFP4、Qwen MoE MXFP4、長時間安定性のconditional extensionとする。
+  fixed llama.cpp、rocprofv3を扱う。
 - correctness、target routing、resource、cleanup defectはPhase内で修正し、影響sessionだけfocused rerunする。新規性能provider探索、
   multi-GPU/Infinity Fabric/RCCL/RDMA、別CDNA SKUへの一般化は含めない。
-- 現時点は計画のみで、VM作成、GPU実行、source修正は開始していない。詳細は
-  [Phase 36 active plan](active/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
+- 2026-08-21にSession A A0〜A5を実行し、MI300X identity、ROCm 7.14 exact build/load、tiny/profiler、99 operator、
+  canonical 4B BF16/FNUZ FP8のfixed/Unicode/stop、cleanupをPASSした。gfx942 public FP8 GGUFのOCP→FNUZ resident変換と、
+  Phase 29 GDN wave32 treeのgfx942へのtarget-scope漏れを修復した。BF16/FP8 `Hello`の3 token目はwave64 BF16と
+  hipBLASLt FNUZの説明可能なcross-provider N1差として記録し、Unicode/stopは一致した。GPU process、allocation、ECC、
+  retry/quarantineは終了時baseline/0へ戻り、ROCm rootもprovider既定へ復元した。final auditでは初回bare `gfx942`
+  code objectのfeature未固定を検出し、logical targetとcodegen targetを分離した。全11最終artifactを唯一の
+  `gfx942:sramecc+:xnack-` bundle、Code Object V6、ELF flags `0xE4C`、wave64へ固定してA1〜A5を再実行し、99/99、
+  BF16/FP8 resident reuse、drop後0、VM外raw退避を再確認した。この時点のSession A summaryは当時の後続sessionを
+  未実行としてscopeを固定しており、後続結果で遡及変更しない。
+- 同日にSession B/Cも実行した。Bは4 KV encodingのFull Attention 116/116、FP16 KV state 19/19、独立low-bit oracle、
+  BF16 targetのFP16/dynamic FP8 KV × auto/512/2K/4K/8K/16Kの10,001 input / 2 output全12 rowを
+  PASSした。全long rowは入力
+  `23066`×10,001、出力`[23066,23066]`、HIP-only、fallbackなし、cleanup 0で、HBM/GTTは終了後baselineへ戻った。
+  gfx942の`contiguous-resident`は維持し、VMM provider変更は行っていない。
+- CはBF16+FP16 KVのMTP off/width 2/3/4/7/8、FP8 target+dynamic FP8 target KVのoff/width 3、
+  PNG/JPEG/WebP各64 visual tokenとlazy residency、OpenAI raw/official-client non-stream/SSE/reasoning/stop/seed/
+  cancel-recovery/two-concurrent/graceful-shutdownをPASSした。公開MTPのgfx942/width 1〜8、state slack、quantized-plan
+  admissionとreportを修復した。全completed rowはexact gfx942/HIP、fallbackなし、cleanup 0である。
+- Session DはBF16/FP8各5ケースの3+10反復性能、fixed llama.cpp 5ケース、BF16 10,001/2 rocprofv3をPASSした。
+  sLLM 10,001/2 E2E中央値はBF16/FP8 `22.5561/22.5565`秒、fixed llama.cppは`0.8513`秒でE1比`26.50`。
+  profileのdevice shareはGDN `73.95%`、Full Attention `25.12%`、projection `0.70%`、other `0.23%`だった。
+  Phase 35 V620比は`-0.56%`、R9700比は`-65.41%`で、明白なfallback/provider/resource defectはなかった。
+  9B、Gemma/MoE、長時間安定性はPhase 36のscope外である。A〜D PASS後、ユーザー決定で当初のconditional extensionを
+  scopeから削除し、VM削除を確認してPhase 36を完了した。詳細は
+  [Phase 36 archive](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)と
+  [Session A final summary](../../ci/matrix/phase36-mi300x-session-a-final-v1.json)（SHA-256
+  `9e39c0aba7bd1a11725b95df0e15f6a5728cbde2e57ec250d07bc0432ca27dd4`）、
+  [Session B summary](../../ci/matrix/phase36-mi300x-session-b-summary-v1.json)（SHA-256
+  `13e4d86859191dbadae66e940bd3adfd8e1ec598fa8dba627de8f3581f6bf274`）、
+  [Session C summary](../../ci/matrix/phase36-mi300x-session-c-summary-v1.json)（SHA-256
+  `4fdc5e4f029e097721b2bc1dfb40b0f51282c268dc55fcbbeb4a7c66073c42f5`）、
+  [Session D summary](../../ci/matrix/phase36-mi300x-session-d-summary-v1.json)（SHA-256
+  `5d05db578fc6466c4dfcf355efde9cd04b0b07567300f882a24703b31bb19214`）を正とする。B/Cの最終candidate source
+  digestは`f07b31c9a83aee326c62de3c2f0d1d2da8ff189a66085526ddf79edad2bdf94a`である。
+
+- Phase 36完了後の独立local比較として、canonical R9700 exact `gfx1201`で同じdirect `23066`×10,001 / 2 token、
+  BF16、FP16 KV、greedy、3+10をcurrent-source sLLMとfixed llama.cpp `b10453`に実行した。E2E中央値は
+  `3.936429665/2.063845785`秒でsLLM/llama.cpp `1.90733x`、prefillは`3.858745634/2.039533770`秒で
+  `1.89197x`だった。全試行の生成は`[23066,23066]`、sLLMはHIP-only、fallback/cleanup 0、llama.cppは33/33 layer
+  full offload、終了後process 0だった。GGUF bytes/tensor setは異なるためE1比較に限定する。Phase 35のmessages入力
+  `65.214`秒は別protocolなので比率へ混ぜない。この記録はPhase 36を再開せず、
+  [R9700 E2E history](../history/2026/08/21-31/r9700-sllm-llama-e2e-comparison.md)と
+  [tracked summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
 
 ### llama.cppとの差分（機能・運用の未割当棚卸し）
 
@@ -1090,8 +1144,9 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 - model architecture/family、hardware/backend/precision/codegen、parallel/multi-user/continuous batching、
   multi-GPU/Infinity Fabric/RCCL/RDMA、性能provider探索はこの棚卸しから除外した。Vulkanと一般的なllama.cpp
   INT4/INT8+scale量子化は既存方針上の意図的除外であり、機能不足として未割当backlogへ加えない。
-- 次の差分にはPhase番号、実装順、採用決定を割り当てない。着手する場合はcurrent requirements、security、
-  compatibility、再利用可能なllama.cpp sourceとprovenance、受入条件を個別に固定する。
+- 2026-08-21のユーザー指示により、次の差分をPhase 39〜48へ依存順に割り当てた。各Phase開始時にcurrent
+  requirements、外部仕様pin、security、compatibility、再利用可能なllama.cpp sourceとprovenance、受入条件を固定する。
+  詳細は[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
 
 | 分類 | 固定llama.cppにある主な機能 | 現行sLLMの状態と未割当範囲 |
 | --- | --- | --- |
@@ -1104,14 +1159,15 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 | service運用・observability | HTTP health/readiness、opt-in Prometheus metrics、props/slots、resumable stream、CORS/TLS、key file/multiple keys、server UI | 起動時ready/shutdown audit、単一Bearer key、SSE disconnect cancellationはあるが、公開health/metrics/slot操作等はない。deployment surfaceごと未割当とする |
 | 周辺tool・品質評価 | general HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task eval、debug dump | fixed converter、model lock、bounded benchmark/evidenceは実装済み。汎用変換・評価toolは未割当。ただし未対応量子化形式を自動的に製品scopeへ追加しない |
 
-- この棚卸しは機能差の事実を残すものであり、優先順位、採用、実装開始、Phase 36のscope変更を意味しない。
-  Phase 36 Session Cはactive planに固定した現行profile v1のservice、reasoning、stop/sampling、連続・二並行request、
+- この棚卸しは機能差の事実を残し、後続Phaseへの割当は上記active planで管理する。割当はPhase 36のscope変更、
+  完了済みPhaseの再開、全機能の一括実装、組込みtool/MCP実行のsecurity承認を意味しない。
+  Phase 36 Session Cは[archived plan](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)に固定したprofile v1のservice、reasoning、stop/sampling、連続・二並行request、
   lifecycle matrixをそのまま実行し、上表の未実装機能を未実行FAIL、追加受入条件、またはPhase 36 blockerとして扱わない。
 
-その他に残る将来項目はKV/会話/model lockの簡易永続化、TurboQuantを含む残りKV形式、残るmodel family、
-multi-GPU/Infinity Fabric/RDMA、README整備、
-人間による発表である。これらには現時点でPhase番号を割り当てない。Responses API、LMCache、RadixAttention、
-将来MX形式等の角括弧項目は初期versionの完了条件へ読み替えない。完了済みのPhase 18へ後続範囲を逆流させない。
+KV/会話/model lockの簡易永続化はPhase 41、Responses APIはPhase 43、WebUIはPhase 48へ割り当てた。
+TurboQuantを含む残りKV形式、残るmodel family、multi-GPU/Infinity Fabric/RDMA、README整備、人間による発表、
+LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り当てない。これらを初期versionの完了条件へ
+読み替えず、完了済みのPhase 18へ後続範囲を逆流させない。
 
 ### 性能最適化backlog
 
@@ -1226,8 +1282,11 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
 - context・target依存の条件付き候補:
   - 短contextではfull attentionは支配要因でない。long-context fresh profileで支配的になった場合だけ、full/sliding-window別
     tiled online softmax、FlashAttention系provider、quantized KVのvectorized unpack/scale共有、GQA head間KV tile共有を扱う。
-  - gfx942はBF16で固定llama.cpp比の大きな差が残るため、実機再取得時にwave64 MMVF、launch replay、GEMM solution、
-    FNUZ quantizerを分離して再profileする。単一MI300X VMの結果を別CDNA SKUへ一般化しない。
+  - gfx942はBF16で固定llama.cpp比の大きな差が残り、Phase 36のdevice timeはGDN `73.95%`、Full Attention
+    `25.12%`だった。Phase 37でgfx942だけbaselineへ戻る二providerをwave64向けに最適化し、Phase 38はその後の
+    fresh residualからwave64 MMVF、launch replay、GEMM solution、FNUZ quantizer、KV providerを分離評価する。
+    詳細は[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とし、
+    単一MI300X VMの結果を別CDNA SKUへ一般化しない。
   - multi-GPU、expert/tensor/pipeline parallel、Infinity Fabric/RCCL/RDMAはcapacity・batch throughput候補とし、
     単一requestやPCIe構成では通信費を含む実測後に採否を決める。
 - 現時点でそのまま再提案しない候補:
@@ -1240,9 +1299,20 @@ multi-GPU/Infinity Fabric/RDMA、README整備、
 
 ## 現在の状態と次の作業
 
-- Phase 36を計画済みとした。次の実装・検証作業は、ユーザーの開始指示後にSession AのMI300X identity、exact gfx942 build/load、
-  99 operator、Qwen3.5-4B BF16/FNUZ FP8短生成を実行する。Session AがPASSするまでlong-context、service、性能を混ぜない。
-  詳細は[Phase 36 active plan](active/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
+- Phase 36はSessions A〜DをPASSして完了した。feature-pinned exact gfx942 build/load、tiny/profiler、99 operator、
+  Qwen3.5-4B BF16/FNUZ FP8、low-bit KV、10,001/2 chunk matrix、MTP widths、vision、OpenAI lifecycle、cleanup、
+  3+10反復性能、fixed llama.cpp E1比較、10,001/2 rocprofv3、VM外raw退避を確認した。ユーザー決定で当初のconditional
+  extensionをscopeから削除し、9B、Gemma/MoE、長時間安定性をPASS claimへ含めずcloseした。
+  詳細は[Phase 36 archive](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
+- 次の番号付き作業はPhase 37とする。MI300X VMは削除済みなので、再確保前はgfx942 compile/selector/oracle準備までを
+  draftとし、GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、
+  Phase 38でfresh residualを閉じる。その後のllama.cpp比機能差はPhase 39〜48へ割り当てた。詳細、依存、受入条件、
+  intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
+- Phase 36完了後のcanonical R9700 direct 10,001/2 E1比較はsLLM `3.936429665`秒、fixed llama.cpp
+  `2.063845785`秒、比`1.90733x`でPASSした。同一token IDs/生成、BF16/FP16 KV、3+10の独立比較であり、
+  Phase 35 messages rowやPhase 36 scopeへ遡及統合しない。詳細は
+  [R9700 E2E history](../history/2026/08/21-31/r9700-sllm-llama-e2e-comparison.md)と
+  [tracked summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
 - Phase 35は両trackの限定採用で完了した。Full Attention Q_TILE=4は`M>=128`、GDN column-stateはtoken count 128以上へ
   gfx1030/gfx1201共通routeし、10,001-token combined E2EをV620 34.93%、R9700 13.45%短縮した。Full Attention/GDNの
   V620 device familyは62.02%/91.95%短縮し、projection、vAttention、KV format、public API、arena high-waterを維持した。
