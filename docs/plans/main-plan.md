@@ -1306,7 +1306,8 @@ LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り�
   詳細は[Phase 36 archive](archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)を正とする。
 - 次の番号付き作業はPhase 37とする。MI300X VMは削除済みなので、再確保前はgfx942 compile/selector/oracle準備までを
   draftとし、GPU性能PASSを主張しない。実機ではGDN column-state wave64、Full Attention tiled wave64を独立採否し、
-  Phase 38でfresh residualを閉じる。その後のllama.cpp比機能差はPhase 39〜48へ割り当てた。詳細、依存、受入条件、
+  Phase 38でfresh residualを閉じる。llama.cpp比機能差はPhase 39〜48へ割り当て、MI300X VM待ちの間もhost側を独立して
+  進める。Phase 37/38のGPU完了はPhase 39以降の開始・merge gateにしない。詳細、依存、受入条件、
   intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
 - Phase 36完了後のcanonical R9700 direct 10,001/2 E1比較はsLLM `3.936429665`秒、fixed llama.cpp
   `2.063845785`秒、比`1.90733x`でPASSした。同一token IDs/生成、BF16/FP16 KV、3+10の独立比較であり、
