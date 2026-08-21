@@ -9,9 +9,10 @@ use axum::Router;
 use serde_json::Value;
 use sllm_frontend::GenerationCancellationV1;
 use sllm_server::{
-    BackendCompletionV1, BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
-    FinishReasonV1, GenerationDeltaSinkV1, ModelRegistryEntryV1, ModelRegistryV1,
-    SchedulerConfigV1, SchedulerV1, ServerConfigV1, TokenUsageV1, build_router_v1,
+    BackendCompletionV1, BackendErrorV1, BackendTokenLogprobV1, BackendTopLogprobV1,
+    ChatCompletionRequestV1, ChatGenerationBackendV1, FinishReasonV1, GenerationDeltaSinkV1,
+    ModelRegistryEntryV1, ModelRegistryV1, SchedulerConfigV1, SchedulerV1, ServerConfigV1,
+    TokenUsageV1, build_router_v1,
 };
 
 // Selected response/usage/finish, first-role/final-chunk, authentication, and
@@ -33,7 +34,7 @@ struct ScriptBackend {
 impl ChatGenerationBackendV1 for ScriptBackend {
     fn generate(
         &self,
-        _: &ChatCompletionRequestV1,
+        request: &ChatCompletionRequestV1,
         cancellation: &GenerationCancellationV1,
         sink: &mut dyn GenerationDeltaSinkV1,
     ) -> Result<BackendCompletionV1, BackendErrorV1> {
@@ -46,6 +47,18 @@ impl ChatGenerationBackendV1 for ScriptBackend {
             if self.fail_after == Some(index + 1) {
                 return Err(BackendErrorV1::new("scripted backend failure"));
             }
+        }
+        if request.logprobs().is_some_and(|options| options.enabled()) {
+            sink.publish_logprobs(vec![BackendTokenLogprobV1 {
+                token: "ok".to_owned(),
+                bytes: Some(vec![111, 107]),
+                logprob: -0.25,
+                top_logprobs: vec![BackendTopLogprobV1 {
+                    token: "alt".to_owned(),
+                    bytes: Some(vec![97, 108, 116]),
+                    logprob: -1.5,
+                }],
+            }])?;
         }
         Ok(BackendCompletionV1 {
             finish_reason: self.finish_reason,
@@ -341,6 +354,136 @@ async fn models_non_stream_and_sse_share_text_usage_and_finish_reason() {
     assert!(body.contains(r#""finish_reason":"stop""#));
     assert!(body.contains(r#""usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}"#));
     assert!(body.ends_with("data: [DONE]\n\n"));
+
+    scheduler.shutdown();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requested_logprobs_are_mapped_for_buffered_and_streaming_responses() {
+    let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(ScriptBackend {
+        deltas: vec!["ok".to_owned()],
+        finish_reason: FinishReasonV1::Stop,
+        usage: TokenUsageV1::new(2, 1).unwrap(),
+        fail_after: None,
+        cancelled: Arc::new(AtomicUsize::new(0)),
+    });
+    let (app, scheduler) = router(backend, 4, 4, None);
+    let (address, server) = serve(app).await;
+    let body = |stream| {
+        format!(
+            r#"{{"model":"qwen-test","messages":[{{"role":"user","content":"hello"}}],"stream":{stream},"logprobs":true,"top_logprobs":1,"max_completion_tokens":2}}"#
+        )
+    };
+
+    let buffered = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            body(false).as_bytes(),
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(buffered.status, 200);
+    let json = buffered.json();
+    assert_eq!(json["choices"][0]["logprobs"]["content"][0]["token"], "ok");
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["bytes"],
+        serde_json::json!([111, 107])
+    );
+    assert_eq!(
+        json["choices"][0]["logprobs"]["content"][0]["top_logprobs"][0]["token"],
+        "alt"
+    );
+
+    let streaming = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            body(true).as_bytes(),
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(streaming.status, 200);
+    let text = String::from_utf8(streaming.body).unwrap();
+    assert!(text.contains(r#""logprobs":{"content":[{"token":"ok""#));
+    assert!(text.ends_with("data: [DONE]\n\n"));
+
+    scheduler.shutdown();
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multiple_choices_use_independent_slots_and_aggregate_usage() {
+    let backend: Arc<dyn ChatGenerationBackendV1> = Arc::new(ScriptBackend {
+        deltas: vec!["choice".to_owned()],
+        finish_reason: FinishReasonV1::Stop,
+        usage: TokenUsageV1::new(3, 2).unwrap(),
+        fail_after: None,
+        cancelled: Arc::new(AtomicUsize::new(0)),
+    });
+    let (app, scheduler) = router(backend, 8, 4, None);
+    let (address, server) = serve(app).await;
+    let body = br#"{"model":"qwen-test","messages":[{"role":"user","content":"hello"}],"n":2,"max_completion_tokens":17}"#;
+
+    let response = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            body,
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    let response = response.json();
+    assert_eq!(response["choices"].as_array().unwrap().len(), 2);
+    assert_eq!(response["choices"][0]["index"], 0);
+    assert_eq!(response["choices"][1]["index"], 1);
+    assert_eq!(response["choices"][0]["message"]["content"], "choice");
+    assert_eq!(response["choices"][1]["message"]["content"], "choice");
+    assert_eq!(response["usage"]["prompt_tokens"], 3);
+    assert_eq!(response["usage"]["completion_tokens"], 4);
+    assert_eq!(response["usage"]["total_tokens"], 7);
+
+    let stream_body = br#"{"model":"qwen-test","messages":[{"role":"user","content":"hello"}],"n":2,"stream":true,"max_completion_tokens":17}"#;
+    let response = raw_http(
+        address,
+        request_bytes(
+            "POST",
+            "/v1/chat/completions",
+            stream_body,
+            &["Content-Type: application/json"],
+        ),
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    let events = String::from_utf8(response.body)
+        .unwrap()
+        .split("\n\n")
+        .filter_map(|block| block.strip_prefix("data: "))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert_eq!(events.iter().filter(|event| *event == "[DONE]").count(), 1);
+    let chunks = events
+        .iter()
+        .filter(|event| event.as_str() != "[DONE]")
+        .map(|event| serde_json::from_str::<Value>(event).unwrap())
+        .collect::<Vec<_>>();
+    let role_indices = chunks
+        .iter()
+        .filter(|chunk| chunk["choices"][0]["delta"]["role"] == "assistant")
+        .map(|chunk| chunk["choices"][0]["index"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(role_indices, [0, 1]);
+    let final_chunk = chunks.last().unwrap();
+    assert_eq!(final_chunk["choices"][0]["index"], 1);
+    assert_eq!(final_chunk["usage"]["total_tokens"], 7);
 
     scheduler.shutdown();
     server.abort();

@@ -1,0 +1,65 @@
+{
+  "schema_version": "phase40-token-selector-gpu-summary-v1",
+  "recorded_at": "2026-08-21T14:58:04Z",
+  "state": "PASS",
+  "baseline_commit": "e7bcdcca09d0dff2deec3b32d80f8b75c03ee167",
+  "source_identity": {
+    "runner_sha256": "edc2ec7effb7d5ccbca62b42b2f89dc2d9fced00a5d95f9c62a9d8868aa52d9f",
+    "kernel_sha256": "c0f2d6c5615574c046e38e610e2f476b8ab578c1d333ecf029b5421191bba9ad"
+  },
+  "toolchain": {
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.17.0-35-generic",
+    "rocm": "7.14.0",
+    "compiler": "AMD clang 23.0.0git",
+    "logical_rocm_root": "/opt/rocm"
+  },
+  "contract": {
+    "vocabularies": [1, 3, 17, 255, 256, 257, 248320],
+    "counters": [0, 1],
+    "fixed_seed_replay": true,
+    "odd_mask_and_additive": true,
+    "status_cases": ["all_masked", "nonfinite"],
+    "cpu_oracle_token_exact": true,
+    "cpu_oracle_logprob_tolerance": 0.005,
+    "selected_record_bytes": 16,
+    "d2h_bytes_per_selection": 16,
+    "full_vocabulary_d2h_count": 0,
+    "fallback_allowed": 0,
+    "fallback_used": 0
+  },
+  "targets": [
+    {
+      "state": "PASS",
+      "gpu": "AMD Radeon Pro V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "bdf": "0000:03:00.0",
+      "logical_target": "gfx1030",
+      "codegen_target": "gfx1030",
+      "wavefront": 32,
+      "binary_size_bytes": 2809792,
+      "binary_sha256": "21cafe07f53c9e2bce230a416fd4d2a703b67dec8435942a2f44fa5375625d34"
+    },
+    {
+      "state": "PASS",
+      "gpu": "AMD Radeon AI PRO R9700",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "bdf": "0000:07:00.0",
+      "logical_target": "gfx1201",
+      "codegen_target": "gfx1201",
+      "wavefront": 32,
+      "binary_size_bytes": 3090912,
+      "binary_sha256": "11bfe7db35599e8e381722d8d052989cfef43dcf5dcaf9c6e3f21b6b4a8c6031"
+    },
+    {
+      "state": "COMPILE_ONLY_PASS",
+      "gpu": "Hot Aisle MI300X VF x1",
+      "logical_target": "gfx942",
+      "codegen_target": "gfx942:sramecc+:xnack-",
+      "wavefront": 64,
+      "artifact_size_bytes": 3195980,
+      "artifact_sha256": "a6ef0ddb01779d118b334a08d401540f0e533a62d8d5ab143959e26845648809",
+      "real_gpu_status": "DEFERRED_UNTIL_VM_IS_AVAILABLE"
+    }
+  ]
+}

@@ -15,8 +15,11 @@ mod security;
 mod service;
 
 pub use api::{
-    ApiErrorV1, ChatCompatibilityProfileV1, ChatCompletionRequestV1, ChatMessageV1, ErrorCodeV1,
-    FinishReasonV1, ReasoningOptionsV1, TokenUsageV1,
+    ApiErrorV1, ChatCompatibilityProfileV1, ChatCompletionRequestV1, ChatMessageV1,
+    DrySamplingConfigV1, DynamicTemperatureConfigV1, ErrorCodeV1, FinishReasonV1,
+    JsonSchemaFormatV1, LogitBiasV1, LogprobOptionsV1, MirostatSamplingConfigV1,
+    ReasoningOptionsV1, ResponseFormatV1, SamplerExtensionConfigV1, TokenUsageV1,
+    XtcSamplingConfigV1,
 };
 pub use lifecycle::{ServerLifecycleStateV1, ServerLifecycleV1};
 pub use metrics::{
@@ -30,9 +33,10 @@ pub use production::{
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{
     BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
-    BackendObservabilitySnapshotV1, ChatGenerationBackendV1, GenerationDeltaSinkV1,
-    ModelRegistryEntryV1, ModelRegistryV1, SchedulerConfigV1, SchedulerSlotSnapshotV1,
-    SchedulerSlotStateV1, SchedulerSnapshotV1, SchedulerV1,
+    BackendObservabilitySnapshotV1, BackendTokenLogprobV1, BackendTopLogprobV1,
+    ChatGenerationBackendV1, GenerationDeltaSinkV1, ModelRegistryEntryV1, ModelRegistryV1,
+    SchedulerConfigV1, SchedulerSlotSnapshotV1, SchedulerSlotStateV1, SchedulerSnapshotV1,
+    SchedulerV1,
 };
 pub use security::{CredentialErrorV1, CredentialRoleV1, CredentialStoreV1};
 pub use service::{ServerConfigV1, build_router_v1};

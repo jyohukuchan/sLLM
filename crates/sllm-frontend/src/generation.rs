@@ -6,17 +6,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sllm_core::{
-    Gemma4ExecutionRequest, Gemma4ModelLock, ProfileSamplerV1, QwenExecutionRequest, SamplingError,
-    SamplingParametersV1, SamplingRandomSource,
+    CompiledGrammar, DeviceTokenSelectorRequestV1, Gemma4ExecutionRequest, Gemma4ModelLock,
+    GrammarError, QwenExecutionRequest, SamplerChainConfigV1, SamplerChainV1, SamplingError,
+    SamplingParametersV1, SamplingRandomSource, SamplingSelectionV1, TokenTrie,
 };
 
 use crate::{
     DecodeModeV1, GenerationStopPolicyV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1,
-    Qwen35RenderOptionsV1, TokenIdsV1, TokenizerFrontendV1, validate_generation_stop_policy,
+    Qwen35RenderOptionsV1, TokenByteTableV1, TokenIdsV1, TokenizerFrontendV1,
+    validate_generation_stop_policy,
 };
 
 pub const MAX_STOP_STRINGS_V1: usize = 4;
 pub const MAX_STOP_STRING_BYTES_V1: usize = 1_048_576;
+pub const MAX_GENERATION_CHOICES_V1: usize = 8;
 
 pub fn gemma4_generation_stop_policy(
     lock: &Gemma4ModelLock,
@@ -55,11 +58,31 @@ pub enum GenerationInputV1 {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GenerationConfigV1 {
     max_new_tokens: u32,
     sampling: SamplingParametersV1,
     stop_strings: Vec<String>,
+    sampler_chain: Option<SamplerChainConfigV1>,
+    grammar: Option<CompiledGrammar>,
+    ignore_stop_tokens: bool,
+    device_selector_seed: Option<u64>,
+}
+
+impl PartialEq for GenerationConfigV1 {
+    fn eq(&self, other: &Self) -> bool {
+        self.max_new_tokens == other.max_new_tokens
+            && self.sampling == other.sampling
+            && self.stop_strings == other.stop_strings
+            && self.sampler_chain == other.sampler_chain
+            && self.ignore_stop_tokens == other.ignore_stop_tokens
+            && self.device_selector_seed == other.device_selector_seed
+            // Compiled grammars intentionally do not expose structural
+            // equality; state-count equality keeps this compatibility trait
+            // useful for error assertions without comparing private NFAs.
+            && self.grammar.as_ref().map(CompiledGrammar::state_count)
+                == other.grammar.as_ref().map(CompiledGrammar::state_count)
+    }
 }
 
 impl GenerationConfigV1 {
@@ -93,6 +116,10 @@ impl GenerationConfigV1 {
             max_new_tokens,
             sampling,
             stop_strings,
+            sampler_chain: None,
+            grammar: None,
+            ignore_stop_tokens: false,
+            device_selector_seed: None,
         })
     }
 
@@ -106,6 +133,59 @@ impl GenerationConfigV1 {
 
     pub fn stop_strings(&self) -> &[String] {
         &self.stop_strings
+    }
+
+    /// Returns the explicit sampler-chain configuration, when advanced
+    /// sampling is enabled. `None` retains the exact legacy profile-v1 path.
+    pub fn sampler_chain(&self) -> Option<&SamplerChainConfigV1> {
+        self.sampler_chain.as_ref()
+    }
+
+    /// Installs a validated, backend-neutral sampler chain while preserving
+    /// the legacy constructor and call sites.
+    pub fn with_sampler_chain(
+        mut self,
+        chain: SamplerChainConfigV1,
+    ) -> Result<Self, GenerationServiceError> {
+        chain.validate()?;
+        if chain.parameters != self.sampling {
+            return Err(GenerationServiceError::SamplingConfigurationMismatch);
+        }
+        self.sampler_chain = Some(chain);
+        Ok(self)
+    }
+
+    pub fn with_grammar(mut self, grammar: CompiledGrammar) -> Self {
+        self.grammar = Some(grammar);
+        self
+    }
+
+    pub fn grammar(&self) -> Option<&CompiledGrammar> {
+        self.grammar.as_ref()
+    }
+
+    /// Masks every stop token in the sampler candidate set. This is useful for
+    /// OpenAI-compatible `ignore_eos` behavior and is deliberately config
+    /// scoped so it cannot mutate the model's reviewed stop policy.
+    pub fn with_ignore_stop_tokens(mut self, enabled: bool) -> Self {
+        self.ignore_stop_tokens = enabled;
+        self
+    }
+
+    pub const fn ignore_stop_tokens(&self) -> bool {
+        self.ignore_stop_tokens
+    }
+
+    /// Pins the request-local random stream used by an eligible prepared GPU
+    /// selector. The host sampler must be initialized from the same seed so a
+    /// capability decision cannot silently change request determinism.
+    pub fn with_device_selector_seed(mut self, seed: u64) -> Self {
+        self.device_selector_seed = Some(seed);
+        self
+    }
+
+    pub const fn device_selector_seed(&self) -> Option<u64> {
+        self.device_selector_seed
     }
 }
 
@@ -145,7 +225,7 @@ impl TokenUsageV1 {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GenerationResultV1 {
     input_token_ids: Vec<u32>,
     generated_token_ids: Vec<u32>,
@@ -157,6 +237,7 @@ pub struct GenerationResultV1 {
     matched_stop: Option<String>,
     usage: TokenUsageV1,
     decode_steps: u32,
+    selections: Vec<SamplingSelectionV1>,
 }
 
 impl GenerationResultV1 {
@@ -199,6 +280,106 @@ impl GenerationResultV1 {
     pub const fn decode_steps(&self) -> u32 {
         self.decode_steps
     }
+
+    /// Sampling metadata in generated-token order. The vector includes a
+    /// stop token when one was selected, matching `generated_token_ids`.
+    pub fn selections(&self) -> &[SamplingSelectionV1] {
+        &self.selections
+    }
+}
+
+/// One independently generated choice. The index is stable across buffered
+/// and streaming transports and is never inferred from completion order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerationChoiceResultV1 {
+    index: u32,
+    result: GenerationResultV1,
+}
+
+impl GenerationChoiceResultV1 {
+    pub const fn index(&self) -> u32 {
+        self.index
+    }
+
+    pub const fn result(&self) -> &GenerationResultV1 {
+        &self.result
+    }
+}
+
+/// Bounded multi-choice result with OpenAI-compatible aggregate accounting:
+/// the shared prompt is counted once and generated tokens are summed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GenerationChoicesResultV1 {
+    choices: Vec<GenerationChoiceResultV1>,
+    usage: TokenUsageV1,
+}
+
+impl GenerationChoicesResultV1 {
+    pub fn new(results: Vec<GenerationResultV1>) -> Result<Self, GenerationServiceError> {
+        if results.is_empty() || results.len() > MAX_GENERATION_CHOICES_V1 {
+            return Err(GenerationServiceError::InvalidChoiceCount);
+        }
+        let prompt = results[0].input_token_ids();
+        if results
+            .iter()
+            .skip(1)
+            .any(|result| result.input_token_ids() != prompt)
+        {
+            return Err(GenerationServiceError::InconsistentChoicePrompt);
+        }
+        let prompt_tokens = results[0].usage().prompt_tokens();
+        let completion_tokens = results.iter().try_fold(0_u64, |total, result| {
+            total
+                .checked_add(result.usage().completion_tokens())
+                .ok_or(GenerationServiceError::CountOverflow)
+        })?;
+        let total_tokens = prompt_tokens
+            .checked_add(completion_tokens)
+            .ok_or(GenerationServiceError::CountOverflow)?;
+        let choices = results
+            .into_iter()
+            .enumerate()
+            .map(|(index, result)| {
+                Ok(GenerationChoiceResultV1 {
+                    index: u32::try_from(index)
+                        .map_err(|_| GenerationServiceError::CountOverflow)?,
+                    result,
+                })
+            })
+            .collect::<Result<Vec<_>, GenerationServiceError>>()?;
+        Ok(Self {
+            choices,
+            usage: TokenUsageV1 {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+            },
+        })
+    }
+
+    pub fn choices(&self) -> &[GenerationChoiceResultV1] {
+        &self.choices
+    }
+
+    pub const fn usage(&self) -> TokenUsageV1 {
+        self.usage
+    }
+}
+
+/// Derives a deterministic per-choice stream while preserving the exact
+/// legacy stream for choice zero. Unseeded requests remain unseeded so each
+/// choice obtains entropy from its independently created random source.
+pub const fn derive_choice_seed_v1(seed: Option<u64>, choice_index: u32) -> Option<u64> {
+    let Some(seed) = seed else {
+        return None;
+    };
+    if choice_index == 0 {
+        return Some(seed);
+    }
+    let mut value = seed ^ (choice_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    Some(value ^ (value >> 31))
 }
 
 #[derive(Clone, Debug)]
@@ -232,6 +413,7 @@ impl GenerationCancellationV1 {
 pub struct GenerationStepV1 {
     device_argmax: u32,
     last_logits: Option<Vec<f32>>,
+    device_selection: Option<SamplingSelectionV1>,
 }
 
 impl GenerationStepV1 {
@@ -239,6 +421,15 @@ impl GenerationStepV1 {
         Self {
             device_argmax,
             last_logits,
+            device_selection: None,
+        }
+    }
+
+    pub fn from_device_selection(selection: SamplingSelectionV1) -> Self {
+        Self {
+            device_argmax: selection.token_id,
+            last_logits: None,
+            device_selection: Some(selection),
         }
     }
 
@@ -248,6 +439,10 @@ impl GenerationStepV1 {
 
     pub fn last_logits(&self) -> Option<&[f32]> {
         self.last_logits.as_deref()
+    }
+
+    pub fn device_selection(&self) -> Option<&SamplingSelectionV1> {
+        self.device_selection.as_ref()
     }
 }
 
@@ -263,6 +458,26 @@ pub trait GenerationExecutorV1 {
         token_id: u32,
         include_last_logits: bool,
     ) -> Result<GenerationStepV1, GenerationServiceError>;
+
+    fn supports_device_selector(&self) -> bool {
+        false
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        _input_token_ids: &[u32],
+        _selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        Err(GenerationServiceError::DeviceSelectorUnsupported)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        _token_id: u32,
+        _selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        Err(GenerationServiceError::DeviceSelectorUnsupported)
+    }
 
     fn cancel(&mut self);
 }
@@ -657,6 +872,13 @@ impl SpeculativeGenerationExecutorV1 for QwenMtpGenerationExecutorV1 {
 pub trait GenerationTextFrontendV1 {
     fn encode_generation(&self, text: &str) -> Result<Vec<u32>, GenerationServiceError>;
     fn decode_generation(&self, token_ids: &[u32]) -> Result<String, GenerationServiceError>;
+
+    /// Returns the decoder-aware raw token pieces needed by constrained
+    /// generation. Lightweight frontends may keep the default fail-closed
+    /// implementation; production tokenizer frontends override it.
+    fn token_byte_table(&self) -> Result<&TokenByteTableV1, GenerationServiceError> {
+        Err(GenerationServiceError::TokenBytesUnsupported)
+    }
 }
 
 /// Receives text that is safe to expose to a transport. Implementations must
@@ -686,6 +908,10 @@ impl GenerationTextFrontendV1 for TokenizerFrontendV1 {
             DecodeModeV1::PreserveSpecialTokens,
         )
         .map_err(|_| GenerationServiceError::Decode)
+    }
+
+    fn token_byte_table(&self) -> Result<&TokenByteTableV1, GenerationServiceError> {
+        Ok(TokenizerFrontendV1::token_byte_table(self))
     }
 }
 
@@ -736,6 +962,43 @@ impl GenerationExecutorV1 for QwenExecutionRequest {
                 .map_err(|_| GenerationServiceError::TokenIdOverflow)?,
             output.last_logits().map(<[f32]>::to_vec),
         ))
+    }
+
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = QwenExecutionRequest::prefill_with_device_selector(self, &input, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = QwenExecutionRequest::decode_with_device_selector(self, token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
     }
 
     fn cancel(&mut self) {
@@ -792,6 +1055,43 @@ impl GenerationExecutorV1 for Gemma4ExecutionRequest {
         ))
     }
 
+    fn supports_device_selector(&self) -> bool {
+        true
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        input_token_ids: &[u32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let input = input_token_ids
+            .iter()
+            .map(|&token| i32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow))
+            .collect::<Result<Vec<_>, _>>()?;
+        let output = Gemma4ExecutionRequest::prefill_with_device_selector(self, &input, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: u32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = Gemma4ExecutionRequest::decode_with_device_selector(self, token, selector)
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let selection = output
+            .selection()
+            .cloned()
+            .ok_or(GenerationServiceError::MissingDeviceSelection)?;
+        Ok(GenerationStepV1::from_device_selection(selection))
+    }
+
     fn cancel(&mut self) {
         Gemma4ExecutionRequest::cancel(self);
     }
@@ -813,7 +1113,14 @@ pub enum GenerationServiceError {
     TokenIdOverflow,
     CountOverflow,
     MissingDeviceArgmax,
+    MissingDeviceSelection,
+    DeviceSelectorUnsupported,
     InvalidStopPolicy,
+    InvalidChoiceCount,
+    InconsistentChoicePrompt,
+    SamplingConfigurationMismatch,
+    TokenBytesUnsupported,
+    Grammar(GrammarError),
     Sampling(SamplingError),
     Execution(String),
     Output(String),
@@ -852,9 +1159,28 @@ impl fmt::Display for GenerationServiceError {
             Self::MissingDeviceArgmax => {
                 formatter.write_str("execution published no device Argmax token")
             }
+            Self::MissingDeviceSelection => {
+                formatter.write_str("execution published no prepared device selection")
+            }
+            Self::DeviceSelectorUnsupported => {
+                formatter.write_str("execution does not support the prepared device selector")
+            }
             Self::InvalidStopPolicy => {
                 formatter.write_str("generation stop-token policy is invalid")
             }
+            Self::InvalidChoiceCount => {
+                formatter.write_str("generation choice count must be between one and eight")
+            }
+            Self::InconsistentChoicePrompt => {
+                formatter.write_str("generation choices must share the exact prompt token IDs")
+            }
+            Self::SamplingConfigurationMismatch => formatter.write_str(
+                "sampler-chain parameters must match the generation sampling parameters",
+            ),
+            Self::TokenBytesUnsupported => {
+                formatter.write_str("generation frontend does not expose raw token bytes")
+            }
+            Self::Grammar(error) => error.fmt(formatter),
             Self::Sampling(error) => error.fmt(formatter),
             Self::Execution(reason) => write!(formatter, "generation execution failed: {reason}"),
             Self::Output(reason) => write!(formatter, "generation output failed: {reason}"),
@@ -868,6 +1194,12 @@ impl std::error::Error for GenerationServiceError {}
 impl From<SamplingError> for GenerationServiceError {
     fn from(error: SamplingError) -> Self {
         Self::Sampling(error)
+    }
+}
+
+impl From<GrammarError> for GenerationServiceError {
+    fn from(error: GrammarError) -> Self {
+        Self::Grammar(error)
     }
 }
 
@@ -993,11 +1325,67 @@ impl<'a> GenerationServiceV1<'a> {
         sink: &mut impl GenerationOutputSinkV1,
     ) -> Result<GenerationResultV1, GenerationServiceError> {
         check_cancelled(cancellation)?;
-        let include_logits = config.sampling.requires_logits();
-        let mut step = executor.prefill(input_token_ids, include_logits)?;
-        let mut sampler = ProfileSamplerV1::new(config.sampling, input_token_ids)?;
+        let sampler_config = config
+            .sampler_chain
+            .clone()
+            .unwrap_or_else(|| SamplerChainConfigV1::legacy(config.sampling));
+        let include_logits = sampler_config.requires_logits()
+            || config.grammar.is_some()
+            || config.ignore_stop_tokens;
+        let mut sampler = SamplerChainV1::new(sampler_config, input_token_ids)?;
+        let (mut grammar_state, grammar_trie) = if let Some(grammar) = config.grammar.as_ref() {
+            let table = self.tokenizer.token_byte_table()?;
+            let pieces = table
+                .as_slice()
+                .iter()
+                .map(|entry| {
+                    if entry.is_grammar_eligible() {
+                        entry.bytes().map(|bytes| bytes.to_vec())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let trie = TokenTrie::new_optional(pieces)?;
+            (Some(grammar.initial_state()), Some(trie))
+        } else {
+            (None, None)
+        };
+        let use_device_selector = config.device_selector_seed.is_some()
+            && sampler.supports_device_selector()
+            && executor.supports_device_selector();
+        let selector_vocab_size = if use_device_selector {
+            Some(self.tokenizer.token_byte_table()?.len())
+        } else {
+            None
+        };
+        let mut device_mask = if use_device_selector {
+            build_valid_token_mask(
+                grammar_state.as_ref(),
+                grammar_trie.as_ref(),
+                config.ignore_stop_tokens,
+                &self.stop_policy.stop_token_ids,
+                selector_vocab_size,
+            )?
+        } else {
+            None
+        };
+        let mut step = if use_device_selector {
+            let selector = sampler.prepare_device_selector(
+                selector_vocab_size.expect("device selector vocabulary was resolved"),
+                device_mask.as_deref(),
+                config
+                    .device_selector_seed
+                    .expect("device selector seed was resolved"),
+                0,
+            )?;
+            executor.prefill_with_device_selector(input_token_ids, &selector)?
+        } else {
+            executor.prefill(input_token_ids, include_logits)?
+        };
         let mut matcher = IncrementalStopMatcher::new(config.stop_strings.clone());
         let mut generated = Vec::new();
+        let mut selections = Vec::new();
         let mut normal_tokens = Vec::<u32>::new();
         let mut decoded_snapshots = Vec::<String>::new();
         let mut decode_inputs = Vec::new();
@@ -1011,9 +1399,46 @@ impl<'a> GenerationServiceV1<'a> {
 
         for index in 0..config.max_new_tokens {
             check_cancelled(cancellation)?;
-            let token = sampler.select(step.device_argmax, step.last_logits.as_deref(), random)?;
+            let valid_mask = if use_device_selector {
+                device_mask.take()
+            } else {
+                build_valid_token_mask(
+                    grammar_state.as_ref(),
+                    grammar_trie.as_ref(),
+                    config.ignore_stop_tokens,
+                    &self.stop_policy.stop_token_ids,
+                    step.last_logits.as_ref().map(Vec::len),
+                )?
+            };
+            let selection = if use_device_selector {
+                step.device_selection
+                    .clone()
+                    .ok_or(GenerationServiceError::MissingDeviceSelection)?
+            } else {
+                sampler.select_with_mask(
+                    step.device_argmax,
+                    step.last_logits.as_deref(),
+                    valid_mask.as_deref(),
+                    random,
+                )?
+            };
+            let token = selection.token_id;
+            let is_stop_token = self.stop_policy.stop_token_ids.contains(&token);
+            if let Some(state) = grammar_state.as_mut()
+                && !is_stop_token
+            {
+                let table = self.tokenizer.token_byte_table()?;
+                let entry = table
+                    .entry(token)
+                    .ok_or(GenerationServiceError::TokenIdOverflow)?;
+                let bytes = entry
+                    .bytes()
+                    .ok_or(GenerationServiceError::TokenBytesUnsupported)?;
+                state.accept(bytes)?;
+            }
             sampler.accept(token)?;
             generated.push(token);
+            selections.push(selection);
 
             if self.stop_policy.stop_token_ids.contains(&token) {
                 finish_reason = Some(FinishReasonV1::Stop);
@@ -1069,7 +1494,26 @@ impl<'a> GenerationServiceV1<'a> {
             }
             decode_inputs.push(token);
             check_cancelled(cancellation)?;
-            step = executor.decode(token, include_logits)?;
+            step = if use_device_selector {
+                device_mask = build_valid_token_mask(
+                    grammar_state.as_ref(),
+                    grammar_trie.as_ref(),
+                    config.ignore_stop_tokens,
+                    &self.stop_policy.stop_token_ids,
+                    selector_vocab_size,
+                )?;
+                let selector = sampler.prepare_device_selector(
+                    selector_vocab_size.expect("device selector vocabulary was resolved"),
+                    device_mask.as_deref(),
+                    config
+                        .device_selector_seed
+                        .expect("device selector seed was resolved"),
+                    u64::from(index) + 1,
+                )?;
+                executor.decode_with_device_selector(token, &selector)?
+            } else {
+                executor.decode(token, include_logits)?
+            };
             decode_steps = decode_steps
                 .checked_add(1)
                 .ok_or(GenerationServiceError::CountOverflow)?;
@@ -1108,8 +1552,63 @@ impl<'a> GenerationServiceV1<'a> {
                 total_tokens,
             },
             decode_steps,
+            selections,
         })
     }
+}
+
+fn build_valid_token_mask(
+    grammar_state: Option<&sllm_core::GrammarState>,
+    grammar_trie: Option<&TokenTrie>,
+    ignore_stop_tokens: bool,
+    stop_token_ids: &[u32],
+    vocab_size_hint: Option<usize>,
+) -> Result<Option<Vec<bool>>, GenerationServiceError> {
+    let mut mask = if let (Some(state), Some(trie)) = (grammar_state, grammar_trie) {
+        let mut mask = match state.valid_token_mask_with_trie(trie) {
+            Ok(mask) => mask,
+            Err(GrammarError::AllTokensMasked)
+                if state.is_finished() && state.is_utf8_boundary() =>
+            {
+                vec![false; trie.token_count()]
+            }
+            Err(error) => return Err(error.into()),
+        };
+        // Special stop rows are deliberately absent from the grammar trie.
+        // They become eligible only after a complete UTF-8 accept state.
+        if state.is_finished() && state.is_utf8_boundary() {
+            for &stop in stop_token_ids {
+                if let Ok(index) = usize::try_from(stop)
+                    && let Some(value) = mask.get_mut(index)
+                {
+                    *value = true;
+                }
+            }
+        }
+        Some(mask)
+    } else if ignore_stop_tokens {
+        let vocab_size = vocab_size_hint.ok_or(SamplingError::MissingLogits)?;
+        Some(vec![true; vocab_size])
+    } else {
+        None
+    };
+
+    if ignore_stop_tokens && let Some(mask) = mask.as_mut() {
+        for &stop in stop_token_ids {
+            if let Ok(index) = usize::try_from(stop)
+                && let Some(value) = mask.get_mut(index)
+            {
+                *value = false;
+            }
+        }
+    }
+    if mask
+        .as_ref()
+        .is_some_and(|values| !values.iter().any(|value| *value))
+    {
+        return Err(GrammarError::AllTokensMasked.into());
+    }
+    Ok(mask)
 }
 
 fn publish_visible(
@@ -1293,6 +1792,72 @@ mod tests {
         }
     }
 
+    struct TinyDeviceSelectorExecutor {
+        selections: VecDeque<SamplingSelectionV1>,
+        requests: Vec<(u64, u64, usize, usize)>,
+        decode_inputs: Vec<u32>,
+        cancel_count: u32,
+    }
+
+    impl TinyDeviceSelectorExecutor {
+        fn select(&mut self, request: &DeviceTokenSelectorRequestV1) -> GenerationStepV1 {
+            self.requests.push((
+                request.seed(),
+                request.counter(),
+                request.additive_logits().len(),
+                request
+                    .valid_mask()
+                    .iter()
+                    .filter(|&&value| value != 0)
+                    .count(),
+            ));
+            GenerationStepV1::from_device_selection(
+                self.selections
+                    .pop_front()
+                    .expect("device selection fixture exhausted"),
+            )
+        }
+    }
+
+    impl GenerationExecutorV1 for TinyDeviceSelectorExecutor {
+        fn prefill(
+            &mut self,
+            _: &[u32],
+            _: bool,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            panic!("host prefill must not be used after the device route is selected")
+        }
+
+        fn decode(&mut self, _: u32, _: bool) -> Result<GenerationStepV1, GenerationServiceError> {
+            panic!("host decode must not be used after the device route is selected")
+        }
+
+        fn supports_device_selector(&self) -> bool {
+            true
+        }
+
+        fn prefill_with_device_selector(
+            &mut self,
+            _: &[u32],
+            selector: &DeviceTokenSelectorRequestV1,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            Ok(self.select(selector))
+        }
+
+        fn decode_with_device_selector(
+            &mut self,
+            token_id: u32,
+            selector: &DeviceTokenSelectorRequestV1,
+        ) -> Result<GenerationStepV1, GenerationServiceError> {
+            self.decode_inputs.push(token_id);
+            Ok(self.select(selector))
+        }
+
+        fn cancel(&mut self) {
+            self.cancel_count += 1;
+        }
+    }
+
     struct TinySpeculativeExecutor {
         prefill_step: Option<GenerationStepV1>,
         target_only_steps: VecDeque<GenerationStepV1>,
@@ -1372,6 +1937,43 @@ mod tests {
         }
     }
 
+    struct GrammarPieceFrontend {
+        table: TokenByteTableV1,
+    }
+
+    impl GrammarPieceFrontend {
+        fn new() -> Self {
+            Self {
+                table: TokenByteTableV1::from_tokenizer_json(
+                    include_bytes!("../../../ci/fixtures/tokenizer-v1/tokenizer.json"),
+                    16,
+                )
+                .expect("grammar fixture table"),
+            }
+        }
+    }
+
+    impl GenerationTextFrontendV1 for GrammarPieceFrontend {
+        fn encode_generation(&self, _: &str) -> Result<Vec<u32>, GenerationServiceError> {
+            Ok(vec![1])
+        }
+
+        fn decode_generation(&self, token_ids: &[u32]) -> Result<String, GenerationServiceError> {
+            Ok(token_ids
+                .iter()
+                .map(|token| match token {
+                    1 => "hello",
+                    2 => "world",
+                    _ => "?",
+                })
+                .collect())
+        }
+
+        fn token_byte_table(&self) -> Result<&TokenByteTableV1, GenerationServiceError> {
+            Ok(&self.table)
+        }
+    }
+
     fn policy() -> GenerationStopPolicyV1 {
         GenerationStopPolicyV1 {
             version: 1,
@@ -1420,6 +2022,48 @@ mod tests {
     }
 
     #[test]
+    fn eligible_sampling_uses_one_fixed_selected_only_device_route() {
+        let frontend = GrammarPieceFrontend::new();
+        let mut stop_policy = policy();
+        stop_policy.stop_token_ids = vec![9];
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(
+            2,
+            SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap(),
+            vec![],
+        )
+        .unwrap()
+        .with_device_selector_seed(7);
+        let selection = |token_id| SamplingSelectionV1 {
+            token_id,
+            logprob: -0.25,
+            top_logprobs: Vec::new(),
+        };
+        let mut executor = TinyDeviceSelectorExecutor {
+            selections: VecDeque::from([selection(1), selection(9)]),
+            requests: Vec::new(),
+            decode_inputs: Vec::new(),
+            cancel_count: 0,
+        };
+
+        let result = service
+            .generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.99),
+            )
+            .unwrap();
+
+        assert_eq!(result.generated_token_ids(), [1, 9]);
+        assert_eq!(result.stop_token_id(), Some(9));
+        assert_eq!(executor.decode_inputs, [1]);
+        assert_eq!(executor.requests, [(7, 0, 16, 16), (7, 1, 16, 16)]);
+        assert_eq!(executor.cancel_count, 0);
+    }
+
+    #[test]
     fn stop_matcher_holds_cross_token_prefix_and_hides_stop() {
         let mut matcher = IncrementalStopMatcher::new(vec!["終わり".to_owned(), "stop".to_owned()]);
         let first = matcher.push("abc終");
@@ -1463,6 +2107,123 @@ mod tests {
         assert_eq!(result.usage().total_tokens(), 6);
         assert_eq!(executor.include_logits, [false, false, false]);
         assert_eq!(executor.cancel_count, 0);
+        assert_eq!(result.selections().len(), 3);
+        assert_eq!(result.selections()[0].token_id, 5);
+    }
+
+    #[test]
+    fn grammar_masks_tokens_and_retains_selection_metadata() {
+        let frontend = GrammarPieceFrontend::new();
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let grammar = CompiledGrammar::compile("root ::= \"hello\"\n").unwrap();
+        let config = GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec![])
+            .unwrap()
+            .with_grammar(grammar);
+        let mut logits = vec![0.0_f32; 16];
+        logits[1] = 1.0;
+        logits[2] = 4.0;
+        let mut executor = TinyExecutor {
+            steps: [GenerationStepV1::new(2, Some(logits))].into(),
+            ..TinyExecutor::default()
+        };
+        let result = service
+            .generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+            )
+            .unwrap();
+        assert_eq!(result.generated_token_ids(), [1]);
+        assert_eq!(result.output_text(), "hello");
+        assert_eq!(result.selections()[0].token_id, 1);
+        assert!(executor.include_logits.iter().all(|value| *value));
+    }
+
+    #[test]
+    fn grammar_terminal_allows_stop_token_only_at_accept_boundary() {
+        let frontend = GrammarPieceFrontend::new();
+        let mut stop_policy = policy();
+        stop_policy.stop_token_ids = vec![9];
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(2, SamplingParametersV1::greedy(), vec![])
+            .unwrap()
+            .with_grammar(CompiledGrammar::compile("root ::= \"hello\"\n").unwrap());
+        let mut first_logits = vec![0.0_f32; 16];
+        first_logits[1] = 1.0;
+        first_logits[2] = 4.0;
+        let mut stop_logits = vec![0.0_f32; 16];
+        stop_logits[9] = 20.0;
+        let mut executor = TinyExecutor {
+            steps: VecDeque::from([
+                GenerationStepV1::new(2, Some(first_logits)),
+                GenerationStepV1::new(9, Some(stop_logits)),
+            ]),
+            ..TinyExecutor::default()
+        };
+        let result = service
+            .generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+            )
+            .unwrap();
+        assert_eq!(result.generated_token_ids(), [1, 9]);
+        assert_eq!(result.stop_token_id(), Some(9));
+        assert_eq!(result.finish_reason(), FinishReasonV1::Stop);
+    }
+
+    #[test]
+    fn grammar_frontend_without_raw_bytes_fails_closed() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec![])
+            .unwrap()
+            .with_grammar(CompiledGrammar::compile("root ::= \"A\"\n").unwrap());
+        let mut executor = TinyExecutor::argmax([5]);
+        assert_eq!(
+            service.generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+            ),
+            Err(GenerationServiceError::TokenBytesUnsupported)
+        );
+        assert_eq!(executor.cancel_count, 1);
+    }
+
+    #[test]
+    fn ignore_stop_tokens_masks_stop_argmax_in_configured_request() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(1, SamplingParametersV1::greedy(), vec![])
+            .unwrap()
+            .with_ignore_stop_tokens(true);
+        let mut logits = vec![0.0_f32; 100];
+        logits[5] = 10.0;
+        logits[99] = 20.0;
+        let mut executor = TinyExecutor {
+            steps: [GenerationStepV1::new(99, Some(logits))].into(),
+            ..TinyExecutor::default()
+        };
+        let result = service
+            .generate_tokens(
+                &mut executor,
+                &[1],
+                &config,
+                &GenerationCancellationV1::new(),
+                &mut FixedRandom(0.0),
+            )
+            .unwrap();
+        assert_eq!(result.generated_token_ids(), [5]);
     }
 
     #[test]
@@ -1680,5 +2441,43 @@ mod tests {
             ),
             Err(GenerationServiceError::TooManyStopStrings)
         );
+    }
+
+    #[test]
+    fn choice_seed_zero_preserves_legacy_and_other_choices_are_stable() {
+        assert_eq!(derive_choice_seed_v1(None, 7), None);
+        assert_eq!(derive_choice_seed_v1(Some(42), 0), Some(42));
+        let first = derive_choice_seed_v1(Some(42), 1).unwrap();
+        assert_eq!(derive_choice_seed_v1(Some(42), 1), Some(first));
+        assert_ne!(first, 42);
+        assert_ne!(derive_choice_seed_v1(Some(42), 2), Some(first));
+    }
+
+    #[test]
+    fn multi_choice_accounting_counts_shared_prompt_once() {
+        let frontend = PieceFrontend;
+        let stop_policy = policy();
+        let service = GenerationServiceV1::new(&frontend, None, &stop_policy).unwrap();
+        let config = GenerationConfigV1::new(2, SamplingParametersV1::greedy(), vec![]).unwrap();
+        let generate = |tokens| {
+            let mut executor = TinyExecutor::argmax(tokens);
+            service
+                .generate_tokens(
+                    &mut executor,
+                    &[1, 2, 3],
+                    &config,
+                    &GenerationCancellationV1::new(),
+                    &mut FixedRandom(0.0),
+                )
+                .unwrap()
+        };
+        let choices =
+            GenerationChoicesResultV1::new(vec![generate([5, 6]), generate([7, 5])]).unwrap();
+        assert_eq!(choices.choices().len(), 2);
+        assert_eq!(choices.choices()[0].index(), 0);
+        assert_eq!(choices.choices()[1].index(), 1);
+        assert_eq!(choices.usage().prompt_tokens(), 3);
+        assert_eq!(choices.usage().completion_tokens(), 4);
+        assert_eq!(choices.usage().total_tokens(), 7);
     }
 }

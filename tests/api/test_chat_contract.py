@@ -63,3 +63,52 @@ def test_numeric_and_boolean_types_are_not_silently_coerced() -> None:
         assert not result.accepted
         assert result.error is not None
         assert result.error.code == "invalid_value"
+
+
+@pytest.mark.tier_h1
+def test_phase40_logprob_schema_and_sampler_bounds_are_fail_closed() -> None:
+    base = {
+        "model": "fixture-model",
+        "messages": [{"role": "user", "content": "Return JSON."}],
+    }
+    accepted = validate_chat_request(
+        {
+            **base,
+            "n": 8,
+            "logit_bias": {"0": -100, "4294967295": 100},
+            "logprobs": True,
+            "top_logprobs": 0,
+            "response_format": {"type": "json_object"},
+            "sllm": {
+                "sampling": {
+                    "chain_version": 1,
+                    "top_k": 0,
+                    "typical_p": 1.0,
+                    "repeat_penalty": 100.0,
+                }
+            },
+        }
+    )
+    assert accepted.accepted
+
+    invalid_requests = (
+        {**base, "top_logprobs": 1},
+        {**base, "logit_bias": {"0": 100.1}},
+        {**base, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": "hello"}]},
+        {
+            **base,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {"type": "string", "pattern": "x"},
+                },
+            },
+        },
+        {**base, "sllm": {"sampling": {"mirostat": {"version": 2}, "top_k": 4}}},
+    )
+    for request in invalid_requests:
+        result = validate_chat_request(request)
+        assert not result.accepted
+        assert result.error is not None
+        assert result.error.code == "invalid_value"

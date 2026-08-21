@@ -25,6 +25,8 @@
 #include "rmsnorm_kernel_internal.hpp"
 #include "rotary_api.hpp"
 #include "rotary_kernel_internal.hpp"
+#include "token_selector_api.hpp"
+#include "token_selector_kernel_internal.hpp"
 #include "windowed_attention_api.hpp"
 
 #include <hip/hip_runtime.h>
@@ -387,6 +389,7 @@ enum class HandleKind : uint32_t {
   EmbeddingPlan,
   MatmulPlan,
   ArgmaxPlan,
+  TokenSelectorPlan,
   MoeRoutePlan,
   MoeExpertPlan,
   AttentionPreprocessPlan,
@@ -859,6 +862,27 @@ using CausalAttentionBuffers = std::array<struct Buffer *, 2>;
 using LinearAttentionBuffers = std::array<struct Buffer *, 9>;
 struct ArgmaxCompletionTag final {};
 
+struct TokenSelectorPlan final : QuarantineNode {
+  Context *context;
+  Buffer *logits;
+  Buffer *additive_logits;
+  Buffer *valid_mask;
+  Buffer *output;
+  sllm_token_selector::DescriptorMetadata metadata;
+  bool release_active;
+  bool in_flight;
+
+  TokenSelectorPlan(Context *const context_value, Buffer *const logits_value,
+                    Buffer *const additive_value, Buffer *const mask_value,
+                    Buffer *const output_value,
+                    const sllm_token_selector::DescriptorMetadata &metadata_value)
+      : QuarantineNode(HandleKind::TokenSelectorPlan),
+        context(context_value), logits(logits_value),
+        additive_logits(additive_value), valid_mask(mask_value),
+        output(output_value), metadata(metadata_value), release_active(false),
+        in_flight(false) {}
+};
+
 struct Completion final : QuarantineNode {
   Context *context;
   Queue *queue;
@@ -905,6 +929,12 @@ struct Completion final : QuarantineNode {
   ElementwisePlan *argmax_plan;
   Buffer *argmax_logits;
   Buffer *argmax_output;
+  bool token_selector;
+  TokenSelectorPlan *token_selector_plan;
+  Buffer *token_selector_logits;
+  Buffer *token_selector_additive;
+  Buffer *token_selector_valid_mask;
+  Buffer *token_selector_output;
   bool array_operation;
   ArrayOperationPlan *array_operation_plan;
   AttentionBuffers array_operation_buffers;
@@ -986,6 +1016,9 @@ struct Completion final : QuarantineNode {
         matmul_weight(matmul_weight_value), matmul_output(matmul_output_value),
         argmax(argmax_plan_value != nullptr), argmax_plan(argmax_plan_value),
         argmax_logits(argmax_logits_value), argmax_output(argmax_output_value),
+        token_selector(false), token_selector_plan(nullptr),
+        token_selector_logits(nullptr), token_selector_additive(nullptr),
+        token_selector_valid_mask(nullptr), token_selector_output(nullptr),
         array_operation(array_plan_value != nullptr),
         array_operation_plan(array_plan_value),
         array_operation_buffers(array_buffers_value),
@@ -2973,6 +3006,26 @@ bool rollback_reserved_argmax_submission(
   return false;
 }
 
+bool rollback_reserved_token_selector_submission(
+    TokenSelectorPlan *const plan, Queue *const queue,
+    sllm_error_sink_t *const sink) noexcept {
+  Context *const context = plan->context;
+  std::lock_guard<std::mutex> lock(context->accounting_mutex);
+  if (sllm_public_runtime::AccountingState::
+          rollback_token_selector_submission(
+              context->accounting, queue->accounting,
+              plan->logits->accounting, plan->additive_logits->accounting,
+              plan->valid_mask->accounting, plan->output->accounting)) {
+    plan->in_flight = false;
+    return true;
+  }
+  poison_context_locked(context);
+  (void)sllm_public_runtime::write_error(
+      sink, SLLM_STATUS_INTERNAL_ERROR,
+      "token selector submission accounting rollback failed; context poisoned");
+  return false;
+}
+
 bool rollback_reserved_array_submission(
     ArrayOperationPlan *const plan, Queue *const queue,
     sllm_error_sink_t *const sink) noexcept {
@@ -3207,6 +3260,14 @@ bool release_submission_references(Completion *const completion) noexcept {
               completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
+    } else if (completion->token_selector) {
+      released = sllm_public_runtime::AccountingState::
+          release_token_selector_active(
+              completion->queue->accounting,
+              completion->token_selector_logits->accounting,
+              completion->token_selector_additive->accounting,
+              completion->token_selector_valid_mask->accounting,
+              completion->token_selector_output->accounting);
     } else if (completion->array_operation) {
       released = release_attention_active(completion->queue->accounting,
                                           completion->array_operation_buffers);
@@ -3247,6 +3308,10 @@ bool release_submission_references(Completion *const completion) noexcept {
   }
   if (completion->argmax && completion->argmax_plan != nullptr) {
     completion->argmax_plan->in_flight = false;
+  }
+  if (completion->token_selector &&
+      completion->token_selector_plan != nullptr) {
+    completion->token_selector_plan->in_flight = false;
   }
   if (completion->array_operation &&
       completion->array_operation_plan != nullptr) {
@@ -3294,6 +3359,14 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->context->accounting, completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
+    } else if (completion->token_selector) {
+      released = sllm_public_runtime::AccountingState::
+          rollback_token_selector_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->token_selector_logits->accounting,
+              completion->token_selector_additive->accounting,
+              completion->token_selector_valid_mask->accounting,
+              completion->token_selector_output->accounting);
     } else if (completion->array_operation) {
       released = rollback_attention_submission(
           completion->context->accounting, completion->queue->accounting,
@@ -3344,6 +3417,10 @@ bool rollback_submission_references(Completion *const completion) noexcept {
     if (completion->argmax && completion->argmax_plan != nullptr) {
       completion->argmax_plan->in_flight = false;
     }
+    if (completion->token_selector &&
+        completion->token_selector_plan != nullptr) {
+      completion->token_selector_plan->in_flight = false;
+    }
     if (completion->array_operation &&
         completion->array_operation_plan != nullptr) {
       completion->array_operation_plan->in_flight = false;
@@ -3393,6 +3470,14 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->context->accounting, completion->queue->accounting,
               completion->argmax_logits->accounting,
               completion->argmax_output->accounting);
+    } else if (completion->token_selector) {
+      released = sllm_public_runtime::AccountingState::
+          release_token_selector_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->token_selector_logits->accounting,
+              completion->token_selector_additive->accounting,
+              completion->token_selector_valid_mask->accounting,
+              completion->token_selector_output->accounting);
     } else if (completion->array_operation) {
       released = release_attention_completion(
           completion->context->accounting, completion->queue->accounting,
@@ -3495,7 +3580,8 @@ sllm_status_t poll_completion(Completion *const completion,
   }
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
-        completion->argmax || completion->array_operation ||
+        completion->argmax || completion->token_selector ||
+        completion->array_operation ||
         completion->kv_state_append || completion->causal_attention ||
         completion->linear_attention) {
       if (completion->timing_start_event == nullptr) {
@@ -4016,6 +4102,75 @@ private:
   NativeEventGuard *const event_guard_;
   sllm_error_sink_t *const sink_;
   bool argmax_;
+  uintptr_t token_;
+  Phase phase_;
+};
+
+class TokenSelectorExecuteScopeGuard final {
+public:
+  TokenSelectorExecuteScopeGuard(
+      TokenSelectorPlan *const plan, Queue *const queue,
+      std::unique_ptr<Completion> *const candidate,
+      NativeEventGuard *const event_guard, sllm_error_sink_t *const sink) noexcept
+      : plan_(plan), queue_(queue), candidate_(candidate),
+        event_guard_(event_guard), sink_(sink), token_(0U),
+        phase_(Phase::Reserved) {}
+
+  TokenSelectorExecuteScopeGuard(const TokenSelectorExecuteScopeGuard &) =
+      delete;
+  TokenSelectorExecuteScopeGuard &operator=(
+      const TokenSelectorExecuteScopeGuard &) = delete;
+
+  ~TokenSelectorExecuteScopeGuard() { cleanup(); }
+
+  void candidate_allocated() noexcept { phase_ = Phase::Candidate; }
+
+  void completion_registered(const uintptr_t token) noexcept {
+    token_ = token;
+    phase_ = Phase::Registered;
+  }
+
+  void disarm() noexcept { phase_ = Phase::Disarmed; }
+
+private:
+  enum class Phase : uint8_t { Reserved, Candidate, Registered, Disarmed };
+
+  void cleanup() noexcept {
+    switch (phase_) {
+    case Phase::Reserved:
+      (void)rollback_reserved_token_selector_submission(plan_, queue_, sink_);
+      break;
+    case Phase::Candidate:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)rollback_unpublished_submission(
+            *candidate_, *event_guard_,
+            "token selector execute unwound before completion registration",
+            sink_);
+      } else {
+        (void)rollback_reserved_token_selector_submission(plan_, queue_, sink_);
+      }
+      break;
+    case Phase::Registered:
+      if (candidate_ != nullptr && candidate_->get() != nullptr) {
+        (void)cleanup_failed_submission(
+            *candidate_, token_, hipErrorUnknown,
+            "token selector execute unwound after completion registration",
+            queue_, sink_);
+      } else {
+        poison_context(plan_->context);
+      }
+      break;
+    case Phase::Disarmed:
+      break;
+    }
+    phase_ = Phase::Disarmed;
+  }
+
+  TokenSelectorPlan *const plan_;
+  Queue *const queue_;
+  std::unique_ptr<Completion> *const candidate_;
+  NativeEventGuard *const event_guard_;
+  sllm_error_sink_t *const sink_;
   uintptr_t token_;
   Phase phase_;
 };
@@ -7246,6 +7401,7 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "matmul_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
+#include "token_selector_runtime.inc"
 #include "rotary_runtime.inc"
 #include "windowed_attention_runtime.inc"
 

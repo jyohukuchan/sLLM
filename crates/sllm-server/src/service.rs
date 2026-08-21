@@ -23,7 +23,9 @@ use crate::api::{
 use crate::lifecycle::ServerLifecycleV1;
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1, ServerMetricsV1};
 use crate::resume::{ReplayErrorV1, ResumableStoreV1};
-use crate::runtime::{GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1};
+use crate::runtime::{
+    BackendTokenLogprobV1, GenerationReceiverV1, ModelRegistryV1, SchedulerEventV1, SchedulerV1,
+};
 use crate::security::CredentialStoreV1;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -424,20 +426,39 @@ async fn create_chat_completion(
     } else {
         None
     };
-    let receiver = match state.scheduler.submit(model, request) {
-        Ok(receiver) => receiver,
-        Err(error) => {
-            if let Some(replay) = &reserved_replay {
-                replay.discard(&context.id);
+    let choice_count = request.choice_count();
+    let mut receivers = Vec::with_capacity(choice_count as usize);
+    let mut admission_error = None;
+    for index in 0..choice_count {
+        let choice_request = match request.for_choice(index) {
+            Ok(request) => request,
+            Err(error) => {
+                admission_error = Some(error);
+                break;
             }
-            if let Some(metrics) = &state.config.metrics {
-                metrics.record_rejected(&context.model, stream_response);
+        };
+        match state.scheduler.submit(Arc::clone(&model), choice_request) {
+            Ok(receiver) => receivers.push(IndexedGenerationReceiverV1 { index, receiver }),
+            Err(error) => {
+                admission_error = Some(error);
+                break;
             }
-            let response = error.into_response();
-            record_http(&state, HttpEndpointV1::ChatCompletions, &response);
-            return response;
         }
-    };
+    }
+    if let Some(error) = admission_error {
+        // Dropping already-admitted receivers cancels their independent slots;
+        // an n-choice request is never partially exposed to the client.
+        drop(receivers);
+        if let Some(replay) = &reserved_replay {
+            replay.discard(&context.id);
+        }
+        if let Some(metrics) = &state.config.metrics {
+            metrics.record_rejected(&context.model, stream_response);
+        }
+        let response = error.into_response();
+        record_http(&state, HttpEndpointV1::ChatCompletions, &response);
+        return response;
+    }
     let request_metrics = state
         .config
         .metrics
@@ -446,12 +467,12 @@ async fn create_chat_completion(
     let response = if stream_response && resumable {
         let replay =
             reserved_replay.expect("resumable replay was reserved before scheduler admission");
-        spawn_resumable_producer(receiver, context.clone(), replay.clone(), request_metrics);
+        spawn_resumable_producer(receivers, context.clone(), replay.clone(), request_metrics);
         replay_stream(replay, context.id.clone(), 0).into_response()
     } else if stream_response {
-        stream_chat_completion(receiver, context, request_metrics).into_response()
+        stream_chat_completion(receivers, context, request_metrics).into_response()
     } else {
-        non_stream_chat_completion(receiver, context, request_metrics).await
+        non_stream_chat_completion(receivers, context, request_metrics).await
     };
     record_http(&state, HttpEndpointV1::ChatCompletions, &response);
     response
@@ -524,82 +545,119 @@ fn validate_content_type(headers: &HeaderMap) -> Result<(), ApiErrorV1> {
     }
 }
 
+struct IndexedGenerationReceiverV1 {
+    index: u32,
+    receiver: GenerationReceiverV1,
+}
+
 async fn non_stream_chat_completion(
-    mut receiver: GenerationReceiverV1,
+    receivers: Vec<IndexedGenerationReceiverV1>,
     context: ResponseContextV1,
     mut metrics: Option<MetricsRequestHandleV1>,
 ) -> Response {
-    let mut splitter = ReasoningSplitterV1::new(context.reasoning);
-    let mut content = String::new();
-    let mut reasoning_content = String::new();
-    while let Some(event) = receiver.recv().await {
-        match event {
-            SchedulerEventV1::Delta(delta) => {
-                if let Some(metrics) = &mut metrics {
-                    metrics.observe_ttft_since_start();
+    let mut choices = Vec::with_capacity(receivers.len());
+    let mut usage = None;
+    for IndexedGenerationReceiverV1 {
+        index,
+        mut receiver,
+    } in receivers
+    {
+        let mut splitter = ReasoningSplitterV1::new(context.reasoning);
+        let mut content = String::new();
+        let mut reasoning_content = String::new();
+        let mut logprobs = None;
+        let mut completed = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                SchedulerEventV1::Delta(delta) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.observe_ttft_since_start();
+                    }
+                    append_split_parts(splitter.feed(&delta), &mut content, &mut reasoning_content);
                 }
-                append_split_parts(splitter.feed(&delta), &mut content, &mut reasoning_content);
-            }
-            SchedulerEventV1::Finished(completion) => {
-                if let Some(metrics) = &mut metrics {
-                    metrics.observe_ttft_since_start();
-                    metrics.record_tokens(
-                        completion.usage.prompt_tokens,
-                        completion.usage.completion_tokens,
-                    );
-                    metrics.finish(RequestOutcomeV1::Success);
+                SchedulerEventV1::Logprobs(values) => {
+                    logprobs = Some(ChatLogprobsV1::from_backend(values));
                 }
-                append_split_parts(splitter.finish(), &mut content, &mut reasoning_content);
-                return axum::Json(ChatCompletionResponseV1 {
-                    id: &context.id,
-                    object: "chat.completion",
-                    created: context.created,
-                    model: &context.model,
-                    choices: [ChatCompletionChoiceV1 {
-                        index: 0,
+                SchedulerEventV1::Finished(completion) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.observe_ttft_since_start();
+                    }
+                    append_split_parts(splitter.finish(), &mut content, &mut reasoning_content);
+                    if let Err(error) = merge_choice_usage(&mut usage, completion.usage) {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        return error.into_response();
+                    }
+                    choices.push(ChatCompletionChoiceV1 {
+                        index,
                         message: AssistantMessageV1 {
                             role: "assistant",
-                            content: &content,
+                            content,
                             reasoning_content: context
                                 .reasoning
                                 .separate_reasoning()
-                                .then_some(reasoning_content.as_str()),
+                                .then_some(reasoning_content),
                         },
-                        logprobs: None,
+                        logprobs,
                         finish_reason: completion.finish_reason,
-                    }],
-                    usage: completion.usage,
-                })
-                .into_response();
-            }
-            SchedulerEventV1::Failed(error) => {
-                if let Some(metrics) = &mut metrics {
-                    metrics.finish(RequestOutcomeV1::Error);
+                    });
+                    completed = true;
+                    break;
                 }
-                return error.into_response();
+                SchedulerEventV1::Failed(error) => {
+                    if let Some(metrics) = &mut metrics {
+                        metrics.finish(RequestOutcomeV1::Error);
+                    }
+                    return error.into_response();
+                }
             }
         }
+        if !completed {
+            if let Some(metrics) = &mut metrics {
+                metrics.finish(RequestOutcomeV1::Error);
+            }
+            return ApiErrorV1::generation_failed("generation ended without a terminal event")
+                .into_response();
+        }
     }
+    let usage = usage.expect("validated request always contains at least one choice");
     if let Some(metrics) = &mut metrics {
-        metrics.finish(RequestOutcomeV1::Error);
+        metrics.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+        metrics.finish(RequestOutcomeV1::Success);
     }
-    ApiErrorV1::generation_failed("generation ended without a terminal event").into_response()
+    axum::Json(ChatCompletionResponseV1 {
+        id: context.id,
+        object: "chat.completion",
+        created: context.created,
+        model: context.model,
+        choices,
+        usage,
+    })
+    .into_response()
 }
 
 fn stream_chat_completion(
-    receiver: GenerationReceiverV1,
+    receivers: Vec<IndexedGenerationReceiverV1>,
     context: ResponseContextV1,
     metrics: Option<MetricsRequestHandleV1>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let reasoning = context.reasoning;
+    let mut receivers = VecDeque::from(receivers);
+    let current = receivers
+        .pop_front()
+        .expect("validated request always contains at least one choice");
     let state = StreamStateV1 {
-        receiver,
+        current,
+        receivers,
         context,
         role_pending: true,
         queued: VecDeque::new(),
         terminal: false,
         splitter: ReasoningSplitterV1::new(reasoning),
         metrics,
+        usage: None,
+        logprobs: None,
     };
     Sse::new(stream::unfold(state, |mut state| async move {
         loop {
@@ -611,40 +669,71 @@ fn stream_chat_completion(
             }
             if state.role_pending {
                 state.role_pending = false;
-                let chunk = StreamChunkV1::role(&state.context);
+                let chunk = StreamChunkV1::role(&state.context, state.current.index);
                 return Some((Ok(json_event(&chunk)), state));
             }
-            match state.receiver.recv().await {
+            match state.current.receiver.recv().await {
                 Some(SchedulerEventV1::Delta(delta)) => {
                     if let Some(metrics) = &mut state.metrics {
                         metrics.observe_ttft_since_start();
                     }
                     for part in state.splitter.feed(&delta) {
-                        let chunk = StreamChunkV1::delta(&state.context, &part);
+                        let chunk =
+                            StreamChunkV1::delta(&state.context, state.current.index, &part);
                         state.queued.push_back(json_event(&chunk));
                     }
+                }
+                Some(SchedulerEventV1::Logprobs(values)) => {
+                    state.logprobs = Some(ChatLogprobsV1::from_backend(values));
                 }
                 Some(SchedulerEventV1::Finished(completion)) => {
                     if let Some(metrics) = &mut state.metrics {
                         metrics.observe_ttft_since_start();
-                        metrics.record_tokens(
-                            completion.usage.prompt_tokens,
-                            completion.usage.completion_tokens,
-                        );
-                        metrics.finish(RequestOutcomeV1::Success);
                     }
                     for part in state.splitter.finish() {
-                        let chunk = StreamChunkV1::delta(&state.context, &part);
+                        let chunk =
+                            StreamChunkV1::delta(&state.context, state.current.index, &part);
                         state.queued.push_back(json_event(&chunk));
                     }
+                    if merge_choice_usage(&mut state.usage, completion.usage).is_err() {
+                        if let Some(metrics) = &mut state.metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        state.terminal = true;
+                        let error = ApiErrorV1::generation_failed(
+                            "independent choice token accounting is inconsistent",
+                        );
+                        return Some((Ok(json_event(&error.envelope())), state));
+                    }
+                    let last_choice = state.receivers.is_empty();
                     let chunk = StreamChunkV1::finished(
                         &state.context,
+                        state.current.index,
                         completion.finish_reason,
-                        completion.usage,
+                        last_choice.then_some(
+                            state
+                                .usage
+                                .expect("usage was merged before the final choice"),
+                        ),
+                        state.logprobs.as_ref(),
                     );
                     state.queued.push_back(json_event(&chunk));
-                    state.queued.push_back(Event::default().data("[DONE]"));
-                    state.terminal = true;
+                    if let Some(next) = state.receivers.pop_front() {
+                        state.current = next;
+                        state.splitter = ReasoningSplitterV1::new(state.context.reasoning);
+                        state.role_pending = true;
+                        state.logprobs = None;
+                    } else {
+                        let usage = state
+                            .usage
+                            .expect("usage was merged before the final choice");
+                        if let Some(metrics) = &mut state.metrics {
+                            metrics.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+                            metrics.finish(RequestOutcomeV1::Success);
+                        }
+                        state.queued.push_back(Event::default().data("[DONE]"));
+                        state.terminal = true;
+                    }
                 }
                 Some(SchedulerEventV1::Failed(error)) => {
                     if let Some(metrics) = &mut state.metrics {
@@ -730,104 +819,130 @@ fn parse_last_event_id(headers: &HeaderMap) -> Result<u64, ApiErrorV1> {
 }
 
 fn spawn_resumable_producer(
-    mut receiver: GenerationReceiverV1,
+    receivers: Vec<IndexedGenerationReceiverV1>,
     context: ResponseContextV1,
     replay: ResumableStoreV1,
     mut metrics: Option<MetricsRequestHandleV1>,
 ) {
     tokio::spawn(async move {
-        let role = StreamChunkV1::role(&context);
-        if append_replay_json(&replay, &context.id, &role, false).is_err() {
+        let choice_count = receivers.len();
+        let mut usage = None;
+        for (
+            position,
+            IndexedGenerationReceiverV1 {
+                index,
+                mut receiver,
+            },
+        ) in receivers.into_iter().enumerate()
+        {
+            let role = StreamChunkV1::role(&context, index);
+            if append_replay_json(&replay, &context.id, &role, false).is_err() {
+                if let Some(metrics) = &mut metrics {
+                    metrics.finish(RequestOutcomeV1::Error);
+                }
+                terminate_replay_with_error(&replay, &context.id);
+                return;
+            }
+            let mut splitter = ReasoningSplitterV1::new(context.reasoning);
+            let mut logprobs = None;
+            let mut completed = false;
+            while let Some(event) = receiver.recv().await {
+                match event {
+                    SchedulerEventV1::Delta(delta) => {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.observe_ttft_since_start();
+                        }
+                        for part in splitter.feed(&delta) {
+                            let chunk = StreamChunkV1::delta(&context, index, &part);
+                            if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                                if let Some(metrics) = &mut metrics {
+                                    metrics.finish(RequestOutcomeV1::Error);
+                                }
+                                terminate_replay_with_error(&replay, &context.id);
+                                return;
+                            }
+                        }
+                    }
+                    SchedulerEventV1::Logprobs(values) => {
+                        logprobs = Some(ChatLogprobsV1::from_backend(values));
+                    }
+                    SchedulerEventV1::Finished(completion) => {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.observe_ttft_since_start();
+                        }
+                        for part in splitter.finish() {
+                            let chunk = StreamChunkV1::delta(&context, index, &part);
+                            if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                                if let Some(metrics) = &mut metrics {
+                                    metrics.finish(RequestOutcomeV1::Error);
+                                }
+                                terminate_replay_with_error(&replay, &context.id);
+                                return;
+                            }
+                        }
+                        if merge_choice_usage(&mut usage, completion.usage).is_err() {
+                            if let Some(metrics) = &mut metrics {
+                                metrics.finish(RequestOutcomeV1::Error);
+                            }
+                            terminate_replay_with_error(&replay, &context.id);
+                            return;
+                        }
+                        let last_choice = position + 1 == choice_count;
+                        let chunk = StreamChunkV1::finished(
+                            &context,
+                            index,
+                            completion.finish_reason,
+                            last_choice.then_some(
+                                usage.expect("usage was merged before the final choice"),
+                            ),
+                            logprobs.as_ref(),
+                        );
+                        if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
+                            if let Some(metrics) = &mut metrics {
+                                metrics.finish(RequestOutcomeV1::Error);
+                            }
+                            terminate_replay_with_error(&replay, &context.id);
+                            return;
+                        }
+                        completed = true;
+                        break;
+                    }
+                    SchedulerEventV1::Failed(error) => {
+                        if let Some(metrics) = &mut metrics {
+                            metrics.finish(RequestOutcomeV1::Error);
+                        }
+                        let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| {
+                            r#"{"error":{"message":"response serialization failed","type":"server_error","param":null,"code":"generation_failed"}}"#.to_owned()
+                        });
+                        if replay.append(&context.id, data, true).is_err() {
+                            replay.terminate(&context.id);
+                        }
+                        return;
+                    }
+                }
+            }
+            if !completed {
+                if let Some(metrics) = &mut metrics {
+                    metrics.finish(RequestOutcomeV1::Error);
+                }
+                terminate_replay_with_error(&replay, &context.id);
+                return;
+            }
+        }
+        if replay
+            .append(&context.id, "[DONE]".to_owned(), true)
+            .is_err()
+        {
             if let Some(metrics) = &mut metrics {
                 metrics.finish(RequestOutcomeV1::Error);
             }
             terminate_replay_with_error(&replay, &context.id);
             return;
         }
-        let mut splitter = ReasoningSplitterV1::new(context.reasoning);
-        while let Some(event) = receiver.recv().await {
-            match event {
-                SchedulerEventV1::Delta(delta) => {
-                    if let Some(metrics) = &mut metrics {
-                        metrics.observe_ttft_since_start();
-                    }
-                    for part in splitter.feed(&delta) {
-                        let chunk = StreamChunkV1::delta(&context, &part);
-                        if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
-                            if let Some(metrics) = &mut metrics {
-                                metrics.finish(RequestOutcomeV1::Error);
-                            }
-                            terminate_replay_with_error(&replay, &context.id);
-                            return;
-                        }
-                    }
-                }
-                SchedulerEventV1::Finished(completion) => {
-                    if let Some(metrics) = &mut metrics {
-                        metrics.observe_ttft_since_start();
-                        metrics.record_tokens(
-                            completion.usage.prompt_tokens,
-                            completion.usage.completion_tokens,
-                        );
-                    }
-                    for part in splitter.finish() {
-                        let chunk = StreamChunkV1::delta(&context, &part);
-                        if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
-                            if let Some(metrics) = &mut metrics {
-                                metrics.finish(RequestOutcomeV1::Error);
-                            }
-                            terminate_replay_with_error(&replay, &context.id);
-                            return;
-                        }
-                    }
-                    let chunk = StreamChunkV1::finished(
-                        &context,
-                        completion.finish_reason,
-                        completion.usage,
-                    );
-                    if append_replay_json(&replay, &context.id, &chunk, false).is_err() {
-                        if let Some(metrics) = &mut metrics {
-                            metrics.finish(RequestOutcomeV1::Error);
-                        }
-                        terminate_replay_with_error(&replay, &context.id);
-                        return;
-                    }
-                    if replay
-                        .append(&context.id, "[DONE]".to_owned(), true)
-                        .is_err()
-                    {
-                        if let Some(metrics) = &mut metrics {
-                            metrics.finish(RequestOutcomeV1::Error);
-                        }
-                        terminate_replay_with_error(&replay, &context.id);
-                        return;
-                    }
-                    if let Some(metrics) = &mut metrics {
-                        metrics.finish(RequestOutcomeV1::Success);
-                    }
-                    return;
-                }
-                SchedulerEventV1::Failed(error) => {
-                    if let Some(metrics) = &mut metrics {
-                        metrics.finish(RequestOutcomeV1::Error);
-                    }
-                    let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| {
-                        r#"{"error":{"message":"response serialization failed","type":"server_error","param":null,"code":"generation_failed"}}"#.to_owned()
-                    });
-                    if replay.append(&context.id, data, true).is_err() {
-                        replay.terminate(&context.id);
-                    }
-                    return;
-                }
-            }
-        }
+        let usage = usage.expect("validated request always contains at least one choice");
         if let Some(metrics) = &mut metrics {
-            metrics.finish(RequestOutcomeV1::Error);
-        }
-        let error = ApiErrorV1::generation_failed("generation ended without a terminal event");
-        let data = serde_json::to_string(&error.envelope()).unwrap_or_else(|_| "{}".to_owned());
-        if replay.append(&context.id, data, true).is_err() {
-            replay.terminate(&context.id);
+            metrics.record_tokens(usage.prompt_tokens, usage.completion_tokens);
+            metrics.finish(RequestOutcomeV1::Success);
         }
     });
 }
@@ -1057,14 +1172,41 @@ fn append_split_parts(
     }
 }
 
+fn merge_choice_usage(
+    aggregate: &mut Option<TokenUsageV1>,
+    choice: TokenUsageV1,
+) -> Result<(), ApiErrorV1> {
+    let Some(current) = aggregate.as_mut() else {
+        *aggregate = Some(choice);
+        return Ok(());
+    };
+    if current.prompt_tokens != choice.prompt_tokens {
+        return Err(ApiErrorV1::generation_failed(
+            "independent choices reported different prompt token counts",
+        ));
+    }
+    current.completion_tokens = current
+        .completion_tokens
+        .checked_add(choice.completion_tokens)
+        .ok_or_else(|| ApiErrorV1::generation_failed("choice token accounting overflowed"))?;
+    current.total_tokens = current
+        .prompt_tokens
+        .checked_add(current.completion_tokens)
+        .ok_or_else(|| ApiErrorV1::generation_failed("choice token accounting overflowed"))?;
+    Ok(())
+}
+
 struct StreamStateV1 {
-    receiver: GenerationReceiverV1,
+    current: IndexedGenerationReceiverV1,
+    receivers: VecDeque<IndexedGenerationReceiverV1>,
     context: ResponseContextV1,
     role_pending: bool,
     queued: VecDeque<Event>,
     terminal: bool,
     splitter: ReasoningSplitterV1,
     metrics: Option<MetricsRequestHandleV1>,
+    usage: Option<TokenUsageV1>,
+    logprobs: Option<ChatLogprobsV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -1106,29 +1248,73 @@ struct ModelObjectV1<'a> {
 }
 
 #[derive(Serialize)]
-struct ChatCompletionResponseV1<'a> {
-    id: &'a str,
+struct ChatCompletionResponseV1 {
+    id: String,
     object: &'static str,
     created: u64,
-    model: &'a str,
-    choices: [ChatCompletionChoiceV1<'a>; 1],
+    model: String,
+    choices: Vec<ChatCompletionChoiceV1>,
     usage: TokenUsageV1,
 }
 
 #[derive(Serialize)]
-struct ChatCompletionChoiceV1<'a> {
+struct ChatCompletionChoiceV1 {
     index: u32,
-    message: AssistantMessageV1<'a>,
-    logprobs: Option<()>,
+    message: AssistantMessageV1,
+    logprobs: Option<ChatLogprobsV1>,
     finish_reason: FinishReasonV1,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct ChatLogprobsV1 {
+    content: Vec<ChatTokenLogprobV1>,
+}
+
+impl ChatLogprobsV1 {
+    fn from_backend(values: Vec<BackendTokenLogprobV1>) -> Self {
+        Self {
+            content: values
+                .into_iter()
+                .map(|value| ChatTokenLogprobV1 {
+                    token: value.token,
+                    bytes: value.bytes,
+                    logprob: value.logprob,
+                    top_logprobs: value
+                        .top_logprobs
+                        .into_iter()
+                        .map(|top| ChatTopLogprobV1 {
+                            token: top.token,
+                            bytes: top.bytes,
+                            logprob: top.logprob,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChatTokenLogprobV1 {
+    token: String,
+    bytes: Option<Vec<u8>>,
+    logprob: f64,
+    top_logprobs: Vec<ChatTopLogprobV1>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ChatTopLogprobV1 {
+    token: String,
+    bytes: Option<Vec<u8>>,
+    logprob: f64,
+}
+
 #[derive(Serialize)]
-struct AssistantMessageV1<'a> {
+struct AssistantMessageV1 {
     role: &'static str,
-    content: &'a str,
+    content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_content: Option<&'a str>,
+    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1143,9 +1329,10 @@ struct StreamChunkV1<'a> {
 }
 
 impl<'a> StreamChunkV1<'a> {
-    fn role(context: &'a ResponseContextV1) -> Self {
+    fn role(context: &'a ResponseContextV1, index: u32) -> Self {
         Self::new(
             context,
+            index,
             StreamDeltaV1 {
                 role: Some("assistant"),
                 content: Some(""),
@@ -1153,12 +1340,14 @@ impl<'a> StreamChunkV1<'a> {
             },
             None,
             None,
+            None,
         )
     }
 
-    fn delta(context: &'a ResponseContextV1, part: &'a SplitPartV1) -> Self {
+    fn delta(context: &'a ResponseContextV1, index: u32, part: &'a SplitPartV1) -> Self {
         Self::new(
             context,
+            index,
             StreamDeltaV1 {
                 role: None,
                 content: part.content.as_deref(),
@@ -1166,31 +1355,38 @@ impl<'a> StreamChunkV1<'a> {
             },
             None,
             None,
+            None,
         )
     }
 
     fn finished(
         context: &'a ResponseContextV1,
+        index: u32,
         finish_reason: FinishReasonV1,
-        usage: TokenUsageV1,
+        usage: Option<TokenUsageV1>,
+        logprobs: Option<&'a ChatLogprobsV1>,
     ) -> Self {
         Self::new(
             context,
+            index,
             StreamDeltaV1 {
                 role: None,
                 content: None,
                 reasoning_content: None,
             },
             Some(finish_reason),
-            Some(usage),
+            usage,
+            logprobs,
         )
     }
 
     fn new(
         context: &'a ResponseContextV1,
+        index: u32,
         delta: StreamDeltaV1<'a>,
         finish_reason: Option<FinishReasonV1>,
         usage: Option<TokenUsageV1>,
+        logprobs: Option<&'a ChatLogprobsV1>,
     ) -> Self {
         Self {
             id: &context.id,
@@ -1198,9 +1394,9 @@ impl<'a> StreamChunkV1<'a> {
             created: context.created,
             model: &context.model,
             choices: [StreamChoiceV1 {
-                index: 0,
+                index,
                 delta,
-                logprobs: None,
+                logprobs,
                 finish_reason,
             }],
             usage,
@@ -1212,7 +1408,7 @@ impl<'a> StreamChunkV1<'a> {
 struct StreamChoiceV1<'a> {
     index: u32,
     delta: StreamDeltaV1<'a>,
-    logprobs: Option<()>,
+    logprobs: Option<&'a ChatLogprobsV1>,
     finish_reason: Option<FinishReasonV1>,
 }
 

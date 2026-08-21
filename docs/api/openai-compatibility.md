@@ -37,7 +37,8 @@ model-lock fingerprint as specified in
 
 ### `POST /v1/chat/completions`
 
-The original profile accepts one text chat and produces one text completion.
+The original profile accepts one text chat and produces one or more bounded text
+completions (`n` up to 8).
 Phase 17 adds the versioned multimodal input subset below without changing the
 response or SSE shape for text-only clients.
 
@@ -62,7 +63,15 @@ Supported generation fields are:
 - `frequency_penalty`;
 - `seed` as an optional signed 64-bit integer, matching the pinned OpenAPI `int64` schema;
 - `stream`;
-- `n`, only when its value is `1`.
+- `n`, an integer in the inclusive range `1..=8`;
+- `logit_bias`, a sparse object whose decimal token-ID keys map to finite values in
+  `[-100,100]` (at most 4,096 entries);
+- `logprobs` and `top_logprobs`. `logprobs` is boolean and
+  `top_logprobs` is an integer in `0..=20`; the latter requires
+  `logprobs: true`;
+- `response_format` with the `text`, `json_object`, or bounded `json_schema`
+  variants described below; and
+- the opt-in `sllm` extension object described in [Sampler-chain extension](#sampler-chain-extension).
 
 The server validates the ranges and types defined by the pinned OpenAI schema. It
 must reject any request containing an unsupported field or value even when the
@@ -73,9 +82,19 @@ Phase 17 resource limits cap the JSON body at 96 MiB so two bounded Base64 image
 payload is also bounded by the request-body limit.
 
 For `stream: false` or an omitted `stream`, the response is the standard
-`chat.completion` object with one choice. The choice contains an assistant text
-message and a `finish_reason`; token accounting is returned in the standard
-`usage` object when available under the pinned schema.
+`chat.completion` object with `n` choices. Each choice has a stable zero-based
+`index`, an assistant text message, and a `finish_reason`; token accounting is
+returned in the standard `usage` object when available under the pinned schema.
+Prompt tokens are counted once while completion tokens are summed across
+choices. Choice zero retains the requested `seed`; later choices use a
+versioned deterministic derivation when a seed is present.
+
+When `logprobs: true`, each generated token exposes the selected token
+log-probability. `top_logprobs` requests up to 20 alternatives at each token.
+The values are computed after all configured masks and sampler stages, so a
+grammar-rejected token never appears as selected or as a top alternative.
+For SSE, profile v1 publishes the accumulated per-choice `logprobs.content`
+array on that choice's terminal chunk; content deltas remain unchanged.
 
 For `stream: true`, the response uses Server-Sent Events with content type
 `text/event-stream`. Each event is framed as `data: <JSON>\n\n` and contains a
@@ -88,6 +107,28 @@ and does not emit a final completion chunk or `[DONE]`. This is an explicit sLLM
 terminal-error convention, not a claim that OpenAI specifies an equivalent
 mid-stream error event. Clients must treat close-without-`[DONE]` as failure and
 must not retain the partial text as a successful completion.
+
+### Structured output
+
+`response_format: {"type":"text"}` leaves ordinary unconstrained text
+generation unchanged. `json_object` enables the bounded JSON grammar and also
+requires at least one message to mention “JSON” (case-insensitive), matching the
+OpenAI request convention. This generic mode permits depth 1, up to four
+members/items per object/array container, string/number length up to 64, and
+whitespace up to 16 bytes. `json_schema` accepts a schema envelope with a
+non-empty name (at most 256 bytes), an optional description (at most 4,096
+bytes), an optional boolean `strict`, and a schema no larger than 64 KiB.
+
+The schema lowerer is deliberately fail-closed. It supports only `$ref` to a
+local `$defs` entry, `$defs`, `type`, `properties`, `required`,
+`additionalProperties: false`, `items`, `enum`, `const`, and `anyOf`. Supported
+types are `object`, `array`, `string`, `number`, `integer`, `boolean`, and
+`null`; property, enum, nesting, and grammar-state limits are bounded. Keywords
+such as `pattern`, `format`, numeric/string/array size bounds, `allOf`, `not`,
+conditional/dependent keywords, `oneOf`, remote references, and recursive
+references are rejected with `invalid_value` instead of being ignored. The
+lowerer does not silently widen this subset when a schema contains one of these
+keywords.
 
 ## Errors and unsupported features
 
@@ -127,12 +168,9 @@ particular, profile v1 rejects:
 
 - tools, function calling, tool choice, and tool messages;
 - image content outside the Phase 17 subset below, and all video or audio content;
-- `logprobs` and `top_logprobs`;
-- structured output and `response_format`;
 - reproducibility claims involving `system_fingerprint`（同一model artifact、runtime、target、
   request parameter内では`seed`をsampling RNGへ固定するが、異なるtuple間のbitwise再現性は保証しない）;
-- `n` with any value other than `1`;
-- multipart message content and non-text output; and
+- multipart content on system or assistant messages and non-text output; and
 - other pinned-schema fields not explicitly listed as supported above.
 
 ### Phase 17 image-content subset
@@ -204,6 +242,42 @@ engine-specific behavior.
 An extension is opt-in. An unrecognized member inside `sllm` is also an error; it
 is not silently ignored. Extension fields are not part of the compatibility claim
 and must be documented and versioned independently.
+
+### Sampler-chain extension
+
+`sllm.sampling` selects sampler-chain version `1` and keeps the stage order
+transport-independent. The accepted controls are `top_k` (`0..=1,000,000`),
+`min_p` (`0..=1`), `typical_p` (`(0,1]`), `repeat_penalty` (`(0,100]`),
+`repeat_last_n` (`0..=4,096`), and `ignore_eos`. Optional bounded stages are
+`dry`, `xtc`, `mirostat`, and `dynamic_temperature`:
+
+```json
+{
+  "sllm": {
+    "sampling": {
+      "chain_version": 1,
+      "top_k": 40,
+      "min_p": 0.05,
+      "repeat_penalty": 1.1,
+      "dry": {
+        "multiplier": 0.5,
+        "base": 1.75,
+        "allowed_length": 2,
+        "penalty_last_n": 64,
+        "sequence_breakers": ["\n", ":"]
+      },
+      "xtc": {"probability": 0.1, "threshold": 0.1, "min_keep": 1},
+      "dynamic_temperature": {"range": 0.2, "exponent": 1.0}
+    }
+  }
+}
+```
+
+DRY sequence breakers are limited to 16 unique strings and 1,024 total bytes;
+history and all stage-specific bounds are fail-closed. Mirostat version `1` or
+`2` uses `tau` in `(0,100]` and `eta` in `(0,1]`, and cannot be combined with
+`top_k`, `min_p`, `typical_p`, XTC, or dynamic temperature. Unknown members and
+unsupported combinations return `invalid_value`.
 
 ### Thinking and separated reasoning extension
 

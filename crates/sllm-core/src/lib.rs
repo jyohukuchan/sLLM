@@ -16,6 +16,7 @@ mod gemma4_graph;
 mod gguf;
 mod gguf_convert;
 mod gguf_writer;
+mod grammar;
 mod handles;
 mod kv_state;
 mod linear_attention;
@@ -112,6 +113,12 @@ pub use gguf_writer::{
     DerivedGgufConverter, DerivedGgufLock, DerivedGgufOutput, GgufWritePlan, GgufWriteReport,
     GgufWriteTensor, VerifiedDerivedGguf, read_derived_gguf_lock, verify_derived_gguf, write_gguf,
 };
+pub use grammar::{
+    CompiledGrammar, GrammarError, GrammarState, JsonSchemaLowerer, MAX_GRAMMAR_ACTIVE_STATES,
+    MAX_GRAMMAR_ALTERNATIVES, MAX_GRAMMAR_BYTES, MAX_GRAMMAR_NAME_BYTES, MAX_GRAMMAR_NESTING,
+    MAX_GRAMMAR_REPEAT, MAX_GRAMMAR_RULES, MAX_GRAMMAR_STACK, MAX_JSON_ENUM, MAX_JSON_PROPERTIES,
+    MAX_TOKEN_PIECE_BYTES, MAX_TOKEN_TRIE_NODES, TokenTrie, Utf8State,
+};
 pub use handles::{
     AccessMode, BufferHandle, BufferUse, CompletionLease, EventHandle, InFlightSubmission,
     QueueHandle,
@@ -158,7 +165,8 @@ pub use op::{
     AttentionPreprocessPositionMode, AttentionPreprocessTensor, ElementwiseTensor, OpError,
     RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor,
     RotaryTensor, SemanticOp, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract,
-    SplitHalfRotaryContract, WindowedCausalAttentionContract,
+    SplitHalfRotaryContract, TokenSelectorContractV1, TokenSelectorTensor,
+    WindowedCausalAttentionContract,
 };
 pub use prepared_execution::{
     ExecutionBoundaryKind, PreparedCachePolicy, PreparedDynamicIdentity, PreparedExecutionAudit,
@@ -222,7 +230,12 @@ pub use qwen35_moe::{
 };
 pub use registry::{BACKEND_REGISTRY, BackendRegistration, backend_registry};
 pub use sampling::{
-    OsSamplingRandom, ProfileSamplerV1, SamplingError, SamplingParametersV1, SamplingRandomSource,
+    DeviceTokenSelectorRequestV1, DrySamplingConfigV1, DynamicTemperatureV1, LogitBiasV1,
+    MAX_CANDIDATES, MAX_SAMPLING_HISTORY, MAX_SEQUENCE_BREAKER_TOKENS, MAX_SEQUENCE_BREAKERS,
+    MirostatModeV1, MirostatSamplingConfigV1, OsSamplingRandom, ProfileSamplerV1,
+    SAMPLER_CHAIN_SCHEMA_V1, SAMPLER_STAGE_ORDER_V1, SamplerChainConfigV1, SamplerChainV1,
+    SamplerStageV1, SamplingError, SamplingLogprobV1, SamplingParametersV1, SamplingRandomSource,
+    SamplingSelectionV1, XtcSamplingConfigV1,
 };
 pub use speculative::{
     DraftToken, OpaqueStateCheckpoint, SpeculativeDecision, SpeculativeError,
@@ -668,6 +681,58 @@ mod tests {
             ),
             OpError::ArgmaxVocabTooLarge { vocab: 1_048_577 }
         );
+    }
+
+    #[test]
+    fn token_selector_freezes_contract_and_tensor_boundaries() {
+        let contract = TokenSelectorContractV1::new(257, 0.7, 11, 3).unwrap();
+        assert_eq!(contract.vocab_size(), 257);
+        assert_eq!(contract.temperature_bits(), 0.7_f32.to_bits());
+        assert_eq!(contract.seed(), 11);
+        assert_eq!(contract.counter(), 3);
+        let valid = SemanticOpDescriptor::new_token_select(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::F32, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::U8, &[1, 257]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::U8, &[16]).unwrap()],
+            contract,
+        )
+        .unwrap();
+        assert_eq!(valid.kind(), SemanticOpKind::TokenSelect);
+        assert_eq!(valid.token_selector_contract(), Some(contract));
+
+        assert_eq!(
+            TokenSelectorContractV1::new(0, 1.0, 0, 0),
+            Err(OpError::TokenSelectorVocabOutOfRange { vocab: 0 })
+        );
+        assert!(matches!(
+            TokenSelectorContractV1::new(1, f32::NAN, 0, 0),
+            Err(OpError::TokenSelectorInvalidTemperature { .. })
+        ));
+        let shape_error = SemanticOpDescriptor::new_token_select(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, 256]).unwrap(),
+                TensorView::contiguous(DType::F32, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::U8, &[1, 257]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::U8, &[16]).unwrap()],
+            contract,
+        )
+        .unwrap_err();
+        assert_eq!(shape_error, OpError::TokenSelectorShapeMismatch);
+        let output_error = SemanticOpDescriptor::new_token_select(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::F32, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::U8, &[1, 257]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::U8, &[15]).unwrap()],
+            contract,
+        )
+        .unwrap_err();
+        assert_eq!(output_error, OpError::TokenSelectorOutputShapeMismatch);
     }
 
     #[test]

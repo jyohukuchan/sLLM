@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-20
+> 最終更新: 2026-08-21
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
 
@@ -493,6 +493,27 @@ FP16 KV、`23066`×10,001 input / 2 output、greedy、3+10を実行した。curr
 `[23066,23066]`、sLLMはfallback/cleanup 0、llama.cppは33/33 layer full GPU offload、終了後process 0だった。
 GGUF identityは異なるためE1 system-equivalentに限定する。Phase 35のR9700 messages rowは入力・生成が異なり、
 この比率へ混ぜない。[R9700 summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
+
+### 2026-08-21 Phase40 token selector・grammar scope（verification中）
+
+Phase 40のhost/API実装は、ordered sampler chain、bounded GBNF/JSON Schema、raw-byte/token-trie/partial UTF-8 state、post-mask
+logprobs、`n=1..=8` choice stateを提供する。HIPは既存Argmax ABIと分離したadditive `TokenSelect` contractを実装し、Qwen/Gemmaの
+terminal projectionと同じqueueでF32 additive/U8 valid-maskを使い、completion後に固定16-byte selected recordだけをreadbackする。
+これはPhase40全体の実機対応宣言ではなく、selector contract matrix取得済み・sampled-generation integration継続中の限定statusである。
+
+| exact target | Phase40 lifecycle | Phase40 evidence | status |
+| --- | --- | --- | --- |
+| V620 `gfx1030` | `experimental` | `project-verified`（selector scope） | vocab `1,3,17,255,256,257,248320`×counter `0,1`、CPU token/logprob、fallback 0、selected-only D2H 16 bytes |
+| R9700 `gfx1201` | `experimental` | `project-verified`（selector scope） | V620と同一matrix、CPU token/logprob tolerance `.005`、fallback 0、selected-only D2H 16 bytes |
+| MI300X `gfx942:sramecc+:xnack-` | `experimental` | `unverified` | wave64 feature-pinned compile-only PASS。real correctness/performanceはVM再確保後へdeferred |
+
+V620/R9700 selector matrixはodd vocabulary・mask/bias、NaN/Inf/all-mask、fixed seed、CPU oracle（logprob tolerance `.005`）、fallback 0、
+selected record D2H 16 bytes、full-vocabulary D2H 0を記録済みである。GPU unavailable、timeout、crash、zero selectionはPASSとしない。
+Qwen/Gemma sampled-generationの最終統合runとPhase40全体のrelease reviewは別途継続する。既存R9700 10,001/2 E1 E2EはPhase40 selector
+evidenceとは別である。Phase40ではllama.cpp sourceの直接reuseはなく、provenance lockは変更しない。詳細は
+[archive plan](../plans/archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)と
+[history](../history/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)および
+[tracked GPU summary](../../ci/matrix/phase40-token-selector-gpu-summary-v1.json)を参照する。
 
 ## 将来AMD候補
 

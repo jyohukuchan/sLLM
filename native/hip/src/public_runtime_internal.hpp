@@ -547,6 +547,230 @@ struct AccountingState final {
     return true;
   }
 
+  /* Token selector owns four descriptor bindings (logits, additive bias,
+   * validity mask, and the fixed-size output record).  Keep alias handling
+   * explicit: descriptors may reuse one backing buffer only when their
+   * intervals are disjoint, and accounting therefore counts repeated pointer
+   * identities with their exact multiplicity. */
+  static constexpr std::size_t token_selector_resource_count = 4U;
+
+  static void token_selector_resource_multiplicities(
+      AccountingState *const *const resources,
+      uint64_t *const multiplicities) noexcept {
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      multiplicities[index] = 0U;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      std::size_t first = index;
+      for (std::size_t prior = 0U; prior != index; ++prior) {
+        if (resources[prior] == resources[index]) {
+          first = prior;
+          break;
+        }
+      }
+      ++multiplicities[first];
+    }
+  }
+
+  static bool reserve_token_selector_prepared_plan(
+      AccountingState &context, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_add(context.child_count, 1U) ||
+        !can_add(context.lifetime_guards, 1U)) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          !can_add(resources[index]->child_count, multiplicities[index])) {
+        return false;
+      }
+    }
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->child_count += multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool release_token_selector_prepared_plan(
+      AccountingState &context, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    if (context.child_count == 0U || context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->child_count < multiplicities[index]) {
+        return false;
+      }
+    }
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->child_count -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool reserve_token_selector_submission(
+      AccountingState &context, AccountingState &queue,
+      AccountingState &logits, AccountingState &additive,
+      AccountingState &valid_mask, AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards)) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          (!can_add(resources[index]->active_submissions,
+                    multiplicities[index]) ||
+           !can_add(resources[index]->completion_references,
+                    multiplicities[index]))) {
+        return false;
+      }
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions += multiplicities[index];
+        resources[index]->completion_references += multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool release_token_selector_active(
+      AccountingState &queue, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    if (queue.active_submissions == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->active_submissions < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool rollback_token_selector_submission(
+      AccountingState &context, AccountingState &queue,
+      AccountingState &logits, AccountingState &additive,
+      AccountingState &valid_mask, AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    if (queue.active_submissions == 0U ||
+        queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          (resources[index]->active_submissions < multiplicities[index] ||
+           resources[index]->completion_references < multiplicities[index])) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->active_submissions -= multiplicities[index];
+        resources[index]->completion_references -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
+  static bool release_token_selector_completion(
+      AccountingState &context, AccountingState &queue,
+      AccountingState &logits, AccountingState &additive,
+      AccountingState &valid_mask, AccountingState &output) noexcept {
+    AccountingState *const resources[] = {&logits, &additive, &valid_mask,
+                                           &output};
+    uint64_t multiplicities[token_selector_resource_count] = {};
+    token_selector_resource_multiplicities(resources, multiplicities);
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U &&
+          resources[index]->completion_references < multiplicities[index]) {
+        return false;
+      }
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (std::size_t index = 0U; index != token_selector_resource_count;
+         ++index) {
+      if (multiplicities[index] != 0U) {
+        resources[index]->completion_references -= multiplicities[index];
+      }
+    }
+    return true;
+  }
+
   static bool reserve_kv_state(AccountingState &context,
                                AccountingState &key_buffer,
                                AccountingState &value_buffer) noexcept {

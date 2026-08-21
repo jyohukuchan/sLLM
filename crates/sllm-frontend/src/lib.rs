@@ -15,15 +15,18 @@ pub use chat::{
     UntrustedChatMessageV1, UntrustedChatRequestV1, UntrustedChatValueV1,
 };
 pub use generation::{
-    FinishReasonV1, GenerationCancellationV1, GenerationConfigV1, GenerationExecutorV1,
-    GenerationInputV1, GenerationOutputSinkV1, GenerationResultV1, GenerationServiceError,
-    GenerationServiceV1, GenerationStepV1, GenerationTextFrontendV1, MAX_STOP_STRING_BYTES_V1,
+    FinishReasonV1, GenerationCancellationV1, GenerationChoiceResultV1, GenerationChoicesResultV1,
+    GenerationConfigV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
+    GenerationResultV1, GenerationServiceError, GenerationServiceV1, GenerationStepV1,
+    GenerationTextFrontendV1, MAX_GENERATION_CHOICES_V1, MAX_STOP_STRING_BYTES_V1,
     MAX_STOP_STRINGS_V1, QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1,
-    SpeculativeGenerationExecutorV1, TokenUsageV1, gemma4_generation_stop_policy,
+    SpeculativeGenerationExecutorV1, TokenUsageV1, derive_choice_seed_v1,
+    gemma4_generation_stop_policy,
 };
 pub use tokenizer::{
-    DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, SpecialTokenSnapshotV1, TokenIdContextV1,
-    TokenIdsV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
+    DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, MAX_TOKEN_PIECE_BYTES_V1,
+    SpecialTokenSnapshotV1, TokenByteEntryV1, TokenByteTableV1, TokenIdContextV1, TokenIdsV1,
+    TokenPieceClassV1, TokenizerError, TokenizerFrontendV1, TokenizerSnapshotV1,
 };
 pub use vision::{
     BoundedImageBytesV1, DecodedRgbImageV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,

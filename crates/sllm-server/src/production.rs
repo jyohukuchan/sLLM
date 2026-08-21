@@ -6,22 +6,26 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use sllm_core::{
-    AllocationSnapshot, Backend, ExecutionSession, ExecutionSessionRequest,
+    AllocationSnapshot, Backend, CompiledGrammar, DrySamplingConfigV1 as CoreDrySamplingConfigV1,
+    DynamicTemperatureV1, ExecutionSession, ExecutionSessionRequest,
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
-    ModelLock, OsSamplingRandom, QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection,
-    QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
+    LogitBiasV1 as CoreLogitBiasV1, MirostatModeV1,
+    MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, OsSamplingRandom,
+    QWEN35_RECOMMENDED_CONTEXT_TOKENS, QwenComponentSelection, QwenExecutionRequest,
+    QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
     QwenVisionExecutionInput, QwenVisionManifest, QwenVisionResidentModel, ReviewedModelLock,
-    VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
-    VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
-    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
-    build_gguf_qwen35_moe_weight_load_plan, build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_moe_execution_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
-    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_qwen35_moe,
+    SamplerChainConfigV1, VerifiedCache, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe,
+    VerifiedGgufWeightSource, VerifiedNvfp4Sidecar, VerifiedQwen35Moe, WeightLoadPlan,
+    XtcSamplingConfigV1 as CoreXtcSamplingConfigV1, assemble_gguf_qwen35_multimodal_prompt,
+    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
+    build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph_with_kv_cache_encoding,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
+    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
+    verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     GenerationCancellationV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
@@ -31,16 +35,199 @@ use sllm_frontend::{
 };
 use sllm_hip::HipBackend;
 
-use crate::api::ChatContentPartV1;
+use crate::api::{ChatContentPartV1, ResponseFormatV1};
 use crate::{
     BackendCompletionV1, BackendErrorV1, BackendMemoryCategorySnapshotV1,
-    BackendObservabilitySnapshotV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
-    FinishReasonV1, GenerationDeltaSinkV1, TokenUsageV1,
+    BackendObservabilitySnapshotV1, BackendTokenLogprobV1, BackendTopLogprobV1,
+    ChatCompletionRequestV1, ChatGenerationBackendV1, FinishReasonV1, GenerationDeltaSinkV1,
+    TokenUsageV1,
 };
 
 const MAX_RETAINED_REQUEST_AUDITS: usize = 64;
 const GEMMA4_RAW_CHAT_MAX_BYTES: usize = 16 * 1024 * 1024;
 const GEMMA4_STATIC_FP8_KV_BYTES_PER_TOKEN: u64 = 172_032;
+
+fn generation_config_for_request(
+    request: &ChatCompletionRequestV1,
+    tokenizer: &TokenizerFrontendV1,
+) -> Result<sllm_frontend::GenerationConfigV1, BackendErrorV1> {
+    let mut generation = request.generation().clone();
+    let mut chain = SamplerChainConfigV1::new(generation.sampling());
+    let mut advanced = false;
+
+    if let Some(bias) = request.logit_bias() {
+        chain = chain
+            .with_logit_bias(
+                bias.entries()
+                    .iter()
+                    .map(|(&token_id, &bias)| CoreLogitBiasV1 { token_id, bias })
+                    .collect(),
+            )
+            .map_err(|error| BackendErrorV1::new(format!("logit bias failed: {error}")))?;
+        advanced = true;
+    }
+    if let Some(logprobs) = request.logprobs() {
+        chain = chain.with_return_logprobs(logprobs.enabled());
+        chain = chain
+            .with_top_logprobs(usize::from(logprobs.top_logprobs().unwrap_or(0)))
+            .map_err(|error| BackendErrorV1::new(format!("logprobs failed: {error}")))?;
+        advanced |= logprobs.enabled();
+    }
+    if let Some(extension) = request.sampler() {
+        if let Some(top_k) = extension.top_k() {
+            chain = chain
+                .with_top_k(top_k as usize)
+                .map_err(|error| BackendErrorV1::new(format!("top-k failed: {error}")))?;
+        }
+        if let Some(min_p) = extension.min_p() {
+            chain = chain
+                .with_min_p(min_p)
+                .map_err(|error| BackendErrorV1::new(format!("min-p failed: {error}")))?;
+        }
+        if let Some(typical_p) = extension.typical_p() {
+            chain = chain
+                .with_typical_p(typical_p)
+                .map_err(|error| BackendErrorV1::new(format!("typical-p failed: {error}")))?;
+        }
+        if let Some(penalty) = extension.repeat_penalty() {
+            chain = chain
+                .with_repeat_penalty(penalty, extension.repeat_last_n() as usize)
+                .map_err(|error| BackendErrorV1::new(format!("repeat penalty failed: {error}")))?;
+        }
+        if let Some(dynamic) = extension.dynamic_temperature() {
+            let center = generation.sampling().temperature().max(0.01);
+            let minimum = (center - dynamic.range()).max(0.01);
+            let maximum = (center + dynamic.range()).min(2.0).max(minimum);
+            let dynamic = DynamicTemperatureV1::new(minimum, maximum, dynamic.exponent()).map_err(
+                |error| BackendErrorV1::new(format!("dynamic temperature failed: {error}")),
+            )?;
+            chain = chain.with_dynamic_temperature(dynamic).map_err(|error| {
+                BackendErrorV1::new(format!("dynamic temperature failed: {error}"))
+            })?;
+        }
+        if let Some(dry) = extension.dry() {
+            let mut breakers = Vec::with_capacity(dry.sequence_breakers().len());
+            for breaker in dry.sequence_breakers() {
+                let tokens = tokenizer
+                    .encode_without_special_tokens(breaker)
+                    .map_err(|error| {
+                        BackendErrorV1::new(format!("DRY sequence breaker failed: {error}"))
+                    })?;
+                if tokens.is_empty() {
+                    return Err(BackendErrorV1::new(
+                        "DRY sequence breaker produced no token IDs",
+                    ));
+                }
+                breakers.push(tokens.as_slice().to_vec());
+            }
+            let dry = CoreDrySamplingConfigV1::new(
+                dry.multiplier(),
+                dry.base(),
+                dry.allowed_length() as usize,
+                breakers,
+            )
+            .and_then(|value| value.with_penalty_last_n(dry.penalty_last_n() as usize))
+            .map_err(|error| BackendErrorV1::new(format!("DRY sampling failed: {error}")))?;
+            chain = chain
+                .with_dry(dry)
+                .map_err(|error| BackendErrorV1::new(format!("DRY sampling failed: {error}")))?;
+        }
+        if let Some(xtc) = extension.xtc() {
+            let xtc = CoreXtcSamplingConfigV1::new(
+                xtc.probability(),
+                xtc.threshold(),
+                xtc.min_keep() as usize,
+            )
+            .map_err(|error| BackendErrorV1::new(format!("XTC sampling failed: {error}")))?;
+            chain = chain
+                .with_xtc(xtc)
+                .map_err(|error| BackendErrorV1::new(format!("XTC sampling failed: {error}")))?;
+        }
+        if let Some(mirostat) = extension.mirostat() {
+            let mode = if mirostat.version() == 1 {
+                MirostatModeV1::V1
+            } else {
+                MirostatModeV1::V2
+            };
+            let mirostat = CoreMirostatSamplingConfigV1::new(
+                mode,
+                mirostat.tau(),
+                mirostat.eta(),
+                2.0 * mirostat.tau(),
+            )
+            .map_err(|error| BackendErrorV1::new(format!("Mirostat failed: {error}")))?;
+            chain = chain
+                .with_mirostat(mirostat)
+                .map_err(|error| BackendErrorV1::new(format!("Mirostat failed: {error}")))?;
+        }
+        generation = generation.with_ignore_stop_tokens(extension.ignore_eos());
+        advanced = true;
+    }
+
+    if advanced {
+        generation = generation
+            .with_sampler_chain(chain)
+            .map_err(|error| BackendErrorV1::new(format!("sampler chain failed: {error}")))?;
+    }
+    if let Some(response_format) = request.response_format() {
+        let grammar = match response_format {
+            ResponseFormatV1::Text => None,
+            ResponseFormatV1::JsonObject => Some(CompiledGrammar::json_object()),
+            ResponseFormatV1::JsonSchema(schema) => {
+                Some(CompiledGrammar::from_json_schema(schema.schema()))
+            }
+        }
+        .transpose()
+        .map_err(|error| BackendErrorV1::new(format!("structured output failed: {error}")))?;
+        if let Some(grammar) = grammar {
+            generation = generation.with_grammar(grammar);
+        }
+    }
+    Ok(generation)
+}
+
+fn publish_generation_logprobs(
+    request: &ChatCompletionRequestV1,
+    tokenizer: &TokenizerFrontendV1,
+    result: &sllm_frontend::GenerationResultV1,
+    sink: &mut dyn GenerationDeltaSinkV1,
+) -> Result<(), BackendErrorV1> {
+    if !request.logprobs().is_some_and(|options| options.enabled()) {
+        return Ok(());
+    }
+    let table = tokenizer.token_byte_table();
+    let token_metadata = |token_id: u32, logprob: f64| {
+        let entry = table.entry(token_id).ok_or_else(|| {
+            BackendErrorV1::new(format!(
+                "logprob token {token_id} is outside the vocabulary"
+            ))
+        })?;
+        Ok(BackendTopLogprobV1 {
+            token: entry.piece().unwrap_or("").to_owned(),
+            bytes: entry.bytes().map(<[u8]>::to_vec),
+            logprob,
+        })
+    };
+    let values = result
+        .selections()
+        .iter()
+        .map(|selection| {
+            let selected = token_metadata(selection.token_id, selection.logprob)?;
+            let top_logprobs = selection
+                .top_logprobs
+                .iter()
+                .map(|value| token_metadata(value.token_id, value.logprob))
+                .collect::<Result<Vec<_>, BackendErrorV1>>()?;
+            Ok(BackendTokenLogprobV1 {
+                token: selected.token,
+                bytes: selected.bytes,
+                logprob: selected.logprob,
+                top_logprobs,
+            })
+        })
+        .collect::<Result<Vec<_>, BackendErrorV1>>()?;
+    sink.publish_logprobs(values)
+}
 
 fn observability_snapshot_from_allocation(
     snapshot: AllocationSnapshot,
@@ -818,6 +1005,24 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             &state.stop_policy,
         )
         .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
+        let mut generation = generation_config_for_request(request, &state.tokenizer)?;
+        let requires_logits = generation
+            .sampler_chain()
+            .map_or(generation.sampling().requires_logits(), |chain| {
+                chain.requires_logits()
+            })
+            || generation.grammar().is_some();
+        let requires_randomness = generation.sampler_chain().map_or(
+            generation.sampling().requires_logits(),
+            SamplerChainConfigV1::requires_randomness,
+        );
+        let resolved_sampling_seed = requires_randomness
+            .then(|| OsSamplingRandom::resolve_seed(request.sampling_seed()))
+            .transpose()
+            .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
+        if let Some(seed) = resolved_sampling_seed {
+            generation = generation.with_device_selector_seed(seed);
+        }
         let input = GenerationInputV1::Messages {
             messages: request
                 .messages()
@@ -935,7 +1140,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
         let state_capacity = prompt_tokens
-            .checked_add(u64::from(request.generation().max_new_tokens()))
+            .checked_add(u64::from(generation.max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
         if state_capacity > u64::from(self.identity.context_length) {
             return Err(BackendErrorV1::new(format!(
@@ -964,9 +1169,8 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             qwen_prefill_chunk_candidates(placement_total_memory_bytes, prompt_tokens)
                 .map_err(|error| BackendErrorV1::new(error.to_string()))?
         };
-        let mtp_target = state.mtp_resident.is_some()
-            && !request.generation().sampling().requires_logits()
-            && multimodal_prompt.is_none();
+        let mtp_target =
+            state.mtp_resident.is_some() && !requires_logits && multimodal_prompt.is_none();
         let build_graph = |chunk_rows: u64| {
             let target_rows = if mtp_target {
                 chunk_rows.max(2)
@@ -1080,11 +1284,9 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 BackendErrorV1::new(format!("request provisioning failed: {error}"))
             })?;
         let mut allocated = state.session.memory_snapshot();
-        let mut random = OsSamplingRandom::for_parameters_and_seed(
-            request.generation().sampling(),
-            request.sampling_seed(),
-        )
-        .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut random =
+            OsSamplingRandom::for_randomness_and_seed(requires_randomness, resolved_sampling_seed)
+                .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
         let (outcome, dispatch, memory, prefill_chunk_count) = if let Some(multimodal_prompt) =
             multimodal_prompt.as_ref()
@@ -1097,7 +1299,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             let outcome = service.generate_tokens_with_sink(
                 &mut executor,
                 &prompt,
-                request.generation(),
+                &generation,
                 cancellation,
                 &mut random,
                 &mut output_sink,
@@ -1107,7 +1309,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             let prefill_chunk_count = owner.prefill_chunk_count();
             drop(owner);
             (outcome, dispatch, memory, Some(prefill_chunk_count))
-        } else if !request.generation().sampling().requires_logits()
+        } else if !requires_logits
             && let (Some(mtp_resident), Some(mtp_plan)) = (&state.mtp_resident, &state.mtp_plan)
         {
             let mtp_graph = build_qwen35_mtp_graph(
@@ -1129,7 +1331,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             let outcome = service.generate_tokens_with_sink(
                 &mut executor,
                 &prompt,
-                request.generation(),
+                &generation,
                 cancellation,
                 &mut random,
                 &mut output_sink,
@@ -1143,7 +1345,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             let outcome = service.generate_tokens_with_sink(
                 &mut owner,
                 &prompt,
-                request.generation(),
+                &generation,
                 cancellation,
                 &mut random,
                 &mut output_sink,
@@ -1186,6 +1388,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                         "completed generation has no physical-memory audit",
                     ));
                 }
+                publish_generation_logprobs(request, &state.tokenizer, &result, output_sink.inner)?;
                 let finish_reason = match result.finish_reason() {
                     sllm_frontend::FinishReasonV1::Stop => FinishReasonV1::Stop,
                     sllm_frontend::FinishReasonV1::Length => FinishReasonV1::Length,
@@ -1235,7 +1438,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             .to_owned(),
             fp8_provider: state.fp8_provider.clone(),
             prompt_tokens,
-            requested_max_completion_tokens: request.generation().max_new_tokens(),
+            requested_max_completion_tokens: generation.max_new_tokens(),
             completion_tokens,
             elapsed_ns,
             selected_backend: dispatch
@@ -1311,6 +1514,18 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
 
         let service = GenerationServiceV1::new(&state.tokenizer, None, &state.stop_policy)
             .map_err(|error| BackendErrorV1::new(format!("generation service failed: {error}")))?;
+        let mut generation = generation_config_for_request(request, &state.tokenizer)?;
+        let requires_randomness = generation.sampler_chain().map_or(
+            generation.sampling().requires_logits(),
+            SamplerChainConfigV1::requires_randomness,
+        );
+        let resolved_sampling_seed = requires_randomness
+            .then(|| OsSamplingRandom::resolve_seed(request.sampling_seed()))
+            .transpose()
+            .map_err(|error| BackendErrorV1::new(format!("sampling seed failed: {error}")))?;
+        if let Some(seed) = resolved_sampling_seed {
+            generation = generation.with_device_selector_seed(seed);
+        }
         let rendered = render_gemma4_raw_messages(request.messages())?;
         let prompt = service
             .prepare_input(&GenerationInputV1::Prompt(rendered))
@@ -1320,7 +1535,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
         let prompt_tokens = u64::try_from(prompt.len())
             .map_err(|_| BackendErrorV1::new("prompt token count overflowed u64"))?;
         let state_capacity = prompt_tokens
-            .checked_add(u64::from(request.generation().max_new_tokens()))
+            .checked_add(u64::from(generation.max_new_tokens()))
             .ok_or_else(|| BackendErrorV1::new("request state capacity overflowed u64"))?;
         if state_capacity > u64::from(self.identity.context_length) {
             return Err(BackendErrorV1::new(format!(
@@ -1335,16 +1550,14 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                 BackendErrorV1::new(format!("request provisioning failed: {error}"))
             })?;
         let allocated = state.session.memory_snapshot();
-        let mut random = OsSamplingRandom::for_parameters_and_seed(
-            request.generation().sampling(),
-            request.sampling_seed(),
-        )
-        .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
+        let mut random =
+            OsSamplingRandom::for_randomness_and_seed(requires_randomness, resolved_sampling_seed)
+                .map_err(|error| BackendErrorV1::new(format!("sampling source failed: {error}")))?;
         let mut output_sink = OutputSinkAdapterV1 { inner: sink };
         let outcome = service.generate_tokens_with_sink(
             &mut owner,
             &prompt,
-            request.generation(),
+            &generation,
             cancellation,
             &mut random,
             &mut output_sink,
@@ -1375,6 +1588,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
                         "completed Gemma generation is not exact HIP/no-fallback",
                     ));
                 }
+                publish_generation_logprobs(request, &state.tokenizer, &result, output_sink.inner)?;
                 let finish_reason = match result.finish_reason() {
                     sllm_frontend::FinishReasonV1::Stop => FinishReasonV1::Stop,
                     sllm_frontend::FinishReasonV1::Length => FinishReasonV1::Length,
@@ -1407,7 +1621,7 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             kv_cache_encoding: "fp8-static".to_owned(),
             fp8_provider: None,
             prompt_tokens,
-            requested_max_completion_tokens: request.generation().max_new_tokens(),
+            requested_max_completion_tokens: generation.max_new_tokens(),
             completion_tokens,
             elapsed_ns,
             selected_backend: dispatch.as_ref().map(|_| "hip".to_owned()),

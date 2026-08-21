@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use crate::gemma4::Gemma4LayerType;
 use crate::gemma4_graph::{GEMMA4_HIDDEN_SIZE, Gemma4Graph, Gemma4GraphNodeKind, Gemma4NormRole};
+use crate::op::TokenSelectorContractV1;
 use crate::op::{RmsNormContract, SemanticOpDescriptor, SemanticOpKind};
 use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, PreparedCachePolicy,
@@ -21,11 +22,11 @@ use crate::prepared_execution::{
 };
 use crate::weights::{WeightClassification, WeightLoadEntry, WeightLoadPlan};
 use crate::{
-    AccessMode, AllocationCategory, BoundSemanticOp, DType, Encoding, ExecutionBuffer,
-    ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding, PrepareSupport,
-    QuantizedTensorEncoding, ScalePlaneRole, TensorDType, TensorView, VerifiedCache,
-    VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar, VerifiedUnslothGemma4Nvfp4, WeightUploadRequest,
-    upload_verified_weight,
+    AccessMode, AllocationCategory, BoundSemanticOp, DType, DeviceTokenSelectorRequestV1, Encoding,
+    ExecutionBuffer, ExecutionQueue, ExecutionSession, ExecutionState, OwnedTensorBinding,
+    PrepareSupport, QuantizedTensorEncoding, SamplingSelectionV1, ScalePlaneRole, TensorDType,
+    TensorView, VerifiedCache, VerifiedGgufGemmaSource, VerifiedNvfp4Sidecar,
+    VerifiedUnslothGemma4Nvfp4, WeightUploadRequest, upload_verified_weight,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -286,6 +287,7 @@ impl GemmaQuantizedSource for VerifiedGgufGemmaSource {
 pub struct Gemma4ExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
+    selection: Option<SamplingSelectionV1>,
     state: crate::Gemma4RequestStateSnapshot,
     audit: PreparedExecutionAudit,
 }
@@ -659,20 +661,32 @@ impl Gemma4ExecutionRequest {
         &mut self,
         token_ids: &[i32],
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.prefill_impl(token_ids, false)
+        self.prefill_impl(token_ids, false, None)
     }
 
     pub fn prefill_with_last_logits(
         &mut self,
         token_ids: &[i32],
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.prefill_impl(token_ids, true)
+        self.prefill_impl(token_ids, true, None)
+    }
+
+    /// Runs prefill with the bounded device token-selector subset.  The
+    /// terminal Argmax is replaced by TokenSelect on the same queue and only
+    /// its fixed selected-record is read back.
+    pub fn prefill_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.prefill_impl(token_ids, false, Some(selector))
     }
 
     fn prefill_impl(
         &mut self,
         token_ids: &[i32],
         include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if self.committed_length != 0 || token_ids.len() as u64 != layout_token_count(&self.layout)?
         {
@@ -695,27 +709,38 @@ impl Gemma4ExecutionRequest {
             state_capacity,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        self.run_graph(graph, include_last_logits)
+        self.run_graph(graph, include_last_logits, selector)
     }
 
     pub fn decode(
         &mut self,
         token_id: i32,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.decode_impl(token_id, false)
+        self.decode_impl(token_id, false, None)
     }
 
     pub fn decode_with_last_logits(
         &mut self,
         token_id: i32,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.decode_impl(token_id, true)
+        self.decode_impl(token_id, true, None)
+    }
+
+    /// Runs decode with the bounded device token-selector subset.  No full
+    /// logits row is copied to the host on this path.
+    pub fn decode_with_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.decode_impl(token_id, false, Some(selector))
     }
 
     fn decode_impl(
         &mut self,
         token_id: i32,
         include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if self.committed_length == 0 {
             return Err(Gemma4ExecutionLayoutError::invalid(
@@ -747,7 +772,7 @@ impl Gemma4ExecutionRequest {
         )?;
         self.layout = layout;
         self.buffers = buffers;
-        self.run_graph(graph, include_last_logits)
+        self.run_graph(graph, include_last_logits, selector)
     }
 
     pub fn cancel(&self) {
@@ -772,6 +797,7 @@ impl Gemma4ExecutionRequest {
         &mut self,
         graph: Gemma4Graph,
         include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.binding_generation = self
             .binding_generation
@@ -782,6 +808,11 @@ impl Gemma4ExecutionRequest {
             completion_timeout: self.completion_timeout,
             expected_backend: 1,
         };
+        if include_last_logits && selector.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device token selector cannot be combined with full logits readback",
+            ));
+        }
         let output = if include_last_logits {
             self.buffers.execute_transition_with_last_logits_and_kv(
                 &graph,
@@ -792,13 +823,14 @@ impl Gemma4ExecutionRequest {
                 options,
             )
         } else {
-            self.buffers.execute_transition_with_kv(
+            self.buffers.execute_transition_with_selector_and_kv(
                 &graph,
                 &self.layout,
                 &self.queue,
                 &self.state,
                 self.opaque_kv_states.as_ref(),
                 options,
+                selector,
             )
         }?;
         self.committed_length = output.state().committed_length;
@@ -874,6 +906,12 @@ impl Gemma4ExecutionOutput {
 
     pub fn last_logits(&self) -> Option<&[f32]> {
         self.last_logits.as_deref()
+    }
+
+    /// Selection metadata returned by the device token-selector route. The
+    /// legacy Argmax and explicit host-logits paths leave this absent.
+    pub fn selection(&self) -> Option<&SamplingSelectionV1> {
+        self.selection.as_ref()
     }
 
     pub const fn state(&self) -> crate::Gemma4RequestStateSnapshot {
@@ -1354,6 +1392,28 @@ impl Gemma4ProvisionedBuffers {
         opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
         options: Gemma4ExecutionOptions,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.execute_transition_with_selector_and_kv(
+            graph,
+            layout,
+            queue,
+            request_state,
+            opaque_kv_states,
+            options,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_transition_with_selector_and_kv(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+        options: Gemma4ExecutionOptions,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.execute_transition_impl(
             graph,
             layout,
@@ -1362,6 +1422,7 @@ impl Gemma4ProvisionedBuffers {
             opaque_kv_states,
             options,
             false,
+            selector,
         )
     }
 
@@ -1400,6 +1461,7 @@ impl Gemma4ProvisionedBuffers {
             opaque_kv_states,
             options,
             true,
+            None,
         )
     }
 
@@ -1413,6 +1475,7 @@ impl Gemma4ProvisionedBuffers {
         opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
         options: Gemma4ExecutionOptions,
         include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if options.completion_timeout.is_zero()
             || queue.session_id() != self.session.id()
@@ -1438,6 +1501,8 @@ impl Gemma4ProvisionedBuffers {
         let mut pending = ExecutionSegment::profiled(options.completion_timeout);
         let mut audit = ExecutionAuditAccumulator::new(options.expected_backend);
         let mut terminal_bytes = None;
+        let mut selector_logits = None;
+        let mut selector_terminal_seen = false;
 
         execution_plan
             .execute(prepared_transition, |planned, current| {
@@ -1532,6 +1597,36 @@ impl Gemma4ProvisionedBuffers {
                     return Ok(());
                 }
 
+                // Device selection replaces the graph's terminal Argmax. The
+                // preceding projection remains queued, and the selector is
+                // submitted below on this same queue so no full logits row is
+                // copied to the host.
+                if selector.is_some() && node.descriptor.kind() == SemanticOpKind::Argmax {
+                    if planned.boundary_after() != Some(ExecutionBoundaryKind::TerminalReadback)
+                        || node.inputs.len() != 1
+                        || node.outputs.len() != 1
+                    {
+                        return Err(Gemma4ExecutionLayoutError::invalid(
+                            "terminal selector replacement requires one Argmax input/output",
+                        ));
+                    }
+                    selector_logits = Some((
+                        node.inputs[0],
+                        layout
+                            .tensors
+                            .get(node.inputs[0])
+                            .ok_or_else(|| {
+                                Gemma4ExecutionLayoutError::invalid(
+                                    "terminal selector logits tensor is absent",
+                                )
+                            })?
+                            .view
+                            .clone(),
+                    ));
+                    selector_terminal_seen = true;
+                    return Ok(());
+                }
+
                 for append in self.bind_kv_appends(layout, node)? {
                     let submission = self
                         .submit_bound(append, queue, PreparedCachePolicy::Transient)
@@ -1619,23 +1714,55 @@ impl Gemma4ProvisionedBuffers {
             })
             .map_err(|error: Gemma4ExecutionLayoutError| error)?;
 
+        let selection = if let Some(selector) = selector {
+            if !selector_terminal_seen {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "device selector did not replace the terminal Argmax",
+                ));
+            }
+            let (logits_tensor_id, logits) = selector_logits.ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("device selector logits are absent")
+            })?;
+            let selection = self.execute_device_token_selector(
+                logits_tensor_id,
+                queue,
+                &logits,
+                selector,
+                &mut pending,
+                &mut audit,
+                options.completion_timeout,
+            )?;
+            transition
+                .complete_boundary(ExecutionBoundaryKind::TerminalReadback)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+            Some(selection)
+        } else {
+            None
+        };
+
         if !pending.is_empty() {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "execution ended with an unclosed segment",
             ));
         }
-        let bytes = terminal_bytes.ok_or_else(|| {
-            Gemma4ExecutionLayoutError::invalid("execution did not publish Argmax output")
-        })?;
-        if bytes.len() % 4 != 0 {
-            return Err(Gemma4ExecutionLayoutError::invalid(
-                "Argmax output byte length is not i32 aligned",
-            ));
-        }
-        let token_ids = bytes
-            .chunks_exact(4)
-            .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect();
+        let token_ids = if let Some(selection) = &selection {
+            vec![i32::try_from(selection.token_id).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("selected token ID does not fit i32")
+            })?]
+        } else {
+            let bytes = terminal_bytes.ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("execution did not publish Argmax output")
+            })?;
+            if bytes.len() % 4 != 0 {
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "Argmax output byte length is not i32 aligned",
+                ));
+            }
+            bytes
+                .chunks_exact(4)
+                .map(|chunk| i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect()
+        };
         let audit = audit
             .snapshot()
             .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
@@ -1650,8 +1777,221 @@ impl Gemma4ProvisionedBuffers {
         Ok(Gemma4ExecutionOutput {
             token_ids,
             last_logits,
+            selection,
             state,
             audit,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_device_token_selector(
+        &self,
+        logits_tensor_id: usize,
+        queue: &ExecutionQueue,
+        logits: &TensorView,
+        selector: &DeviceTokenSelectorRequestV1,
+        pending: &mut ExecutionSegment,
+        audit: &mut ExecutionAuditAccumulator,
+        completion_timeout: Duration,
+    ) -> Result<SamplingSelectionV1, Gemma4ExecutionLayoutError> {
+        let vocab = selector.additive_logits().len();
+        if vocab == 0 || selector.valid_mask().len() != vocab {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector additive logits/mask must be non-empty and equal-sized",
+            ));
+        }
+        if !selector.valid_mask().iter().any(|&value| value != 0) {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector valid mask rejects every token",
+            ));
+        }
+        if logits.dtype() != DType::Bf16
+            || logits.encoding() != Encoding::Unquantized
+            || logits.shape().len() != 2
+            || logits.shape()[0] == 0
+            || logits.shape()[1] != vocab
+            || !logits.is_contiguous()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "terminal selector logits must be contiguous BF16 [tokens,vocab]",
+            ));
+        }
+        let row_bytes = logits
+            .payload_bytes()
+            .checked_div(u64::try_from(logits.shape()[0]).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("terminal logits row count is too large")
+            })?)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("terminal logits row size overflowed")
+            })?;
+        let row_offset = logits
+            .byte_offset()
+            .checked_add(
+                row_bytes
+                    .checked_mul(u64::try_from(logits.shape()[0] - 1).map_err(|_| {
+                        Gemma4ExecutionLayoutError::invalid(
+                            "terminal logits row index is too large",
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        Gemma4ExecutionLayoutError::invalid("terminal logits row offset overflowed")
+                    })?,
+            )
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("terminal logits row offset overflowed")
+            })?;
+        let logits_row = TensorView::new(
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[1, vocab],
+            &[vocab, 1],
+            row_offset,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let additive_view = TensorView::contiguous(DType::F32, &[1, vocab])
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mask_view = TensorView::contiguous(DType::U8, &[1, vocab])
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let output_view = TensorView::contiguous(DType::U8, &[16])
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let additive = self
+            .session
+            .allocate_with_category(
+                additive_view.payload_bytes(),
+                AllocationCategory::RequestState,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let valid_mask = self
+            .session
+            .allocate_with_category(mask_view.payload_bytes(), AllocationCategory::RequestState)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let output = self
+            .session
+            .allocate_with_category(
+                output_view.payload_bytes(),
+                AllocationCategory::RequestState,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let additive_bytes = selector
+            .additive_logits()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        upload_selector_bytes(
+            self.session.as_ref(),
+            queue,
+            &additive,
+            &additive_view,
+            &additive_bytes,
+            completion_timeout,
+            "Gemma device selector additive-logit upload",
+        )?;
+        upload_selector_bytes(
+            self.session.as_ref(),
+            queue,
+            &valid_mask,
+            &mask_view,
+            selector.valid_mask(),
+            completion_timeout,
+            "Gemma device selector valid-mask upload",
+        )?;
+        let contract = TokenSelectorContractV1::new(
+            u64::try_from(vocab).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("selector vocabulary is too large")
+            })?,
+            selector.temperature(),
+            selector.seed(),
+            selector.counter(),
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let descriptor = Arc::new(
+            SemanticOpDescriptor::new_token_select(
+                vec![logits_row.clone(), additive_view.clone(), mask_view.clone()],
+                vec![output_view.clone()],
+                contract,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+        );
+        let operation = BoundSemanticOp::new(
+            descriptor,
+            vec![
+                self.session
+                    .bind(self.buffer(logits_tensor_id)?, logits_row, AccessMode::Read)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+                self.session
+                    .bind(&additive, additive_view, AccessMode::Read)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+                self.session
+                    .bind(&valid_mask, mask_view, AccessMode::Read)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+            ],
+            vec![
+                self.session
+                    .bind(&output, output_view, AccessMode::Write)
+                    .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+            ],
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut submission =
+            self.submit_bound(Arc::new(operation), queue, PreparedCachePolicy::Transient)?;
+        pending
+            .flush_with_semantic(
+                "gemma.token_select",
+                &mut submission,
+                ExecutionBoundaryKind::TerminalReadback,
+                audit,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut readback = submission
+            .start_output_readback(0)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        require_terminal_success(
+            "gemma.token_select",
+            readback
+                .wait(completion_timeout)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut bytes = [0_u8; 16];
+        let copied = readback
+            .read_into(&mut bytes)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if copied != 16 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector returned a short or long selected record",
+            ));
+        }
+        let token_id = i32::from_le_bytes(bytes[0..4].try_into().expect("token ID record bytes"));
+        let status = u32::from_le_bytes(bytes[4..8].try_into().expect("status record bytes"));
+        let logprob = f32::from_le_bytes(bytes[8..12].try_into().expect("logprob record bytes"));
+        let reserved = u32::from_le_bytes(bytes[12..16].try_into().expect("reserved record bytes"));
+        if status != 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(format!(
+                "device selector record status is {status}"
+            )));
+        }
+        if reserved != 0 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector selected record reserved field is non-zero",
+            ));
+        }
+        if token_id < 0
+            || usize::try_from(token_id).map_or(true, |id| id >= vocab)
+            || selector.valid_mask()[usize::try_from(token_id).unwrap_or(0)] == 0
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector returned an out-of-range or masked token ID",
+            ));
+        }
+        if !logprob.is_finite() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "device selector returned a non-finite logprob",
+            ));
+        }
+        Ok(SamplingSelectionV1 {
+            token_id: u32::try_from(token_id).expect("validated token ID fits u32"),
+            logprob: f64::from(logprob),
+            top_logprobs: Vec::new(),
         })
     }
 
@@ -1901,6 +2241,67 @@ fn require_transfer_success(
             "{label} reported failure"
         ))),
     }
+}
+
+fn upload_selector_bytes(
+    session: &ExecutionSession,
+    queue: &ExecutionQueue,
+    buffer: &ExecutionBuffer,
+    view: &TensorView,
+    bytes: &[u8],
+    completion_timeout: Duration,
+    stage: &str,
+) -> Result<(), Gemma4ExecutionLayoutError> {
+    if bytes.is_empty()
+        || view.payload_bytes()
+            != u64::try_from(bytes.len()).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("selector upload length does not fit u64")
+            })?
+    {
+        return Err(Gemma4ExecutionLayoutError::invalid(format!(
+            "{stage} bytes do not exactly match the tensor view"
+        )));
+    }
+    let maximum = session
+        .max_transfer_bytes()
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+    if maximum == 0 {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "backend transfer limit must be non-zero",
+        ));
+    }
+    let mut offset = 0_u64;
+    let total = u64::try_from(bytes.len())
+        .map_err(|_| Gemma4ExecutionLayoutError::invalid("selector upload is too large"))?;
+    while offset < total {
+        let length = (total - offset).min(maximum);
+        let start = usize::try_from(offset).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("selector upload offset is too large")
+        })?;
+        let end = start
+            .checked_add(usize::try_from(length).map_err(|_| {
+                Gemma4ExecutionLayoutError::invalid("selector upload chunk is too large")
+            })?)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("selector upload range overflowed")
+            })?;
+        let destination = buffer
+            .range(
+                view.byte_offset().checked_add(offset).ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("selector upload offset overflowed")
+                })?,
+                length,
+            )
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let mut transfer = session
+            .upload(queue, destination, Arc::from(bytes[start..end].to_vec()))
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        require_transfer_success(transfer.wait(completion_timeout), stage)?;
+        offset = offset.checked_add(length).ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("selector upload progress overflowed")
+        })?;
+    }
+    Ok(())
 }
 
 fn gemma_is_nvfp4_weight(view: &TensorView) -> bool {

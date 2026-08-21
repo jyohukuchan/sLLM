@@ -1,6 +1,6 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-19
+> 最終更新: 2026-08-21
 >
 > この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
@@ -247,6 +247,27 @@ sLLM `3.936429665`秒、llama.cpp `2.063845785`秒で比`1.90733x`、prefill比�
 終了後process 0、VRAM 0%へ復帰した。model GGUF bytes/tensor setが異なるためE1 system-equivalentに限定し、
 別SKU/model/shape/ROCm、strict artifact identity、一般性能保証へ拡張しない。
 [R9700 summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
+
+### 2026-08-21 Phase40 token selector・grammar scope（verification中）
+
+Phase 40では、backend-neutral sampler chain、bounded GBNF/JSON Schema、raw-byte/token-trie/partial UTF-8 state、post-mask logprobs、
+`n=1..=8` choice state、strict OpenAI wireをhostへ実装した。HIP側は既存Argmax ABIを変更せず、additive `TokenSelect` contract、
+Qwen/Gemma terminal adapter、F32 additive/U8 valid-mask、completion後の固定16-byte selected record readbackを追加した。
+このscopeではfull-vocabulary logits D2Hを行わず、GPU selector非対応のsamplerはhost pathへ明示routeする。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| V620 exact `gfx1030` Phase40 selector contract matrix | `experimental` | `project-verified`（selector scope） | vocab `1,3,17,255,256,257,248320`×counter `0,1`、CPU token/logprob、fallback 0、selected-only D2H 16 bytes |
+| R9700 exact `gfx1201` Phase40 selector contract matrix | `experimental` | `project-verified`（selector scope） | V620と同一matrix。既存10,001/2 E1 E2Eはselector matrixと別 |
+| MI300X exact `gfx942:sramecc+:xnack-` Phase40 route/compile | `experimental` | `unverified` | wave64 feature-pinned compile-only PASS。real correctness/performanceはdeferred |
+
+V620/R9700 selector matrixはodd vocabulary/mask/bias、NaN/Inf/all-mask、fixed seed、CPU token/logprob oracle（tolerance `.005`）、
+fallback 0、selected record D2H 16 bytes、full-vocabulary D2H 0を記録済みである。GPU unavailable、timeout、crash、zero selectionは
+PASSにしない。Qwen/Gemma sampled-generationの最終統合runは別途継続する。Phase40詳細は
+[archive plan](../plans/archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)と
+[history](../history/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)および
+[tracked GPU summary](../../ci/matrix/phase40-token-selector-gpu-summary-v1.json)を正とする。Phase40ではllama.cpp sourceの
+直接reuseはなく、既存provenance lockを変更しない。
 
 ### software.mdとの関係
 

@@ -22,7 +22,7 @@ use crate::linear_attention::{LinearAttentionDescriptor, LinearAttentionStateDes
 use crate::model::{TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
-    SemanticOpKind,
+    SemanticOpKind, TokenSelectorContractV1,
 };
 use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, ExecutionTransaction,
@@ -45,12 +45,14 @@ use crate::{
     Qwen35MoeTensorPlane, VerifiedFp8Sidecar, VerifiedGgufQwen35Moe, VerifiedNvfp4Sidecar,
     VerifiedQwen35Moe, decode_e4m3fn,
 };
+use crate::{DeviceTokenSelectorRequestV1, SamplingSelectionV1};
 
 /// Output published by a fully completed Qwen request transition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QwenExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
+    selection: Option<SamplingSelectionV1>,
     logits_bf16: Option<Vec<u16>>,
     hidden_states_bf16: Option<Vec<u16>>,
     committed_length: u64,
@@ -291,6 +293,19 @@ impl QwenExecutionOutput {
     /// one BF16 row and convert it to finite-width F32 host values.
     pub fn last_logits(&self) -> Option<&[f32]> {
         self.last_logits.as_deref()
+    }
+
+    /// Selection metadata returned by the device token-selector route. The
+    /// route reads back only the fixed 16-byte selected-record; `None` denotes
+    /// the legacy Argmax or host-logits paths.
+    pub fn selection(&self) -> Option<&SamplingSelectionV1> {
+        self.selection.as_ref()
+    }
+
+    /// Explicitly named alias for transport adapters that use the sampling
+    /// terminology in their response contract.
+    pub fn sampling_selection(&self) -> Option<&SamplingSelectionV1> {
+        self.selection()
     }
 
     /// All target-logit rows in row-major BF16, published only by the
@@ -811,6 +826,18 @@ impl QwenExecutionRequest {
         self.core.prefill_with_last_logits(token_ids)
     }
 
+    /// Runs text prefill through the additive device token-selector subset.
+    /// The selector is ordered after the terminal projection on the same
+    /// execution queue and returns only a validated 16-byte selected record.
+    /// MTP graphs are intentionally unsupported for this route.
+    pub fn prefill_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.prefill_with_device_selector(token_ids, selector)
+    }
+
     pub fn prefill_with_mtp_state(
         &mut self,
         token_ids: &[i32],
@@ -841,6 +868,17 @@ impl QwenExecutionRequest {
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         self.core.decode_with_last_logits(token_id)
+    }
+
+    /// Runs one decode transition through the additive device token-selector
+    /// subset. Unsupported selector/graph combinations fail closed; there is
+    /// no implicit host-logits or Argmax fallback.
+    pub fn decode_with_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        self.core.decode_with_device_selector(token_id, selector)
     }
 
     pub fn decode_with_mtp_state(
@@ -1078,6 +1116,11 @@ struct PendingSpeculativeBlock {
 enum TerminalOutputRows {
     Last,
     All,
+}
+
+struct TerminalSelection {
+    token_ids: Vec<i32>,
+    selection: Option<SamplingSelectionV1>,
 }
 
 const TERMINAL_ROW_MIN_TOKENS: u64 = 255;
@@ -2482,21 +2525,34 @@ impl QwenExecutionCore {
     }
 
     fn prefill(&mut self, token_ids: &[i32]) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(token_ids, false, false, None, None)
+        self.prefill_impl(token_ids, false, false, None, None, None)
     }
 
     fn prefill_with_last_logits(
         &mut self,
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(token_ids, true, false, None, None)
+        self.prefill_impl(token_ids, true, false, None, None, None)
+    }
+
+    fn prefill_with_device_selector(
+        &mut self,
+        token_ids: &[i32],
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.graph.is_mtp() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device token selector is unsupported for MTP graphs".to_owned(),
+            ));
+        }
+        self.prefill_impl(token_ids, false, false, None, None, Some(selector))
     }
 
     fn prefill_with_mtp_state(
         &mut self,
         token_ids: &[i32],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(token_ids, true, true, None, None)
+        self.prefill_impl(token_ids, true, true, None, None, None)
     }
 
     fn prefill_multimodal(
@@ -2511,6 +2567,7 @@ impl QwenExecutionCore {
             false,
             None,
             Some((embeddings_bf16, positions)),
+            None,
         )
     }
 
@@ -2519,7 +2576,14 @@ impl QwenExecutionCore {
         token_id: i32,
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.prefill_impl(&[token_id], true, true, Some(target_hidden_bf16), None)
+        self.prefill_impl(
+            &[token_id],
+            true,
+            true,
+            Some(target_hidden_bf16),
+            None,
+            None,
+        )
     }
 
     fn prefill_impl(
@@ -2529,6 +2593,7 @@ impl QwenExecutionCore {
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -2567,6 +2632,7 @@ impl QwenExecutionCore {
                 target_hidden_bf16,
                 multimodal,
                 true,
+                device_selector,
             )?;
             self.prefill_chunk_count = 1;
             return Ok(output);
@@ -2598,6 +2664,7 @@ impl QwenExecutionCore {
                 None,
                 None,
                 final_chunk,
+                final_chunk.then_some(device_selector).flatten(),
             )?;
             if let Some(all_hidden) = &mut hidden_states {
                 all_hidden.extend(output.hidden_states_bf16.take().ok_or_else(|| {
@@ -2623,28 +2690,41 @@ impl QwenExecutionCore {
     }
 
     fn decode(&mut self, token_id: i32) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, false, false, false, None)
+        self.decode_impl(token_id, false, false, false, None, None)
     }
 
     fn decode_with_last_logits(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, false, false, None)
+        self.decode_impl(token_id, true, false, false, None, None)
+    }
+
+    fn decode_with_device_selector(
+        &mut self,
+        token_id: i32,
+        selector: &DeviceTokenSelectorRequestV1,
+    ) -> Result<QwenExecutionOutput, QwenExecutionError> {
+        if self.graph.is_mtp() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device token selector is unsupported for MTP graphs".to_owned(),
+            ));
+        }
+        self.decode_impl(token_id, false, false, false, None, Some(selector))
     }
 
     fn decode_with_mtp_state(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, false, true, None)
+        self.decode_impl(token_id, true, false, true, None, None)
     }
 
     fn decode_with_mtp_state_and_logits(
         &mut self,
         token_id: i32,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, false, true, true, None)
+        self.decode_impl(token_id, false, true, true, None, None)
     }
 
     fn decode_block_with_mtp_state(
@@ -2679,6 +2759,7 @@ impl QwenExecutionCore {
             None,
             None,
             true,
+            None,
         )?;
         self.pending_speculative = Some(PendingSpeculativeBlock {
             start_length,
@@ -2719,6 +2800,7 @@ impl QwenExecutionCore {
             None,
             None,
             true,
+            None,
         )?;
         self.pending_speculative = Some(PendingSpeculativeBlock {
             start_length,
@@ -2769,6 +2851,7 @@ impl QwenExecutionCore {
             None,
             None,
             true,
+            None,
         )
     }
 
@@ -2839,7 +2922,7 @@ impl QwenExecutionCore {
         token_id: i32,
         target_hidden_bf16: &[u16],
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
-        self.decode_impl(token_id, true, false, true, Some(target_hidden_bf16))
+        self.decode_impl(token_id, true, false, true, Some(target_hidden_bf16), None)
     }
 
     fn decode_impl(
@@ -2849,6 +2932,7 @@ impl QwenExecutionCore {
         include_all_logits_bf16: bool,
         include_hidden_states: bool,
         target_hidden_bf16: Option<&[u16]>,
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
@@ -2868,6 +2952,7 @@ impl QwenExecutionCore {
             target_hidden_bf16,
             None,
             true,
+            device_selector,
         )
     }
 
@@ -2883,6 +2968,7 @@ impl QwenExecutionCore {
         target_hidden_bf16: Option<&[u16]>,
         multimodal: Option<(&[u16], &[[i32; 3]])>,
         emit_terminal: bool,
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<QwenExecutionOutput, QwenExecutionError> {
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
@@ -2969,7 +3055,12 @@ impl QwenExecutionCore {
             })
             .transpose()?;
 
-        let terminal_rows = if self.graph.token_count() < TERMINAL_ROW_MIN_TOKENS
+        let terminal_rows = if device_selector.is_some() {
+            // The selector consumes exactly the final BF16 row.  This override
+            // also covers small/chunked graphs whose legacy path retains all
+            // rows for Argmax/readback.
+            TerminalOutputRows::Last
+        } else if self.graph.token_count() < TERMINAL_ROW_MIN_TOKENS
             || include_all_logits_bf16
             || force_all_terminal_rows
             || self.graph.is_mtp()
@@ -3006,6 +3097,7 @@ impl QwenExecutionCore {
             position_mode,
             terminal_rows,
             emit_terminal,
+            device_selector,
         )?;
         let last_logits = include_last_logits
             .then(|| self.read_last_logits(token_count, terminal_rows))
@@ -3019,8 +3111,9 @@ impl QwenExecutionCore {
         self.ensure_state_lengths(expected_length)?;
 
         let output = QwenExecutionOutput {
-            token_ids: output,
+            token_ids: output.token_ids,
             last_logits,
+            selection: output.selection,
             logits_bf16,
             hidden_states_bf16,
             committed_length: expected_length,
@@ -3063,7 +3156,8 @@ impl QwenExecutionCore {
         position_mode: AttentionPreprocessPositionMode,
         terminal_rows: TerminalOutputRows,
         emit_terminal: bool,
-    ) -> Result<Vec<i32>, QwenExecutionError> {
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
+    ) -> Result<TerminalSelection, QwenExecutionError> {
         let plan = self.execution_plan.clone();
         let transition = PreparedTransition::new(token_count, start_position, 0, start_position)?;
         if transition.expected_length() != expected_length {
@@ -3071,7 +3165,7 @@ impl QwenExecutionCore {
                 "prepared transition length differs from the Qwen admission result".to_owned(),
             ));
         }
-        let mut argmax = None;
+        let mut argmax: Option<TerminalSelection> = None;
         let mut pending = ExecutionSegment::profiled(self.completion_timeout);
         plan.execute(transition, |planned, transition| {
             let node = planned.operation();
@@ -3091,6 +3185,7 @@ impl QwenExecutionCore {
                             transition.token_count(),
                             planned.boundary_after(),
                             terminal_rows,
+                            device_selector,
                             &mut pending,
                         )?;
                         if let Some(output) = output {
@@ -3194,7 +3289,10 @@ impl QwenExecutionCore {
                 ));
             }
             self.close_boundary(&mut pending, ExecutionBoundaryKind::PrefillChunkCompletion)?;
-            return Ok(Vec::new());
+            return Ok(TerminalSelection {
+                token_ids: Vec::new(),
+                selection: None,
+            });
         }
         if let Some(argmax) = argmax {
             return Ok(argmax);
@@ -3438,9 +3536,15 @@ impl QwenExecutionCore {
         token_count: u64,
         boundary_after: Option<ExecutionBoundaryKind>,
         terminal_rows: TerminalOutputRows,
+        device_selector: Option<&DeviceTokenSelectorRequestV1>,
         pending: &mut ExecutionSegment,
-    ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
         if terminal_rows == TerminalOutputRows::All {
+            if device_selector.is_some() {
+                return Err(QwenExecutionError::InvalidRequest(
+                    "device token selector requires a final BF16 row".to_owned(),
+                ));
+            }
             return self.execute_semantic_all_rows(node, token_count, boundary_after, pending);
         }
         let operation = node.operation().ok_or_else(|| {
@@ -3499,6 +3603,15 @@ impl QwenExecutionCore {
                 self.bind_many(node.outputs(), token_count, AccessMode::Write)?,
             )
         };
+        if let Some(selector) = device_selector.filter(|_| is_terminal_argmax) {
+            return self.execute_device_token_selector(
+                node,
+                token_count,
+                boundary_after,
+                selector,
+                pending,
+            );
+        }
         let descriptor = match operation.kind() {
             SemanticOpKind::RmsNorm => SemanticOpDescriptor::new_rms_norm_with_contract(
                 inputs,
@@ -3574,7 +3687,179 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        Ok(Some(decode_argmax_bytes(&bytes)?))
+        Ok(Some(TerminalSelection {
+            token_ids: decode_argmax_bytes(&bytes)?,
+            selection: None,
+        }))
+    }
+
+    fn execute_device_token_selector(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        selector: &DeviceTokenSelectorRequestV1,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        if boundary_after != Some(ExecutionBoundaryKind::TerminalReadback) {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal token selector lacks its readback boundary".to_owned(),
+            ));
+        }
+        if node.inputs().len() != 1 || node.outputs().len() != 1 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal token selector requires one logits input and one output".to_owned(),
+            ));
+        }
+        let vocab = QWEN35_VOCAB_SIZE;
+        if selector.additive_logits().len() != vocab || selector.valid_mask().len() != vocab {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector additive logits/mask must match Qwen vocabulary".to_owned(),
+            ));
+        }
+        if !selector.valid_mask().iter().any(|&value| value != 0) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector valid mask rejects every token".to_owned(),
+            ));
+        }
+        let logits = first_row_view(&self.view(node.inputs()[0], token_count)?)?;
+        if logits.dtype() != DType::Bf16 || logits.shape() != [1, vocab] {
+            return Err(QwenExecutionError::InvalidGraph(
+                "terminal selector logits must be BF16 [1,vocab]".to_owned(),
+            ));
+        }
+        let additive_view = TensorView::contiguous(DType::F32, &[1, vocab]).map_err(|error| {
+            QwenExecutionError::InvalidGraph(format!(
+                "device selector additive tensor view is invalid: {error}"
+            ))
+        })?;
+        let mask_view = TensorView::contiguous(DType::U8, &[1, vocab]).map_err(|error| {
+            QwenExecutionError::InvalidGraph(format!(
+                "device selector mask tensor view is invalid: {error}"
+            ))
+        })?;
+        let output_view = TensorView::contiguous(DType::U8, &[16]).map_err(|error| {
+            QwenExecutionError::InvalidGraph(format!(
+                "device selector output tensor view is invalid: {error}"
+            ))
+        })?;
+        let additive = self.session.allocate_with_category(
+            additive_view.payload_bytes(),
+            crate::AllocationCategory::RequestState,
+        )?;
+        let valid_mask = self.session.allocate_with_category(
+            mask_view.payload_bytes(),
+            crate::AllocationCategory::RequestState,
+        )?;
+        let output = self.session.allocate_with_category(
+            output_view.payload_bytes(),
+            crate::AllocationCategory::RequestState,
+        )?;
+        let additive_bytes = selector
+            .additive_logits()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>();
+        let mask_bytes = selector.valid_mask().to_vec();
+        upload_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &additive,
+            &additive_view,
+            &additive_bytes,
+            self.completion_timeout,
+            "device selector additive-logit upload",
+        )?;
+        upload_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &valid_mask,
+            &mask_view,
+            &mask_bytes,
+            self.completion_timeout,
+            "device selector valid-mask upload",
+        )?;
+        let contract = TokenSelectorContractV1::new(
+            u64::try_from(vocab).expect("Qwen vocabulary fits u64"),
+            selector.temperature(),
+            selector.seed(),
+            selector.counter(),
+        )?;
+        let descriptor = SemanticOpDescriptor::new_token_select(
+            vec![logits.clone(), additive_view.clone(), mask_view.clone()],
+            vec![output_view.clone()],
+            contract,
+        )?;
+        let input_bindings = vec![
+            self.bind_view(node.inputs()[0], logits, AccessMode::Read)?,
+            self.session
+                .bind(&additive, additive_view, AccessMode::Read)?,
+            self.session
+                .bind(&valid_mask, mask_view, AccessMode::Read)?,
+        ];
+        let output_binding = self.session.bind(&output, output_view, AccessMode::Write)?;
+        let mut submission = self.submit_semantic(
+            descriptor,
+            input_bindings,
+            vec![output_binding],
+            PreparedCachePolicy::Transient,
+        )?;
+        self.close_boundary_with_semantic(
+            pending,
+            node.label(),
+            &mut submission,
+            ExecutionBoundaryKind::TerminalReadback,
+        )?;
+        let mut readback = submission.start_output_readback(0)?;
+        require_terminal_success(node.label(), readback.wait(self.completion_timeout)?)?;
+        let mut bytes = [0_u8; 16];
+        let copied = readback.read_into(&mut bytes)?;
+        if copied != 16 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector returned a short or long selected record".to_owned(),
+            ));
+        }
+        let token_id = i32::from_le_bytes(bytes[0..4].try_into().expect("record token bytes"));
+        let status = u32::from_le_bytes(bytes[4..8].try_into().expect("record status bytes"));
+        let logprob = f32::from_le_bytes(bytes[8..12].try_into().expect("record logprob bytes"));
+        let reserved = u32::from_le_bytes(bytes[12..16].try_into().expect("record reserved bytes"));
+        if status != 0 {
+            return Err(QwenExecutionError::Execution(
+                ExecutionError::BackendStatus {
+                    status,
+                    diagnostic: format!("{} token-selector record status", node.label()),
+                },
+            ));
+        }
+        if reserved != 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector selected record reserved field is non-zero".to_owned(),
+            ));
+        }
+        if token_id < 0 || usize::try_from(token_id).map_or(true, |id| id >= vocab) {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector returned an out-of-range token ID".to_owned(),
+            ));
+        }
+        let token_index = usize::try_from(token_id).expect("non-negative token ID");
+        if selector.valid_mask()[token_index] == 0 {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector returned a masked token ID".to_owned(),
+            ));
+        }
+        if !logprob.is_finite() {
+            return Err(QwenExecutionError::InvalidRequest(
+                "device selector returned a non-finite logprob".to_owned(),
+            ));
+        }
+        Ok(Some(TerminalSelection {
+            token_ids: vec![token_id],
+            selection: Some(SamplingSelectionV1 {
+                token_id: u32::try_from(token_id).expect("validated token ID fits u32"),
+                logprob: f64::from(logprob),
+                top_logprobs: Vec::new(),
+            }),
+        }))
     }
 
     fn execute_semantic_all_rows(
@@ -3583,7 +3868,7 @@ impl QwenExecutionCore {
         token_count: u64,
         boundary_after: Option<ExecutionBoundaryKind>,
         pending: &mut ExecutionSegment,
-    ) -> Result<Option<Vec<i32>>, QwenExecutionError> {
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
         let operation = node.operation().ok_or_else(|| {
             QwenExecutionError::InvalidGraph(format!(
                 "semantic node {} has no descriptor",
@@ -3672,7 +3957,10 @@ impl QwenExecutionCore {
                 node.label()
             )));
         }
-        Ok(Some(decode_argmax_bytes(&bytes)?))
+        Ok(Some(TerminalSelection {
+            token_ids: decode_argmax_bytes(&bytes)?,
+            selection: None,
+        }))
     }
 
     fn execute_multimodal_embedding_select(
@@ -6542,6 +6830,18 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
             output: &OwnedTensorBinding,
         ) -> Result<Box<dyn ExecutionReadbackAdapter>, ExecutionError> {
+            if self.kind == SemanticOpKind::TokenSelect {
+                if output.view().shape() != [16] {
+                    return Err(ExecutionError::InvalidRequest {
+                        reason: "recorder token-selector output has the wrong shape".to_owned(),
+                    });
+                }
+                self.recorder.event("token-selector-readback-start");
+                return Ok(Box::new(RecorderReadback {
+                    recorder: Arc::clone(&self.recorder),
+                    bytes: vec![0_u8; 16],
+                }));
+            }
             if self.kind != SemanticOpKind::Argmax {
                 return Err(ExecutionError::InvalidRequest {
                     reason: "recorder only permits argmax output readback".to_owned(),
@@ -7274,6 +7574,90 @@ mod tests {
                 .count(),
             2,
         );
+    }
+
+    #[test]
+    fn device_selector_reads_only_the_fixed_record_and_preserves_metadata() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (mut core, _) = provisioned_core(Arc::clone(&recorder));
+        let parameters = crate::SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap();
+        let chain =
+            crate::SamplerChainV1::new(crate::SamplerChainConfigV1::new(parameters), &[]).unwrap();
+        let selector = chain
+            .prepare_device_selector(QWEN35_VOCAB_SIZE, None, 17, 3)
+            .unwrap();
+        let output = core
+            .prefill_with_device_selector(&[1], &selector)
+            .expect("device selector route succeeds on recorder");
+        assert_eq!(output.token_ids(), [0]);
+        assert!(output.last_logits().is_none());
+        assert_eq!(
+            output.selection().map(|selection| selection.token_id),
+            Some(0)
+        );
+        let events = recorder.events();
+        assert!(events.iter().any(|event| event == "submit:TokenSelect"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "token-selector-readback-start")
+        );
+        assert!(!events.iter().any(|event| event == "argmax-readback-start"));
+
+        let decode_recorder = Arc::new(ExecutionRecorder::default());
+        let (mut decode_core, _) = provisioned_core(Arc::clone(&decode_recorder));
+        decode_core
+            .prefill(&[1])
+            .expect("legacy prefill before selector decode");
+        let argmax_readbacks_before_decode = decode_recorder
+            .events()
+            .iter()
+            .filter(|event| event.as_str() == "argmax-readback-start")
+            .count();
+        let decode_output = decode_core
+            .decode_with_device_selector(2, &selector)
+            .expect("device selector decode succeeds on recorder");
+        assert_eq!(decode_output.token_ids(), [0]);
+        assert_eq!(
+            decode_output
+                .sampling_selection()
+                .map(|selection| selection.token_id),
+            Some(0)
+        );
+        assert_eq!(
+            decode_recorder
+                .events()
+                .iter()
+                .filter(|event| event.as_str() == "argmax-readback-start")
+                .count(),
+            argmax_readbacks_before_decode
+        );
+    }
+
+    #[test]
+    fn device_selector_rejects_mtp_without_fallback() {
+        let recorder = Arc::new(ExecutionRecorder::default());
+        let (graph, plan) = crate::qwen_graph::qwen35_mtp_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("recorder", recorder));
+        let mut core = QwenExecutionCore::provision(
+            session,
+            graph,
+            plan,
+            Duration::from_millis(1),
+            &TestProvisionSource::default(),
+        )
+        .expect("MTP fixture provisions");
+        let parameters = crate::SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap();
+        let chain =
+            crate::SamplerChainV1::new(crate::SamplerChainConfigV1::new(parameters), &[]).unwrap();
+        let selector = chain
+            .prepare_device_selector(QWEN35_VOCAB_SIZE, None, 1, 0)
+            .unwrap();
+        assert!(matches!(
+            core.prefill_with_device_selector(&[1], &selector),
+            Err(QwenExecutionError::InvalidRequest(reason))
+                if reason.contains("unsupported for MTP")
+        ));
     }
 
     #[test]

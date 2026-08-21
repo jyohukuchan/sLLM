@@ -10,10 +10,15 @@ def test_pinned_openai_profile_fixture_is_accepted_and_negative_cases_reject(
     load_json_fixture,
 ) -> None:
     fixture = load_json_fixture("openai_chat_profile_v1.json")
-    positive = validate_chat_request(
-        fixture["positive"]["request"], served_models=(fixture["served_model"],)
+    positive_requests = [fixture["positive"]["request"]]
+    positive_requests.extend(
+        case["request"] for case in fixture.get("positive_variants", [])
     )
-    assert positive.accepted
+    for request in positive_requests:
+        positive = validate_chat_request(
+            request, served_models=(fixture["served_model"],)
+        )
+        assert positive.accepted, request
     for case in fixture["negative"]:
         if isinstance(case["body"], str):
             continue

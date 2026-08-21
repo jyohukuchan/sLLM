@@ -37,6 +37,21 @@ pub struct BackendCompletionV1 {
     pub usage: TokenUsageV1,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendTopLogprobV1 {
+    pub token: String,
+    pub bytes: Option<Vec<u8>>,
+    pub logprob: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackendTokenLogprobV1 {
+    pub token: String,
+    pub bytes: Option<Vec<u8>>,
+    pub logprob: f64,
+    pub top_logprobs: Vec<BackendTopLogprobV1>,
+}
+
 /// One redacted, bounded memory-accounting category exposed to operational
 /// observers.  It contains no allocation identity, prompt, token, or
 /// credential data.
@@ -61,6 +76,13 @@ pub struct BackendObservabilitySnapshotV1 {
 
 pub trait GenerationDeltaSinkV1 {
     fn publish(&mut self, delta: &str) -> Result<(), BackendErrorV1>;
+
+    fn publish_logprobs(
+        &mut self,
+        _logprobs: Vec<BackendTokenLogprobV1>,
+    ) -> Result<(), BackendErrorV1> {
+        Ok(())
+    }
 }
 
 pub trait ChatGenerationBackendV1: Send + Sync + 'static {
@@ -277,6 +299,7 @@ struct SlotRegistryV1 {
 #[derive(Debug)]
 pub(crate) enum SchedulerEventV1 {
     Delta(String),
+    Logprobs(Vec<BackendTokenLogprobV1>),
     Finished(BackendCompletionV1),
     Failed(ApiErrorV1),
 }
@@ -636,6 +659,21 @@ impl GenerationDeltaSinkV1 for ChannelDeltaSinkV1 {
         }
         self.events
             .blocking_send(SchedulerEventV1::Delta(delta.to_owned()))
+            .map_err(|_| {
+                self.cancellation.cancel();
+                BackendErrorV1::new("generation consumer disconnected")
+            })
+    }
+
+    fn publish_logprobs(
+        &mut self,
+        logprobs: Vec<BackendTokenLogprobV1>,
+    ) -> Result<(), BackendErrorV1> {
+        if self.cancellation.is_cancelled() {
+            return Err(BackendErrorV1::new("generation was cancelled"));
+        }
+        self.events
+            .blocking_send(SchedulerEventV1::Logprobs(logprobs))
             .map_err(|_| {
                 self.cancellation.cancel();
                 BackendErrorV1::new("generation consumer disconnected")

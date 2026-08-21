@@ -97,6 +97,10 @@ pub enum RuntimeStatus {
     LinearAttentionLengthMismatch,
     LinearAttentionStateBusy,
     InvalidArgmaxDescriptor,
+    InvalidTokenSelectorDescriptor,
+    TokenSelectorNonfinite,
+    TokenSelectorAllMasked,
+    TokenSelectorInvalidTemperature,
     InvalidRotaryDescriptor,
     InvalidWindowedAttentionDescriptor,
     Unknown(u32),
@@ -164,6 +168,14 @@ impl RuntimeStatus {
             }
             sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY => Self::LinearAttentionStateBusy,
             sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR => Self::InvalidArgmaxDescriptor,
+            sys::SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR => {
+                Self::InvalidTokenSelectorDescriptor
+            }
+            sys::SLLM_STATUS_TOKEN_SELECTOR_NONFINITE => Self::TokenSelectorNonfinite,
+            sys::SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED => Self::TokenSelectorAllMasked,
+            sys::SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE => {
+                Self::TokenSelectorInvalidTemperature
+            }
             sys::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR => Self::InvalidRotaryDescriptor,
             sys::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR => {
                 Self::InvalidWindowedAttentionDescriptor
@@ -233,6 +245,14 @@ impl RuntimeStatus {
             }
             Self::LinearAttentionStateBusy => sys::SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY,
             Self::InvalidArgmaxDescriptor => sys::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR,
+            Self::InvalidTokenSelectorDescriptor => {
+                sys::SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR
+            }
+            Self::TokenSelectorNonfinite => sys::SLLM_STATUS_TOKEN_SELECTOR_NONFINITE,
+            Self::TokenSelectorAllMasked => sys::SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED,
+            Self::TokenSelectorInvalidTemperature => {
+                sys::SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE
+            }
             Self::InvalidRotaryDescriptor => sys::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR,
             Self::InvalidWindowedAttentionDescriptor => {
                 sys::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR
@@ -327,6 +347,10 @@ fn status_name(status: RuntimeStatus) -> &'static str {
         RuntimeStatus::LinearAttentionLengthMismatch => "linear-attention length mismatch",
         RuntimeStatus::LinearAttentionStateBusy => "linear-attention state is busy",
         RuntimeStatus::InvalidArgmaxDescriptor => "invalid argmax descriptor",
+        RuntimeStatus::InvalidTokenSelectorDescriptor => "invalid token selector descriptor",
+        RuntimeStatus::TokenSelectorNonfinite => "token selector encountered a non-finite logit",
+        RuntimeStatus::TokenSelectorAllMasked => "token selector has no valid candidate",
+        RuntimeStatus::TokenSelectorInvalidTemperature => "token selector temperature is invalid",
         RuntimeStatus::InvalidRotaryDescriptor => "invalid split-half rotary descriptor",
         RuntimeStatus::InvalidWindowedAttentionDescriptor => {
             "invalid windowed causal-attention descriptor"
@@ -1975,6 +1999,19 @@ pub(crate) fn release_argmax_plan_once(
     let mut error_sink = sink(&mut error_buffer);
     let mut native = raw.as_ptr();
     let status = unsafe { sys::sllm_argmax_plan_release(&mut native, &mut error_sink) };
+    (RuntimeStatus::from_raw(status), NonNull::new(native))
+}
+
+pub(crate) fn release_token_selector_plan_once(
+    raw: NonNull<sys::sllm_token_selector_plan_t>,
+) -> (
+    RuntimeStatus,
+    Option<NonNull<sys::sllm_token_selector_plan_t>>,
+) {
+    let mut error_buffer = [0_u8; ERROR_CAPACITY];
+    let mut error_sink = sink(&mut error_buffer);
+    let mut native = raw.as_ptr();
+    let status = unsafe { sys::sllm_token_selector_plan_release(&mut native, &mut error_sink) };
     (RuntimeStatus::from_raw(status), NonNull::new(native))
 }
 

@@ -41,11 +41,12 @@ use crate::{
     MatmulSubmission, MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission,
     MoeRouteDescriptor, MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess,
     PreparedElementwise, PreparedEmbedding, PreparedMatmul, PreparedMoeExpert, PreparedMoeRoute,
-    PreparedRmsNorm, PreparedRotary, PreparedWindowedAttention, Queue,
+    PreparedRmsNorm, PreparedRotary, PreparedTokenSelector, PreparedWindowedAttention, Queue,
     QueueCompletionMode as HipQueueCompletionMode, RmsNormDescriptor, RmsNormDispatchInfo,
     RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
-    RuntimeStatus, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,
-    WindowedAttentionSubmission, moe_expert_workspace_bytes,
+    RuntimeStatus, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorSubmission,
+    WindowedAttentionDescriptor, WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
+    moe_expert_workspace_bytes,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
@@ -302,6 +303,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::AttentionPreprocess
                 | sllm_core::SemanticOpKind::Rotary
                 | sllm_core::SemanticOpKind::CausalAttention
+                | sllm_core::SemanticOpKind::TokenSelect
                 | sllm_core::SemanticOpKind::SparseMoe
         ) {
             return PrepareSupport::Unsupported {
@@ -742,6 +744,48 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         .map_err(map_backend_error)?,
                 )
             }
+            sllm_core::SemanticOpKind::TokenSelect => {
+                let logits_owned = &operation.inputs()[0];
+                let additive_owned = &operation.inputs()[1];
+                let mask_owned = &operation.inputs()[2];
+                let output_owned = &operation.outputs()[0];
+                let logits = access
+                    .downcast_buffer_payload::<Buffer>(logits_owned.buffer())?
+                    .clone();
+                let additive = access
+                    .downcast_buffer_payload::<Buffer>(additive_owned.buffer())?
+                    .clone();
+                let mask = access
+                    .downcast_buffer_payload::<Buffer>(mask_owned.buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(output_owned.buffer())?
+                    .clone();
+                let contract = operation
+                    .descriptor()
+                    .token_selector_contract()
+                    .ok_or_else(|| ExecutionError::InvalidRequest {
+                        reason: "token_select semantic descriptor is missing its contract"
+                            .to_owned(),
+                    })?;
+                let descriptor = TokenSelectorDescriptor::new(
+                    logits.binding(logits_owned.view().clone()),
+                    additive.binding(additive_owned.view().clone()),
+                    mask.binding(mask_owned.view().clone()),
+                    output.binding(output_owned.view().clone()),
+                    contract.vocab_size(),
+                    contract.temperature(),
+                    contract.seed(),
+                    contract.counter(),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::TokenSelector(
+                    self.backend
+                        .prepare_token_selector(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
             sllm_core::SemanticOpKind::AttentionPreprocess => {
                 let packed_q_gate = access
                     .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
@@ -996,6 +1040,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                     dispatch_from_argmax(dispatch),
                 )
             }
+            HipPreparedPlan::TokenSelector(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::TokenSelector(submission),
+                    dispatch_from_token_selector(dispatch),
+                )
+            }
             HipPreparedPlan::AttentionPreprocess(plan) => {
                 let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
                 (
@@ -1115,6 +1166,7 @@ enum HipPreparedPlan {
     Embedding(PreparedEmbedding),
     Matmul(PreparedMatmul),
     Argmax(PreparedArgmax),
+    TokenSelector(PreparedTokenSelector),
     AttentionPreprocess(PreparedAttentionPreprocess),
     Rotary(PreparedRotary),
     WindowedAttention(PreparedWindowedAttention),
@@ -1134,6 +1186,7 @@ enum HipSemanticSubmission {
     Embedding(EmbeddingSubmission),
     Matmul(MatmulSubmission),
     Argmax(ArgmaxSubmission),
+    TokenSelector(TokenSelectorSubmission),
     AttentionPreprocess(AttentionPreprocessSubmission),
     Rotary(RotarySubmission),
     WindowedAttention(WindowedAttentionSubmission),
@@ -1154,6 +1207,7 @@ impl HipSemanticSubmission {
             Self::Embedding(submission) => submission.query(),
             Self::Matmul(submission) => submission.query(),
             Self::Argmax(submission) => submission.query(),
+            Self::TokenSelector(submission) => submission.query(),
             Self::AttentionPreprocess(submission) => submission.query(),
             Self::Rotary(submission) => submission.query(),
             Self::WindowedAttention(submission) => submission.query(),
@@ -1168,6 +1222,7 @@ impl HipSemanticSubmission {
             Self::Embedding(submission) => submission.wait(timeout),
             Self::Matmul(submission) => submission.wait(timeout),
             Self::Argmax(submission) => submission.wait(timeout),
+            Self::TokenSelector(submission) => submission.wait(timeout),
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
             Self::Rotary(submission) => submission.wait(timeout),
             Self::WindowedAttention(submission) => submission.wait(timeout),
@@ -1182,6 +1237,7 @@ impl HipSemanticSubmission {
             Self::Embedding(submission) => submission.finalize_after_token(fence_token),
             Self::Matmul(submission) => submission.finalize_after_token(fence_token),
             Self::Argmax(submission) => submission.finalize_after_token(fence_token),
+            Self::TokenSelector(submission) => submission.finalize_after_token(fence_token),
             Self::AttentionPreprocess(submission) => submission.finalize_after_token(fence_token),
             Self::Rotary(submission) => submission.finalize_after_token(fence_token),
             Self::WindowedAttention(submission) => submission.finalize_after_token(fence_token),
@@ -1200,6 +1256,7 @@ impl HipSemanticSubmission {
             Self::Embedding(submission) => submission.kernel_elapsed_ns(),
             Self::Matmul(submission) => submission.kernel_elapsed_ns(),
             Self::Argmax(submission) => submission.kernel_elapsed_ns(),
+            Self::TokenSelector(submission) => submission.kernel_elapsed_ns(),
             Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
             Self::Rotary(submission) => submission.kernel_elapsed_ns(),
             Self::WindowedAttention(submission) => submission.kernel_elapsed_ns(),
@@ -1571,6 +1628,26 @@ fn dispatch_from_argmax(dispatch: ArgmaxDispatchInfo) -> DispatchEvidence {
     }
 }
 
+fn dispatch_from_token_selector(dispatch: TokenSelectorDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: 1,
+        normalized_size: dispatch.vocab_size,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
 fn dispatch_from_attention_preprocess(
     dispatch: AttentionPreprocessDispatchInfo,
 ) -> DispatchEvidence {
@@ -1719,7 +1796,7 @@ mod tests {
     use sllm_core::{
         AttentionPreprocessContract, AttentionPreprocessPositionMode, Backend, DType,
         ExecutionSessionRequest, SemanticOpDescriptor, SplitHalfRotaryContract, TensorView,
-        WindowedCausalAttentionContract,
+        TokenSelectorContractV1, WindowedCausalAttentionContract,
     };
 
     #[test]
@@ -1912,6 +1989,51 @@ mod tests {
         )
         .expect("valid windowed attention descriptor");
         assert_eq!(adapter.supports(&descriptor), PrepareSupport::Supported);
+    }
+
+    #[test]
+    fn supports_token_selector_and_maps_dispatch_evidence() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
+            available_memory_bytes: u64::MAX,
+        };
+        let contract = TokenSelectorContractV1::new(257, 0.75, 7, 11).unwrap();
+        let descriptor = SemanticOpDescriptor::new_token_select(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::F32, &[1, 257]).unwrap(),
+                TensorView::contiguous(DType::U8, &[1, 257]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::U8, &[16]).unwrap()],
+            contract,
+        )
+        .expect("valid token selector descriptor");
+        assert_eq!(adapter.supports(&descriptor), PrepareSupport::Supported);
+
+        let dispatch = dispatch_from_token_selector(TokenSelectorDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 9,
+            dispatch_count: 1,
+            kernel_id: 1,
+            workgroup_size_x: 256,
+            grid_size_x: 2,
+            vocab_size: 257,
+            fallback_allowed: false,
+            fallback_used: false,
+            result_status: 0,
+            token_id: 3,
+            backend: sys::SLLM_BACKEND_HIP,
+            kernel_symbol: "token_selector.bf16_f32_mask.v1".to_owned(),
+            device_symbol: "sllm_token_selector_bf16_f32_mask_v1".to_owned(),
+            gcn_arch_name: "gfx942".to_owned(),
+        });
+        assert_eq!(dispatch.normalized_size, 257);
+        assert_eq!(dispatch.row_count, 1);
+        assert_eq!(dispatch.target, "gfx942");
     }
 
     #[test]

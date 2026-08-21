@@ -12,6 +12,7 @@
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_api.hpp"
 #include "rotary_api.hpp"
+#include "token_selector_api.hpp"
 #include "windowed_attention_api.hpp"
 
 #include <cstring>
@@ -1217,6 +1218,92 @@ sllm_argmax_execute(const sllm_argmax_plan_t *const plan,
   } catch (...) {
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in argmax execute stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_token_selector_prepare(
+    const sllm_context_t *const context,
+    const sllm_token_selector_desc_t *const descriptor,
+    sllm_token_selector_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr) {
+      *plan = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (context == nullptr || plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "token selector context or plan output is null");
+    }
+    sllm_token_selector::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_token_selector::validate_and_copy_descriptor(descriptor, &metadata,
+                                                          error_sink);
+    if (descriptor_status != SLLM_STATUS_OK) {
+      return descriptor_status;
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in token selector prepare stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_token_selector_plan_release(
+    sllm_token_selector_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || *plan == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "token selector plan handle is null");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in token selector release stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_token_selector_execute(
+    const sllm_token_selector_plan_t *const plan,
+    const sllm_queue_t *const queue,
+    sllm_completion_t **const completion,
+    sllm_token_selector_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (completion != nullptr) {
+      *completion = nullptr;
+    }
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK) {
+      return sink_status;
+    }
+    if (plan == nullptr || queue == nullptr || completion == nullptr ||
+        dispatch_info == nullptr) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "token selector execute input or output is null");
+    }
+    if (dispatch_info->struct_size != sizeof(*dispatch_info) ||
+        dispatch_info->abi_version != SLLM_HIP_ABI_VERSION ||
+        dispatch_info->info_version !=
+            SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION ||
+        !std::all_of(std::begin(dispatch_info->reserved),
+                     std::end(dispatch_info->reserved),
+                     [](const uint32_t value) { return value == 0U; })) {
+      return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                         "token selector dispatch info is unsupported");
+    }
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in token selector execute stub");
   }
 }
 

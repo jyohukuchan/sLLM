@@ -1006,7 +1006,7 @@ candidateを再確認した。
 | ready-host-prep | Phase 37 | gfx942 GDN・Full Attention provider parity | Phase 36でdevice timeの73.95%/25.12%を占めた二familyのgfx942 baseline routeをwave64最適化providerへ置換する。実機baseline/perfはVM再確保までdeferred |
 | planned | Phase 38 | MI300X residual closure・peer比較 | Phase 37後のfresh profileからFNUZ/GEMM、execution replay、KV provider等をAmdahl順に限定評価する |
 | 完了 | Phase 39 | service operability・認証・observability | health/readiness、bounded metrics・memory、redacted slots、opt-in resumable SSE、TLS/CORS、複数user/admin keyをhost integrationで固定した |
-| planned | Phase 40 | token selection・grammar・structured generation | sampler chain、GPU sampling、logit bias/logprobs、GBNF/JSON Schema、`n>1`を共通化する |
+| 完了 | Phase 40 | token selection・grammar・structured generation | host/API/HIP/Qwen/Gemmaへ統合。V620/R9700 selector matrixとV620 Qwen/Gemma model integrationをPASS、gfx942 realのみdeferred |
 | planned | Phase 41 | prefix/KV・session state・speculation | prefix reuse、checkpoint、context shift、assistant prefill、external draft/ngramをidentity-safeに実装する |
 | planned | Phase 42 | inference mode・基本public endpoint | Completions、Embeddings、Rerank、token utilities、apply-template、infillを公開する |
 | planned | Phase 43 | Responses・Anthropic・function/tool protocol | 別仕様pinと共通internal itemでAPI/event/tool callを実装し、tool実行とは分離する |
@@ -1136,6 +1136,26 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
   [R9700 E2E history](../history/2026/08/21-31/r9700-sllm-llama-e2e-comparison.md)と
   [tracked summary](../../ci/matrix/r9700-sllm-llama-e2e-v1.json)を正とする。
 
+### Phase 40: token selection・grammar・structured generation（完了）
+
+- 2026-08-21時点で、sampler chain（legacy互換、top-k/min-p/typical/repeat、dynamic temperature、DRY/XTC/Mirostat、ignore-EOS）、
+  post-mask logprobs、tokenizer raw-byte seam、bounded GBNF/token-trie/partial UTF-8 state、JSON objectと明示subsetのJSON Schema、
+  `n=1..=8` choice state、strict API/SSE wireをhost/APIへ実装した。
+- generic `json_object`はdepth 1、containerあたり最大4 members/items、string/number 64、whitespace 16へboundedし、JSON Schemaは別の
+  global property/state limitを適用する。
+- additive HIP `TokenSelect` contract、selected-only固定16-byte record、Qwen/Gemma terminal projection接続、grammar mask・bias・
+  history-derived additive入力、full-vocabulary D2H 0のrouteを実装した。legacy Argmaxと既存ABIは維持し、MTP block selectorとGPU非対応
+  samplerのsilent fallbackは行わない。
+- targeted host/ABI evidenceと、V620 `gfx1030` / R9700 `gfx1201`のselector contract matrix（vocabulary `1,3,17,255,256,257,248320`、
+  counter `0,1`、CPU token exact/logprob tolerance `.005`、fallback 0、selected-only 16-byte D2H、full-vocabulary D2H 0）は取得済みである。
+  最終workspace test、integration review、V620 Qwen/Gemma sampled structured-generationをPASSした。reviewで検出したcategorical
+  累積順とshared grammar rule returnのcorrectness defectも修正済みである。gfx942はwave64 feature-pinned compile/routeのみPASSで、
+  MI300X実機correctness/performanceはVM再確保後へdeferredする。matrixの正は
+  [phase40-token-selector-gpu-summary-v1.json](../../ci/matrix/phase40-token-selector-gpu-summary-v1.json)である。
+- Phase 40ではllama.cpp sourceを直接reuseしていないため、既存provenance lockからの追加変更はない。詳細な作業単位、検証欄、
+  historyは[Phase 40 archive plan](archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)と
+  [Phase 40 history](../history/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)を正とする。
+
 ### llama.cppとの差分（機能・運用の未割当棚卸し）
 
 - 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
@@ -1150,9 +1170,9 @@ Full Attention 10.820→4.110秒、GDN family 7.672→0.618秒で、projection 1
 
 | 分類 | 固定llama.cppにある主な機能 | 現行sLLMの状態と未割当範囲 |
 | --- | --- | --- |
-| 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | HTTPは`/v1/models`と`/v1/chat/completions`だけを公開し、`n>1`の複数choicesも拒否する。Responsesは既存deferred、その他のHTTP endpoint/runtime modeは未割当。CLIのtokenize/render/decodeとinternal embedding opを、対応するHTTP APIのsupportとは数えない |
-| 制約生成・tool | GBNF/JSON Schema constrained decoding、structured output、function/tool calling、組込みtool/MCP実行、logit bias、logprobs | `response_format`、tools/function、logprobs等をprofile v1で明示拒否する。grammar engine、tool result parser、確率出力を未割当とし、tool/MCP実行権限は別のsecurity判断とする |
-| sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | temperature、top-p、presence/frequency penalty、seed、greedyを実装済み。sampler追加と順序指定は未割当。既存performance backlogのGPU sampling移行とは分ける |
+| 公開API・用途 | Responses、Completions、Embeddings、Rerank、Anthropic Messages、tokenize/detokenize、apply-template、infill、専用input-token-count endpoint | HTTPは`/v1/models`と`/v1/chat/completions`だけを公開し、Chat CompletionsはPhase 40で`n=1..=8`へ拡張した。Responsesは既存deferred、その他のHTTP endpoint/runtime modeは未割当。CLIのtokenize/render/decodeとinternal embedding opを、対応するHTTP APIのsupportとは数えない |
+| 制約生成・tool | GBNF/JSON Schema constrained decoding、structured output、function/tool calling、組込みtool/MCP実行、logit bias、logprobs | Phase 40でbounded GBNF/JSON Schema、structured `response_format`、logit bias、post-mask logprobsをprofile v1へ実装した。tools/function、tool result parser、組込みtool/MCP実行は未割当で、実行権限は別のsecurity判断とする |
+| sampling | configurable sampler chain、top-k、min-p、typical、Mirostat、DRY、XTC、adaptive/dynamic temperature、ignore-EOS | Phase 40でversioned ordered sampler chainと追加samplerを実装済み。GPU TokenSelectは対応subsetだけを明示routeし、高度な全候補filterはhost pathへ残す。既存performance backlogのGPU sampling移行とは分ける |
 | prompt・context・state | context shift、prompt/KV reuse、session/slot checkpoint save/restore、assistant prefill、FIM/infill、external draft/ngram speculation | stateはrequest-localで、cross-request prefix/session reuseはない。prefix/KV cacheと簡易永続化のbacklog、将来RoPE scalingへ接続するが、追加runtime controlは未割当。model固有MTPはこの比較から除外する |
 | adapter・load lifecycle | preloaded LoRAのscale/request切替、control vector、model cache/offline controls、router model load/unload/cache | verified model lockと起動時GGUF resident load/shutdownを維持する。adapter/control-vectorと動的router model lifecycleは未割当であり、Phase 20のGGUF container完了をこれらの対応へ読み替えない |
 | template・対話UX | arbitrary Jinja/custom templateとkwargs、reasoning controls、in-flight reasoning control API、interactive conversation、reverse prompt、prompt file、WebUI | reviewed Qwen renderer、Gemma raw-text path、限定thinking extension、単発CLIを実装済み。generic template、対話session、WebUIは未割当または既存の将来項目として維持する |
@@ -1315,6 +1335,11 @@ LMCache、RadixAttention、将来MX形式には現時点でPhase番号を割り�
   fresh residualを閉じる。機能laneの次はPhase 40とし、MI300X待ちの間もhost側を独立して進める。Phase 37/38のGPU完了は
   Phase 40以降の開始・merge gateにしない。詳細、依存、受入条件、
   intentional exclusionsは[Phase 37以降のactive plan](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
+- Phase 40は完了した。既存profile-v1のtoken列とtemperature-zero Argmaxをlegacy adapterで維持し、ordered sampler chain、
+  post-mask logprobs、bounded GBNF/token trie/UTF-8 state、明示JSON Schema subset、独立`n=1..=8` choice state、selected-only
+  D2HのHIP prepared selectorを実装した。V620/R9700実機correctnessとgfx942 compile routeをPASSし、MI300X実機PASSはVM再確保後へ
+  deferredした。詳細な受入条件、上限、work unit、検証結果は
+  [Phase 40 archive plan](archive/2026/08/21-31/phase40-token-selection-grammar-structured-generation.md)を正とする。
 - Phase 36完了後のcanonical R9700 direct 10,001/2 E1比較はsLLM `3.936429665`秒、fixed llama.cpp
   `2.063845785`秒、比`1.90733x`でPASSした。同一token IDs/生成、BF16/FP16 KV、3+10の独立比較であり、
   Phase 35 messages rowやPhase 36 scopeへ遡及統合しない。詳細は

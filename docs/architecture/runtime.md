@@ -293,6 +293,31 @@ usage、`stop`/`length`、generated/visible/decode-input token列を保持する
 再利用不能にするが、resident model ownerを破棄しない。A5のHTTP disconnect/shutdown/timeoutはこのcancellation
 境界へ接続する。
 
+### Phase 40 sampler・grammar・selected-only generation
+
+Phase 40はこのrequest-local境界にversioned `SamplerChainV1`、bounded grammar、確率metadata、choice stateを接続する。
+chainの順序はraw logitsのfinite検証、biasとhistory penalty、grammar/EOS mask、temperature、candidate filter、terminal selector、
+logprob metadataで固定する。legacy-v1で追加fieldを省略した場合は既存device Argmaxとtoken/tie/RNG/stop semanticsを維持する。
+追加chainはtop-k、min-p、typical、repeat、dynamic temperature、DRY、XTC、Mirostat、ignore-EOSを含み、NaN/Inf、zero mass、
+all-masked、上限超過はerrorへlowerする。
+
+grammarはRust frontendのraw token bytes、bounded token trie、partial UTF-8 stateで受理可能tokenのU8 maskを作る。GBNFとJSON object、
+JSON Schemaの明示subset（object/array/string/number/integer/boolean/null、enum/const、required、`additionalProperties:false`、
+`anyOf`、local `$defs`/`$ref`）だけをcompileし、unsupported keyword、remote/recursive reference、state explosionを受付時に拒否する。
+generic `json_object`はdepth 1、containerあたり最大4 members/items、string/number 64、whitespace 16のbounded grammarであり、JSON Schemaは
+global property/state limitsを別に適用する。
+選択後もgrammar stateをchoice ownerへ保持し、SSE/non-streamのlogprobはpost-mask/post-filter分布から同じtoken IDのtext/raw bytesへ写像する。
+
+`n=1..=8`はchoice index、derived seed/RNG、sampler history、grammar、stop matcher、usage、KV/generation ownerを分離する。
+Qwen/GemmaのGPU selector対応subsetでは、terminal projectionと同じqueue上でadditive F32とvalid-token U8 maskをuploadし、
+`TokenSelect`をsubmitする。completion後に固定16-byte selected recordだけをD2Hし、full-vocabulary logits D2Hは0にする。selectorが
+対応しないsamplerはhost full-logits pathを選択し、GPU route開始後のCPU silent fallbackはしない。MTP block selectorはこのM=1 contractの対象外である。
+
+Phase 40のHIP selectorはadditive ABIとして既存Argmax ABIと分離し、exact target/capability、status、reserved、token範囲、finite
+logprobをfail-closedに監査する。gfx1030/gfx1201のselector contract matrixはvocabulary・counter・CPU oracle・selected-only D2HをPASSした。
+gfx942はwave64 feature-pinned compile/routeのみPASSで、MI300X real correctness/performanceはVM再確保後へdeferredする。直接llama.cpp
+source reuseはなく、provenance lockは変更しない。
+
 ### OpenAI serverのadmissionとstreaming境界
 
 Phase 6 A4/A5の初期serverは一つのworkerだけがgeneration backendを呼び、bounded FIFOを超えるrequestを

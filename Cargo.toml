@@ -23,7 +23,7 @@ futures-util = { version = "=0.3.33", default-features = false, features = ["std
 image = { version = "=0.25.8", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 libc = { version = "=0.2.186" }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = { version = "=1.0.150" }
+serde_json = { version = "=1.0.150", features = ["preserve_order"] }
 serde_path_to_error = { version = "=0.1.20" }
 sha2 = { version = "=0.10.9" }
 tokenizers = { version = "=0.21.4", default-features = false, features = ["onig"] }

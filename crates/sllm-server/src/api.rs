@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use axum::Json;
@@ -7,7 +7,7 @@ use axum::response::{IntoResponse, Response};
 use serde::de::{DeserializeOwned, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Number, Value};
-use sllm_core::SamplingParametersV1;
+use sllm_core::{CompiledGrammar, SamplingParametersV1};
 use sllm_frontend::{
     BoundedImageBytesV1, GenerationConfigV1, MAX_TOTAL_VISUAL_TOKENS_V1, ProcessedVisionInputV1,
     Qwen35ChatMessageV1, Qwen35VisionProcessorV1, ThinkingModeV1,
@@ -18,6 +18,14 @@ pub const DEFAULT_MAX_COMPLETION_TOKENS: u32 = 256;
 pub const MAX_COMPLETION_TOKENS: u32 = 4_096;
 const MAX_MODEL_ALIAS_BYTES: usize = 256;
 const MAX_MESSAGES: usize = 1_024;
+const MAX_LOGIT_BIAS_ENTRIES: usize = 4_096;
+const MAX_SAMPLER_TOP_K: u32 = 1_000_000;
+const MAX_SAMPLER_HISTORY: u32 = 4_096;
+const MAX_SAMPLER_SEQUENCE_BREAKERS: usize = 16;
+const MAX_SAMPLER_SEQUENCE_BREAKER_BYTES: usize = 1_024;
+const MAX_SCHEMA_NAME_BYTES: usize = 256;
+const MAX_SCHEMA_DESCRIPTION_BYTES: usize = 4_096;
+const MAX_SCHEMA_BYTES: usize = 64 * 1024;
 
 const SUPPORTED_FIELDS: &[&str] = &[
     "model",
@@ -31,6 +39,10 @@ const SUPPORTED_FIELDS: &[&str] = &[
     "seed",
     "stream",
     "n",
+    "logit_bias",
+    "logprobs",
+    "top_logprobs",
+    "response_format",
     "sllm",
 ];
 
@@ -38,21 +50,17 @@ const KNOWN_UNSUPPORTED_FIELDS: &[&str] = &[
     "audio",
     "function_call",
     "functions",
-    "logit_bias",
-    "logprobs",
     "max_tokens",
     "metadata",
     "modalities",
     "parallel_tool_calls",
     "prediction",
     "reasoning_effort",
-    "response_format",
     "service_tier",
     "store",
     "stream_options",
     "tool_choice",
     "tools",
-    "top_logprobs",
     "user",
     "web_search_options",
 ];
@@ -341,6 +349,227 @@ impl ChatMessageV1 {
     }
 }
 
+/// A validated sparse logit-bias table.  The map is ordered by token ID so
+/// every backend adapter observes a deterministic transport-independent view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogitBiasV1 {
+    entries: BTreeMap<u32, f32>,
+}
+
+impl LogitBiasV1 {
+    pub fn entries(&self) -> &BTreeMap<u32, f32> {
+        &self.entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrySamplingConfigV1 {
+    multiplier: f32,
+    base: f32,
+    allowed_length: u32,
+    penalty_last_n: u32,
+    sequence_breakers: Vec<String>,
+}
+
+impl DrySamplingConfigV1 {
+    pub const fn multiplier(&self) -> f32 {
+        self.multiplier
+    }
+
+    pub const fn base(&self) -> f32 {
+        self.base
+    }
+
+    pub const fn allowed_length(&self) -> u32 {
+        self.allowed_length
+    }
+
+    pub const fn penalty_last_n(&self) -> u32 {
+        self.penalty_last_n
+    }
+
+    pub fn sequence_breakers(&self) -> &[String] {
+        &self.sequence_breakers
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct XtcSamplingConfigV1 {
+    probability: f32,
+    threshold: f32,
+    min_keep: u32,
+}
+
+impl XtcSamplingConfigV1 {
+    pub const fn probability(self) -> f32 {
+        self.probability
+    }
+
+    pub const fn threshold(self) -> f32 {
+        self.threshold
+    }
+
+    pub const fn min_keep(self) -> u32 {
+        self.min_keep
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MirostatSamplingConfigV1 {
+    version: u8,
+    tau: f32,
+    eta: f32,
+}
+
+impl MirostatSamplingConfigV1 {
+    pub const fn version(self) -> u8 {
+        self.version
+    }
+
+    pub const fn tau(self) -> f32 {
+        self.tau
+    }
+
+    pub const fn eta(self) -> f32 {
+        self.eta
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DynamicTemperatureConfigV1 {
+    range: f32,
+    exponent: f32,
+}
+
+impl DynamicTemperatureConfigV1 {
+    pub const fn range(self) -> f32 {
+        self.range
+    }
+
+    pub const fn exponent(self) -> f32 {
+        self.exponent
+    }
+}
+
+/// Optional sLLM sampler controls.  All fields are disabled when absent;
+/// `chain_version` fixes the backend-neutral stage order without accepting an
+/// arbitrary client-defined sampler sequence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SamplerExtensionConfigV1 {
+    chain_version: u8,
+    top_k: Option<u32>,
+    min_p: Option<f32>,
+    typical_p: Option<f32>,
+    repeat_penalty: Option<f32>,
+    repeat_last_n: u32,
+    ignore_eos: bool,
+    dry: Option<DrySamplingConfigV1>,
+    xtc: Option<XtcSamplingConfigV1>,
+    mirostat: Option<MirostatSamplingConfigV1>,
+    dynamic_temperature: Option<DynamicTemperatureConfigV1>,
+}
+
+impl SamplerExtensionConfigV1 {
+    pub const fn chain_version(&self) -> u8 {
+        self.chain_version
+    }
+
+    pub const fn top_k(&self) -> Option<u32> {
+        self.top_k
+    }
+
+    pub const fn min_p(&self) -> Option<f32> {
+        self.min_p
+    }
+
+    pub const fn typical_p(&self) -> Option<f32> {
+        self.typical_p
+    }
+
+    pub const fn repeat_penalty(&self) -> Option<f32> {
+        self.repeat_penalty
+    }
+
+    pub const fn repeat_last_n(&self) -> u32 {
+        self.repeat_last_n
+    }
+
+    pub const fn ignore_eos(&self) -> bool {
+        self.ignore_eos
+    }
+
+    pub fn dry(&self) -> Option<&DrySamplingConfigV1> {
+        self.dry.as_ref()
+    }
+
+    pub const fn xtc(&self) -> Option<XtcSamplingConfigV1> {
+        self.xtc
+    }
+
+    pub const fn mirostat(&self) -> Option<MirostatSamplingConfigV1> {
+        self.mirostat
+    }
+
+    pub const fn dynamic_temperature(&self) -> Option<DynamicTemperatureConfigV1> {
+        self.dynamic_temperature
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct JsonSchemaFormatV1 {
+    name: String,
+    description: Option<String>,
+    schema: Value,
+    strict: Option<bool>,
+}
+
+impl JsonSchemaFormatV1 {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    pub const fn schema(&self) -> &Value {
+        &self.schema
+    }
+
+    pub const fn strict(&self) -> Option<bool> {
+        self.strict
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResponseFormatV1 {
+    Text,
+    JsonObject,
+    JsonSchema(JsonSchemaFormatV1),
+}
+
+/// Validated logprob request controls.  `top_logprobs` is retained as an
+/// option so omitted and explicitly-zero requests remain distinguishable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LogprobOptionsV1 {
+    enabled: bool,
+    top_logprobs: Option<u8>,
+}
+
+impl LogprobOptionsV1 {
+    pub const fn enabled(self) -> bool {
+        self.enabled
+    }
+
+    pub const fn top_logprobs(self) -> Option<u8> {
+        self.top_logprobs
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChatCompletionRequestV1 {
     model: String,
@@ -350,6 +579,11 @@ pub struct ChatCompletionRequestV1 {
     stream: bool,
     reasoning: ReasoningOptionsV1,
     resumable: bool,
+    choice_count: u32,
+    logit_bias: Option<LogitBiasV1>,
+    logprobs: Option<LogprobOptionsV1>,
+    response_format: Option<ResponseFormatV1>,
+    sampler: Option<SamplerExtensionConfigV1>,
 }
 
 impl ChatCompletionRequestV1 {
@@ -387,6 +621,68 @@ impl ChatCompletionRequestV1 {
     pub const fn resumable(&self) -> bool {
         self.resumable
     }
+
+    pub const fn choice_count(&self) -> u32 {
+        self.choice_count
+    }
+
+    pub const fn n(&self) -> u32 {
+        self.choice_count
+    }
+
+    pub const fn logit_bias(&self) -> Option<&LogitBiasV1> {
+        self.logit_bias.as_ref()
+    }
+
+    pub const fn logprobs(&self) -> Option<LogprobOptionsV1> {
+        self.logprobs
+    }
+
+    pub const fn response_format(&self) -> Option<&ResponseFormatV1> {
+        self.response_format.as_ref()
+    }
+
+    pub const fn sampler(&self) -> Option<&SamplerExtensionConfigV1> {
+        self.sampler.as_ref()
+    }
+
+    /// Clone a validated request for one independent choice.  Choice zero is
+    /// deliberately byte-for-byte compatible with the original seed; later
+    /// choices receive a versioned deterministic derivation when a seed was
+    /// provided.  Generation/KV ownership is created by the transport-neutral
+    /// frontend, so this method only changes request-local choice metadata.
+    pub fn for_choice(&self, index: u32) -> Result<Self, ApiErrorV1> {
+        if index >= self.choice_count {
+            return Err(ApiErrorV1::invalid_value(
+                "n",
+                format!("choice index {index} is outside n={}", self.choice_count),
+            ));
+        }
+        let mut request = self.clone();
+        request.choice_count = 1;
+        if index != 0 {
+            request.seed = derive_choice_seed_v1(self.seed, index);
+        }
+        Ok(request)
+    }
+}
+
+/// Versioned, deterministic choice-seed derivation used by the API adapter.
+/// An absent seed remains absent so the runtime's existing entropy source is
+/// preserved for callers that did not request reproducibility.
+pub fn derive_choice_seed_v1(seed: Option<i64>, index: u32) -> Option<i64> {
+    let seed = seed?;
+    if index == 0 {
+        return Some(seed);
+    }
+    // Keep this bit-for-bit aligned with the frontend's public helper. The
+    // signed wire seed is only a transport representation of the same u64
+    // stream state.
+    let mut state = u64::from_ne_bytes(seed.to_ne_bytes())
+        ^ u64::from(index).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    state = (state ^ (state >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    state = (state ^ (state >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    Some(i64::from_ne_bytes((state ^ (state >> 31)).to_ne_bytes()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -431,6 +727,10 @@ struct WireChatCompletionRequest {
     seed: Option<i64>,
     stream: Option<bool>,
     n: Option<u32>,
+    logit_bias: Option<BTreeMap<String, f32>>,
+    logprobs: Option<bool>,
+    top_logprobs: Option<u8>,
+    response_format: Option<WireResponseFormat>,
     sllm: Option<WireSllmOptions>,
 }
 
@@ -440,6 +740,86 @@ struct WireSllmOptions {
     thinking: Option<WireThinkingMode>,
     separate_reasoning: Option<bool>,
     resumable: Option<bool>,
+    sampling: Option<WireSamplerExtensionOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireSamplerExtensionOptions {
+    chain_version: Option<u8>,
+    top_k: Option<u32>,
+    min_p: Option<f32>,
+    typical_p: Option<f32>,
+    repeat_penalty: Option<f32>,
+    repeat_last_n: Option<u32>,
+    ignore_eos: Option<bool>,
+    dry: Option<WireDrySamplingOptions>,
+    xtc: Option<WireXtcSamplingOptions>,
+    mirostat: Option<WireMirostatSamplingOptions>,
+    dynamic_temperature: Option<WireDynamicTemperatureOptions>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireDrySamplingOptions {
+    multiplier: Option<f32>,
+    base: Option<f32>,
+    allowed_length: Option<u32>,
+    penalty_last_n: Option<u32>,
+    sequence_breakers: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireXtcSamplingOptions {
+    probability: Option<f32>,
+    threshold: Option<f32>,
+    min_keep: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireMirostatSamplingOptions {
+    version: Option<u8>,
+    tau: Option<f32>,
+    eta: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireDynamicTemperatureOptions {
+    range: Option<f32>,
+    exponent: Option<f32>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum WireResponseFormat {
+    #[serde(rename = "text")]
+    Text(WireEmptyObject),
+    #[serde(rename = "json_object")]
+    JsonObject(WireEmptyObject),
+    #[serde(rename = "json_schema")]
+    JsonSchema(WireJsonSchemaFormat),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireEmptyObject {}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireJsonSchemaFormat {
+    json_schema: WireJsonSchema,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireJsonSchema {
+    name: String,
+    description: Option<String>,
+    schema: Value,
+    strict: Option<bool>,
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -462,6 +842,346 @@ struct WireMessage {
 enum WireStop {
     One(String),
     Many(Vec<String>),
+}
+
+fn parse_logit_bias(
+    wire: Option<BTreeMap<String, f32>>,
+) -> Result<Option<LogitBiasV1>, ApiErrorV1> {
+    let Some(entries) = wire else {
+        return Ok(None);
+    };
+    if entries.len() > MAX_LOGIT_BIAS_ENTRIES {
+        return Err(ApiErrorV1::invalid_value(
+            "logit_bias",
+            format!("logit_bias must contain at most {MAX_LOGIT_BIAS_ENTRIES} entries"),
+        ));
+    }
+    let mut validated = BTreeMap::new();
+    for (raw_token_id, bias) in entries {
+        let token_id = raw_token_id
+            .parse::<u64>()
+            .ok()
+            .and_then(|value| (value <= u64::from(u32::MAX)).then_some(value as u32));
+        let Some(token_id) = token_id else {
+            return Err(ApiErrorV1::invalid_value(
+                format!("logit_bias.{raw_token_id}"),
+                "logit_bias keys must be unsigned 32-bit token IDs",
+            ));
+        };
+        if !bias.is_finite() || !(-100.0..=100.0).contains(&bias) {
+            return Err(ApiErrorV1::invalid_value(
+                format!("logit_bias.{raw_token_id}"),
+                "logit bias must be finite and in [-100,100]",
+            ));
+        }
+        validated.insert(token_id, bias);
+    }
+    Ok(Some(LogitBiasV1 { entries: validated }))
+}
+
+fn parse_response_format(
+    wire: Option<WireResponseFormat>,
+) -> Result<Option<ResponseFormatV1>, ApiErrorV1> {
+    let Some(wire) = wire else {
+        return Ok(None);
+    };
+    let format = match wire {
+        WireResponseFormat::Text(_) => ResponseFormatV1::Text,
+        WireResponseFormat::JsonObject(_) => ResponseFormatV1::JsonObject,
+        WireResponseFormat::JsonSchema(WireJsonSchemaFormat { json_schema }) => {
+            if json_schema.name.is_empty() || json_schema.name.len() > MAX_SCHEMA_NAME_BYTES {
+                return Err(ApiErrorV1::invalid_value(
+                    "response_format.json_schema.name",
+                    format!("schema name must contain 1..={MAX_SCHEMA_NAME_BYTES} bytes"),
+                ));
+            }
+            if let Some(description) = &json_schema.description {
+                if description.len() > MAX_SCHEMA_DESCRIPTION_BYTES {
+                    return Err(ApiErrorV1::invalid_value(
+                        "response_format.json_schema.description",
+                        format!(
+                            "schema description must contain at most {MAX_SCHEMA_DESCRIPTION_BYTES} bytes"
+                        ),
+                    ));
+                }
+            }
+            if !json_schema.schema.is_object() {
+                return Err(ApiErrorV1::invalid_value(
+                    "response_format.json_schema.schema",
+                    "schema must be a JSON object",
+                ));
+            }
+            let schema_bytes = serde_json::to_vec(&json_schema.schema).map_err(|error| {
+                ApiErrorV1::invalid_value(
+                    "response_format.json_schema.schema",
+                    format!("schema is not serializable: {error}"),
+                )
+            })?;
+            if schema_bytes.len() > MAX_SCHEMA_BYTES {
+                return Err(ApiErrorV1::invalid_value(
+                    "response_format.json_schema.schema",
+                    format!("schema must be at most {MAX_SCHEMA_BYTES} bytes"),
+                ));
+            }
+            CompiledGrammar::from_json_schema(&json_schema.schema).map_err(|error| {
+                ApiErrorV1::invalid_value(
+                    "response_format.json_schema.schema",
+                    format!("unsupported JSON Schema: {error}"),
+                )
+            })?;
+            ResponseFormatV1::JsonSchema(JsonSchemaFormatV1 {
+                name: json_schema.name,
+                description: json_schema.description,
+                schema: json_schema.schema,
+                strict: json_schema.strict,
+            })
+        }
+    };
+    Ok(Some(format))
+}
+
+fn parse_sampler_extension(
+    wire: Option<WireSamplerExtensionOptions>,
+) -> Result<Option<SamplerExtensionConfigV1>, ApiErrorV1> {
+    let Some(wire) = wire else {
+        return Ok(None);
+    };
+    let chain_version = wire.chain_version.unwrap_or(1);
+    if chain_version != 1 {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.chain_version",
+            "only sampler chain version 1 is supported",
+        ));
+    }
+    if let Some(top_k) = wire.top_k {
+        if top_k > MAX_SAMPLER_TOP_K {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.sampling.top_k",
+                format!("top_k must be in [0,{MAX_SAMPLER_TOP_K}]"),
+            ));
+        }
+    }
+    if let Some(min_p) = wire.min_p {
+        if !min_p.is_finite() || !(0.0..=1.0).contains(&min_p) {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.sampling.min_p",
+                "min_p must be finite and in [0,1]",
+            ));
+        }
+    }
+    if let Some(typical_p) = wire.typical_p {
+        if !typical_p.is_finite() || !(0.0..=1.0).contains(&typical_p) || typical_p == 0.0 {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.sampling.typical_p",
+                "typical_p must be finite and in (0,1]",
+            ));
+        }
+    }
+    if let Some(repeat_penalty) = wire.repeat_penalty {
+        if !repeat_penalty.is_finite()
+            || !(0.0..=100.0).contains(&repeat_penalty)
+            || repeat_penalty == 0.0
+        {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.sampling.repeat_penalty",
+                "repeat_penalty must be finite and in (0,100]",
+            ));
+        }
+    }
+    let repeat_last_n = wire.repeat_last_n.unwrap_or(64);
+    if repeat_last_n > MAX_SAMPLER_HISTORY {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.repeat_last_n",
+            format!("repeat_last_n must be in [0,{MAX_SAMPLER_HISTORY}]"),
+        ));
+    }
+
+    let dry = wire.dry.map(parse_dry_sampling).transpose()?;
+    let xtc = wire.xtc.map(parse_xtc_sampling).transpose()?;
+    let mirostat = wire.mirostat.map(parse_mirostat_sampling).transpose()?;
+    let dynamic_temperature = wire
+        .dynamic_temperature
+        .map(parse_dynamic_temperature)
+        .transpose()?;
+
+    if mirostat.is_some()
+        && (wire.top_k.is_some()
+            || wire.min_p.is_some()
+            || wire.typical_p.is_some()
+            || xtc.is_some()
+            || dynamic_temperature.is_some())
+    {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.mirostat",
+            "mirostat cannot be combined with top_k, min_p, typical_p, xtc, or dynamic_temperature",
+        ));
+    }
+
+    Ok(Some(SamplerExtensionConfigV1 {
+        chain_version,
+        top_k: wire.top_k,
+        min_p: wire.min_p,
+        typical_p: wire.typical_p,
+        repeat_penalty: wire.repeat_penalty,
+        repeat_last_n,
+        ignore_eos: wire.ignore_eos.unwrap_or(false),
+        dry,
+        xtc,
+        mirostat,
+        dynamic_temperature,
+    }))
+}
+
+fn parse_dry_sampling(wire: WireDrySamplingOptions) -> Result<DrySamplingConfigV1, ApiErrorV1> {
+    let multiplier = wire.multiplier.unwrap_or(0.0);
+    if !multiplier.is_finite() || !(0.0..=100.0).contains(&multiplier) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.multiplier",
+            "DRY multiplier must be finite and in [0,100]",
+        ));
+    }
+    let base = wire.base.unwrap_or(1.75);
+    if !base.is_finite() || !(1.0..=4.0).contains(&base) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.base",
+            "DRY base must be finite and in [1,4]",
+        ));
+    }
+    let allowed_length = wire.allowed_length.unwrap_or(2);
+    if allowed_length > MAX_SAMPLER_HISTORY {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.allowed_length",
+            format!("DRY allowed_length must be in [0,{MAX_SAMPLER_HISTORY}]"),
+        ));
+    }
+    let penalty_last_n = wire.penalty_last_n.unwrap_or(64);
+    if penalty_last_n > MAX_SAMPLER_HISTORY {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.penalty_last_n",
+            format!("DRY penalty_last_n must be in [0,{MAX_SAMPLER_HISTORY}]"),
+        ));
+    }
+    let sequence_breakers = wire.sequence_breakers.unwrap_or_else(|| {
+        ["\n", ":", "\"", "*"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    });
+    if sequence_breakers.len() > MAX_SAMPLER_SEQUENCE_BREAKERS {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.sequence_breakers",
+            format!(
+                "DRY sequence_breakers must contain at most {MAX_SAMPLER_SEQUENCE_BREAKERS} entries"
+            ),
+        ));
+    }
+    let mut total_bytes = 0_usize;
+    let mut seen = BTreeSet::new();
+    for breaker in &sequence_breakers {
+        if breaker.is_empty() || breaker.len() > 128 || !seen.insert(breaker) {
+            return Err(ApiErrorV1::invalid_value(
+                "sllm.sampling.dry.sequence_breakers",
+                "DRY sequence breakers must be nonempty, unique, and at most 128 bytes",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(breaker.len()).ok_or_else(|| {
+            ApiErrorV1::invalid_value(
+                "sllm.sampling.dry.sequence_breakers",
+                "DRY sequence breaker bytes overflowed",
+            )
+        })?;
+    }
+    if total_bytes > MAX_SAMPLER_SEQUENCE_BREAKER_BYTES {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dry.sequence_breakers",
+            format!(
+                "DRY sequence breakers must contain at most {MAX_SAMPLER_SEQUENCE_BREAKER_BYTES} bytes"
+            ),
+        ));
+    }
+    Ok(DrySamplingConfigV1 {
+        multiplier,
+        base,
+        allowed_length,
+        penalty_last_n,
+        sequence_breakers,
+    })
+}
+
+fn parse_xtc_sampling(wire: WireXtcSamplingOptions) -> Result<XtcSamplingConfigV1, ApiErrorV1> {
+    let probability = wire.probability.unwrap_or(0.0);
+    let threshold = wire.threshold.unwrap_or(0.1);
+    let min_keep = wire.min_keep.unwrap_or(1);
+    if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.xtc.probability",
+            "XTC probability must be finite and in [0,1]",
+        ));
+    }
+    if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.xtc.threshold",
+            "XTC threshold must be finite and in [0,1]",
+        ));
+    }
+    if min_keep == 0 || min_keep > MAX_SAMPLER_HISTORY {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.xtc.min_keep",
+            format!("XTC min_keep must be in [1,{MAX_SAMPLER_HISTORY}]"),
+        ));
+    }
+    Ok(XtcSamplingConfigV1 {
+        probability,
+        threshold,
+        min_keep,
+    })
+}
+
+fn parse_mirostat_sampling(
+    wire: WireMirostatSamplingOptions,
+) -> Result<MirostatSamplingConfigV1, ApiErrorV1> {
+    let version = wire.version.unwrap_or(2);
+    if !matches!(version, 1 | 2) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.mirostat.version",
+            "Mirostat version must be 1 or 2",
+        ));
+    }
+    let tau = wire.tau.unwrap_or(5.0);
+    let eta = wire.eta.unwrap_or(0.1);
+    if !tau.is_finite() || !(0.0..=100.0).contains(&tau) || tau == 0.0 {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.mirostat.tau",
+            "Mirostat tau must be finite and in (0,100]",
+        ));
+    }
+    if !eta.is_finite() || !(0.0..=1.0).contains(&eta) || eta == 0.0 {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.mirostat.eta",
+            "Mirostat eta must be finite and in (0,1]",
+        ));
+    }
+    Ok(MirostatSamplingConfigV1 { version, tau, eta })
+}
+
+fn parse_dynamic_temperature(
+    wire: WireDynamicTemperatureOptions,
+) -> Result<DynamicTemperatureConfigV1, ApiErrorV1> {
+    let range = wire.range.unwrap_or(0.0);
+    let exponent = wire.exponent.unwrap_or(1.0);
+    if !range.is_finite() || !(0.0..=10.0).contains(&range) {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dynamic_temperature.range",
+            "dynamic temperature range must be finite and in [0,10]",
+        ));
+    }
+    if !exponent.is_finite() || !(0.0..=10.0).contains(&exponent) || exponent == 0.0 {
+        return Err(ApiErrorV1::invalid_value(
+            "sllm.sampling.dynamic_temperature.exponent",
+            "dynamic temperature exponent must be finite and in (0,10]",
+        ));
+    }
+    Ok(DynamicTemperatureConfigV1 { range, exponent })
 }
 
 fn parse_text_message_content(
@@ -663,9 +1383,36 @@ pub(crate) fn parse_chat_completion_request_for_profile(
             "messages must contain between 1 and 1024 entries",
         ));
     }
-    if wire.n.unwrap_or(1) != 1 {
-        return Err(ApiErrorV1::unsupported("n"));
+    let choice_count = wire.n.unwrap_or(1);
+    if !(1..=8).contains(&choice_count) {
+        return Err(ApiErrorV1::invalid_value(
+            "n",
+            "n must be an integer in [1,8]",
+        ));
     }
+    let logit_bias = parse_logit_bias(wire.logit_bias)?;
+    if wire.top_logprobs.is_some() && wire.logprobs != Some(true) {
+        return Err(ApiErrorV1::invalid_value(
+            "top_logprobs",
+            "top_logprobs requires logprobs=true",
+        ));
+    }
+    let logprobs = match (wire.logprobs, wire.top_logprobs) {
+        (None, None) => None,
+        (enabled, top_logprobs) => Some(LogprobOptionsV1 {
+            enabled: enabled.unwrap_or(false),
+            top_logprobs,
+        }),
+    };
+    if let Some(top_logprobs) = wire.top_logprobs {
+        if top_logprobs > 20 {
+            return Err(ApiErrorV1::invalid_value(
+                "top_logprobs",
+                "top_logprobs must be in [0,20]",
+            ));
+        }
+    }
+    let response_format = parse_response_format(wire.response_format)?;
 
     let mut messages = Vec::with_capacity(wire.messages.len());
     let mut system_seen = false;
@@ -733,6 +1480,14 @@ pub(crate) fn parse_chat_completion_request_for_profile(
             "at least one user message is required",
         ));
     }
+    if matches!(response_format, Some(ResponseFormatV1::JsonObject))
+        && !messages.iter().any(message_mentions_json)
+    {
+        return Err(ApiErrorV1::invalid_value(
+            "messages",
+            "response_format=json_object requires a message to mention JSON",
+        ));
+    }
 
     let sampling = SamplingParametersV1::new(
         wire.temperature.unwrap_or(1.0),
@@ -790,8 +1545,8 @@ pub(crate) fn parse_chat_completion_request_for_profile(
     };
     let generation = GenerationConfigV1::new(max_completion_tokens, sampling, stop_strings)
         .map_err(|error| ApiErrorV1::invalid_value("stop", error.to_string()))?;
-    let (reasoning, resumable) = match wire.sllm {
-        None => (ReasoningOptionsV1::disabled(), false),
+    let (reasoning, resumable, sampler) = match wire.sllm {
+        None => (ReasoningOptionsV1::disabled(), false, None),
         Some(options) => {
             let thinking = match options.thinking.unwrap_or(WireThinkingMode::Disabled) {
                 WireThinkingMode::Enabled => ThinkingModeV1::Enabled,
@@ -810,9 +1565,20 @@ pub(crate) fn parse_chat_completion_request_for_profile(
                     separate_reasoning,
                 },
                 options.resumable.unwrap_or(false),
+                parse_sampler_extension(options.sampling)?,
             )
         }
     };
+    if sampler
+        .as_ref()
+        .is_some_and(|extension| extension.mirostat().is_some())
+        && sampling.top_p() < 1.0
+    {
+        return Err(ApiErrorV1::invalid_value(
+            "top_p",
+            "top_p must be 1 when Mirostat is enabled",
+        ));
+    }
     let stream = wire.stream.unwrap_or(false);
     if resumable && !stream {
         return Err(ApiErrorV1::invalid_value(
@@ -829,7 +1595,24 @@ pub(crate) fn parse_chat_completion_request_for_profile(
         stream,
         reasoning,
         resumable,
+        choice_count,
+        logit_bias,
+        logprobs,
+        response_format,
+        sampler,
     })
+}
+
+fn message_mentions_json(message: &ChatMessageV1) -> bool {
+    let content = match message.inner() {
+        Qwen35ChatMessageV1::System { content }
+        | Qwen35ChatMessageV1::User { content }
+        | Qwen35ChatMessageV1::Assistant { content, .. } => content,
+    };
+    content
+        .as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b"json"))
 }
 
 fn deserialize_with_path<T: DeserializeOwned>(body: &[u8]) -> Result<T, ApiErrorV1> {
@@ -976,6 +1759,248 @@ mod tests {
     }
 
     #[test]
+    fn phase40_wire_fields_are_typed_without_changing_legacy_generation() {
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "return json"}],
+            "temperature": 0.8,
+            "seed": 41,
+            "logit_bias": {"0": -100, "7": 2.5, "4294967295": 100},
+            "logprobs": true,
+            "top_logprobs": 20,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "description": "bounded answer",
+                    "schema": {"type": "object", "properties": {}, "additionalProperties": false},
+                    "strict": true
+                }
+            },
+            "n": 8,
+            "sllm": {
+                "sampling": {
+                    "chain_version": 1,
+                    "top_k": 17,
+                    "min_p": 0.05,
+                    "typical_p": 0.9,
+                    "repeat_penalty": 1.1,
+                    "ignore_eos": true,
+                    "dry": {"multiplier": 0.5, "base": 1.75, "allowed_length": 2, "penalty_last_n": 64},
+                    "xtc": {"probability": 0.2, "threshold": 0.1, "min_keep": 1},
+                    "dynamic_temperature": {"range": 0.25, "exponent": 1.2}
+                }
+            }
+        }))
+        .unwrap();
+        let request = parse_chat_completion_request(&body).unwrap();
+        assert_eq!(request.choice_count(), 8);
+        assert_eq!(request.logit_bias().unwrap().entries().len(), 3);
+        assert_eq!(request.logit_bias().unwrap().entries()[&0], -100.0);
+        assert_eq!(
+            request.logprobs(),
+            Some(LogprobOptionsV1 {
+                enabled: true,
+                top_logprobs: Some(20)
+            })
+        );
+        let ResponseFormatV1::JsonSchema(schema) = request.response_format().unwrap() else {
+            panic!("expected json schema response format")
+        };
+        assert_eq!(schema.name(), "answer");
+        assert_eq!(schema.strict(), Some(true));
+        let sampler = request.sampler().unwrap();
+        assert_eq!(sampler.chain_version(), 1);
+        assert_eq!(sampler.top_k(), Some(17));
+        assert_eq!(sampler.repeat_last_n(), 64);
+        assert!(sampler.dry().is_some());
+        assert!(sampler.xtc().is_some());
+        assert!(sampler.dynamic_temperature().is_some());
+        assert!(sampler.mirostat().is_none());
+        assert_eq!(request.generation().sampling().temperature(), 0.8);
+
+        let choice_zero = request.for_choice(0).unwrap();
+        let choice_seven = request.for_choice(7).unwrap();
+        assert_eq!(choice_zero.choice_count(), 1);
+        assert_eq!(choice_zero.seed(), request.seed());
+        assert_eq!(choice_seven.choice_count(), 1);
+        assert_ne!(choice_seven.seed(), request.seed());
+        assert!(request.for_choice(8).is_err());
+    }
+
+    #[test]
+    fn response_format_variants_and_omitted_fields_are_accepted() {
+        for (response_format, expected) in [
+            (serde_json::json!({"type": "text"}), "text"),
+            (serde_json::json!({"type": "json_object"}), "json_object"),
+        ] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "model": "qwen",
+                "messages": [{"role": "user", "content": "return JSON"}],
+                "response_format": response_format,
+            }))
+            .unwrap();
+            let request = parse_chat_completion_request(&body).unwrap();
+            assert_eq!(
+                match request.response_format().unwrap() {
+                    ResponseFormatV1::Text => "text",
+                    ResponseFormatV1::JsonObject => "json_object",
+                    ResponseFormatV1::JsonSchema(_) => "json_schema",
+                },
+                expected
+            );
+            assert_eq!(request.choice_count(), 1);
+            assert!(request.logit_bias().is_none());
+            assert!(request.logprobs().is_none());
+            assert!(request.sampler().is_none());
+        }
+    }
+
+    #[test]
+    fn structured_formats_fail_closed_before_generation() {
+        let missing_json_instruction = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "return an object"}],
+            "response_format": {"type": "json_object"}
+        }))
+        .unwrap();
+        let error = parse_chat_completion_request(&missing_json_instruction).unwrap_err();
+        assert_eq!(error.param(), Some("messages"));
+
+        let unsupported_schema = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "return JSON"}],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "answer",
+                    "schema": {
+                        "type": "string",
+                        "pattern": "^[a-z]+$"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let error = parse_chat_completion_request(&unsupported_schema).unwrap_err();
+        assert_eq!(error.param(), Some("response_format.json_schema.schema"));
+    }
+
+    #[test]
+    fn phase40_wire_limits_and_conflicts_fail_closed() {
+        for (body, param, code) in [
+            (valid(r#", "n":0"#), "n", ErrorCodeV1::InvalidValue),
+            (valid(r#", "n":9"#), "n", ErrorCodeV1::InvalidValue),
+            (
+                valid(r#", "top_logprobs":1"#),
+                "top_logprobs",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "logprobs":false, "top_logprobs":0"#),
+                "top_logprobs",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "logprobs":true, "top_logprobs":21"#),
+                "top_logprobs",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "logit_bias":{"-1":1}"#),
+                "logit_bias.-1",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "logit_bias":{"1":101}"#),
+                "logit_bias.1",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"typical_p":0}}"#),
+                "sllm.sampling.typical_p",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"repeat_penalty":0}}"#),
+                "sllm.sampling.repeat_penalty",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"repeat_last_n":4097}}"#),
+                "sllm.sampling.repeat_last_n",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"xtc":{"min_keep":0}}}"#),
+                "sllm.sampling.xtc.min_keep",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "response_format":{"type":"text","extra":true}"#),
+                "response_format",
+                ErrorCodeV1::InvalidJson,
+            ),
+            (
+                valid(
+                    r#", "response_format":{"type":"json_schema","json_schema":{"name":"x","schema":[]}}"#,
+                ),
+                "response_format.json_schema.schema",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"chain_version":2}}"#),
+                "sllm.sampling.chain_version",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "sllm":{"sampling":{"mirostat":{"version":2},"top_k":4}}"#),
+                "sllm.sampling.mirostat",
+                ErrorCodeV1::InvalidValue,
+            ),
+            (
+                valid(r#", "top_p":0.9, "sllm":{"sampling":{"mirostat":{"version":2}}}"#),
+                "top_p",
+                ErrorCodeV1::InvalidValue,
+            ),
+        ] {
+            let error = parse_chat_completion_request(&body).unwrap_err();
+            assert_eq!(error.param(), Some(param), "unexpected error for {param}");
+            assert_eq!(error.code(), code);
+        }
+
+        let too_many_biases = (0..=MAX_LOGIT_BIAS_ENTRIES)
+            .map(|token| (token.to_string(), 0.0_f32))
+            .collect::<BTreeMap<_, _>>();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hi"}],
+            "logit_bias": too_many_biases,
+        }))
+        .unwrap();
+        let error = parse_chat_completion_request(&body).unwrap_err();
+        assert_eq!(error.param(), Some("logit_bias"));
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+
+        let too_large_schema = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": "large",
+                "schema": {"description": "x".repeat(MAX_SCHEMA_BYTES)},
+            },
+        });
+        let body = serde_json::to_vec(&serde_json::json!({
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": too_large_schema,
+        }))
+        .unwrap();
+        let error = parse_chat_completion_request(&body).unwrap_err();
+        assert_eq!(error.param(), Some("response_format.json_schema.schema"));
+        assert_eq!(error.code(), ErrorCodeV1::InvalidValue);
+    }
+
+    #[test]
     fn unknown_unsupported_and_duplicate_fields_fail_closed() {
         for (body, param, code) in [
             (
@@ -984,21 +2009,10 @@ mod tests {
                 ErrorCodeV1::UnsupportedParameter,
             ),
             (
-                valid(r#", "response_format":{"type":"json_object"}"#),
-                "response_format",
-                ErrorCodeV1::UnsupportedParameter,
-            ),
-            (
-                valid(r#", "logprobs":false"#),
-                "logprobs",
-                ErrorCodeV1::UnsupportedParameter,
-            ),
-            (
                 valid(r#", "mystery":1"#),
                 "mystery",
                 ErrorCodeV1::UnsupportedParameter,
             ),
-            (valid(r#", "n":2"#), "n", ErrorCodeV1::UnsupportedParameter),
             (
                 br#"{"model":"qwen","messages":[{"role":"developer","content":"x"}]}"#.to_vec(),
                 "messages[0].role",

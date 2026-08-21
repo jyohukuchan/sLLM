@@ -31,6 +31,7 @@ mod moe_route;
 mod rmsnorm;
 mod rotary;
 mod runtime;
+mod token_selector;
 mod windowed_attention;
 
 pub use argmax::{ArgmaxDescriptor, ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
@@ -63,6 +64,10 @@ pub use rotary::{PreparedRotary, RotaryDescriptor, RotaryDispatchInfo, RotarySub
 pub use runtime::{
     Buffer, Completion, CompletionState, Context, DeviceInfo, Event, Queue, QueueCompletionMode,
     RuntimeError, RuntimeStatus,
+};
+pub use token_selector::{
+    PreparedTokenSelector, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorRecord,
+    TokenSelectorSubmission,
 };
 pub use windowed_attention::{
     PreparedWindowedAttention, WindowedAttentionDescriptor, WindowedAttentionDispatchInfo,

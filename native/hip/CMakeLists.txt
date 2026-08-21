@@ -30,6 +30,11 @@ option(SLLM_ENABLE_ARGMAX_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST
+    "Build the focused real-GPU prepared token-selector numerical runner"
+    OFF
+)
+
 option(SLLM_ENABLE_MOE_ROUTE_GPU_TEST
     "Build the focused real-GPU deterministic MoE routing runner"
     OFF
@@ -110,7 +115,8 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
        NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
        SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
        SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
-       SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST)
+       SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST OR
+       SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST)
         message(FATAL_ERROR
             "semantic G1 discovery test requires only public HIP runtime authority")
     endif()
@@ -327,6 +333,7 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/elementwise_api.cpp
     src/matmul_api.cpp
     src/argmax_api.cpp
+    src/token_selector_api.cpp
     src/moe_route_api.cpp
     src/moe_expert_api.cpp
     src/rmsnorm_api.cpp
@@ -373,6 +380,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_EMBEDDING_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/embedding_kernel.hip.o")
         set(SLLM_MATMUL_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/matmul_kernel.hip.o")
         set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
+        set(SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/token_selector_kernel.hip.o")
         set(SLLM_MOE_ROUTE_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/moe_route_kernel.hip.o")
         set(SLLM_MOE_EXPERT_G1_KERNEL_OBJECT
@@ -396,6 +405,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/argmax_runtime.inc
+                src/token_selector_runtime.inc
                 src/moe_route_runtime.inc
                 src/moe_expert_runtime.inc
                 src/attention_preprocess_runtime.inc
@@ -408,6 +418,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/elementwise_kernel_internal.hpp src/matmul_api.hpp
                 src/matmul_kernel_internal.hpp src/argmax_api.hpp
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
+                src/token_selector_api.hpp src/token_selector_kernel_internal.hpp
                 src/moe_route_api.hpp src/moe_route_kernel_internal.hpp
                 src/moe_expert_api.hpp src/moe_expert_kernel_internal.hpp
                 src/attention_preprocess_api.hpp
@@ -471,6 +482,17 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/argmax_kernel.hip.cpp"
                 -o "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             DEPENDS src/argmax_kernel.hip.cpp src/argmax_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/token_selector_kernel.hip.cpp"
+                -o "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
+            DEPENDS src/token_selector_kernel.hip.cpp
+                src/token_selector_kernel_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -567,6 +589,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
@@ -583,6 +606,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
+            "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
@@ -599,6 +623,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/matmul_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_expert_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/attention_preprocess_kernel.hip.cpp
@@ -618,6 +643,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/matmul_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_expert_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES
@@ -746,6 +772,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/elementwise_api.cpp
         src/matmul_api.cpp
         src/argmax_api.cpp
+        src/token_selector_api.cpp
+        src/token_selector_kernel.hip.cpp
         src/moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
@@ -790,6 +818,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/elementwise_api.cpp
         src/matmul_api.cpp
         src/argmax_api.cpp
+        src/token_selector_api.cpp
+        src/token_selector_kernel.hip.cpp
         src/moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
@@ -820,6 +850,46 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     target_link_libraries(sllm_argmax_public_c_abi_host_test PRIVATE Threads::Threads)
     add_test(NAME sllm_argmax_public_c_abi_host_test
         COMMAND sllm_argmax_public_c_abi_host_test
+    )
+
+    add_executable(sllm_token_selector_public_c_abi_host_test
+        src/public_runtime.hip.cpp
+        src/embedding_api.cpp
+        src/elementwise_api.cpp
+        src/matmul_api.cpp
+        src/argmax_api.cpp
+        src/token_selector_api.cpp
+        src/token_selector_kernel.hip.cpp
+        src/moe_route_api.cpp
+        src/moe_expert_api.cpp
+        src/rmsnorm_api.cpp
+        src/attention_preprocess_api.cpp
+        src/rotary_api.cpp
+        src/windowed_attention_api.cpp
+        src/causal_attention_api.cpp
+        src/kv_state_api.cpp
+        src/linear_attention_api.cpp
+        tests/fake_hip_runtime.cpp
+        tests/token_selector_public_c_abi_test.cpp
+    )
+    set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES
+        LANGUAGE CXX
+    )
+    target_compile_features(sllm_token_selector_public_c_abi_host_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_token_selector_public_c_abi_host_test PRIVATE
+        SLLM_PUBLIC_RUNTIME_HOST_TEST=1
+    )
+    target_include_directories(sllm_token_selector_public_c_abi_host_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/../../include"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/tests/fake_hip/include"
+    )
+    target_compile_options(sllm_token_selector_public_c_abi_host_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_token_selector_public_c_abi_host_test PRIVATE Threads::Threads)
+    add_test(NAME sllm_token_selector_public_c_abi_host_test
+        COMMAND sllm_token_selector_public_c_abi_host_test
     )
 
     add_executable(sllm_private_evidence_stub_test
@@ -883,6 +953,24 @@ if(SLLM_ENABLE_ARGMAX_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_argmax_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "token-selector GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_token_selector_gpu_test
+        tests/token_selector_gpu_test.cpp
+    )
+    target_compile_features(sllm_token_selector_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_token_selector_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_token_selector_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_token_selector_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
 if(SLLM_ENABLE_MOE_ROUTE_GPU_TEST)

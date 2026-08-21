@@ -79,6 +79,10 @@ typedef uint32_t sllm_status_t;
 #define SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR UINT32_C(0x126)
 #define SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR UINT32_C(0x127)
 #define SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR UINT32_C(0x128)
+#define SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR UINT32_C(0x129)
+#define SLLM_STATUS_TOKEN_SELECTOR_NONFINITE UINT32_C(0x12a)
+#define SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED UINT32_C(0x12b)
+#define SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE UINT32_C(0x12c)
 
 #define SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1 UINT32_C(1)
@@ -149,6 +153,15 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ARGMAX_WORKGROUP_SIZE UINT32_C(256)
 #define SLLM_HIP_ARGMAX_MAX_V UINT64_C(1048576)
 #define SLLM_HIP_ARGMAX_MAX_M UINT64_C(4294967295)
+
+#define SLLM_HIP_TOKEN_SELECTOR_VERSION UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1 UINT32_C(1)
+#define SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_TOKEN_SELECTOR_MAX_V UINT64_C(1048576)
+#define SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES UINT32_C(16)
 
 #define SLLM_HIP_MOE_ROUTE_VERSION UINT32_C(1)
 #define SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -338,6 +351,7 @@ typedef struct sllm_elementwise_plan_t sllm_elementwise_plan_t;
 typedef struct sllm_embedding_plan_t sllm_embedding_plan_t;
 typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
 typedef struct sllm_argmax_plan_t sllm_argmax_plan_t;
+typedef struct sllm_token_selector_plan_t sllm_token_selector_plan_t;
 typedef struct sllm_moe_route_plan_t sllm_moe_route_plan_t;
 typedef struct sllm_moe_expert_plan_t sllm_moe_expert_plan_t;
 typedef struct sllm_attention_preprocess_plan_t
@@ -653,6 +667,57 @@ typedef struct sllm_argmax_dispatch_info_t {
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
   uint32_t reserved[8];
 } sllm_argmax_dispatch_info_t;
+
+/* Prepared, backend-resident categorical selection for exactly one BF16 logits
+ * row (M=1).  All inputs and the fixed-size output record are tensor bindings
+ * owned by the context.  The plan retains their backing buffers until release;
+ * execute enqueues on the supplied queue and returns an asynchronous
+ * completion.  The kernel performs finite validation, stable softmax, and
+ * counter-based categorical sampling without a full-vocabulary D2H readback.
+ * The selected record is the only output and is read with the normal selected
+ * 16-byte D2H transfer path after completion. */
+typedef struct sllm_token_selector_record_t {
+  int32_t token_id;
+  uint32_t status;
+  float logprob;
+  uint32_t reserved0;
+} sllm_token_selector_record_t;
+
+typedef struct sllm_token_selector_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t logits;
+  sllm_tensor_binding_t additive_logits;
+  sllm_tensor_binding_t valid_mask;
+  sllm_tensor_binding_t output;
+  uint64_t vocab_size;
+  float temperature;
+  uint64_t seed;
+  uint64_t counter;
+} sllm_token_selector_desc_t;
+
+typedef struct sllm_token_selector_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t vocab_size;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint32_t result_status;
+  int32_t token_id;
+  char kernel_symbol[SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_token_selector_dispatch_info_t;
 
 /* Sparse-MoE routing consumes contiguous BF16 logits [M,E]. `metadata` is a
  * contiguous unquantized U8 byte buffer whose reviewed layout is:
@@ -1303,6 +1368,21 @@ SLLM_HIP_API sllm_status_t sllm_argmax_plan_release(
 SLLM_HIP_API sllm_status_t sllm_argmax_execute(
     const sllm_argmax_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion, sllm_argmax_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_token_selector_prepare(
+    const sllm_context_t *context, const sllm_token_selector_desc_t *descriptor,
+    sllm_token_selector_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_token_selector_plan_release(
+    sllm_token_selector_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_token_selector_execute(
+    const sllm_token_selector_plan_t *plan,
+    const sllm_queue_t *queue, sllm_completion_t **completion,
+    sllm_token_selector_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_moe_route_prepare(

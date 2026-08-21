@@ -18,6 +18,7 @@ pub enum SemanticOpKind {
     CausalAttention,
     AttentionPreprocess,
     Argmax,
+    TokenSelect,
     SparseMoe,
 }
 
@@ -74,6 +75,89 @@ pub enum ElementwiseTensor {
 pub enum ArgmaxTensor {
     Logits,
     Output,
+}
+
+/// Tensor roles in the baseline categorical token-selection operation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TokenSelectorTensor {
+    Logits,
+    AdditiveLogits,
+    ValidMask,
+    Output,
+}
+
+impl fmt::Display for TokenSelectorTensor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Logits => "logits",
+            Self::AdditiveLogits => "additive logits",
+            Self::ValidMask => "valid mask",
+            Self::Output => "output",
+        })
+    }
+}
+
+/// Fixed numerical and RNG contract for one baseline categorical selection.
+///
+/// The temperature is stored as bits so this contract remains `Eq`/`Hash` and
+/// can be used as a prepared-operation cache key.  The seed and counter are
+/// explicit to make replay and multi-choice derivation backend-independent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct TokenSelectorContractV1 {
+    vocab_size: u64,
+    temperature_bits: u32,
+    seed: u64,
+    counter: u64,
+}
+
+impl TokenSelectorContractV1 {
+    pub const MAX_VOCAB_SIZE: u64 = 1_048_576;
+
+    pub fn new(
+        vocab_size: u64,
+        temperature: f32,
+        seed: u64,
+        counter: u64,
+    ) -> Result<Self, OpError> {
+        if vocab_size == 0 || vocab_size > Self::MAX_VOCAB_SIZE {
+            return Err(OpError::TokenSelectorVocabOutOfRange { vocab: vocab_size });
+        }
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(OpError::TokenSelectorInvalidTemperature {
+                bits: temperature.to_bits(),
+            });
+        }
+        Ok(Self {
+            vocab_size,
+            temperature_bits: temperature.to_bits(),
+            seed,
+            counter,
+        })
+    }
+
+    pub const fn vocab_size(self) -> u64 {
+        self.vocab_size
+    }
+
+    pub const fn vocab(self) -> u64 {
+        self.vocab_size
+    }
+
+    pub const fn temperature(self) -> f32 {
+        f32::from_bits(self.temperature_bits)
+    }
+
+    pub const fn temperature_bits(self) -> u32 {
+        self.temperature_bits
+    }
+
+    pub const fn seed(self) -> u64 {
+        self.seed
+    }
+
+    pub const fn counter(self) -> u64 {
+        self.counter
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -133,6 +217,7 @@ impl SemanticOpKind {
             Self::CausalAttention => "causal_attention",
             Self::AttentionPreprocess => "attention_preprocess",
             Self::Argmax => "argmax",
+            Self::TokenSelect => "token_select",
             Self::SparseMoe => "sparse_moe",
         }
     }
@@ -153,6 +238,7 @@ impl SemanticOpKind {
             Self::CausalAttention => (3, 1),
             Self::AttentionPreprocess => (5, 3),
             Self::Argmax => (1, 1),
+            Self::TokenSelect => (3, 1),
             Self::SparseMoe => (3, 1),
         }
     }
@@ -905,6 +991,7 @@ pub struct SemanticOpDescriptor {
     rotary_contract: Option<SplitHalfRotaryContract>,
     causal_attention_contract: Option<WindowedCausalAttentionContract>,
     attention_preprocess_contract: Option<AttentionPreprocessContract>,
+    token_selector_contract: Option<TokenSelectorContractV1>,
     sparse_moe_contract: Option<SparseMoeContract>,
 }
 
@@ -925,6 +1012,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            token_selector_contract: None,
             sparse_moe_contract: None,
         };
         descriptor.validate()?;
@@ -956,6 +1044,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            token_selector_contract: None,
             sparse_moe_contract: None,
         };
         descriptor.validate()?;
@@ -975,6 +1064,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: Some(contract),
+            token_selector_contract: None,
             sparse_moe_contract: None,
         };
         descriptor.validate()?;
@@ -994,6 +1084,7 @@ impl SemanticOpDescriptor {
             rotary_contract: Some(contract),
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            token_selector_contract: None,
             sparse_moe_contract: None,
         };
         descriptor.validate()?;
@@ -1013,10 +1104,42 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: Some(contract),
             attention_preprocess_contract: None,
+            token_selector_contract: None,
             sparse_moe_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
+    }
+
+    /// Creates a categorical token-selection descriptor with an explicit
+    /// vocabulary, temperature, seed, and counter contract.
+    pub fn new_token_select(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: TokenSelectorContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::TokenSelect,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: Some(contract),
+            sparse_moe_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Alias retaining the noun used by the HIP public API.
+    pub fn new_token_selector(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: TokenSelectorContractV1,
+    ) -> Result<Self, OpError> {
+        Self::new_token_select(inputs, outputs, contract)
     }
 
     pub fn new_sparse_moe(
@@ -1032,6 +1155,7 @@ impl SemanticOpDescriptor {
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
+            token_selector_contract: None,
             sparse_moe_contract: Some(contract),
         };
         descriptor.validate()?;
@@ -1068,6 +1192,10 @@ impl SemanticOpDescriptor {
 
     pub const fn attention_preprocess_contract(&self) -> Option<AttentionPreprocessContract> {
         self.attention_preprocess_contract
+    }
+
+    pub const fn token_selector_contract(&self) -> Option<TokenSelectorContractV1> {
+        self.token_selector_contract
     }
 
     pub const fn sparse_moe_contract(&self) -> Option<SparseMoeContract> {
@@ -1162,6 +1290,12 @@ impl SemanticOpDescriptor {
             }
             SemanticOpKind::Argmax => {
                 validate_argmax(&self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::TokenSelect => {
+                let contract = self
+                    .token_selector_contract
+                    .ok_or(OpError::TokenSelectorContractRequired)?;
+                validate_token_selector(&self.inputs, &self.outputs, contract)?;
             }
             SemanticOpKind::SparseMoe => {
                 let contract = self
@@ -1353,6 +1487,63 @@ fn validate_argmax(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
         return Err(OpError::ArgmaxVocabTooLarge {
             vocab: logits.shape()[1],
         });
+    }
+    Ok(())
+}
+
+fn validate_token_selector(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: TokenSelectorContractV1,
+) -> Result<(), OpError> {
+    let roles = [
+        (&inputs[0], TokenSelectorTensor::Logits),
+        (&inputs[1], TokenSelectorTensor::AdditiveLogits),
+        (&inputs[2], TokenSelectorTensor::ValidMask),
+        (&outputs[0], TokenSelectorTensor::Output),
+    ];
+    for (tensor, role) in roles {
+        if tensor.shape().contains(&0) {
+            return Err(OpError::TokenSelectorZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::TokenSelectorNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::TokenSelectorUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+    }
+    let vocab = usize::try_from(contract.vocab_size()).map_err(|_| {
+        OpError::TokenSelectorVocabOutOfRange {
+            vocab: contract.vocab_size(),
+        }
+    })?;
+    if inputs[0].shape() != [1, vocab]
+        || inputs[1].shape() != [1, vocab]
+        || inputs[2].shape() != [1, vocab]
+    {
+        return Err(OpError::TokenSelectorShapeMismatch);
+    }
+    if outputs[0].shape() != [16] || outputs[0].payload_bytes() != 16 {
+        return Err(OpError::TokenSelectorOutputShapeMismatch);
+    }
+    let expected = [
+        (TokenSelectorTensor::Logits, DType::Bf16),
+        (TokenSelectorTensor::AdditiveLogits, DType::F32),
+        (TokenSelectorTensor::ValidMask, DType::U8),
+        (TokenSelectorTensor::Output, DType::U8),
+    ];
+    for ((tensor, role), (_, dtype)) in roles.into_iter().zip(expected) {
+        if tensor.dtype() != dtype {
+            return Err(OpError::TokenSelectorUnsupportedDType {
+                tensor: role,
+                expected: dtype,
+                actual: tensor.dtype(),
+            });
+        }
     }
     Ok(())
 }
@@ -1859,6 +2050,30 @@ pub enum OpError {
     ArgmaxVocabTooLarge {
         vocab: usize,
     },
+    TokenSelectorContractRequired,
+    TokenSelectorInvalidTemperature {
+        bits: u32,
+    },
+    TokenSelectorVocabOutOfRange {
+        vocab: u64,
+    },
+    TokenSelectorZeroExtent {
+        tensor: TokenSelectorTensor,
+    },
+    TokenSelectorNonContiguous {
+        tensor: TokenSelectorTensor,
+    },
+    TokenSelectorUnsupportedDType {
+        tensor: TokenSelectorTensor,
+        expected: DType,
+        actual: DType,
+    },
+    TokenSelectorUnsupportedEncoding {
+        tensor: TokenSelectorTensor,
+        actual: Encoding,
+    },
+    TokenSelectorShapeMismatch,
+    TokenSelectorOutputShapeMismatch,
     SparseMoeContractRequired,
     SparseMoeInvalidContract,
     SparseMoeTensorContractMismatch,
@@ -2152,6 +2367,41 @@ impl fmt::Display for OpError {
             Self::ArgmaxVocabTooLarge { vocab } => {
                 write!(formatter, "argmax vocabulary size {vocab} exceeds 1048576")
             }
+            Self::TokenSelectorContractRequired => {
+                formatter.write_str("token_select requires an explicit selection contract")
+            }
+            Self::TokenSelectorInvalidTemperature { bits } => write!(
+                formatter,
+                "token_select temperature must be finite and positive (bits 0x{bits:08x})"
+            ),
+            Self::TokenSelectorVocabOutOfRange { vocab } => write!(
+                formatter,
+                "token_select vocabulary size {vocab} is outside the supported 1..=1048576 range"
+            ),
+            Self::TokenSelectorZeroExtent { tensor } => {
+                write!(formatter, "token_select {tensor} must have non-zero extents")
+            }
+            Self::TokenSelectorNonContiguous { tensor } => {
+                write!(formatter, "token_select {tensor} must be row-major contiguous")
+            }
+            Self::TokenSelectorUnsupportedDType {
+                tensor,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "token_select {tensor} must use {expected}, got {actual}"
+            ),
+            Self::TokenSelectorUnsupportedEncoding { tensor, actual } => write!(
+                formatter,
+                "token_select {tensor} must use unquantized encoding, got {actual:?}"
+            ),
+            Self::TokenSelectorShapeMismatch => formatter.write_str(
+                "token_select logits, additive logits, and valid mask must be contiguous [1,V] tensors"
+            ),
+            Self::TokenSelectorOutputShapeMismatch => formatter.write_str(
+                "token_select output must be a contiguous unquantized U8 [16] record"
+            ),
             Self::SparseMoeContractRequired => {
                 formatter.write_str("sparse_moe requires an explicit routing/expert contract")
             }

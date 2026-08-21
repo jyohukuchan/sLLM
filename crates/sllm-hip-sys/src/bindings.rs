@@ -61,6 +61,10 @@ pub const SLLM_STATUS_LINEAR_ATTENTION_STATE_BUSY: sllm_status_t = 0x125;
 pub const SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR: sllm_status_t = 0x126;
 pub const SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR: sllm_status_t = 0x127;
 pub const SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR: sllm_status_t = 0x128;
+pub const SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR: sllm_status_t = 0x129;
+pub const SLLM_STATUS_TOKEN_SELECTOR_NONFINITE: sllm_status_t = 0x12a;
+pub const SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED: sllm_status_t = 0x12b;
+pub const SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE: sllm_status_t = 0x12c;
 
 pub const SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1: u32 = 1;
@@ -127,6 +131,14 @@ pub const SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ARGMAX_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_ARGMAX_MAX_V: u64 = 1_048_576;
 pub const SLLM_HIP_ARGMAX_MAX_M: u64 = 4_294_967_295;
+pub const SLLM_HIP_TOKEN_SELECTOR_VERSION: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_KERNEL_ID_BF16_F32_MASK_V1: u32 = 1;
+pub const SLLM_HIP_TOKEN_SELECTOR_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_TOKEN_SELECTOR_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_TOKEN_SELECTOR_MAX_V: u64 = 1_048_576;
+pub const SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES: u32 = 16;
 pub const SLLM_HIP_MOE_ROUTE_VERSION: u32 = 1;
 pub const SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1: u32 = 1;
@@ -335,6 +347,11 @@ pub struct sllm_matmul_plan_t {
 
 #[repr(C)]
 pub struct sllm_argmax_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_token_selector_plan_t {
     _private: [u8; 0],
 }
 
@@ -689,6 +706,55 @@ pub struct sllm_argmax_dispatch_info_t {
     pub vocab_size: u64,
     pub fallback_allowed: u32,
     pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_token_selector_record_t {
+    pub token_id: i32,
+    pub status: u32,
+    pub logprob: f32,
+    pub reserved0: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_token_selector_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub reserved: [u32; 4],
+    pub logits: sllm_tensor_binding_t,
+    pub additive_logits: sllm_tensor_binding_t,
+    pub valid_mask: sllm_tensor_binding_t,
+    pub output: sllm_tensor_binding_t,
+    pub vocab_size: u64,
+    pub temperature: f32,
+    pub seed: u64,
+    pub counter: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_token_selector_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub vocab_size: u64,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub result_status: u32,
+    pub token_id: i32,
     pub kernel_symbol: [c_char; 64],
     pub device_symbol: [c_char; 64],
     pub gcn_arch_name: [c_char; 64],
@@ -1360,6 +1426,23 @@ unsafe extern "C" {
         queue: *const sllm_queue_t,
         completion: *mut *mut sllm_completion_t,
         dispatch_info: *mut sllm_argmax_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_token_selector_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_token_selector_desc_t,
+        plan: *mut *mut sllm_token_selector_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_token_selector_plan_release(
+        plan: *mut *mut sllm_token_selector_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_token_selector_execute(
+        plan: *const sllm_token_selector_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_token_selector_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_moe_route_prepare(

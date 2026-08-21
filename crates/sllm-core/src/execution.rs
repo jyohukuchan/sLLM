@@ -2682,6 +2682,13 @@ impl BoundSemanticOp {
                 ("argmax logits", &inputs[0]),
                 ("argmax output", &outputs[0]),
             ])?;
+        } else if descriptor.kind() == SemanticOpKind::TokenSelect {
+            validate_nonoverlap(&[
+                ("token_select logits", &inputs[0]),
+                ("token_select additive logits", &inputs[1]),
+                ("token_select valid mask", &inputs[2]),
+                ("token_select output", &outputs[0]),
+            ])?;
         }
 
         Ok(Self {
@@ -2742,6 +2749,9 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::CausalAttention, 1) => "causal_attention key",
         (SemanticOpKind::CausalAttention, 2) => "causal_attention value",
         (SemanticOpKind::Argmax, 0) => "argmax logits",
+        (SemanticOpKind::TokenSelect, 0) => "token_select logits",
+        (SemanticOpKind::TokenSelect, 1) => "token_select additive logits",
+        (SemanticOpKind::TokenSelect, 2) => "token_select valid mask",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess packed Q/gate",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess K",
         (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess Q raw scale",
@@ -2767,6 +2777,7 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Rotary, 1) => "rotary key output",
         (SemanticOpKind::CausalAttention, 0) => "causal_attention output",
         (SemanticOpKind::Argmax, 0) => "argmax output",
+        (SemanticOpKind::TokenSelect, 0) => "token_select output",
         (SemanticOpKind::AttentionPreprocess, 0) => "attention_preprocess Q output",
         (SemanticOpKind::AttentionPreprocess, 1) => "attention_preprocess gate output",
         (SemanticOpKind::AttentionPreprocess, 2) => "attention_preprocess K output",

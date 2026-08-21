@@ -1,5 +1,5 @@
 use core::fmt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sllm_core::{
     Gemma4ModelLock, ModelLock, StopIdentity, TokenizerContract, VerifiedCache, VerifiedGguf,
@@ -250,6 +250,23 @@ pub enum TokenizerError {
         id: u32,
     },
     Decode,
+    TokenByteDecoderUnsupported {
+        decoder: String,
+    },
+    TokenByteUnsupported {
+        id: u32,
+    },
+    TokenBytePieceTooLong {
+        id: u32,
+        len: usize,
+    },
+    TokenByteTableVocabMismatch {
+        id: u32,
+        vocab_size: u64,
+    },
+    TokenByteTableCapacityOverflow {
+        value: u64,
+    },
 }
 
 impl fmt::Display for TokenizerError {
@@ -313,6 +330,21 @@ impl fmt::Display for TokenizerError {
                 formatter.write_str("token sequence contains an unknown ID")
             }
             Self::Decode => formatter.write_str("tokenizer could not decode token IDs"),
+            Self::TokenByteDecoderUnsupported { .. } => {
+                formatter.write_str("tokenizer decoder cannot be represented as token bytes")
+            }
+            Self::TokenByteUnsupported { .. } => {
+                formatter.write_str("token piece cannot be represented as raw bytes")
+            }
+            Self::TokenBytePieceTooLong { .. } => {
+                formatter.write_str("token piece exceeds the bounded raw-byte length")
+            }
+            Self::TokenByteTableVocabMismatch { .. } => {
+                formatter.write_str("token ID is outside the model vocabulary capacity")
+            }
+            Self::TokenByteTableCapacityOverflow { .. } => {
+                formatter.write_str("model vocabulary capacity does not fit the host index type")
+            }
         }
     }
 }
@@ -325,6 +357,110 @@ impl From<StopPolicyError> for TokenizerError {
     }
 }
 
+/// Maximum raw-byte length retained for one token piece.  Grammar and
+/// structured-output consumers can therefore bound their trie transition
+/// work independently of the model vocabulary size.
+pub const MAX_TOKEN_PIECE_BYTES_V1: usize = 128;
+
+/// Classification of one immutable vocabulary row.
+///
+/// `Reserved` rows are in the LM-head capacity but are absent from the
+/// tokenizer vocabulary.  They are never treated as an empty token.  A
+/// `Special` row is retained for identity/diagnostics but is not eligible for
+/// grammar transitions.  `ByteFallback` is a single raw byte emitted by
+/// tokenizers' byte-fallback convention; `Ordinary` is a regular piece whose
+/// bytes were derived using the tokenizer's decoder metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TokenPieceClassV1 {
+    Ordinary,
+    ByteFallback,
+    Special,
+    Reserved,
+}
+
+/// One row in the immutable, token-ID-ordered raw piece table.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenByteEntryV1 {
+    class: TokenPieceClassV1,
+    piece: Option<Box<str>>,
+    bytes: Option<Box<[u8]>>,
+}
+
+impl TokenByteEntryV1 {
+    fn reserved() -> Self {
+        Self {
+            class: TokenPieceClassV1::Reserved,
+            piece: None,
+            bytes: None,
+        }
+    }
+
+    pub const fn class(&self) -> TokenPieceClassV1 {
+        self.class
+    }
+
+    /// The model vocabulary piece, when this row is present in the tokenizer.
+    pub fn piece(&self) -> Option<&str> {
+        self.piece.as_deref()
+    }
+
+    /// Decoder-aware raw bytes.  Special and reserved rows deliberately return
+    /// `None`; callers must branch on [`Self::class`] instead of interpreting
+    /// an absent value as an empty token.
+    pub fn bytes(&self) -> Option<&[u8]> {
+        self.bytes.as_deref()
+    }
+
+    pub const fn is_grammar_eligible(&self) -> bool {
+        matches!(
+            self.class,
+            TokenPieceClassV1::Ordinary | TokenPieceClassV1::ByteFallback
+        )
+    }
+}
+
+/// Immutable token-ID-ordered table used by grammar/token-trie builders.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TokenByteTableV1 {
+    entries: Box<[TokenByteEntryV1]>,
+}
+
+impl TokenByteTableV1 {
+    /// Build a table directly from a tokenizer JSON asset.  Production callers
+    /// should obtain the table from [`TokenizerFrontendV1::token_byte_table`]
+    /// so the capacity comes from the verified model lock.
+    pub fn from_tokenizer_json(
+        bytes: &[u8],
+        model_vocab_size: u64,
+    ) -> Result<Self, TokenizerError> {
+        let tokenizer =
+            Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
+        build_token_byte_table(bytes, &tokenizer, model_vocab_size)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn as_slice(&self) -> &[TokenByteEntryV1] {
+        &self.entries
+    }
+
+    /// Returns `None` only for an ID outside the model capacity.  An ID inside
+    /// the capacity always has an explicit ordinary, special, or reserved row.
+    pub fn entry(&self, id: u32) -> Option<&TokenByteEntryV1> {
+        self.entries.get(usize::try_from(id).ok()?)
+    }
+
+    pub fn get(&self, id: u32) -> Result<&TokenByteEntryV1, TokenizerError> {
+        self.entry(id).ok_or(TokenizerError::UnknownTokenId { id })
+    }
+}
+
 /// An immutable tokenizer loaded only from a core-verified model-cache asset.
 /// The retained fingerprint is a consistency label, not a cryptographic lock
 /// binding; core's mutable public fingerprint fields remain separate debt.
@@ -332,6 +468,7 @@ impl From<StopPolicyError> for TokenizerError {
 pub struct TokenizerFrontendV1 {
     tokenizer: Tokenizer,
     snapshot: TokenizerSnapshotV1,
+    token_byte_table: TokenByteTableV1,
     encode_add_special_tokens: bool,
 }
 
@@ -406,7 +543,7 @@ impl TokenizerFrontendV1 {
         fingerprint: &str,
     ) -> Result<Self, TokenizerError> {
         let tokenizer =
-            Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
+            Tokenizer::from_bytes(bytes.clone()).map_err(|_| TokenizerError::InvalidTokenizer)?;
 
         validate_generation_stop_policy(contract.generation_stop_policy())?;
         let checked = CheckedContract::new(contract)?;
@@ -475,6 +612,8 @@ impl TokenizerFrontendV1 {
             });
         }
 
+        let token_byte_table = build_token_byte_table(&bytes, &tokenizer, contract.vocab_size)?;
+
         let snapshot = TokenizerSnapshotV1 {
             // This is retained as a consistency label only. It does not make
             // the mutable core label a cryptographic lock binding.
@@ -489,6 +628,7 @@ impl TokenizerFrontendV1 {
         Ok(Self {
             tokenizer,
             snapshot,
+            token_byte_table,
             encode_add_special_tokens: false,
         })
     }
@@ -548,7 +688,7 @@ impl TokenizerFrontendV1 {
 
     fn from_gemma4_bytes(lock: &Gemma4ModelLock, bytes: Vec<u8>) -> Result<Self, TokenizerError> {
         let tokenizer =
-            Tokenizer::from_bytes(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
+            Tokenizer::from_bytes(bytes.clone()).map_err(|_| TokenizerError::InvalidTokenizer)?;
         let contract = &lock.model.tokenizer_contract;
         let tokenizer_vocab = tokenizer.get_vocab(true);
         let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
@@ -616,6 +756,7 @@ impl TokenizerFrontendV1 {
                 actual: stop_token_ids,
             });
         }
+        let token_byte_table = build_token_byte_table(&bytes, &tokenizer, contract.vocab_size)?;
         let eos = EosIdentitySnapshotV1 {
             token: "<eos>".to_owned(),
             token_id: eos_id,
@@ -637,6 +778,7 @@ impl TokenizerFrontendV1 {
         Ok(Self {
             tokenizer,
             snapshot,
+            token_byte_table,
             encode_add_special_tokens: true,
         })
     }
@@ -645,10 +787,26 @@ impl TokenizerFrontendV1 {
         &self.snapshot
     }
 
+    /// Returns the decoder-aware immutable raw piece table in token-ID order.
+    pub fn token_byte_table(&self) -> &TokenByteTableV1 {
+        &self.token_byte_table
+    }
+
     pub fn encode(&self, text: &str) -> Result<TokenIdsV1, TokenizerError> {
         let encoding = self
             .tokenizer
             .encode(text, self.encode_add_special_tokens)
+            .map_err(|_| TokenizerError::Encode)?;
+        Ok(TokenIdsV1::from_slice(encoding.get_ids()))
+    }
+
+    /// Tokenizes an auxiliary generation control string without injecting
+    /// model BOS/EOS tokens.  This is used for stop and DRY sequence-breaker
+    /// configuration, never for the user prompt path.
+    pub fn encode_without_special_tokens(&self, text: &str) -> Result<TokenIdsV1, TokenizerError> {
+        let encoding = self
+            .tokenizer
+            .encode(text, false)
             .map_err(|_| TokenizerError::Encode)?;
         Ok(TokenIdsV1::from_slice(encoding.get_ids()))
     }
@@ -670,6 +828,290 @@ impl TokenizerFrontendV1 {
             .decode(token_ids.as_slice(), mode.skip_special_tokens())
             .map_err(|_| TokenizerError::Decode)
     }
+}
+
+#[derive(Clone, Debug, Default)]
+struct TokenDecoderFeatures {
+    byte_level: bool,
+    byte_fallback: bool,
+    metaspace_marker: Option<char>,
+    unsupported_decoder: Option<String>,
+    byte_level_inverse: Option<HashMap<char, u8>>,
+}
+
+fn build_token_byte_table(
+    bytes: &[u8],
+    tokenizer: &Tokenizer,
+    model_vocab_size: u64,
+) -> Result<TokenByteTableV1, TokenizerError> {
+    let root: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| TokenizerError::InvalidTokenizer)?;
+    let features = decoder_features(&root)?;
+    if let Some(decoder) = features.unsupported_decoder {
+        return Err(TokenizerError::TokenByteDecoderUnsupported { decoder });
+    }
+
+    let capacity = usize::try_from(model_vocab_size).map_err(|_| {
+        TokenizerError::TokenByteTableCapacityOverflow {
+            value: model_vocab_size,
+        }
+    })?;
+    let vocabulary = tokenizer.get_vocab(true);
+    if vocabulary.len() != tokenizer.get_vocab_size(true) {
+        return Err(TokenizerError::InvalidTokenizer);
+    }
+    let max_id = vocabulary.values().copied().max();
+    if max_id.is_some_and(|id| u64::from(id) >= model_vocab_size) {
+        return Err(TokenizerError::TokenByteTableVocabMismatch {
+            id: max_id.expect("max_id is present"),
+            vocab_size: model_vocab_size,
+        });
+    }
+    let mut entries = vec![TokenByteEntryV1::reserved(); capacity];
+    let added_tokens = tokenizer.get_added_tokens_decoder();
+    for (piece, id) in vocabulary {
+        let index =
+            usize::try_from(id).map_err(|_| TokenizerError::TokenByteTableVocabMismatch {
+                id,
+                vocab_size: model_vocab_size,
+            })?;
+        let observed = tokenizer
+            .id_to_token(id)
+            .ok_or(TokenizerError::UnknownTokenId { id })?;
+        if observed != piece {
+            return Err(TokenizerError::InvalidTokenizer);
+        }
+        let is_special = added_tokens.get(&id).is_some_and(|token| token.special);
+        let entry = if is_special {
+            TokenByteEntryV1 {
+                class: TokenPieceClassV1::Special,
+                piece: Some(piece.into_boxed_str()),
+                bytes: None,
+            }
+        } else {
+            let (class, raw_bytes) = encode_piece_bytes(&piece, id, &features)?;
+            TokenByteEntryV1 {
+                class,
+                piece: Some(piece.into_boxed_str()),
+                bytes: Some(raw_bytes.into_boxed_slice()),
+            }
+        };
+        entries[index] = entry;
+    }
+    Ok(TokenByteTableV1 {
+        entries: entries.into_boxed_slice(),
+    })
+}
+
+fn decoder_features(root: &serde_json::Value) -> Result<TokenDecoderFeatures, TokenizerError> {
+    let mut features = TokenDecoderFeatures::default();
+    if root
+        .get("model")
+        .and_then(|model| model.get("byte_fallback"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        features.byte_fallback = true;
+    }
+    if let Some(pre_tokenizer) = root.get("pre_tokenizer") {
+        visit_decoder_value(pre_tokenizer, &mut features, false)?;
+    }
+    if let Some(decoder) = root.get("decoder") {
+        visit_decoder_value(decoder, &mut features, true)?;
+    }
+    if features.byte_level {
+        features.byte_level_inverse = Some(byte_level_inverse());
+    }
+    Ok(features)
+}
+
+fn visit_decoder_value(
+    value: &serde_json::Value,
+    features: &mut TokenDecoderFeatures,
+    decoder_position: bool,
+) -> Result<(), TokenizerError> {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                visit_decoder_value(value, features, decoder_position)?;
+            }
+        }
+        serde_json::Value::Object(object) => {
+            if let Some(kind) = object.get("type").and_then(serde_json::Value::as_str) {
+                match kind {
+                    "ByteLevel" => features.byte_level = true,
+                    "ByteFallback" => features.byte_fallback = true,
+                    "Metaspace" => {
+                        if let Some(marker) = object
+                            .get("replacement")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|value| value.chars().next())
+                        {
+                            features.metaspace_marker = Some(marker);
+                        }
+                    }
+                    "Sequence" | "Fuse" => {}
+                    "Replace" => {}
+                    "Strip" | "Precompiled" => {
+                        features.unsupported_decoder = Some(kind.to_owned());
+                    }
+                    // A tokenizer can have an arbitrary pre-tokenizer plugin,
+                    // but an unknown *decoder* would make byte derivation
+                    // ambiguous.  Keep the contract fail-closed there.
+                    other if decoder_position => {
+                        features.unsupported_decoder = Some(other.to_owned());
+                    }
+                    _ => {}
+                }
+            }
+            let mut recognized_replace = false;
+            if let Some(pattern) = object.get("pattern") {
+                if let Some(replacement) = object
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|value| value.chars().next())
+                {
+                    if pattern
+                        .get("String")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|value| value == "▁")
+                    {
+                        features.metaspace_marker = Some('▁');
+                        recognized_replace = replacement == ' ';
+                        if replacement != ' ' {
+                            features.unsupported_decoder = Some("Replace".to_owned());
+                        }
+                    }
+                }
+            }
+            if object
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind == "Replace")
+                && !recognized_replace
+            {
+                features.unsupported_decoder = Some("Replace".to_owned());
+            }
+            for child in object.values() {
+                if child.is_object() || child.is_array() {
+                    visit_decoder_value(child, features, decoder_position)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn encode_piece_bytes(
+    piece: &str,
+    id: u32,
+    features: &TokenDecoderFeatures,
+) -> Result<(TokenPieceClassV1, Vec<u8>), TokenizerError> {
+    if let Some(byte) = parse_byte_fallback_piece(piece) {
+        if features.byte_fallback {
+            return bounded_piece_bytes(id, TokenPieceClassV1::ByteFallback, vec![byte]);
+        }
+        return bounded_piece_bytes(id, TokenPieceClassV1::Ordinary, piece.as_bytes().to_vec());
+    }
+    if piece.starts_with("<0x") && piece.ends_with('>') {
+        return Err(TokenizerError::TokenByteUnsupported { id });
+    }
+
+    let raw = if features.byte_level {
+        let inverse = features
+            .byte_level_inverse
+            .as_ref()
+            .expect("byte-level feature carries its inverse map");
+        let mut raw = Vec::with_capacity(piece.len());
+        for character in piece.chars() {
+            let byte = inverse
+                .get(&character)
+                .copied()
+                .ok_or(TokenizerError::TokenByteUnsupported { id })?;
+            raw.push(byte);
+        }
+        raw
+    } else if let Some(marker) = features.metaspace_marker {
+        let mut raw = Vec::with_capacity(piece.len());
+        for character in piece.chars() {
+            if character == marker {
+                raw.push(b' ');
+            } else {
+                let mut encoded = [0_u8; 4];
+                raw.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+        }
+        raw
+    } else {
+        piece.as_bytes().to_vec()
+    };
+    bounded_piece_bytes(id, TokenPieceClassV1::Ordinary, raw)
+}
+
+fn bounded_piece_bytes(
+    id: u32,
+    class: TokenPieceClassV1,
+    bytes: Vec<u8>,
+) -> Result<(TokenPieceClassV1, Vec<u8>), TokenizerError> {
+    if bytes.is_empty() || bytes.len() > MAX_TOKEN_PIECE_BYTES_V1 {
+        return if bytes.len() > MAX_TOKEN_PIECE_BYTES_V1 {
+            Err(TokenizerError::TokenBytePieceTooLong {
+                id,
+                len: bytes.len(),
+            })
+        } else {
+            Err(TokenizerError::TokenByteUnsupported { id })
+        };
+    }
+    Ok((class, bytes))
+}
+
+fn parse_byte_fallback_piece(piece: &str) -> Option<u8> {
+    if piece.len() != 6 || !piece.starts_with("<0x") || !piece.ends_with('>') {
+        return None;
+    }
+    let digits = piece.as_bytes();
+    let high = hex_digit(digits[3])?;
+    let low = hex_digit(digits[4])?;
+    Some((high << 4) | low)
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn byte_level_inverse() -> HashMap<char, u8> {
+    let mut map = HashMap::with_capacity(256);
+    let mut used = HashSet::with_capacity(256);
+    for byte in 33_u8..=126 {
+        map.insert(char::from(byte), byte);
+        used.insert(byte);
+    }
+    for byte in 161_u8..=172 {
+        map.insert(char::from(byte), byte);
+        used.insert(byte);
+    }
+    for byte in 174_u8..=255 {
+        map.insert(char::from(byte), byte);
+        used.insert(byte);
+    }
+    let mut next_codepoint = 256_u32;
+    for byte in 0_u8..=255 {
+        if used.contains(&byte) {
+            continue;
+        }
+        let character =
+            char::from_u32(next_codepoint).expect("GPT-2 byte-level Unicode mapping is valid");
+        map.insert(character, byte);
+        next_codepoint += 1;
+    }
+    map
 }
 
 fn gemma4_special_token_contents() -> HashMap<&'static str, &'static str> {
@@ -894,6 +1336,79 @@ mod tests {
                 identity: EosIdentityV1::Tokenizer,
                 id: 9
             })
+        );
+    }
+
+    #[test]
+    fn byte_level_piece_uses_decoder_byte_mapping_without_decode_round_trip() {
+        let bytes = br#"{
+          "version": "1.0",
+          "added_tokens": [],
+          "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false},
+          "decoder": {"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false},
+          "model": {
+            "type": "WordLevel",
+            "vocab": {"\u0120": 0, "\u00c3\u00a9": 1},
+            "unk_token": "\u0120"
+          }
+        }"#;
+        let table =
+            TokenByteTableV1::from_tokenizer_json(bytes, 2).expect("byte-level table constructs");
+        assert_eq!(
+            table.entry(0).and_then(TokenByteEntryV1::bytes),
+            Some(&b" "[..])
+        );
+        assert_eq!(
+            table.entry(1).and_then(TokenByteEntryV1::bytes),
+            Some(&[0xc3, 0xa9][..])
+        );
+    }
+
+    #[test]
+    fn byte_fallback_piece_is_one_raw_byte() {
+        let bytes = br#"{
+          "version": "1.0",
+          "added_tokens": [],
+          "decoder": {"type": "ByteFallback"},
+          "model": {
+            "type": "WordLevel",
+            "byte_fallback": true,
+            "vocab": {"<0x00>": 0, "<0xFF>": 1},
+            "unk_token": "<0x00>"
+          }
+        }"#;
+        let table = TokenByteTableV1::from_tokenizer_json(bytes, 2)
+            .expect("byte-fallback table constructs");
+        assert_eq!(
+            table.entry(0).and_then(TokenByteEntryV1::bytes),
+            Some(&[0][..])
+        );
+        assert_eq!(
+            table.entry(0).map(TokenByteEntryV1::class),
+            Some(TokenPieceClassV1::ByteFallback)
+        );
+        assert_eq!(
+            table.entry(1).and_then(TokenByteEntryV1::bytes),
+            Some(&[0xff][..])
+        );
+    }
+
+    #[test]
+    fn malformed_byte_fallback_piece_fails_closed() {
+        let bytes = br#"{
+          "version": "1.0",
+          "added_tokens": [],
+          "decoder": {"type": "ByteFallback"},
+          "model": {
+            "type": "WordLevel",
+            "byte_fallback": true,
+            "vocab": {"<0xGG>": 0},
+            "unk_token": "<0xGG>"
+          }
+        }"#;
+        assert_eq!(
+            TokenByteTableV1::from_tokenizer_json(bytes, 1),
+            Err(TokenizerError::TokenByteUnsupported { id: 0 })
         );
     }
 }

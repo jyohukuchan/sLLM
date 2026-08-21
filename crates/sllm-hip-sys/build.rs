@@ -279,6 +279,9 @@ fn main() {
     let argmax_kernel_internal = source_dir.join("src/argmax_kernel_internal.hpp");
     let argmax_kernel = source_dir.join("src/argmax_kernel.hip.cpp");
     let argmax_runtime = source_dir.join("src/argmax_runtime.inc");
+    let token_selector_kernel_internal = source_dir.join("src/token_selector_kernel_internal.hpp");
+    let token_selector_kernel = source_dir.join("src/token_selector_kernel.hip.cpp");
+    let token_selector_api = source_dir.join("src/token_selector_api.cpp");
     let rmsnorm_api_header = source_dir.join("src/rmsnorm_api.hpp");
     let rmsnorm_api = source_dir.join("src/rmsnorm_api.cpp");
     let rmsnorm_kernel_internal = source_dir.join("src/rmsnorm_kernel_internal.hpp");
@@ -404,6 +407,12 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", argmax_kernel.display());
     println!("cargo:rerun-if-changed={}", argmax_runtime.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_kernel_internal.display()
+    );
+    println!("cargo:rerun-if-changed={}", token_selector_kernel.display());
+    println!("cargo:rerun-if-changed={}", token_selector_api.display());
     println!("cargo:rerun-if-changed={}", rmsnorm_api_header.display());
     println!("cargo:rerun-if-changed={}", rmsnorm_api.display());
     println!(
@@ -1112,8 +1121,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_EMBEDDING_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE={{}}\", bindings::SLLM_STATUS_TOKEN_ID_OUT_OF_RANGE);\n\
              println!(\"const SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR);\n\
-             println!(\"const SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR);\n\
-             println!(\"const SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR);\n\
+            println!(\"const SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ARGMAX_DESCRIPTOR);\n\
+            println!(\"const SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ROTARY_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_WINDOWED_ATTENTION_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR={{}}\", bindings::SLLM_STATUS_INVALID_ATTENTION_PREPROCESS_DESCRIPTOR);\n\
              println!(\"const SLLM_STATUS_POSITION_PAYLOAD_MISMATCH={{}}\", bindings::SLLM_STATUS_POSITION_PAYLOAD_MISMATCH);\n\
@@ -1203,8 +1212,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ARGMAX_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ARGMAX_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ARGMAX_WORKGROUP_SIZE);\n\
              println!(\"const SLLM_HIP_ARGMAX_MAX_V={{}}\", bindings::SLLM_HIP_ARGMAX_MAX_V);\n\
-             println!(\"const SLLM_HIP_ARGMAX_MAX_M={{}}\", bindings::SLLM_HIP_ARGMAX_MAX_M);\n\
-             println!(\"const SLLM_HIP_MOE_ROUTE_VERSION={{}}\", bindings::SLLM_HIP_MOE_ROUTE_VERSION);\n\
+            println!(\"const SLLM_HIP_ARGMAX_MAX_M={{}}\", bindings::SLLM_HIP_ARGMAX_MAX_M);\n\
+            println!(\"const SLLM_HIP_MOE_ROUTE_VERSION={{}}\", bindings::SLLM_HIP_MOE_ROUTE_VERSION);\n\
              println!(\"const SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1={{}}\", bindings::SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1);\n\
              println!(\"const SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MOE_ROUTE_KERNEL_SYMBOL_MAX);\n\
