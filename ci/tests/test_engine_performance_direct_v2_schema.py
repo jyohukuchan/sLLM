@@ -150,6 +150,38 @@ class DirectV2SchemaTests(unittest.TestCase):
             target = {"$schema": self.schema["$schema"], "$ref": f"#/$defs/{definition}", "$defs": self.schema["$defs"]}
             Draft202012Validator(target).validate(value)
 
+    def test_schema_allows_phase52_selector_and_kv_physical_metadata(self) -> None:
+        result = current_result(warmups=1, measured=3)
+        result["config"].update(  # type: ignore[union-attr]
+            {
+                "prefill_chunk_selection": "automatic",
+                "prefill_chunk_candidates": [2048, 512],
+                "prefill_chunk_rejections": [],
+            }
+        )
+        sample = result["measured"]["samples"][0]  # type: ignore[index]
+        sample["memory"]["kv"] = {
+            "kv_layer_count": 1,
+            "committed_kv_bytes": 536_870_912,
+            "layers": [
+                {
+                    "layer": 3,
+                    "logical_capacity_tokens": 131_072,
+                    "observed_length_tokens": 100_002,
+                    "memory_kind": "contiguous-resident",
+                    "physical_page_bytes": 2_097_152,
+                    "tokens_per_page": 1_024,
+                    "mapped_token_capacity": 131_072,
+                    "committed_bytes_per_plane": 268_435_456,
+                }
+            ],
+        }
+        self.assert_valid(result)
+
+        sample["memory"]["kv"]["layers"][0]["memory_kind"] = "silent-fallback"
+        with self.assertRaises(Exception):
+            self.validator.validate(result)
+
     def test_v1_shape_and_separate_control_are_rejected(self) -> None:
         stale = current_result()
         stale["benchmark_schema_version"] = "engine-performance-direct-v1"

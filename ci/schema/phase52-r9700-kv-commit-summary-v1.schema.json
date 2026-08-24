@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase52-r9700-kv-commit-summary-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "source_commit", "target", "gpu_uuid", "gpu_bdf", "binary_sha256", "model_sha256", "model_lock_sha256", "producer_runner_sha256", "provider_policy", "rows", "acceptance"],
+  "properties": {
+    "schema_version": {"const": "phase52-r9700-kv-commit-summary-v1"},
+    "state": {"const": "PASS"},
+    "source_commit": {"$ref": "#/$defs/git_sha"},
+    "target": {"const": "gfx1201"},
+    "gpu_uuid": {"const": "GPU-a8e9ddefa2d60f55"},
+    "gpu_bdf": {"const": "0000:07:00.0"},
+    "binary_sha256": {"$ref": "#/$defs/sha256"},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "model_lock_sha256": {"$ref": "#/$defs/sha256"},
+    "producer_runner_sha256": {"$ref": "#/$defs/sha256"},
+    "provider_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "minimum_capacity_tokens", "memory_kind"],
+      "properties": {"target": {"const": "gfx1201"}, "minimum_capacity_tokens": {"const": 65536}, "memory_kind": {"const": "contiguous-resident"}}
+    },
+    "rows": {
+      "type": "array", "minItems": 2, "maxItems": 2,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"case_id": {"const": "long-10001"}, "input_token_count": {"const": 10001}, "warmups": {"const": 3}, "measured": {"const": 10}, "context_length": {"const": 10003}, "kv": {"properties": {"memory_kind": {"const": "virtual-contiguous"}}}}}]},
+        {"allOf": [{"$ref": "#/$defs/row"}, {"properties": {"case_id": {"const": "long-100000"}, "input_token_count": {"const": 100000}, "warmups": {"const": 1}, "measured": {"const": 3}, "context_length": {"const": 131072}, "kv": {"properties": {"memory_kind": {"const": "contiguous-resident"}}}}}]}
+      ]
+    },
+    "acceptance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["automatic_prefill", "all_requests_passed", "output_exact", "hip_only", "fallback_count", "cleanup_failures", "baseline_restored"],
+      "properties": {"automatic_prefill": {"const": true}, "all_requests_passed": {"const": true}, "output_exact": {"const": true}, "hip_only": {"const": true}, "fallback_count": {"const": 0}, "cleanup_failures": {"const": 0}, "baseline_restored": {"const": true}}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "git_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "stats": {"type": "object", "additionalProperties": false, "required": ["median", "mad", "count", "min", "max"], "properties": {"median": {"type": "number", "exclusiveMinimum": 0}, "mad": {"type": "number", "minimum": 0}, "count": {"enum": [3, 10]}, "min": {"type": "number", "exclusiveMinimum": 0}, "max": {"type": "number", "exclusiveMinimum": 0}}},
+    "placement": {"type": "object", "additionalProperties": false, "required": ["total_memory_bytes", "available_memory_bytes", "required_bytes", "model_resident_bytes", "request_state_bytes", "workspace_arena_bytes", "safety_reserve_bytes"], "properties": {"total_memory_bytes": {"type": "integer", "minimum": 1}, "available_memory_bytes": {"type": "integer", "minimum": 1}, "required_bytes": {"type": "integer", "minimum": 1}, "model_resident_bytes": {"type": "integer", "minimum": 0}, "request_state_bytes": {"type": "integer", "minimum": 0}, "workspace_arena_bytes": {"type": "integer", "minimum": 0}, "safety_reserve_bytes": {"type": "integer", "minimum": 0}}},
+    "repetitions": {"type": "object", "additionalProperties": false, "required": ["e2e_ns", "ttft_ns", "tpot_ns"], "properties": {"e2e_ns": {"type": "array", "minItems": 3, "maxItems": 10, "items": {"type": "integer", "minimum": 1}}, "ttft_ns": {"type": "array", "minItems": 3, "maxItems": 10, "items": {"type": "integer", "minimum": 1}}, "tpot_ns": {"type": "array", "minItems": 3, "maxItems": 10, "items": {"type": "integer", "minimum": 1}}}},
+    "kv": {"type": "object", "additionalProperties": false, "required": ["memory_kind", "kv_layer_count", "logical_capacity_tokens", "observed_length_tokens", "physical_page_bytes", "mapped_token_capacity", "committed_kv_bytes"], "properties": {"memory_kind": {"enum": ["virtual-contiguous", "contiguous-resident"]}, "kv_layer_count": {"type": "integer", "minimum": 1}, "logical_capacity_tokens": {"type": "integer", "minimum": 1}, "observed_length_tokens": {"type": "integer", "minimum": 1}, "physical_page_bytes": {"type": "integer", "minimum": 1}, "mapped_token_capacity": {"type": "integer", "minimum": 1}, "committed_kv_bytes": {"type": "integer", "minimum": 1}}},
+    "resources": {"type": "object", "additionalProperties": false, "required": ["sysfs_hbm_peak_bytes", "sysfs_gtt_peak_bytes", "process_group_gone", "baseline_restored", "cleanup_failures"], "properties": {"sysfs_hbm_peak_bytes": {"type": "integer", "minimum": 1}, "sysfs_gtt_peak_bytes": {"type": "integer", "minimum": 1}, "process_group_gone": {"const": true}, "baseline_restored": {"const": true}, "cleanup_failures": {"const": 0}}},
+    "evidence": {"type": "object", "additionalProperties": false, "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}}},
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "row_id", "input_token_count", "requested_output_tokens", "warmups", "measured", "context_length", "effective_prefill_chunk_tokens", "prefill_chunk_candidates", "placement", "kv", "input_token_ids_sha256", "generated_token_ids_sha256", "metrics", "repetitions", "resources", "evidence"],
+      "properties": {
+        "case_id": {"enum": ["long-10001", "long-100000"]}, "row_id": {"type": "string", "minLength": 1}, "input_token_count": {"type": "integer", "minimum": 1}, "requested_output_tokens": {"const": 2}, "warmups": {"enum": [1, 3]}, "measured": {"enum": [3, 10]}, "context_length": {"type": "integer", "minimum": 1}, "effective_prefill_chunk_tokens": {"enum": [512, 2048]}, "prefill_chunk_candidates": {"const": [2048, 512]}, "placement": {"$ref": "#/$defs/placement"}, "kv": {"$ref": "#/$defs/kv"}, "input_token_ids_sha256": {"$ref": "#/$defs/sha256"}, "generated_token_ids_sha256": {"$ref": "#/$defs/sha256"}, "metrics": {"type": "object", "additionalProperties": false, "required": ["e2e_ns", "ttft_ns", "tpot_ns"], "properties": {"e2e_ns": {"$ref": "#/$defs/stats"}, "ttft_ns": {"$ref": "#/$defs/stats"}, "tpot_ns": {"$ref": "#/$defs/stats"}}}, "repetitions": {"$ref": "#/$defs/repetitions"}, "resources": {"$ref": "#/$defs/resources"}, "evidence": {"$ref": "#/$defs/evidence"}
+      }
+    }
+  }
+}

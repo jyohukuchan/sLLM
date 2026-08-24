@@ -3,6 +3,7 @@
 #include "sllm/hip.h"
 
 #include <cmath>
+#include <array>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -78,9 +79,32 @@ struct State final {
   std::unordered_set<void *> allocations;
   std::unordered_set<void *> reservations;
   std::unordered_set<hipMemGenericAllocationHandle_t> vmm_handles;
+  std::array<uint64_t, 7> vmm_failure_after{};
+  std::array<std::size_t, 7> vmm_operation_calls{};
 };
 
 State state;
+
+constexpr std::size_t
+vmm_index(const fake_hip::VmmOperation operation) noexcept {
+  return static_cast<std::size_t>(operation);
+}
+
+hipError_t consume_vmm_failure_locked(
+    const fake_hip::VmmOperation operation) noexcept {
+  const std::size_t index = vmm_index(operation);
+  ++state.vmm_operation_calls[index];
+  uint64_t &remaining = state.vmm_failure_after[index];
+  if (remaining == UINT64_MAX) {
+    return hipSuccess;
+  }
+  if (remaining == 0U) {
+    remaining = UINT64_MAX;
+    return hipErrorOutOfMemory;
+  }
+  --remaining;
+  return hipSuccess;
+}
 
 uint16_t bf16_to_f16(const uint16_t value) noexcept {
   const uint32_t bits = static_cast<uint32_t>(value) << 16U;
@@ -190,6 +214,8 @@ void reset() noexcept {
   state.event_query_entered = false;
   state.completion_pending = false;
   state.vmm_supported = true;
+  state.vmm_failure_after.fill(UINT64_MAX);
+  state.vmm_operation_calls.fill(0U);
   state.rmsnorm_launch_status = hipSuccess;
   state.rmsnorm_numerical_execution = false;
   state.elementwise_launch_status = hipSuccess;
@@ -260,6 +286,22 @@ std::size_t device_property_calls() noexcept {
 void set_vmm_supported(const bool supported) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   state.vmm_supported = supported;
+}
+
+void set_vmm_failure_after(const VmmOperation operation,
+                           const uint64_t successful_calls) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.vmm_failure_after[vmm_index(operation)] = successful_calls;
+}
+
+void clear_vmm_failures() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  state.vmm_failure_after.fill(UINT64_MAX);
+}
+
+std::size_t vmm_operation_calls(const VmmOperation operation) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.vmm_operation_calls[vmm_index(operation)];
 }
 
 hipError_t rmsnorm_launch(const uint16_t *const activation,
@@ -1143,6 +1185,14 @@ hipError_t hipMemAddressReserve(void **const pointer, const std::size_t size,
   if (pointer == nullptr || size == 0U) {
     return hipErrorInvalidValue;
   }
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const hipError_t injected =
+        consume_vmm_failure_locked(fake_hip::VmmOperation::AddressReserve);
+    if (injected != hipSuccess) {
+      return injected;
+    }
+  }
   *pointer = std::calloc(1U, size);
   if (*pointer == nullptr) {
     return hipErrorUnknown;
@@ -1158,6 +1208,11 @@ hipError_t hipMemAddressFree(void *const pointer,
     return hipErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::AddressFree);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   if (state.reservations.erase(pointer) == 0U) {
     return hipErrorInvalidValue;
   }
@@ -1174,11 +1229,16 @@ hipError_t hipMemCreate(hipMemGenericAllocationHandle_t *const handle,
       properties->location.type != hipMemLocationTypeDevice) {
     return hipErrorInvalidValue;
   }
+  std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::Create);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   *handle = new (std::nothrow) FakeHipMemHandle{size};
   if (*handle == nullptr) {
     return hipErrorUnknown;
   }
-  std::lock_guard<std::mutex> lock(state.mutex);
   state.vmm_handles.insert(*handle);
   return hipSuccess;
 }
@@ -1188,6 +1248,11 @@ hipError_t hipMemMap(void *const pointer, const std::size_t size,
                      const hipMemGenericAllocationHandle_t handle,
                      const unsigned long long /*flags*/) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::Map);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   return pointer == nullptr || size == 0U || offset != 0U ||
                  state.vmm_handles.count(handle) == 0U
              ? hipErrorInvalidValue
@@ -1197,14 +1262,27 @@ hipError_t hipMemMap(void *const pointer, const std::size_t size,
 hipError_t hipMemSetAccess(void *const pointer, const std::size_t size,
                            const hipMemAccessDesc *const descriptors,
                            const std::size_t count) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::SetAccess);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   return pointer == nullptr || size == 0U || descriptors == nullptr ||
                  count != 1U ||
-                 descriptors->flags != hipMemAccessFlagsProtReadWrite
+                 (descriptors->flags != hipMemAccessFlagsProtReadWrite &&
+                  descriptors->flags != hipMemAccessFlagsProtRead)
              ? hipErrorInvalidValue
              : hipSuccess;
 }
 
 hipError_t hipMemUnmap(void *const pointer, const std::size_t size) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::Unmap);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   return pointer == nullptr || size == 0U ? hipErrorInvalidValue : hipSuccess;
 }
 
@@ -1214,6 +1292,11 @@ hipMemRelease(const hipMemGenericAllocationHandle_t handle) noexcept {
     return hipErrorInvalidValue;
   }
   std::lock_guard<std::mutex> lock(state.mutex);
+  const hipError_t injected =
+      consume_vmm_failure_locked(fake_hip::VmmOperation::Release);
+  if (injected != hipSuccess) {
+    return injected;
+  }
   if (state.vmm_handles.erase(handle) == 0U) {
     return hipErrorInvalidValue;
   }

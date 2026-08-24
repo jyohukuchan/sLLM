@@ -54,7 +54,7 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "6819b66645d558c134b2fe9bcdb651f23e46d695ce644c94ccacea7048172004"
+          "sha256": "82d6c3a6b05002a74742ebae73658910a23375cb88ef64c862360bb500d6a2af"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -69,7 +69,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "dc62aa3c8b517ff41f726bc6105d2b7e63f9da24e0463bf2339cbf474390a814"
+      "source_set_sha256": "fb47c54a5a0f7ec0592b37bbb72585dbae3b8f49db2f8fe0433ae5c5d927bb85"
     },
     "binding_build": {
       "canonical_order": [
@@ -151,7 +151,7 @@
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "01d0a3b686d37985e41b152b03238d4369c34f9f2f8494e5842a074b229a908f"
+          "sha256": "f349c00d391fd72b34cefed6a2a6c0e60a2cd1ba31d7d85dc09218ba85d75896"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -178,7 +178,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "cb3070aa3a24fab8bf1f63ae30a905dcc63608891d226399ee85a1c9163257c2"
+      "source_set_sha256": "1fe19703f09f5fef1801472eecb809dc2eff055c8fc3de0925d11b99d12e849a"
     }
   },
   "source_symbol_map": [

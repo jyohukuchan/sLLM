@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "6819b66645d558c134b2fe9bcdb651f23e46d695ce644c94ccacea7048172004"
+        "sha256": "82d6c3a6b05002a74742ebae73658910a23375cb88ef64c862360bb500d6a2af"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
       }
     ],
-    "source_set_sha256": "a2770e4fc41e4c6ae022c99c24c5f292be30e86f80f0b9f92cbc66f43573bff0"
+    "source_set_sha256": "5f33ca2f716f696b85d0f00a08089bcb9ca8b7db80b5db96dc952c3f8185f443"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -309,7 +309,7 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "6819b66645d558c134b2fe9bcdb651f23e46d695ce644c94ccacea7048172004"
+        "sha256": "82d6c3a6b05002a74742ebae73658910a23375cb88ef64c862360bb500d6a2af"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -372,7 +372,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "32f57c181fb161ae6e8ad8474c798d9d59e09335873701c3e2f8c7b801e5df77"
+    "source_set_sha256": "574848a9de652ffe13157a72af1c5dd7662ba5caa17c382982032de62beb01b1"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

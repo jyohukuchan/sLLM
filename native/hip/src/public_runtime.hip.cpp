@@ -48,6 +48,7 @@ extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
 #endif
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -654,12 +655,16 @@ struct KvVmmPlane final {
   uint64_t page_bytes;
   std::vector<hipMemGenericAllocationHandle_t> handles;
   std::vector<uint8_t> shared_pages;
+  /* During a COW transaction the current handle is the replacement and this
+   * side vector retains the old shared handle until commit or rollback.  A
+   * shared_pages value of 2 denotes that pending state. */
+  std::vector<hipMemGenericAllocationHandle_t> cow_old_handles;
   bool contiguous;
 
   KvVmmPlane() noexcept
       : address(nullptr), logical_bytes(0U), reservation_bytes(0U),
         mapped_bytes(0U), page_bytes(0U), handles(), shared_pages(),
-        contiguous(false) {}
+        cow_old_handles(), contiguous(false) {}
   KvVmmPlane(const KvVmmPlane &) = delete;
   KvVmmPlane &operator=(const KvVmmPlane &) = delete;
   KvVmmPlane(KvVmmPlane &&other) noexcept
@@ -668,6 +673,7 @@ struct KvVmmPlane final {
         mapped_bytes(other.mapped_bytes), page_bytes(other.page_bytes),
         handles(std::move(other.handles)),
         shared_pages(std::move(other.shared_pages)),
+        cow_old_handles(std::move(other.cow_old_handles)),
         contiguous(other.contiguous) {
     other.address = nullptr;
     other.logical_bytes = 0U;
@@ -675,6 +681,7 @@ struct KvVmmPlane final {
     other.mapped_bytes = 0U;
     other.page_bytes = 0U;
     other.shared_pages.clear();
+    other.cow_old_handles.clear();
     other.contiguous = false;
   }
 
@@ -720,6 +727,8 @@ struct KvVmmPlane final {
     page_bytes = page;
     try {
       handles.reserve(static_cast<std::size_t>(reservation / page));
+      shared_pages.reserve(static_cast<std::size_t>(reservation / page));
+      cow_old_handles.reserve(static_cast<std::size_t>(reservation / page));
     } catch (...) {
       (void)hipMemAddressFree(address,
                               static_cast<std::size_t>(reservation_bytes));
@@ -727,6 +736,9 @@ struct KvVmmPlane final {
       logical_bytes = 0U;
       reservation_bytes = 0U;
       page_bytes = 0U;
+      handles.clear();
+      shared_pages.clear();
+      cow_old_handles.clear();
       return hipErrorUnknown;
     }
     return hipSuccess;
@@ -763,8 +775,21 @@ struct KvVmmPlane final {
         (void)hipMemRelease(handle);
         return status;
       }
-      handles.push_back(handle);
-      shared_pages.push_back(0U);
+      const std::size_t handles_before = handles.size();
+      const std::size_t shared_before = shared_pages.size();
+      const std::size_t cow_before = cow_old_handles.size();
+      try {
+        handles.push_back(handle);
+        shared_pages.push_back(0U);
+        cow_old_handles.push_back(nullptr);
+      } catch (...) {
+        handles.resize(handles_before);
+        shared_pages.resize(shared_before);
+        cow_old_handles.resize(cow_before);
+        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+        (void)hipMemRelease(handle);
+        return hipErrorUnknown;
+      }
       mapped_bytes += page_bytes;
     }
     return hipSuccess;
@@ -795,6 +820,7 @@ struct KvVmmPlane final {
 #endif
     if (status == hipSuccess) {
       shared_pages.assign(handles.size(), 0U);
+      cow_old_handles.assign(handles.size(), nullptr);
       const std::size_t shared_page_count = std::min(
           handles.size(), static_cast<std::size_t>(
                               (visible_bytes + page_bytes - 1U) / page_bytes));
@@ -873,21 +899,46 @@ struct KvVmmPlane final {
         release_noexcept();
         return status;
       }
-      handles.push_back(retained);
-      shared_pages.push_back(1U);
+      const std::size_t handles_before = handles.size();
+      const std::size_t shared_before = shared_pages.size();
+      const std::size_t cow_before = cow_old_handles.size();
+      try {
+        handles.push_back(retained);
+        shared_pages.push_back(1U);
+        cow_old_handles.push_back(nullptr);
+      } catch (...) {
+        handles.resize(handles_before);
+        shared_pages.resize(shared_before);
+        cow_old_handles.resize(cow_before);
+        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+        (void)hipMemRelease(retained);
+        return hipErrorUnknown;
+      }
       mapped_bytes += page_bytes;
     }
     return hipSuccess;
   }
 
-  /* Make all shared pages intersecting [0, required_bytes) private.  The
-   * temporary mapping keeps the old retained allocation available for
-   * rollback if mapping the replacement fails. */
+  static constexpr uint8_t kCowPending = 2U;
+
+  bool has_pending_cow() const noexcept {
+    return std::any_of(shared_pages.begin(), shared_pages.end(),
+                       [](const uint8_t value) { return value == kCowPending; });
+  }
+
+  /* Make all shared pages intersecting [start_bytes, end_bytes) private.  Old
+   * retained handles remain owned by this plane until commit_pending_cow(),
+   * allowing a caller to restore every replacement if a later plane fails. */
   hipError_t make_private(const uint64_t start_bytes, const uint64_t end_bytes,
                           const hipMemAllocationProp &properties,
-                          const hipMemAccessDesc &rw_access) noexcept {
+                          const hipMemAccessDesc &rw_access,
+                          const hipMemAccessDesc &shared_access) noexcept {
     if (contiguous || start_bytes >= end_bytes || shared_pages.empty()) {
       return hipSuccess;
+    }
+    if (handles.size() != shared_pages.size() ||
+        cow_old_handles.size() != handles.size() || has_pending_cow()) {
+      return hipErrorInvalidValue;
     }
     const std::size_t first_page =
         static_cast<std::size_t>(start_bytes / page_bytes);
@@ -895,7 +946,7 @@ struct KvVmmPlane final {
         shared_pages.size(),
         static_cast<std::size_t>((end_bytes + page_bytes - 1U) / page_bytes));
     for (std::size_t index = first_page; index < page_count; ++index) {
-      if (shared_pages[index] == 0U) {
+      if (shared_pages[index] != 1U) {
         continue;
       }
       void *temporary = nullptr;
@@ -921,16 +972,22 @@ struct KvVmmPlane final {
       if (status == hipSuccess) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
         std::memcpy(temporary, target, static_cast<std::size_t>(page_bytes));
-        status = hipSuccess;
 #else
         status =
             hipMemcpy(temporary, target, static_cast<std::size_t>(page_bytes),
                       hipMemcpyDeviceToDevice);
 #endif
       }
-      if (status == hipSuccess) {
-        status = hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+      if (status != hipSuccess) {
+        (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
+        if (replacement != nullptr) {
+          (void)hipMemRelease(replacement);
+        }
+        (void)hipMemAddressFree(temporary,
+                                static_cast<std::size_t>(page_bytes));
+        return status;
       }
+      status = hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
       if (status == hipSuccess) {
         status = hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
                            replacement, 0U);
@@ -940,29 +997,156 @@ struct KvVmmPlane final {
                                  &rw_access, 1U);
       }
       if (status != hipSuccess) {
-        /* Best-effort remap of the source handle keeps the state usable on a
-         * recoverable HIP error; callers fail closed if this also fails. */
-        if (status != hipSuccess) {
-          (void)hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
-                          handles[index], 0U);
-          (void)hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
-                                &rw_access, 1U);
-        }
-        if (replacement != nullptr) {
-          (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
-          (void)hipMemRelease(replacement);
-        }
+        /* The old handle is retained, so restore the old mapping before
+         * releasing the replacement.  If restoration itself fails the caller
+         * poisons the context rather than exposing a partially mapped plane. */
+        (void)hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+        const hipError_t restore_map =
+            hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                      handles[index], 0U);
+        const hipError_t restore_access =
+            restore_map == hipSuccess
+                ? hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                                  &shared_access, 1U)
+                : restore_map;
+        (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
+        (void)hipMemRelease(replacement);
         (void)hipMemAddressFree(temporary,
                                 static_cast<std::size_t>(page_bytes));
-        return status;
+        return restore_access == hipSuccess ? status : restore_access;
       }
-      (void)hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
-      (void)hipMemAddressFree(temporary, static_cast<std::size_t>(page_bytes));
-      (void)hipMemRelease(handles[index]);
+      cow_old_handles[index] = handles[index];
       handles[index] = replacement;
-      shared_pages[index] = 0U;
+      shared_pages[index] = kCowPending;
+      const hipError_t temporary_unmap =
+          hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
+      const hipError_t temporary_free =
+          hipMemAddressFree(temporary,
+                            static_cast<std::size_t>(page_bytes));
+      if (temporary_unmap != hipSuccess || temporary_free != hipSuccess) {
+        return temporary_unmap != hipSuccess ? temporary_unmap : temporary_free;
+      }
     }
     return hipSuccess;
+  }
+
+  hipError_t make_private(const uint64_t start_bytes, const uint64_t end_bytes,
+                          const hipMemAllocationProp &properties,
+                          const hipMemAccessDesc &rw_access) noexcept {
+    hipMemAccessDesc shared_access = rw_access;
+    shared_access.flags = hipMemAccessFlagsProtRead;
+    const hipError_t status =
+        make_private(start_bytes, end_bytes, properties, rw_access,
+                     shared_access);
+    if (status != hipSuccess) {
+      return status;
+    }
+    return commit_pending_cow();
+  }
+
+  hipError_t commit_pending_cow() noexcept {
+    if (handles.size() != shared_pages.size() ||
+        cow_old_handles.size() != handles.size()) {
+      return hipErrorInvalidValue;
+    }
+    hipError_t first = hipSuccess;
+    for (std::size_t index = 0U; index != shared_pages.size(); ++index) {
+      if (shared_pages[index] != kCowPending) {
+        continue;
+      }
+      const hipError_t status = hipMemRelease(cow_old_handles[index]);
+      if (first == hipSuccess && status != hipSuccess) {
+        first = status;
+      }
+      if (status == hipSuccess) {
+        cow_old_handles[index] = nullptr;
+        shared_pages[index] = 0U;
+      }
+    }
+    return first;
+  }
+
+  hipError_t rollback_pending_cow(
+      const hipMemAccessDesc &shared_access) noexcept {
+    if (handles.size() != shared_pages.size() ||
+        cow_old_handles.size() != handles.size()) {
+      return hipErrorInvalidValue;
+    }
+    hipError_t first = hipSuccess;
+    for (std::size_t index = shared_pages.size(); index > 0U; --index) {
+      const std::size_t page = index - 1U;
+      if (shared_pages[page] != kCowPending) {
+        continue;
+      }
+      void *const target = static_cast<char *>(address) +
+                           page * static_cast<std::size_t>(page_bytes);
+      const hipError_t unmap_status =
+          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+      if (unmap_status != hipSuccess) {
+        if (first == hipSuccess) {
+          first = unmap_status;
+        }
+        continue;
+      }
+      const hipError_t map_status =
+          hipMemMap(target, static_cast<std::size_t>(page_bytes), 0U,
+                    cow_old_handles[page], 0U);
+      const hipError_t access_status =
+          map_status == hipSuccess
+              ? hipMemSetAccess(target, static_cast<std::size_t>(page_bytes),
+                                &shared_access, 1U)
+              : map_status;
+      if (access_status != hipSuccess) {
+        if (first == hipSuccess) {
+          first = access_status;
+        }
+        continue;
+      }
+      const hipError_t release_status = hipMemRelease(handles[page]);
+      if (release_status != hipSuccess) {
+        if (first == hipSuccess) {
+          first = release_status;
+        }
+        continue;
+      }
+      handles[page] = cow_old_handles[page];
+      cow_old_handles[page] = nullptr;
+      shared_pages[page] = 1U;
+    }
+    return first;
+  }
+
+  hipError_t rollback_growth_to(const uint64_t target_mapped_bytes) noexcept {
+    if (contiguous || target_mapped_bytes > mapped_bytes ||
+        page_bytes == 0U || target_mapped_bytes % page_bytes != 0U ||
+        handles.size() != shared_pages.size() ||
+        cow_old_handles.size() != handles.size()) {
+      return target_mapped_bytes == mapped_bytes ? hipSuccess
+                                                 : hipErrorInvalidValue;
+    }
+    hipError_t first = hipSuccess;
+    while (mapped_bytes > target_mapped_bytes) {
+      if (handles.empty()) {
+        return first == hipSuccess ? hipErrorInvalidValue : first;
+      }
+      const std::size_t index = handles.size() - 1U;
+      void *const target = static_cast<char *>(address) +
+                           index * static_cast<std::size_t>(page_bytes);
+      const hipError_t unmap_status =
+          hipMemUnmap(target, static_cast<std::size_t>(page_bytes));
+      if (unmap_status != hipSuccess) {
+        return first == hipSuccess ? unmap_status : first;
+      }
+      const hipError_t release_status = hipMemRelease(handles[index]);
+      if (release_status != hipSuccess) {
+        return first == hipSuccess ? release_status : first;
+      }
+      handles.pop_back();
+      shared_pages.pop_back();
+      cow_old_handles.pop_back();
+      mapped_bytes -= page_bytes;
+    }
+    return first;
   }
 
   uint64_t shared_page_count() const noexcept {
@@ -980,6 +1164,7 @@ struct KvVmmPlane final {
       mapped_bytes = 0U;
       page_bytes = 0U;
       shared_pages.clear();
+      cow_old_handles.clear();
       contiguous = false;
       return status;
     }
@@ -997,8 +1182,19 @@ struct KvVmmPlane final {
         first = release;
       }
     }
+    for (hipMemGenericAllocationHandle_t &old_handle : cow_old_handles) {
+      if (old_handle == nullptr) {
+        continue;
+      }
+      const hipError_t release = hipMemRelease(old_handle);
+      if (first == hipSuccess && release != hipSuccess) {
+        first = release;
+      }
+      old_handle = nullptr;
+    }
     handles.clear();
     shared_pages.clear();
+    cow_old_handles.clear();
     mapped_bytes = 0U;
     if (address != nullptr) {
       const hipError_t free_status = hipMemAddressFree(
@@ -1142,6 +1338,91 @@ struct KvState final : QuarantineNode {
       tokens_per_page =
           std::max(UINT64_C(1), page_bytes_value / value_bytes_per_token);
     }
+  }
+};
+
+void poison_context_locked(Context *const context) noexcept;
+
+struct KvVmmAppendTransaction final {
+  KvState *state;
+  std::array<KvVmmPlane *, 6> planes;
+  std::array<uint64_t, 6> mapped_before;
+  hipMemAccessDesc shared_access;
+  uint64_t mapped_token_capacity_before;
+  uint64_t committed_bytes_before;
+  uint64_t shared_page_count_before;
+  uint64_t cow_copied_bytes_before;
+  bool finished;
+
+  KvVmmAppendTransaction(KvState *const state_value,
+                         const hipMemAccessDesc &shared_access_value) noexcept
+      : state(state_value),
+        planes{&state_value->key_plane, &state_value->value_plane,
+               &state_value->key_scale_plane,
+               &state_value->value_scale_plane,
+               &state_value->key_outer_scale_plane,
+               &state_value->value_outer_scale_plane},
+        mapped_before{}, shared_access(shared_access_value),
+        mapped_token_capacity_before(state_value->mapped_token_capacity),
+        committed_bytes_before(state_value->committed_bytes_per_plane),
+        shared_page_count_before(state_value->shared_page_count),
+        cow_copied_bytes_before(state_value->cow_copied_bytes), finished(false) {
+    for (std::size_t index = 0U; index != planes.size(); ++index) {
+      mapped_before[index] = planes[index]->mapped_bytes;
+    }
+  }
+
+  ~KvVmmAppendTransaction() {
+    if (finished || rollback()) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+    poison_context_locked(state->context);
+  }
+
+  bool rollback() noexcept {
+    if (finished) {
+      return true;
+    }
+    hipError_t first = hipSuccess;
+    for (std::size_t index = planes.size(); index > 0U; --index) {
+      const hipError_t status =
+          planes[index - 1U]->rollback_pending_cow(shared_access);
+      if (first == hipSuccess && status != hipSuccess) {
+        first = status;
+      }
+    }
+    for (std::size_t index = planes.size(); index > 0U; --index) {
+      const hipError_t status =
+          planes[index - 1U]->rollback_growth_to(mapped_before[index - 1U]);
+      if (first == hipSuccess && status != hipSuccess) {
+        first = status;
+      }
+    }
+    state->mapped_token_capacity = mapped_token_capacity_before;
+    state->committed_bytes_per_plane = committed_bytes_before;
+    state->shared_page_count = shared_page_count_before;
+    state->cow_copied_bytes = cow_copied_bytes_before;
+    finished = true;
+    return first == hipSuccess;
+  }
+
+  bool commit() noexcept {
+    if (finished) {
+      return false;
+    }
+    hipError_t first = hipSuccess;
+    for (KvVmmPlane *const plane : planes) {
+      const hipError_t status = plane->commit_pending_cow();
+      if (first == hipSuccess && status != hipSuccess) {
+        first = status;
+      }
+    }
+    if (first == hipSuccess) {
+      finished = true;
+      return true;
+    }
+    return false;
   }
 };
 
@@ -10310,6 +10591,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     hipMemAccessDesc access{};
     access.location = allocation_properties.location;
     access.flags = hipMemAccessFlagsProtReadWrite;
+    hipMemAccessDesc shared_access = access;
+    shared_access.flags = hipMemAccessFlagsProtRead;
+    KvVmmAppendTransaction vmm_transaction(state, shared_access);
     const auto grow_plane = [&](KvVmmPlane &plane,
                                 const uint64_t bytes_per_token) -> hipError_t {
       if (bytes_per_token == 0U) {
@@ -10331,7 +10615,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       const uint64_t start_bytes = metadata.start_position * bytes_per_token;
       const uint64_t end_bytes = metadata.end_position * bytes_per_token;
       return plane.make_private(start_bytes, end_bytes, allocation_properties,
-                                access);
+                                access, shared_access);
     };
     const uint64_t shared_before =
         state->key_plane.shared_page_count() +
@@ -10366,23 +10650,19 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     }
     if (cow_status != hipSuccess) {
       execute_guard.disarm();
+      const bool vmm_rolled_back = vmm_transaction.rollback();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
                                            error_sink)) {
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      if (!vmm_rolled_back) {
+        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+        poison_context_locked(state->context);
         return SLLM_STATUS_INTERNAL_ERROR;
       }
       return hip_failure(error_sink, cow_status,
                          "copy-on-write shared KV pages");
     }
-    const uint64_t shared_after =
-        state->key_plane.shared_page_count() +
-        state->value_plane.shared_page_count() +
-        state->key_scale_plane.shared_page_count() +
-        state->value_scale_plane.shared_page_count() +
-        state->key_outer_scale_plane.shared_page_count() +
-        state->value_outer_scale_plane.shared_page_count();
-    state->shared_page_count = shared_after;
-    state->cow_copied_bytes +=
-        (shared_before - shared_after) * state->physical_page_bytes;
     hipError_t grow_status =
         grow_plane(state->key_plane, state->value_bytes_per_token);
     if (grow_status == hipSuccess) {
@@ -10407,37 +10687,18 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
     }
     if (grow_status != hipSuccess) {
       execute_guard.disarm();
+      const bool vmm_rolled_back = vmm_transaction.rollback();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,
                                            error_sink)) {
         return SLLM_STATUS_INTERNAL_ERROR;
       }
+      if (!vmm_rolled_back) {
+        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+        poison_context_locked(state->context);
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
       return hip_failure(error_sink, grow_status,
                          "grow virtual KV physical commitment");
-    }
-    state->committed_bytes_per_plane =
-        std::min(state->key_plane.mapped_bytes,
-                 state->value_plane.mapped_bytes) +
-        std::min(state->key_scale_plane.mapped_bytes,
-                 state->value_scale_plane.mapped_bytes) +
-        std::min(state->key_outer_scale_plane.mapped_bytes,
-                 state->value_outer_scale_plane.mapped_bytes);
-    state->mapped_token_capacity = std::min(
-        state->capacity_tokens, std::min(state->key_plane.mapped_bytes,
-                                         state->value_plane.mapped_bytes) /
-                                    state->value_bytes_per_token);
-    if (state->scale_bytes_per_token != 0U) {
-      state->mapped_token_capacity =
-          std::min(state->mapped_token_capacity,
-                   std::min(state->key_scale_plane.mapped_bytes,
-                            state->value_scale_plane.mapped_bytes) /
-                       state->scale_bytes_per_token);
-    }
-    if (state->outer_scale_bytes_per_token != 0U) {
-      state->mapped_token_capacity =
-          std::min(state->mapped_token_capacity,
-                   std::min(state->key_outer_scale_plane.mapped_bytes,
-                            state->value_outer_scale_plane.mapped_bytes) /
-                       state->outer_scale_bytes_per_token);
     }
     try {
       candidate = std::make_unique<Completion>(
@@ -10519,6 +10780,54 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       return cleanup_failed_submission(candidate, token, timing_record_status,
                                        "hipEventRecord KV timing start", queue,
                                        error_sink);
+    }
+    if (!vmm_transaction.commit()) {
+      const bool vmm_rolled_back = vmm_transaction.rollback();
+      execute_guard.disarm();
+      const sllm_status_t cleanup_status = cleanup_failed_submission(
+          candidate, token, hipErrorUnknown, "commit private shared KV pages",
+          queue, error_sink);
+      if (!vmm_rolled_back) {
+        std::lock_guard<std::mutex> lock(state->context->accounting_mutex);
+        poison_context_locked(state->context);
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      return cleanup_status;
+    }
+    const uint64_t shared_after =
+        state->key_plane.shared_page_count() +
+        state->value_plane.shared_page_count() +
+        state->key_scale_plane.shared_page_count() +
+        state->value_scale_plane.shared_page_count() +
+        state->key_outer_scale_plane.shared_page_count() +
+        state->value_outer_scale_plane.shared_page_count();
+    state->shared_page_count = shared_after;
+    state->cow_copied_bytes +=
+        (shared_before - shared_after) * state->physical_page_bytes;
+    state->committed_bytes_per_plane =
+        std::min(state->key_plane.mapped_bytes,
+                 state->value_plane.mapped_bytes) +
+        std::min(state->key_scale_plane.mapped_bytes,
+                 state->value_scale_plane.mapped_bytes) +
+        std::min(state->key_outer_scale_plane.mapped_bytes,
+                 state->value_outer_scale_plane.mapped_bytes);
+    state->mapped_token_capacity = std::min(
+        state->capacity_tokens, std::min(state->key_plane.mapped_bytes,
+                                         state->value_plane.mapped_bytes) /
+                                    state->value_bytes_per_token);
+    if (state->scale_bytes_per_token != 0U) {
+      state->mapped_token_capacity =
+          std::min(state->mapped_token_capacity,
+                   std::min(state->key_scale_plane.mapped_bytes,
+                            state->value_scale_plane.mapped_bytes) /
+                       state->scale_bytes_per_token);
+    }
+    if (state->outer_scale_bytes_per_token != 0U) {
+      state->mapped_token_capacity =
+          std::min(state->mapped_token_capacity,
+                   std::min(state->key_outer_scale_plane.mapped_bytes,
+                            state->value_outer_scale_plane.mapped_bytes) /
+                       state->outer_scale_bytes_per_token);
     }
     const auto byte_pointer = [](Buffer *const buffer,
                                  const uint64_t offset) -> void * {

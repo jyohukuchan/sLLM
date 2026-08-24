@@ -1061,6 +1061,13 @@ pub enum QwenExecutionError {
         node: String,
         error: Box<QwenExecutionError>,
     },
+    /// The request's primary execution failure is retained when bounded
+    /// completion cleanup also fails.  Cleanup is diagnostic context, not a
+    /// replacement for the backend error that caused the request to abort.
+    CleanupFailure {
+        primary: Box<QwenExecutionError>,
+        cleanup: Box<QwenExecutionError>,
+    },
     Execution(ExecutionError),
     WeightUpload(WeightUploadError),
     Tensor(TensorError),
@@ -1105,6 +1112,9 @@ impl fmt::Display for QwenExecutionError {
             Self::NodeExecution { node, error } => {
                 write!(formatter, "Qwen node {node} failed: {error}")
             }
+            Self::CleanupFailure { primary, cleanup } => {
+                write!(formatter, "{primary}; cleanup failed: {cleanup}")
+            }
             Self::Execution(error) => error.fmt(formatter),
             Self::WeightUpload(error) => error.fmt(formatter),
             Self::Tensor(error) => error.fmt(formatter),
@@ -1118,6 +1128,7 @@ impl std::error::Error for QwenExecutionError {
         match self {
             Self::Execution(error) => Some(error),
             Self::NodeExecution { error, .. } => Some(error.as_ref()),
+            Self::CleanupFailure { primary, .. } => Some(primary.as_ref()),
             Self::WeightUpload(error) => Some(error),
             Self::Tensor(error) => Some(error),
             Self::Operation(error) => Some(error),
@@ -1148,6 +1159,19 @@ impl From<PreparedExecutionError> for QwenExecutionError {
             | PreparedExecutionError::InvalidTransition(reason)
             | PreparedExecutionError::InvalidAudit(reason) => Self::InvalidRequest(reason),
         }
+    }
+}
+
+fn preserve_primary_execution_error(
+    primary: QwenExecutionError,
+    cleanup: Result<(), PreparedExecutionError>,
+) -> QwenExecutionError {
+    match cleanup {
+        Ok(()) => primary,
+        Err(cleanup) => QwenExecutionError::CleanupFailure {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup.into()),
+        },
     }
 }
 
@@ -5492,10 +5516,8 @@ impl QwenExecutionCore {
             })
         });
         if let Err(error) = execute_result {
-            return match pending.abort() {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(cleanup.into()),
-            };
+            let cleanup = pending.abort();
+            return Err(preserve_primary_execution_error(error, cleanup));
         }
         if !emit_terminal {
             if pending.is_empty() {
@@ -12937,6 +12959,40 @@ mod tests {
         let guard = lifecycle.begin().unwrap();
         drop(guard);
         assert!(lifecycle.is_poisoned());
+    }
+
+    #[test]
+    fn cleanup_failure_keeps_primary_execution_error_as_context() {
+        let primary = QwenExecutionError::Execution(ExecutionError::BackendStatus {
+            status: 260,
+            diagnostic: "grow virtual KV physical commitment".to_owned(),
+        });
+        let merged = preserve_primary_execution_error(
+            primary,
+            Err(PreparedExecutionError::CompletionPending {
+                stage: "execution segment abort".to_owned(),
+            }),
+        );
+        assert!(matches!(
+            &merged,
+            QwenExecutionError::CleanupFailure { primary, cleanup }
+                if matches!(
+                    primary.as_ref(),
+                    QwenExecutionError::Execution(ExecutionError::BackendStatus {
+                        status: 260,
+                        diagnostic,
+                    }) if diagnostic == "grow virtual KV physical commitment"
+                )
+                    && matches!(
+                        cleanup.as_ref(),
+                        QwenExecutionError::CompletionPending { stage }
+                            if stage == "execution segment abort"
+                    )
+        ));
+        let message = merged.to_string();
+        assert!(message.contains("backend status 260"));
+        assert!(message.contains("cleanup failed"));
+        assert!(message.contains("execution segment abort"));
     }
 
     #[test]

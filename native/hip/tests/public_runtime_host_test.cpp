@@ -5740,6 +5740,286 @@ bool kv_vattention_page_boundary_and_idempotent_cancel_contract() {
   return valid;
 }
 
+bool kv_vmm_append_transaction_failure_injection_contract() {
+  constexpr uint64_t capacity = 4096U;
+  constexpr uint64_t row_elements = 4U * 256U;
+  constexpr uint64_t prefix_tokens = 1U;
+  constexpr uint64_t append_tokens = capacity - prefix_tokens;
+  const uint64_t row_bytes = row_elements * sizeof(uint16_t);
+  const uint64_t input_bytes = append_tokens * row_bytes;
+  struct VmmFailureCase final {
+    fake_hip::VmmOperation operation;
+    uint64_t successful_calls;
+  };
+  const std::array<VmmFailureCase, 5> failure_cases = {
+      VmmFailureCase{fake_hip::VmmOperation::Create, 0U},
+      VmmFailureCase{fake_hip::VmmOperation::Create, 2U},
+      VmmFailureCase{fake_hip::VmmOperation::Create, 5U},
+      VmmFailureCase{fake_hip::VmmOperation::Map, 0U},
+      VmmFailureCase{fake_hip::VmmOperation::SetAccess, 0U}};
+
+  for (const VmmFailureCase &failure_case : failure_cases) {
+    fake_hip::reset();
+    const std::size_t baseline_allocations = fake_hip::live_allocations();
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    sllm_kv_state_t *state = nullptr;
+    sllm_buffer_t *key = nullptr;
+    sllm_buffer_t *value = nullptr;
+    Error error;
+    bool valid =
+        create_context(&context) && create_queue(context, &queue) &&
+        create_kv_state(context, capacity, &state) &&
+        create_buffer_sized(context, input_bytes, &key) &&
+        create_buffer_sized(context, input_bytes, &value);
+    std::vector<uint16_t> words(
+        static_cast<std::size_t>(append_tokens * row_elements), 0x3f80U);
+    valid = valid && upload_kv_words(queue, key, words) &&
+            upload_kv_words(queue, value, words);
+    sllm_completion_t *completion = nullptr;
+    sllm_kv_append_info_t info = kv_append_info();
+    auto descriptor = kv_append_descriptor(key, value, prefix_tokens, 0U);
+    valid = valid &&
+            expect_status(sllm_kv_state_append(state, queue, &descriptor,
+                                               &completion, &info,
+                                               &error.sink),
+                          SLLM_STATUS_OK, "VMM transaction prefix append",
+                          error) &&
+            query_completion(completion, SLLM_STATUS_OK) &&
+            release_completion(&completion);
+
+    sllm_kv_view_info_t before{};
+    before.struct_size = sizeof(before);
+    before.abi_version = SLLM_HIP_ABI_VERSION;
+    before.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+    valid = valid &&
+            expect_status(sllm_kv_state_query(state, &before, &error.sink),
+                          SLLM_STATUS_OK, "VMM transaction pre-failure query",
+                          error);
+    const std::size_t live_before_failure = fake_hip::live_allocations();
+    fake_hip::set_vmm_failure_after(failure_case.operation,
+                                     failure_case.successful_calls);
+    descriptor = kv_append_descriptor(key, value, append_tokens, 1U);
+    info = kv_append_info();
+    completion = nullptr;
+    valid = valid &&
+            expect_status(sllm_kv_state_append(state, queue, &descriptor,
+                                               &completion, &info,
+                                               &error.sink),
+                          SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                          "VMM transaction injected grow failure", error) &&
+            completion == nullptr && kv_query(state, 1U, 1U) &&
+            fake_hip::kv_state_append_launch_calls() == 1U &&
+            fake_hip::live_allocations() == live_before_failure;
+    sllm_kv_view_info_t after{};
+    after.struct_size = sizeof(after);
+    after.abi_version = SLLM_HIP_ABI_VERSION;
+    after.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+    valid = valid &&
+            expect_status(sllm_kv_state_query(state, &after, &error.sink),
+                          SLLM_STATUS_OK, "VMM transaction post-failure query",
+                          error) &&
+            after.mapped_token_capacity == before.mapped_token_capacity &&
+            after.committed_bytes_per_plane == before.committed_bytes_per_plane;
+
+    fake_hip::clear_vmm_failures();
+    descriptor = kv_append_descriptor(key, value, append_tokens, 1U);
+    info = kv_append_info();
+    completion = nullptr;
+    valid = valid &&
+            expect_status(sllm_kv_state_append(state, queue, &descriptor,
+                                               &completion, &info,
+                                               &error.sink),
+                          SLLM_STATUS_OK, "VMM transaction retry", error) &&
+            completion != nullptr && query_completion(completion, SLLM_STATUS_OK) &&
+            release_completion(&completion) && kv_query(state, capacity, 2U);
+
+    if (key != nullptr) {
+      valid = release_buffer(&key) && valid;
+    }
+    if (value != nullptr) {
+      valid = release_buffer(&value) && valid;
+    }
+    if (state != nullptr) {
+      valid = expect_status(sllm_kv_state_release(&state, &error.sink),
+                            SLLM_STATUS_OK, "VMM transaction state release",
+                            error) &&
+              valid;
+    }
+    if (queue != nullptr) {
+      valid = release_queue(&queue) && valid;
+    }
+    if (context != nullptr) {
+      valid = release_context(&context) && valid;
+    }
+    if (!valid || fake_hip::live_allocations() != baseline_allocations) {
+      std::cerr << "VMM append transaction rollback case failed after "
+                << failure_case.successful_calls << " successful VMM calls; live="
+                << fake_hip::live_allocations() << " baseline="
+                << baseline_allocations << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
+bool kv_vmm_cow_transaction_failure_injection_contract() {
+  constexpr uint64_t source_capacity = 2048U;
+  constexpr uint64_t prefix_tokens = 1025U;
+  constexpr uint64_t row_elements = 4U * 256U;
+  const uint64_t row_bytes = row_elements * sizeof(uint16_t);
+  struct VmmFailureCase final {
+    fake_hip::VmmOperation operation;
+    uint64_t successful_calls;
+  };
+  const std::array<VmmFailureCase, 4> failure_cases = {
+      VmmFailureCase{fake_hip::VmmOperation::Create, 0U},
+      VmmFailureCase{fake_hip::VmmOperation::Create, 1U},
+      VmmFailureCase{fake_hip::VmmOperation::Map, 2U},
+      VmmFailureCase{fake_hip::VmmOperation::SetAccess, 2U}};
+  for (const VmmFailureCase &failure_case : failure_cases) {
+    fake_hip::reset();
+    const std::size_t baseline_allocations = fake_hip::live_allocations();
+    sllm_context_t *context = nullptr;
+    sllm_queue_t *queue = nullptr;
+    sllm_kv_state_t *source = nullptr;
+    sllm_kv_state_t *child = nullptr;
+    sllm_buffer_t *source_key = nullptr;
+    sllm_buffer_t *source_value = nullptr;
+    sllm_buffer_t *child_key = nullptr;
+    sllm_buffer_t *child_value = nullptr;
+    Error error;
+    bool valid = create_context(&context) && create_queue(context, &queue) &&
+                 create_kv_state(context, source_capacity, &source) &&
+                 create_buffer_sized(context, prefix_tokens * row_bytes,
+                                     &source_key) &&
+                 create_buffer_sized(context, prefix_tokens * row_bytes,
+                                     &source_value) &&
+                 create_buffer_sized(context, row_bytes, &child_key) &&
+                 create_buffer_sized(context, row_bytes, &child_value);
+    std::vector<uint16_t> source_words(
+        static_cast<std::size_t>(prefix_tokens * row_elements), 0x3f80U);
+    std::vector<uint16_t> child_words(static_cast<std::size_t>(row_elements),
+                                      0x4000U);
+    valid = valid && upload_kv_words(queue, source_key, source_words) &&
+            upload_kv_words(queue, source_value, source_words) &&
+            upload_kv_words(queue, child_key, child_words) &&
+            upload_kv_words(queue, child_value, child_words);
+    sllm_completion_t *completion = nullptr;
+    sllm_kv_append_info_t append_info = kv_append_info();
+    auto append = kv_append_descriptor(source_key, source_value, prefix_tokens,
+                                       0U);
+    valid = valid &&
+            expect_status(sllm_kv_state_append(source, queue, &append,
+                                               &completion, &append_info,
+                                               &error.sink),
+                          SLLM_STATUS_OK, "COW transaction source append",
+                          error) &&
+            query_completion(completion, SLLM_STATUS_OK) &&
+            release_completion(&completion);
+
+    sllm_kv_state_create_info_v2_t destination{};
+    destination.struct_size = sizeof(destination);
+    destination.abi_version = SLLM_HIP_ABI_VERSION;
+    destination.create_info_version = SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION;
+    destination.session_id = 0x1234U;
+    destination.layer_id = 7U;
+    destination.capacity_tokens = source_capacity;
+    destination.head_count = 4U;
+    destination.head_dim = 256U;
+    destination.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+    destination.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+    destination.dtype = SLLM_TENSOR_DTYPE_F16;
+    destination.encoding = SLLM_HIP_KV_ENCODING_FP16_V1;
+    sllm_state_fork_info_t fork_info{};
+    fork_info.struct_size = sizeof(fork_info);
+    fork_info.abi_version = SLLM_HIP_ABI_VERSION;
+    fork_info.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    valid = valid &&
+            expect_status(sllm_kv_state_fork(source, &destination, &child,
+                                             &fork_info, &error.sink),
+                          SLLM_STATUS_OK, "COW transaction child fork", error) &&
+            fork_info.shared_bytes != 0U;
+    const uint64_t shared_before = fork_info.shared_bytes;
+    const std::size_t live_before_failure = fake_hip::live_allocations();
+    fake_hip::set_vmm_failure_after(failure_case.operation,
+                                     failure_case.successful_calls);
+    append = kv_append_descriptor(child_key, child_value, 1U, prefix_tokens);
+    append_info = kv_append_info();
+    completion = nullptr;
+    valid = valid &&
+            expect_status(sllm_kv_state_append(child, queue, &append,
+                                               &completion, &append_info,
+                                               &error.sink),
+                          SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                          "COW transaction injected failure", error) &&
+            completion == nullptr && kv_query(child, prefix_tokens, 1U) &&
+            fake_hip::live_allocations() == live_before_failure;
+    sllm_state_fork_info_t after_failure{};
+    after_failure.struct_size = sizeof(after_failure);
+    after_failure.abi_version = SLLM_HIP_ABI_VERSION;
+    after_failure.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+    valid = valid &&
+            expect_status(sllm_kv_state_fork_query(child, &after_failure,
+                                                   &error.sink),
+                          SLLM_STATUS_OK, "COW transaction rollback query",
+                          error) &&
+            after_failure.shared_bytes == shared_before;
+
+    fake_hip::clear_vmm_failures();
+    append = kv_append_descriptor(child_key, child_value, 1U, prefix_tokens);
+    append_info = kv_append_info();
+    completion = nullptr;
+    valid = valid &&
+            expect_status(sllm_kv_state_append(child, queue, &append,
+                                               &completion, &append_info,
+                                               &error.sink),
+                          SLLM_STATUS_OK, "COW transaction retry", error) &&
+            completion != nullptr && query_completion(completion, SLLM_STATUS_OK) &&
+            release_completion(&completion) && kv_query(child, prefix_tokens + 1U,
+                                                        2U);
+
+    if (child != nullptr) {
+      valid = expect_status(sllm_kv_state_release(&child, &error.sink),
+                            SLLM_STATUS_OK, "COW transaction child release",
+                            error) &&
+              valid;
+    }
+    if (source != nullptr) {
+      valid = expect_status(sllm_kv_state_release(&source, &error.sink),
+                            SLLM_STATUS_OK, "COW transaction source release",
+                            error) &&
+              valid;
+    }
+    if (source_key != nullptr) {
+      valid = release_buffer(&source_key) && valid;
+    }
+    if (source_value != nullptr) {
+      valid = release_buffer(&source_value) && valid;
+    }
+    if (child_key != nullptr) {
+      valid = release_buffer(&child_key) && valid;
+    }
+    if (child_value != nullptr) {
+      valid = release_buffer(&child_value) && valid;
+    }
+    if (queue != nullptr) {
+      valid = release_queue(&queue) && valid;
+    }
+    if (context != nullptr) {
+      valid = release_context(&context) && valid;
+    }
+    if (!valid || fake_hip::live_allocations() != baseline_allocations) {
+      std::cerr << "COW transaction rollback case failed after "
+                << failure_case.successful_calls << " successful VMM calls; live="
+                << fake_hip::live_allocations() << " baseline="
+                << baseline_allocations << '\n';
+      return false;
+    }
+  }
+  return true;
+}
+
 bool kv_append_lifetime_alias_and_quarantine_contract() {
   fake_hip::reset();
   constexpr uint64_t input_bytes = 17U * 4U * 256U * sizeof(uint16_t);
@@ -6781,6 +7061,8 @@ int main() {
   SLLM_RUN_KV_CONTRACT(kv_append_layout_and_transaction_contract)
   SLLM_RUN_KV_CONTRACT(
       kv_vattention_page_boundary_and_idempotent_cancel_contract)
+  SLLM_RUN_KV_CONTRACT(kv_vmm_append_transaction_failure_injection_contract)
+  SLLM_RUN_KV_CONTRACT(kv_vmm_cow_transaction_failure_injection_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
   SLLM_RUN_KV_CONTRACT(state_fork_vmm_and_linear_image_contract)
 #undef SLLM_RUN_KV_CONTRACT

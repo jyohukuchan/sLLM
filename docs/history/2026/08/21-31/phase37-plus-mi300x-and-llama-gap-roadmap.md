@@ -116,4 +116,19 @@
   Phase 31 summaryとschema/testは当時の16 GiB境界と実測を保存する履歴証拠なので書き換えず、現在のcontractはRust selector testと
   runtime文書を正とする。
 
+## 2026-08-24: 自動2K候補での100k再実行とPhase 52計画
+
+- push済みcommit `159bc526cb26d180161f2cd7abcc22abb7e67e84`のfresh exact `gfx1201` binaryで、同じR9700
+  `100,000/2`を明示chunk overrideなしで再実行した。32 GiBのcandidate列は`[2048, 512]`だが、失敗rowには
+  実効chunkが保存されていない。
+- 約`152.867`秒後、`layer.23.kv_append`のvirtual KV physical commitmentがHIP status 260 OOMとなった。
+  HBM peakは旧Phase 50失敗の`26,414,587,904` bytesから`13,160,554,496` bytesへ約50.18%低下したため、
+  selector修正のmemory効果とOOM解消を分けて扱う。終了後はprocessなし、HBM／GTTはbaselineへ復帰したが、stderrには
+  `execution resource is busy`のcleanup errorも記録された。
+- ユーザー指示により、この残件をPhase 52へ割り当てた。実効chunk、provider、per-plane physical commitを失敗時にも保存し、
+  VMM grow／copy-on-writeのtransactional rollbackとprofiled abortのpending completion処理を優先して検証する。
+  明示512は限定診断であり、最終解決やsilent retryには使わない。
+- Phase 51はMI300X wave64移植、Phase 52はR9700 100k OOMを所有し、相互の開始・完了gateにはしない。詳細は
+  [Phase 52計画](../../../../plans/active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)へ固定した。
+
 [対応する計画](../../../../plans/active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)

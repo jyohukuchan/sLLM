@@ -49,6 +49,7 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
     "p49.v620.summary",
     "p50.r9700.runner-identity",
     "p50.r9700.summary",
+    "p52.r9700.kv-commit-summary",
 ]
 EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
 EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
@@ -119,11 +120,14 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
     "ci/schema/engine-performance-direct-v2.schema.json",
     "ci/schema/phase49-v620-summary-v1.schema.json",
     "ci/schema/phase50-r9700-summary-v1.schema.json",
+    "ci/schema/phase52-r9700-kv-commit-summary-v1.schema.json",
     "ci/matrix/phase50-r9700-summary-v1.json",
+    "ci/matrix/phase52-r9700-kv-commit-summary-v1.json",
     "ci/matrix/r9700-sllm-llama-e2e-v1.json",
     "ci/schema/r9700-sllm-llama-e2e-v1.schema.json",
     "ci/tools/aggregate_phase49_v620.py",
     "ci/tools/aggregate_phase50_r9700.py",
+    "ci/tools/aggregate_phase52_r9700.py",
     "ci/tools/llama_phase49_v620_wrapper.cpp",
     "ci/tools/llama_phase50_r9700_wrapper.cpp",
     "ci/tools/run_phase49_v620_llama.py",
@@ -134,6 +138,7 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
     "ci/tests/test_phase49_v620_summary.py",
     "ci/tests/test_phase50_r9700_runner_identity.py",
     "ci/tests/test_phase50_r9700_summary.py",
+    "ci/tests/test_phase52_r9700_summary.py",
 }
 EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES = {
     "ci/matrix/engine-performance-render-v1.json",
@@ -798,6 +803,7 @@ def validate_phase5_suite_registration(
                 "ci.tests.test_phase49_v620_summary",
                 "ci.tests.test_phase50_r9700_runner_identity",
                 "ci.tests.test_phase50_r9700_summary",
+                "ci.tests.test_phase52_r9700_summary",
             ]},
             EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES,
         ),
@@ -973,12 +979,12 @@ def main() -> int:
             raise ContractError("host-v1 has unknown or missing top-level key")
         if set(paths) != {"schema_version", "revision", "default_suite_ids", "rules"}:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
-        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 29:
-            raise ContractError("suites-v1 identity is not revision 29")
+        if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 30:
+            raise ContractError("suites-v1 identity is not revision 30")
         if host.get("schema_version") != "host-v1" or host.get("revision") != 19:
             raise ContractError("host-v1 identity is not revision 19")
-        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 44:
-            raise ContractError("path-to-suite-v1 identity is not revision 44")
+        if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 45:
+            raise ContractError("path-to-suite-v1 identity is not revision 45")
         for suite in suites["suites"]:
             sid = suite["suite_id"]
             if set(suite) != {"suite_id", "tier", "marker", "attributes", "test_ids", "commands"}:

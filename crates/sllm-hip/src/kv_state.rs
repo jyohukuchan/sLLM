@@ -66,12 +66,12 @@ fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
     }
 }
 
-const GFX1030_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
+const RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
 
 fn selected_memory_kind_for_target(expected_target: Option<&str>, capacity_tokens: u64) -> u32 {
     if expected_target == Some("gfx942")
-        || (expected_target == Some("gfx1030")
-            && capacity_tokens >= GFX1030_CONTIGUOUS_LONG_KV_MIN_TOKENS)
+        || (matches!(expected_target, Some("gfx1030" | "gfx1201"))
+            && capacity_tokens >= RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS)
     {
         sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
     } else {
@@ -2118,7 +2118,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_gfx1030_and_gfx942_use_only_the_fixed_contiguous_provider() {
+    fn long_rdna_and_gfx942_use_only_the_fixed_contiguous_provider() {
         assert_eq!(
             selected_memory_kind_for_target(Some("gfx942"), 1),
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
@@ -2132,8 +2132,20 @@ mod tests {
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
         );
         assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1201"), 131_072),
+            selected_memory_kind_for_target(Some("gfx1030"), 65_537),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx1201"), 65_535),
             sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx1201"), 65_536),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx1201"), 65_537),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
         );
         assert_eq!(
             selected_memory_kind_for_target(None, 131_072),

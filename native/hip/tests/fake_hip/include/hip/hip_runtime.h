@@ -28,7 +28,10 @@ enum hipMemAllocationGranularity_flags : int {
   hipMemAllocationGranularityMinimum = 0,
   hipMemAllocationGranularityRecommended = 1,
 };
-enum hipMemAccessFlags : int { hipMemAccessFlagsProtReadWrite = 3 };
+enum hipMemAccessFlags : int {
+  hipMemAccessFlagsProtRead = 1,
+  hipMemAccessFlagsProtReadWrite = 3,
+};
 struct hipMemLocation {
   hipMemLocationType type;
   int id;
@@ -112,9 +115,25 @@ hipError_t hipMemcpyAsync(void *destination, const void *source,
 
 namespace fake_hip {
 
+enum class VmmOperation : uint8_t {
+  AddressReserve,
+  AddressFree,
+  Create,
+  Map,
+  SetAccess,
+  Unmap,
+  Release,
+};
+
 uint32_t f16_to_f32_bits_for_test(uint16_t raw) noexcept;
 void reset() noexcept;
 void set_vmm_supported(bool supported) noexcept;
+/* The next `successful_calls` matching operations pass, then one operation
+ * fails with hipErrorOutOfMemory.  A zero value fails the next operation. */
+void set_vmm_failure_after(VmmOperation operation,
+                           uint64_t successful_calls) noexcept;
+void clear_vmm_failures() noexcept;
+std::size_t vmm_operation_calls(VmmOperation operation) noexcept;
 std::size_t device_property_calls() noexcept;
 hipError_t rmsnorm_launch(const uint16_t *activation, const uint16_t *raw_scale,
                           uint16_t *output, uint32_t normalized_size,

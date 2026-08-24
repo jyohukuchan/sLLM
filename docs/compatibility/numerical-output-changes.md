@@ -55,6 +55,22 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-24-P52: RDNA長context KV providerとVMM append rollback（N0）
+
+- scope: exact `gfx1030`/`gfx1201`のlogical capacity 65,536以上と、共通virtual-contiguous KV append/COW。
+  exact `gfx942`の既存resident選択、65,535以下、unknown target、KV layout/encoding、attention kernelは変更しない。
+- baseline/candidate: 長capacityのRDNAはpage単位VMM commitからlogical capacity全量の通常device allocationへ変える。
+  virtual経路は各planeを逐次更新していたgrow/COWをappend transactionで包み、失敗時に追加mapping/handleと旧shared accessを戻す。
+- 分類: **N0**。K/Vのtoken-major byte layout、append入力、attention式、dtype、演算順、丸め、logical publication時点は不変である。
+  providerは同じcontiguous pointer contractの物理所有方式だけを変え、失敗rollbackは成功出力を変更しない。
+- host correctness: capacity 65,535/65,536/65,537のtarget selector、VMM createのfirst/middle/last、map/access、COWの
+  first/cross-plane failureを注入し、logical/mapped/commit復元、retry、release、live resource baselineを確認した。
+  R9700 `10,001/2`と`100,000/2`の実機出力・資源証拠はPhase 52 closeout summaryへ固定する。
+- decision/rollback: exact targetとcapacity境界に限定採用する。rollbackは
+  `RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS`のgfx1201選択を除去し、virtual providerへ戻す。VMM transactional rollbackは
+  correctness修正なのでprovider selectorのrollbackとは分離する。
+- 詳細: [Phase 52計画](../plans/active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)。
+
 ### OUT-2026-08-24-P49-P50-BUNDLE: Qwen decode 3融合（N0・target限定採用）
 
 - scope: 固定Qwen3.5-4B BF16 graph、text-only greedy、exact `gfx1030`/`gfx1201`、`M=1`、FP16 KV、adapter/control、

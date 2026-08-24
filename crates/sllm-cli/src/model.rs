@@ -2974,6 +2974,7 @@ impl ModelFrontendBackend for ProductionBackend {
             placement_total_memory_bytes,
             input_len,
         )?;
+        let placement_candidate_tokens = chunk_candidates.clone();
         let build_graph = |graph_token_count: u64| {
             if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
                 build_qwen35_nvfp4_graph(
@@ -3040,6 +3041,24 @@ impl ModelFrontendBackend for ProductionBackend {
                 rejected.join(",")
             )
         })?;
+        let placement_diagnostic = json!({
+            "selection": if request.prefill_chunk_tokens.is_some() {
+                "explicit"
+            } else {
+                "automatic"
+            },
+            "candidate_tokens": placement_candidate_tokens,
+            "rejected_chunk_required_bytes": rejected,
+            "selected_chunk_tokens": graph_token_count,
+            "total_memory_bytes": placement_total_memory_bytes,
+            "available_memory_bytes": placement_available_memory_bytes,
+            "required_bytes": placement.required_bytes(),
+            "model_resident_bytes": placement.model_resident_bytes(),
+            "workspace_baseline_bytes": placement.workspace_baseline_bytes(),
+            "workspace_arena_bytes": placement.workspace_arena_bytes(),
+            "request_state_bytes": placement.request_state_bytes(),
+            "safety_reserve_bytes": placement.safety_reserve_bytes(),
+        });
 
         let execution = (|| -> Result<Value, String> {
             let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
@@ -3194,12 +3213,45 @@ impl ModelFrontendBackend for ProductionBackend {
                     ),
                     Err(error) => Err(error),
                 };
-                let audit = if outcome.is_ok() {
-                    Some(owner.audit_snapshot().map_err(|_| {
+                let (audit, kv_memory) = if outcome.is_ok() {
+                    let audit = owner.audit_snapshot().map_err(|_| {
                         "Qwen benchmark dispatch audit was empty or invalid".to_owned()
-                    }))
+                    });
+                    let memory = owner.memory_audit_snapshot().map_err(|error| {
+                        format!("Qwen benchmark KV memory audit failed: {error}")
+                    })?;
+                    let layers = memory
+                        .kv_layers()
+                        .iter()
+                        .map(|layer| {
+                            let physical = layer.physical();
+                            json!({
+                                "layer": layer.layer(),
+                                "logical_capacity_tokens": layer.logical_capacity_tokens(),
+                                "observed_length_tokens": layer.observed_length_tokens(),
+                                "memory_kind": match physical.memory_kind() {
+                                    sllm_core::KvMemoryKind::VirtualContiguous => "virtual-contiguous",
+                                    sllm_core::KvMemoryKind::ContiguousResident => "contiguous-resident",
+                                },
+                                "physical_page_bytes": physical.physical_page_bytes(),
+                                "tokens_per_page": physical.tokens_per_page(),
+                                "mapped_token_capacity": physical.mapped_token_capacity(),
+                                "committed_bytes_per_plane": physical.committed_bytes_per_plane(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    (
+                        Some(audit),
+                        Some(json!({
+                            "kv_layer_count": layers.len(),
+                            "committed_kv_bytes": memory
+                                .committed_kv_bytes()
+                                .map_err(|error| format!("Qwen benchmark KV committed-byte audit failed: {error}"))?,
+                            "layers": layers,
+                        })),
+                    )
                 } else {
-                    None
+                    (None, None)
                 };
                 drop(owner);
                 let cleanup_timestamp_ns = timing.now_ns();
@@ -3250,6 +3302,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     memory: json!({
                         "request_start": request_memory,
                         "after_cleanup": cleanup_memory,
+                        "kv": kv_memory,
                     }),
                     cleanup: json!({
                         "sample_index": sample_index,
@@ -3363,6 +3416,13 @@ impl ModelFrontendBackend for ProductionBackend {
                     "effective_context_length": state_capacity,
                     "prefill_chunk_tokens": request.prefill_chunk_tokens,
                     "effective_prefill_chunk_tokens": graph_token_count,
+                    "prefill_chunk_selection": if request.prefill_chunk_tokens.is_some() {
+                        "explicit"
+                    } else {
+                        "automatic"
+                    },
+                    "prefill_chunk_candidates": placement_diagnostic["candidate_tokens"].clone(),
+                    "prefill_chunk_rejections": placement_diagnostic["rejected_chunk_required_bytes"].clone(),
                     "completion_timeout_seconds": request
                         .completion_timeout_seconds
                         .unwrap_or(DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS),
@@ -3393,6 +3453,13 @@ impl ModelFrontendBackend for ProductionBackend {
                     "effective_context_length": state_capacity,
                     "prefill_chunk_tokens": request.prefill_chunk_tokens,
                     "effective_prefill_chunk_tokens": graph_token_count,
+                    "prefill_chunk_selection": if request.prefill_chunk_tokens.is_some() {
+                        "explicit"
+                    } else {
+                        "automatic"
+                    },
+                    "prefill_chunk_candidates": placement_diagnostic["candidate_tokens"].clone(),
+                    "prefill_chunk_rejections": placement_diagnostic["rejected_chunk_required_bytes"].clone(),
                     "completion_timeout_seconds": request
                         .completion_timeout_seconds
                         .unwrap_or(DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS),
@@ -3514,6 +3581,9 @@ impl ModelFrontendBackend for ProductionBackend {
         let mut result = match execution {
             Ok(result) => result,
             Err(execution_error) => {
+                let execution_error = format!(
+                    "Qwen benchmark placement diagnostics={placement_diagnostic}; {execution_error}"
+                );
                 return match cleanup_result {
                     Ok(_) => Err(execution_error),
                     Err(cleanup_error) => Err(format!(

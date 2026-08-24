@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::execution::{
     BoundSemanticOp, CausalAttentionSubmission, ExecutionError, ExecutionQueue,
@@ -319,6 +319,13 @@ impl<N> PreparedExecutionPlan<N> {
 
 trait SegmentCompletionOwner: Send {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    /// Waits for terminal completion during abort cleanup.  The default keeps
+    /// host-only test owners compatible while native adapters override this
+    /// with their bounded completion wait.
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let _ = timeout;
+        self.query()
+    }
     fn finalize_after_fence(
         &mut self,
         _fence: &ExecutionQueueFence,
@@ -331,6 +338,10 @@ trait SegmentCompletionOwner: Send {
 impl SegmentCompletionOwner for Submission {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.wait(timeout)
     }
 
     fn finalize_after_fence(
@@ -350,6 +361,10 @@ impl SegmentCompletionOwner for CausalAttentionSubmission {
         self.query()
     }
 
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.wait(timeout)
+    }
+
     fn finalize_after_fence(
         &mut self,
         fence: &ExecutionQueueFence,
@@ -365,6 +380,10 @@ impl SegmentCompletionOwner for CausalAttentionSubmission {
 impl SegmentCompletionOwner for LinearAttentionSubmission {
     fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
         self.query()
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.wait(timeout)
     }
 
     fn finalize_after_fence(
@@ -467,8 +486,7 @@ impl ExecutionSegment {
                 Ok(())
             }
         } else {
-            self.pending.clear();
-            Ok(())
+            self.drain_profiled_pending(self.profiled_timeout.unwrap_or(Duration::ZERO))
         };
         let restore = self.restore_profiled();
         match (result, restore) {
@@ -650,6 +668,29 @@ impl ExecutionSegment {
             audit.record_labeled(&retained.label, retained.owner.dispatch())?;
         }
         Ok(())
+    }
+
+    /// Waits every profiled owner before dropping it.  A timeout is a total
+    /// budget for the segment, rather than one fresh budget per submission,
+    /// so a large failed graph cannot turn abort into an unbounded drain.
+    fn drain_profiled_pending(&mut self, timeout: Duration) -> Result<(), PreparedExecutionError> {
+        let deadline = Instant::now().checked_add(timeout);
+        let mut first_error = None;
+        for mut retained in self.pending.drain(..) {
+            let remaining = deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or(Duration::ZERO);
+            let result = match retained.owner.wait(remaining) {
+                Ok(state) => require_terminal_success(&retained.label, state),
+                Err(error) => Err(error.into()),
+            };
+            if let Err(error) = result {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     #[cfg(test)]
@@ -1048,6 +1089,43 @@ mod tests {
         }
     }
 
+    struct AbortOwner {
+        query_state: ExecutionState,
+        wait_state: ExecutionState,
+        wait_error: bool,
+        waits: Arc<AtomicUsize>,
+        drops: Arc<AtomicUsize>,
+        evidence: DispatchEvidence,
+    }
+
+    impl SegmentCompletionOwner for AbortOwner {
+        fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+            Ok(self.query_state)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            self.waits.fetch_add(1, Ordering::Relaxed);
+            if self.wait_error {
+                Err(ExecutionError::AsyncFailure {
+                    status: 260,
+                    diagnostic: "synthetic bounded wait timeout".to_owned(),
+                })
+            } else {
+                Ok(self.wait_state)
+            }
+        }
+
+        fn dispatch(&self) -> &DispatchEvidence {
+            &self.evidence
+        }
+    }
+
+    impl Drop for AbortOwner {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     fn evidence(dispatch_count: u32) -> DispatchEvidence {
         DispatchEvidence {
             abi_version: 1,
@@ -1249,6 +1327,61 @@ mod tests {
             assert_eq!(drops.load(Ordering::Relaxed), 1);
             assert!(audit.snapshot().is_err());
         }
+    }
+
+    #[test]
+    fn profiled_abort_waits_pending_owner_before_drop() {
+        let waits = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut segment = ExecutionSegment::profiled(Duration::from_millis(10));
+        segment.retain_test_owner(
+            "profiled-pending",
+            AbortOwner {
+                query_state: ExecutionState::Pending,
+                wait_state: ExecutionState::Success,
+                wait_error: false,
+                waits: Arc::clone(&waits),
+                drops: Arc::clone(&drops),
+                evidence: evidence(1),
+            },
+        );
+
+        segment
+            .abort()
+            .expect("profiled abort must drain completion");
+        assert_eq!(waits.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(segment.is_empty());
+    }
+
+    #[test]
+    fn profiled_abort_keeps_first_wait_error_but_drains_all_owners() {
+        let waits = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut segment = ExecutionSegment::profiled(Duration::from_millis(10));
+        for (label, wait_error) in [("timeout", true), ("after-timeout", false)] {
+            segment.retain_test_owner(
+                label,
+                AbortOwner {
+                    query_state: ExecutionState::Pending,
+                    wait_state: ExecutionState::Success,
+                    wait_error,
+                    waits: Arc::clone(&waits),
+                    drops: Arc::clone(&drops),
+                    evidence: evidence(1),
+                },
+            );
+        }
+
+        assert!(matches!(
+            segment.abort(),
+            Err(PreparedExecutionError::Execution(
+                ExecutionError::AsyncFailure { status: 260, .. }
+            ))
+        ));
+        assert_eq!(waits.load(Ordering::Relaxed), 2);
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
+        assert!(segment.is_empty());
     }
 
     #[test]

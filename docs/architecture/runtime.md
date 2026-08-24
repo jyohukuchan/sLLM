@@ -280,6 +280,11 @@ allocationで確保する。Phase 12のHot Aisle MI300X VFはVMM capability=true
 VMM capability=trueなら既存virtual-contiguous providerを維持する。これはPaged Attentionへの方針変更でも
 実行時error後のfallbackでもない。必要byte、capacity、selected provider、resident allocationはdiagnostic/auditへ残す。
 
+Phase 52は同じ`contiguous-resident`実装を、exact `gfx1030`/`gfx1201`かつlogical capacity 65,536以上へ限定して
+create時に選ぶ。短いcapacity、unknown target、他targetのcapability-selected policyは不変であり、OOM後のruntime fallbackは
+行わない。virtual-contiguous appendでは全K/V/scale planeのgrowとshared tail COWをtransaction化し、途中失敗時に追加page、
+replacement handle、旧shared mapping/access、mapped/committed accountingをappend前へ戻す。rollbackが失敗したcontextはpoisonする。
+
 Phase 8のproduction causal attentionは、Qwen3.5のhead dim 256を一workgroupで協調reductionし、scoreの
 再計算とthread-0 softmaxを一pass online softmaxへ置き換えたFA2-style pathである。opaque KV owner、
 virtual-contiguous FP16 K/V pointer、token-major layout、GQA mappingは変更しない。これはupstream

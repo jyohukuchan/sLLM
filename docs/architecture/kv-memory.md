@@ -23,6 +23,11 @@ KVのlogical capacity、token-major layout、virtual-contiguous providerを変�
 memory preflightから除外しない。従ってproduction Paged Attentionとは競合せず、将来必要になれば同じopaque KV contractの下へ
 別physical-layout providerとして追加する。
 
+Phase 52では、exact `gfx1030`と`gfx1201`のlogical capacityが65,536 token以上の場合に限り、同じtoken-major layoutと
+contiguous pointerを`contiguous-resident`で実装する。32 GiBのR9700で100,000-token入力がHIP VMMのpage/handle
+commit上限に達した一方、logical capacity全量のK/Vはpreflight上収まるためである。65,535以下、unknown target、他targetの
+capability選択は変更しない。これは実行中OOM後のfallbackではなくcreate時の決定であり、確保失敗時に別providerへ再試行しない。
+
 ## 比較のidentityと範囲
 
 - local tuple: Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0。
@@ -95,6 +100,9 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
   `SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR`を明示する。
 - native `KvState`がVA reservation、physical handles、mapping、event lifetimeを所有する。
   createはVAだけをreserveし、appendはlaunch前にK/Vを同じpublished capacityまでgrowする。
+- 一つのappendで行う全planeのgrowとshared tailのCOWは一transactionである。途中失敗時はそのappendで追加したmappingと
+  handleを逆順に解放し、COW前のshared handleとread-only access、mapped capacity、commit accountingを復元する。
+  復元自体に失敗したcontextはpoisonし、部分状態を再利用しない。
 - cancelはpublicationを行わない。既にcommitしたpageはstate lifetime中は保持し、release時に
   unmap、handle release、VA freeを行う。cancel/release cleanupはidempotentである。
 - viewはlogical capacity、mapped token capacity、physical page bytes、K/Vのcommitted bytesを返すが、
@@ -106,6 +114,8 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
   FP8とNVFP4は明示選択時だけ使う。10,001-token dynamic FP8はexact gfx1030/gfx1201の双方、16,385-token 2-chunk
   dynamic FP8はgfx1201でHIP-only、fallbackなし、cleanup 0をPASSした。static FP8の固定scale 1.0は実験設定であり、
   model由来calibrationやdefault policyではない。
+- Phase 52の自動providerはexact `gfx942`を全capacityで、exact `gfx1030`/`gfx1201`をcapacity 65,536以上で
+  `contiguous-resident`へ固定する。それ以外は従来のcapability-selected providerを維持する。
 
 ## 再検討条件
 

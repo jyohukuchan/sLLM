@@ -6,11 +6,12 @@
 2026-08-23のユーザー指示により、Phase 49は全7比較行の同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の退行を確認して完了した。
 Phase 50はR9700 exact `gfx1201`の限定採用とMI300X exact `gfx942` wave64引継ぎ準備を完了し、
-実機性能検証をPhase 51へ引き継ぐ。既定実行順は49→50→51だが、V620またはR9700の同等達成を後続GPU開始の必須条件にはしない。
+実機性能検証をPhase 51へ引き継ぐ。Phase 52ではR9700 `100,000/2`に残るKV物理コミットOOMを解消する。
+番号上の既定順は49→50→51→52だが、Phase 51と52は独立に開始でき、V620またはR9700の同等達成を後続GPU開始の必須条件にはしない。
 
 2026-08-21に作成した旧Phase 37〜38のMI300X先行計画はコード変更・GPU実行前に再編し、その作業範囲を
 Phase 51へ吸収する。Phase 39〜45は完了済み、Phase 46〜48の機能計画は予約済みのまま保持する。
-番号は既存割当との衝突を避けるため49〜51を使うが、ユーザーが変更しない限り実行優先順位は49〜51を先とする。
+番号は既存割当との衝突を避けるため49〜52を使うが、ユーザーが変更しない限り実行優先順位は49〜52を先とする。
 
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
@@ -62,10 +63,11 @@ Phase 51へ吸収する。Phase 39〜45は完了済み、Phase 46〜48の機能�
 | 48 | planned | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
 | 49 | complete-scoped-adoption | V620のGQA P32を限定採用、long-prefill v2とHIP Graphを棄却 | 3候補の関連実機行、通常5行退行確認、採否履歴 |
 | 50 | complete-limited-adoption | R9700 `gfx1201`採用とMI300X `gfx942` wave64引継ぎ準備 | Phase 49完了（充足済み） |
-| 51 | planned-next | Phase 49/50採用内容のMI300X wave64適用・実機検証 | MI300X VM。Phase 50引継ぎ台帳 |
+| 51 | on-hold | Phase 49/50採用内容のMI300X wave64適用・実機検証 | ユーザー指示により一時保留。MI300X VM。Phase 50引継ぎ台帳 |
+| 52 | in-progress | R9700 `100,000/2`のKV物理コミットOOM解消 | R9700実機。Phase 51に先行して実施 |
 
-直近の性能laneの既定順はPhase 49→50→51である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
-MI300X wave64引継ぎ準備は完了し、次はPhase 51を開始できる。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
+直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
+MI300X wave64引継ぎ準備は完了した。ユーザー指示によりPhase 51は一時保留し、R9700限定のPhase 52を先に進める。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
 採用routeをexact `gfx1201`へ限定した。Phase 50の全7行llama.cpp同等達成は後続Phase開始のgateではない。Phase 46〜48は内容と番号を保持するが、
 既定の実行優先順位は性能laneの後とする。
 
@@ -240,12 +242,17 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
 - Phase 50後の`100,000/2` OOM分析で、16 GiB超を一律16K候補から評価する自動prefill selectorを修正した。capacity tierは
   24 GiB未満512、24〜35 GiB未満2K、35〜60 GiB未満4K、60〜160 GiB未満8K、160 GiB以上16Kであり、各tierの下位候補は
   exact graph memory見積りで選ぶ。32 GiBのV620/R9700は2K開始へ変わるため、既存Phase 49/50測定は履歴として維持し、
-  current candidateの性能主張には再測定を要する。R9700 `100,000/2`再実機は未実施であり、Phase 51の開始gateにはしない。
+  current candidateの性能主張には再測定を要する。修正後のR9700 `100,000/2`自動再実行ではHBM peakが
+  `26,414,587,904` bytesから`13,160,554,496` bytesへ約50.18%低下したが、約`152.867`秒後、layer 23の
+  virtual KV physical commitmentで再びOOMとなった。実効2K／512を失敗rowへ保存できていない問題を含め、Phase 52で解消する。
+  この残件はPhase 51の開始gateにはしない。
 
 実行tuple、7行、selector境界、candidate順、停止／再計画条件、証拠は
 [Phase 50詳細計画](../../../../archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とする。
 
 ## Phase 51: MI300Xへの適用と検証
+
+> 状態: on-hold（2026-08-24のユーザー指示。Phase 52完了後も自動再開しない）
 
 ### 範囲と作業単位
 
@@ -268,6 +275,22 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
   Phase 50で確立したR9700経路がある場合はその正しさと性能を退行させない。
 - 全3 targetの最終7行比較、GPU family内訳、target selector、正しさ、資源、既知制約を一つの追跡済み要約へ固定する。
 - MI300A、MI325X、bare metal、複数GPU、FNUZ FP8のllama.cpp比較、他モデルを完了主張へ含めない。
+
+## Phase 52: R9700 100k KV物理コミットOOMの解消
+
+> 状態: in-progress（2026-08-24）
+
+- exact `gfx1201`、Qwen3.5-4B BF16／FP16 KV、単一要求の`100,000/2`に限定し、自動prefillの実効chunk、
+  KV memory kind、K／V／scale各planeのmapped／committed量、VMM page／extent／handle、grow失敗位置を失敗時にも保存する。
+- 最優先候補は、複数plane growとcopy-on-writeを一つのtransactionとして扱い、途中失敗時に今回追加・置換した
+  mapping／handleだけを完全rollbackする修正である。provider-aware preflight、extent集約、gfx1201長context限定の
+  `contiguous-resident`は、取得した原因証拠に応じて個別比較する。
+- 明示512はworkspace圧力を分ける限定診断にだけ使い、最終条件にしない。silent retry、CPU/backend fallback、
+  要求分割による意味変更は導入しない。
+- 最終自動経路で1 warmup＋3 measuredを完走し、生成token、HIP-only、fallback 0、cleanup 0、process消滅、
+  HBM／GTT復帰を確認する。llama.cpp性能同等は報告するが完了gateにしない。
+- 固定tuple、仮説順、failure injection、証拠schema、停止条件は
+  [Phase 52詳細計画](phase52-r9700-100k-kv-commit-oom.md)を正本とする。Phase 51と52は相互の開始・完了条件にしない。
 
 ## Phase 39: service operability・認証・observability
 
