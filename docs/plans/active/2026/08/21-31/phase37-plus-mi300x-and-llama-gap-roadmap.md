@@ -6,7 +6,8 @@
 2026-08-23のユーザー指示により、Phase 49は全7比較行の同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の退行を確認して完了した。
 Phase 50はR9700 exact `gfx1201`の限定採用とMI300X exact `gfx942` wave64引継ぎ準備を完了し、
-実機性能検証をPhase 51へ引き継ぐ。Phase 52ではR9700 `100,000/2`に残るKV物理コミットOOMを解消する。
+実機性能検証をPhase 51へ引き継いだが、同Phaseはユーザー指示により一時保留している。Phase 52はR9700
+`100,000/2`に残ったKV物理コミットOOMを解消して完了した。
 番号上の既定順は49→50→51→52だが、Phase 51と52は独立に開始でき、V620またはR9700の同等達成を後続GPU開始の必須条件にはしない。
 
 2026-08-21に作成した旧Phase 37〜38のMI300X先行計画はコード変更・GPU実行前に再編し、その作業範囲を
@@ -64,10 +65,10 @@ Phase 51へ吸収する。Phase 39〜45は完了済み、Phase 46〜48の機能�
 | 49 | complete-scoped-adoption | V620のGQA P32を限定採用、long-prefill v2とHIP Graphを棄却 | 3候補の関連実機行、通常5行退行確認、採否履歴 |
 | 50 | complete-limited-adoption | R9700 `gfx1201`採用とMI300X `gfx942` wave64引継ぎ準備 | Phase 49完了（充足済み） |
 | 51 | on-hold | Phase 49/50採用内容のMI300X wave64適用・実機検証 | ユーザー指示により一時保留。MI300X VM。Phase 50引継ぎ台帳 |
-| 52 | in-progress | R9700 `100,000/2`のKV物理コミットOOM解消 | R9700実機。Phase 51に先行して実施 |
+| 52 | complete | R9700 `100,000/2`のKV物理コミットOOM解消 | 自動経路4/4 PASS、10,001 regression 13/13 PASS |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
-MI300X wave64引継ぎ準備は完了した。ユーザー指示によりPhase 51は一時保留し、R9700限定のPhase 52を先に進める。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
+MI300X wave64引継ぎ準備は完了した。ユーザー指示によりPhase 51は一時保留し、R9700限定のPhase 52を先に完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
 採用routeをexact `gfx1201`へ限定した。Phase 50の全7行llama.cpp同等達成は後続Phase開始のgateではない。Phase 46〜48は内容と番号を保持するが、
 既定の実行優先順位は性能laneの後とする。
 
@@ -290,7 +291,19 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
 - 最終自動経路で1 warmup＋3 measuredを完走し、生成token、HIP-only、fallback 0、cleanup 0、process消滅、
   HBM／GTT復帰を確認する。llama.cpp性能同等は報告するが完了gateにしない。
 - 固定tuple、仮説順、failure injection、証拠schema、停止条件は
-  [Phase 52詳細計画](phase52-r9700-100k-kv-commit-oom.md)を正本とする。Phase 51と52は相互の開始・完了条件にしない。
+  [Phase 52保存済み計画](../../../../archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)を正本とする。
+  Phase 51はユーザーが再開するまで一時保留を維持する。
+
+### Phase 52完了結果
+
+- exact `gfx1201`のlogical capacity 65,536以上だけを`contiguous-resident`へ固定し、短いcapacityとunknown targetは
+  capability-selectedを維持した。runtime OOM後のretry/fallbackは追加していない。
+- source `3ed002c476b49417cc702119e37c2389cefb96bc`の自動2K経路で`100,000/2`を1+3回、
+  `10,001/2`を3+10回PASSした。全requestで生成`[23066,23066]`、HIP-only、fallback/cleanup 0、資源復帰を確認した。
+- 100k E2E中央値は`325.593963905`秒、HBM peakは`15,388,794,880` bytesだった。VMMの内部handle上限値は
+  推測せず、総HBM不足ではないprovider physical-commit問題として閉じた。
+- 全反復値と物理KV metadataは
+  [`phase52-r9700-kv-commit-summary-v1.json`](../../../../../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正とする。
 
 ## Phase 39: service operability・認証・observability
 

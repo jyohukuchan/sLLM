@@ -167,7 +167,7 @@ class DirectV2SchemaTests(unittest.TestCase):
                 {
                     "layer": 3,
                     "logical_capacity_tokens": 131_072,
-                    "observed_length_tokens": 100_002,
+                    "observed_length_tokens": 100_001,
                     "memory_kind": "contiguous-resident",
                     "physical_page_bytes": 2_097_152,
                     "tokens_per_page": 1_024,

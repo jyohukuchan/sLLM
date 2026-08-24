@@ -63,13 +63,15 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
   virtual経路は各planeを逐次更新していたgrow/COWをappend transactionで包み、失敗時に追加mapping/handleと旧shared accessを戻す。
 - 分類: **N0**。K/Vのtoken-major byte layout、append入力、attention式、dtype、演算順、丸め、logical publication時点は不変である。
   providerは同じcontiguous pointer contractの物理所有方式だけを変え、失敗rollbackは成功出力を変更しない。
-- host correctness: capacity 65,535/65,536/65,537のtarget selector、VMM createのfirst/middle/last、map/access、COWの
-  first/cross-plane failureを注入し、logical/mapped/commit復元、retry、release、live resource baselineを確認した。
-  R9700 `10,001/2`と`100,000/2`の実機出力・資源証拠はPhase 52 closeout summaryへ固定する。
+- correctness/output影響: capacity 65,535/65,536/65,537のtarget selector、VMM createのfirst/middle/last、map/access、
+  COWのfirst/cross-plane failureを注入し、logical/mapped/commit復元、retry、release、live resource baselineを確認した。
+  R9700 `10,001/2`は13/13、`100,000/2`は4/4 PASSし、全requestの生成は`[23066,23066]`、HIP-only、fallback/cleanup 0だった。
 - decision/rollback: exact targetとcapacity境界に限定採用する。rollbackは
   `RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS`のgfx1201選択を除去し、virtual providerへ戻す。VMM transactional rollbackは
   correctness修正なのでprovider selectorのrollbackとは分離する。
-- 詳細: [Phase 52計画](../plans/active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)。
+- resource: 100kは8 KV layerのK/V 4 GiBをresident確保し、HBM peak `15,388,794,880` bytes、終了後baseline復帰。
+- 詳細: [Phase 52計画](../plans/archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)、
+  [summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)。
 
 ### OUT-2026-08-24-P49-P50-BUNDLE: Qwen decode 3融合（N0・target限定採用）
 

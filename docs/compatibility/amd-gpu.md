@@ -558,6 +558,22 @@ generic/multi-arch binaryを性能evidenceへ混ぜない。MI300X側は論理ta
 MI300X runtime evidenceを拡張せず、Phase 51でfresh preflightと実機7行を行うまで実行対応とは扱わない。
 すべてのlifecycleは`experimental`のままとし、RDNA4/CDNA3の広いtarget、SKU、OS、driver、ROCm tupleへ昇格しない。
 
+### 2026-08-24 Phase52 exact `gfx1201`長capacity resident KV
+
+Phase 50後の自動2K再実行はHBM総容量を大きく下回るlayer 23 VMM physical commitで失敗した。Phase 52では
+exact `gfx1201`かつlogical capacity 65,536以上だけを`contiguous-resident`へ固定し、65,535以下、unknown target、
+他targetのcapability-selected policyを変更しなかった。VMM grow/COWは途中失敗をappend前へ戻すtransactional rollbackへ変更した。
+
+canonical R9700で`100,000/2`を1 warmup＋3 measured、`10,001/2`を3 warmup＋10 measured実行し、それぞれ4/4、
+13/13 PASSした。100kは自動chunk 2,048、8 KV layer、K/V 4 GiB、E2E中央値`325.593963905`秒、HBM peak
+`15,388,794,880` bytesである。両行で生成`[23066,23066]`、HIP-only、fallback/cleanup 0、process消滅、baseline復帰を確認した。
+この固定scopeだけを`project-verified`へ追加し、lifecycleは`experimental`を維持する。詳細は
+[Phase 52 summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正とする。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| R9700 exact `gfx1201` Phase 52 Qwen3.5-4B BF16 `100,000/2` | `experimental` | `project-verified`（固定長context scope） | resident KV、自動2K、4/4 PASS、HIP-only、fallback/cleanup 0、資源復帰 |
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

@@ -320,6 +320,22 @@ feature suffix付きtargetはdirect CMake probeだけで扱う。gfx1201 provide
 拡張せず、Phase 51のfresh実機検証を待つ。Phase 50のいずれのscopeもlifecycleを`supported`へ昇格させず、
 RDNA4全体、CDNA3全体、他のOS・driver・ROCm・SKUへ互換性を推論しない。
 
+### 2026-08-24 Phase52 R9700 100k resident KV scope
+
+canonical R9700 UUID `GPU-a8e9ddefa2d60f55`、BDF `0000:07:00.0`、exact `gfx1201`で、Qwen3.5-4B BF16、
+FP16 KV、単一requestの`100,000/2`を自動prefill 2,048、1 warmup＋3 measuredで4/4 PASSした。
+logical capacity 131,072は`contiguous-resident`、8 KV layerのK/V commitは4 GiBである。生成は全て
+`[23066,23066]`、HIP-only、fallback/cleanup failure 0、process消滅、HBM/GTT baseline復帰を確認した。
+`10,001/2`も短い`virtual-contiguous`経路で13/13 PASSしたため、resident選択を65,536未満へ広げない。
+
+この結果はPhase 50の100k OOM履歴を削除せず、Phase 52 source/binary/tupleの追加成功scopeとして扱う。R9700全model、
+RDNA4全SKU、別driver/ROCm、batch/parallel、Paged Attentionへ一般化せず、lifecycleは`experimental`のままとする。
+全反復とidentityは[Phase 52 summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正とする。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| R9700 exact `gfx1201` Phase 52 Qwen3.5-4B BF16 `100,000/2` | `experimental` | `project-verified`（固定単一request scope） | 自動2K、resident KV、4/4 PASS、生成一致、HIP-only、fallback/cleanup 0、資源復帰 |
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

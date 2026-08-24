@@ -19,7 +19,7 @@ spec.loader.exec_module(aggregate_tool)
 def kv_sample(case_id: str) -> dict[str, object]:
     long_case = case_id == "long-100000"
     capacity = 131_072 if long_case else 10_003
-    observed = 100_002 if long_case else 10_003
+    observed = 100_001 if long_case else 10_002
     memory_kind = "contiguous-resident" if long_case else "virtual-contiguous"
     mapped = capacity if long_case else 10_240
     committed = 268_435_456 if long_case else 20_971_520
@@ -68,7 +68,7 @@ class Phase52R9700SummaryTests(unittest.TestCase):
         self.assertEqual(long["memory_kind"], "contiguous-resident")
 
         invalid = kv_sample("long-100000")
-        invalid["memory"]["kv"]["layers"][0]["observed_length_tokens"] = 100_001
+        invalid["memory"]["kv"]["layers"][0]["observed_length_tokens"] = 100_000
         with self.assertRaises(aggregate_tool.Phase52Error):
             aggregate_tool.validate_kv_memory(invalid, "long-100000", "invalid")
 

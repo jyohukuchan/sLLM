@@ -468,6 +468,19 @@ Phase 51でfresh preflight・7行・wave64 providerを検証するためのhando
 R9700のscopeをRDNA4全体、MI300XのscopeをCDNA3全体、他OS・kernel・driver・ROCm・SKUへ推論せず、
 全tupleのlifecycleは`experimental`を維持する。
 
+### 2026-08-24 Phase52 local R9700 100k tuple
+
+Phase 50と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
+HIP `7.14.60850`、LLVM 23、Code Object V6、wave32、UUID `GPU-a8e9ddefa2d60f55`、BDF `0000:07:00.0`、
+exact `gfx1201`を使った。source commit `3ed002c476b49417cc702119e37c2389cefb96bc`からfresh buildした
+release binary SHA256は`79b0099f0c8981c46d1629debaf2aacfe551107adb13ec00465f4ebce11c8f81`である。
+
+固定Qwen3.5-4B BF16 GGUF、FP16 KV、単一request、自動prefillで`10,001/2`を13/13、`100,000/2`を4/4 PASSした。
+100kはlogical capacity 131,072のresident KVと実効chunk 2,048を使用し、生成、HIP-only、fallback/cleanup 0、process消滅、
+HBM/GTT baseline復帰を確認した。このsoftware tupleとcaseだけを追加実機evidenceとし、別OS/kernel/driver/ROCm/SKU、
+batch/parallel、他modelへ一般化しない。software lifecycleは`experimental`のままで、
+[Phase 52 summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

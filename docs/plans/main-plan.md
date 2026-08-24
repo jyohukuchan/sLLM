@@ -380,14 +380,14 @@
 | 完了・限定採用 | 49 | V620 `gfx1030`でGQA P32を限定採用し、long-prefill v2とHIP Graphを棄却。通常5行の退行確認まで完了 |
 | 完了・限定採用 | 50 | R9700 `gfx1201`でPhase 49変更を採否し、MI300X `gfx942`向けwave64引継ぎを準備 |
 | 一時保留 | 51 | フェーズ49/50の採用内容をMI300X `gfx942`へwave64対応で適用し、同じ7行で検証 |
-| 進行中 | 52 | R9700 `gfx1201`の`100,000/2`に残るKV物理コミットOOMを観測・修正し、自動経路で再検証 |
+| 完了 | 52 | R9700 `gfx1201`の長capacityをresident KVへ限定routeし、`10,001/2`と`100,000/2`の自動経路を再検証 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 
 直近の性能経路は番号上の既定順をフェーズ49→50→51→52とする。フェーズ49はV620の全7行同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の正しさ・資源・通常5行の退行確認を終えて完了した。
 フェーズ50はR9700 `gfx1201`の限定採用とMI300X `gfx942` wave64引継ぎ準備を終え、実機性能検証をフェーズ51へ引き継ぐ。
-ユーザー指示によりフェーズ51は一時保留し、フェーズ52を先に進める。フェーズ52はR9700 `100,000/2`のOOMだけを解消し、
-R9700の同等達成もMI300X再開の必須条件にはしない。
+ユーザー指示によりフェーズ51は一時保留し、フェーズ52を先に完了した。R9700の同等達成はMI300X再開の必須条件にせず、
+フェーズ51は別のユーザー指示があるまで自動再開しない。
 フェーズ46〜48は予約済みの機能経路として保持するが、ユーザーが優先順位を変更しない限り性能経路の後に扱う。
 フェーズ37〜38はコード変更や実機検証へ着手する前にこの性能経路へ再編した。
 フェーズ37以降の詳細な依存関係と受入条件は
@@ -651,7 +651,13 @@ LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を
   192 GiBのMI300Xは16K開始となる。selector境界のCPU testはPASSした。修正後のR9700 `100,000/2`自動再実行は
   HBM peakを旧`26,414,587,904` bytesから`13,160,554,496` bytesへ約50.18%下げたが、約`152.867`秒後、
   layer 23のvirtual KV physical commitmentでOOMとなった。自動候補列は`[2048, 512]`だが、失敗rowに実効chunkを
-  保存できていないため、per-plane commitとtransactional rollbackを含めPhase 52で解消する。
+  保存できていない課題を、per-plane commitとtransactional rollbackを含むPhase 52へ引き継いだ。
+- フェーズ52はexact `gfx1201`のlogical capacity 65,536以上だけを`contiguous-resident`へrouteし、同じ自動候補
+  `[2048,512]`から2,048を選択した`100,000/2`を1 warmup＋3 measuredで4/4 PASSした。生成は全て
+  `[23066,23066]`、HIP-only、fallback/cleanup failure 0、HBM/GTT baseline復帰だった。E2E中央値は
+  `325.593963905`秒、HBM peakは`15,388,794,880` bytes、8 KV layerのK/V commitは4 GiBである。
+  `10,001/2`も従来VMM経路で13/13 PASSし、短いcapacityをresidentへ広げていない。VMM grow/COWのtransactional rollbackと
+  profiled abortのbounded drainもhost failure injectionで固定した。
 - フェーズ50ではexact `gfx1201`のresidual RMSNorm、GDN projection bundle、MLP gate-up-SiLU bundle、GQA4 P32（KV長4,096以上）を採用し、
   `gfx1030`限定経路、不採用経路、gfx942 wave64再設計を分類した。共通source変更後のV620 exact `gfx1030`通常5行は5/5 PASSで、
   フェーズ49 closeout比`-0.21〜+1.16%`だった。exact `gfx942` Cargo/probe/host selectorはPASSしたが、MI300X実機は未検証であり、
@@ -659,18 +665,18 @@ LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を
 
 ### 次に進める独立経路
 
-1. **フェーズ52・R9700 100k OOM解消（進行中）**: 自動prefillの実効chunkとKV各planeの物理commitを失敗時にも記録し、
-   VMM grow／copy-on-writeのtransactional rollback、provider-aware preflight、extent集約、gfx1201限定provider選択を
-   根因に応じて個別採否する。詳細は
-   [フェーズ52進行中計画](active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)を正本とする。
-2. **フェーズ51・MI300X適用（一時保留）**: 再開後、フェーズ49/50の成果と引継ぎ台帳をexact `gfx942`へwave64対応で適用し、
+1. **フェーズ52・R9700 100k OOM解消（完了）**: exact gfx1201長capacity限定resident provider、VMM transactional
+   rollback、bounded cleanup、selector/KV physical evidenceを採用した。詳細は
+   [フェーズ52保存済み計画](archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)と
+   [追跡summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正本とする。
+2. **フェーズ51・MI300X適用（一時保留）**: ユーザーが再開した後、フェーズ49/50の成果と引継ぎ台帳をexact `gfx942`へwave64対応で適用し、
    同じ7行で検証する。旧フェーズ37〜38のGDN、Full Attention、FNUZ/GEMM、実行再生、KV残差もここへ統合する。
 3. **フェーズ46〜48・機能経路**: ツール、承認制の組込みtool/MCP、WebUIの計画は保持するが、直近の既定優先順位では
    フェーズ49〜52の後に扱う。フェーズ47だけは引き続き明示承認を必要とする。
 
 フェーズ37以降の作業単位、依存関係、受入条件、除外範囲は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
-フェーズ49の3候補判定とフェーズ50のR9700採否、V620退行確認、gfx942引継ぎ準備を終えたため、フェーズ51と52を独立に開始できる。
+フェーズ49の3候補判定、フェーズ50のR9700採否、フェーズ52の100k OOM解消を完了した。フェーズ51は一時保留を維持する。
 フェーズ50の詳細計画は[保存済み計画](archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とし、
 番号上の既定実行順は50→51→52だが、フェーズ51と52は相互に待たず、フェーズ49または50の全7行llama.cpp同等達成を
 後続フェーズの開始条件にはしない。

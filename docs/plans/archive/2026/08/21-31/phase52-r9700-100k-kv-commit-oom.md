@@ -1,6 +1,6 @@
 # Phase 52: R9700 100k KV物理コミットOOMの解消
 
-> 状態: in-progress（2026-08-24）
+> 状態: complete（2026-08-24）
 > 対象: Radeon AI PRO R9700 exact `gfx1201`、単一GPU・単一要求、Qwen3.5-4B BF16 weight／FP16 KVの`100,000/2`
 > 順序: ユーザー指示によりPhase 51を一時保留し、Phase 52を先に実施する。
 
@@ -17,7 +17,7 @@ focused regressionを追加し、その結果をPhase 51のcandidate入力へ渡
 ## 正本と固定入力
 
 - 全体順序と共通の7行契約は
-  [Phase 37以降の性能・機能ロードマップ](phase37-plus-mi300x-and-llama-gap-roadmap.md)を使う。
+  [Phase 37以降の性能・機能ロードマップ](../../../../active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を使う。
 - KV memory kind、opaque view、virtual-contiguous providerの現行契約は
   [KV memory方式](../../../../../architecture/kv-memory.md)と
   [runtime architecture](../../../../../architecture/runtime.md)を正とする。
@@ -163,5 +163,20 @@ focused regressionを追加し、その結果をPhase 51のcandidate入力へ渡
 
 完了または再計画時にこのplanをarchiveへ移し、採用source、棄却candidate、GPU証拠、残課題をmatching historyへ追記する。
 Phase 51を待つこと、またはPhase 51がPhase 52を待つことを完了条件にしない。
+
+## 完了結果
+
+- source commit `3ed002c476b49417cc702119e37c2389cefb96bc`、exact `gfx1201` release binary SHA256
+  `79b0099f0c8981c46d1629debaf2aacfe551107adb13ec00465f4ebce11c8f81`で固定tupleを実行した。
+- 自動候補`[2048,512]`から2,048を選択した。`10,001/2`は従来の`virtual-contiguous`で3 warmup＋10 measured、
+  `100,000/2`はcapacity 131,072の`contiguous-resident`で1 warmup＋3 measuredを全て完走した。
+- 両行の生成tokenは`[23066,23066]`、HIP-only、fallback 0、cleanup failure 0、process group消滅、HBM/GTT baseline復帰だった。
+  100kのKVは8 layer、logical/mapped 131,072、observed 100,001、K/V合計4,294,967,296 bytesである。
+- 100k E2E/TTFT中央値は`325.593963905/325.526989625`秒、sysfs HBM/GTT peakは
+  `15,388,794,880/106,524,672` bytesだった。性能同等はこのPhaseのgateにしていない。
+- VMM extent集約、明示512、runtime retryは採用しなかった。resident providerの自動2K経路で完走したため、追加診断は不要と判断した。
+  VMM transactional rollbackとbounded abort drainは、短いvirtual経路を含むfailure correctness修正として維持する。
+- 追跡証拠は[`phase52-r9700-kv-commit-summary-v1.json`](../../../../../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)
+  （SHA256 `9206f7d900b3656ff951c69f25fb36ea589cc752f7e5bf8ae9b08a4ddb82a771`）を正とする。
 
 [全体計画](../../../../main-plan.md) / [対応する履歴](../../../../../history/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)

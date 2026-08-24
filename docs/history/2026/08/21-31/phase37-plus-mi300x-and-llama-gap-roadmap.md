@@ -129,6 +129,15 @@
   VMM grow／copy-on-writeのtransactional rollbackとprofiled abortのpending completion処理を優先して検証する。
   明示512は限定診断であり、最終解決やsilent retryには使わない。
 - Phase 51はMI300X wave64移植、Phase 52はR9700 100k OOMを所有し、相互の開始・完了gateにはしない。詳細は
-  [Phase 52計画](../../../../plans/active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)へ固定した。
+  [Phase 52計画](../../../../plans/archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)へ固定した。
+
+## 2026-08-24: Phase 51一時保留とPhase 52完了
+
+- ユーザー指示によりPhase 51を一時保留し、Phase 52を先に実施した。Phase 51はPhase 52完了によって自動再開しない。
+- exact gfx1201かつlogical capacity 65,536以上へresident KVを限定採用し、自動2Kの`100,000/2`を4/4、
+  従来VMMの`10,001/2`を13/13 PASSした。生成、HIP-only、fallback/cleanup 0、資源復帰を確認した。
+- VMM grow/COWのtransactional rollback、profiled abortのbounded drain、selector/KV physical metadataを共通contractへ追加した。
+- 詳細identity、全反復、HBM/GTT peakは
+  [`phase52-r9700-kv-commit-summary-v1.json`](../../../../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)へ固定した。
 
 [対応する計画](../../../../plans/active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)

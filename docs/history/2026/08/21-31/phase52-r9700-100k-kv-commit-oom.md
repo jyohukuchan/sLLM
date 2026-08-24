@@ -32,4 +32,31 @@
   上書きしない`CleanupFailure`へ変更した。実効prefill candidate、棄却見積り、選択chunk、KV physical auditをdirect結果へ追加した。
 - この時点ではR9700実機を未実行であり、provider candidateの最終採用、GPU PASS、Phase 52完了は主張しない。
 
-[対応する計画](../../../../plans/active/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)
+## 2026-08-24: R9700実機PASSと完了
+
+- 実装をcommit `3ed002c476b49417cc702119e37c2389cefb96bc`へ固定し、ROCm 7.14.0、HIP `7.14.60850`、
+  LLVM 23、Code Object V6、wave32のexact `gfx1201` release binaryをfresh buildした。binary SHA256は
+  `79b0099f0c8981c46d1629debaf2aacfe551107adb13ec00465f4ebce11c8f81`である。
+- 自動prefillは両行とも候補`[2048,512]`から2,048を選択した。`10,001/2`はcapacity 10,003の
+  `virtual-contiguous`で3 warmup＋10 measured、`100,000/2`はcapacity 131,072の
+  `contiguous-resident`で1 warmup＋3 measuredを全てPASSした。明示512、silent retry、fallbackは使っていない。
+- 両行の全requestで生成tokenは`[23066,23066]`、HIP-only、fallback 0、timeoutなし、cleanup failure 0だった。
+  process groupは消滅し、全GPU合計sysfs HBM/GTTはbaseline `98,664,448/100,134,912` bytesへexactに復帰した。
+- 100kの8 KV layerはlogical/mapped capacity 131,072、observed 100,001、K/V合計commit
+  `4,294,967,296` bytesだった。E2E measuredは`325.439180387/326.827859973/325.593963905`秒、中央値
+  `325.593963905`秒、TTFT中央値`325.526989625`秒、sysfs HBM/GTT peakは
+  `15,388,794,880/106,524,672` bytesだった。旧VMM failureのHBM peak `13,160,554,496` bytesを越えて完走し、
+  Phase 50旧selectorの`26,414,587,904` bytesより41.74%低い。
+- 10,001行のE2E中央値は`4.096388783`秒、TTFT中央値`4.0516689515`秒、HBM peak
+  `11,429,343,232` bytesだった。KVは8 layer、observed 10,002、K/V合計commit `335,544,320` bytesである。
+- 原因は総HBM不足ではなく、R9700長capacityのVMM page/handle commit経路に局所化した。driver内部の個別上限値までは
+  推測せず、同じcontiguous pointer契約でpreflightに収まるresident providerをexact gfx1201長capacityだけへ採用した。
+  extent集約は不要、明示512は原因分離不要、runtime retryは意味を変えるため不採用とした。
+- raw rowはrepository外の
+  `/home/homelab1/.local/share/sllm-evidence/phase52/r9700/final-3ed002c476b49417cc702119e37c2389cefb96bc/sllm/raw/`
+  に置き、10,001/100k row SHA256は`b2d73f7fc1a1900b224b40b6a1ee452bcab0d9ecae9d4893963a31533cb71dfe`／
+  `ac367c6320de15a581148828f67a22563c0bd4302004ab478d3ea0d63a0817b0`である。全反復値とidentityは
+  [`phase52-r9700-kv-commit-summary-v1.json`](../../../../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)へ固定した。
+- Phase 52を完了し、詳細計画をarchiveへ移した。Phase 51はユーザー指示どおり一時保留のままで、自動再開しない。
+
+[対応する計画](../../../../plans/archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)

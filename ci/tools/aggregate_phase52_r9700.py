@@ -172,7 +172,9 @@ def validate_kv_memory(sample: Mapping[str, Any], case_id: str, label: str) -> d
             for field in integer_fields
         ):
             _fail(f"{label}: KV layer {index} has invalid physical metadata")
-        expected_observed = 10_003 if case_id == "long-10001" else 100_002
+        # The terminal generated token is published but is not fed back into
+        # KV; two generated tokens therefore append one decode-input token.
+        expected_observed = 10_002 if case_id == "long-10001" else 100_001
         if layer["logical_capacity_tokens"] != EXPECTED_CONTEXT[case_id]:
             _fail(f"{label}: KV layer {index} logical capacity differs")
         if layer["observed_length_tokens"] != expected_observed:
@@ -189,7 +191,9 @@ def validate_kv_memory(sample: Mapping[str, Any], case_id: str, label: str) -> d
         "logical_capacity_tokens": normalized[0]["logical_capacity_tokens"],
         "observed_length_tokens": normalized[0]["observed_length_tokens"],
         "physical_page_bytes": normalized[0]["physical_page_bytes"],
+        "tokens_per_page": normalized[0]["tokens_per_page"],
         "mapped_token_capacity": min(layer["mapped_token_capacity"] for layer in normalized),
+        "committed_bytes_per_plane": normalized[0]["committed_bytes_per_plane"],
         "committed_kv_bytes": committed,
     }
 
@@ -264,11 +268,19 @@ def summarize_row(path: Path, case_id: str) -> dict[str, Any]:
         _fail(f"{path}: fixed long output is not [23066,23066]")
     raw = report.get("raw")
     input_item = raw.get("input_token_ids") if isinstance(raw, dict) else None
-    if not isinstance(input_item, dict) or not isinstance(input_item.get("path"), str) or not isinstance(input_item.get("sha256"), str):
-        _fail(f"{path}: input token evidence is absent")
-    input_path = Path(input_item["path"])
-    if input_path.is_symlink() or not input_path.is_file() or sha256_file(input_path) != input_item["sha256"]:
-        _fail(f"{path}: input token evidence is absent or changed")
+    if input_item is not None:
+        if not isinstance(input_item, dict) or not isinstance(input_item.get("path"), str) or not isinstance(input_item.get("sha256"), str):
+            _fail(f"{path}: input token artifact identity is malformed")
+        input_path = Path(input_item["path"])
+        if input_path.is_symlink() or not input_path.is_file() or sha256_file(input_path) != input_item["sha256"]:
+            _fail(f"{path}: input token artifact is absent or changed")
+    input_token_ids = row.get("input_token_ids")
+    if (
+        not isinstance(input_token_ids, list)
+        or len(input_token_ids) != expected_input
+        or any(token != 23066 for token in input_token_ids)
+    ):
+        _fail(f"{path}: fixed semantic input token sequence differs")
     return {
         "case_id": case_id,
         "row_id": row["row_id"],
@@ -281,7 +293,7 @@ def summarize_row(path: Path, case_id: str) -> dict[str, Any]:
         "prefill_chunk_candidates": [2048, 512],
         "placement": placement,
         "kv": kv_audits[0],
-        "input_token_ids_sha256": input_item["sha256"],
+        "input_token_ids_sha256": hashlib.sha256(canonical_bytes(input_token_ids)).hexdigest(),
         "generated_token_ids_sha256": hashlib.sha256(canonical_bytes(generated)).hexdigest(),
         "metrics": {"e2e_ns": stats(e2e, f"{case_id} e2e"), "ttft_ns": stats(ttft, f"{case_id} ttft"), "tpot_ns": stats(tpot, f"{case_id} tpot")},
         "repetitions": {"e2e_ns": e2e, "ttft_ns": ttft, "tpot_ns": tpot},
