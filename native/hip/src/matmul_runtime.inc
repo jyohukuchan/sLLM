@@ -97,8 +97,44 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
       try {
         candidate = std::make_unique<ElementwisePlan>(context, activation,
                                                       weight, output, metadata);
+        bool short_mixed_shape =
+            ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_shape(
+                metadata.m, metadata.k, metadata.n);
+#if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+        if (short_mixed_shape) {
+          const char *const disable_short_mixed =
+              std::getenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+          if (disable_short_mixed != nullptr &&
+              std::strcmp(disable_short_mixed, "0") == 0) {
+            short_mixed_shape = false;
+          } else {
+            const sllm_status_t mixed_device_status =
+                select_context_device(context, error_sink);
+            if (mixed_device_status != SLLM_STATUS_OK) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              return mixed_device_status;
+            }
+            hipDeviceProp_t mixed_properties = {};
+            const sllm_status_t mixed_property_status =
+                get_context_device_properties(context, &mixed_properties,
+                                              error_sink);
+            if (mixed_property_status != SLLM_STATUS_OK) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              return mixed_property_status;
+            }
+            short_mixed_shape = matches_runtime_gcn_arch(
+                mixed_properties.gcnArchName, "gfx1030");
+          }
+        }
+#else
+        short_mixed_shape = false;
+#endif
         if (metadata.fp8_outer || metadata.nvfp4_w4a4 ||
-            metadata.mxfp4_w4a4) {
+            metadata.mxfp4_w4a4 || short_mixed_shape) {
           const sllm_status_t device_status =
               select_context_device(context, error_sink);
           if (device_status != SLLM_STATUS_OK) {
@@ -107,25 +143,50 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
                 weight->accounting, output->accounting);
             return device_status;
           }
-          const uint64_t value_bytes =
-              metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
-                  ? metadata.m * ((metadata.k + UINT64_C(1)) / UINT64_C(2))
-                  : metadata.m * metadata.k;
-          const uint64_t scale_offset =
-              metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
-                                            ? value_bytes
-                                            : (value_bytes + UINT64_C(3)) &
-                                                  ~UINT64_C(3);
-          candidate->matmul_workspace_bytes =
-              scale_offset +
-              (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
-                   ? metadata.m *
-                         ((metadata.k +
-                           (metadata.mxfp4_w4a4 ? UINT64_C(31)
-                                               : UINT64_C(15))) /
-                          (metadata.mxfp4_w4a4 ? UINT64_C(32)
-                                              : UINT64_C(16)))
-                   : metadata.m * UINT64_C(4));
+          uint64_t scale_offset = 0U;
+          if (short_mixed_shape) {
+            uint64_t workspace_bytes = 0U;
+            const bool workspace_valid =
+                ::sllm_matmul_kernel::phase49_gfx1030_mixed_workspace_bytes(
+                    metadata.m, metadata.n, &workspace_bytes);
+            if (!workspace_valid ||
+                workspace_bytes >
+                    static_cast<uint64_t>(std::numeric_limits<std::size_t>::max()) ||
+                metadata.m >
+                    static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+                metadata.k >
+                    static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
+                metadata.n >
+                    static_cast<uint64_t>(std::numeric_limits<int>::max())) {
+              (void)sllm_public_runtime::AccountingState::release_prepared_plan(
+                  context->accounting, activation->accounting,
+                  weight->accounting, output->accounting);
+              return sllm_public_runtime::write_error(
+                  error_sink, SLLM_STATUS_UNSUPPORTED,
+                  "mixed matmul workspace or dispatch size overflowed");
+            }
+            candidate->matmul_workspace_bytes = workspace_bytes;
+          } else {
+            const uint64_t value_bytes =
+                metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                    ? metadata.m * ((metadata.k + UINT64_C(1)) / UINT64_C(2))
+                    : metadata.m * metadata.k;
+            scale_offset =
+                metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                                              ? value_bytes
+                                              : (value_bytes + UINT64_C(3)) &
+                                                    ~UINT64_C(3);
+            candidate->matmul_workspace_bytes =
+                scale_offset +
+                (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                     ? metadata.m *
+                           ((metadata.k +
+                             (metadata.mxfp4_w4a4 ? UINT64_C(31)
+                                                 : UINT64_C(15))) /
+                            (metadata.mxfp4_w4a4 ? UINT64_C(32)
+                                                : UINT64_C(16)))
+                     : metadata.m * UINT64_C(4));
+          }
           const hipError_t workspace_status = hipMalloc(
               &candidate->matmul_workspace,
               static_cast<std::size_t>(candidate->matmul_workspace_bytes));
@@ -139,8 +200,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
           if (metadata.fp8_outer) {
             hipDeviceProp_t properties = {};
-            const sllm_status_t property_status = get_device_properties(
-                context->device_index, &properties, error_sink);
+            const sllm_status_t property_status =
+                get_context_device_properties(context, &properties, error_sink);
             if (property_status != SLLM_STATUS_OK) {
               (void)sllm_public_runtime::AccountingState::release_prepared_plan(
                   context->accounting, activation->accounting,
@@ -384,8 +445,8 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        plan->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status = get_context_device_properties(
+        plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -676,7 +737,102 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
 #endif
     } else
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
-    if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlas) {
+    if (variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed) {
+      uint64_t workspace_bytes = 0U;
+      uint64_t output_elements = 0U;
+      bool workspace_valid =
+          ::sllm_matmul_kernel::phase49_gfx1030_mixed_workspace_bytes(
+              plan->matmul_metadata.m, plan->matmul_metadata.n,
+              &workspace_bytes);
+      if (workspace_valid) {
+        output_elements = plan->matmul_metadata.m * plan->matmul_metadata.n;
+        workspace_valid =
+            plan->matmul_workspace != nullptr &&
+            plan->matmul_workspace_bytes >= workspace_bytes &&
+            output_elements <= UINT32_MAX &&
+            plan->matmul_metadata.m <=
+                static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+            plan->matmul_metadata.n <=
+                static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+            plan->matmul_metadata.k <=
+                static_cast<uint64_t>(std::numeric_limits<int>::max());
+      }
+      if (!workspace_valid) {
+        launch_status = hipErrorOutOfMemory;
+      } else if (plan->context->matmul_blas_handle == nullptr) {
+        launch_status = hipErrorInvalidHandle;
+      } else {
+        auto *const output_f32 = static_cast<float *>(
+            plan->matmul_workspace);
+        std::lock_guard<std::mutex> blas_lock(
+            plan->context->matmul_blas_mutex);
+        const float alpha = 1.0F;
+        const float beta = 0.0F;
+        const int32_t short_mixed_solution =
+            ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n);
+        const char *const force_baseline =
+            std::getenv("SLLM_MATMUL_FORCE_BASELINE");
+        const bool force_baseline_enabled =
+            force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0;
+        bool short_mixed_rocblas_succeeded = false;
+        if (!force_baseline_enabled && short_mixed_solution != 0 &&
+            ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+                arch_name, plan->matmul_metadata.m,
+                plan->matmul_metadata.k, plan->matmul_metadata.n) &&
+            plan->context->matmul_rocblas_handle != nullptr &&
+            rocblas_set_stream(plan->context->matmul_rocblas_handle,
+                               queue->stream) == rocblas_status_success) {
+          const rocblas_status rocblas_status = (rocblas_gemm_ex)(
+              plan->context->matmul_rocblas_handle,
+              rocblas_operation_transpose, rocblas_operation_none,
+              static_cast<rocblas_int>(plan->matmul_metadata.n),
+              static_cast<rocblas_int>(plan->matmul_metadata.m),
+              static_cast<rocblas_int>(plan->matmul_metadata.k), &alpha,
+              weight, rocblas_datatype_bf16_r,
+              static_cast<rocblas_int>(plan->matmul_metadata.k), activation,
+              rocblas_datatype_bf16_r,
+              static_cast<rocblas_int>(plan->matmul_metadata.k), &beta,
+              output_f32, rocblas_datatype_f32_r,
+              static_cast<rocblas_int>(plan->matmul_metadata.n), output_f32,
+              rocblas_datatype_f32_r,
+              static_cast<rocblas_int>(plan->matmul_metadata.n),
+              rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index,
+              short_mixed_solution, 0U);
+          short_mixed_rocblas_succeeded =
+              rocblas_status == rocblas_status_success;
+        }
+        if (!short_mixed_rocblas_succeeded) {
+          const hipblasStatus_t stream_status = hipblasSetStream(
+              plan->context->matmul_blas_handle, queue->stream);
+          const hipblasStatus_t blas_status =
+              stream_status == HIPBLAS_STATUS_SUCCESS
+                  ? hipblasGemmEx(
+                        plan->context->matmul_blas_handle, HIPBLAS_OP_T,
+                        HIPBLAS_OP_N,
+                        static_cast<int>(plan->matmul_metadata.n),
+                        static_cast<int>(plan->matmul_metadata.m),
+                        static_cast<int>(plan->matmul_metadata.k), &alpha,
+                        weight, HIPBLAS_R_16B,
+                        static_cast<int>(plan->matmul_metadata.k), activation,
+                        HIPBLAS_R_16B,
+                        static_cast<int>(plan->matmul_metadata.k), &beta,
+                        output_f32, HIPBLAS_R_32F,
+                        static_cast<int>(plan->matmul_metadata.n),
+                        HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT)
+                  : stream_status;
+          if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+            launch_status = hipErrorUnknown;
+          }
+        }
+        if (launch_status == hipSuccess) {
+          launch_status =
+              ::sllm_matmul_kernel::launch_short_mixed_f32_to_bf16(
+                  output_f32, output, output_elements, queue->stream);
+        }
+      }
+    } else if (variant == ::sllm_matmul_kernel::KernelVariant::HipBlas) {
       if (plan->context->matmul_blas_handle == nullptr) {
         launch_status = hipErrorInvalidHandle;
       } else {
@@ -685,21 +841,96 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         const float beta = 0.0F;
         const hipblasStatus_t stream_status =
             hipblasSetStream(plan->context->matmul_blas_handle, queue->stream);
-        const hipblasStatus_t blas_status =
-            stream_status == HIPBLAS_STATUS_SUCCESS
-                ? hipblasGemmEx(
-                      plan->context->matmul_blas_handle, HIPBLAS_OP_T,
-                      HIPBLAS_OP_N, static_cast<int>(plan->matmul_metadata.n),
-                      static_cast<int>(plan->matmul_metadata.m),
-                      static_cast<int>(plan->matmul_metadata.k), &alpha, weight,
-                      HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.k),
-                      activation, HIPBLAS_R_16B,
-                      static_cast<int>(plan->matmul_metadata.k), &beta, output,
-                      HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.n),
-                      HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT)
-                : stream_status;
-        if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+        const char *const solution_env =
+            std::getenv("SLLM_MATMUL_GFX1030_ROCBLAS_SOLUTION_445");
+        const bool use_rocblas_solution_445 =
+            matches_runtime_gcn_arch(arch_name, "gfx1030") &&
+            ::sllm_matmul_kernel::phase49_gfx1030_rocblas_solution_445_shape(
+                plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n) &&
+            (solution_env == nullptr || std::strcmp(solution_env, "1") == 0);
+        if (stream_status != HIPBLAS_STATUS_SUCCESS) {
           launch_status = hipErrorUnknown;
+        } else if (use_rocblas_solution_445) {
+          if (plan->context->matmul_rocblas_handle == nullptr ||
+              rocblas_set_stream(plan->context->matmul_rocblas_handle,
+                                 queue->stream) != rocblas_status_success) {
+            launch_status = hipErrorInvalidHandle;
+          } else {
+            const std::array<uint64_t, 3> shape = {
+                plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n};
+            bool shape_is_primed = false;
+            for (const auto &primed_shape :
+                 plan->context->matmul_rocblas_primed_shapes) {
+              if (primed_shape == shape) {
+                shape_is_primed = true;
+                break;
+              }
+            }
+            rocblas_status query_status = rocblas_status_success;
+            if (!shape_is_primed) {
+              rocblas_int solution_count = 0;
+              query_status = rocblas_gemm_ex_get_solutions(
+                    plan->context->matmul_rocblas_handle,
+                    rocblas_operation_transpose, rocblas_operation_none,
+                    static_cast<rocblas_int>(plan->matmul_metadata.n),
+                    static_cast<rocblas_int>(plan->matmul_metadata.m),
+                    static_cast<rocblas_int>(plan->matmul_metadata.k), &alpha,
+                    weight, rocblas_datatype_bf16_r,
+                    static_cast<rocblas_int>(plan->matmul_metadata.k),
+                    activation, rocblas_datatype_bf16_r,
+                    static_cast<rocblas_int>(plan->matmul_metadata.k), &beta,
+                    output, rocblas_datatype_bf16_r,
+                    static_cast<rocblas_int>(plan->matmul_metadata.n), output,
+                    rocblas_datatype_bf16_r,
+                    static_cast<rocblas_int>(plan->matmul_metadata.n),
+                    rocblas_datatype_f32_r, rocblas_gemm_algo_standard, 0U,
+                    nullptr, &solution_count);
+              if (query_status == rocblas_status_success &&
+                  solution_count > 0) {
+                plan->context->matmul_rocblas_primed_shapes.push_back(shape);
+              } else if (query_status == rocblas_status_success) {
+                query_status = rocblas_status_not_implemented;
+              }
+            }
+            rocblas_status execution_status = query_status;
+            if (query_status == rocblas_status_success) {
+              execution_status = (rocblas_gemm_ex)(
+                plan->context->matmul_rocblas_handle,
+                rocblas_operation_transpose, rocblas_operation_none,
+                static_cast<rocblas_int>(plan->matmul_metadata.n),
+                static_cast<rocblas_int>(plan->matmul_metadata.m),
+                static_cast<rocblas_int>(plan->matmul_metadata.k), &alpha,
+                weight, rocblas_datatype_bf16_r,
+                static_cast<rocblas_int>(plan->matmul_metadata.k), activation,
+                rocblas_datatype_bf16_r,
+                static_cast<rocblas_int>(plan->matmul_metadata.k), &beta,
+                output, rocblas_datatype_bf16_r,
+                static_cast<rocblas_int>(plan->matmul_metadata.n), output,
+                rocblas_datatype_bf16_r,
+                static_cast<rocblas_int>(plan->matmul_metadata.n),
+                rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index,
+                ::sllm_matmul_kernel::kPhase49Gfx1030RocblasSolution445, 0U);
+            }
+            if (execution_status != rocblas_status_success) {
+              launch_status = hipErrorUnknown;
+            }
+          }
+        } else {
+          const hipblasStatus_t blas_status = hipblasGemmEx(
+              plan->context->matmul_blas_handle, HIPBLAS_OP_T, HIPBLAS_OP_N,
+              static_cast<int>(plan->matmul_metadata.n),
+              static_cast<int>(plan->matmul_metadata.m),
+              static_cast<int>(plan->matmul_metadata.k), &alpha, weight,
+              HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.k),
+              activation, HIPBLAS_R_16B,
+              static_cast<int>(plan->matmul_metadata.k), &beta, output,
+              HIPBLAS_R_16B, static_cast<int>(plan->matmul_metadata.n),
+              HIPBLAS_COMPUTE_32F, HIPBLAS_GEMM_DEFAULT);
+          if (blas_status != HIPBLAS_STATUS_SUCCESS) {
+            launch_status = hipErrorUnknown;
+          }
         }
       }
     } else

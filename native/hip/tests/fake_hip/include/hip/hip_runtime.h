@@ -7,16 +7,17 @@
 enum hipError_t : int {
   hipSuccess = 0,
   hipErrorInvalidValue = 1,
+  hipErrorOutOfMemory = 2,
+  hipErrorNotSupported = 801,
   hipErrorNotReady = 600,
   hipErrorUnknown = 999,
 };
 
-struct FakeHipStream;
+struct FakeHipStream {};
 struct FakeHipMemHandle;
 struct FakeHipEvent {
   bool recorded = false;
 };
-
 using hipStream_t = FakeHipStream *;
 using hipEvent_t = FakeHipEvent *;
 using hipMemGenericAllocationHandle_t = FakeHipMemHandle *;
@@ -114,10 +115,18 @@ namespace fake_hip {
 uint32_t f16_to_f32_bits_for_test(uint16_t raw) noexcept;
 void reset() noexcept;
 void set_vmm_supported(bool supported) noexcept;
+std::size_t device_property_calls() noexcept;
 hipError_t rmsnorm_launch(const uint16_t *activation, const uint16_t *raw_scale,
                           uint16_t *output, uint32_t normalized_size,
                           uint32_t row_count, float epsilon,
                           uint32_t scale_mode, hipStream_t stream) noexcept;
+hipError_t residual_rmsnorm_launch(const uint16_t *residual,
+                                   const uint16_t *addend,
+                                   const uint16_t *raw_scale,
+                                   uint16_t *residual_output, uint16_t *output,
+                                   uint32_t normalized_size, uint32_t row_count,
+                                   float epsilon, uint32_t scale_mode,
+                                   hipStream_t stream) noexcept;
 hipError_t elementwise_copy_launch(const uint16_t *input, uint16_t *output,
                                    uint64_t element_count,
                                    hipStream_t stream) noexcept;
@@ -190,6 +199,7 @@ hipError_t causal_attention_launch(const uint16_t *query, const uint16_t *key,
                                    uint64_t committed_kv_length,
                                    hipStream_t stream) noexcept;
 std::size_t embedding_gather_launch_calls() noexcept;
+void set_gcn_arch_name(const char *name) noexcept;
 std::size_t matmul_launch_calls() noexcept;
 std::size_t attention_preprocess_launch_calls() noexcept;
 std::size_t rotary_launch_calls() noexcept;
@@ -223,6 +233,7 @@ uint64_t elementwise_last_element_count() noexcept;
 void set_rmsnorm_launch_status(hipError_t status) noexcept;
 void set_rmsnorm_numerical_execution(bool enabled) noexcept;
 std::size_t rmsnorm_launch_calls() noexcept;
+std::size_t residual_rmsnorm_launch_calls() noexcept;
 uint32_t rmsnorm_last_normalized_size() noexcept;
 uint32_t rmsnorm_last_row_count() noexcept;
 uint32_t rmsnorm_last_scale_mode() noexcept;

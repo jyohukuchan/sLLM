@@ -39,12 +39,17 @@ use crate::{
     ArgmaxDescriptor, AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo,
     AttentionPreprocessSubmission, Buffer, Completion, CompletionState, Context,
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
-    EmbeddingDispatchInfo, EmbeddingSubmission, HipBackend, MatmulDescriptor, MatmulDispatchInfo,
-    MatmulSubmission, MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission,
-    MoeRouteDescriptor, MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess,
-    PreparedElementwise, PreparedEmbedding, PreparedMatmul, PreparedMoeExpert, PreparedMoeRoute,
-    PreparedRmsNorm, PreparedRotary, PreparedTokenSelector, PreparedWindowedAttention, Queue,
-    QueueCompletionMode as HipQueueCompletionMode, RmsNormDescriptor, RmsNormDispatchInfo,
+    EmbeddingDispatchInfo, EmbeddingSubmission, GdnProjectionBundleDescriptor,
+    GdnProjectionBundleDispatchInfo, GdnProjectionBundleSubmission, HipBackend, MatmulDescriptor,
+    MatmulDispatchInfo, MatmulSubmission, MlpGateUpSiluBundleDescriptor,
+    MlpGateUpSiluBundleDispatchInfo, MlpGateUpSiluBundleSubmission, MoeExpertDescriptor,
+    MoeExpertDispatchInfo, MoeExpertSubmission, MoeRouteDescriptor, MoeRouteLayout,
+    MoeRouteSubmission, PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding,
+    PreparedGdnProjectionBundle, PreparedMatmul, PreparedMlpGateUpSiluBundle, PreparedMoeExpert,
+    PreparedMoeRoute, PreparedResidualRmsNorm, PreparedRmsNorm, PreparedRotary,
+    PreparedTokenSelector, PreparedWindowedAttention, Queue,
+    QueueCompletionMode as HipQueueCompletionMode, ResidualRmsNormDescriptor,
+    ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission, RmsNormDescriptor, RmsNormDispatchInfo,
     RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
     RuntimeStatus, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorSubmission,
     WindowedAttentionDescriptor, WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
@@ -360,6 +365,10 @@ struct HipExecutionSession {
 }
 
 impl ExecutionSessionAdapter for HipExecutionSession {
+    fn expected_target(&self) -> Option<String> {
+        self.context.expected_target().map(str::to_owned)
+    }
+
     fn max_transfer_bytes(&self) -> u64 {
         crate::sys::SLLM_HIP_MAX_TRANSFER_BYTES
     }
@@ -395,7 +404,10 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::TanhSoftcap
                 | sllm_core::SemanticOpKind::Embedding
                 | sllm_core::SemanticOpKind::Matmul
+                | sllm_core::SemanticOpKind::GdnProjectionBundle
+                | sllm_core::SemanticOpKind::MlpGateUpSiluBundle
                 | sllm_core::SemanticOpKind::RmsNorm
+                | sllm_core::SemanticOpKind::ResidualRmsNorm
                 | sllm_core::SemanticOpKind::Argmax
                 | sllm_core::SemanticOpKind::AttentionPreprocess
                 | sllm_core::SemanticOpKind::Rotary
@@ -1006,6 +1018,86 @@ impl ExecutionSessionAdapter for HipExecutionSession {
     ) -> Result<AdapterResource, ExecutionError> {
         self.state.ensure_open()?;
         let prepared = match operation.descriptor().kind() {
+            sllm_core::SemanticOpKind::GdnProjectionBundle => {
+                let activation = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let weights: [Result<Buffer, ExecutionError>; 4] = std::array::from_fn(|index| {
+                    access
+                        .downcast_buffer_payload::<Buffer>(operation.inputs()[index + 1].buffer())
+                        .cloned()
+                });
+                let weights: [Buffer; 4] = weights
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()?
+                    .try_into()
+                    .map_err(|_| ExecutionError::InvalidRequest {
+                        reason: "GDN weight binding count mismatch".to_owned(),
+                    })?;
+                let outputs: [Result<Buffer, ExecutionError>; 4] = std::array::from_fn(|index| {
+                    access
+                        .downcast_buffer_payload::<Buffer>(operation.outputs()[index].buffer())
+                        .cloned()
+                });
+                let outputs: [Buffer; 4] = outputs
+                    .into_iter()
+                    .collect::<Result<Vec<_>, _>>()?
+                    .try_into()
+                    .map_err(|_| ExecutionError::InvalidRequest {
+                        reason: "GDN output binding count mismatch".to_owned(),
+                    })?;
+                let descriptor = GdnProjectionBundleDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    activation.binding(operation.inputs()[0].view().clone()),
+                    std::array::from_fn(|index| {
+                        weights[index].binding(operation.inputs()[index + 1].view().clone())
+                    }),
+                    std::array::from_fn(|index| {
+                        outputs[index].binding(operation.outputs()[index].view().clone())
+                    }),
+                )
+                .map_err(map_backend_error)?;
+                HipPreparedPlan::GdnProjectionBundle(
+                    self.backend
+                        .prepare_gdn_projection_bundle(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::MlpGateUpSiluBundle => {
+                let activation = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let gate_weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let up_weight = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let gate_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let up_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[1].buffer())?
+                    .clone();
+                let silu_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[2].buffer())?
+                    .clone();
+                let descriptor = MlpGateUpSiluBundleDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    activation.binding(operation.inputs()[0].view().clone()),
+                    gate_weight.binding(operation.inputs()[1].view().clone()),
+                    up_weight.binding(operation.inputs()[2].view().clone()),
+                    gate_output.binding(operation.outputs()[0].view().clone()),
+                    up_output.binding(operation.outputs()[1].view().clone()),
+                    silu_output.binding(operation.outputs()[2].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                HipPreparedPlan::MlpGateUpSiluBundle(
+                    self.backend
+                        .prepare_mlp_gate_up_silu_bundle(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
             sllm_core::SemanticOpKind::RmsNorm => {
                 let activation = access
                     .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
@@ -1027,6 +1119,38 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 HipPreparedPlan::RmsNorm(
                     self.backend
                         .prepare_rms_norm(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::ResidualRmsNorm => {
+                let residual = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[0].buffer())?
+                    .clone();
+                let addend = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[1].buffer())?
+                    .clone();
+                let raw_scale = access
+                    .downcast_buffer_payload::<Buffer>(operation.inputs()[2].buffer())?
+                    .clone();
+                let residual_output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[0].buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(operation.outputs()[1].buffer())?
+                    .clone();
+                let descriptor = ResidualRmsNormDescriptor::from_validated_semantic(
+                    Arc::clone(operation.descriptor()),
+                    residual.binding(operation.inputs()[0].view().clone()),
+                    addend.binding(operation.inputs()[1].view().clone()),
+                    raw_scale.binding(operation.inputs()[2].view().clone()),
+                    residual_output.binding(operation.outputs()[0].view().clone()),
+                    output.binding(operation.outputs()[1].view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::ResidualRmsNorm(
+                    self.backend
+                        .prepare_residual_rms_norm(&self.context, descriptor)
                         .map_err(map_backend_error)?,
                 )
             }
@@ -1398,6 +1522,13 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                     dispatch_from_rmsnorm(dispatch),
                 )
             }
+            HipPreparedPlan::ResidualRmsNorm(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::ResidualRmsNorm(submission),
+                    dispatch_from_residual_rmsnorm(dispatch),
+                )
+            }
             HipPreparedPlan::Elementwise(plan) => {
                 let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
                 (
@@ -1417,6 +1548,20 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 (
                     HipSemanticSubmission::Matmul(submission),
                     dispatch_from_matmul(dispatch),
+                )
+            }
+            HipPreparedPlan::GdnProjectionBundle(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::GdnProjectionBundle(submission),
+                    dispatch_from_gdn_projection_bundle(dispatch),
+                )
+            }
+            HipPreparedPlan::MlpGateUpSiluBundle(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::MlpGateUpSiluBundle(submission),
+                    dispatch_from_mlp_gate_up_silu_bundle(dispatch),
                 )
             }
             HipPreparedPlan::Argmax(plan) => {
@@ -1585,9 +1730,12 @@ impl ExecutionSessionAdapter for HipExecutionSession {
 #[derive(Clone)]
 enum HipPreparedPlan {
     RmsNorm(PreparedRmsNorm),
+    ResidualRmsNorm(PreparedResidualRmsNorm),
     Elementwise(PreparedElementwise),
     Embedding(PreparedEmbedding),
     Matmul(PreparedMatmul),
+    GdnProjectionBundle(PreparedGdnProjectionBundle),
+    MlpGateUpSiluBundle(PreparedMlpGateUpSiluBundle),
     Argmax(PreparedArgmax),
     TokenSelector(PreparedTokenSelector),
     AttentionPreprocess(PreparedAttentionPreprocess),
@@ -1605,9 +1753,12 @@ struct PreparedSparseMoe {
 
 enum HipSemanticSubmission {
     RmsNorm(RmsNormSubmission),
+    ResidualRmsNorm(ResidualRmsNormSubmission),
     Elementwise(ElementwiseSubmission),
     Embedding(EmbeddingSubmission),
     Matmul(MatmulSubmission),
+    GdnProjectionBundle(GdnProjectionBundleSubmission),
+    MlpGateUpSiluBundle(MlpGateUpSiluBundleSubmission),
     Argmax(ArgmaxSubmission),
     TokenSelector(TokenSelectorSubmission),
     AttentionPreprocess(AttentionPreprocessSubmission),
@@ -1626,9 +1777,12 @@ impl HipSemanticSubmission {
     fn query(&mut self) -> Result<CompletionState, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.query(),
+            Self::ResidualRmsNorm(submission) => submission.query(),
             Self::Elementwise(submission) => submission.query(),
             Self::Embedding(submission) => submission.query(),
             Self::Matmul(submission) => submission.query(),
+            Self::GdnProjectionBundle(submission) => submission.query(),
+            Self::MlpGateUpSiluBundle(submission) => submission.query(),
             Self::Argmax(submission) => submission.query(),
             Self::TokenSelector(submission) => submission.query(),
             Self::AttentionPreprocess(submission) => submission.query(),
@@ -1641,9 +1795,12 @@ impl HipSemanticSubmission {
     fn wait(&mut self, timeout: Duration) -> Result<CompletionState, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.wait(timeout),
+            Self::ResidualRmsNorm(submission) => submission.wait(timeout),
             Self::Elementwise(submission) => submission.wait(timeout),
             Self::Embedding(submission) => submission.wait(timeout),
             Self::Matmul(submission) => submission.wait(timeout),
+            Self::GdnProjectionBundle(submission) => submission.wait(timeout),
+            Self::MlpGateUpSiluBundle(submission) => submission.wait(timeout),
             Self::Argmax(submission) => submission.wait(timeout),
             Self::TokenSelector(submission) => submission.wait(timeout),
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
@@ -1656,9 +1813,12 @@ impl HipSemanticSubmission {
     fn finalize_after_token(&mut self, fence_token: u64) -> Result<CompletionState, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.finalize_after_token(fence_token),
+            Self::ResidualRmsNorm(submission) => submission.finalize_after_token(fence_token),
             Self::Elementwise(submission) => submission.finalize_after_token(fence_token),
             Self::Embedding(submission) => submission.finalize_after_token(fence_token),
             Self::Matmul(submission) => submission.finalize_after_token(fence_token),
+            Self::GdnProjectionBundle(submission) => submission.finalize_after_token(fence_token),
+            Self::MlpGateUpSiluBundle(submission) => submission.finalize_after_token(fence_token),
             Self::Argmax(submission) => submission.finalize_after_token(fence_token),
             Self::TokenSelector(submission) => submission.finalize_after_token(fence_token),
             Self::AttentionPreprocess(submission) => submission.finalize_after_token(fence_token),
@@ -1675,9 +1835,12 @@ impl HipSemanticSubmission {
     fn kernel_elapsed_ns(&mut self) -> Result<u64, RuntimeError> {
         match self {
             Self::RmsNorm(submission) => submission.kernel_elapsed_ns(),
+            Self::ResidualRmsNorm(submission) => submission.kernel_elapsed_ns(),
             Self::Elementwise(submission) => submission.kernel_elapsed_ns(),
             Self::Embedding(submission) => submission.kernel_elapsed_ns(),
             Self::Matmul(submission) => submission.kernel_elapsed_ns(),
+            Self::GdnProjectionBundle(submission) => submission.kernel_elapsed_ns(),
+            Self::MlpGateUpSiluBundle(submission) => submission.kernel_elapsed_ns(),
             Self::Argmax(submission) => submission.kernel_elapsed_ns(),
             Self::TokenSelector(submission) => submission.kernel_elapsed_ns(),
             Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
@@ -1972,6 +2135,26 @@ fn dispatch_from_rmsnorm(dispatch: RmsNormDispatchInfo) -> DispatchEvidence {
     }
 }
 
+fn dispatch_from_residual_rmsnorm(dispatch: ResidualRmsNormDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.row_count,
+        normalized_size: dispatch.normalized_size,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
 fn dispatch_from_elementwise(dispatch: ElementwiseDispatchInfo) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: dispatch.abi_version,
@@ -2026,6 +2209,50 @@ fn dispatch_from_matmul(dispatch: MatmulDispatchInfo) -> DispatchEvidence {
         backend: dispatch.backend,
         fallback_allowed: dispatch.fallback_allowed,
         fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_gdn_projection_bundle(
+    dispatch: GdnProjectionBundleDispatchInfo,
+) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sllm_hip_sys::SLLM_HIP_ABI_VERSION,
+        info_version: sllm_hip_sys::SLLM_HIP_GDN_PROJECTION_BUNDLE_DISPATCH_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: 0,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.m,
+        normalized_size: dispatch.widths.iter().map(|w| *w as u64).sum(),
+        backend: 1,
+        fallback_allowed: false,
+        fallback_used: dispatch.fallback_used != 0,
+        kernel_symbol: "sllm_gdn_projection_bundle_bf16_fp32_decode_v1".to_owned(),
+        device_symbol: "sllm_gdn_projection_bundle_bf16_fp32_decode_v1".to_owned(),
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_mlp_gate_up_silu_bundle(
+    dispatch: MlpGateUpSiluBundleDispatchInfo,
+) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sllm_hip_sys::SLLM_HIP_ABI_VERSION,
+        info_version: sllm_hip_sys::SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_DISPATCH_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.m,
+        normalized_size: dispatch.n * 3,
+        backend: 1,
+        fallback_allowed: false,
+        fallback_used: dispatch.fallback_used != 0,
         kernel_symbol: dispatch.kernel_symbol,
         device_symbol: dispatch.device_symbol,
         target: logical_dispatch_target(dispatch.gcn_arch_name),

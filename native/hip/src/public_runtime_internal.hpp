@@ -4,6 +4,7 @@
 #include "sllm/hip.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -144,9 +145,8 @@ struct AccountingState final {
 
   static bool rollback_queue_fence(AccountingState &context,
                                    AccountingState &queue) noexcept {
-    if (queue.active_submissions == 0U ||
-        queue.completion_references == 0U || context.child_count == 0U ||
-        context.lifetime_guards == 0U) {
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U) {
       return false;
     }
     --queue.active_submissions;
@@ -156,8 +156,8 @@ struct AccountingState final {
     return true;
   }
 
-  static bool release_queue_fence_completion(
-      AccountingState &context, AccountingState &queue) noexcept {
+  static bool release_queue_fence_completion(AccountingState &context,
+                                             AccountingState &queue) noexcept {
     if (queue.completion_references == 0U || context.child_count == 0U ||
         context.lifetime_guards == 0U) {
       return false;
@@ -300,6 +300,244 @@ struct AccountingState final {
     activation.completion_references -= activation_count;
     raw_scale.completion_references -= raw_scale_count;
     output.completion_references -= output_count;
+    return true;
+  }
+
+  /* Fused residual+RMSNorm binds five tensor intervals.  Keep the same
+   * duplicate-binding semantics as RMSNorm (two disjoint intervals may share
+   * one backing Buffer) while reserving/releasing the complete dependency set
+   * atomically. */
+  static void five_buffer_counts(AccountingState *const buffers[5],
+                                 uint64_t counts[5]) noexcept {
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      counts[i] = 0U;
+      for (uint32_t j = 0U; j != 5U; ++j) {
+        if (buffers[i] == buffers[j]) {
+          ++counts[i];
+        }
+      }
+    }
+  }
+
+  static bool reserve_five_buffer_submission(
+      AccountingState &context, AccountingState &queue, AccountingState &first,
+      AccountingState &second, AccountingState &third, AccountingState &fourth,
+      AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_increment(queue.active_submissions) ||
+        !can_increment(queue.completion_references) ||
+        !can_increment(context.child_count) ||
+        !can_increment(context.lifetime_guards)) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        if (!can_add(buffers[i]->active_submissions, counts[i]) ||
+            !can_add(buffers[i]->completion_references, counts[i])) {
+          return false;
+        }
+      }
+    }
+    ++queue.active_submissions;
+    ++queue.completion_references;
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->active_submissions += counts[i];
+        buffers[i]->completion_references += counts[i];
+      }
+    }
+    return true;
+  }
+
+  static bool release_five_buffer_active(AccountingState &queue,
+                                         AccountingState &first,
+                                         AccountingState &second,
+                                         AccountingState &third,
+                                         AccountingState &fourth,
+                                         AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    if (queue.active_submissions == 0U) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen && buffers[i]->active_submissions < counts[i]) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->active_submissions -= counts[i];
+      }
+    }
+    return true;
+  }
+
+  static bool rollback_five_buffer_submission(
+      AccountingState &context, AccountingState &queue, AccountingState &first,
+      AccountingState &second, AccountingState &third, AccountingState &fourth,
+      AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen && (buffers[i]->active_submissions < counts[i] ||
+                          buffers[i]->completion_references < counts[i])) {
+        return false;
+      }
+    }
+    --queue.active_submissions;
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->active_submissions -= counts[i];
+        buffers[i]->completion_references -= counts[i];
+      }
+    }
+    return true;
+  }
+
+  static bool release_five_buffer_completion(
+      AccountingState &context, AccountingState &queue, AccountingState &first,
+      AccountingState &second, AccountingState &third, AccountingState &fourth,
+      AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    if (queue.completion_references == 0U || context.child_count == 0U ||
+        context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen && buffers[i]->completion_references < counts[i]) {
+        return false;
+      }
+    }
+    --queue.completion_references;
+    --context.child_count;
+    --context.lifetime_guards;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->completion_references -= counts[i];
+      }
+    }
+    return true;
+  }
+
+  static bool reserve_five_buffer_prepared_plan(
+      AccountingState &context, AccountingState &first, AccountingState &second,
+      AccountingState &third, AccountingState &fourth,
+      AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    const auto can_add = [](const uint64_t value, const uint64_t amount) {
+      return amount <= std::numeric_limits<uint64_t>::max() - value;
+    };
+    if (!can_add(context.child_count, 1U) ||
+        !can_add(context.lifetime_guards, 1U)) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen && !can_add(buffers[i]->child_count, counts[i])) {
+        return false;
+      }
+    }
+    ++context.child_count;
+    ++context.lifetime_guards;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->child_count += counts[i];
+      }
+    }
+    return true;
+  }
+
+  static bool release_five_buffer_prepared_plan(
+      AccountingState &context, AccountingState &first, AccountingState &second,
+      AccountingState &third, AccountingState &fourth,
+      AccountingState &fifth) noexcept {
+    AccountingState *buffers[5] = {&first, &second, &third, &fourth, &fifth};
+    uint64_t counts[5] = {};
+    five_buffer_counts(buffers, counts);
+    if (context.child_count == 0U || context.lifetime_guards == 0U) {
+      return false;
+    }
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen && buffers[i]->child_count < counts[i]) {
+        return false;
+      }
+    }
+    --context.child_count;
+    --context.lifetime_guards;
+    for (uint32_t i = 0U; i != 5U; ++i) {
+      bool first_seen = false;
+      for (uint32_t j = 0U; j != i; ++j) {
+        first_seen = first_seen || buffers[j] == buffers[i];
+      }
+      if (!first_seen) {
+        buffers[i]->child_count -= counts[i];
+      }
+    }
     return true;
   }
 
@@ -579,7 +817,7 @@ struct AccountingState final {
       AccountingState &additive, AccountingState &valid_mask,
       AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     const auto can_add = [](const uint64_t value, const uint64_t amount) {
@@ -612,7 +850,7 @@ struct AccountingState final {
       AccountingState &additive, AccountingState &valid_mask,
       AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (context.child_count == 0U || context.lifetime_guards == 0U) {
@@ -637,11 +875,11 @@ struct AccountingState final {
   }
 
   static bool reserve_token_selector_submission(
-      AccountingState &context, AccountingState &queue,
-      AccountingState &logits, AccountingState &additive,
-      AccountingState &valid_mask, AccountingState &output) noexcept {
+      AccountingState &context, AccountingState &queue, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     const auto can_add = [](const uint64_t value, const uint64_t amount) {
@@ -677,12 +915,13 @@ struct AccountingState final {
     return true;
   }
 
-  static bool release_token_selector_active(
-      AccountingState &queue, AccountingState &logits,
-      AccountingState &additive, AccountingState &valid_mask,
-      AccountingState &output) noexcept {
+  static bool release_token_selector_active(AccountingState &queue,
+                                            AccountingState &logits,
+                                            AccountingState &additive,
+                                            AccountingState &valid_mask,
+                                            AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (queue.active_submissions == 0U) {
@@ -706,16 +945,15 @@ struct AccountingState final {
   }
 
   static bool rollback_token_selector_submission(
-      AccountingState &context, AccountingState &queue,
-      AccountingState &logits, AccountingState &additive,
-      AccountingState &valid_mask, AccountingState &output) noexcept {
+      AccountingState &context, AccountingState &queue, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
-    if (queue.active_submissions == 0U ||
-        queue.completion_references == 0U || context.child_count == 0U ||
-        context.lifetime_guards == 0U) {
+    if (queue.active_submissions == 0U || queue.completion_references == 0U ||
+        context.child_count == 0U || context.lifetime_guards == 0U) {
       return false;
     }
     for (std::size_t index = 0U; index != token_selector_resource_count;
@@ -741,11 +979,11 @@ struct AccountingState final {
   }
 
   static bool release_token_selector_completion(
-      AccountingState &context, AccountingState &queue,
-      AccountingState &logits, AccountingState &additive,
-      AccountingState &valid_mask, AccountingState &output) noexcept {
+      AccountingState &context, AccountingState &queue, AccountingState &logits,
+      AccountingState &additive, AccountingState &valid_mask,
+      AccountingState &output) noexcept {
     AccountingState *const resources[] = {&logits, &additive, &valid_mask,
-                                           &output};
+                                          &output};
     uint64_t multiplicities[token_selector_resource_count] = {};
     token_selector_resource_multiplicities(resources, multiplicities);
     if (queue.completion_references == 0U || context.child_count == 0U ||

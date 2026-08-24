@@ -710,22 +710,25 @@ matmul_bf16_decode_body(const uint16_t *const activation,
 }
 
 template <uint32_t WaveWidth, uint32_t WaveCount>
-__device__ __forceinline__ void
-matmul_bf16_serial_rows_body(const uint16_t *const activation,
-                             const uint16_t *const weight,
-                             uint16_t *const output, const uint64_t m,
-                             const uint64_t k, const uint64_t n) {
+__device__ __forceinline__ void matmul_bf16_serial_rows_body(
+    const uint16_t *const activation, const uint16_t *const weight,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n, const uint64_t row_start = 0U,
+    const uint64_t column_override = UINT64_MAX) {
   constexpr uint32_t max_rows = 8U;
-  const uint64_t column = blockIdx.x;
+  const uint64_t column = column_override == UINT64_MAX
+                              ? static_cast<uint64_t>(blockIdx.x)
+                              : column_override;
   if (column >= n || m == 0U || m > max_rows) {
     return;
   }
   float partial[max_rows] = {};
   const uint16_t *const weight_row = weight + column * k;
-  const bool paired =
-      (k & UINT64_C(1)) == 0U && ((reinterpret_cast<uintptr_t>(activation) |
-                                   reinterpret_cast<uintptr_t>(weight_row)) &
-                                  static_cast<uintptr_t>(3U)) == 0U;
+  const uint16_t *const activation_start = activation + row_start * k;
+  const bool paired = (k & UINT64_C(1)) == 0U &&
+                      ((reinterpret_cast<uintptr_t>(activation_start) |
+                        reinterpret_cast<uintptr_t>(weight_row)) &
+                       static_cast<uintptr_t>(3U)) == 0U;
   if (paired) {
     const auto *const weight_pairs =
         reinterpret_cast<const uint32_t *>(weight_row);
@@ -738,7 +741,7 @@ matmul_bf16_serial_rows_body(const uint16_t *const activation,
           bf16_to_float(static_cast<uint16_t>(weight_pair >> 16U));
       for (uint32_t row = 0U; row < m; ++row) {
         const auto *const activation_pairs = reinterpret_cast<const uint32_t *>(
-            activation + static_cast<uint64_t>(row) * k);
+            activation_start + static_cast<uint64_t>(row) * k);
         const uint32_t activation_pair = activation_pairs[pair];
         partial[row] +=
             bf16_to_float(static_cast<uint16_t>(activation_pair)) * weight0;
@@ -754,7 +757,7 @@ matmul_bf16_serial_rows_body(const uint16_t *const activation,
       for (uint32_t row = 0U; row < m; ++row) {
         partial[row] +=
             bf16_to_float(
-                activation[static_cast<uint64_t>(row) * k + reduction]) *
+                activation_start[static_cast<uint64_t>(row) * k + reduction]) *
             weight_value;
       }
     }
@@ -785,7 +788,7 @@ matmul_bf16_serial_rows_body(const uint16_t *const activation,
     }
     if (lane == 0U) {
       for (uint32_t row = 0U; row < m; ++row) {
-        output[static_cast<uint64_t>(row) * n + column] =
+        output[(row_start + static_cast<uint64_t>(row)) * n + column] =
             float_to_bf16_rne_bits(partial[row]);
       }
     }
@@ -822,6 +825,42 @@ __launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_decode_serial_rows_wave64_v
     uint16_t *const output, const uint64_t m, const uint64_t k,
     const uint64_t n) {
   matmul_bf16_serial_rows_body<64U, 4U>(activation, weight, output, m, k, n);
+}
+
+// Short prefill provider for the exact gfx1030 Qwen projection shapes.  Each
+// block owns one output column and one consecutive group of up to eight rows;
+// the existing serial-reduction body is reused unchanged for each group.
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_bf16_fp32_prefill_short_serial_v1(
+    const uint16_t *const activation, const uint16_t *const weight,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  if (n == 0U || m == 0U) {
+    return;
+  }
+  const uint64_t column = blockIdx.x % n;
+  const uint64_t row_group = blockIdx.x / n;
+  const uint64_t row_start = row_group * UINT64_C(8);
+  if (row_start >= m) {
+    return;
+  }
+  const uint64_t remaining_rows = m - row_start;
+  const uint64_t rows =
+      remaining_rows < UINT64_C(8) ? remaining_rows : UINT64_C(8);
+  // gfx1030 uses wave32, matching the established M=2..8 provider.
+  matmul_bf16_serial_rows_body<32U, 8U>(activation, weight, output, rows, k, n,
+                                        row_start, column);
+}
+
+extern "C" __global__ void
+sllm_matmul_fp32_to_bf16_short_mixed_v1(const float *const input,
+                                        uint16_t *const output,
+                                        const uint64_t element_count) {
+  const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+                         static_cast<uint64_t>(threadIdx.x);
+  if (index < element_count) {
+    output[index] = float_to_bf16_rne_bits(input[index]);
+  }
 }
 
 // The Phase 15 provider remains the decode path and is also the within-binary
@@ -1097,6 +1136,10 @@ hipError_t launch(const uint16_t *const activation,
     hipLaunchKernelGGL(sllm_matmul_bf16_fp32_decode_serial_rows_v1,
                        dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
                        stream, activation, weight, output, m, k, n);
+  } else if (variant == KernelVariant::PrefillShortSerial) {
+    hipLaunchKernelGGL(sllm_matmul_bf16_fp32_prefill_short_serial_v1,
+                       dim3(grid_size_x(variant, m, n)), dim3(kWorkgroupSize),
+                       0U, stream, activation, weight, output, m, k, n);
   } else if (variant == KernelVariant::PrefillTiled16) {
     hipLaunchKernelGGL(sllm_matmul_bf16_fp32_tiled16_v2,
                        dim3(static_cast<uint32_t>((n + 15U) / 16U),
@@ -1108,6 +1151,20 @@ hipError_t launch(const uint16_t *const activation,
                        dim3(grid_size_x(variant, m, n)), dim3(kWorkgroupSize),
                        0U, stream, activation, weight, output, m, k, n);
   }
+  return hipGetLastError();
+}
+
+hipError_t launch_short_mixed_f32_to_bf16(const float *const output_f32,
+                                          uint16_t *const output,
+                                          const uint64_t element_count,
+                                          const hipStream_t stream) noexcept {
+  if (element_count == 0U || element_count > UINT32_MAX) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_matmul_fp32_to_bf16_short_mixed_v1,
+                     dim3(static_cast<uint32_t>((element_count + 255U) / 256U)),
+                     dim3(kWorkgroupSize), 0U, stream, output_f32, output,
+                     element_count);
   return hipGetLastError();
 }
 

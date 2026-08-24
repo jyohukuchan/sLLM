@@ -1,0 +1,808 @@
+{
+  "failure_count": 1,
+  "failures": [
+    {
+      "case_id": "long-100000",
+      "engine": "sllm",
+      "kind": "oom",
+      "reason": "nonzero exit 2; stderr=sllm: Qwen prefill failed: Qwen node layer.31.kv_append failed: backend status 260: grow virtual KV physical commitment: out of memory; HIP session cleanup failed: execution resource is busy",
+      "row_id": "phase50-r9700-sllm-long-100000"
+    }
+  ],
+  "gate": {
+    "all_pass": false,
+    "e2e": false,
+    "formula": "sLLM median <= llama.cpp median + max(sLLM MAD, llama.cpp MAD)",
+    "tpot": false,
+    "ttft": false
+  },
+  "gpu_bdf": "0000:07:00.0",
+  "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+  "identities": {
+    "llama": {
+      "commit": "3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70",
+      "engine": "llama.cpp",
+      "gpu_bdf": "0000:07:00.0",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "schema_version": "phase50-r9700-llama-v1",
+      "tag": "b10453",
+      "target": "gfx1201"
+    },
+    "sllm": {
+      "backend": "hip",
+      "engine": "sllm",
+      "gpu_bdf": "0000:07:00.0",
+      "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+      "schema_version": "phase50-r9700-sllm-v1",
+      "target": "gfx1201"
+    }
+  },
+  "inputs": {
+    "llama": {
+      "path": "/home/homelab1/.local/share/sllm-evidence/phase50/r9700/baseline-current-20260823/llama/phase50-r9700-llama-v1.json",
+      "sha256": "56777f25bf054335ba46df4ffaecbcbec688ac0bc95743608d9a58c0c6774bc8"
+    },
+    "sllm": {
+      "path": "/home/homelab1/.local/share/sllm-evidence/phase50/r9700/final-current-20260824/sllm/phase50-r9700-sllm-v1.json",
+      "sha256": "39f95d1f0964624bcd3405108d794781cc44e1ab4e180d1d37d717927fda6e29"
+    }
+  },
+  "matrix": {
+    "cases": [
+      "short-odd",
+      "32-32",
+      "prefill-long",
+      "decode-long",
+      "long-10001",
+      "long-100000",
+      "decode-20000"
+    ],
+    "row_count": 7
+  },
+  "rows": [
+    {
+      "case_id": "short-odd",
+      "gates": {
+        "e2e_ns": {
+          "limit": 333871333.0,
+          "llama_mad": 299593.5,
+          "llama_median": 332726339.0,
+          "pass": false,
+          "sllm_mad": 1144994.0,
+          "sllm_median": 407914958.0
+        },
+        "tpot_ns": {
+          "limit": 18653059.0,
+          "llama_mad": 27755.25,
+          "llama_median": 18615428.25,
+          "pass": false,
+          "sllm_mad": 37630.75,
+          "sllm_median": 22000021.5
+        },
+        "ttft_ns": {
+          "limit": 25031154.0,
+          "llama_mad": 24090.5,
+          "llama_median": 24847351.0,
+          "pass": false,
+          "sllm_mad": 183803.0,
+          "sllm_median": 49416027.5
+        }
+      },
+      "input_token_count": 17,
+      "measured_sample_count": {
+        "llama": 10,
+        "sllm": 10
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 299593.5,
+            "max": 333322735.0,
+            "median": 332726339.0,
+            "min": 332085993.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 27755.25,
+            "max": 18648471.0,
+            "median": 18615428.25,
+            "min": 18560375.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 24090.5,
+            "max": 25042933.0,
+            "median": 24847351.0,
+            "min": 24792710.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 1144994.0,
+            "max": 413853506.0,
+            "median": 407914958.0,
+            "min": 406666227.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 37630.75,
+            "max": 22211490.0,
+            "median": 22000021.5,
+            "min": 21956785.5
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 183803.0,
+            "max": 51372635.0,
+            "median": 49416027.5,
+            "min": 49157729.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 34,
+        "ignore_eos": false,
+        "measured": 10,
+        "warmups": 3
+      },
+      "requested_output_tokens": 17,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-short-odd",
+        "sllm": "phase50-r9700-sllm-short-odd"
+      },
+      "tokens": {
+        "generated_equal": true,
+        "generated_sha256": {
+          "llama": "003a793405be0b812d8b5ca97725db90d919a1e2921d8f02abd24c61ff64baf1",
+          "sllm": "003a793405be0b812d8b5ca97725db90d919a1e2921d8f02abd24c61ff64baf1"
+        },
+        "input_sha256": "8237ae67c49cfc9ddd85341a7ebd9a4801447bef29bc356061ed65c44102ac8f",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": true,
+        "visible_sha256": {
+          "llama": "003a793405be0b812d8b5ca97725db90d919a1e2921d8f02abd24c61ff64baf1",
+          "sllm": "003a793405be0b812d8b5ca97725db90d919a1e2921d8f02abd24c61ff64baf1"
+        }
+      }
+    },
+    {
+      "case_id": "32-32",
+      "gates": {
+        "e2e_ns": {
+          "limit": 605807579.0,
+          "llama_mad": 970235.0,
+          "llama_median": 604069209.5,
+          "pass": false,
+          "sllm_mad": 1738369.5,
+          "sllm_median": 759729283.0
+        },
+        "tpot_ns": {
+          "limit": 18311182.5,
+          "llama_mad": 24350.0,
+          "llama_median": 18286832.5,
+          "pass": false,
+          "sllm_mad": 13280.5,
+          "sllm_median": 22189774.0
+        },
+        "ttft_ns": {
+          "limit": 27140739.0,
+          "llama_mad": 124216.0,
+          "llama_median": 26611955.5,
+          "pass": false,
+          "sllm_mad": 528783.5,
+          "sllm_median": 63903004.5
+        }
+      },
+      "input_token_count": 32,
+      "measured_sample_count": {
+        "llama": 10,
+        "sllm": 10
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 970235.0,
+            "max": 607767797.0,
+            "median": 604069209.5,
+            "min": 602641145.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 24350.0,
+            "max": 18347918.0,
+            "median": 18286832.5,
+            "min": 18254076.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 124216.0,
+            "max": 26812658.0,
+            "median": 26611955.5,
+            "min": 26438694.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 1738369.5,
+            "max": 926063993.0,
+            "median": 759729283.0,
+            "min": 757683928.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 13280.5,
+            "max": 22357777.0,
+            "median": 22189774.0,
+            "min": 22167924.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 528783.5,
+            "max": 225281471.0,
+            "median": 63903004.5,
+            "min": 63268109.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 64,
+        "ignore_eos": false,
+        "measured": 10,
+        "warmups": 3
+      },
+      "requested_output_tokens": 32,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-32-32",
+        "sllm": "phase50-r9700-sllm-32-32"
+      },
+      "tokens": {
+        "generated_equal": true,
+        "generated_sha256": {
+          "llama": "47be94802476b187ed2c23b60ca6120fcf17a4ab885384db340e4e28a1484ea5",
+          "sllm": "47be94802476b187ed2c23b60ca6120fcf17a4ab885384db340e4e28a1484ea5"
+        },
+        "input_sha256": "78e3eea685919a01f7244ded081477465c2e03e8e1d8a18910c4c9f94d6be459",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": true,
+        "visible_sha256": {
+          "llama": "47be94802476b187ed2c23b60ca6120fcf17a4ab885384db340e4e28a1484ea5",
+          "sllm": "47be94802476b187ed2c23b60ca6120fcf17a4ab885384db340e4e28a1484ea5"
+        }
+      }
+    },
+    {
+      "case_id": "prefill-long",
+      "gates": {
+        "e2e_ns": {
+          "limit": 2512627228.0,
+          "llama_mad": 3213919.0,
+          "llama_median": 2509156369.5,
+          "pass": false,
+          "sllm_mad": 3470858.5,
+          "sllm_median": 3383626517.0
+        },
+        "tpot_ns": {
+          "limit": 18371931.0,
+          "llama_mad": 7249.5,
+          "llama_median": 18343685.5,
+          "pass": false,
+          "sllm_mad": 28245.5,
+          "sllm_median": 25135042.5
+        },
+        "ttft_ns": {
+          "limit": 167069938.0,
+          "llama_mad": 416304.0,
+          "llama_median": 166653634.0,
+          "pass": false,
+          "sllm_mad": 218703.0,
+          "sllm_median": 182870295.5
+        }
+      },
+      "input_token_count": 1024,
+      "measured_sample_count": {
+        "llama": 10,
+        "sllm": 10
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 3213919.0,
+            "max": 2606754338.0,
+            "median": 2509156369.5,
+            "min": 2504477434.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 7249.5,
+            "max": 18430972.0,
+            "median": 18343685.5,
+            "min": 18334430.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 416304.0,
+            "max": 167585088.0,
+            "median": 166653634.0,
+            "min": 164243822.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 3470858.5,
+            "max": 3392726192.0,
+            "median": 3383626517.0,
+            "min": 3374680764.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 28245.5,
+            "max": 25176163.0,
+            "median": 25135042.5,
+            "min": 25033531.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 218703.0,
+            "max": 183194555.0,
+            "median": 182870295.5,
+            "min": 182187418.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 1152,
+        "ignore_eos": false,
+        "measured": 10,
+        "warmups": 3
+      },
+      "requested_output_tokens": 128,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-prefill-long",
+        "sllm": "phase50-r9700-sllm-prefill-long"
+      },
+      "tokens": {
+        "generated_equal": true,
+        "generated_sha256": {
+          "llama": "275dfbe37ede0a3e14872cd012b50fb8df59e69f422fba89a343164e2860e453",
+          "sllm": "275dfbe37ede0a3e14872cd012b50fb8df59e69f422fba89a343164e2860e453"
+        },
+        "input_sha256": "2c945c2dd3afb874354fb7046c0fe39213b1099076a9d4a935446456f7a277d3",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": true,
+        "visible_sha256": {
+          "llama": "275dfbe37ede0a3e14872cd012b50fb8df59e69f422fba89a343164e2860e453",
+          "sllm": "275dfbe37ede0a3e14872cd012b50fb8df59e69f422fba89a343164e2860e453"
+        }
+      }
+    },
+    {
+      "case_id": "decode-long",
+      "gates": {
+        "e2e_ns": {
+          "limit": 4718996109.0,
+          "llama_mad": 2681534.0,
+          "llama_median": 4712364031.0,
+          "pass": false,
+          "sllm_mad": 6632078.0,
+          "sllm_median": 5959859813.0
+        },
+        "tpot_ns": {
+          "limit": 18320346.0,
+          "llama_mad": 10127.5,
+          "llama_median": 18282360.0,
+          "pass": false,
+          "sllm_mad": 37986.0,
+          "sllm_median": 23075713.0
+        },
+        "ttft_ns": {
+          "limit": 28012899.0,
+          "llama_mad": 75305.5,
+          "llama_median": 27208362.0,
+          "pass": false,
+          "sllm_mad": 804537.0,
+          "sllm_median": 65446127.0
+        }
+      },
+      "input_token_count": 32,
+      "measured_sample_count": {
+        "llama": 10,
+        "sllm": 10
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 2681534.0,
+            "max": 4726999977.0,
+            "median": 4712364031.0,
+            "min": 4709234002.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 10127.5,
+            "max": 18349094.0,
+            "median": 18282360.0,
+            "min": 18270594.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 75305.5,
+            "max": 27381435.0,
+            "median": 27208362.0,
+            "min": 27099472.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 6632078.0,
+            "max": 6090045367.0,
+            "median": 5959859813.0,
+            "min": 5946332977.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 37986.0,
+            "max": 23143369.0,
+            "median": 23075713.0,
+            "min": 23015857.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 804537.0,
+            "max": 66497980.0,
+            "median": 65446127.0,
+            "min": 63748414.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 288,
+        "ignore_eos": false,
+        "measured": 10,
+        "warmups": 3
+      },
+      "requested_output_tokens": 256,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-decode-long",
+        "sllm": "phase50-r9700-sllm-decode-long"
+      },
+      "tokens": {
+        "generated_equal": false,
+        "generated_sha256": {
+          "llama": "6c9f0dbf64a2990dc898b085f46c7f3215756a8ed8e8b555bf6a0469ebab9fe6",
+          "sllm": "b01b8b5009086d722d237c3b0c70d7297bf1c760b95baf69adfa179be8024b49"
+        },
+        "input_sha256": "78e3eea685919a01f7244ded081477465c2e03e8e1d8a18910c4c9f94d6be459",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": false,
+        "visible_sha256": {
+          "llama": "6c9f0dbf64a2990dc898b085f46c7f3215756a8ed8e8b555bf6a0469ebab9fe6",
+          "sllm": "b01b8b5009086d722d237c3b0c70d7297bf1c760b95baf69adfa179be8024b49"
+        }
+      }
+    },
+    {
+      "case_id": "long-10001",
+      "gates": {
+        "e2e_ns": {
+          "limit": 2087923516.0,
+          "llama_mad": 1596997.0,
+          "llama_median": 2072475557.5,
+          "pass": false,
+          "sllm_mad": 15447958.5,
+          "sllm_median": 4002833892.5
+        },
+        "tpot_ns": {
+          "limit": 21065714.5,
+          "llama_mad": 60330.5,
+          "llama_median": 20990767.5,
+          "pass": null,
+          "sllm_mad": 74947.0,
+          "sllm_median": 25957309.5
+        },
+        "ttft_ns": {
+          "limit": 2063483097.5,
+          "llama_mad": 1237962.5,
+          "llama_median": 2050309303.5,
+          "pass": false,
+          "sllm_mad": 13173794.0,
+          "sllm_median": 3958926365.0
+        }
+      },
+      "input_token_count": 10001,
+      "measured_sample_count": {
+        "llama": 10,
+        "sllm": 10
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 1596997.0,
+            "max": 2082886410.0,
+            "median": 2072475557.5,
+            "min": 2070013337.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 60330.5,
+            "max": 21331178.0,
+            "median": 20990767.5,
+            "min": 20887162.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 1237962.5,
+            "max": 2060373737.0,
+            "median": 2050309303.5,
+            "min": 2047974460.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 10,
+            "mad": 15447958.5,
+            "max": 4159973483.0,
+            "median": 4002833892.5,
+            "min": 3979728310.0
+          },
+          "tpot_ns": {
+            "count": 10,
+            "mad": 74947.0,
+            "max": 27185044.0,
+            "median": 25957309.5,
+            "min": 25878143.0
+          },
+          "ttft_ns": {
+            "count": 10,
+            "mad": 13173794.0,
+            "max": 4114953417.0,
+            "median": 3958926365.0,
+            "min": 3935838232.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 10003,
+        "ignore_eos": false,
+        "measured": 10,
+        "warmups": 3
+      },
+      "requested_output_tokens": 2,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-long-10001",
+        "sllm": "phase50-r9700-sllm-long-10001"
+      },
+      "tokens": {
+        "generated_equal": true,
+        "generated_sha256": {
+          "llama": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66",
+          "sllm": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66"
+        },
+        "input_sha256": "8b694c72679ae5c508a14758fdb63411ec1e89c1aacb69c9bae9500b8d3ef1dd",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": true,
+        "visible_sha256": {
+          "llama": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66",
+          "sllm": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66"
+        }
+      }
+    },
+    {
+      "case_id": "long-100000",
+      "failures": {
+        "llama": null,
+        "sllm": {
+          "kind": "oom",
+          "reason": "nonzero exit 2; stderr=sllm: Qwen prefill failed: Qwen node layer.31.kv_append failed: backend status 260: grow virtual KV physical commitment: out of memory; HIP session cleanup failed: execution resource is busy"
+        }
+      },
+      "gates": {
+        "e2e_ns": null,
+        "tpot_ns": null,
+        "ttft_ns": null
+      },
+      "input_token_count": 100000,
+      "measured_sample_count": {
+        "llama": 3,
+        "sllm": 0
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 3,
+            "mad": 15087912.0,
+            "max": 69798143398.0,
+            "median": 69783055486.0,
+            "min": 69744785511.0
+          },
+          "tpot_ns": {
+            "count": 3,
+            "mad": 47289.0,
+            "max": 25998395.0,
+            "median": 25951106.0,
+            "min": 25889311.0
+          },
+          "ttft_ns": {
+            "count": 3,
+            "mad": 14170016.0,
+            "max": 69756884150.0,
+            "median": 69742714134.0,
+            "min": 69704099443.0
+          }
+        },
+        "sllm": null
+      },
+      "protocol": {
+        "context_length": 131072,
+        "ignore_eos": false,
+        "measured": 3,
+        "warmups": 1
+      },
+      "requested_output_tokens": 2,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-long-100000",
+        "sllm": "phase50-r9700-sllm-long-100000"
+      },
+      "tokens": {
+        "generated_equal": null,
+        "generated_sha256": {
+          "llama": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66",
+          "sllm": null
+        },
+        "input_sha256": "7fb99f621bfc87334782e63ee23df2f00b2f10f2e71879d9838e992805d66eff",
+        "stop_equal": null,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": null
+        },
+        "visible_equal": null,
+        "visible_sha256": {
+          "llama": "13a290f3aaecf39ee08c7baa949a23e2dab386168ab3e2809b4cfb59ea314d66",
+          "sllm": null
+        }
+      }
+    },
+    {
+      "case_id": "decode-20000",
+      "gates": {
+        "e2e_ns": {
+          "limit": 377754753633.0,
+          "llama_mad": 31960806.0,
+          "llama_median": 377632767706.0,
+          "pass": false,
+          "sllm_mad": 121985927.0,
+          "sllm_median": 532486026195.0
+        },
+        "tpot_ns": {
+          "limit": 18831304.0,
+          "llama_mad": 2570.0,
+          "llama_median": 18828734.0,
+          "pass": false,
+          "sllm_mad": 1809.0,
+          "sllm_median": 26519028.0
+        },
+        "ttft_ns": {
+          "limit": 35625387.0,
+          "llama_mad": 102004.0,
+          "llama_median": 35523383.0,
+          "pass": false,
+          "sllm_mad": 67545.0,
+          "sllm_median": 66701994.0
+        }
+      },
+      "input_token_count": 32,
+      "measured_sample_count": {
+        "llama": 3,
+        "sllm": 3
+      },
+      "metrics": {
+        "llama": {
+          "e2e_ns": {
+            "count": 3,
+            "mad": 31960806.0,
+            "max": 377673633358.0,
+            "median": 377632767706.0,
+            "min": 377600806900.0
+          },
+          "tpot_ns": {
+            "count": 3,
+            "mad": 2570.0,
+            "max": 18833432.0,
+            "median": 18828734.0,
+            "min": 18826164.0
+          },
+          "ttft_ns": {
+            "count": 3,
+            "mad": 102004.0,
+            "max": 35625387.0,
+            "median": 35523383.0,
+            "min": 35309424.0
+          }
+        },
+        "sllm": {
+          "e2e_ns": {
+            "count": 3,
+            "mad": 121985927.0,
+            "max": 532688965262.0,
+            "median": 532486026195.0,
+            "min": 532364040268.0
+          },
+          "tpot_ns": {
+            "count": 3,
+            "mad": 1809.0,
+            "max": 26520837.0,
+            "median": 26519028.0,
+            "min": 26516761.0
+          },
+          "ttft_ns": {
+            "count": 3,
+            "mad": 67545.0,
+            "max": 66769539.0,
+            "median": 66701994.0,
+            "min": 66158575.0
+          }
+        }
+      },
+      "protocol": {
+        "context_length": 131072,
+        "ignore_eos": true,
+        "measured": 3,
+        "warmups": 1
+      },
+      "requested_output_tokens": 20000,
+      "row_ids": {
+        "llama": "phase50-r9700-llama-decode-20000",
+        "sllm": "phase50-r9700-sllm-decode-20000"
+      },
+      "tokens": {
+        "generated_equal": false,
+        "generated_sha256": {
+          "llama": "61633ef33ae0f725edadd6c007b651307c335834089c60eda3b7bb0cab7d4105",
+          "sllm": "1de4af324daf0b655b28783717ec4b940fbbb588b5d50ed2732277ed48358001"
+        },
+        "input_sha256": "78e3eea685919a01f7244ded081477465c2e03e8e1d8a18910c4c9f94d6be459",
+        "stop_equal": true,
+        "stop_sha256": {
+          "llama": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6",
+          "sllm": "676774ee1c72fe64afea3f739126a697213c4fe4dbdca17265b53dcdd260b2c6"
+        },
+        "visible_equal": false,
+        "visible_sha256": {
+          "llama": "61633ef33ae0f725edadd6c007b651307c335834089c60eda3b7bb0cab7d4105",
+          "sllm": "1de4af324daf0b655b28783717ec4b940fbbb588b5d50ed2732277ed48358001"
+        }
+      }
+    }
+  ],
+  "schema_version": "phase50-r9700-summary-v1",
+  "state": "FAIL",
+  "target": "gfx1201"
+}

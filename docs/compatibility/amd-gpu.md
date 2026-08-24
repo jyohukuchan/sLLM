@@ -1,8 +1,8 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-21
+> 最終更新: 2026-08-24
 >
-> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。
+> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
 
 共通の状態、resource gate候補、NVIDIAを含む将来例は[GPU互換性方針](gpu.md)を参照する。
 
@@ -526,6 +526,37 @@ scratchを含む5 planeをimport/fork/export oracleへ照合した。各binary�
 exact `gfx942:sramecc+:xnack-`はROCm 7.14/LLVM 23、wave64でcompile/linkだけをPASSした。MI300X VMは削除済みなので
 Phase 41 state/context/checkpointのreal gfx942 evidenceは追加せず、既存Phase 36の別scopeへも遡及しない。lifecycleは全targetで
 `experimental`のままで、証跡範囲は[Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。
+
+### 2026-08-24 Phase49 exact `gfx1030`限定性能scope
+
+Phase 49はcanonical V620 exact `gfx1030`（UUID `GPU-76a08c022586fed6`、BDF `0000:03:00.0`）だけへ性能候補を開き、GQA4 decodeのP32 partitionを`M=1`、
+head dimension 256、FP16 KV、KV長4,096以上へ限定して既定採用した。long-prefill v2とHIP Graphは採用せず、
+このtargetのselector、閾値、solution ID、wave32 binaryをexact `gfx1201`または`gfx942`へコピーしない。
+最終通常5行の正しさ・HIP-only・fallback・cleanupを確認したが、全7行の同等達成は主張しない。この履歴の
+`project-verified`はV620の上記scopeだけに付与し、RDNA2全SKUや`gfx1030`全shapeへ一般化しない。詳細は
+[数値変更台帳](numerical-output-changes.md)と[Phase 49以降ロードマップ](../history/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を参照する。
+
+### 2026-08-24 Phase50 exact `gfx1201`狭い実機scope
+
+canonical Radeon AI PRO R9700のUUID `GPU-a8e9ddefa2d60f55`、BDF `0000:07:00.0`、exact `gfx1201`だけを
+Phase 50の性能targetとした。Residual RMSNorm、GDN projection、MLP gate/up/SiLU、GQA P32のA/B比較を、
+Qwen3.5-4B BF16、FP16 KV、`M=1`、単一active requestのtarget専用selectorで確認した。最終通常行と長行の
+計測・未達判定はこのR9700 scopeへ限定し、100,000-token prefillはOOMで完走せず`project-verified`成功scopeへ含めない。
+20,000-token decodeの完走結果は[Phase 50履歴](../history/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)とsummaryへ固定し、
+この方針文書では数値を重複しない。詳細なcandidate分類と取得済み行は[数値変更台帳](numerical-output-changes.md)を正とする。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| R9700 exact `gfx1201` Phase 50 Residual/GDN/MLP/P32 A/B、通常・長行 | `experimental` | `project-verified`（上記scopeのみ。100k OOM未達は除外） | HIP-only、fallbackなし、target selector、cleanup/資源復帰を確認。別shape・別model・別SKU・別tupleへ一般化しない |
+| MI300X logical `gfx942` / feature付きdevice target `gfx942:sramecc+:xnack-` Phase 50 handoff | `experimental` | `unverified`（compile/host scope） | `sramecc=on`、`xnack=off`、Code Object V6、wave64のcompile/linkとhost selector非選択のみ。MI300X runtime PASSはPhase 51実機待ち |
+
+Phase 50のR9700固定tupleはUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
+HIP `7.14.60850`、LLVM 23、Code Object V6、wave32である。exact target専用artifactとloader closureを使い、
+generic/multi-arch binaryを性能evidenceへ混ぜない。MI300X側は論理target `gfx942`、feature付きdevice/codegen target
+`gfx942:sramecc+:xnack-`、Code Object V6、wave64、`xnack=off`、`sramecc=on`をcompile/linkへ固定する。production Cargoの
+`CMAKE_HIP_ARCHITECTURES`はlogical `gfx942`を使い、feature suffix付きtargetはdirect CMake probeだけで扱う。gfx1201 providerがhost selectorで非選択になることだけを検証する。Phase 50のcompile/host結果は既存Hot Aisle
+MI300X runtime evidenceを拡張せず、Phase 51でfresh preflightと実機7行を行うまで実行対応とは扱わない。
+すべてのlifecycleは`experimental`のままとし、RDNA4/CDNA3の広いtarget、SKU、OS、driver、ROCm tupleへ昇格しない。
 
 ## 将来AMD候補
 

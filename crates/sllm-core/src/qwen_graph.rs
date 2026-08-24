@@ -554,6 +554,394 @@ impl QwenGraph {
             tensor_name.to_owned(),
         ))
     }
+
+    /// Returns a request-local graph with the 32 attention residual-add and
+    /// post-attention RMSNorm pairs represented by one semantic operation.
+    /// The method only rewrites node metadata: tensor IDs, views, allocations,
+    /// state descriptors, and completion boundaries remain unchanged. Callers
+    /// must gate it on the exact backend/target and adapter policy; `enabled`
+    /// is deliberately explicit so graph construction itself never opts in.
+    pub fn with_residual_rmsnorm_fusion(&self, enabled: bool) -> Result<Self, QwenGraphError> {
+        if !enabled {
+            return Ok(self.clone());
+        }
+        if self.model_fingerprint != crate::model::QWEN35_4B_FINGERPRINT
+            || self.fp8_sidecar_fingerprint.is_some()
+            || self.mtp
+            || self.multimodal
+            || self.layer_types.len() != QWEN35_LAYER_COUNT
+            || self.layer_types != QWEN35_LAYER_TYPES
+        {
+            return Ok(self.clone());
+        }
+        let mut fused = Vec::with_capacity(self.nodes.len());
+        let mut old_to_new = vec![None; self.nodes.len()];
+        let mut index = 0usize;
+        let mut pairs = 0usize;
+        let mut cursor = 0usize;
+        while cursor < self.nodes.len() {
+            let node = &self.nodes[cursor];
+            let is_pair = node.label.ends_with("attention_residual_add")
+                && cursor + 1 < self.nodes.len()
+                && self.nodes[cursor + 1]
+                    .label
+                    .ends_with("post_attention_rmsnorm")
+                && node
+                    .operation
+                    .as_ref()
+                    .is_some_and(|op| op.kind() == SemanticOpKind::Add)
+                && self.nodes[cursor + 1]
+                    .operation
+                    .as_ref()
+                    .is_some_and(|op| op.kind() == SemanticOpKind::RmsNorm)
+                && node.inputs.len() == 2
+                && node.outputs.len() == 1
+                && self.nodes[cursor + 1].inputs.len() == 2
+                && self.nodes[cursor + 1].outputs.len() == 1;
+            if !is_pair {
+                old_to_new[cursor] = Some(index);
+                fused.push(node.clone());
+                index += 1;
+                cursor += 1;
+                continue;
+            }
+            let post = &self.nodes[cursor + 1];
+            let rms = post
+                .operation
+                .as_ref()
+                .expect("validated RMSNorm operation");
+            let contract = rms.rms_norm_contract().ok_or_else(|| {
+                QwenGraphError::InvalidPlan("post-attention RMSNorm contract is absent".to_owned())
+            })?;
+            let operation = SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                vec![
+                    self.tensors[node.inputs[0]].view.clone(),
+                    self.tensors[node.inputs[1]].view.clone(),
+                    self.tensors[post.inputs[1]].view.clone(),
+                ],
+                vec![
+                    self.tensors[node.outputs[0]].view.clone(),
+                    self.tensors[post.outputs[0]].view.clone(),
+                ],
+                crate::op::ResidualRmsNormContract::from_rms_norm(contract),
+            )?;
+            old_to_new[cursor] = Some(index);
+            old_to_new[cursor + 1] = Some(index);
+            fused.push(QwenGraphNode {
+                label: format!("{}.fused", node.label),
+                kind: QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm),
+                operation: Some(operation),
+                inputs: vec![node.inputs[0], node.inputs[1], post.inputs[1]],
+                outputs: vec![node.outputs[0], post.outputs[0]],
+                dependencies: node.dependencies.clone(),
+                weights: post.weights.clone(),
+            });
+            pairs += 1;
+            index += 1;
+            cursor += 2;
+        }
+        if pairs != QWEN35_LAYER_COUNT {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "residual RMSNorm fusion expected {QWEN35_LAYER_COUNT} pairs, got {pairs}"
+            )));
+        }
+        for (new_index, node) in fused.iter_mut().enumerate() {
+            for dependency in &mut node.dependencies {
+                let old = *dependency;
+                let mapped = old_to_new
+                    .get(old)
+                    .and_then(|mapped| *mapped)
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "fused graph dependency refers to a removed node".to_owned(),
+                        )
+                    })?;
+                *dependency = mapped;
+            }
+            node.dependencies.sort_unstable();
+            node.dependencies.dedup();
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency >= new_index)
+            {
+                return Err(QwenGraphError::InvalidPlan(
+                    "fused graph dependency is not topologically prior".to_owned(),
+                ));
+            }
+        }
+        let mut graph = self.clone();
+        graph.nodes = fused;
+        Ok(graph)
+    }
+
+    /// Replaces each linear-attention layer's four independent projection
+    /// matmul nodes with one fixed-role GDN bundle. The four output tensors
+    /// remain distinct BF16 graph values; only dispatch ownership changes.
+    /// Construction is default-off and callers must gate it on the exact
+    /// gfx1030/decode/adapters policy.
+    pub fn with_gdn_projection_bundle(&self, enabled: bool) -> Result<Self, QwenGraphError> {
+        if !enabled
+            || self.model_fingerprint != crate::model::QWEN35_4B_FINGERPRINT
+            || self.fp8_sidecar_fingerprint.is_some()
+            || self.mtp
+            || self.multimodal
+            || self.layer_types != QWEN35_LAYER_TYPES
+        {
+            return Ok(self.clone());
+        }
+        let mut fused = Vec::with_capacity(self.nodes.len());
+        let mut old_to_new = vec![None; self.nodes.len()];
+        let mut cursor = 0usize;
+        let mut pairs = 0usize;
+        while cursor < self.nodes.len() {
+            let is_bundle = cursor + 4 < self.nodes.len()
+                && self.nodes[cursor].label.ends_with("linear.qkv_matmul")
+                && self.nodes[cursor + 1].label.ends_with("linear.z_matmul")
+                && self.nodes[cursor + 2].label.ends_with("linear.b_matmul")
+                && self.nodes[cursor + 3].label.ends_with("linear.a_matmul")
+                && self.nodes[cursor + 4]
+                    .label
+                    .ends_with("linear_attention_state")
+                && self.nodes[cursor..cursor + 4].iter().all(|node| {
+                    node.operation
+                        .as_ref()
+                        .is_some_and(|op| op.kind() == SemanticOpKind::Matmul)
+                })
+                && self.nodes[cursor..cursor + 4]
+                    .iter()
+                    .all(|node| node.inputs.len() == 2 && node.outputs.len() == 1);
+            if !is_bundle {
+                old_to_new[cursor] = Some(fused.len());
+                fused.push(self.nodes[cursor].clone());
+                cursor += 1;
+                continue;
+            }
+            let qkv = &self.nodes[cursor];
+            let z = &self.nodes[cursor + 1];
+            let b = &self.nodes[cursor + 2];
+            let a = &self.nodes[cursor + 3];
+            let operation = SemanticOpDescriptor::new_gdn_projection_bundle(
+                vec![
+                    self.tensors[qkv.inputs[0]].view.clone(),
+                    self.tensors[qkv.inputs[1]].view.clone(),
+                    self.tensors[z.inputs[1]].view.clone(),
+                    self.tensors[b.inputs[1]].view.clone(),
+                    self.tensors[a.inputs[1]].view.clone(),
+                ],
+                vec![
+                    self.tensors[qkv.outputs[0]].view.clone(),
+                    self.tensors[z.outputs[0]].view.clone(),
+                    self.tensors[b.outputs[0]].view.clone(),
+                    self.tensors[a.outputs[0]].view.clone(),
+                ],
+                crate::GdnProjectionBundleContractV1::qwen35(),
+            )?;
+            let new_index = fused.len();
+            for mapped in old_to_new.iter_mut().skip(cursor).take(4) {
+                *mapped = Some(new_index);
+            }
+            fused.push(QwenGraphNode {
+                label: format!("{}.bundle", qkv.label),
+                kind: QwenGraphNodeKind::Semantic(SemanticOpKind::GdnProjectionBundle),
+                operation: Some(operation),
+                inputs: vec![
+                    qkv.inputs[0],
+                    qkv.inputs[1],
+                    z.inputs[1],
+                    b.inputs[1],
+                    a.inputs[1],
+                ],
+                outputs: vec![qkv.outputs[0], z.outputs[0], b.outputs[0], a.outputs[0]],
+                dependencies: qkv
+                    .dependencies
+                    .iter()
+                    .chain(z.dependencies.iter())
+                    .chain(b.dependencies.iter())
+                    .chain(a.dependencies.iter())
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                weights: qkv
+                    .weights
+                    .iter()
+                    .chain(z.weights.iter())
+                    .chain(b.weights.iter())
+                    .chain(a.weights.iter())
+                    .copied()
+                    .collect(),
+            });
+            // The state node is retained and remapped below. Its four
+            // projection dependencies all point at this bundle now.
+            old_to_new[cursor + 4] = Some(fused.len());
+            fused.push(self.nodes[cursor + 4].clone());
+            pairs += 1;
+            cursor += 5;
+        }
+        if pairs
+            != QWEN35_LAYER_TYPES
+                .iter()
+                .filter(|layer| **layer == LayerType::LinearAttention)
+                .count()
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "GDN projection bundle expected 24 layers, got {pairs}"
+            )));
+        }
+        for (new_index, node) in fused.iter_mut().enumerate() {
+            for dependency in &mut node.dependencies {
+                *dependency = old_to_new
+                    .get(*dependency)
+                    .and_then(|mapped| *mapped)
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "GDN bundle dependency refers to removed node".to_owned(),
+                        )
+                    })?;
+            }
+            node.dependencies.sort_unstable();
+            node.dependencies.dedup();
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency >= new_index)
+            {
+                return Err(QwenGraphError::InvalidPlan(
+                    "GDN bundle dependency is not topologically prior".to_owned(),
+                ));
+            }
+        }
+        let mut graph = self.clone();
+        graph.nodes = fused;
+        Ok(graph)
+    }
+
+    /// Replaces each dense layer's gate projection, up projection, and SiLU
+    /// multiply nodes with one fixed-role MLP bundle.  The three original
+    /// activation tensors remain explicit outputs so prefill can decompose to
+    /// the baseline operations while the M=1 decode path uses one dispatch.
+    /// Construction is default-off and callers must gate it on the exact
+    /// gfx1030/Qwen text/no-adapter policy.
+    pub fn with_mlp_gate_up_silu_bundle(&self, enabled: bool) -> Result<Self, QwenGraphError> {
+        if !enabled
+            || self.model_fingerprint != crate::model::QWEN35_4B_FINGERPRINT
+            || self.fp8_sidecar_fingerprint.is_some()
+            || self.mtp
+            || self.multimodal
+            || self.layer_types != QWEN35_LAYER_TYPES
+        {
+            return Ok(self.clone());
+        }
+        let mut fused = Vec::with_capacity(self.nodes.len());
+        let mut old_to_new = vec![None; self.nodes.len()];
+        let mut cursor = 0usize;
+        let mut bundles = 0usize;
+        while cursor < self.nodes.len() {
+            let is_bundle = cursor + 2 < self.nodes.len()
+                && self.nodes[cursor].label.ends_with(".mlp_gate_matmul")
+                && self.nodes[cursor + 1].label.ends_with(".mlp_up_matmul")
+                && self.nodes[cursor + 2].label.ends_with(".mlp_silu_mul")
+                && self.nodes[cursor..cursor + 2].iter().all(|node| {
+                    node.operation
+                        .as_ref()
+                        .is_some_and(|op| op.kind() == SemanticOpKind::Matmul)
+                })
+                && self.nodes[cursor + 2]
+                    .operation
+                    .as_ref()
+                    .is_some_and(|op| op.kind() == SemanticOpKind::SiluMul)
+                && self.nodes[cursor..cursor + 2]
+                    .iter()
+                    .all(|node| node.inputs.len() == 2 && node.outputs.len() == 1)
+                && self.nodes[cursor + 2].inputs.len() == 2
+                && self.nodes[cursor + 2].outputs.len() == 1;
+            if !is_bundle {
+                old_to_new[cursor] = Some(fused.len());
+                fused.push(self.nodes[cursor].clone());
+                cursor += 1;
+                continue;
+            }
+            let gate = &self.nodes[cursor];
+            let up = &self.nodes[cursor + 1];
+            let silu = &self.nodes[cursor + 2];
+            let operation = SemanticOpDescriptor::new_mlp_gate_up_silu_bundle(
+                vec![
+                    self.tensors[gate.inputs[0]].view.clone(),
+                    self.tensors[gate.inputs[1]].view.clone(),
+                    self.tensors[up.inputs[1]].view.clone(),
+                ],
+                vec![
+                    self.tensors[gate.outputs[0]].view.clone(),
+                    self.tensors[up.outputs[0]].view.clone(),
+                    self.tensors[silu.outputs[0]].view.clone(),
+                ],
+                crate::MlpGateUpSiluBundleContractV1::qwen35(),
+            )?;
+            let new_index = fused.len();
+            for mapped in old_to_new.iter_mut().skip(cursor).take(3) {
+                *mapped = Some(new_index);
+            }
+            fused.push(QwenGraphNode {
+                label: format!("{}.bundle", gate.label),
+                kind: QwenGraphNodeKind::Semantic(SemanticOpKind::MlpGateUpSiluBundle),
+                operation: Some(operation),
+                inputs: vec![gate.inputs[0], gate.inputs[1], up.inputs[1]],
+                outputs: vec![gate.outputs[0], up.outputs[0], silu.outputs[0]],
+                dependencies: gate
+                    .dependencies
+                    .iter()
+                    .chain(up.dependencies.iter())
+                    .chain(silu.dependencies.iter())
+                    .copied()
+                    .filter(|dependency| *dependency < cursor || *dependency >= cursor + 3)
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                weights: gate
+                    .weights
+                    .iter()
+                    .chain(up.weights.iter())
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            });
+            bundles += 1;
+            cursor += 3;
+        }
+        if bundles != QWEN35_LAYER_COUNT {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "MLP gate/up/SiLU bundle expected {QWEN35_LAYER_COUNT} layers, got {bundles}"
+            )));
+        }
+        for (new_index, node) in fused.iter_mut().enumerate() {
+            for dependency in &mut node.dependencies {
+                *dependency = old_to_new
+                    .get(*dependency)
+                    .and_then(|mapped| *mapped)
+                    .ok_or_else(|| {
+                        QwenGraphError::InvalidPlan(
+                            "MLP bundle dependency refers to removed node".to_owned(),
+                        )
+                    })?;
+            }
+            node.dependencies.sort_unstable();
+            node.dependencies.dedup();
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| *dependency >= new_index)
+            {
+                return Err(QwenGraphError::InvalidPlan(
+                    "MLP bundle dependency is not topologically prior".to_owned(),
+                ));
+            }
+        }
+        let mut graph = self.clone();
+        graph.nodes = fused;
+        Ok(graph)
+    }
 }
 
 pub fn build_qwen35_graph(
@@ -4325,6 +4713,117 @@ mod tests {
     }
 
     #[test]
+    fn residual_rmsnorm_fusion_is_explicit_and_preserves_intermediate_tensor() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let graph = build_qwen35_graph(&lock, &plan, 17, 257).expect("graph builds");
+        let disabled = graph
+            .with_residual_rmsnorm_fusion(false)
+            .expect("disabled fusion clone");
+        assert_eq!(disabled.nodes().len(), graph.nodes().len());
+        let fused = graph
+            .with_residual_rmsnorm_fusion(true)
+            .expect("exact dense graph fuses");
+        assert_eq!(
+            fused.nodes().len(),
+            graph.nodes().len() - QWEN35_LAYER_COUNT
+        );
+        let fused_nodes = fused
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::ResidualRmsNorm)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fused_nodes.len(), QWEN35_LAYER_COUNT);
+        for node in fused_nodes {
+            assert_eq!(node.inputs().len(), 3);
+            assert_eq!(node.outputs().len(), 2);
+            assert!(node.label().ends_with("attention_residual_add.fused"));
+            assert_eq!(
+                node.operation().unwrap().kind(),
+                SemanticOpKind::ResidualRmsNorm
+            );
+        }
+        assert_eq!(fused.nodes().last().unwrap().label(), "argmax");
+    }
+
+    #[test]
+    fn gdn_projection_bundle_is_explicit_and_preserves_outputs() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let graph = build_qwen35_graph(&lock, &plan, 17, 257).expect("graph builds");
+        let disabled = graph
+            .with_gdn_projection_bundle(false)
+            .expect("disabled bundle clone");
+        assert_eq!(disabled.nodes().len(), graph.nodes().len());
+        let bundled = graph
+            .with_gdn_projection_bundle(true)
+            .expect("bundle graph");
+        assert_eq!(bundled.nodes().len(), graph.nodes().len() - 24 * 3);
+        let nodes = bundled
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::GdnProjectionBundle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(nodes.len(), 24);
+        assert_eq!(bundled.tensor_metadata(), graph.tensor_metadata());
+        assert_eq!(bundled.states(), graph.states());
+        for node in nodes {
+            assert_eq!(node.inputs().len(), 5);
+            assert_eq!(node.outputs().len(), 4);
+            assert_eq!(
+                node.operation().unwrap().kind(),
+                SemanticOpKind::GdnProjectionBundle
+            );
+            assert!(node.label().ends_with("qkv_matmul.bundle"));
+            let qkv_label = node
+                .label()
+                .strip_suffix(".bundle")
+                .expect("bundle label suffix");
+            let qkv_index = graph
+                .nodes()
+                .iter()
+                .position(|candidate| candidate.label() == qkv_label)
+                .expect("original qkv node");
+            let original = &graph.nodes()[qkv_index..qkv_index + 5];
+            assert_eq!(
+                node.inputs(),
+                &[
+                    original[0].inputs()[0],
+                    original[0].inputs()[1],
+                    original[1].inputs()[1],
+                    original[2].inputs()[1],
+                    original[3].inputs()[1],
+                ]
+            );
+            assert_eq!(
+                node.outputs(),
+                &[
+                    original[0].outputs()[0],
+                    original[1].outputs()[0],
+                    original[2].outputs()[0],
+                    original[3].outputs()[0],
+                ]
+            );
+            let bundled_index = bundled
+                .nodes()
+                .iter()
+                .position(|candidate| candidate.label() == node.label())
+                .expect("bundled qkv node");
+            let bundled_state = &bundled.nodes()[bundled_index + 1];
+            assert_eq!(bundled_state.label(), original[4].label());
+            assert_eq!(bundled_state.kind(), original[4].kind());
+            assert_eq!(bundled_state.inputs(), original[4].inputs());
+            assert_eq!(bundled_state.outputs(), original[4].outputs());
+            assert!(bundled_state.dependencies().contains(&bundled_index));
+        }
+        assert_eq!(bundled.nodes().last().unwrap().label(), "argmax");
+    }
+
+    #[test]
     fn bf16_weights_do_not_constrain_the_selected_kv_encoding() {
         let lock = fixed_lock();
         let plan = synthetic_canonical_load_plan(&lock);
@@ -4366,6 +4865,69 @@ mod tests {
                 );
             }
             assert!(graph.total_state_bytes() < fp16.total_state_bytes());
+        }
+    }
+
+    #[test]
+    fn mlp_gate_up_silu_bundle_is_explicit_and_preserves_outputs() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let graph = build_qwen35_graph(&lock, &plan, 17, 257).expect("graph builds");
+        let disabled = graph
+            .with_mlp_gate_up_silu_bundle(false)
+            .expect("disabled bundle clone");
+        assert_eq!(disabled.nodes().len(), graph.nodes().len());
+        let bundled = graph
+            .with_mlp_gate_up_silu_bundle(true)
+            .expect("bundle graph");
+        assert_eq!(
+            bundled.nodes().len(),
+            graph.nodes().len() - QWEN35_LAYER_COUNT * 2
+        );
+        assert_eq!(bundled.tensor_metadata(), graph.tensor_metadata());
+        assert_eq!(bundled.states(), graph.states());
+        let nodes = bundled
+            .nodes()
+            .iter()
+            .filter(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::MlpGateUpSiluBundle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(nodes.len(), QWEN35_LAYER_COUNT);
+        for node in nodes {
+            assert_eq!(node.inputs().len(), 3);
+            assert_eq!(node.outputs().len(), 3);
+            assert_eq!(
+                node.operation().unwrap().kind(),
+                SemanticOpKind::MlpGateUpSiluBundle
+            );
+            assert!(node.label().ends_with("mlp_gate_matmul.bundle"));
+            let gate_label = node
+                .label()
+                .strip_suffix(".bundle")
+                .expect("bundle label suffix");
+            let gate_index = graph
+                .nodes()
+                .iter()
+                .position(|candidate| candidate.label() == gate_label)
+                .expect("original gate node");
+            let original = &graph.nodes()[gate_index..gate_index + 3];
+            assert_eq!(
+                node.inputs(),
+                &[
+                    original[0].inputs()[0],
+                    original[0].inputs()[1],
+                    original[1].inputs()[1],
+                ]
+            );
+            assert_eq!(
+                node.outputs(),
+                &[
+                    original[0].outputs()[0],
+                    original[1].outputs()[0],
+                    original[2].outputs()[0],
+                ]
+            );
         }
     }
 

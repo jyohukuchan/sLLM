@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm-project.local/ci/schema/engine-performance-direct-v2.schema.json",
+  "title": "sLLM direct engine performance CLI result v2",
+  "description": "The direct benchmark contract emitted by the current CLI. A correctness reference is derived from the first timed warmup and is never a separate request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "benchmark_schema_version",
+    "state",
+    "lane",
+    "lane_definition",
+    "row",
+    "identities",
+    "model_load",
+    "config",
+    "memory",
+    "audit",
+    "cleanup",
+    "session_cleanup",
+    "correctness_control",
+    "warmups",
+    "measured"
+  ],
+  "properties": {
+    "benchmark_schema_version": {"const": "engine-performance-direct-v2"},
+    "state": {"const": "PASS"},
+    "lane": {"const": "direct"},
+    "lane_definition": {"const": "pretokenized direct engine: request start excludes render/tokenize"},
+    "row": {"$ref": "#/$defs/row"},
+    "identities": {"$ref": "#/$defs/identities"},
+    "model_load": {"$ref": "#/$defs/model_load"},
+    "config": {"$ref": "#/$defs/config"},
+    "memory": {"$ref": "#/$defs/memory"},
+    "audit": {"$ref": "#/$defs/audit"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "session_cleanup": {"$ref": "#/$defs/session_cleanup"},
+    "correctness_control": {"$ref": "#/$defs/correctness_control"},
+    "warmups": {"$ref": "#/$defs/warmups"},
+    "measured": {"$ref": "#/$defs/measured"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"config": {"properties": {"warmups": {"const": 3}, "measured": {"const": 10}}}}},
+      "then": {
+        "properties": {
+          "warmups": {"properties": {"count": {"const": 3}, "samples": {"minItems": 3, "maxItems": 3}}},
+          "measured": {"properties": {"count": {"const": 10}, "samples": {"minItems": 10, "maxItems": 10}}},
+          "audit": {"properties": {"sample_count": {"const": 13}, "total_request_count": {"const": 13}}},
+          "cleanup": {"properties": {"warmup_request_count": {"const": 3}, "measured_request_count": {"const": 10}, "request_cleanup_count": {"const": 13}, "performance_sample_count": {"const": 13}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"config": {"properties": {"warmups": {"const": 1}, "measured": {"const": 3}}}}},
+      "then": {
+        "properties": {
+          "warmups": {"properties": {"count": {"const": 1}, "samples": {"minItems": 1, "maxItems": 1}}},
+          "measured": {"properties": {"count": {"const": 3}, "samples": {"minItems": 3, "maxItems": 3}}},
+          "audit": {"properties": {"sample_count": {"const": 4}, "total_request_count": {"const": 4}}},
+          "cleanup": {"properties": {"warmup_request_count": {"const": 1}, "measured_request_count": {"const": 3}, "request_cleanup_count": {"const": 4}, "performance_sample_count": {"const": 4}}}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"config": {"properties": {"max_new_tokens": {"const": 20000}}}}},
+      "then": {
+        "properties": {
+          "warmups": {"items": {"properties": {"events": {"properties": {"later_token_publications_ns": {"minItems": 19999, "maxItems": 19999}}}, "derived": {"properties": {"tpot_ns": {"minItems": 19999, "maxItems": 19999}, "decode_tokens": {"const": 19999}}}}}},
+          "measured": {"items": {"properties": {"events": {"properties": {"later_token_publications_ns": {"minItems": 19999, "maxItems": 19999}}}, "derived": {"properties": {"tpot_ns": {"minItems": 19999, "maxItems": 19999}, "decode_tokens": {"const": 19999}}}}}}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "token": {"type": "integer", "minimum": 0, "maximum": 248319},
+    "input_tokens": {"type": "array", "minItems": 1, "maxItems": 1048576, "items": {"$ref": "#/$defs/token"}},
+    "output_tokens": {"type": "array", "minItems": 1, "maxItems": 20000, "items": {"$ref": "#/$defs/token"}},
+    "visible_tokens": {"type": "array", "minItems": 0, "maxItems": 20000, "items": {"$ref": "#/$defs/token"}},
+    "decode_input_tokens": {"type": "array", "minItems": 0, "maxItems": 19999, "items": {"$ref": "#/$defs/token"}},
+    "model": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_size", "repo_id", "resolved_revision", "lock_fingerprint"],
+      "properties": {
+        "model_size": {"enum": ["2B", "4B", "9B"]},
+        "repo_id": {"enum": ["Qwen/Qwen3.5-2B", "Qwen/Qwen3.5-4B", "Qwen/Qwen3.5-9B"]},
+        "resolved_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "lock_fingerprint": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["row_id", "model_size", "case_id", "input_token_ids", "input_token_count", "requested_output_tokens"],
+      "properties": {
+        "row_id": {"type": "string", "pattern": "^(engine-performance-direct-(2b|4b|9b)-gfx(1030|1201|942)-[a-z0-9-]+|phase49-v620-sllm-[a-z0-9-]+)$"},
+        "model_size": {"enum": ["2B", "4B", "9B"]},
+        "case_id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "input_token_ids": {"$ref": "#/$defs/input_tokens"},
+        "input_token_count": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "requested_output_tokens": {"type": "integer", "minimum": 1, "maximum": 20000}
+      }
+    },
+    "identities": {
+      "type": "object", "additionalProperties": false,
+      "required": ["engine", "backend", "session_id", "device_index", "target", "model", "binding"],
+      "properties": {
+        "engine": {"const": "sllm"}, "backend": {"const": "hip"},
+        "session_id": {"type": "integer", "minimum": 1}, "device_index": {"const": 0},
+        "target": {"enum": ["gfx1030", "gfx1201", "gfx942"]},
+        "model": {"$ref": "#/$defs/model"},
+        "binding": {
+          "type": "object", "additionalProperties": false,
+          "required": ["model_fingerprint", "plan_digest"],
+          "properties": {"model_fingerprint": {"$ref": "#/$defs/digest"}, "plan_digest": {"$ref": "#/$defs/digest"}}
+        }
+      }
+    },
+    "model_load": {
+      "type": "object", "additionalProperties": false,
+      "required": ["event", "start_ns", "model_ready_ns", "duration_ns", "load_count"],
+      "properties": {
+        "event": {"const": "model_load"},
+        "start_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "model_ready_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "duration_ns": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "load_count": {"const": 1}
+      }
+    },
+    "stop_policy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["stop_token_ids", "ignore_eos", "visible_stop_tokens"],
+      "properties": {
+        "stop_token_ids": {"oneOf": [{"const": [248046, 248044]}, {"const": []}]},
+        "ignore_eos": {"type": "boolean"}, "visible_stop_tokens": {"const": false}
+      },
+      "oneOf": [
+        {"properties": {"stop_token_ids": {"const": [248046, 248044]}, "ignore_eos": {"const": false}}},
+        {"properties": {"stop_token_ids": {"const": []}, "ignore_eos": {"const": true}}}
+      ]
+    },
+    "config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_token_ids", "input_token_count", "max_new_tokens", "ignore_eos", "context_length", "effective_context_length", "prefill_chunk_tokens", "effective_prefill_chunk_tokens", "completion_timeout_seconds", "greedy", "warmups", "measured", "lane", "tokenizer", "render", "kv_cache_encoding", "stop_policy"],
+      "properties": {
+        "input_token_ids": {"$ref": "#/$defs/input_tokens"},
+        "input_token_count": {"type": "integer", "minimum": 1, "maximum": 1048576},
+        "max_new_tokens": {"type": "integer", "minimum": 1, "maximum": 20000},
+        "ignore_eos": {"type": "boolean"},
+        "context_length": {"type": ["integer", "null"], "minimum": 1, "maximum": 4294967295},
+        "effective_context_length": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "prefill_chunk_tokens": {"type": ["integer", "null"], "minimum": 1, "maximum": 16384},
+        "effective_prefill_chunk_tokens": {"type": "integer", "minimum": 1, "maximum": 16384},
+        "completion_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+        "greedy": {"const": true},
+        "warmups": {"enum": [1, 3]}, "measured": {"enum": [3, 10]},
+        "lane": {"const": "direct"}, "tokenizer": {"const": false}, "render": {"const": false},
+        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4"]},
+        "stop_policy": {"$ref": "#/$defs/stop_policy"}
+      },
+      "oneOf": [
+        {"properties": {"warmups": {"const": 3}, "measured": {"const": 10}}},
+        {"properties": {"warmups": {"const": 1}, "measured": {"const": 3}}}
+      ]
+    },
+    "category": {
+      "type": "object", "additionalProperties": false,
+      "required": ["current_bytes", "high_water_bytes"],
+      "properties": {"current_bytes": {"type": "integer", "minimum": 0}, "high_water_bytes": {"type": "integer", "minimum": 0}}
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_resident", "request_state", "workspace", "current_bytes", "high_water_bytes", "poisoned"],
+      "properties": {
+        "model_resident": {"$ref": "#/$defs/category"}, "request_state": {"$ref": "#/$defs/category"}, "workspace": {"$ref": "#/$defs/category"},
+        "current_bytes": {"type": "integer", "minimum": 0}, "high_water_bytes": {"type": "integer", "minimum": 0}, "poisoned": {"const": false}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["placement_total_memory_bytes", "placement_available_memory_bytes", "placement_required_bytes", "placement_model_resident_bytes", "placement_request_state_bytes", "placement_safety_reserve_bytes", "workspace_separate_allocation_bytes", "workspace_arena_bytes", "model_ready", "after_model_drop", "model_resident_high_water_bytes", "resident_vram_bytes", "resident_vram_source", "peak_vram_bytes", "peak_source"],
+      "properties": {
+        "placement_total_memory_bytes": {"type": "integer", "minimum": 1}, "placement_available_memory_bytes": {"type": "integer", "minimum": 1},
+        "placement_required_bytes": {"type": "integer", "minimum": 1}, "placement_model_resident_bytes": {"type": "integer", "minimum": 1},
+        "placement_request_state_bytes": {"type": "integer", "minimum": 1}, "placement_safety_reserve_bytes": {"type": "integer", "minimum": 0},
+        "workspace_separate_allocation_bytes": {"type": "integer", "minimum": 0}, "workspace_arena_bytes": {"type": "integer", "minimum": 0},
+        "model_ready": {"$ref": "#/$defs/snapshot"}, "after_model_drop": {"$ref": "#/$defs/snapshot"},
+        "model_resident_high_water_bytes": {"type": "integer", "minimum": 1}, "resident_vram_bytes": {"type": "integer", "minimum": 1},
+        "resident_vram_source": {"const": "model_resident_allocator_high_water"}, "peak_vram_bytes": {"type": "integer", "minimum": 1}, "peak_source": {"const": "runtime_allocator"}
+      }
+    },
+    "sample_events": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_start_ns", "prefill_submit_ns", "prefill_complete_ns", "first_token_ns", "later_token_publications_ns", "stop_ns", "cleanup_ns"],
+      "properties": {
+        "request_start_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}, "prefill_submit_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "prefill_complete_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}, "first_token_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807},
+        "later_token_publications_ns": {"type": "array", "maxItems": 19999, "items": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}},
+        "stop_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}, "cleanup_ns": {"type": "integer", "minimum": 0, "maximum": 9223372036854775807}
+      }
+    },
+    "sample_derived": {
+      "type": "object", "additionalProperties": false,
+      "required": ["ttft_ns", "prefill_ns", "prefill_tokens_per_second", "e2e_ns", "tpot_ns", "decode_tokens", "decode_tokens_per_second"],
+      "properties": {
+        "ttft_ns": {"type": "integer", "minimum": 1}, "prefill_ns": {"type": "integer", "minimum": 1}, "prefill_tokens_per_second": {"type": "number", "exclusiveMinimum": 0}, "e2e_ns": {"type": "integer", "minimum": 1},
+        "tpot_ns": {"type": "array", "maxItems": 19999, "items": {"type": "integer", "minimum": 1}}, "decode_tokens": {"type": "integer", "minimum": 0, "maximum": 19999},
+        "decode_tokens_per_second": {"anyOf": [{"type": "null"}, {"type": "number", "exclusiveMinimum": 0}]}
+      }
+    },
+    "sample_tokens": {
+      "type": "object", "additionalProperties": false,
+      "required": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"],
+      "properties": {
+        "input_token_ids": {"$ref": "#/$defs/input_tokens"}, "generated_token_ids": {"$ref": "#/$defs/output_tokens"},
+        "visible_token_ids": {"$ref": "#/$defs/visible_tokens"}, "decode_input_token_ids": {"$ref": "#/$defs/decode_input_tokens"}
+      }
+    },
+    "stop": {
+      "type": "object", "additionalProperties": false, "required": ["version", "reason_version", "kind", "token_id"],
+      "properties": {"version": {"const": 1}, "reason_version": {"const": 1}, "kind": {"enum": ["max_new_tokens", "stop_token"]}, "token_id": {"anyOf": [{"type": "null"}, {"enum": [248046, 248044]}]}}
+    },
+    "sample_audit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count", "all_dispatches_hip"],
+      "properties": {
+        "selected_backend": {"const": "hip"}, "target": {"enum": ["gfx1030", "gfx1201", "gfx942"]}, "device_index": {"const": 0},
+        "model_fingerprint": {"$ref": "#/$defs/digest"}, "plan_digest": {"$ref": "#/$defs/digest"}, "fallback_used": {"const": false},
+        "submission_count": {"type": "integer", "minimum": 1}, "kernel_dispatch_count": {"type": "integer", "minimum": 1}, "segment_count": {"type": "integer", "minimum": 1}, "boundary_count": {"type": "integer", "minimum": 1}, "all_dispatches_hip": {"const": true}
+      }
+    },
+    "sample_memory": {
+      "type": "object", "additionalProperties": false, "required": ["request_start", "after_cleanup"],
+      "properties": {"request_start": {"$ref": "#/$defs/snapshot"}, "after_cleanup": {"$ref": "#/$defs/snapshot"}}
+    },
+    "sample_cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_index", "request_dropped", "allocator_cleanup_validated", "retryable_cleanup", "durable_quarantine"],
+      "properties": {"sample_index": {"type": "integer", "minimum": 0, "maximum": 9}, "request_dropped": {"const": true}, "allocator_cleanup_validated": {"const": true}, "retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}
+    },
+    "sample": {
+      "type": "object", "additionalProperties": false,
+      "required": ["execution_path", "timing_instrumentation", "events", "derived", "tokens", "stop", "audit", "memory", "cleanup"],
+      "properties": {"execution_path": {"const": "timed-production"}, "timing_instrumentation": {"const": "on"}, "events": {"$ref": "#/$defs/sample_events"}, "derived": {"$ref": "#/$defs/sample_derived"}, "tokens": {"$ref": "#/$defs/sample_tokens"}, "stop": {"$ref": "#/$defs/stop"}, "audit": {"$ref": "#/$defs/sample_audit"}, "memory": {"$ref": "#/$defs/sample_memory"}, "cleanup": {"$ref": "#/$defs/sample_cleanup"}}
+    },
+    "correctness_control": {
+      "type": "object", "additionalProperties": false,
+      "required": ["label", "execution_path", "timing_instrumentation", "included_in_performance_statistics", "source", "tokens", "stop", "audit", "memory", "cleanup", "comparison"],
+      "properties": {
+        "label": {"const": "correctness-reference"}, "execution_path": {"const": "first-warmup-sample"}, "timing_instrumentation": {"const": "on"}, "included_in_performance_statistics": {"const": false},
+        "source": {"type": "object", "additionalProperties": false, "required": ["kind", "sample_index", "request_count"], "properties": {"kind": {"const": "warmup-sample"}, "sample_index": {"const": 0}, "request_count": {"const": 0}}},
+        "tokens": {"$ref": "#/$defs/sample_tokens"}, "stop": {"$ref": "#/$defs/stop"}, "audit": {"$ref": "#/$defs/sample_audit"}, "memory": {"$ref": "#/$defs/sample_memory"},
+        "cleanup": {"type": "object", "additionalProperties": false, "required": ["reference_sample", "request_dropped", "allocator_cleanup_validated", "retryable_cleanup", "durable_quarantine"], "properties": {"reference_sample": {"const": true}, "request_dropped": {"const": true}, "allocator_cleanup_validated": {"const": true}, "retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}},
+        "comparison": {"type": "object", "additionalProperties": false, "required": ["mode", "scope", "reference_source", "token_fields", "stop_fields", "dispatch_fields", "dispatch_count_rule"], "properties": {"mode": {"const": "exact"}, "scope": {"const": "first_warmup_reference_against_every_remaining_warmup_and_measured_sample"}, "reference_source": {"const": "warmups.samples[0]"}, "token_fields": {"const": ["input_token_ids", "generated_token_ids", "visible_token_ids", "decode_input_token_ids"]}, "stop_fields": {"const": ["version", "reason_version", "kind", "token_id"]}, "dispatch_fields": {"const": ["selected_backend", "target", "device_index", "model_fingerprint", "plan_digest", "fallback_used", "all_dispatches_hip", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count"]}, "dispatch_count_rule": {"const": "exact_when_token_and_stop_fields_match"}}}
+      }
+    },
+    "audit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_backend", "target", "device_index", "submission_count", "kernel_dispatch_count", "segment_count", "boundary_count", "fallback_used", "all_dispatches_hip", "model_load_count", "weight_encoding", "fp8_provider", "request_model_load_count", "model_reused", "sample_count", "correctness_control_request_count", "correctness_control_source", "correctness_control_reference_sample_index", "total_request_count"],
+      "properties": {
+        "selected_backend": {"const": "hip"}, "target": {"enum": ["gfx1030", "gfx1201", "gfx942"]}, "device_index": {"const": 0},
+        "submission_count": {"type": "integer", "minimum": 1}, "kernel_dispatch_count": {"type": "integer", "minimum": 1}, "segment_count": {"type": "integer", "minimum": 1}, "boundary_count": {"type": "integer", "minimum": 1},
+        "fallback_used": {"const": false}, "all_dispatches_hip": {"const": true}, "model_load_count": {"const": 1},
+        "weight_encoding": {"enum": ["bf16", "bf16-converted-from-ocp-e4m3fn", "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32", "nvfp4-e2m1-block16-e4m3fn-tensor-f32", "ocp-e4m3fn-outer-f32"]},
+        "fp8_provider": {"type": ["string", "null"], "enum": [null, "native", "native-fnuz", "emulation", "converted-bf16", "nvfp4-packed-dequant"]},
+        "request_model_load_count": {"const": 0}, "model_reused": {"const": true}, "sample_count": {"enum": [4, 13]}, "correctness_control_request_count": {"const": 0}, "correctness_control_source": {"const": "first-warmup-sample"}, "correctness_control_reference_sample_index": {"const": 0}, "total_request_count": {"enum": [4, 13]}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["correctness_control_request_count", "correctness_control_source", "correctness_control_reference_sample_index", "warmup_request_count", "measured_request_count", "request_cleanup_count", "performance_sample_count", "all_requests_dropped", "retryable_cleanup", "durable_quarantine"],
+      "properties": {
+        "correctness_control_request_count": {"const": 0}, "correctness_control_source": {"const": "first-warmup-sample"}, "correctness_control_reference_sample_index": {"const": 0},
+        "warmup_request_count": {"enum": [1, 3]}, "measured_request_count": {"enum": [3, 10]}, "request_cleanup_count": {"enum": [4, 13]}, "performance_sample_count": {"enum": [4, 13]},
+        "all_requests_dropped": {"const": true}, "retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}
+      }
+    },
+    "session_cleanup": {"type": "object", "additionalProperties": false, "required": ["retryable_cleanup", "durable_quarantine"], "properties": {"retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}}},
+    "warmups": {"type": "object", "additionalProperties": false, "required": ["count", "samples"], "properties": {"count": {"enum": [1, 3]}, "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}}}},
+    "measured": {"type": "object", "additionalProperties": false, "required": ["count", "samples"], "properties": {"count": {"enum": [3, 10]}, "samples": {"type": "array", "items": {"$ref": "#/$defs/sample"}}}}
+  }
+}

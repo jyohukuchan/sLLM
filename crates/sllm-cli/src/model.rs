@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,9 +46,14 @@ use crate::benchmark::{
 const REPORT_SCHEMA: &str = "model-frontend-cli-report-v1";
 const MAX_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TOKEN_IDS: usize = 1_048_576;
+const MAX_TOKEN_IDS_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_EMBEDDING_INPUTS: usize = 256;
 const MAX_PHASE42_AGGREGATE_BYTES: usize = 96 * 1024 * 1024;
 const MAX_NEW_TOKENS: u32 = 4096;
+const MAX_BENCHMARK_DIRECT_NEW_TOKENS: u32 = 20_000;
+const MAX_BENCHMARK_CONTEXT_LENGTH: u64 = QWEN_RUNTIME_MAX_CONTEXT_TOKENS;
+const DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS: u64 = 120;
+const MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS: u64 = 86_400;
 const MAX_PREFILL_CHUNK_TOKENS: u64 = 16_384;
 const MAX_MTP_DRAFT_WIDTH: u8 = QwenMtpGenerationExecutorV1::MAX_DRAFT_WIDTH as u8;
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
@@ -330,6 +336,10 @@ struct BenchmarkRequest {
     case_id: String,
     input: BenchmarkInput,
     max_new_tokens: u32,
+    ignore_eos: bool,
+    context_length: Option<u64>,
+    completion_timeout_seconds: Option<u64>,
+    prefill_chunk_tokens: Option<u64>,
     device_index: u32,
     target: String,
     greedy: bool,
@@ -375,6 +385,7 @@ struct GenerationOutcome {
     decode_steps: u32,
 }
 
+#[cfg(test)]
 fn run_greedy_generation(
     executor: &mut impl GreedyExecution,
     policy: &GenerationStopPolicyV1,
@@ -439,6 +450,103 @@ fn run_greedy_generation_timed(
         report: controller.into_report(),
         decode_steps,
     })
+}
+
+fn benchmark_stop_policy(
+    policy: &GenerationStopPolicyV1,
+    ignore_eos: bool,
+) -> GenerationStopPolicyV1 {
+    if !ignore_eos {
+        return policy.clone();
+    }
+    let mut policy = policy.clone();
+    // Keep the reviewed stop policy shape valid while making the benchmark's
+    // explicit ignore-EOS mode unable to stop on any model vocabulary token.
+    policy.stop_token_ids = vec![u32::MAX];
+    policy
+}
+
+fn benchmark_state_capacity(
+    input_len: u64,
+    max_new_tokens: u32,
+    context_length: Option<u64>,
+) -> Result<u64, String> {
+    let required = input_len
+        .checked_add(u64::from(max_new_tokens))
+        .ok_or_else(|| "benchmark state capacity overflowed".to_owned())?;
+    let capacity = context_length.unwrap_or(required);
+    if capacity < required {
+        return Err(format!(
+            "benchmark context length {capacity} is smaller than required input+output {required}"
+        ));
+    }
+    if capacity > MAX_BENCHMARK_CONTEXT_LENGTH {
+        return Err(format!(
+            "benchmark context length must be in [1,{MAX_BENCHMARK_CONTEXT_LENGTH}]"
+        ));
+    }
+    Ok(capacity)
+}
+
+fn benchmark_completion_timeout(seconds: Option<u64>) -> Result<Duration, String> {
+    let seconds = seconds.unwrap_or(DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS);
+    if seconds == 0 || seconds > MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS {
+        return Err(format!(
+            "benchmark completion timeout must be in [1,{MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS}] seconds"
+        ));
+    }
+    Ok(Duration::from_secs(seconds))
+}
+
+fn validate_benchmark_protocol(warmups: u32, measured: u32) -> Result<(), String> {
+    validate_sample_count(warmups, measured)?;
+    if !matches!((warmups, measured), (3, 10) | (1, 3)) {
+        return Err(
+            "benchmark protocol requires exactly 3 warmups and 10 measured requests, or 1 warmup and 3 measured requests"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn correctness_reference_from_warmup(sample: &Value) -> Result<Value, String> {
+    let section = |name: &str| {
+        sample
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("benchmark correctness reference {name} is absent"))
+    };
+    let mut comparison = control_comparison_contract();
+    if let Some(object) = comparison.as_object_mut() {
+        object.insert(
+            "scope".to_owned(),
+            json!("first_warmup_reference_against_every_remaining_warmup_and_measured_sample"),
+        );
+        object.insert("reference_source".to_owned(), json!("warmups.samples[0]"));
+    }
+    Ok(json!({
+        "label": "correctness-reference",
+        "execution_path": "first-warmup-sample",
+        "timing_instrumentation": "on",
+        "included_in_performance_statistics": false,
+        "source": {
+            "kind": "warmup-sample",
+            "sample_index": 0,
+            "request_count": 0,
+        },
+        "tokens": section("tokens")?,
+        "stop": section("stop")?,
+        "audit": section("audit")?,
+        "memory": section("memory")?,
+        "cleanup": {
+            "reference_sample": true,
+            "request_dropped": true,
+            "allocator_cleanup_validated": true,
+            "retryable_cleanup": 0,
+            "durable_quarantine": 0,
+        },
+        "comparison": comparison,
+    }))
 }
 
 #[derive(Debug, PartialEq)]
@@ -1234,7 +1342,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
         })();
         let cleanup = session
             .shutdown(SHUTDOWN_TIMEOUT)
-            .map_err(|_| "HIP session cleanup failed".to_owned())?;
+            .map_err(|error| format!("HIP session cleanup failed: {error}"))?;
         if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
             return Err("HIP session cleanup was not empty".to_owned());
         }
@@ -2750,15 +2858,19 @@ impl ModelFrontendBackend for ProductionBackend {
                     .to_owned(),
             );
         }
-        validate_sample_count(request.warmups, request.measured)?;
-        if request.warmups != 3 || request.measured != 10 {
-            return Err(
-                "benchmark protocol requires exactly 3 warmups and 10 measured requests".to_owned(),
-            );
-        }
+        validate_benchmark_protocol(request.warmups, request.measured)?;
         if !request.greedy {
             return Err("benchmark requires explicit --greedy mode".to_owned());
         }
+        if request.ignore_eos && request.lane != BenchmarkLane::Direct {
+            return Err("--ignore-eos is supported only for benchmark direct lane".to_owned());
+        }
+        if request.prefill_chunk_tokens.is_some() && request.lane != BenchmarkLane::Direct {
+            return Err(
+                "--prefill-chunk-tokens is supported only for benchmark direct lane".to_owned(),
+            );
+        }
+        let completion_timeout = benchmark_completion_timeout(request.completion_timeout_seconds)?;
         let expected_model_size = match self.lock.model().repo_id.as_str() {
             "Qwen/Qwen3.5-2B" => "2B",
             "Qwen/Qwen3.5-4B" => "4B",
@@ -2795,9 +2907,10 @@ impl ModelFrontendBackend for ProductionBackend {
         }
         let input_len = u64::try_from(seed_input.len())
             .map_err(|_| "benchmark input token count overflowed".to_owned())?;
-        let state_capacity = input_len
-            .checked_add(u64::from(request.max_new_tokens))
-            .ok_or_else(|| "benchmark state capacity overflowed".to_owned())?;
+        let state_capacity =
+            benchmark_state_capacity(input_len, request.max_new_tokens, request.context_length)?;
+        let stop_policy =
+            benchmark_stop_policy(self.lock.generation_stop_policy(), request.ignore_eos);
         let model_load_start_ns = timing.model_load_start_ns();
         let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
         let embedded_fp8 = matches!(
@@ -2841,36 +2954,6 @@ impl ModelFrontendBackend for ProductionBackend {
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
-        let first_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
-            build_qwen35_nvfp4_graph(&self.lock, &plan, nvfp4_sidecar, input_len, state_capacity)
-        } else {
-            match (&sidecar, fp8_provider) {
-                (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                    build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                }
-                (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => build_qwen35_fp8_fnuz_graph(
-                    &self.lock,
-                    &plan,
-                    sidecar,
-                    input_len,
-                    state_capacity,
-                ),
-                (Some(sidecar), Some(_)) => {
-                    build_qwen35_fp8_graph(&self.lock, &plan, sidecar, input_len, state_capacity)
-                }
-                (None, None) => self.build_plain_graph(
-                    &plan,
-                    input_len,
-                    state_capacity,
-                    &request.target,
-                    request.kv_cache_encoding,
-                ),
-                _ => unreachable!("quantized provider selection validated sidecar state"),
-            }
-        }
-        .map_err(|error| {
-            format!("benchmark graph does not satisfy the fixed Qwen contract: {error}")
-        })?;
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
         let session_request =
             ExecutionSessionRequest::new(request.device_index, request.target.clone())
@@ -2878,6 +2961,85 @@ impl ModelFrontendBackend for ProductionBackend {
         let session = backend
             .open_execution_session(session_request)
             .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let placement_total_memory_bytes = session
+            .total_memory_bytes()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "HIP backend omitted total device memory".to_owned())?;
+        let placement_available_memory_bytes = session
+            .available_memory_bytes()
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "HIP backend omitted available device memory".to_owned())?;
+        let chunk_candidates = cli_prefill_chunk_candidates(
+            request.prefill_chunk_tokens,
+            placement_total_memory_bytes,
+            input_len,
+        )?;
+        let build_graph = |graph_token_count: u64| {
+            if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
+                build_qwen35_nvfp4_graph(
+                    &self.lock,
+                    &plan,
+                    nvfp4_sidecar,
+                    graph_token_count,
+                    state_capacity,
+                )
+            } else {
+                match (&sidecar, fp8_provider) {
+                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
+                        build_qwen35_graph(&self.lock, &plan, graph_token_count, state_capacity)
+                    }
+                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
+                        build_qwen35_fp8_fnuz_graph(
+                            &self.lock,
+                            &plan,
+                            sidecar,
+                            graph_token_count,
+                            state_capacity,
+                        )
+                    }
+                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
+                        &self.lock,
+                        &plan,
+                        sidecar,
+                        graph_token_count,
+                        state_capacity,
+                    ),
+                    (None, None) => self.build_plain_graph(
+                        &plan,
+                        graph_token_count,
+                        state_capacity,
+                        &request.target,
+                        request.kv_cache_encoding,
+                    ),
+                    _ => unreachable!("quantized provider selection validated sidecar state"),
+                }
+            }
+        };
+        let mut rejected = Vec::new();
+        let mut selected = None;
+        for graph_token_count in chunk_candidates {
+            let graph = build_graph(graph_token_count).map_err(|error| {
+                format!("benchmark graph does not satisfy the fixed Qwen contract: {error}")
+            })?;
+            let estimate = qwen_graph_memory_estimate(&graph, &plan, placement_total_memory_bytes)
+                .map_err(|error| error.to_string())?;
+            if estimate.required_bytes() <= placement_available_memory_bytes {
+                selected = Some((graph_token_count, graph, estimate));
+                break;
+            }
+            rejected.push(format!(
+                "{}:{}",
+                graph_token_count,
+                estimate.required_bytes()
+            ));
+        }
+        let (graph_token_count, first_graph, placement) = selected.ok_or_else(|| {
+            format!(
+                "no benchmark prefill chunk fits available device memory {}; candidates chunk:required [{}]",
+                placement_available_memory_bytes,
+                rejected.join(",")
+            )
+        })?;
 
         let execution = (|| -> Result<Value, String> {
             let resident = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
@@ -2887,7 +3049,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     plan.clone(),
                     Arc::clone(self.cache()?),
                     Arc::clone(nvfp4_sidecar),
-                    COMPLETION_TIMEOUT,
+                    completion_timeout,
                 )
             } else {
                 match (&sidecar, fp8_provider) {
@@ -2898,7 +3060,7 @@ impl ModelFrontendBackend for ProductionBackend {
                             plan.clone(),
                             Arc::clone(self.cache()?),
                             Arc::clone(sidecar),
-                            COMPLETION_TIMEOUT,
+                            completion_timeout,
                         )
                     }
                     (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
@@ -2908,7 +3070,7 @@ impl ModelFrontendBackend for ProductionBackend {
                             plan.clone(),
                             Arc::clone(self.cache()?),
                             Arc::clone(sidecar),
-                            COMPLETION_TIMEOUT,
+                            completion_timeout,
                         )
                     }
                     (Some(sidecar), Some(_)) => QwenResidentModel::new_fp8(
@@ -2917,7 +3079,7 @@ impl ModelFrontendBackend for ProductionBackend {
                         plan.clone(),
                         Arc::clone(self.cache()?),
                         Arc::clone(sidecar),
-                        COMPLETION_TIMEOUT,
+                        completion_timeout,
                     ),
                     (None, None) => match &self.source {
                         QwenDenseSource::Cache(cache) => QwenResidentModel::new(
@@ -2925,14 +3087,14 @@ impl ModelFrontendBackend for ProductionBackend {
                             first_graph,
                             plan.clone(),
                             Arc::clone(cache),
-                            COMPLETION_TIMEOUT,
+                            completion_timeout,
                         ),
                         QwenDenseSource::Gguf(source) => QwenResidentModel::new_gguf(
                             Arc::clone(&session),
                             first_graph,
                             plan.clone(),
                             Arc::clone(source),
-                            COMPLETION_TIMEOUT,
+                            completion_timeout,
                         ),
                     },
                     _ => unreachable!("quantized provider selection validated sidecar state"),
@@ -2945,138 +3107,6 @@ impl ModelFrontendBackend for ProductionBackend {
             let model_resident_high_water_bytes =
                 validate_model_ready_snapshot(&model_ready_memory)?;
             let ready_model_current_bytes = model_ready_snapshot.model_resident().current_bytes();
-
-            let control_graph = if let Some(nvfp4_sidecar) = &nvfp4_sidecar {
-                build_qwen35_nvfp4_graph(
-                    &self.lock,
-                    &plan,
-                    nvfp4_sidecar,
-                    input_len,
-                    state_capacity,
-                )
-            } else {
-                match (&sidecar, fp8_provider) {
-                    (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                        build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
-                    }
-                    (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
-                        build_qwen35_fp8_fnuz_graph(
-                            &self.lock,
-                            &plan,
-                            sidecar,
-                            input_len,
-                            state_capacity,
-                        )
-                    }
-                    (Some(sidecar), Some(_)) => build_qwen35_fp8_graph(
-                        &self.lock,
-                        &plan,
-                        sidecar,
-                        input_len,
-                        state_capacity,
-                    ),
-                    (None, None) => self.build_plain_graph(
-                        &plan,
-                        input_len,
-                        state_capacity,
-                        &request.target,
-                        request.kv_cache_encoding,
-                    ),
-                    _ => unreachable!("quantized provider selection validated sidecar state"),
-                }
-            }
-            .map_err(|error| {
-                format!("benchmark correctness-control graph does not satisfy the Qwen contract: {error}")
-            })?;
-            let mut control_owner = match resident.new_request(control_graph) {
-                Ok(owner) => owner,
-                Err(error) => {
-                    let cleanup_memory = allocation_snapshot_value(session.memory_snapshot());
-                    validate_request_cleanup_snapshot(&cleanup_memory, ready_model_current_bytes)?;
-                    return Err(format!(
-                        "Qwen benchmark correctness-control provisioning failed: {error}"
-                    ));
-                }
-            };
-            let control_request_memory = allocation_snapshot_value(session.memory_snapshot());
-            let control_outcome = match validate_snapshot_accounting(
-                &control_request_memory,
-                "correctness-control request",
-            ) {
-                Ok(()) => run_greedy_generation(
-                    &mut control_owner,
-                    self.lock.generation_stop_policy(),
-                    request.max_new_tokens,
-                    seed_input.as_slice(),
-                ),
-                Err(error) => Err(error),
-            };
-            let control_audit = if control_outcome.is_ok() {
-                Some(control_owner.audit_snapshot().map_err(|_| {
-                    "Qwen correctness-control dispatch audit was empty or invalid".to_owned()
-                }))
-            } else {
-                None
-            };
-            drop(control_owner);
-            let control_cleanup_memory = allocation_snapshot_value(session.memory_snapshot());
-            validate_request_cleanup_snapshot(&control_cleanup_memory, ready_model_current_bytes)?;
-            let control_outcome = control_outcome?;
-            let control_audit = control_audit.ok_or_else(|| {
-                "correctness-control dispatch audit was not collected".to_owned()
-            })??;
-            if control_audit.target() != request.target {
-                return Err(
-                    "Qwen correctness-control dispatch audit target differs from requested target"
-                        .to_owned(),
-                );
-            }
-            let control_report = control_outcome.report;
-            let control_stop = control_report.stop_reason().ok_or_else(|| {
-                "correctness-control generation ended without a stop reason".to_owned()
-            })?;
-            let control_stop_value = json!({
-                "version": control_stop.version(),
-                "reason_version": control_stop.reason_version(),
-                "kind": control_stop.reason_token(),
-                "token_id": control_stop.token_id(),
-            });
-            let control_audit_value = json!({
-                "selected_backend": control_audit.selected_backend(),
-                "target": control_audit.target(),
-                "device_index": request.device_index,
-                "model_fingerprint": self.lock.fingerprint(),
-                "plan_digest": plan.digest_hex(),
-                "fallback_used": control_audit.fallback_used(),
-                "submission_count": control_audit.submission_count(),
-                "kernel_dispatch_count": control_audit.kernel_dispatch_count(),
-                "segment_count": control_audit.segment_count(),
-                "boundary_count": control_audit.boundary_count(),
-                "all_dispatches_hip": control_audit.all_dispatches_hip(),
-            });
-            let correctness_control = json!({
-                "label": "correctness-only",
-                "execution_path": "normal-untimed",
-                "timing_instrumentation": "off",
-                "included_in_performance_statistics": false,
-                "tokens": {
-                    "input_token_ids": control_report.input_token_ids(),
-                    "generated_token_ids": control_report.generated_token_ids(),
-                    "visible_token_ids": control_report.visible_token_ids(),
-                    "decode_input_token_ids": control_report.decode_input_token_ids(),
-                },
-                "stop": control_stop_value,
-                "audit": control_audit_value,
-                "memory": {
-                    "request_start": control_request_memory,
-                    "after_cleanup": control_cleanup_memory,
-                },
-                "cleanup": {
-                    "request_dropped": true,
-                    "allocator_cleanup_validated": true,
-                },
-                "comparison": control_comparison_contract(),
-            });
 
             let run_sample = |sample_index: u32| -> Result<Value, String> {
                 let request_start_ns = timing.now_ns();
@@ -3102,20 +3132,20 @@ impl ModelFrontendBackend for ProductionBackend {
                         &self.lock,
                         &plan,
                         nvfp4_sidecar,
-                        input_len,
+                        graph_token_count,
                         state_capacity,
                     )
                 } else {
                     match (&sidecar, fp8_provider) {
                         (Some(_), Some(CliFp8Provider::ConvertedBf16)) => {
-                            build_qwen35_graph(&self.lock, &plan, input_len, state_capacity)
+                            build_qwen35_graph(&self.lock, &plan, graph_token_count, state_capacity)
                         }
                         (Some(sidecar), Some(CliFp8Provider::NativeFnuz)) => {
                             build_qwen35_fp8_fnuz_graph(
                                 &self.lock,
                                 &plan,
                                 sidecar,
-                                input_len,
+                                graph_token_count,
                                 state_capacity,
                             )
                         }
@@ -3123,12 +3153,12 @@ impl ModelFrontendBackend for ProductionBackend {
                             &self.lock,
                             &plan,
                             sidecar,
-                            input_len,
+                            graph_token_count,
                             state_capacity,
                         ),
                         (None, None) => self.build_plain_graph(
                             &plan,
-                            input_len,
+                            graph_token_count,
                             state_capacity,
                             &request.target,
                             request.kv_cache_encoding,
@@ -3157,7 +3187,7 @@ impl ModelFrontendBackend for ProductionBackend {
                 let outcome = match validate_snapshot_accounting(&request_memory, "timed request") {
                     Ok(()) => run_greedy_generation_timed(
                         &mut owner,
-                        self.lock.generation_stop_policy(),
+                        &stop_policy,
                         request.max_new_tokens,
                         input.as_slice(),
                         Some((&mut timeline, timing.request_clock())),
@@ -3178,10 +3208,12 @@ impl ModelFrontendBackend for ProductionBackend {
                 let outcome = outcome?;
                 let audit =
                     audit.ok_or_else(|| "timed dispatch audit was not collected".to_owned())??;
-                if audit.target() != request.target {
+                if audit.target() != request.target
+                    || audit.fallback_used()
+                    || !audit.all_dispatches_hip()
+                {
                     return Err(
-                        "Qwen benchmark dispatch audit target differs from requested target"
-                            .to_owned(),
+                        "Qwen benchmark dispatch audit is not exact HIP/no-fallback".to_owned()
                     );
                 }
                 let report = outcome.report;
@@ -3227,7 +3259,6 @@ impl ModelFrontendBackend for ProductionBackend {
                         "durable_quarantine": 0,
                     }),
                 })?;
-                compare_control_sample(&correctness_control, &sample)?;
                 Ok(sample)
             };
 
@@ -3238,6 +3269,13 @@ impl ModelFrontendBackend for ProductionBackend {
             let mut measured_samples = Vec::with_capacity(request.measured as usize);
             for index in 0..request.measured {
                 measured_samples.push(run_sample(index)?);
+            }
+            let control_reference = warmup_samples.first().ok_or_else(|| {
+                "benchmark correctness reference requires at least one warmup sample".to_owned()
+            })?;
+            let correctness_control = correctness_reference_from_warmup(control_reference)?;
+            for sample in warmup_samples.iter().skip(1).chain(measured_samples.iter()) {
+                compare_control_sample(&correctness_control, sample)?;
             }
             let all_samples = warmup_samples.iter().chain(measured_samples.iter());
             let mut submission_count = 0_u64;
@@ -3320,6 +3358,14 @@ impl ModelFrontendBackend for ProductionBackend {
                     "input_token_ids": seed_input.as_slice(),
                     "input_token_count": seed_input.len(),
                     "max_new_tokens": request.max_new_tokens,
+                    "ignore_eos": request.ignore_eos,
+                    "context_length": request.context_length,
+                    "effective_context_length": state_capacity,
+                    "prefill_chunk_tokens": request.prefill_chunk_tokens,
+                    "effective_prefill_chunk_tokens": graph_token_count,
+                    "completion_timeout_seconds": request
+                        .completion_timeout_seconds
+                        .unwrap_or(DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS),
                     "greedy": request.greedy,
                     "warmups": request.warmups,
                     "measured": request.measured,
@@ -3328,7 +3374,12 @@ impl ModelFrontendBackend for ProductionBackend {
                     "render": render_enabled,
                     "kv_cache_encoding": kv_cache_encoding,
                     "stop_policy": {
-                        "stop_token_ids": [248046, 248044],
+                        "stop_token_ids": if request.ignore_eos {
+                            Vec::<u32>::new()
+                        } else {
+                            vec![248046, 248044]
+                        },
+                        "ignore_eos": request.ignore_eos,
                         "visible_stop_tokens": false,
                     },
                 })
@@ -3337,13 +3388,26 @@ impl ModelFrontendBackend for ProductionBackend {
                     "input_token_ids": seed_input.as_slice(),
                     "input_token_count": seed_input.len(),
                     "max_new_tokens": request.max_new_tokens,
+                    "ignore_eos": request.ignore_eos,
+                    "context_length": request.context_length,
+                    "effective_context_length": state_capacity,
+                    "prefill_chunk_tokens": request.prefill_chunk_tokens,
+                    "effective_prefill_chunk_tokens": graph_token_count,
+                    "completion_timeout_seconds": request
+                        .completion_timeout_seconds
+                        .unwrap_or(DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS),
                     "greedy": request.greedy,
                     "warmups": request.warmups,
                     "measured": request.measured,
                     "tokenizer": tokenizer_enabled,
                     "render": render_enabled,
                     "stop_policy": {
-                        "stop_token_ids": [248046, 248044],
+                        "stop_token_ids": if request.ignore_eos {
+                            Vec::<u32>::new()
+                        } else {
+                            vec![248046, 248044]
+                        },
+                        "ignore_eos": request.ignore_eos,
                         "visible_stop_tokens": false,
                     },
                 })
@@ -3388,6 +3452,14 @@ impl ModelFrontendBackend for ProductionBackend {
                 },
                 "config": config,
                 "memory": {
+                    "placement_total_memory_bytes": placement_total_memory_bytes,
+                    "placement_available_memory_bytes": placement_available_memory_bytes,
+                    "placement_required_bytes": placement.required_bytes(),
+                    "placement_model_resident_bytes": placement.model_resident_bytes(),
+                    "placement_request_state_bytes": placement.request_state_bytes(),
+                    "placement_safety_reserve_bytes": placement.safety_reserve_bytes(),
+                    "workspace_separate_allocation_bytes": placement.workspace_baseline_bytes(),
+                    "workspace_arena_bytes": placement.workspace_arena_bytes(),
                     "model_ready": model_ready_memory,
                     "after_model_drop": final_memory,
                     "model_resident_high_water_bytes": model_resident_high_water_bytes,
@@ -3400,6 +3472,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "selected_backend": "hip",
                     "target": request.target,
                     "device_index": request.device_index,
+                    "model_fingerprint": self.lock.fingerprint(),
+                    "plan_digest": plan.digest_hex(),
                     "submission_count": submission_count,
                     "kernel_dispatch_count": kernel_dispatch_count,
                     "segment_count": segment_count,
@@ -3414,17 +3488,20 @@ impl ModelFrontendBackend for ProductionBackend {
                     "request_model_load_count": 0,
                     "model_reused": true,
                     "sample_count": request.warmups + request.measured,
-                    "correctness_control_request_count": 1,
-                    "total_request_count": request.warmups + request.measured + 1,
+                    "correctness_control_request_count": 0,
+                    "correctness_control_source": "first-warmup-sample",
+                    "correctness_control_reference_sample_index": 0,
+                    "total_request_count": request.warmups + request.measured,
                 },
                 "cleanup": {
-                    "correctness_control_request_count": 1,
+                    "correctness_control_request_count": 0,
+                    "correctness_control_source": "first-warmup-sample",
+                    "correctness_control_reference_sample_index": 0,
                     "warmup_request_count": request.warmups,
                     "measured_request_count": request.measured,
-                    "request_cleanup_count": request.warmups + request.measured + 1,
+                    "request_cleanup_count": request.warmups + request.measured,
                     "performance_sample_count": request.warmups + request.measured,
                     "all_requests_dropped": true,
-                    "correctness_control_dropped": true,
                     "retryable_cleanup": 0,
                     "durable_quarantine": 0,
                 },
@@ -3433,10 +3510,20 @@ impl ModelFrontendBackend for ProductionBackend {
                 "measured": {"count": request.measured, "samples": measured_samples},
             }))
         })();
-        let cleanup = session
-            .shutdown(SHUTDOWN_TIMEOUT)
-            .map_err(|_| "HIP session cleanup failed".to_owned())?;
-        let mut result = execution?;
+        let cleanup_result = session.shutdown(SHUTDOWN_TIMEOUT);
+        let mut result = match execution {
+            Ok(result) => result,
+            Err(execution_error) => {
+                return match cleanup_result {
+                    Ok(_) => Err(execution_error),
+                    Err(cleanup_error) => Err(format!(
+                        "{execution_error}; HIP session cleanup failed: {cleanup_error}"
+                    )),
+                };
+            }
+        };
+        let cleanup =
+            cleanup_result.map_err(|error| format!("HIP session cleanup failed: {error}"))?;
         let object = result
             .as_object_mut()
             .ok_or_else(|| "benchmark result was not an object".to_owned())?;
@@ -3659,6 +3746,9 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let mut benchmark_case_id = None;
     let mut benchmark_warmups = None;
     let mut benchmark_measured = None;
+    let mut benchmark_ignore_eos = false;
+    let mut benchmark_context_length = None;
+    let mut benchmark_completion_timeout_seconds = None;
     let fp8_manifest: Option<PathBuf> = None;
     let fp8_artifact: Option<PathBuf> = None;
     let fp8_provider: Option<CliFp8Provider> = None;
@@ -3764,6 +3854,14 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "--input-token-ids",
                 )?;
             }
+            "--input-token-ids-file" if command == "benchmark" => {
+                let value = take_value(&mut arguments, "--input-token-ids-file")?;
+                set_once(
+                    &mut token_ids,
+                    parse_token_ids_file(Path::new(&value))?,
+                    "--input-token-ids-file",
+                )?;
+            }
             "--skip-special-tokens" if command == "decode" || command == "detokenize" => {
                 if skip_special_tokens {
                     return Err("duplicate --skip-special-tokens".to_owned());
@@ -3801,12 +3899,59 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 let parsed = value
                     .parse::<u32>()
                     .map_err(|_| "--max-new-tokens must be an unsigned decimal U32".to_owned())?;
-                if parsed == 0 || parsed > MAX_NEW_TOKENS {
-                    return Err(format!("--max-new-tokens must be in [1,{MAX_NEW_TOKENS}]"));
+                let max_allowed = if command == "benchmark" {
+                    MAX_BENCHMARK_DIRECT_NEW_TOKENS
+                } else {
+                    MAX_NEW_TOKENS
+                };
+                if parsed == 0 || parsed > max_allowed {
+                    return Err(format!("--max-new-tokens must be in [1,{max_allowed}]"));
                 }
                 set_once(&mut max_new_tokens, parsed, "--max-new-tokens")?;
             }
-            "--prefill-chunk-tokens" if command == "generate" => {
+            "--ignore-eos" if command == "benchmark" => {
+                if benchmark_ignore_eos {
+                    return Err("duplicate --ignore-eos".to_owned());
+                }
+                benchmark_ignore_eos = true;
+            }
+            "--context-length" if command == "benchmark" => {
+                let value = take_value(&mut arguments, "--context-length")?;
+                if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
+                    return Err("--context-length must be an unsigned decimal U64".to_owned());
+                }
+                let parsed = value
+                    .parse::<u64>()
+                    .map_err(|_| "--context-length must be an unsigned decimal U64".to_owned())?;
+                if parsed == 0 || parsed > MAX_BENCHMARK_CONTEXT_LENGTH {
+                    return Err(format!(
+                        "--context-length must be in [1,{MAX_BENCHMARK_CONTEXT_LENGTH}]"
+                    ));
+                }
+                set_once(&mut benchmark_context_length, parsed, "--context-length")?;
+            }
+            "--completion-timeout-seconds" if command == "benchmark" => {
+                let value = take_value(&mut arguments, "--completion-timeout-seconds")?;
+                if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
+                    return Err(
+                        "--completion-timeout-seconds must be an unsigned decimal U64".to_owned(),
+                    );
+                }
+                let parsed = value.parse::<u64>().map_err(|_| {
+                    "--completion-timeout-seconds must be an unsigned decimal U64".to_owned()
+                })?;
+                if parsed == 0 || parsed > MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS {
+                    return Err(format!(
+                        "--completion-timeout-seconds must be in [1,{MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS}]"
+                    ));
+                }
+                set_once(
+                    &mut benchmark_completion_timeout_seconds,
+                    parsed,
+                    "--completion-timeout-seconds",
+                )?;
+            }
+            "--prefill-chunk-tokens" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--prefill-chunk-tokens")?;
                 if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
                     return Err("--prefill-chunk-tokens must be an unsigned decimal U64".to_owned());
@@ -4258,13 +4403,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             let lane = benchmark_lane.unwrap_or(BenchmarkLane::RenderTokenize);
             let warmups = benchmark_warmups.unwrap_or(3);
             let measured = benchmark_measured.unwrap_or(10);
-            validate_sample_count(warmups, measured)?;
-            if warmups != 3 || measured != 10 {
-                return Err(
-                    "benchmark protocol requires exactly 3 warmups and 10 measured requests"
-                        .to_owned(),
-                );
-            }
+            validate_benchmark_protocol(warmups, measured)?;
             let model_size =
                 benchmark_model_size.ok_or_else(|| "benchmark requires --model-size".to_owned())?;
             if lane == BenchmarkLane::RenderTokenize
@@ -4287,17 +4426,17 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 BenchmarkLane::Direct => {
                     if !messages.is_empty() || thinking.is_some() {
                         return Err(
-                            "benchmark direct lane accepts only --input-token-ids".to_owned()
+                            "benchmark direct lane accepts only pretokenized input".to_owned()
                         );
                     }
                     BenchmarkInput::TokenIds(token_ids.ok_or_else(|| {
-                        "benchmark direct lane requires --input-token-ids IDS".to_owned()
+                        "benchmark direct lane requires --input-token-ids IDS or --input-token-ids-file PATH".to_owned()
                     })?)
                 }
                 BenchmarkLane::RenderTokenize => {
                     if token_ids.is_some() {
                         return Err(
-                            "benchmark render-tokenize lane does not accept --input-token-ids"
+                            "benchmark render-tokenize lane does not accept pretokenized input"
                                 .to_owned(),
                         );
                     }
@@ -4316,14 +4455,33 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     }
                 }
             };
+            if lane == BenchmarkLane::RenderTokenize && prefill_chunk_tokens.is_some() {
+                return Err(
+                    "benchmark --prefill-chunk-tokens is supported only for the direct lane"
+                        .to_owned(),
+                );
+            }
+            let requested_max_new_tokens =
+                max_new_tokens.ok_or_else(|| "benchmark requires --max-new-tokens".to_owned())?;
+            if lane == BenchmarkLane::RenderTokenize && requested_max_new_tokens > MAX_NEW_TOKENS {
+                return Err(format!(
+                    "benchmark render-tokenize --max-new-tokens must be in [1,{MAX_NEW_TOKENS}]"
+                ));
+            }
+            if lane == BenchmarkLane::RenderTokenize && benchmark_ignore_eos {
+                return Err("--ignore-eos is supported only for benchmark direct lane".to_owned());
+            }
             Operation::Benchmark(BenchmarkRequest {
                 lane,
                 row_id,
                 model_size,
                 case_id,
                 input,
-                max_new_tokens: max_new_tokens
-                    .ok_or_else(|| "benchmark requires --max-new-tokens".to_owned())?,
+                max_new_tokens: requested_max_new_tokens,
+                ignore_eos: benchmark_ignore_eos,
+                context_length: benchmark_context_length,
+                completion_timeout_seconds: benchmark_completion_timeout_seconds,
+                prefill_chunk_tokens,
                 device_index: device_index
                     .ok_or_else(|| "benchmark requires --device-index".to_owned())?,
                 target: target.ok_or_else(|| "benchmark requires --target".to_owned())?,
@@ -4517,6 +4675,28 @@ fn parse_token_ids(value: &str) -> Result<TokenIdsV1, String> {
     Ok(TokenIdsV1::from_slice(&ids))
 }
 
+fn parse_token_ids_file(path: &Path) -> Result<TokenIdsV1, String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot stat --input-token-ids-file: {error}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("--input-token-ids-file must be a regular non-symlink file".to_owned());
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_TOKEN_IDS_FILE_BYTES {
+        return Err(format!(
+            "--input-token-ids-file must contain between 1 and {MAX_TOKEN_IDS_FILE_BYTES} bytes"
+        ));
+    }
+    let bytes =
+        fs::read(path).map_err(|error| format!("cannot read --input-token-ids-file: {error}"))?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err("--input-token-ids-file changed while being read".to_owned());
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| "--input-token-ids-file must be UTF-8 ASCII token IDs".to_owned())?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    parse_token_ids(text)
+}
+
 fn parse_message(value: &str) -> Result<Qwen35ChatMessageV1, String> {
     let (role, content) = value
         .split_once(':')
@@ -4535,6 +4715,49 @@ fn parse_message(value: &str) -> Result<Qwen35ChatMessageV1, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn correctness_reference_reuses_first_warmup_without_extra_request() {
+        let warmup = json!({
+            "tokens": {
+                "input_token_ids": [1, 3, 17],
+                "generated_token_ids": [7, 8, 9],
+                "visible_token_ids": [7, 8, 9],
+                "decode_input_token_ids": [7, 8],
+            },
+            "stop": {"kind": "max_new_tokens", "token_id": null},
+            "audit": {
+                "selected_backend": "hip",
+                "target": "gfx1030",
+                "device_index": 0,
+                "model_fingerprint": "model",
+                "plan_digest": "plan",
+                "fallback_used": false,
+                "all_dispatches_hip": true,
+                "submission_count": 12,
+                "kernel_dispatch_count": 12,
+                "segment_count": 3,
+                "boundary_count": 4,
+            },
+            "memory": {"request_start": {}, "after_cleanup": {}},
+        });
+        let reference = correctness_reference_from_warmup(&warmup).unwrap();
+        assert_eq!(reference["label"], "correctness-reference");
+        assert_eq!(reference["execution_path"], "first-warmup-sample");
+        assert_eq!(reference["timing_instrumentation"], "on");
+        assert_eq!(reference["source"]["request_count"], 0);
+        assert_eq!(reference["tokens"], warmup["tokens"]);
+        assert_eq!(reference["audit"], warmup["audit"]);
+        assert_eq!(reference["cleanup"]["reference_sample"], true);
+        assert_eq!(
+            reference["comparison"]["reference_source"],
+            "warmups.samples[0]"
+        );
+        assert_eq!(
+            reference["comparison"]["scope"],
+            "first_warmup_reference_against_every_remaining_warmup_and_measured_sample"
+        );
+    }
 
     #[test]
     fn fp8_provider_defaults_preserve_target_specific_performance_policy() {
@@ -4782,9 +5005,9 @@ mod tests {
                 }
             };
             let config = if request.lane == BenchmarkLane::Direct {
-                json!({"lane": lane, "warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render, "kv_cache_encoding": "fp16"})
+                json!({"lane": lane, "warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render, "kv_cache_encoding": "fp16", "ignore_eos": request.ignore_eos, "context_length": request.context_length, "completion_timeout_seconds": request.completion_timeout_seconds, "prefill_chunk_tokens": request.prefill_chunk_tokens})
             } else {
-                json!({"warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render})
+                json!({"warmups": request.warmups, "measured": request.measured, "tokenizer": tokenizer, "render": render, "ignore_eos": request.ignore_eos, "context_length": request.context_length, "completion_timeout_seconds": request.completion_timeout_seconds, "prefill_chunk_tokens": request.prefill_chunk_tokens})
             };
             Ok(json!({
                 "benchmark_schema_version": request.lane.schema_version(),
@@ -5556,7 +5779,7 @@ mod tests {
                 assert_eq!(document["lane"], "direct");
                 assert_eq!(
                     document["benchmark_schema_version"],
-                    "engine-performance-direct-v1"
+                    "engine-performance-direct-v2"
                 );
                 assert_eq!(document["config"]["lane"], "direct");
                 assert_eq!(document["config"]["kv_cache_encoding"], "fp16");
@@ -5610,7 +5833,7 @@ mod tests {
     fn benchmark_direct_lane_accepts_large_pretokenized_input_and_kv_encoding() {
         assert_eq!(
             BenchmarkLane::Direct.schema_version(),
-            "engine-performance-direct-v1"
+            "engine-performance-direct-v2"
         );
         let input_ids = std::iter::repeat_n("23066", 10_001)
             .collect::<Vec<_>>()
@@ -5651,6 +5874,184 @@ mod tests {
                 ..
             }) if ids.len() == 10_001 && ids.as_slice().iter().all(|id| *id == 23_066)
         ));
+    }
+
+    #[test]
+    fn benchmark_direct_lane_reads_bounded_pretokenized_input_file() {
+        let path = std::env::temp_dir().join(format!(
+            "sllm-phase49-input-token-ids-{}-{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&path, "23066,23066,23066\n").unwrap();
+        let path_text = path.to_str().unwrap().to_owned();
+        let request = parse_args(
+            "benchmark",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--lane",
+                "direct",
+                "--model-size",
+                "4B",
+                "--input-token-ids-file",
+                path_text.as_str(),
+                "--max-new-tokens",
+                "2",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        fs::remove_file(path).unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::Benchmark(BenchmarkRequest {
+                lane: BenchmarkLane::Direct,
+                input: BenchmarkInput::TokenIds(ref ids),
+                ..
+            }) if ids.as_slice() == [23_066, 23_066, 23_066]
+        ));
+    }
+
+    #[test]
+    fn benchmark_direct_phase49_controls_parse_and_normal_generate_stays_bounded() {
+        let request = parse_args(
+            "benchmark",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--lane",
+                "direct",
+                "--model-size",
+                "4B",
+                "--case-id",
+                "decode-20000",
+                "--input-token-ids",
+                "1,3,17",
+                "--max-new-tokens",
+                "20000",
+                "--ignore-eos",
+                "--context-length",
+                "131072",
+                "--completion-timeout-seconds",
+                "3600",
+                "--prefill-chunk-tokens",
+                "16384",
+                "--warmups",
+                "1",
+                "--measured",
+                "3",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::Benchmark(BenchmarkRequest {
+                lane: BenchmarkLane::Direct,
+                max_new_tokens: 20_000,
+                ignore_eos: true,
+                context_length: Some(131_072),
+                completion_timeout_seconds: Some(3_600),
+                prefill_chunk_tokens: Some(16_384),
+                warmups: 1,
+                measured: 3,
+                ..
+            })
+        ));
+
+        assert!(
+            parse_args(
+                "generate",
+                &[
+                    "--gguf",
+                    "model.gguf",
+                    "--derived-lock",
+                    "model.lock.json",
+                    "--prompt",
+                    "abc",
+                    "--max-new-tokens",
+                    "20000",
+                    "--device-index",
+                    "0",
+                    "--target",
+                    "gfx1030",
+                    "--greedy",
+                ],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn benchmark_phase49_controls_reject_wrong_scope_and_invalid_protocols() {
+        let render_common = [
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--lane",
+            "render-tokenize",
+            "--model-size",
+            "4B",
+            "--message",
+            "user:abc",
+            "--max-new-tokens",
+            "3",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1030",
+            "--greedy",
+        ];
+        let mut ignore_eos = render_common.to_vec();
+        ignore_eos.push("--ignore-eos");
+        assert!(parse_args("benchmark", &ignore_eos).is_err());
+
+        let mut long_render = render_common.to_vec();
+        let max_tokens_index = long_render.iter().position(|value| *value == "3").unwrap();
+        long_render[max_tokens_index] = "20000";
+        assert!(parse_args("benchmark", &long_render).is_err());
+
+        let mut chunked_render = render_common.to_vec();
+        chunked_render.extend(["--prefill-chunk-tokens", "16384"]);
+        assert!(parse_args("benchmark", &chunked_render).is_err());
+        assert!(validate_benchmark_protocol(3, 10).is_ok());
+        assert!(validate_benchmark_protocol(1, 3).is_ok());
+        assert!(validate_benchmark_protocol(1, 10).is_err());
+        assert!(benchmark_state_capacity(32, 20_000, Some(131_072)).is_ok());
+        assert!(benchmark_state_capacity(100, 20_000, Some(20_000)).is_err());
+        assert!(benchmark_completion_timeout(Some(86_400)).is_ok());
+        assert!(benchmark_completion_timeout(Some(86_401)).is_err());
+    }
+
+    #[test]
+    fn benchmark_ignore_eos_runs_through_qwen_stop_ids_to_max_budget() {
+        let policy = qwen_stop_policy();
+        let ignored_policy = benchmark_stop_policy(&policy, true);
+        let mut executor = SequenceExecution::new([248_046, 248_044, 7]);
+        let outcome =
+            run_greedy_generation(&mut executor, &ignored_policy, 3, &[1, 3, 17]).unwrap();
+        assert_eq!(outcome.report.generated_token_ids(), &[248_046, 248_044, 7]);
+        assert_eq!(outcome.report.visible_token_ids(), &[248_046, 248_044, 7]);
+        assert_eq!(outcome.report.decode_input_token_ids(), &[248_046, 248_044]);
+        assert_eq!(outcome.report.reason_token(), Some("max_new_tokens"));
+        assert_eq!(outcome.decode_steps, 2);
     }
 
     #[test]

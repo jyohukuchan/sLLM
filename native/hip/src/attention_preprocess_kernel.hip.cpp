@@ -1,6 +1,7 @@
 #include "attention_preprocess_kernel_internal.hpp"
 
 #include "rmsnorm_kernel_internal.hpp"
+#include "sllm/hip.h"
 
 #include <cmath>
 #include <cstdint>
@@ -51,8 +52,8 @@ rotate_mrope_64(float *const values, const int32_t *const positions) noexcept {
     }
     const float exponent =
         -static_cast<float>(2U * pair) / static_cast<float>(64U);
-    const float angle = static_cast<float>(positions[axis]) *
-                        powf(theta, exponent);
+    const float angle =
+        static_cast<float>(positions[axis]) * powf(theta, exponent);
     const float cosine = cosf(angle);
     const float sine = sinf(angle);
     const float first = values[pair];
@@ -62,11 +63,10 @@ rotate_mrope_64(float *const values, const int32_t *const positions) noexcept {
   }
 }
 
-__device__ __forceinline__ void process_head(const uint16_t *const input,
-                                             const uint16_t *const raw_scale,
-                                             uint16_t *const output,
-                                             const int32_t *const positions,
-                                             const uint32_t position_components) noexcept {
+__device__ __forceinline__ void
+process_head(const uint16_t *const input, const uint16_t *const raw_scale,
+             uint16_t *const output, const int32_t *const positions,
+             const uint32_t position_components) noexcept {
   float values[256];
   float sum = 0.0F;
   /* One logical thread owns one head. This deliberately keeps the RMSNorm
@@ -94,6 +94,13 @@ __device__ __forceinline__ void process_head(const uint16_t *const input,
   }
 }
 
+__device__ __forceinline__ float wave32_reduce_sum(float value) noexcept {
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    value += __shfl_down(value, offset, 32);
+  }
+  return __shfl(value, 0U, 32);
+}
+
 } // namespace
 
 extern "C" __global__
@@ -103,7 +110,8 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
     const int32_t *const positions, uint16_t *const q_output,
     uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
     const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
-    const uint32_t position_components) {
+    const uint32_t position_components, const uint32_t start_position,
+    const uint32_t position_payload_mode) {
   if (threadIdx.x != 0U) {
     return;
   }
@@ -121,7 +129,13 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
     row = k_block / k_heads;
     head = static_cast<uint32_t>(k_block % k_heads);
   }
-  const int32_t *const position = positions + row * position_components;
+  const int32_t derived_position =
+      static_cast<int32_t>(start_position + static_cast<uint32_t>(row));
+  const int32_t *const position =
+      position_payload_mode ==
+              SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1
+          ? &derived_position
+          : positions + row * position_components;
   if (is_q) {
     const uint64_t input_offset = row * q_heads * head_dim * 2U +
                                   static_cast<uint64_t>(head) * head_dim * 2U;
@@ -145,24 +159,132 @@ __launch_bounds__(1, 1) void sllm_attention_preprocess_headwise_norm_rope_v1(
   }
 }
 
+extern "C" __global__
+__launch_bounds__(32, 1) void sllm_attention_preprocess_headwise_norm_rope_wave32_v1(
+    const uint16_t *const packed_q_gate, const uint16_t *const k,
+    const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
+    const int32_t *const positions, uint16_t *const q_output,
+    uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+    const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
+    const uint32_t position_components, const uint32_t start_position,
+    const uint32_t position_payload_mode) {
+  constexpr uint32_t kWaveSize = 32U;
+  constexpr uint32_t kHeadDim = 256U;
+  constexpr uint32_t kQGateHeadDim = 512U;
+  (void)head_dim;
+  const uint64_t q_block_count = static_cast<uint64_t>(m) * q_heads;
+  const uint64_t block = static_cast<uint64_t>(blockIdx.x);
+  if (block >= static_cast<uint64_t>(m) * (q_heads + k_heads) ||
+      threadIdx.x >= kWaveSize) {
+    return;
+  }
+  const bool is_q = block < q_block_count;
+  const uint64_t local_block = is_q ? block : block - q_block_count;
+  const uint32_t heads = is_q ? q_heads : k_heads;
+  const uint64_t row = local_block / heads;
+  const uint32_t head = static_cast<uint32_t>(local_block % heads);
+  const uint32_t lane = threadIdx.x;
+  const int32_t derived_position =
+      static_cast<int32_t>(start_position + static_cast<uint32_t>(row));
+  const int32_t *const position =
+      position_payload_mode ==
+              SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1
+          ? &derived_position
+          : positions + row * position_components;
+
+  const uint16_t *input = nullptr;
+  const uint16_t *raw_scale = nullptr;
+  uint16_t *output = nullptr;
+  uint16_t *gate = nullptr;
+  if (is_q) {
+    const uint64_t input_offset = row * q_heads * kQGateHeadDim +
+                                  static_cast<uint64_t>(head) * kQGateHeadDim;
+    const uint64_t output_offset =
+        (row * q_heads + static_cast<uint64_t>(head)) * kHeadDim;
+    input = packed_q_gate + input_offset;
+    raw_scale = q_raw_scale + static_cast<uint64_t>(head) * kHeadDim;
+    output = q_output + output_offset;
+    gate = gate_output + output_offset;
+  } else {
+    const uint64_t offset =
+        (row * k_heads + static_cast<uint64_t>(head)) * kHeadDim;
+    input = k + offset;
+    raw_scale = k_raw_scale + static_cast<uint64_t>(head) * kHeadDim;
+    output = k_output + offset;
+  }
+
+  float sum = 0.0F;
+  for (uint32_t dim = lane; dim < kHeadDim; dim += kWaveSize) {
+    const float value = bf16_to_float(input[dim]);
+    sum += value * value;
+  }
+  const float reduced_sum = wave32_reduce_sum(sum);
+  const float inverse_rms =
+      __shfl(1.0F / sqrtf(reduced_sum / static_cast<float>(kHeadDim) + 1.0e-6F),
+             0U, kWaveSize);
+
+  __shared__ float values[kHeadDim];
+  for (uint32_t dim = lane; dim < kHeadDim; dim += kWaveSize) {
+    values[dim] = bf16_to_float(sllm_rmsnorm_kernel::float_to_bf16_rne_bits(
+        norm_value(input[dim], raw_scale[dim], inverse_rms)));
+  }
+  __syncthreads();
+
+  constexpr float theta = 10000000.0F;
+  const uint32_t pair = lane;
+  const float exponent =
+      -static_cast<float>(2U * pair) / static_cast<float>(64U);
+  const uint32_t axis =
+      position_components == 1U
+          ? 0U
+          : ((pair % 3U == 1U && pair < 33U)
+                 ? 1U
+                 : ((pair % 3U == 2U && pair < 30U) ? 2U : 0U));
+  const float angle =
+      static_cast<float>(position[axis]) * powf(theta, exponent);
+  const float cosine = cosf(angle);
+  const float sine = sinf(angle);
+  const float first = values[pair];
+  const float second = values[pair + 32U];
+  values[pair] = first * cosine - second * sine;
+  values[pair + 32U] = first * sine + second * cosine;
+  __syncthreads();
+
+  for (uint32_t dim = lane; dim < kHeadDim; dim += kWaveSize) {
+    output[dim] = sllm_rmsnorm_kernel::float_to_bf16_rne_bits(values[dim]);
+    if (is_q) {
+      gate[dim] = input[kHeadDim + dim];
+    }
+  }
+}
+
 namespace sllm_attention_preprocess_kernel {
 
-hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
-                  const uint16_t *const q_raw_scale,
-                  const uint16_t *const k_raw_scale,
-                  const int32_t *const positions, uint16_t *const q_output,
-                  uint16_t *const gate_output, uint16_t *const k_output,
-                  const uint32_t m, const uint32_t q_heads,
-                  const uint32_t k_heads, const uint32_t head_dim,
-                  const uint32_t position_components,
-                  const hipStream_t stream) noexcept {
+hipError_t
+launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
+       const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
+       const int32_t *const positions, uint16_t *const q_output,
+       uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+       const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
+       const uint32_t position_components, const uint32_t start_position,
+       const uint32_t position_payload_mode, const bool use_wave32,
+       const hipStream_t stream) noexcept {
   const uint32_t block_count = m * (q_heads + k_heads);
   const dim3 grid(block_count, 1U, 1U);
-  const dim3 block(1U, 1U, 1U);
-  hipLaunchKernelGGL(sllm_attention_preprocess_headwise_norm_rope_v1, grid,
-                     block, 0U, stream, packed_q_gate, k, q_raw_scale,
-                     k_raw_scale, positions, q_output, gate_output, k_output, m,
-                     q_heads, k_heads, head_dim, position_components);
+  const dim3 block(use_wave32 ? 32U : 1U, 1U, 1U);
+  if (use_wave32) {
+    hipLaunchKernelGGL(sllm_attention_preprocess_headwise_norm_rope_wave32_v1,
+                       grid, block, 0U, stream, packed_q_gate, k, q_raw_scale,
+                       k_raw_scale, positions, q_output, gate_output, k_output,
+                       m, q_heads, k_heads, head_dim, position_components,
+                       start_position, position_payload_mode);
+  } else {
+    hipLaunchKernelGGL(sllm_attention_preprocess_headwise_norm_rope_v1, grid,
+                       block, 0U, stream, packed_q_gate, k, q_raw_scale,
+                       k_raw_scale, positions, q_output, gate_output, k_output,
+                       m, q_heads, k_heads, head_dim, position_components,
+                       start_position, position_payload_mode);
+  }
   return hipGetLastError();
 }
 

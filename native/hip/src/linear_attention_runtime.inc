@@ -1,5 +1,37 @@
 namespace {
 
+bool short_column_state_opt_in(const uint64_t token_count,
+                               const uint32_t qk_heads,
+                               const uint32_t value_heads,
+                               const uint32_t head_dim,
+                               const char *const arch_name,
+                               const char *const force_baseline) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
+  return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+         (opt_in == nullptr || std::strcmp(opt_in, "1") == 0) &&
+         token_count >= 17U && token_count < 128U &&
+         qk_heads == ::sllm_linear_attention_kernel::kQkHeads &&
+         value_heads == ::sllm_linear_attention_kernel::kValueHeads &&
+         head_dim == ::sllm_linear_attention_kernel::kHeadDim &&
+         arch_name != nullptr && std::strcmp(arch_name, "gfx1030") == 0;
+}
+
+bool short_column_state_shape_opt_in(const uint64_t token_count,
+                                     const uint32_t qk_heads,
+                                     const uint32_t value_heads,
+                                     const uint32_t head_dim,
+                                     const char *const force_baseline) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
+  return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+         (opt_in == nullptr || std::strcmp(opt_in, "1") == 0) &&
+         token_count >= 17U && token_count < 128U &&
+         qk_heads == ::sllm_linear_attention_kernel::kQkHeads &&
+         value_heads == ::sllm_linear_attention_kernel::kValueHeads &&
+         head_dim == ::sllm_linear_attention_kernel::kHeadDim;
+}
+
 class LinearAttentionExecuteScopeGuard final {
 public:
   LinearAttentionExecuteScopeGuard(LinearAttentionState *const state,
@@ -143,7 +175,8 @@ void fill_linear_attention_dispatch_info(
     sllm_linear_attention_dispatch_info_t *const info,
     const uint64_t dispatch_id,
     const sllm_linear_attention::DescriptorMetadata &metadata,
-    const char *const arch_name, const bool use_column_provider) noexcept {
+    const char *const arch_name, const bool use_column_provider,
+    const bool use_decode_pair_provider) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -157,7 +190,10 @@ void fill_linear_attention_dispatch_info(
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
   info->recurrent_kernel_id =
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
-  info->workgroup_size_x = SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
+  info->workgroup_size_x =
+      use_decode_pair_provider
+          ? ::sllm_linear_attention_kernel::kDecodePairWorkgroupSize
+          : SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
   const uint64_t conv_elements =
       (metadata.token_count + metadata.conv_kernel_size - 1U) *
       metadata.qkv_width;
@@ -166,7 +202,9 @@ void fill_linear_attention_dispatch_info(
       SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
   info->recurrent_grid_size_x =
       use_column_provider ? metadata.value_heads * metadata.head_dim / 4U
-                          : metadata.value_heads;
+          : use_decode_pair_provider
+                ? metadata.qk_heads
+                : metadata.value_heads;
   info->token_count = metadata.token_count;
   info->start_position = metadata.start_position;
   info->expected_length = metadata.expected_length;
@@ -179,7 +217,9 @@ void fill_linear_attention_dispatch_info(
       info->kernel_symbol, SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX,
       use_column_provider
           ? ::sllm_linear_attention_kernel::kColumnLogicalKernelId
-          : ::sllm_linear_attention_kernel::kLogicalKernelId);
+          : use_decode_pair_provider
+                ? ::sllm_linear_attention_kernel::kDecodePairLogicalKernelId
+                : ::sllm_linear_attention_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->conv_device_symbol, SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
       ::sllm_linear_attention_kernel::kConvDeviceSymbol);
@@ -188,7 +228,9 @@ void fill_linear_attention_dispatch_info(
       SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
       use_column_provider
           ? ::sllm_linear_attention_kernel::kColumnRecurrentDeviceSymbol
-          : ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
+          : use_decode_pair_provider
+                ? ::sllm_linear_attention_kernel::kDecodePairDeviceSymbol
+                : ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -743,8 +785,11 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     }
     const char *const force_baseline = std::getenv("SLLM_GDN_FORCE_BASELINE");
     const bool column_candidate_by_shape =
-        metadata.token_count >= 128U &&
-        (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0);
+        (metadata.token_count >= 128U &&
+         (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0)) ||
+        short_column_state_shape_opt_in(
+            metadata.token_count, metadata.qk_heads, metadata.value_heads,
+            metadata.head_dim, force_baseline);
     constexpr uint64_t kMaxU64 = std::numeric_limits<uint64_t>::max();
     if (metadata.qkv_width == 0U || metadata.value_heads == 0U ||
         metadata.token_count >
@@ -792,7 +837,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     }
     hipDeviceProp_t properties = {};
     const sllm_status_t property_status =
-        get_device_properties(context->device_index, &properties, error_sink);
+        get_context_device_properties(context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       return property_status;
     }
@@ -811,9 +856,21 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
           "target");
     }
 #endif
+    const bool use_short_column_provider = short_column_state_opt_in(
+        metadata.token_count, metadata.qk_heads, metadata.value_heads,
+        metadata.head_dim, arch_name, force_baseline);
+    const bool use_long_column_provider =
+        metadata.token_count >= 128U &&
+        (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+        (std::strcmp(arch_name, "gfx1030") == 0 ||
+         std::strcmp(arch_name, "gfx1201") == 0);
     const bool use_column_provider =
-        column_candidate_by_shape && (std::strcmp(arch_name, "gfx1030") == 0 ||
-                                      std::strcmp(arch_name, "gfx1201") == 0);
+        use_short_column_provider || use_long_column_provider;
+    const bool use_decode_pair_provider =
+        (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+        metadata.token_count == 1U && metadata.qk_heads == 16U &&
+        metadata.value_heads == 32U && metadata.head_dim == 128U &&
+        std::strcmp(arch_name, "gfx1030") == 0;
     try {
       candidate = std::make_unique<Completion>(context, queue, nullptr, 0U,
                                                false, std::vector<uint8_t>{});
@@ -910,7 +967,23 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        "linear attention convolution launch",
                                        queue, error_sink);
     }
-    if (use_column_provider) {
+    if (use_decode_pair_provider) {
+      const hipError_t recurrent_status =
+          ::sllm_linear_attention_kernel::launch_decode_pair(
+              static_cast<const uint16_t *>(state->scratch), z, b_input,
+              a_input, a_log, dt_bias, norm_weight,
+              static_cast<const float *>(state->recurrent_state[active_slot]),
+              static_cast<float *>(state->recurrent_state[inactive_slot]),
+              output, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, metadata.output_width, queue->stream);
+      if (recurrent_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, recurrent_status,
+            "linear attention decode-pair recurrent launch", queue,
+            error_sink);
+      }
+    } else if (use_column_provider) {
       auto *const scalar_base = reinterpret_cast<float *>(
           static_cast<char *>(state->scratch) + convolved_scratch);
       float *const beta = scalar_base;
@@ -975,8 +1048,9 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
                                        "hipEventRecord linear attention", queue,
                                        error_sink);
     }
-    fill_linear_attention_dispatch_info(dispatch_info, dispatch_id, metadata,
-                                        arch_name, use_column_provider);
+    fill_linear_attention_dispatch_info(
+        dispatch_info, dispatch_id, metadata, arch_name, use_column_provider,
+        use_decode_pair_provider);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

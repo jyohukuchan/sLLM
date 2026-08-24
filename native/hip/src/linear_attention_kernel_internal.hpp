@@ -15,11 +15,16 @@ constexpr uint32_t kOutputWidth = 4096U;
 constexpr uint32_t kConvHistory = 3U;
 constexpr uint32_t kConvKernelSize = 4U;
 constexpr uint32_t kWorkgroupSize = 128U;
+constexpr uint32_t kDecodePairWorkgroupSize = 256U;
 constexpr const char *kLogicalKernelId = "linear_attention.gdn.v1";
 constexpr const char *kConvDeviceSymbol =
     "sllm_linear_attention_causal_conv_silu_v1";
 constexpr const char *kRecurrentDeviceSymbol =
     "sllm_linear_attention_recurrent_gated_norm_v1";
+constexpr const char *kDecodePairLogicalKernelId =
+    "linear_attention.gdn.decode_pair.v1";
+constexpr const char *kDecodePairDeviceSymbol =
+    "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1";
 constexpr const char *kColumnLogicalKernelId =
     "linear_attention.gdn.column_state.v2";
 constexpr const char *kColumnRecurrentDeviceSymbol =
@@ -33,6 +38,17 @@ hipError_t launch_convolution(const uint16_t *qkv, const uint16_t *conv_weight,
                               hipStream_t stream) noexcept;
 
 hipError_t launch_recurrent(
+    const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
+    const uint16_t *a_input, const float *a_log, const uint16_t *dt_bias,
+    const float *norm_weight, const float *previous_recurrent_state,
+    float *next_recurrent_state, uint16_t *output, uint32_t token_count,
+    uint32_t qk_heads, uint32_t value_heads, uint32_t head_dim,
+    uint32_t qkv_width, uint32_t output_width, hipStream_t stream) noexcept;
+
+// Exact gfx1030 m=1 path. One block owns one Q/K head and processes its two
+// value heads in sequence, sharing the Q/K load and normalization while
+// retaining independent recurrent-state updates and output gates.
+hipError_t launch_decode_pair(
     const uint16_t *convolved_qkv, const uint16_t *z, const uint16_t *b_input,
     const uint16_t *a_input, const float *a_log, const uint16_t *dt_bias,
     const float *norm_weight, const float *previous_recurrent_state,

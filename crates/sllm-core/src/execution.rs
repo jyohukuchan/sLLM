@@ -567,6 +567,13 @@ impl AdapterResource {
 /// obtain its opaque resources through the checked downcast accessors on the
 /// session passed to each method.
 pub trait ExecutionSessionAdapter: Send + Sync {
+    /// Exact target selected when the backend context was opened, when the
+    /// backend can report it.  This is crate-private control-plane metadata;
+    /// it is not part of the public execution ABI or numerical contract.
+    fn expected_target(&self) -> Option<String> {
+        None
+    }
+
     /// Maximum byte count accepted by one H2D or D2H transfer.
     fn max_transfer_bytes(&self) -> u64;
 
@@ -1058,6 +1065,10 @@ impl ExecutionSession {
 
     pub fn backend_name(&self) -> &'static str {
         self.state.backend
+    }
+
+    pub(crate) fn expected_target(&self) -> Option<String> {
+        self.state.adapter.expected_target()
     }
 
     pub fn max_transfer_bytes(&self) -> Result<u64, ExecutionError> {
@@ -3263,6 +3274,15 @@ impl BoundSemanticOp {
                 ("matmul weight", &inputs[1]),
                 ("matmul output", &outputs[0]),
             ])?;
+        } else if descriptor.kind() == SemanticOpKind::MlpGateUpSiluBundle {
+            validate_nonoverlap(&[
+                ("mlp_gate_up_silu_bundle activation", &inputs[0]),
+                ("mlp_gate_up_silu_bundle gate weight", &inputs[1]),
+                ("mlp_gate_up_silu_bundle up weight", &inputs[2]),
+                ("mlp_gate_up_silu_bundle gate output", &outputs[0]),
+                ("mlp_gate_up_silu_bundle up output", &outputs[1]),
+                ("mlp_gate_up_silu_bundle silu output", &outputs[2]),
+            ])?;
         } else if descriptor.kind() == SemanticOpKind::RmsNorm {
             validate_rmsnorm_nonoverlap(&inputs, &outputs)?;
         } else if descriptor.kind() == SemanticOpKind::Rotary {
@@ -3348,6 +3368,9 @@ fn input_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::Embedding, 1) => "embedding token IDs",
         (SemanticOpKind::Matmul, 0) => "matmul activation",
         (SemanticOpKind::Matmul, 1) => "matmul weight",
+        (SemanticOpKind::MlpGateUpSiluBundle, 0) => "mlp_gate_up_silu_bundle activation",
+        (SemanticOpKind::MlpGateUpSiluBundle, 1) => "mlp_gate_up_silu_bundle gate weight",
+        (SemanticOpKind::MlpGateUpSiluBundle, 2) => "mlp_gate_up_silu_bundle up weight",
         (SemanticOpKind::SiluMul, 0) => "silu_mul gate",
         (SemanticOpKind::SiluMul, 1) => "silu_mul up",
         (SemanticOpKind::GeluTanhMul, 0) => "gelu_tanh_mul gate",
@@ -3385,6 +3408,9 @@ fn output_role(kind: SemanticOpKind, index: usize) -> &'static str {
         (SemanticOpKind::ScalarMul, 0) => "scalar_mul output",
         (SemanticOpKind::Embedding, 0) => "embedding output",
         (SemanticOpKind::Matmul, 0) => "matmul output",
+        (SemanticOpKind::MlpGateUpSiluBundle, 0) => "mlp_gate_up_silu_bundle gate output",
+        (SemanticOpKind::MlpGateUpSiluBundle, 1) => "mlp_gate_up_silu_bundle up output",
+        (SemanticOpKind::MlpGateUpSiluBundle, 2) => "mlp_gate_up_silu_bundle silu output",
         (SemanticOpKind::SiluMul, 0) => "silu_mul output",
         (SemanticOpKind::GeluTanhMul, 0) => "gelu_tanh_mul output",
         (SemanticOpKind::SigmoidMul, 0) => "sigmoid_mul output",

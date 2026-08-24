@@ -55,6 +55,52 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-24-P49-P50-BUNDLE: Qwen decode 3融合（N0・target限定採用）
+
+- scope: 固定Qwen3.5-4B BF16 graph、text-only greedy、exact `gfx1030`/`gfx1201`、`M=1`、FP16 KV、adapter/control、
+  MTP、multimodal、FP8 sidecarなし。Residual RMSNorm、GDN qkv/z/b/a projection、MLP gate/up/SiLUの3 familyを対象とし、
+  `M>1`とscope外graphは既存opへ意味分解する。exact `gfx942`とunknown targetは選択しない。
+- baseline/candidate: Residual RMSNormはF32 add→BF16-RNE intermediate→wave32 RMSNorm→BF16-RNEを1 kernelへまとめるが、
+  中間roundと8 wave reduction順を維持する。GDNは4本のdecode matmulを一launchへ束ね、各columnのBF16 decode、K項のF32
+  accumulate、wave32 tree、BF16-RNEを維持する。MLPはgate/upの独立F32 reductionとBF16-RNEを同じblockで実行し、丸め済み
+  gateをSiLU→BF16-RNE、丸め済みupとF32 multiply→BF16-RNEする既存elementwise境界を維持する。
+- 分類: 固定Qwenのfinite input/model scopeでは3件とも**N0**。real-number式、入力項、F32 accumulator、wave32 reduction、
+  BF16 round stage、公開tensor境界を変更しない。GDN bundleのNaN payload canonicalizationはbaselineとのbit-exact比較を未実施であり、
+  非有限payloadをN0へ一般化しない。説明不能なfinite差、state差、非決定差はN3としてcandidateを無効化する。
+- correctness/output影響: Residualは`1x2560`、`2x255`、`3x256`、`3x257`のintermediate/output bitwise oracle、
+  GDNはactual `K=2560`、width `8192/4096/32/32`を4 baseline matmulへ20 repeat照合した。いずれもgfx1030 evidenceである。
+  MLP専用operator oracleと3件のgfx1201専用scalar oracleは未実施だが、gfx1201のcontrol/residual/GDN/MLP/fused3は3 warmup＋
+  10 measured、HIP-only、fallbackなし、cleanup復帰、全sampleの生成token列一致をPASSした。5 candidate間でも生成token列は一致した。
+- performance/resource: gfx1201 short 17/17のE2E中央値はcontrol `451.8648785` ms、Residual `446.7119175` ms、
+  GDN `435.1726845` ms、MLP `436.8484785` ms、3融合 `410.794651` ms。3融合はcontrol比9.09%短縮し、dispatchは
+  `108732`から`73372`へ減少した。各runはprocess終了後にHBM/GTT baselineへ復帰した。
+- decision/rollback: exact targetごとの専用selectorで限定採用し、対応targetではunset/`1`を有効、`0`/unknownを無効とする。
+  rollbackは`SLLM_QWEN_GFX{1030,1201}_RESIDUAL_RMSNORM_FUSION=0`、
+  `SLLM_QWEN_GFX{1030,1201}_GDN_PROJECTION_BUNDLE=0`、
+  `SLLM_QWEN_GFX{1030,1201}_MLP_GATE_UP_SILU_BUNDLE=0`。詳細は
+  [Phase 50履歴](../history/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を参照する。
+
+### OUT-2026-08-24-P49-P50-P32: decode GQA4 32 partition（N2・target限定採用）
+
+- scope: exact `gfx1030`/`gfx1201`、causal attention decode `M=1`、KV長4,096以上、Q heads 16、KV heads 4、
+  head dimension 256、FP16 KV。KV `4095`以下、別head/dtype/target、force-baselineでは既存providerを維持し、gfx942は選択しない。
+- baseline/candidate: baselineはkey順の単一online-softmax stateを持つ。P32はKVを32区間へ分け、128-thread/4-waveのstage 1で
+  partition-local maximum、denominator、weighted Vを計算し、stage 2がpartition順に固定mergeする。real-number式、causal key集合、
+  GQA mapping、F32 state、最終BF16-RNEは同じだが、QKの加算依存深さは概ね8段から12段へ増え、partition merge順も変わる。
+- 分類: **N2**。Phase 33 C1およびPhase 49のユーザー承認済みGQA split数値方針と同じく、僅かなworst-case bound増加を
+  token一致だけでN0/N1へ再分類しない。gfx1201への展開も同一algorithm/scopeをtarget別A/Bして採用し、別shapeへ拡張しない。
+- correctness/output影響: gfx1030はKV `1023/1024/1025/4096/8192/16384`の独立scalar oracle 6/6と、境界・非有限を含む
+  full candidate 22/22をPASSし、最大絶対誤差0、fallback/cleanup 0だった。gfx1201はhost selectorで`4095/4096/4097`、env、
+  force-baseline、shape、gfx942非選択を確認し、4,096/256 full-modelを1 warmup＋3 measuredでcontrol/P32/P32+3融合とも
+  HIP-only、fallbackなし、cleanup復帰、全sample token一致でPASSした。gfx1201専用scalar oracleは未実施であり、その点を隠さない。
+- performance/resource: gfx1201 4,096/256のE2E中央値はcontrol `10417.448939` ms、P32 `7671.955934` ms、
+  P32+3融合 `6969.896471` ms。P32単体は26.36%、統合候補は33.09%短縮し、統合時decodeは`42.6583` token/sだった。
+  P32単体のdispatchはcontrol `504000`から`512160`へ増えたが、全runでHBM/GTTはbaselineへ復帰した。
+- decision/rollback: exact target専用envのunset/`1`で既定有効、`0`/unknownで無効とする。
+  `SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32=0`または
+  `SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32=0`でtarget単位に戻し、
+  `SLLM_CAUSAL_ATTENTION_FORCE_BASELINE=1`でattention candidate全体をbaselineへ戻す。wave32 block/partitionをgfx942へ直接使わない。
+
 ### OUT-2026-08-21-P36-MTP: gfx942 MTP width/state/admission拡張（N0）
 
 - scope: Qwen3.5-4B、公開CLI、exact `gfx942`、greedy MTP draft width 1〜8。BF16 targetはFP16 KV、FP8 targetは

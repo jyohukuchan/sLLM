@@ -93,6 +93,10 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_RMSNORM_WORKGROUP_SIZE UINT32_C(256)
 #define SLLM_HIP_RMSNORM_MAX_ROWS UINT64_C(4294967295)
 
+#define SLLM_HIP_RESIDUAL_RMSNORM_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE32_V1 UINT32_C(1)
+#define SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE64_V1 UINT32_C(2)
+
 #define SLLM_HIP_ELEMENTWISE_VERSION UINT32_C(1)
 #define SLLM_HIP_ELEMENTWISE_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_COPY_V1 UINT32_C(1)
@@ -191,9 +195,11 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ATTENTION_PREPROCESS_VERSION UINT32_C(1)
 #define SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1 UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1 UINT32_C(2)
 #define SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE UINT32_C(1)
+#define SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE UINT32_C(32)
 #define SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS UINT32_C(16)
 #define SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS UINT32_C(4)
 #define SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM UINT32_C(256)
@@ -204,6 +210,7 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ATTENTION_PREPROCESS_MAX_M UINT64_C(262144)
 #define SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1 UINT32_C(0)
 #define SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1 UINT32_C(1)
+#define SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1 UINT32_C(2)
 
 #define SLLM_HIP_ROTARY_VERSION UINT32_C(1)
 #define SLLM_HIP_ROTARY_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -315,6 +322,7 @@ typedef uint32_t sllm_access_mode_t;
 #define SLLM_HIP_MAX_TRANSFER_BYTES UINT64_C(1073741824)
 
 #define SLLM_HIP_RMSNORM_VERSION UINT32_C(1)
+#define SLLM_HIP_RESIDUAL_RMSNORM_VERSION UINT32_C(1)
 #define SLLM_HIP_TENSOR_MAX_RANK UINT32_C(8)
 
 typedef uint32_t sllm_tensor_dtype_t;
@@ -369,9 +377,14 @@ typedef struct sllm_buffer_t sllm_buffer_t;
 typedef struct sllm_event_t sllm_event_t;
 typedef struct sllm_completion_t sllm_completion_t;
 typedef struct sllm_rmsnorm_plan_t sllm_rmsnorm_plan_t;
+typedef struct sllm_residual_rmsnorm_plan_t sllm_residual_rmsnorm_plan_t;
 typedef struct sllm_elementwise_plan_t sllm_elementwise_plan_t;
 typedef struct sllm_embedding_plan_t sllm_embedding_plan_t;
 typedef struct sllm_matmul_plan_t sllm_matmul_plan_t;
+typedef struct sllm_gdn_projection_bundle_plan_t
+    sllm_gdn_projection_bundle_plan_t;
+typedef struct sllm_mlp_gate_up_silu_bundle_plan_t
+    sllm_mlp_gate_up_silu_bundle_plan_t;
 typedef struct sllm_argmax_plan_t sllm_argmax_plan_t;
 typedef struct sllm_token_selector_plan_t sllm_token_selector_plan_t;
 typedef struct sllm_moe_route_plan_t sllm_moe_route_plan_t;
@@ -383,7 +396,6 @@ typedef struct sllm_windowed_attention_plan_t sllm_windowed_attention_plan_t;
 typedef struct sllm_kv_state_t sllm_kv_state_t;
 typedef struct sllm_kv_view_t sllm_kv_view_t;
 typedef struct sllm_linear_attention_state_t sllm_linear_attention_state_t;
-
 typedef struct sllm_completion_timing_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -569,6 +581,45 @@ typedef struct sllm_rmsnorm_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_rmsnorm_dispatch_info_t;
 
+/* Fused residual-add/RMSNorm keeps the BF16-RNE add intermediate as output0
+ * and writes the normalized BF16 result as output1. Both operations use F32
+ * accumulation; no completion or aliasing contract is inherited implicitly. */
+typedef struct sllm_residual_rmsnorm_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  sllm_rmsnorm_accumulation_dtype_t accumulation_dtype;
+  sllm_rmsnorm_scale_mode_t scale_mode;
+  sllm_rmsnorm_alias_policy_t alias_policy;
+  uint32_t epsilon_bits;
+  uint32_t reserved[3];
+  sllm_tensor_binding_t residual;
+  sllm_tensor_binding_t addend;
+  sllm_tensor_binding_t raw_scale;
+  sllm_tensor_binding_t residual_output;
+  sllm_tensor_binding_t output;
+} sllm_residual_rmsnorm_desc_t;
+
+typedef struct sllm_residual_rmsnorm_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t row_count;
+  uint64_t normalized_size;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_residual_rmsnorm_dispatch_info_t;
+
 /* Copy leaves input1 zero-initialized. Add and SiLU-multiply supply all three
  * bindings. Every accepted binding is contiguous, unquantized BF16, non-empty,
  * and pairwise non-overlapping within a backing-buffer identity. */
@@ -669,6 +720,83 @@ typedef struct sllm_matmul_dispatch_info_t {
   char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
   uint32_t reserved[8];
 } sllm_matmul_dispatch_info_t;
+
+/* Fixed-role Qwen3.5 GDN projection bundle. The four BF16 matmuls share one
+ * activation but retain independent weights and outputs (qkv,z,b,a). */
+#define SLLM_HIP_GDN_PROJECTION_BUNDLE_VERSION UINT32_C(1)
+#define SLLM_HIP_GDN_PROJECTION_BUNDLE_DISPATCH_INFO_VERSION UINT32_C(1)
+typedef struct sllm_gdn_projection_bundle_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved[5];
+  sllm_tensor_binding_t activation;
+  sllm_tensor_binding_t weights[4];
+  sllm_tensor_binding_t outputs[4];
+} sllm_gdn_projection_bundle_desc_t;
+
+typedef struct sllm_gdn_projection_bundle_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t m;
+  uint64_t k;
+  uint32_t widths[4];
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_gdn_projection_bundle_dispatch_info_t;
+
+/* Fixed-role Qwen3.5 MLP gate/up/SiLU bundle.  One decode workgroup computes
+ * both BF16 gate/up projections (M=1,K=2560,N=9216), stores the rounded gate
+ * and up intermediates, then applies the existing BF16-RNE SiLU multiply. */
+#define SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_VERSION UINT32_C(1)
+#define SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_KERNEL_ID_V1 UINT32_C(1)
+typedef struct sllm_mlp_gate_up_silu_bundle_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t reserved[5];
+  sllm_tensor_binding_t activation;
+  sllm_tensor_binding_t gate_weight;
+  sllm_tensor_binding_t up_weight;
+  sllm_tensor_binding_t gate_output;
+  sllm_tensor_binding_t up_output;
+  sllm_tensor_binding_t silu_output;
+} sllm_mlp_gate_up_silu_bundle_desc_t;
+
+typedef struct sllm_mlp_gate_up_silu_bundle_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint64_t m;
+  uint64_t k;
+  uint64_t n;
+  uint64_t output_elements;
+  char kernel_symbol[SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_mlp_gate_up_silu_bundle_dispatch_info_t;
 
 /* Greedy BF16 logits reduction. logits is contiguous unquantized BF16 [M,V]
  * and output is contiguous unquantized I32 [M]. NaN rows produce -1; all
@@ -838,7 +966,9 @@ typedef struct sllm_moe_expert_dispatch_info_t {
  * [M, 16, 512], with each head's final axis [Q 256, gate 256]. K is [M, 4,
  * 256]. All eight tensor bindings are required to be contiguous and their
  * byte ranges must not overlap; the runtime retains every unique backing
- * buffer through the asynchronous completion. */
+ * buffer through the asynchronous completion. reserved[0] selects the
+ * position payload mode. DERIVED_CONTIGUOUS computes start_position+row in
+ * the kernel and does not read the otherwise ABI-required positions payload. */
 typedef struct sllm_attention_preprocess_desc_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1405,6 +1535,22 @@ SLLM_HIP_API sllm_status_t sllm_rmsnorm_execute(
     sllm_completion_t **completion, sllm_rmsnorm_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+SLLM_HIP_API sllm_status_t
+sllm_residual_rmsnorm_prepare(const sllm_context_t *context,
+                              const sllm_residual_rmsnorm_desc_t *descriptor,
+                              sllm_residual_rmsnorm_plan_t **plan,
+                              sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_residual_rmsnorm_plan_release(
+    sllm_residual_rmsnorm_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_residual_rmsnorm_execute(
+    const sllm_residual_rmsnorm_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_residual_rmsnorm_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t sllm_elementwise_prepare(
     const sllm_context_t *context, const sllm_elementwise_desc_t *descriptor,
     sllm_elementwise_plan_t **plan,
@@ -1445,6 +1591,38 @@ SLLM_HIP_API sllm_status_t sllm_matmul_plan_release(
 SLLM_HIP_API sllm_status_t sllm_matmul_execute(
     const sllm_matmul_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion, sllm_matmul_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_gdn_projection_bundle_prepare(
+    const sllm_context_t *context,
+    const sllm_gdn_projection_bundle_desc_t *descriptor,
+    sllm_gdn_projection_bundle_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_gdn_projection_bundle_plan_release(
+    sllm_gdn_projection_bundle_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_gdn_projection_bundle_execute(
+    const sllm_gdn_projection_bundle_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_gdn_projection_bundle_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_mlp_gate_up_silu_bundle_prepare(
+    const sllm_context_t *context,
+    const sllm_mlp_gate_up_silu_bundle_desc_t *descriptor,
+    sllm_mlp_gate_up_silu_bundle_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_mlp_gate_up_silu_bundle_plan_release(
+    sllm_mlp_gate_up_silu_bundle_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_mlp_gate_up_silu_bundle_execute(
+    const sllm_mlp_gate_up_silu_bundle_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_mlp_gate_up_silu_bundle_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_argmax_prepare(

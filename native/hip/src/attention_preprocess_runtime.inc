@@ -1,3 +1,25 @@
+namespace {
+
+bool use_gfx1030_wave32_attention_preprocess(
+    const sllm_attention_preprocess::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32");
+  // The exact gfx1030/Qwen shape is the profiled production path.  Keep an
+  // explicit zero (and unknown values) as a fail-closed rollback while an
+  // unset variable selects the accepted default.
+  const bool enabled = opt_in == nullptr || std::strcmp(opt_in, "1") == 0;
+  return enabled &&
+         std::strcmp(arch_name, "gfx1030") == 0 &&
+         metadata.q_heads == SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS &&
+         metadata.k_heads == SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS &&
+         metadata.head_dim == SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM &&
+         (metadata.position_components == 1U ||
+          metadata.position_components == 3U);
+}
+
+} // namespace
+
 extern "C" sllm_status_t sllm_attention_preprocess_prepare(
     const sllm_context_t *const raw_context,
     const sllm_attention_preprocess_desc_t *const descriptor,
@@ -310,8 +332,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        plan->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status = get_context_device_properties(
+        plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       return property_status;
     }
@@ -338,6 +360,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
     };
     const int32_t *const positions = static_cast<const int32_t *>(
         byte_pointer(plan->buffers[4], plan->metadata.positions.byte_offset));
+    if (plan->metadata.position_payload_mode !=
+        SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1) {
     std::vector<int32_t> host_positions(
         static_cast<std::size_t>(plan->metadata.m) *
         plan->metadata.position_components);
@@ -376,9 +400,10 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
       if (!valid) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_POSITION_PAYLOAD_MISMATCH,
-            "attention preprocess position payload does not equal the "
-            "requested contiguous range");
+          "attention preprocess position payload does not equal the "
+          "requested contiguous range");
       }
+    }
     }
 
     try {
@@ -460,11 +485,14 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
         byte_pointer(plan->buffers[6], plan->metadata.gate_output.byte_offset));
     uint16_t *const k_output = static_cast<uint16_t *>(
         byte_pointer(plan->buffers[7], plan->metadata.k_output.byte_offset));
+    const bool use_wave32 =
+        use_gfx1030_wave32_attention_preprocess(plan->metadata, arch_name);
     status = ::sllm_attention_preprocess_kernel::launch(
         packed_q_gate, k, q_raw_scale, k_raw_scale, positions, q_output,
         gate_output, k_output, static_cast<uint32_t>(plan->metadata.m),
         plan->metadata.q_heads, plan->metadata.k_heads, plan->metadata.head_dim,
-        plan->metadata.position_components, queue->stream);
+        plan->metadata.position_components, plan->metadata.start_position,
+        plan->metadata.position_payload_mode, use_wave32, queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,
@@ -479,8 +507,8 @@ extern "C" sllm_status_t sllm_attention_preprocess_execute(
       return cleanup_failed_submission(candidate, token, status,
                                        "hipEventRecord", queue, error_sink);
     }
-    initialize_attention_preprocess_dispatch_info(dispatch_info, dispatch_id,
-                                                  plan->metadata, arch_name);
+    initialize_attention_preprocess_dispatch_info(
+        dispatch_info, dispatch_id, plan->metadata, use_wave32, arch_name);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

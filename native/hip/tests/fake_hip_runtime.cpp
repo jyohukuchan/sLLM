@@ -10,7 +10,6 @@
 #include <new>
 #include <unordered_set>
 
-struct FakeHipStream {};
 struct FakeHipMemHandle {
   std::size_t size = 0U;
 };
@@ -35,6 +34,7 @@ struct State final {
   hipError_t causal_attention_launch_status = hipSuccess;
   hipError_t event_record_status = hipSuccess;
   std::size_t rmsnorm_launch_calls = 0U;
+  std::size_t residual_rmsnorm_launch_calls = 0U;
   std::size_t elementwise_copy_launch_calls = 0U;
   std::size_t elementwise_add_launch_calls = 0U;
   std::size_t elementwise_broadcast_add_launch_calls = 0U;
@@ -48,6 +48,7 @@ struct State final {
   std::size_t argmax_launch_calls = 0U;
   std::size_t attention_preprocess_launch_calls = 0U;
   std::size_t rotary_launch_calls = 0U;
+  std::size_t device_property_calls = 0U;
   std::size_t windowed_attention_launch_calls = 0U;
   uint64_t elementwise_last_element_count = 0U;
   uint64_t matmul_last_m = 0U;
@@ -58,6 +59,7 @@ struct State final {
   uint64_t argmax_last_v = 0U;
   uint32_t attention_preprocess_last_m = 0U;
   uint32_t rotary_last_token_count = 0U;
+  char gcn_arch_name[64] = "gfx1201";
   std::size_t kv_state_append_launch_calls = 0U;
   std::size_t causal_attention_launch_calls = 0U;
   uint32_t kv_state_last_token_count = 0U;
@@ -197,6 +199,7 @@ void reset() noexcept {
   state.causal_attention_launch_status = hipSuccess;
   state.event_record_status = hipSuccess;
   state.rmsnorm_launch_calls = 0U;
+  state.residual_rmsnorm_launch_calls = 0U;
   state.elementwise_copy_launch_calls = 0U;
   state.elementwise_add_launch_calls = 0U;
   state.elementwise_broadcast_add_launch_calls = 0U;
@@ -210,6 +213,7 @@ void reset() noexcept {
   state.argmax_launch_calls = 0U;
   state.attention_preprocess_launch_calls = 0U;
   state.rotary_launch_calls = 0U;
+  state.device_property_calls = 0U;
   state.windowed_attention_launch_calls = 0U;
   state.kv_state_append_launch_calls = 0U;
   state.causal_attention_launch_calls = 0U;
@@ -233,6 +237,24 @@ void reset() noexcept {
   state.event_destroy_calls = 0U;
   state.stream_destroy_calls = 0U;
   state.allocation_free_calls = 0U;
+  std::strncpy(state.gcn_arch_name, "gfx1201",
+               sizeof(state.gcn_arch_name) - 1U);
+  state.gcn_arch_name[sizeof(state.gcn_arch_name) - 1U] = '\0';
+}
+
+void set_gcn_arch_name(const char *const name) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (name == nullptr) {
+    state.gcn_arch_name[0] = '\0';
+    return;
+  }
+  std::strncpy(state.gcn_arch_name, name, sizeof(state.gcn_arch_name) - 1U);
+  state.gcn_arch_name[sizeof(state.gcn_arch_name) - 1U] = '\0';
+}
+
+std::size_t device_property_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.device_property_calls;
 }
 
 void set_vmm_supported(const bool supported) noexcept {
@@ -269,6 +291,45 @@ hipError_t rmsnorm_launch(const uint16_t *const activation,
             scale_mode == SLLM_RMSNORM_SCALE_MODE_DIRECT ? raw : 1.0F + raw;
         output[row_offset + column] = f32_to_bf16_rne(
             bf16_to_f32(activation[row_offset + column]) * inverse_rms * scale);
+      }
+    }
+  }
+  return state.rmsnorm_launch_status;
+}
+
+hipError_t residual_rmsnorm_launch(
+    const uint16_t *const residual, const uint16_t *const addend,
+    const uint16_t *const raw_scale, uint16_t *const residual_output,
+    uint16_t *const output, const uint32_t normalized_size,
+    const uint32_t row_count, const float epsilon, const uint32_t scale_mode,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.residual_rmsnorm_launch_calls;
+  state.rmsnorm_last_normalized_size = normalized_size;
+  state.rmsnorm_last_row_count = row_count;
+  state.rmsnorm_last_scale_mode = scale_mode;
+  if (state.rmsnorm_launch_status == hipSuccess &&
+      state.rmsnorm_numerical_execution) {
+    for (uint32_t row = 0U; row != row_count; ++row) {
+      const uint64_t row_offset = static_cast<uint64_t>(row) * normalized_size;
+      float sum = 0.0F;
+      for (uint32_t column = 0U; column != normalized_size; ++column) {
+        const float value = bf16_to_f32(residual[row_offset + column]) +
+                            bf16_to_f32(addend[row_offset + column]);
+        const uint16_t rounded = f32_to_bf16_rne(value);
+        residual_output[row_offset + column] = rounded;
+        const float bf16_value = bf16_to_f32(rounded);
+        sum += bf16_value * bf16_value;
+      }
+      const float inverse_rms =
+          1.0F / std::sqrt(sum / static_cast<float>(normalized_size) + epsilon);
+      for (uint32_t column = 0U; column != normalized_size; ++column) {
+        const float raw = bf16_to_f32(raw_scale[column]);
+        const float scale =
+            scale_mode == SLLM_RMSNORM_SCALE_MODE_DIRECT ? raw : 1.0F + raw;
+        output[row_offset + column] =
+            f32_to_bf16_rne(bf16_to_f32(residual_output[row_offset + column]) *
+                            inverse_rms * scale);
       }
     }
   }
@@ -866,6 +927,11 @@ std::size_t rmsnorm_launch_calls() noexcept {
   return state.rmsnorm_launch_calls;
 }
 
+std::size_t residual_rmsnorm_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.residual_rmsnorm_launch_calls;
+}
+
 uint32_t rmsnorm_last_normalized_size() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.rmsnorm_last_normalized_size;
@@ -991,6 +1057,10 @@ const char *hipGetErrorString(const hipError_t error) noexcept {
     return "success";
   case hipErrorInvalidValue:
     return "invalid value";
+  case hipErrorOutOfMemory:
+    return "out of memory";
+  case hipErrorNotSupported:
+    return "not supported";
   case hipErrorNotReady:
     return "not ready";
   case hipErrorUnknown:
@@ -1009,13 +1079,15 @@ hipError_t hipGetDeviceCount(int *const count) noexcept {
 
 hipError_t hipGetDeviceProperties(hipDeviceProp_t *const properties,
                                   const unsigned int device) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
   if (properties == nullptr || device != 0U) {
     return hipErrorInvalidValue;
   }
+  ++state.device_property_calls;
   std::memset(properties, 0, sizeof(*properties));
   std::strncpy(properties->name, "fake-host-device",
                sizeof(properties->name) - 1U);
-  std::strncpy(properties->gcnArchName, "gfx1201",
+  std::strncpy(properties->gcnArchName, state.gcn_arch_name,
                sizeof(properties->gcnArchName) - 1U);
   properties->totalGlobalMem = static_cast<std::size_t>(16U) * 1024U * 1024U;
   properties->warpSize = 32;

@@ -189,9 +189,10 @@ pub use nvfp4_sidecar::{
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessPositionPayloadModeV1,
-    AttentionPreprocessTensor, ElementwiseTensor, OpError, RmsNormAliasPolicy, RmsNormContract,
-    RmsNormEpsilon, RmsNormScaleMode, RmsNormTensor, RotaryPositionModeV1, RotaryTensor,
-    SemanticOp, SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
+    AttentionPreprocessTensor, ElementwiseTensor, GdnProjectionBundleContractV1,
+    MlpGateUpSiluBundleContractV1, OpError, RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon,
+    RmsNormScaleMode, RmsNormTensor, RotaryPositionModeV1, RotaryTensor, SemanticOp,
+    SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
     TokenSelectorContractV1, TokenSelectorTensor, WindowedCausalAttentionContract,
 };
 pub use prefix_cache::{

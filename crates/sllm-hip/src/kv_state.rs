@@ -66,16 +66,21 @@ fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
     }
 }
 
-fn selected_memory_kind_for_target(expected_target: Option<&str>) -> u32 {
-    if expected_target == Some("gfx942") {
+const GFX1030_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
+
+fn selected_memory_kind_for_target(expected_target: Option<&str>, capacity_tokens: u64) -> u32 {
+    if expected_target == Some("gfx942")
+        || (expected_target == Some("gfx1030")
+            && capacity_tokens >= GFX1030_CONTIGUOUS_LONG_KV_MIN_TOKENS)
+    {
         sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
     } else {
         sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
     }
 }
 
-fn selected_memory_kind(context: &Context) -> u32 {
-    selected_memory_kind_for_target(context.expected_target())
+fn selected_memory_kind(context: &Context, capacity_tokens: u64) -> u32 {
+    selected_memory_kind_for_target(context.expected_target(), capacity_tokens)
 }
 
 struct KvStateInner {
@@ -157,7 +162,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(context),
+            memory_kind: selected_memory_kind(context, descriptor.capacity()),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
@@ -274,7 +279,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(&self.inner.context),
+            memory_kind: selected_memory_kind(&self.inner.context, descriptor.capacity()),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
@@ -1524,6 +1529,187 @@ fn validate_append_info(
     })
 }
 
+fn decode_wave_split_q_preload_enabled(
+    expected_target: Option<&str>,
+    use_decode_wave_split: bool,
+    q_preload_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    expected_target == Some("gfx1030")
+        && use_decode_wave_split
+        && q_preload_opt_in.is_none_or(|value| value == "1")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_wave_split_fp16_pair_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_none_or(|value| value == "1")
+        && query_count == 1
+        && committed_kv_length >= 1024
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_gqa4_split_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count == 1
+        && committed_kv_length >= 4096
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn decode_gqa4_split_p32_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    decode_gqa4_split_p32_target_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        kv_heads,
+        head_dim,
+        encoding,
+        opt_in,
+        None,
+        force_baseline,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_gqa4_split_p32_target_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    gfx1030_opt_in: Option<&std::ffi::OsStr>,
+    gfx1201_opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    let target_opt_in = match expected_target {
+        Some("gfx1030") => gfx1030_opt_in.is_none_or(|value| value == "1"),
+        Some("gfx1201") => gfx1201_opt_in.is_none_or(|value| value == "1"),
+        _ => false,
+    };
+    !force_baseline
+        && target_opt_in
+        && query_count == 1
+        && committed_kv_length >= 4096
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_wave_split_short_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    committed_kv_length: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    short_decode_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    expected_target == Some("gfx1030")
+        && short_decode_opt_in.is_none_or(|value| value == "1")
+        && query_count == 1
+        && (32..1024).contains(&committed_kv_length)
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+fn decode_wave_split_short_q_preload_enabled(
+    use_decode_wave_split_short: bool,
+    short_q_preload_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    use_decode_wave_split_short && short_q_preload_opt_in.is_none_or(|value| value == "1")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn scaled_prefill_gemm_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_none_or(|value| value == "1")
+        && query_count >= 1024
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+#[allow(clippy::too_many_arguments)]
+fn long_prefill_v2_enabled(
+    expected_target: Option<&str>,
+    query_count: u64,
+    query_heads: u32,
+    kv_heads: u32,
+    head_dim: u32,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_some_and(|value| value == "1")
+        && query_count >= 1024
+        && query_heads == 16
+        && kv_heads == 4
+        && head_dim == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
 fn validate_causal_attention_info(
     info: &sys::sllm_causal_attention_dispatch_info_t,
     context: &Context,
@@ -1551,15 +1737,106 @@ fn validate_causal_attention_info(
     let use_phase33_common_provider = matches!(expected_target, Some("gfx1030" | "gfx1201"));
     let force_baseline =
         std::env::var_os("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE").is_some_and(|value| value == "1");
-    let use_decode_wave_split = use_phase33_common_provider
+    let use_decode_wave_split_long = use_phase33_common_provider
         && query_count == 1
         && committed_kv_length >= 1024
         && descriptor.layout().head_dim() == 256;
+    let short_decode_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT");
+    let use_decode_wave_split_short = decode_wave_split_short_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        short_decode_opt_in.as_deref(),
+    );
+    let use_decode_wave_split = use_decode_wave_split_long || use_decode_wave_split_short;
+    let fp16_pair_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR");
+    let gqa4_split_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT");
+    let gqa4_split_p32_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32");
+    let gfx1201_gqa4_split_p32_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32");
+    let use_decode_gqa4_split_p32 = decode_gqa4_split_p32_target_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa4_split_p32_opt_in.as_deref(),
+        gfx1201_gqa4_split_p32_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_decode_gqa4_split = decode_gqa4_split_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        gqa4_split_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_decode_gqa4_split_p32;
+    let use_decode_wave_split_fp16_pair = decode_wave_split_fp16_pair_enabled(
+        expected_target,
+        query_count,
+        committed_kv_length,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        fp16_pair_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_decode_gqa4_split
+        && !use_decode_gqa4_split_p32;
+    let q_preload_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD");
+    let use_decode_wave_split_q_preload_long = decode_wave_split_q_preload_enabled(
+        expected_target,
+        use_decode_wave_split_long,
+        q_preload_opt_in.as_deref(),
+    );
+    let short_q_preload_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD");
+    let use_decode_wave_split_q_preload_short = decode_wave_split_short_q_preload_enabled(
+        use_decode_wave_split_short,
+        short_q_preload_opt_in.as_deref(),
+    );
+    let use_decode_wave_split_q_preload =
+        use_decode_wave_split_q_preload_long || use_decode_wave_split_q_preload_short;
     let use_prefill_gqa4 = use_phase33_common_provider
         && query_count >= 64
         && query_heads as usize / descriptor.layout().heads() == 4
         && descriptor.layout().head_dim() == 256;
-    let use_prefill_gqa4_qtile4 = use_prefill_gqa4 && query_count >= 128 && !force_baseline;
+    let scaled_prefill_opt_in =
+        std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
+    let long_prefill_v2_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
+    let use_long_prefill_v2 = long_prefill_v2_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        long_prefill_v2_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_scaled_prefill_gemm = scaled_prefill_gemm_enabled(
+        expected_target,
+        query_count,
+        query_heads,
+        descriptor.layout().heads() as u32,
+        descriptor.layout().head_dim() as u32,
+        descriptor.cache_encoding(),
+        scaled_prefill_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_long_prefill_v2;
+    let use_prefill_gqa4_qtile4 =
+        use_prefill_gqa4 && query_count >= 128 && !force_baseline && !use_scaled_prefill_gemm;
     let (expected_kernel_id, baseline_kernel, baseline_device) =
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
@@ -1574,10 +1851,42 @@ fn validate_causal_attention_info(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
-    let (expected_kernel, expected_device) = if use_decode_wave_split {
+    let (expected_kernel, expected_device) = if use_decode_gqa4_split_p32 {
         (
-            "causal_attention.decode.wave8_split.v5",
-            "sllm_causal_attention_decode_wave8_split_v5",
+            "causal_attention.decode.gqa4_tiled_split.p32.v1",
+            "sllm_causal_attention_decode_gqa4_split_p32_v1",
+        )
+    } else if use_decode_gqa4_split {
+        (
+            "causal_attention.decode.gqa4_tiled_split.v1",
+            "sllm_causal_attention_decode_gqa4_tiled_split_v1",
+        )
+    } else if use_decode_wave_split_fp16_pair {
+        (
+            "causal_attention.decode.wave8_split.fp16_pair.v1",
+            "sllm_causal_attention_decode_wave8_split_fp16_pair_v1",
+        )
+    } else if use_decode_wave_split {
+        if use_decode_wave_split_q_preload {
+            (
+                "causal_attention.decode.wave8_split.q_preload.v1",
+                "sllm_causal_attention_decode_wave8_split_q_preload_v1",
+            )
+        } else {
+            (
+                "causal_attention.decode.wave8_split.v5",
+                "sllm_causal_attention_decode_wave8_split_v5",
+            )
+        }
+    } else if use_long_prefill_v2 {
+        (
+            "causal_attention.prefill.gfx1030_qtile8_split.v2",
+            "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2",
+        )
+    } else if use_scaled_prefill_gemm {
+        (
+            "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
+            "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1",
         )
     } else if use_prefill_gqa4_qtile4 {
         (
@@ -1609,11 +1918,38 @@ fn validate_causal_attention_info(
         || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
         || info.backend != sys::SLLM_BACKEND_HIP
         || info.dispatch_id == 0
-        || info.dispatch_count != 1
+        || info.dispatch_count
+            != if use_decode_gqa4_split || use_decode_gqa4_split_p32 || use_long_prefill_v2 {
+                2
+            } else {
+                1
+            }
         || info.kernel_id != expected_kernel_id
-        || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
+        || info.workgroup_size_x
+            != if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
+                128
+            } else {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
+            }
         || Some(info.grid_size_x)
-            != if use_prefill_gqa4_qtile4 {
+            != if use_decode_gqa4_split_p32 {
+                Some(128)
+            } else if use_decode_gqa4_split {
+                Some(64)
+            } else if use_scaled_prefill_gemm {
+                query_count
+                    .checked_add(255)
+                    .and_then(|value| (value / 256).checked_mul(descriptor.layout().heads() as u64))
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_long_prefill_v2 {
+                query_count
+                    .checked_add(7)
+                    .and_then(|value| {
+                        (value / 8)
+                            .checked_mul((descriptor.layout().heads() as u64).checked_mul(16)?)
+                    })
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if use_prefill_gqa4_qtile4 {
                 query_count
                     .checked_add(3)
                     .and_then(|value| (value / 4).checked_mul(descriptor.layout().heads() as u64))
@@ -1782,30 +2118,952 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gfx942_keeps_the_fixed_contiguous_resident_provider() {
+    fn long_gfx1030_and_gfx942_use_only_the_fixed_contiguous_provider() {
         assert_eq!(
-            selected_memory_kind_for_target(Some("gfx942")),
+            selected_memory_kind_for_target(Some("gfx942"), 1),
             sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
         );
         assert_eq!(
-            selected_memory_kind_for_target(Some("gfx1201")),
+            selected_memory_kind_for_target(Some("gfx1030"), 65_535),
             sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
         );
         assert_eq!(
-            selected_memory_kind_for_target(None),
+            selected_memory_kind_for_target(Some("gfx1030"), 65_536),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT
+        );
+        assert_eq!(
+            selected_memory_kind_for_target(Some("gfx1201"), 131_072),
             sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
         );
+        assert_eq!(
+            selected_memory_kind_for_target(None, 131_072),
+            sys::SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+        );
+    }
+
+    #[test]
+    fn phase50_gfx942_never_selects_rdna_causal_candidates() {
+        let opt_ins = [
+            None,
+            Some(std::ffi::OsStr::new("1")),
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ];
+        for opt_in in opt_ins {
+            for committed_kv_length in [4095, 4096, 4097] {
+                assert!(!decode_wave_split_fp16_pair_enabled(
+                    Some("gfx942"),
+                    1,
+                    committed_kv_length,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ));
+                assert!(!decode_gqa4_split_enabled(
+                    Some("gfx942"),
+                    1,
+                    committed_kv_length,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ));
+                assert!(!decode_gqa4_split_p32_enabled(
+                    Some("gfx942"),
+                    1,
+                    committed_kv_length,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ));
+            }
+            for committed_kv_length in [31, 32, 33, 1023] {
+                assert!(!decode_wave_split_short_enabled(
+                    Some("gfx942"),
+                    1,
+                    committed_kv_length,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                ));
+            }
+            assert!(!decode_wave_split_q_preload_enabled(
+                Some("gfx942"),
+                true,
+                opt_in,
+            ));
+            assert!(!decode_wave_split_q_preload_enabled(
+                Some("gfx1201"),
+                true,
+                opt_in,
+            ));
+            for query_count in [1023, 1024, 1025, 4096, 10_001] {
+                assert!(!scaled_prefill_gemm_enabled(
+                    Some("gfx942"),
+                    query_count,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ));
+                assert!(!long_prefill_v2_enabled(
+                    Some("gfx942"),
+                    query_count,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ));
+            }
+        }
+
+        // A force-baseline request must remain safe even if a candidate
+        // opt-in is present; gfx942 is rejected before this fallback branch.
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            Some("gfx942"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("1")),
+            true,
+        ));
+        assert!(!decode_gqa4_split_enabled(
+            Some("gfx942"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("1")),
+            true,
+        ));
+        assert!(!decode_gqa4_split_p32_enabled(
+            Some("gfx942"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("1")),
+            true,
+        ));
+        assert!(!scaled_prefill_gemm_enabled(
+            Some("gfx942"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("1")),
+            true,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            Some("gfx942"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("1")),
+            true,
+        ));
+    }
+
+    #[test]
+    fn decode_q_preload_guard_defaults_on_and_accepts_only_explicit_disable() {
+        assert!(decode_wave_split_q_preload_enabled(
+            Some("gfx1030"),
+            true,
+            None
+        ));
+        assert!(decode_wave_split_q_preload_enabled(
+            Some("gfx1030"),
+            true,
+            Some(std::ffi::OsStr::new("1"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            Some("gfx1030"),
+            true,
+            Some(std::ffi::OsStr::new("0"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            Some("gfx1030"),
+            true,
+            Some(std::ffi::OsStr::new("invalid"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            Some("gfx1201"),
+            true,
+            None
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            Some("gfx1030"),
+            false,
+            None
+        ));
+    }
+
+    #[test]
+    fn decode_fp16_pair_guard_defaults_on_for_long_gfx1030_shape_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_wave_split_fp16_pair_enabled(
+            Some("gfx1030"),
+            1,
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(decode_wave_split_fp16_pair_enabled(
+            Some("gfx1030"),
+            1,
+            100_000,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for (committed_kv_length, query_count) in [(1023, 1), (1024, 2)] {
+            assert!(!decode_wave_split_fp16_pair_enabled(
+                Some("gfx1030"),
+                query_count,
+                committed_kv_length,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        assert!(decode_wave_split_fp16_pair_enabled(
+            Some("gfx1030"),
+            1,
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        for opt_in in [
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!decode_wave_split_fp16_pair_enabled(
+                Some("gfx1030"),
+                1,
+                1024,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            Some("gfx1201"),
+            1,
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for (query_heads, kv_heads, head_dim, encoding) in [
+            (8, 4, 256, KvCacheEncoding::Fp16),
+            (16, 8, 256, KvCacheEncoding::Fp16),
+            (16, 4, 128, KvCacheEncoding::Fp16),
+            (16, 4, 256, KvCacheEncoding::Fp8E4M3Fn),
+        ] {
+            assert!(!decode_wave_split_fp16_pair_enabled(
+                Some("gfx1030"),
+                1,
+                1024,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            Some("gfx1030"),
+            1,
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+    }
+
+    #[test]
+    fn decode_gqa4_split_guard_requires_exact_opt_in_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_gqa4_split_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!decode_gqa4_split_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        assert!(!decode_gqa4_split_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("0")),
+            false,
+        ));
+        assert!(!decode_gqa4_split_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for (committed_kv_length, query_count) in [(1023, 1), (1024, 1), (1025, 1), (4095, 1)] {
+            assert!(!decode_gqa4_split_enabled(
+                Some("gfx1030"),
+                query_count,
+                committed_kv_length,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        for (target, query_count, committed_kv_length, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx1201"), 1, 4096, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 2, 4096, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 8, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 16, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 4096, 16, 4, 128, KvCacheEncoding::Fp16),
+            (
+                Some("gfx1030"),
+                1,
+                4096,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp8E4M3Fn,
+            ),
+        ] {
+            assert!(!decode_gqa4_split_enabled(
+                target,
+                query_count,
+                committed_kv_length,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_gqa4_split_partition_guards_share_shape_and_threshold_contract() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for opt_in in [enabled, Some(std::ffi::OsStr::new("0")), None] {
+            assert_eq!(
+                decode_gqa4_split_enabled(
+                    Some("gfx1030"),
+                    1,
+                    4096,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    opt_in,
+                    false,
+                ),
+                opt_in == enabled,
+            );
+        }
+        for committed_kv_length in [1023, 1024, 1025, 4095] {
+            assert!(!decode_gqa4_split_enabled(
+                Some("gfx1030"),
+                1,
+                committed_kv_length,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_gqa4_split_p32_guard_is_default_on_with_explicit_rollback() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let rollback = Some(std::ffi::OsStr::new("0"));
+        let unknown = Some(std::ffi::OsStr::new("unexpected"));
+        for opt_in in [None, enabled] {
+            assert!(decode_gqa4_split_p32_enabled(
+                Some("gfx1030"),
+                1,
+                4096,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        for opt_in in [rollback, unknown] {
+            assert!(!decode_gqa4_split_p32_enabled(
+                Some("gfx1030"),
+                1,
+                4096,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_gqa4_split_p32_enabled(
+            Some("gfx1030"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for committed_kv_length in [4095, 4096, 4097] {
+            assert_eq!(
+                decode_gqa4_split_p32_enabled(
+                    Some("gfx1030"),
+                    1,
+                    committed_kv_length,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    None,
+                    false,
+                ),
+                committed_kv_length >= 4096,
+            );
+        }
+        assert!(decode_gqa4_split_p32_target_enabled(
+            Some("gfx1201"),
+            1,
+            4096,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            None,
+            false,
+        ));
+        for (target, query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx942"), 1, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 2, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 8, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 16, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 16, 4, 128, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1, 16, 4, 256, KvCacheEncoding::Fp8E4M3Fn),
+        ] {
+            assert!(!decode_gqa4_split_p32_enabled(
+                target,
+                query_count,
+                4096,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                None,
+                false,
+            ));
+        }
+    }
+
+    #[test]
+    fn decode_gqa4_split_p32_gfx1201_is_default_on_and_target_scoped() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        let unknown = Some(std::ffi::OsStr::new("unknown"));
+        let select = |target,
+                      committed_kv_length,
+                      query_count,
+                      query_heads,
+                      kv_heads,
+                      head_dim,
+                      encoding,
+                      gfx1030_opt_in,
+                      gfx1201_opt_in,
+                      force_baseline| {
+            decode_gqa4_split_p32_target_enabled(
+                target,
+                query_count,
+                committed_kv_length,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                gfx1030_opt_in,
+                gfx1201_opt_in,
+                force_baseline,
+            )
+        };
+
+        assert!(select(
+            Some("gfx1201"),
+            4096,
+            1,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            None,
+            false,
+        ));
+        for opt_in in [disabled, unknown] {
+            assert!(!select(
+                Some("gfx1201"),
+                4096,
+                1,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                opt_in,
+                false,
+            ));
+        }
+        for committed_kv_length in [4095, 4096, 4097] {
+            assert_eq!(
+                select(
+                    Some("gfx1201"),
+                    committed_kv_length,
+                    1,
+                    16,
+                    4,
+                    256,
+                    KvCacheEncoding::Fp16,
+                    None,
+                    enabled,
+                    false,
+                ),
+                committed_kv_length >= 4096,
+            );
+        }
+        assert!(!select(
+            Some("gfx1201"),
+            4096,
+            1,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            enabled,
+            true,
+        ));
+        for (query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (2, 16, 4, 256, KvCacheEncoding::Fp16),
+            (1, 8, 4, 256, KvCacheEncoding::Fp16),
+            (1, 16, 8, 256, KvCacheEncoding::Fp16),
+            (1, 16, 4, 128, KvCacheEncoding::Fp16),
+            (1, 16, 4, 256, KvCacheEncoding::Fp8E4M3Fn),
+        ] {
+            assert!(!select(
+                Some("gfx1201"),
+                4096,
+                query_count,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                None,
+                enabled,
+                false,
+            ));
+        }
+        assert!(select(
+            Some("gfx1201"),
+            4096,
+            1,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            None,
+            false,
+        ));
+        assert!(!select(
+            Some("gfx942"),
+            4096,
+            1,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            enabled,
+            false,
+        ));
+        assert!(!select(
+            Some("unknown"),
+            4096,
+            1,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            enabled,
+            false,
+        ));
+    }
+
+    #[test]
+    fn decode_short_wave_guard_is_exact_target_shape_encoding_and_default_on() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            32,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            128,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+        ));
+        assert!(decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            1023,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        for (query_count, committed_kv_length) in [(1, 31), (1, 1024), (2, 128)] {
+            assert!(!decode_wave_split_short_enabled(
+                Some("gfx1030"),
+                query_count,
+                committed_kv_length,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+            ));
+        }
+        assert!(!decode_wave_split_short_enabled(
+            Some("gfx1201"),
+            1,
+            128,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            128,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp8E4M3Fn,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            128,
+            8,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            128,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("0")),
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            Some("gfx1030"),
+            1,
+            128,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("unknown")),
+        ));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            false,
+            Some(std::ffi::OsStr::new("1")),
+        ));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("0")),
+        ));
+        assert!(decode_wave_split_short_q_preload_enabled(true, None));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("unknown")),
+        ));
+        assert!(decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("1")),
+        ));
+    }
+
+    #[test]
+    fn scaled_prefill_gemm_guard_is_exact_target_shape_and_default_on() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1023,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        for query_count in [1024, 1025, 4096, 10001, 100000] {
+            assert!(scaled_prefill_gemm_enabled(
+                Some("gfx1030"),
+                query_count,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        assert!(scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        for value in ["0", "unknown"] {
+            assert!(!scaled_prefill_gemm_enabled(
+                Some("gfx1030"),
+                1024,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                Some(std::ffi::OsStr::new(value)),
+                false,
+            ));
+        }
+        for (target, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx1201"), 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 8, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 16, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 16, 4, 128, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 16, 4, 256, KvCacheEncoding::Fp8E4M3Fn),
+        ] {
+            assert!(!scaled_prefill_gemm_enabled(
+                target,
+                1024,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
+        assert!(!scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+    }
+
+    #[test]
+    fn long_prefill_v2_guard_is_explicit_and_matches_native_shape() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for query_count in [1024, 4096, 10_001, 100_000] {
+            assert!(long_prefill_v2_enabled(
+                Some("gfx1030"),
+                query_count,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        assert!(!long_prefill_v2_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        for (target, query_count, query_heads, kv_heads, head_dim, encoding) in [
+            (Some("gfx1201"), 1024, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1023, 16, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1024, 8, 4, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1024, 16, 8, 256, KvCacheEncoding::Fp16),
+            (Some("gfx1030"), 1024, 16, 4, 128, KvCacheEncoding::Fp16),
+            (
+                Some("gfx1030"),
+                1024,
+                16,
+                4,
+                256,
+                KvCacheEncoding::Fp8E4M3Fn,
+            ),
+        ] {
+            assert!(!long_prefill_v2_enabled(
+                target,
+                query_count,
+                query_heads,
+                kv_heads,
+                head_dim,
+                encoding,
+                enabled,
+                false,
+            ));
+        }
     }
 
     #[test]
     fn fp16_oracle_covers_special_and_rounding_cases() {
         assert_eq!(bf16_to_f16_bits(0x0000), 0x0000);
         assert_eq!(bf16_to_f16_bits(0x8000), 0x8000);
+        assert_eq!(bf16_to_f16_bits(0x0001), 0x0000);
+        assert_eq!(bf16_to_f16_bits(0x3880), 0x0400);
         assert_eq!(bf16_to_f16_bits(0x7f80), 0x7c00);
         assert_eq!(bf16_to_f16_bits(0xff80), 0xfc00);
         assert_eq!(bf16_to_f16_bits(0x7fc1), 0x7e00);
         assert_eq!(bf16_to_f16_bits(0x3f80), 0x3c00);
         assert_eq!(bf16_to_f16_bits(0x3f81), 0x3c08);
+        assert_eq!(bf16_to_f16_bits(0x477f), 0x7bf8);
+        assert_eq!(bf16_to_f16_bits(0x4780), 0x7c00);
     }
 
     #[test]

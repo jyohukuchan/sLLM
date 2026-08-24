@@ -31,18 +31,18 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "8bc3c74ae87b83ea4dd5f62b0a49467689f6f71303e8e41813527852079d255b"
+          "sha256": "d208fefb686d19d0ed5cb5e97602aec42e0716f120b4dc03f0c6a02ea1879866"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "sha256": "f305bc8814551b48d6fa11fe01e99ec388b482c91568d23d351eb855b4503dba"
+          "sha256": "2f8d78823d727b42f5dfe7fe79bfcb28ccdbcf7494201f7d4403a7d748a651bd"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel_internal.hpp",
-          "sha256": "7957b1c2e25b78a2083de2492d1712ddacc560bf23d73585141fa6b3e339cfbf"
+          "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "006840763ef8039c63abe8eb3006fd811969bf9481bf49c18fa5ab0a17fb0a06"
+      "source_set_sha256": "fca0a47cbc975e5528ad5ed67a0e98b07b269c624e921860dd82d9723962e593"
     },
     "host_abi": {
       "canonical_order": [
@@ -54,22 +54,22 @@
       "files": [
         {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "5ac0a24baf22551b8a3bcf369ea4231d85d706a4064246bb27ff6dc2020989ee"
+          "sha256": "6819b66645d558c134b2fe9bcdb651f23e46d695ce644c94ccacea7048172004"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
-          "sha256": "b4db8b948c8b0277a3d11b54f5a60a20b14ac7b60ce293e653985960bbce7367"
+          "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
         },
         {
           "path": "native/hip/src/rmsnorm_api.cpp",
-          "sha256": "ae55d6ae9e16f5b09ddb12ff04cba0cd4b87714f5699d2afc639bba42093bae8"
+          "sha256": "c7c4d7e0141d5a7587ae9e4d8c4ae51abbb76694004b839cdd900e3d3f69e911"
         },
         {
           "path": "native/hip/src/rmsnorm_api.hpp",
-          "sha256": "f7a061cf121a47f248dc7ae539f2b3a7d53e706c0976b27bad9a3e8b346cb152"
+          "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "a80d52ef3c785c6ffb0610ef8e301c6d6c0a6309611e8a34fca100bc6ab61106"
+      "source_set_sha256": "dc62aa3c8b517ff41f726bc6105d2b7e63f9da24e0463bf2339cbf474390a814"
     },
     "binding_build": {
       "canonical_order": [
@@ -82,11 +82,11 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "ca8835cd0372771e41ff4f55bc6ae17251c196995e9c87aab1e7e4529186dc72"
+          "sha256": "d70b3dba14b78b314ee8bc57317249b4ce1574f45f0d7bfab8fa673e3ea628dc"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "ed9f9f00afe786897ce1d6187150829417b3676e634c6d7c73f0593c86ad3fa0"
+          "sha256": "5e99168ba57d79754c10f1594e94376f4e5f1d37e0cf8405b42dcfdf14460d31"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
@@ -94,14 +94,14 @@
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "71069e36088d03ebba49baa6aaedd236886e7a343473f00395b07914619339ac"
+          "sha256": "82f28b17792245cd079ed526eb5891167d31f74e6fbbe6cf7ac85c7b9906bc1d"
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "5689dec49ddb21cc66bdfb8e1b3442ef64bb8ad614814ca3da21d5aa577f9ee1"
+          "sha256": "0003e932680cbb8dc6765508efd07576118cdbf609292f27bba28da750a4843a"
         }
       ],
-      "source_set_sha256": "a74f805b50d01ae3be84aa9b9db107340e41f82e7822d5ede25879b4283a20c9"
+      "source_set_sha256": "cc8eba0f33b60dc0bf7eaf62dff83423e8a80abb4f4e52f10ad5afc211f32d35"
     },
     "ci_contract": {
       "canonical_order": [
@@ -147,11 +147,11 @@
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "975f6301d865958ee9c20d234627cef9c319fbc2716355b3443646817bfe819a"
+          "sha256": "960bef820d0af981a6460ad4c8335db34d0088304f09579293cdd0a826d7c07d"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "20df95080e0768dd901b758216cfc48a9d82f4011c27fd2b1b8d9cfe2d73343c"
+          "sha256": "01d0a3b686d37985e41b152b03238d4369c34f9f2f8494e5842a074b229a908f"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -167,7 +167,7 @@
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_runner.py",
-          "sha256": "295a4e73510e93fa21dc34c76dbd541a1ae7eea6a163475e0399c93773ef0052"
+          "sha256": "d67cfd6f46b76d9b04681377e3dad8800d2a6db8039483bf0c5dcc5d9ebac42b"
         },
         {
           "path": "ci/tests/test_rmsnorm_h3_aggregate.py",
@@ -178,7 +178,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "726a50180ddb7e4b09cad531a612caa59ad6e3c26371ea031c5d8ea12dd81fe3"
+      "source_set_sha256": "cb3070aa3a24fab8bf1f63ae30a905dcc63608891d226399ee85a1c9163257c2"
     }
   },
   "source_symbol_map": [
@@ -241,6 +241,9 @@
     "sllm_embedding_prepare",
     "sllm_event_create",
     "sllm_event_release",
+    "sllm_gdn_projection_bundle_execute",
+    "sllm_gdn_projection_bundle_plan_release",
+    "sllm_gdn_projection_bundle_prepare",
     "sllm_get_abi_version",
     "sllm_kv_state_append",
     "sllm_kv_state_append_cancel",
@@ -258,11 +261,17 @@
     "sllm_matmul_execute",
     "sllm_matmul_plan_release",
     "sllm_matmul_prepare",
+    "sllm_mlp_gate_up_silu_bundle_execute",
+    "sllm_mlp_gate_up_silu_bundle_plan_release",
+    "sllm_mlp_gate_up_silu_bundle_prepare",
     "sllm_query_version",
     "sllm_queue_create",
     "sllm_queue_fence",
     "sllm_queue_release",
     "sllm_queue_set_completion_mode",
+    "sllm_residual_rmsnorm_execute",
+    "sllm_residual_rmsnorm_plan_release",
+    "sllm_residual_rmsnorm_prepare",
     "sllm_rmsnorm_execute",
     "sllm_rmsnorm_plan_release",
     "sllm_rmsnorm_prepare",
@@ -408,6 +417,7 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
             "{repo}/native/hip/src/rotary_api.cpp",
             "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
@@ -417,10 +427,12 @@
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/gemma_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
             "-x",
             "none",
@@ -428,7 +440,8 @@
             "{build_dir}/host-bundle-{target}.elf",
             "/opt/rocm/lib/libamdhip64.so",
             "/opt/rocm/lib/libhipblas.so",
-            "/opt/rocm/lib/libhipblaslt.so"
+            "/opt/rocm/lib/libhipblaslt.so",
+            "/opt/rocm/lib/librocblas.so"
           ]
         ]
       },
@@ -580,6 +593,7 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
             "{repo}/native/hip/src/rotary_api.cpp",
             "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
@@ -589,10 +603,12 @@
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
+            "{repo}/native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/gemma_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
             "-x",
             "none",
@@ -600,7 +616,8 @@
             "{build_dir}/host-bundle-{target}.elf",
             "/opt/rocm/lib/libamdhip64.so",
             "/opt/rocm/lib/libhipblas.so",
-            "/opt/rocm/lib/libhipblaslt.so"
+            "/opt/rocm/lib/libhipblaslt.so",
+            "/opt/rocm/lib/librocblas.so"
           ]
         ]
       },

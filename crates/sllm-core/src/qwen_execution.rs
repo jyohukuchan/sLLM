@@ -7,6 +7,7 @@
 //! execution/session contracts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -39,8 +40,9 @@ use crate::prepared_execution::{
     PreparedPlanNode, PreparedSemanticCache, PreparedTransition, require_terminal_success,
 };
 use crate::qwen_graph::{
-    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenGraph, QwenGraphNode, QwenGraphNodeKind,
-    QwenGraphStateDescriptor, QwenGraphStateKind, QwenGraphTensorBacking, QwenGraphWeightBinding,
+    QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QWEN35_LAYER_COUNT, QWEN35_LAYER_TYPES, QwenGraph,
+    QwenGraphNode, QwenGraphNodeKind, QwenGraphStateDescriptor, QwenGraphStateKind,
+    QwenGraphTensorBacking, QwenGraphWeightBinding,
 };
 use crate::session_checkpoint::{
     CheckpointIdentity, CheckpointPayload, SessionCheckpoint, StateOwnerKindV1, StatePlaneKindV1,
@@ -527,8 +529,11 @@ impl QwenPrefixStateV1 {
 }
 
 pub const QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS: u64 = 512;
-pub const QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES: u64 = 16 * 1024 * 1024 * 1024;
-pub const QWEN_PREFILL_CHUNK_BUCKETS: [u64; 4] = [16_384, 8_192, 4_096, 2_048];
+pub const QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES: u64 = 24 * 1024 * 1024 * 1024 - 1;
+pub const QWEN_PREFILL_CHUNK_BUCKETS: [u64; 5] = [16_384, 8_192, 4_096, 2_048, 512];
+const QWEN_PREFILL_2K_DEVICE_CEILING_BYTES: u64 = 35 * 1024 * 1024 * 1024;
+const QWEN_PREFILL_4K_DEVICE_CEILING_BYTES: u64 = 60 * 1024 * 1024 * 1024;
+const QWEN_PREFILL_8K_DEVICE_CEILING_BYTES: u64 = 160 * 1024 * 1024 * 1024;
 
 /// Deterministic placement estimate for one candidate Qwen graph capacity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -567,9 +572,10 @@ impl QwenGraphMemoryEstimate {
     }
 }
 
-/// Returns the stable, descending candidate capacities for one prompt. Short
-/// prompts use their actual row count; a 512-row floor is evaluated before a
-/// fail-closed rejection on devices larger than 16 GiB.
+/// Returns the stable, descending candidate capacities for one prompt. The
+/// largest candidate is capped by total device-memory capacity; smaller
+/// candidates remain available to the placement estimate. Short prompts use
+/// their actual row count.
 pub fn qwen_prefill_chunk_candidates(
     total_memory_bytes: u64,
     prompt_tokens: u64,
@@ -579,22 +585,23 @@ pub fn qwen_prefill_chunk_candidates(
             "prefill chunk selection requires non-zero device memory and prompt tokens".to_owned(),
         ));
     }
-    let buckets: &[u64] = if total_memory_bytes <= QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES {
-        &[QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS]
+    let first_bucket = if total_memory_bytes <= QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES {
+        4
+    } else if total_memory_bytes < QWEN_PREFILL_2K_DEVICE_CEILING_BYTES {
+        3
+    } else if total_memory_bytes < QWEN_PREFILL_4K_DEVICE_CEILING_BYTES {
+        2
+    } else if total_memory_bytes < QWEN_PREFILL_8K_DEVICE_CEILING_BYTES {
+        1
     } else {
-        &QWEN_PREFILL_CHUNK_BUCKETS
+        0
     };
-    let mut candidates = Vec::with_capacity(buckets.len() + 1);
+    let buckets = &QWEN_PREFILL_CHUNK_BUCKETS[first_bucket..];
+    let mut candidates = Vec::with_capacity(buckets.len());
     for bucket in buckets {
         let rows = prompt_tokens.min(*bucket);
         if candidates.last().copied() != Some(rows) {
             candidates.push(rows);
-        }
-    }
-    if total_memory_bytes > QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES {
-        let floor = prompt_tokens.min(QWEN_PREFILL_SMALL_DEVICE_CHUNK_TOKENS);
-        if candidates.last().copied() != Some(floor) {
-            candidates.push(floor);
         }
     }
     Ok(candidates)
@@ -608,6 +615,231 @@ struct AttentionPreprocessExecution {
     token_count: u64,
     start_position: u64,
     position_mode: AttentionPreprocessPositionMode,
+}
+
+fn execution_position_payload_mode(
+    mode: crate::AttentionPreprocessPositionPayloadModeV1,
+    multimodal: bool,
+    mtp: bool,
+) -> crate::AttentionPreprocessPositionPayloadModeV1 {
+    match mode {
+        crate::AttentionPreprocessPositionPayloadModeV1::Contiguous if !multimodal && !mtp => {
+            crate::AttentionPreprocessPositionPayloadModeV1::DerivedContiguous
+        }
+        mode => mode,
+    }
+}
+
+fn should_skip_derived_position_upload(
+    payload_mode: crate::AttentionPreprocessPositionPayloadModeV1,
+    multimodal: bool,
+    mtp: bool,
+    has_multimodal_payload: bool,
+    has_explicit_positions: bool,
+) -> bool {
+    // Derived text attention computes `start_position + row` in the kernel;
+    // keep the input tensor/view allocated and bound, but avoid a redundant
+    // host-to-device copy when no caller supplied a position payload.
+    payload_mode == crate::AttentionPreprocessPositionPayloadModeV1::DerivedContiguous
+        && !multimodal
+        && !mtp
+        && !has_multimodal_payload
+        && !has_explicit_positions
+}
+
+const QWEN_DEFERRED_COMPLETION_ENV: &str = "SLLM_QWEN_DEFERRED_COMPLETION";
+const QWEN_RESIDUAL_RMSNORM_FUSION_ENV: &str = "SLLM_QWEN_GFX1030_RESIDUAL_RMSNORM_FUSION";
+const QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_RESIDUAL_RMSNORM_FUSION";
+const QWEN_GDN_PROJECTION_BUNDLE_ENV: &str = "SLLM_QWEN_GFX1030_GDN_PROJECTION_BUNDLE";
+const QWEN_GDN_PROJECTION_BUNDLE_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_GDN_PROJECTION_BUNDLE";
+const QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV: &str = "SLLM_QWEN_GFX1030_MLP_GATE_UP_SILU_BUNDLE";
+const QWEN_MLP_GATE_UP_SILU_BUNDLE_GFX1201_ENV: &str = "SLLM_QWEN_GFX1201_MLP_GATE_UP_SILU_BUNDLE";
+const QWEN_SHORT_TERMINAL_LAST_ROW_ENV: &str = "SLLM_QWEN_GFX1030_SHORT_TERMINAL_LAST_ROW";
+
+fn default_on_env(value: Option<&OsStr>) -> bool {
+    value.is_none_or(|value| value == OsStr::new("1"))
+}
+
+/// Target-scoped policy for Phase 50 candidates.  gfx1030 retains the Phase
+/// 49 default-on behavior, and gfx1201 uses its own default-on environment
+/// variable without inheriting the gfx1030 variable.  Unknown targets are
+/// rejected.
+fn target_candidate_env_enabled(expected_target: Option<&str>, env_value: Option<&OsStr>) -> bool {
+    match expected_target {
+        Some("gfx1030") => default_on_env(env_value),
+        Some("gfx1201") => default_on_env(env_value),
+        _ => false,
+    }
+}
+
+fn target_candidate_env_value(
+    session: &ExecutionSession,
+    gfx1030_name: &str,
+    gfx1201_name: &str,
+) -> Option<std::ffi::OsString> {
+    if session.expected_target().as_deref() == Some("gfx1201") {
+        std::env::var_os(gfx1201_name)
+    } else {
+        std::env::var_os(gfx1030_name)
+    }
+}
+
+fn qwen_residual_rmsnorm_fusion_enabled_with_env(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    env_value: Option<&OsStr>,
+) -> bool {
+    target_candidate_env_enabled(session.expected_target().as_deref(), env_value)
+        && session.backend_name() == "hip"
+        && matches!(
+            session.expected_target().as_deref(),
+            Some("gfx1030" | "gfx1201")
+        )
+        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+        && graph.fp8_sidecar_fingerprint().is_none()
+        && !graph.is_multimodal()
+        && !graph.is_mtp()
+        && graph.layer_types().len() == QWEN35_LAYER_COUNT
+        && adapters.adapters().is_empty()
+        && adapters.controls().is_empty()
+}
+
+fn qwen_residual_rmsnorm_fusion_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+) -> bool {
+    let env_value = target_candidate_env_value(
+        session,
+        QWEN_RESIDUAL_RMSNORM_FUSION_ENV,
+        QWEN_RESIDUAL_RMSNORM_FUSION_GFX1201_ENV,
+    );
+    qwen_residual_rmsnorm_fusion_enabled_with_env(session, graph, adapters, env_value.as_deref())
+}
+
+fn qwen_gdn_projection_bundle_enabled_with_env(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    env_value: Option<&OsStr>,
+) -> bool {
+    target_candidate_env_enabled(session.expected_target().as_deref(), env_value)
+        && session.backend_name() == "hip"
+        && matches!(
+            session.expected_target().as_deref(),
+            Some("gfx1030" | "gfx1201")
+        )
+        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+        && graph.fp8_sidecar_fingerprint().is_none()
+        && !graph.is_multimodal()
+        && !graph.is_mtp()
+        && graph.layer_types() == QWEN35_LAYER_TYPES
+        && adapters.adapters().is_empty()
+        && adapters.controls().is_empty()
+}
+
+fn qwen_gdn_projection_bundle_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+) -> bool {
+    let env_value = target_candidate_env_value(
+        session,
+        QWEN_GDN_PROJECTION_BUNDLE_ENV,
+        QWEN_GDN_PROJECTION_BUNDLE_GFX1201_ENV,
+    );
+    qwen_gdn_projection_bundle_enabled_with_env(session, graph, adapters, env_value.as_deref())
+}
+
+fn qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    env_value: Option<&OsStr>,
+) -> bool {
+    target_candidate_env_enabled(session.expected_target().as_deref(), env_value)
+        && session.backend_name() == "hip"
+        && matches!(
+            session.expected_target().as_deref(),
+            Some("gfx1030" | "gfx1201")
+        )
+        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+        && graph.fp8_sidecar_fingerprint().is_none()
+        && !graph.is_multimodal()
+        && !graph.is_mtp()
+        && graph.layer_types() == QWEN35_LAYER_TYPES
+        && adapters.adapters().is_empty()
+        && adapters.controls().is_empty()
+}
+
+fn qwen_mlp_gate_up_silu_bundle_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+) -> bool {
+    let env_value = target_candidate_env_value(
+        session,
+        QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV,
+        QWEN_MLP_GATE_UP_SILU_BUNDLE_GFX1201_ENV,
+    );
+    qwen_mlp_gate_up_silu_bundle_enabled_with_env(session, graph, adapters, env_value.as_deref())
+}
+
+fn qwen_short_terminal_last_row_enabled_with_env(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+    env_value: Option<&OsStr>,
+) -> bool {
+    default_on_env(env_value)
+        && (17..TERMINAL_ROW_MIN_TOKENS).contains(&graph.token_count())
+        && session.backend_name() == "hip"
+        && session.expected_target().as_deref() == Some("gfx1030")
+        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+        && graph.fp8_sidecar_fingerprint().is_none()
+        && !graph.is_multimodal()
+        && !graph.is_mtp()
+        && graph.layer_types() == QWEN35_LAYER_TYPES
+        && adapters.adapters().is_empty()
+        && adapters.controls().is_empty()
+}
+
+fn qwen_short_terminal_last_row_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &AdapterRequestSetV1,
+) -> bool {
+    qwen_short_terminal_last_row_enabled_with_env(
+        session,
+        graph,
+        adapters,
+        std::env::var_os(QWEN_SHORT_TERMINAL_LAST_ROW_ENV).as_deref(),
+    )
+}
+
+fn qwen_deferred_completion_enabled(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    env_value: Option<&OsStr>,
+) -> bool {
+    // The canonical gfx1030 text path uses deferred completion by default.
+    // Keep an explicit zero as the rollback switch; unknown values remain
+    // fail-closed and therefore retain the profiled path.
+    let mode_enabled = match env_value {
+        None => true,
+        Some(value) if value == OsStr::new("1") => true,
+        Some(value) if value == OsStr::new("0") => false,
+        Some(_) => false,
+    };
+    mode_enabled
+        && session.backend_name() == "hip"
+        && session.expected_target().as_deref() == Some("gfx1030")
+        && graph.model_fingerprint() == QWEN35_4B_FINGERPRINT
+        && graph.fp8_sidecar_fingerprint().is_none()
+        && !graph.is_multimodal()
+        && !graph.is_mtp()
+        && graph.layer_types().len() == 32
 }
 
 #[derive(Clone, Copy)]
@@ -1914,6 +2146,7 @@ struct QwenExecutionCore {
     last_output: Option<QwenExecutionOutput>,
     pending_speculative: Option<PendingSpeculativeBlock>,
     adapters: QwenAdapterRuntime,
+    short_terminal_last_row: bool,
 }
 
 struct QwenAdapterRuntime {
@@ -1969,6 +2202,29 @@ struct PendingSpeculativeBlock {
 enum TerminalOutputRows {
     Last,
     All,
+}
+
+fn select_terminal_output_rows(
+    graph_token_count: u64,
+    graph_is_mtp: bool,
+    short_terminal_last_row: bool,
+    device_selector_present: bool,
+    include_all_logits_bf16: bool,
+    force_all_terminal_rows: bool,
+) -> TerminalOutputRows {
+    if device_selector_present {
+        // The device selector consumes exactly one final BF16 row. Preserve
+        // its existing precedence over legacy all-row retention.
+        TerminalOutputRows::Last
+    } else if include_all_logits_bf16
+        || force_all_terminal_rows
+        || graph_is_mtp
+        || (graph_token_count < TERMINAL_ROW_MIN_TOKENS && !short_terminal_last_row)
+    {
+        TerminalOutputRows::All
+    } else {
+        TerminalOutputRows::Last
+    }
 }
 
 struct TerminalSelection {
@@ -3420,7 +3676,34 @@ impl QwenExecutionCore {
         graph: QwenGraph,
         adapters: AdapterRequestSetV1,
     ) -> Result<Self, QwenExecutionError> {
-        let layout = validate_graph_plan(&graph, &resident.plan)?;
+        let graph = graph
+            .with_residual_rmsnorm_fusion(qwen_residual_rmsnorm_fusion_enabled(
+                resident.session.as_ref(),
+                &graph,
+                &adapters,
+            ))
+            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+        let graph = graph
+            .with_gdn_projection_bundle(qwen_gdn_projection_bundle_enabled(
+                resident.session.as_ref(),
+                &graph,
+                &adapters,
+            ))
+            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+        let graph = graph
+            .with_mlp_gate_up_silu_bundle(qwen_mlp_gate_up_silu_bundle_enabled(
+                resident.session.as_ref(),
+                &graph,
+                &adapters,
+            ))
+            .map_err(|error| QwenExecutionError::InvalidGraph(error.to_string()))?;
+        let short_terminal_last_row =
+            qwen_short_terminal_last_row_enabled(resident.session.as_ref(), &graph, &adapters);
+        let layout = validate_graph_plan_with_terminal_mode(
+            &graph,
+            &resident.plan,
+            short_terminal_last_row,
+        )?;
         if graph.model_fingerprint() != resident.model_fingerprint {
             return Err(QwenExecutionError::InvalidRequest(
                 "resident model identity or backend differs from the request graph".to_owned(),
@@ -3500,6 +3783,7 @@ impl QwenExecutionCore {
             last_output: None,
             pending_speculative: None,
             adapters,
+            short_terminal_last_row,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -4250,6 +4534,7 @@ impl QwenExecutionCore {
             last_output: None,
             pending_speculative: None,
             adapters: QwenAdapterRuntime::disabled(),
+            short_terminal_last_row: false,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -4967,22 +5252,16 @@ impl QwenExecutionCore {
             })
             .transpose()?;
 
-        let terminal_rows = if device_selector.is_some() {
-            // The selector consumes exactly the final BF16 row.  This override
-            // also covers small/chunked graphs whose legacy path retains all
-            // rows for Argmax/readback.
-            TerminalOutputRows::Last
-        } else if self.graph.token_count() < TERMINAL_ROW_MIN_TOKENS
-            || include_all_logits_bf16
-            || force_all_terminal_rows
-            || self.graph.is_mtp()
-        {
-            TerminalOutputRows::All
-        } else {
-            TerminalOutputRows::Last
-        };
+        let terminal_rows = select_terminal_output_rows(
+            self.graph.token_count(),
+            self.graph.is_mtp(),
+            self.short_terminal_last_row,
+            device_selector.is_some(),
+            include_all_logits_bf16,
+            force_all_terminal_rows,
+        );
         if terminal_rows == TerminalOutputRows::All
-            && self.graph.token_count() >= TERMINAL_ROW_MIN_TOKENS
+            && (self.graph.token_count() >= TERMINAL_ROW_MIN_TOKENS || self.short_terminal_last_row)
             && !self.graph.is_mtp()
         {
             self.ensure_terminal_output_capacity(token_count)?;
@@ -5080,8 +5359,17 @@ impl QwenExecutionCore {
             ));
         }
         let mut argmax: Option<TerminalSelection> = None;
-        let mut pending = ExecutionSegment::profiled(self.completion_timeout);
-        plan.execute(transition, |planned, transition| {
+        let deferred = qwen_deferred_completion_enabled(
+            self.session.as_ref(),
+            &self.graph,
+            std::env::var_os(QWEN_DEFERRED_COMPLETION_ENV).as_deref(),
+        );
+        let mut pending = if deferred {
+            ExecutionSegment::deferred(self.session.as_ref(), &self.queue, self.completion_timeout)?
+        } else {
+            ExecutionSegment::profiled(self.completion_timeout)
+        };
+        let execute_result = plan.execute(transition, |planned, transition| {
             let node = planned.operation();
             (|| -> Result<(), QwenExecutionError> {
                 match node.kind() {
@@ -5202,7 +5490,13 @@ impl QwenExecutionCore {
                     error
                 }
             })
-        })?;
+        });
+        if let Err(error) = execute_result {
+            return match pending.abort() {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(cleanup.into()),
+            };
+        }
         if !emit_terminal {
             if pending.is_empty() {
                 return Err(QwenExecutionError::InvalidGraph(
@@ -5531,6 +5825,150 @@ impl QwenExecutionCore {
         Ok(values)
     }
 
+    /// Executes the fixed-role GDN projection node as the four original
+    /// matmuls for non-decode transitions.  The graph remains bundled so the
+    /// resident plan is stable across prefill/decode, but the native bundle
+    /// ABI is intentionally restricted to M=1.  These submissions stay on
+    /// the same queue and preserve the original qkv, z, b, a order and BF16
+    /// output boundaries.
+    fn execute_gdn_projection_bundle_decomposed(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        if boundary_after.is_some() || node.inputs().len() != 5 || node.outputs().len() != 4 {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "GDN projection bundle {} has an invalid execution boundary or arity",
+                node.label()
+            )));
+        }
+        let inputs = self.views(node.inputs(), token_count)?;
+        let outputs = self.views(node.outputs(), token_count)?;
+        let activation = inputs.first().cloned().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(
+                "GDN projection bundle activation is absent".to_owned(),
+            )
+        })?;
+        for role in 0..4 {
+            let weight = inputs.get(role + 1).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "GDN projection bundle weight is absent".to_owned(),
+                )
+            })?;
+            let output = outputs.get(role).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "GDN projection bundle output is absent".to_owned(),
+                )
+            })?;
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), weight],
+                vec![output],
+            )?;
+            let input_bindings = vec![
+                self.bind(node.inputs()[0], token_count, AccessMode::Read)?,
+                self.bind(node.inputs()[role + 1], token_count, AccessMode::Read)?,
+            ];
+            let output_bindings =
+                vec![self.bind(node.outputs()[role], token_count, AccessMode::Write)?];
+            let submission = self.submit_semantic(
+                descriptor,
+                input_bindings,
+                output_bindings,
+                PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+            )?;
+            pending.retain_semantic(
+                match role {
+                    0 => "gdn_projection_bundle.qkv",
+                    1 => "gdn_projection_bundle.z",
+                    2 => "gdn_projection_bundle.b",
+                    3 => "gdn_projection_bundle.a",
+                    _ => unreachable!(),
+                },
+                submission,
+            );
+        }
+        Ok(None)
+    }
+
+    /// Executes the MLP gate/up/SiLU bundle as the original two projection
+    /// matmuls and one elementwise operation for M>1.  Native bundle ABI is
+    /// restricted to the single-token decode path; decomposition preserves
+    /// every baseline tensor boundary and dependency on prefill.
+    fn execute_mlp_gate_up_silu_bundle_decomposed(
+        &self,
+        node: &QwenGraphNode,
+        token_count: u64,
+        boundary_after: Option<ExecutionBoundaryKind>,
+        pending: &mut ExecutionSegment,
+    ) -> Result<Option<TerminalSelection>, QwenExecutionError> {
+        if boundary_after.is_some() || node.inputs().len() != 3 || node.outputs().len() != 3 {
+            return Err(QwenExecutionError::InvalidGraph(format!(
+                "MLP gate/up/SiLU bundle {} has an invalid execution boundary or arity",
+                node.label()
+            )));
+        }
+        let inputs = self.views(node.inputs(), token_count)?;
+        let outputs = self.views(node.outputs(), token_count)?;
+        let activation = inputs.first().cloned().ok_or_else(|| {
+            QwenExecutionError::InvalidGraph(
+                "MLP gate/up/SiLU bundle activation is absent".to_owned(),
+            )
+        })?;
+        for role in 0..2 {
+            let weight = inputs.get(role + 1).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "MLP gate/up/SiLU bundle weight is absent".to_owned(),
+                )
+            })?;
+            let output = outputs.get(role).cloned().ok_or_else(|| {
+                QwenExecutionError::InvalidGraph(
+                    "MLP gate/up/SiLU bundle projection output is absent".to_owned(),
+                )
+            })?;
+            let descriptor = SemanticOpDescriptor::new(
+                SemanticOpKind::Matmul,
+                vec![activation.clone(), weight],
+                vec![output],
+            )?;
+            let submission = self.submit_semantic(
+                descriptor,
+                vec![
+                    self.bind(node.inputs()[0], token_count, AccessMode::Read)?,
+                    self.bind(node.inputs()[role + 1], token_count, AccessMode::Read)?,
+                ],
+                vec![self.bind(node.outputs()[role], token_count, AccessMode::Write)?],
+                PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+            )?;
+            pending.retain_semantic(
+                if role == 0 {
+                    "mlp_gate_up_silu_bundle.gate"
+                } else {
+                    "mlp_gate_up_silu_bundle.up"
+                },
+                submission,
+            );
+        }
+        let descriptor = SemanticOpDescriptor::new(
+            SemanticOpKind::SiluMul,
+            vec![outputs[0].clone(), outputs[1].clone()],
+            vec![outputs[2].clone()],
+        )?;
+        let submission = self.submit_semantic(
+            descriptor,
+            vec![
+                self.bind(node.outputs()[0], token_count, AccessMode::Read)?,
+                self.bind(node.outputs()[1], token_count, AccessMode::Read)?,
+            ],
+            vec![self.bind(node.outputs()[2], token_count, AccessMode::Write)?],
+            PreparedCachePolicy::Reusable(PreparedDynamicIdentity::stateless(token_count, 0)),
+        )?;
+        pending.retain_semantic("mlp_gate_up_silu_bundle.silu", submission);
+        Ok(None)
+    }
+
     fn execute_semantic(
         &self,
         node: &QwenGraphNode,
@@ -5554,6 +5992,22 @@ impl QwenExecutionCore {
                 node.label()
             ))
         })?;
+        if operation.kind() == SemanticOpKind::GdnProjectionBundle && token_count != 1 {
+            return self.execute_gdn_projection_bundle_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
+        if operation.kind() == SemanticOpKind::MlpGateUpSiluBundle && token_count != 1 {
+            return self.execute_mlp_gate_up_silu_bundle_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
         if operation.kind() == SemanticOpKind::Matmul
             && self
                 .node_weight_name(node)
@@ -5637,6 +6091,18 @@ impl QwenExecutionCore {
                     ))
                 })?,
             )?,
+            SemanticOpKind::ResidualRmsNorm => {
+                SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                    inputs,
+                    outputs,
+                    operation.residual_rms_norm_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "ResidualRmsNorm node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
+                )?
+            }
             SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
                 inputs,
                 outputs,
@@ -5647,6 +6113,30 @@ impl QwenExecutionCore {
                     ))
                 })?,
             )?,
+            SemanticOpKind::GdnProjectionBundle => SemanticOpDescriptor::new_gdn_projection_bundle(
+                inputs,
+                outputs,
+                operation.gdn_projection_bundle_contract().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "GDN projection bundle node {} has no contract",
+                        node.label()
+                    ))
+                })?,
+            )?,
+            SemanticOpKind::MlpGateUpSiluBundle => {
+                SemanticOpDescriptor::new_mlp_gate_up_silu_bundle(
+                    inputs,
+                    outputs,
+                    operation
+                        .mlp_gate_up_silu_bundle_contract()
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidGraph(format!(
+                                "MLP gate/up/SiLU bundle node {} has no contract",
+                                node.label()
+                            ))
+                        })?,
+                )?
+            }
             kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
         };
         let kind = descriptor.kind();
@@ -6293,6 +6783,22 @@ impl QwenExecutionCore {
                 node.label()
             ))
         })?;
+        if operation.kind() == SemanticOpKind::GdnProjectionBundle && token_count != 1 {
+            return self.execute_gdn_projection_bundle_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
+        if operation.kind() == SemanticOpKind::MlpGateUpSiluBundle && token_count != 1 {
+            return self.execute_mlp_gate_up_silu_bundle_decomposed(
+                node,
+                token_count,
+                boundary_after,
+                pending,
+            );
+        }
         if operation.kind() == SemanticOpKind::Matmul
             && self
                 .node_weight_name(node)
@@ -6325,6 +6831,18 @@ impl QwenExecutionCore {
                     ))
                 })?,
             )?,
+            SemanticOpKind::ResidualRmsNorm => {
+                SemanticOpDescriptor::new_residual_rms_norm_with_contract(
+                    inputs,
+                    outputs,
+                    operation.residual_rms_norm_contract().ok_or_else(|| {
+                        QwenExecutionError::InvalidGraph(format!(
+                            "ResidualRmsNorm node {} has no contract",
+                            node.label()
+                        ))
+                    })?,
+                )?
+            }
             SemanticOpKind::SparseMoe => SemanticOpDescriptor::new_sparse_moe(
                 inputs,
                 outputs,
@@ -6335,6 +6853,30 @@ impl QwenExecutionCore {
                     ))
                 })?,
             )?,
+            SemanticOpKind::GdnProjectionBundle => SemanticOpDescriptor::new_gdn_projection_bundle(
+                inputs,
+                outputs,
+                operation.gdn_projection_bundle_contract().ok_or_else(|| {
+                    QwenExecutionError::InvalidGraph(format!(
+                        "GDN projection bundle node {} has no contract",
+                        node.label()
+                    ))
+                })?,
+            )?,
+            SemanticOpKind::MlpGateUpSiluBundle => {
+                SemanticOpDescriptor::new_mlp_gate_up_silu_bundle(
+                    inputs,
+                    outputs,
+                    operation
+                        .mlp_gate_up_silu_bundle_contract()
+                        .ok_or_else(|| {
+                            QwenExecutionError::InvalidGraph(format!(
+                                "MLP gate/up/SiLU bundle node {} has no contract",
+                                node.label()
+                            ))
+                        })?,
+                )?
+            }
             kind => SemanticOpDescriptor::new(kind, inputs, outputs)?,
         };
         let input_bindings = self.bind_many(node.inputs(), token_count, AccessMode::Read)?;
@@ -6463,7 +7005,11 @@ impl QwenExecutionCore {
                     "request context exceeds the u32 execution ABI".to_owned(),
                 )
             })?,
-            self.graph.position_payload_mode(),
+            execution_position_payload_mode(
+                self.graph.position_payload_mode(),
+                self.graph.is_multimodal(),
+                self.graph.is_mtp(),
+            ),
         )?;
         let descriptor = SemanticOpDescriptor::new_attention_preprocess(
             self.views(node.inputs(), execution.token_count)?,
@@ -6600,7 +7146,10 @@ impl QwenExecutionCore {
         pending: &mut ExecutionSegment,
         boundary: ExecutionBoundaryKind,
     ) -> Result<(), QwenExecutionError> {
-        if boundary == ExecutionBoundaryKind::PrefillChunkCompletion && !pending.is_empty() {
+        if boundary == ExecutionBoundaryKind::PrefillChunkCompletion
+            && !pending.is_empty()
+            && !pending.is_deferred()
+        {
             let mut fence = self.session.create_queue_fence(&self.queue)?;
             require_terminal_success(
                 "prefill chunk completion fence",
@@ -6762,35 +7311,51 @@ impl QwenExecutionCore {
         let token_view = self.view(token_tensor, token_count)?;
         let position_view = self.view(position_tensor, token_count)?;
         let token_bytes = i32_bytes(token_ids);
-        let positions = if self.graph.is_multimodal() {
-            if let Some((_, positions)) = multimodal {
-                if positions.len() != token_ids.len()
-                    || positions.iter().flatten().any(|position| {
-                        *position < 0
-                            || u64::try_from(*position)
-                                .map_or(true, |position| position >= self.graph.state_capacity())
-                    })
-                {
-                    return Err(QwenExecutionError::InvalidRequest(
-                        "multimodal position payload differs".to_owned(),
-                    ));
-                }
-                mrope_position_bytes(positions)
-            } else {
-                let position = i32::try_from(start_position).map_err(|_| {
-                    QwenExecutionError::InvalidRequest(
-                        "decode mRoPE position does not fit i32".to_owned(),
-                    )
-                })?;
-                let positions = vec![[position; 3]; token_ids.len()];
-                mrope_position_bytes(&positions)
-            }
+        let skip_position_upload = should_skip_derived_position_upload(
+            execution_position_payload_mode(
+                self.graph.position_payload_mode(),
+                self.graph.is_multimodal(),
+                self.graph.is_mtp(),
+            ),
+            self.graph.is_multimodal(),
+            self.graph.is_mtp(),
+            multimodal.is_some(),
+            explicit_positions.is_some(),
+        );
+        let positions = if skip_position_upload {
+            None
         } else {
-            if let Some(positions) = explicit_positions {
-                position_values_bytes(positions)?
+            Some(if self.graph.is_multimodal() {
+                if let Some((_, positions)) = multimodal {
+                    if positions.len() != token_ids.len()
+                        || positions.iter().flatten().any(|position| {
+                            *position < 0
+                                || u64::try_from(*position).map_or(true, |position| {
+                                    position >= self.graph.state_capacity()
+                                })
+                        })
+                    {
+                        return Err(QwenExecutionError::InvalidRequest(
+                            "multimodal position payload differs".to_owned(),
+                        ));
+                    }
+                    mrope_position_bytes(positions)
+                } else {
+                    let position = i32::try_from(start_position).map_err(|_| {
+                        QwenExecutionError::InvalidRequest(
+                            "decode mRoPE position does not fit i32".to_owned(),
+                        )
+                    })?;
+                    let positions = vec![[position; 3]; token_ids.len()];
+                    mrope_position_bytes(&positions)
+                }
             } else {
-                position_bytes(start_position, token_count)?
-            }
+                if let Some(positions) = explicit_positions {
+                    position_values_bytes(positions)?
+                } else {
+                    position_bytes(start_position, token_count)?
+                }
+            })
         };
         upload_exact_bytes(
             self.session.as_ref(),
@@ -6801,15 +7366,17 @@ impl QwenExecutionCore {
             self.completion_timeout,
             "token input upload",
         )?;
-        upload_exact_bytes(
-            self.session.as_ref(),
-            &self.queue,
-            &self.tensors[position_tensor].buffer,
-            &position_view,
-            &positions,
-            self.completion_timeout,
-            "position input upload",
-        )?;
+        if let Some(positions) = positions {
+            upload_exact_bytes(
+                self.session.as_ref(),
+                &self.queue,
+                &self.tensors[position_tensor].buffer,
+                &position_view,
+                &positions,
+                self.completion_timeout,
+                "position input upload",
+            )?;
+        }
         match (
             self.tensor_ids.get("input.multimodal_embeddings").copied(),
             multimodal,
@@ -7269,15 +7836,25 @@ fn workspace_allocation_bytes(
     tensor_id: usize,
     terminal_outputs: [usize; 2],
 ) -> Result<u64, QwenExecutionError> {
+    workspace_allocation_bytes_with_terminal_mode(graph, tensor_id, terminal_outputs, false)
+}
+
+fn workspace_allocation_bytes_with_terminal_mode(
+    graph: &QwenGraph,
+    tensor_id: usize,
+    terminal_outputs: [usize; 2],
+    short_terminal_last_row: bool,
+) -> Result<u64, QwenExecutionError> {
     let tensor = graph.tensor_metadata().get(tensor_id).ok_or_else(|| {
         QwenExecutionError::InvalidGraph("workspace tensor ID is out of range".to_owned())
     })?;
-    compact_terminal_allocation_end(
+    compact_terminal_allocation_end_with_terminal_mode(
         graph.token_count(),
         graph.is_mtp(),
         tensor_id,
         terminal_outputs,
         tensor.view(),
+        short_terminal_last_row,
     )
     .map(|value| value.unwrap_or_else(|| tensor.view().end_offset()))
 }
@@ -7339,6 +7916,14 @@ fn plan_workspace_arena(
     graph: &QwenGraph,
     dynamic_tensors: &[bool],
 ) -> Result<WorkspaceArenaLayout, QwenExecutionError> {
+    plan_workspace_arena_with_terminal_mode(graph, dynamic_tensors, false)
+}
+
+fn plan_workspace_arena_with_terminal_mode(
+    graph: &QwenGraph,
+    dynamic_tensors: &[bool],
+    short_terminal_last_row: bool,
+) -> Result<WorkspaceArenaLayout, QwenExecutionError> {
     if dynamic_tensors.len() != graph.tensor_metadata().len() {
         return Err(QwenExecutionError::InvalidGraph(
             "dynamic tensor table differs from graph metadata".to_owned(),
@@ -7394,11 +7979,12 @@ fn plan_workspace_arena(
         if !dynamic_tensors[tensor_id] || tensor.backing() != QwenGraphTensorBacking::Owned {
             continue;
         }
-        let size_bytes = align_workspace(workspace_allocation_bytes(
-            graph,
-            tensor_id,
-            terminal_outputs,
-        )?)?;
+        let allocation_bytes = if short_terminal_last_row {
+            workspace_allocation_bytes_with_terminal_mode(graph, tensor_id, terminal_outputs, true)?
+        } else {
+            workspace_allocation_bytes(graph, tensor_id, terminal_outputs)?
+        };
+        let size_bytes = align_workspace(allocation_bytes)?;
         baseline_bytes = baseline_bytes.checked_add(size_bytes).ok_or_else(|| {
             QwenExecutionError::InvalidGraph("workspace baseline byte count overflowed".to_owned())
         })?;
@@ -7462,6 +8048,14 @@ fn plan_workspace_arena(
 fn validate_graph_plan(
     graph: &QwenGraph,
     plan: &WeightLoadPlan,
+) -> Result<GraphLayout, QwenExecutionError> {
+    validate_graph_plan_with_terminal_mode(graph, plan, false)
+}
+
+fn validate_graph_plan_with_terminal_mode(
+    graph: &QwenGraph,
+    plan: &WeightLoadPlan,
+    short_terminal_last_row: bool,
 ) -> Result<GraphLayout, QwenExecutionError> {
     if graph.model_fingerprint() != plan.lock_fingerprint || graph.plan_digest() != plan.digest() {
         return Err(QwenExecutionError::InvalidGraph(
@@ -7657,7 +8251,11 @@ fn validate_graph_plan(
         }
     }
 
-    let workspace = plan_workspace_arena(graph, &dynamic_tensors)?;
+    let workspace = if short_terminal_last_row {
+        plan_workspace_arena_with_terminal_mode(graph, &dynamic_tensors, true)?
+    } else {
+        plan_workspace_arena(graph, &dynamic_tensors)?
+    };
     Ok(GraphLayout {
         tensor_ids,
         _weight_tensor_ids: weight_tensor_ids,
@@ -8406,6 +9004,7 @@ fn terminal_output_tensor_ids(graph: &QwenGraph) -> Result<[usize; 2], QwenExecu
     Ok([argmax.inputs()[0], argmax.outputs()[0]])
 }
 
+#[cfg(test)]
 fn compact_terminal_allocation_end(
     graph_token_count: u64,
     is_mtp: bool,
@@ -8413,7 +9012,27 @@ fn compact_terminal_allocation_end(
     terminal_outputs: [usize; 2],
     view: &TensorView,
 ) -> Result<Option<u64>, QwenExecutionError> {
-    if graph_token_count < TERMINAL_ROW_MIN_TOKENS
+    compact_terminal_allocation_end_with_terminal_mode(
+        graph_token_count,
+        is_mtp,
+        tensor_id,
+        terminal_outputs,
+        view,
+        false,
+    )
+}
+
+fn compact_terminal_allocation_end_with_terminal_mode(
+    graph_token_count: u64,
+    is_mtp: bool,
+    tensor_id: usize,
+    terminal_outputs: [usize; 2],
+    view: &TensorView,
+    short_terminal_last_row: bool,
+) -> Result<Option<u64>, QwenExecutionError> {
+    let short_terminal =
+        short_terminal_last_row && (17..TERMINAL_ROW_MIN_TOKENS).contains(&graph_token_count);
+    if (graph_token_count < TERMINAL_ROW_MIN_TOKENS && !short_terminal)
         || is_mtp
         || !terminal_outputs.contains(&tensor_id)
     {
@@ -9010,10 +9629,87 @@ mod tests {
         ExecutionCausalAttentionSubmissionAdapter, ExecutionKvStateSubmissionAdapter,
         ExecutionLinearAttentionSubmissionAdapter, ExecutionReadbackAdapter,
         ExecutionSessionAdapter, ExecutionState, ExecutionSubmissionAdapter,
-        ExecutionTransferAdapter, PreparedOperation, ShutdownReport,
+        ExecutionTransferAdapter, PreparedOperation, QueueCompletionMode, ShutdownReport,
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
+
+    #[test]
+    fn text_contiguous_positions_use_derived_mode_but_multimodal_does_not() {
+        use crate::AttentionPreprocessPositionPayloadModeV1::{
+            Contiguous, DerivedContiguous, Explicit,
+        };
+
+        assert_eq!(
+            execution_position_payload_mode(Contiguous, false, false),
+            DerivedContiguous
+        );
+        assert_eq!(
+            execution_position_payload_mode(Contiguous, true, false),
+            Contiguous
+        );
+        assert_eq!(
+            execution_position_payload_mode(Contiguous, false, true),
+            Contiguous
+        );
+        assert_eq!(
+            execution_position_payload_mode(Explicit, false, false),
+            Explicit
+        );
+        assert_eq!(
+            execution_position_payload_mode(Explicit, true, false),
+            Explicit
+        );
+    }
+
+    #[test]
+    fn derived_position_upload_skip_is_text_only_and_payload_free() {
+        use crate::AttentionPreprocessPositionPayloadModeV1::{
+            Contiguous, DerivedContiguous, Explicit,
+        };
+
+        assert!(should_skip_derived_position_upload(
+            DerivedContiguous,
+            false,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            Contiguous, false, false, false, false,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            DerivedContiguous,
+            true,
+            false,
+            false,
+            false,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            DerivedContiguous,
+            false,
+            true,
+            false,
+            false,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            DerivedContiguous,
+            false,
+            false,
+            true,
+            false,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            DerivedContiguous,
+            false,
+            false,
+            false,
+            true,
+        ));
+        assert!(!should_skip_derived_position_upload(
+            Explicit, false, false, false, false,
+        ));
+    }
 
     #[test]
     fn resident_fp8_weight_view_accepts_ocp_and_fnuz_storage() {
@@ -9176,11 +9872,14 @@ mod tests {
         argmax_sequences: VecDeque<Vec<i32>>,
         preprocess: Vec<(AttentionPreprocessPositionMode, u32, u32)>,
         uploads: Vec<Vec<u8>>,
+        matmul_input_rows: Vec<usize>,
     }
 
     #[derive(Clone)]
     struct ExecutionRecorder {
         state: Arc<Mutex<RecorderState>>,
+        target: Arc<Mutex<String>>,
+        completion_mode: Arc<Mutex<QueueCompletionMode>>,
         failure_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         pending_kind: Arc<Mutex<Option<SemanticOpKind>>>,
         shutdown_calls: Arc<AtomicUsize>,
@@ -9194,6 +9893,8 @@ mod tests {
         fn default() -> Self {
             Self {
                 state: Arc::new(Mutex::new(RecorderState::default())),
+                target: Arc::new(Mutex::new("recorder".to_owned())),
+                completion_mode: Arc::new(Mutex::new(QueueCompletionMode::Profiled)),
                 failure_kind: Arc::new(Mutex::new(None)),
                 pending_kind: Arc::new(Mutex::new(None)),
                 shutdown_calls: Arc::new(AtomicUsize::new(0)),
@@ -9206,6 +9907,12 @@ mod tests {
     }
 
     impl ExecutionRecorder {
+        fn with_target(target: &str) -> Self {
+            let recorder = Self::default();
+            *recorder.target.lock().expect("target lock") = target.to_owned();
+            recorder
+        }
+
         fn with_argmax_sequences(sequences: impl IntoIterator<Item = Vec<i32>>) -> Self {
             let state = RecorderState {
                 argmax_sequences: sequences.into_iter().collect(),
@@ -9225,6 +9932,10 @@ mod tests {
                 .push(event.into());
         }
 
+        fn target(&self) -> String {
+            self.target.lock().expect("target lock").clone()
+        }
+
         fn events(&self) -> Vec<String> {
             self.state.lock().expect("recorder lock").events.clone()
         }
@@ -9235,6 +9946,14 @@ mod tests {
 
         fn uploads(&self) -> Vec<Vec<u8>> {
             self.state.lock().expect("recorder lock").uploads.clone()
+        }
+
+        fn matmul_input_rows(&self) -> Vec<usize> {
+            self.state
+                .lock()
+                .expect("recorder lock")
+                .matmul_input_rows
+                .clone()
         }
 
         fn set_failure(&self, kind: SemanticOpKind) {
@@ -9275,6 +9994,10 @@ mod tests {
     }
 
     impl ExecutionSessionAdapter for ExecutionRecorder {
+        fn expected_target(&self) -> Option<String> {
+            Some(self.target())
+        }
+
         fn max_transfer_bytes(&self) -> u64 {
             1_048_576
         }
@@ -9297,6 +10020,17 @@ mod tests {
         ) -> Result<AdapterResource, ExecutionError> {
             self.event("queue");
             Ok(AdapterResource::new(()))
+        }
+
+        fn set_queue_completion_mode(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            mode: QueueCompletionMode,
+        ) -> Result<(), ExecutionError> {
+            *self.completion_mode.lock().expect("completion mode lock") = mode;
+            self.event(format!("queue-mode:{mode:?}"));
+            Ok(())
         }
 
         fn create_queue_fence(
@@ -9322,6 +10056,15 @@ mod tests {
             _access: &ExecutionAdapterAccess<'_>,
             operation: &BoundSemanticOp,
         ) -> Result<AdapterResource, ExecutionError> {
+            if operation.descriptor().kind() == SemanticOpKind::Matmul {
+                if let Some(input) = operation.descriptor().inputs().first() {
+                    self.state
+                        .lock()
+                        .expect("recorder lock")
+                        .matmul_input_rows
+                        .push(input.shape().first().copied().unwrap_or(0));
+                }
+            }
             if let Some(contract) = operation.descriptor().attention_preprocess_contract() {
                 self.state.lock().expect("recorder lock").preprocess.push((
                     contract.position_mode(),
@@ -9342,12 +10085,14 @@ mod tests {
         {
             let kind = prepared.operation().descriptor().kind();
             self.event(format!("submit:{kind:?}"));
+            let mut dispatch = dispatch_evidence();
+            dispatch.target = self.target();
             Ok((
                 Box::new(RecorderSubmission {
                     recorder: Arc::new(self.clone_for_submission()),
                     kind,
                 }),
-                dispatch_evidence(),
+                dispatch,
             ))
         }
 
@@ -9572,6 +10317,8 @@ mod tests {
                 request.start_position(),
                 request.token_count()
             ));
+            let mut dispatch = dispatch_evidence();
+            dispatch.target = self.target();
             Ok((
                 Box::new(RecorderKvCompletion {
                     recorder: Arc::new(self.clone_for_submission()),
@@ -9579,7 +10326,7 @@ mod tests {
                     expected_length: request.end_position(),
                     completed: false,
                 }),
-                dispatch_evidence(),
+                dispatch,
             ))
         }
 
@@ -9598,6 +10345,8 @@ mod tests {
             ),
             ExecutionError,
         > {
+            let mut dispatch = dispatch_evidence();
+            dispatch.target = self.target();
             Ok((
                 Box::new(RecorderCausalCompletion {
                     recorder: Arc::new(self.clone_for_submission()),
@@ -9608,7 +10357,7 @@ mod tests {
                         descriptor.query_count()
                     ),
                 }),
-                dispatch_evidence(),
+                dispatch,
             ))
         }
 
@@ -9745,6 +10494,7 @@ mod tests {
                 descriptor.token_count()
             ));
             let mut dispatch = dispatch_evidence();
+            dispatch.target = self.target();
             dispatch.dispatch_count = 2;
             Ok((
                 Box::new(RecorderLinearCompletion {
@@ -9784,6 +10534,15 @@ mod tests {
     impl ExecutionSubmissionAdapter for RecorderSubmission {
         fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
             self.wait(Duration::ZERO)
+        }
+
+        fn finalize_after_fence(
+            &mut self,
+            _fence_token: u64,
+        ) -> Result<ExecutionState, ExecutionError> {
+            self.recorder
+                .event(format!("semantic-fence:{:?}", self.kind));
+            Ok(self.recorder.semantic_completion(self.kind))
         }
 
         fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
@@ -9896,7 +10655,24 @@ mod tests {
             self.wait(Duration::ZERO)
         }
 
+        fn finalize_after_fence(
+            &mut self,
+            _fence_token: u64,
+        ) -> Result<ExecutionState, ExecutionError> {
+            self.complete();
+            self.recorder.event("kv-fence-success");
+            Ok(ExecutionState::Success)
+        }
+
         fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            self.complete();
+            self.recorder.event("kv-success");
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    impl RecorderKvCompletion {
+        fn complete(&mut self) {
             if !self.completed {
                 self.recorder
                     .state
@@ -9906,8 +10682,6 @@ mod tests {
                     .insert(self.state_id, self.expected_length);
                 self.completed = true;
             }
-            self.recorder.event("kv-success");
-            Ok(ExecutionState::Success)
         }
     }
 
@@ -9919,6 +10693,14 @@ mod tests {
     impl ExecutionCausalAttentionSubmissionAdapter for RecorderCausalCompletion {
         fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
             self.wait(Duration::ZERO)
+        }
+
+        fn finalize_after_fence(
+            &mut self,
+            _fence_token: u64,
+        ) -> Result<ExecutionState, ExecutionError> {
+            self.recorder.event(format!("{}-fence", self.event));
+            Ok(ExecutionState::Success)
         }
 
         fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
@@ -9939,7 +10721,24 @@ mod tests {
             self.wait(Duration::ZERO)
         }
 
+        fn finalize_after_fence(
+            &mut self,
+            _fence_token: u64,
+        ) -> Result<ExecutionState, ExecutionError> {
+            self.complete();
+            self.recorder.event("linear-fence-success");
+            Ok(ExecutionState::Success)
+        }
+
         fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            self.complete();
+            self.recorder.event("linear-success");
+            Ok(ExecutionState::Success)
+        }
+    }
+
+    impl RecorderLinearCompletion {
+        fn complete(&mut self) {
             if !self.completed {
                 self.recorder
                     .state
@@ -9949,8 +10748,6 @@ mod tests {
                     .insert(self.state_id, self.expected_length);
                 self.completed = true;
             }
-            self.recorder.event("linear-success");
-            Ok(ExecutionState::Success)
         }
     }
 
@@ -9972,6 +10769,763 @@ mod tests {
             device_symbol: "recorder".to_owned(),
             target: "recorder".to_owned(),
         }
+    }
+
+    #[test]
+    fn deferred_completion_gate_is_exact_target_and_canonical_text_only() {
+        let (graph, _) = crate::qwen_graph::qwen35_execution_fixture();
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let session = ExecutionSession::new("hip", recorder);
+        assert!(qwen_deferred_completion_enabled(&session, &graph, None));
+        assert!(!qwen_deferred_completion_enabled(
+            &session,
+            &graph,
+            Some(OsStr::new("0"))
+        ));
+        assert!(!qwen_deferred_completion_enabled(
+            &session,
+            &graph,
+            Some(OsStr::new("other"))
+        ));
+        assert!(qwen_deferred_completion_enabled(
+            &session,
+            &graph,
+            Some(OsStr::new("1"))
+        ));
+
+        let other_target = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let other_session = ExecutionSession::new("hip", other_target);
+        assert!(!qwen_deferred_completion_enabled(
+            &other_session,
+            &graph,
+            Some(OsStr::new("1"))
+        ));
+    }
+
+    #[test]
+    fn phase50_candidate_env_selector_is_target_scoped() {
+        let one = Some(OsStr::new("1"));
+        let zero = Some(OsStr::new("0"));
+        let unknown = Some(OsStr::new("unknown"));
+        assert!(target_candidate_env_enabled(Some("gfx1030"), None));
+        assert!(target_candidate_env_enabled(Some("gfx1030"), one));
+        assert!(!target_candidate_env_enabled(Some("gfx1030"), zero));
+        assert!(!target_candidate_env_enabled(Some("gfx1030"), unknown));
+        assert!(target_candidate_env_enabled(Some("gfx1201"), None));
+        assert!(target_candidate_env_enabled(Some("gfx1201"), one));
+        assert!(!target_candidate_env_enabled(Some("gfx1201"), zero));
+        assert!(!target_candidate_env_enabled(Some("gfx1201"), unknown));
+        assert!(!target_candidate_env_enabled(Some("gfx942"), one));
+        assert!(!target_candidate_env_enabled(Some("unknown"), one));
+        assert!(!target_candidate_env_enabled(None, one));
+    }
+
+    #[test]
+    fn deferred_segment_restores_shared_recorder_queue_on_drop() {
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let session = ExecutionSession::new("hip", recorder.clone());
+        let queue = session.create_queue().expect("recorder queue");
+        {
+            let _segment = ExecutionSegment::deferred(&session, &queue, Duration::from_millis(1))
+                .expect("recorder deferred mode");
+            assert!(
+                recorder
+                    .events()
+                    .iter()
+                    .any(|event| event == "queue-mode:Deferred")
+            );
+        }
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "queue-mode:Profiled")
+        );
+    }
+
+    #[test]
+    fn deferred_recorder_transition_uses_one_fence_and_restores_profiled() {
+        struct DeferredEnvGuard(Option<std::ffi::OsString>);
+        impl Drop for DeferredEnvGuard {
+            fn drop(&mut self) {
+                // Restore the inherited value even when an assertion fails so
+                // subsequent tests stay on their inherited default mode.
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var(QWEN_DEFERRED_COMPLETION_ENV, value);
+                    } else {
+                        std::env::remove_var(QWEN_DEFERRED_COMPLETION_ENV);
+                    }
+                }
+            }
+        }
+
+        let previous = std::env::var_os(QWEN_DEFERRED_COMPLETION_ENV);
+        let _environment = DeferredEnvGuard(previous);
+        unsafe {
+            std::env::set_var(QWEN_DEFERRED_COMPLETION_ENV, "1");
+        }
+
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let session = Arc::new(ExecutionSession::new("hip", recorder.clone()));
+        let source = TestProvisionSource::default();
+        let mut core =
+            QwenExecutionCore::provision(session, graph, plan, Duration::from_millis(1), &source)
+                .expect("structural fixture provisions");
+        core.prefill(&[1]).expect("deferred recorder transition");
+
+        let events = recorder.events();
+        assert!(events.iter().any(|event| event == "queue-mode:Deferred"));
+        assert!(events.iter().any(|event| event == "queue-mode:Profiled"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "queue-fence")
+                .count(),
+            9
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.starts_with("semantic-fence:"))
+        );
+        assert!(!events.iter().any(|event| event.starts_with("semantic:")));
+    }
+
+    #[test]
+    fn residual_rmsnorm_fusion_lowers_with_contract_and_executes() {
+        struct FusionEnvGuard(Option<std::ffi::OsString>);
+        impl Drop for FusionEnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var(QWEN_RESIDUAL_RMSNORM_FUSION_ENV, value);
+                    } else {
+                        std::env::remove_var(QWEN_RESIDUAL_RMSNORM_FUSION_ENV);
+                    }
+                }
+            }
+        }
+
+        let previous = std::env::var_os(QWEN_RESIDUAL_RMSNORM_FUSION_ENV);
+        let _environment = FusionEnvGuard(previous);
+        unsafe {
+            std::env::set_var(QWEN_RESIDUAL_RMSNORM_FUSION_ENV, "1");
+        }
+
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture();
+        let recorder = ExecutionRecorder::with_target("gfx1030");
+        recorder
+            .state
+            .lock()
+            .expect("recorder lock")
+            .argmax_sequences
+            .push_back(vec![7]);
+        let recorder = Arc::new(recorder);
+        let session = Arc::new(ExecutionSession::new("hip", recorder.clone()));
+        assert_eq!(graph.model_fingerprint(), QWEN35_4B_FINGERPRINT);
+        assert_eq!(graph.layer_types().len(), QWEN35_LAYER_COUNT);
+        assert_eq!(session.backend_name(), "hip");
+        assert_eq!(session.expected_target().as_deref(), Some("gfx1030"));
+        assert!(graph.fp8_sidecar_fingerprint().is_none());
+        assert!(!graph.is_multimodal());
+        assert!(!graph.is_mtp());
+        assert!(qwen_residual_rmsnorm_fusion_enabled(
+            &session,
+            &graph,
+            &AdapterRequestSetV1::disabled()
+        ));
+        let disabled_adapters = AdapterRequestSetV1::disabled();
+        for env_value in [None, Some(OsStr::new("1"))] {
+            assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_residual_rmsnorm_fusion_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let wrong_target_recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let wrong_target_session = ExecutionSession::new("hip", wrong_target_recorder);
+        assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            None,
+        ));
+        assert!(qwen_residual_rmsnorm_fusion_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            Some(OsStr::new("1")),
+        ));
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_residual_rmsnorm_fusion_enabled_with_env(
+                &wrong_target_session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let source = TestProvisionSource::default();
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan,
+                Duration::from_millis(1),
+                &source,
+            )
+            .expect("resident fixture provisions"),
+        );
+        let mut core =
+            QwenExecutionCore::from_resident(resident, graph, AdapterRequestSetV1::disabled())
+                .expect("fused request provisions");
+        core.prefill(&[1]).expect("fused request executes");
+        let events = recorder.events();
+        assert!(
+            events
+                .iter()
+                .any(|event| event == "prepare:ResidualRmsNorm")
+        );
+        assert!(events.iter().any(|event| event == "submit:ResidualRmsNorm"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "prepare:ResidualRmsNorm")
+                .count(),
+            crate::qwen_graph::QWEN35_LAYER_COUNT
+        );
+    }
+
+    #[test]
+    fn gdn_bundle_resident_graph_selects_four_prefill_matmuls_and_one_decode_bundle() {
+        struct BundleEnvGuard(Option<std::ffi::OsString>);
+        impl Drop for BundleEnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var(QWEN_GDN_PROJECTION_BUNDLE_ENV, value);
+                    } else {
+                        std::env::remove_var(QWEN_GDN_PROJECTION_BUNDLE_ENV);
+                    }
+                }
+            }
+        }
+
+        let previous = std::env::var_os(QWEN_GDN_PROJECTION_BUNDLE_ENV);
+        let _environment = BundleEnvGuard(previous);
+        unsafe {
+            std::env::set_var(QWEN_GDN_PROJECTION_BUNDLE_ENV, "1");
+        }
+
+        // The resident graph has capacity three, while the bundle gate is
+        // decided by the exact model/backend identity rather than capacity.
+        // M>1 decomposes at execution time; M=1 uses the bundle ABI.
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(3);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        assert!(qwen_gdn_projection_bundle_enabled(
+            &session,
+            &graph,
+            &AdapterRequestSetV1::disabled()
+        ));
+        let disabled_adapters = AdapterRequestSetV1::disabled();
+        for env_value in [None, Some(OsStr::new("1"))] {
+            assert!(qwen_gdn_projection_bundle_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_gdn_projection_bundle_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let wrong_target_recorder = Arc::new(ExecutionRecorder::with_target("gfx1201"));
+        let wrong_target_session = ExecutionSession::new("hip", wrong_target_recorder);
+        assert!(qwen_gdn_projection_bundle_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            None,
+        ));
+        assert!(qwen_gdn_projection_bundle_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            Some(OsStr::new("1")),
+        ));
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_gdn_projection_bundle_enabled_with_env(
+                &wrong_target_session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("bundle resident fixture provisions"),
+        );
+        let core =
+            QwenExecutionCore::from_resident(resident, graph, AdapterRequestSetV1::disabled())
+                .expect("bundle resident request provisions");
+        let bundle_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::GdnProjectionBundle)
+            })
+            .expect("bundle node is present");
+
+        let before = recorder.events();
+        let mut prefill_pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            bundle_node,
+            3,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut prefill_pending,
+        )
+        .expect("M=3 bundle decomposes");
+        let after_prefill = recorder.events();
+        assert_eq!(
+            after_prefill
+                .iter()
+                .skip(before.len())
+                .filter(|event| event.as_str() == "submit:GdnProjectionBundle")
+                .count(),
+            0
+        );
+        assert_eq!(
+            after_prefill
+                .iter()
+                .skip(before.len())
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            4
+        );
+        prefill_pending.abort().expect("prefill cleanup");
+
+        let before_decode = recorder.events();
+        let mut decode_pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            bundle_node,
+            1,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut decode_pending,
+        )
+        .expect("M=1 bundle uses native semantic operation");
+        let after_decode = recorder.events();
+        assert_eq!(
+            after_decode
+                .iter()
+                .skip(before_decode.len())
+                .filter(|event| event.as_str() == "submit:GdnProjectionBundle")
+                .count(),
+            1
+        );
+        assert_eq!(
+            after_decode
+                .iter()
+                .skip(before_decode.len())
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            0
+        );
+        decode_pending.abort().expect("decode cleanup");
+    }
+
+    #[test]
+    fn mlp_gate_up_silu_bundle_resident_graph_decomposes_prefill_and_bundles_decode() {
+        struct BundleEnvGuard(Option<std::ffi::OsString>);
+        impl Drop for BundleEnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var(QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV, value);
+                    } else {
+                        std::env::remove_var(QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV);
+                    }
+                }
+            }
+        }
+
+        let previous = std::env::var_os(QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV);
+        let _environment = BundleEnvGuard(previous);
+        unsafe {
+            std::env::remove_var(QWEN_MLP_GATE_UP_SILU_BUNDLE_ENV);
+        }
+
+        let (graph, plan) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(3);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let adapter: Arc<dyn ExecutionSessionAdapter> = recorder.clone();
+        let session = Arc::new(ExecutionSession::new("hip", adapter));
+        let disabled_adapters = AdapterRequestSetV1::disabled();
+        assert!(qwen_mlp_gate_up_silu_bundle_enabled(
+            &session,
+            &graph,
+            &disabled_adapters
+        ));
+        for env_value in [None, Some(OsStr::new("1"))] {
+            assert!(qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+                &session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let wrong_target_session =
+            ExecutionSession::new("hip", Arc::new(ExecutionRecorder::with_target("gfx1201")));
+        assert!(qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            Some(OsStr::new("1")),
+        ));
+        assert!(qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+            &wrong_target_session,
+            &graph,
+            &disabled_adapters,
+            None,
+        ));
+        for env_value in [Some(OsStr::new("0")), Some(OsStr::new("unknown"))] {
+            assert!(!qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+                &wrong_target_session,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+        let (mtp_graph, _) = crate::qwen_graph::qwen35_mtp_execution_fixture();
+        assert!(!qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+            &session,
+            &mtp_graph,
+            &disabled_adapters,
+            Some(OsStr::new("1")),
+        ));
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan.clone(),
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("MLP bundle resident fixture provisions"),
+        );
+        let artifact = control_fixture(&graph, &plan);
+        let adapter_request = AdapterRequestSetV1::new(
+            Vec::new(),
+            vec![ControlVectorSelectionV1 {
+                alias: "mlp-bundle-control".to_owned(),
+                artifact,
+                scale: 1.0,
+            }],
+        )
+        .expect("control adapter fixture validates");
+        assert!(!qwen_mlp_gate_up_silu_bundle_enabled_with_env(
+            &session,
+            &graph,
+            &adapter_request,
+            Some(OsStr::new("1")),
+        ));
+        let core = QwenExecutionCore::from_resident(resident, graph, disabled_adapters)
+            .expect("MLP bundle resident request provisions");
+        let bundle_node = core
+            .graph
+            .nodes()
+            .iter()
+            .find(|node| {
+                node.kind() == QwenGraphNodeKind::Semantic(SemanticOpKind::MlpGateUpSiluBundle)
+            })
+            .expect("MLP bundle node is present");
+
+        let before_prefill = recorder.events();
+        let mut prefill_pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            bundle_node,
+            3,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut prefill_pending,
+        )
+        .expect("M=3 MLP bundle decomposes");
+        let after_prefill = recorder.events();
+        let prefill_events = &after_prefill[before_prefill.len()..];
+        assert_eq!(
+            prefill_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:MlpGateUpSiluBundle")
+                .count(),
+            0
+        );
+        assert_eq!(
+            prefill_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            2
+        );
+        assert_eq!(
+            prefill_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:SiluMul")
+                .count(),
+            1
+        );
+        prefill_pending.abort().expect("prefill cleanup");
+
+        let before_decode = recorder.events();
+        let mut decode_pending = ExecutionSegment::profiled(Duration::from_millis(1));
+        core.execute_semantic(
+            bundle_node,
+            1,
+            None,
+            TerminalOutputRows::Last,
+            None,
+            &mut decode_pending,
+        )
+        .expect("M=1 MLP bundle uses native semantic operation");
+        let after_decode = recorder.events();
+        let decode_events = &after_decode[before_decode.len()..];
+        assert_eq!(
+            decode_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:MlpGateUpSiluBundle")
+                .count(),
+            1
+        );
+        assert_eq!(
+            decode_events
+                .iter()
+                .filter(|event| event.as_str() == "submit:Matmul")
+                .count(),
+            0
+        );
+        decode_pending.abort().expect("decode cleanup");
+    }
+
+    #[test]
+    fn short_terminal_last_row_selector_contract_covers_boundaries_and_overrides() {
+        let disabled_adapters = AdapterRequestSetV1::disabled();
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        let session = ExecutionSession::new("hip", recorder);
+        for token_count in [16_u64, 17, 32, 33, 254, 255] {
+            let (graph, _) =
+                crate::qwen_graph::qwen35_execution_fixture_with_token_count(token_count);
+            let expected = (17..TERMINAL_ROW_MIN_TOKENS).contains(&token_count);
+            for (label, env_value, env_enabled) in [
+                ("unset", None, true),
+                ("exact-1", Some(OsStr::new("1")), true),
+                ("exact-0", Some(OsStr::new("0")), false),
+                ("unknown", Some(OsStr::new("unknown")), false),
+            ] {
+                assert_eq!(
+                    qwen_short_terminal_last_row_enabled_with_env(
+                        &session,
+                        &graph,
+                        &disabled_adapters,
+                        env_value,
+                    ),
+                    expected && env_enabled,
+                    "{label} selector at token_count={token_count}"
+                );
+            }
+
+            let rows =
+                select_terminal_output_rows(token_count, false, expected, false, false, false);
+            assert_eq!(
+                rows,
+                if expected {
+                    TerminalOutputRows::Last
+                } else if token_count < TERMINAL_ROW_MIN_TOKENS {
+                    TerminalOutputRows::All
+                } else {
+                    TerminalOutputRows::Last
+                },
+                "terminal row selection at token_count={token_count}"
+            );
+            assert_eq!(
+                select_terminal_output_rows(token_count, false, expected, false, true, false),
+                TerminalOutputRows::All,
+                "include_all_logits_bf16 must override short terminal mode"
+            );
+            assert_eq!(
+                select_terminal_output_rows(token_count, false, expected, false, false, true),
+                TerminalOutputRows::All,
+                "force_all_terminal_rows must override short terminal mode"
+            );
+            assert_eq!(
+                select_terminal_output_rows(token_count, false, expected, true, true, true),
+                TerminalOutputRows::Last,
+                "device selector keeps its existing final-row precedence"
+            );
+        }
+
+        let (graph, _) = crate::qwen_graph::qwen35_execution_fixture_with_token_count(32);
+        let terminal_outputs = terminal_output_tensor_ids(&graph).expect("terminal IDs");
+        for tensor_id in terminal_outputs {
+            let view = graph.tensor_metadata()[tensor_id].view();
+            let full = workspace_allocation_bytes(&graph, tensor_id, terminal_outputs)
+                .expect("full terminal allocation");
+            let compact = workspace_allocation_bytes_with_terminal_mode(
+                &graph,
+                tensor_id,
+                terminal_outputs,
+                true,
+            )
+            .expect("short terminal allocation");
+            assert_eq!(compact, first_row_view(view).unwrap().end_offset());
+            assert_eq!(full, view.end_offset());
+        }
+        let wrong_target =
+            ExecutionSession::new("hip", Arc::new(ExecutionRecorder::with_target("gfx1201")));
+        for env_value in [None, Some(OsStr::new("1"))] {
+            assert!(!qwen_short_terminal_last_row_enabled_with_env(
+                &wrong_target,
+                &graph,
+                &disabled_adapters,
+                env_value,
+            ));
+        }
+    }
+
+    #[test]
+    fn short_terminal_last_row_preserves_visible_token_and_repeatability() {
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(value) = self.0.take() {
+                        std::env::set_var(QWEN_SHORT_TERMINAL_LAST_ROW_ENV, value);
+                    } else {
+                        std::env::remove_var(QWEN_SHORT_TERMINAL_LAST_ROW_ENV);
+                    }
+                }
+            }
+        }
+
+        let previous = std::env::var_os(QWEN_SHORT_TERMINAL_LAST_ROW_ENV);
+        let _environment = EnvGuard(previous);
+        let token_count = 32_usize;
+        let (graph, plan) =
+            crate::qwen_graph::qwen35_execution_fixture_with_token_count(token_count as u64);
+        let recorder = Arc::new(ExecutionRecorder::with_target("gfx1030"));
+        {
+            let mut state = recorder.state.lock().expect("recorder lock");
+            state.argmax_sequences.push_back(vec![31; token_count]);
+            state.argmax_sequences.push_back(vec![31]);
+            state.argmax_sequences.push_back(vec![31]);
+        }
+        let session = Arc::new(ExecutionSession::new("hip", recorder.clone()));
+        let resident = Arc::new(
+            QwenResidentInner::provision(
+                Arc::clone(&session),
+                graph.clone(),
+                plan,
+                Duration::from_millis(1),
+                &TestProvisionSource::default(),
+            )
+            .expect("visible-token resident fixture provisions"),
+        );
+
+        unsafe {
+            std::env::set_var(QWEN_SHORT_TERMINAL_LAST_ROW_ENV, "0");
+        }
+        let mut baseline = QwenExecutionCore::from_resident(
+            Arc::clone(&resident),
+            graph.clone(),
+            AdapterRequestSetV1::disabled(),
+        )
+        .expect("baseline request provisions");
+        let baseline_output = baseline
+            .prefill(&vec![1; token_count])
+            .expect("baseline prefill executes");
+        let baseline_token = baseline_output
+            .token_ids()
+            .last()
+            .copied()
+            .expect("baseline visible token");
+        drop(baseline);
+
+        unsafe {
+            std::env::set_var(QWEN_SHORT_TERMINAL_LAST_ROW_ENV, "1");
+        }
+        let mut first = QwenExecutionCore::from_resident(
+            Arc::clone(&resident),
+            graph.clone(),
+            AdapterRequestSetV1::disabled(),
+        )
+        .expect("short request provisions");
+        let first_output = first
+            .prefill(&vec![1; token_count])
+            .expect("short prefill executes");
+        let first_token = first_output
+            .token_ids()
+            .last()
+            .copied()
+            .expect("short visible token");
+        drop(first);
+
+        let mut repeat =
+            QwenExecutionCore::from_resident(resident, graph, AdapterRequestSetV1::disabled())
+                .expect("repeat request provisions");
+        let repeat_output = repeat
+            .prefill(&vec![1; token_count])
+            .expect("repeat short prefill executes");
+        let repeat_token = repeat_output
+            .token_ids()
+            .last()
+            .copied()
+            .expect("repeat visible token");
+
+        assert_eq!(first_token, baseline_token);
+        assert_eq!(repeat_token, first_token);
+        assert_eq!(first_output.token_ids(), [31]);
+        assert_eq!(repeat_output.token_ids(), [31]);
+        assert!(recorder.matmul_input_rows().contains(&1));
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| event == "submit:Argmax"),
+            "terminal argmax must remain in the execution trace"
+        );
     }
 
     fn provisioned_core(
@@ -10218,38 +11772,44 @@ mod tests {
     }
 
     #[test]
-    fn chunk_candidates_cover_the_16_gib_boundary_and_non_aligned_prompts() {
-        let threshold = QWEN_PREFILL_SMALL_DEVICE_MAX_BYTES;
+    fn chunk_candidates_follow_memory_capacity_tiers_and_non_aligned_prompts() {
+        let gib = 1024 * 1024 * 1024;
+        let prompt = 65_537;
+        for (memory_bytes, expected) in [
+            (24 * gib - 1, vec![512]),
+            (24 * gib, vec![2_048, 512]),
+            (35 * gib - 1, vec![2_048, 512]),
+            (35 * gib, vec![4_096, 2_048, 512]),
+            (60 * gib - 1, vec![4_096, 2_048, 512]),
+            (60 * gib, vec![8_192, 4_096, 2_048, 512]),
+            (160 * gib - 1, vec![8_192, 4_096, 2_048, 512]),
+            (160 * gib, vec![16_384, 8_192, 4_096, 2_048, 512]),
+        ] {
+            assert_eq!(
+                qwen_prefill_chunk_candidates(memory_bytes, prompt).unwrap(),
+                expected,
+                "memory bytes {memory_bytes}"
+            );
+        }
         assert_eq!(
-            qwen_prefill_chunk_candidates(threshold - 1, 10_001).unwrap(),
-            [512]
+            qwen_prefill_chunk_candidates(32 * gib, 10_001).unwrap(),
+            [2_048, 512]
         );
-        assert_eq!(
-            qwen_prefill_chunk_candidates(threshold, 10_001).unwrap(),
-            [512]
-        );
-        assert_eq!(
-            qwen_prefill_chunk_candidates(threshold + 1, 10_001).unwrap(),
-            [10_001, 8_192, 4_096, 2_048, 512]
-        );
-        assert_eq!(
-            qwen_prefill_chunk_candidates(threshold + 1, 511).unwrap(),
-            [511]
-        );
+        assert_eq!(qwen_prefill_chunk_candidates(32 * gib, 511).unwrap(), [511]);
         for prompt in [
             1_u64, 3, 511, 512, 513, 2_047, 2_048, 2_049, 4_095, 4_096, 4_097, 8_191, 8_192, 8_193,
             16_383, 16_384, 16_385, 65_535, 65_536, 65_537,
         ] {
-            let small = qwen_prefill_chunk_candidates(threshold, prompt).unwrap();
+            let small = qwen_prefill_chunk_candidates(24 * gib - 1, prompt).unwrap();
             assert_eq!(small, [prompt.min(512)], "small-device prompt {prompt}");
 
-            let large = qwen_prefill_chunk_candidates(threshold + 1, prompt).unwrap();
+            let large = qwen_prefill_chunk_candidates(160 * gib, prompt).unwrap();
             assert_eq!(large.first().copied(), Some(prompt.min(16_384)));
             assert_eq!(large.last().copied(), Some(prompt.min(512)));
             assert!(large.windows(2).all(|pair| pair[0] > pair[1]));
         }
         assert!(qwen_prefill_chunk_candidates(0, 1).is_err());
-        assert!(qwen_prefill_chunk_candidates(threshold, 0).is_err());
+        assert!(qwen_prefill_chunk_candidates(24 * gib, 0).is_err());
     }
 
     #[test]

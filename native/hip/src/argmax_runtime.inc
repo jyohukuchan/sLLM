@@ -270,8 +270,8 @@ sllm_argmax_execute(const sllm_argmax_plan_t *const raw_plan,
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        plan->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status = get_context_device_properties(
+        plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       if (!rollback_reserved_argmax_submission(plan, queue, error_sink)) {
         execute_guard.disarm();

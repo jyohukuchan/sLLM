@@ -28,8 +28,18 @@ constexpr const char *kSerialRowsWave64LogicalKernelId =
     "matmul.bf16_fp32.decode.serial_rows.wave64.v1";
 constexpr const char *kSerialRowsWave64DeviceSymbol =
     "sllm_matmul_bf16_fp32_decode_serial_rows_wave64_v1";
+constexpr const char *kShortSerialLogicalKernelId =
+    "matmul.bf16_fp32.prefill.short_serial.v1";
+constexpr const char *kShortSerialDeviceSymbol =
+    "sllm_matmul_bf16_fp32_prefill_short_serial_v1";
+constexpr const char *kShortMixedLogicalKernelId =
+    "matmul.bf16_fp32.prefill.short_mixed_bss.v2";
+constexpr const char *kShortMixedDeviceSymbol = "hipblasGemmExBbsF32Output";
 constexpr const char *kHipBlasLogicalKernelId = "matmul.hipblas.gemm_ex.v2";
 constexpr const char *kHipBlasDeviceSymbol = "hipblasGemmEx";
+constexpr int32_t kPhase49Gfx1030RocblasSolution445 = -445;
+constexpr const char *kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment =
+    "SLLM_MATMUL_GFX1030_SHORT_MIXED_ROCBLAS_SOLUTION";
 constexpr const char *kFp8NativeLogicalKernelId =
     "matmul.fp8.outer.hipblaslt.v1";
 constexpr const char *kFp8NativeDeviceSymbol = "hipblasLtMatmul";
@@ -78,6 +88,8 @@ enum class KernelVariant : uint32_t {
   SerialRowsReductionWave64 = 13U,
   Mxfp4W4A4Decode = 14U,
   Mxfp4W4A4Prefill = 15U,
+  PrefillShortSerial = 16U,
+  PrefillShortMixed = 17U,
 };
 
 inline KernelVariant select_mxfp4_variant(const uint64_t m) noexcept {
@@ -120,6 +132,17 @@ constexpr bool phase34_gfx1030_hipblas_shape(const uint64_t m, const uint64_t k,
   return k == 2560U && n == 1024U && m >= 1024U;
 }
 
+// ROCm 7.14 exposes a faster Tensile solution for the same BF16/F32 GEMM
+// contract through rocblas_gemm_algo_solution_index. Keep this accepted
+// default candidate constrained to the already-adopted Phase 34 gfx1030 shape
+// set; an explicit environment value of 0 (or any unknown value) rolls back
+// to the ordinary hipBLAS path, as do all other targets and shapes.
+constexpr bool
+phase49_gfx1030_rocblas_solution_445_shape(const uint64_t m, const uint64_t k,
+                                           const uint64_t n) noexcept {
+  return phase34_gfx1030_hipblas_shape(m, k, n);
+}
+
 static_assert(!phase34_gfx1030_hipblas_shape(127U, 2560U, 9216U));
 static_assert(phase34_gfx1030_hipblas_shape(128U, 2560U, 9216U));
 static_assert(phase34_gfx1030_hipblas_shape(129U, 4096U, 2560U));
@@ -127,6 +150,130 @@ static_assert(!phase34_gfx1030_hipblas_shape(1023U, 2560U, 1024U));
 static_assert(phase34_gfx1030_hipblas_shape(1024U, 2560U, 1024U));
 static_assert(!phase34_gfx1030_hipblas_shape(10001U, 2560U, 32U));
 static_assert(!phase34_gfx1030_hipblas_shape(10001U, 2560U, 248320U));
+static_assert(!phase49_gfx1030_rocblas_solution_445_shape(127U, 2560U, 9216U));
+static_assert(phase49_gfx1030_rocblas_solution_445_shape(128U, 2560U, 9216U));
+static_assert(phase49_gfx1030_rocblas_solution_445_shape(10001U, 2560U, 9216U));
+static_assert(!phase49_gfx1030_rocblas_solution_445_shape(10001U, 2560U, 32U));
+static_assert(!phase49_gfx1030_rocblas_solution_445_shape(10001U, 2560U,
+                                                          248320U));
+
+// The short-serial rollback provider covers the five dense Qwen projection
+// shapes that are known to benefit from row grouping at small prefill M.
+constexpr bool phase49_gfx1030_short_serial_shape(const uint64_t m,
+                                                  const uint64_t k,
+                                                  const uint64_t n) noexcept {
+  const bool main_projection =
+      (k == 2560U && (n == 9216U || n == 8192U || n == 4096U)) ||
+      (k == 9216U && n == 2560U) || (k == 4096U && n == 2560U);
+  return m >= 9U && m <= 63U && main_projection;
+}
+
+static_assert(!phase49_gfx1030_short_serial_shape(8U, 2560U, 9216U));
+static_assert(phase49_gfx1030_short_serial_shape(9U, 2560U, 9216U));
+static_assert(phase49_gfx1030_short_serial_shape(17U, 2560U, 8192U));
+static_assert(phase49_gfx1030_short_serial_shape(31U, 2560U, 4096U));
+static_assert(phase49_gfx1030_short_serial_shape(33U, 9216U, 2560U));
+static_assert(phase49_gfx1030_short_serial_shape(63U, 4096U, 2560U));
+static_assert(!phase49_gfx1030_short_serial_shape(64U, 4096U, 2560U));
+static_assert(!phase49_gfx1030_short_serial_shape(17U, 2560U, 1024U));
+static_assert(!phase49_gfx1030_short_serial_shape(17U, 2560U, 248320U));
+
+constexpr bool phase49_gfx1030_short_mixed_shape(const uint64_t m,
+                                                 const uint64_t k,
+                                                 const uint64_t n) noexcept {
+  const bool qwen_projection =
+      (k == 2560U && (n == 32U || n == 1024U || n == 4096U || n == 8192U ||
+                      n == 9216U || n == 248320U)) ||
+      (k == 4096U && n == 2560U) || (k == 9216U && n == 2560U);
+  return m >= 9U && m <= 63U && qwen_projection;
+}
+
+// Phase 49 short-mixed solution table.  The table is deliberately narrower
+// than the default short-mixed provider: M=17 keeps its per-shape fastest
+// choices, while M=32 uses the -473 candidate uniformly because it is the
+// measured exact-output solution across all non-vocabulary shapes.  The
+// vocabulary head (N=248320) stays on the hipBLAS baseline.  A zero return
+// means baseline.  The companion environment is default-on when unset or
+// exactly "1"; exactly "0" and unknown values disable the candidate.
+constexpr int32_t
+phase49_gfx1030_short_mixed_rocblas_solution(const uint64_t m, const uint64_t k,
+                                             const uint64_t n) noexcept {
+  if (m != 17U && m != 32U) {
+    return 0;
+  }
+  if (m == 32U) {
+    if ((k == 2560U &&
+         (n == 32U || n == 1024U || n == 4096U || n == 8192U || n == 9216U)) ||
+        ((k == 4096U || k == 9216U) && n == 2560U)) {
+      return -473;
+    }
+    return 0;
+  }
+  if (k == 2560U) {
+    if (n == 9216U || n == 8192U || n == 32U) {
+      return -473;
+    }
+    if (n == 4096U) {
+      return -472;
+    }
+    if (n == 1024U && m == 17U) {
+      return -473;
+    }
+    return 0;
+  }
+  if ((k == 4096U || k == 9216U) && n == 2560U) {
+    return -472;
+  }
+  return 0;
+}
+
+inline bool
+phase49_gfx1030_short_mixed_rocblas_enabled(const char *const target,
+                                            const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
+  const char *const force_baseline = std::getenv("SLLM_MATMUL_FORCE_BASELINE");
+  if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
+    return false;
+  }
+  const char *const environment =
+      std::getenv(kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment);
+  const bool enabled =
+      environment == nullptr || std::strcmp(environment, "1") == 0;
+  return target_is(target, "gfx1030") && enabled &&
+         phase49_gfx1030_short_mixed_rocblas_solution(m, k, n) != 0;
+}
+
+constexpr bool
+phase49_gfx1030_mixed_workspace_bytes(const uint64_t m, const uint64_t n,
+                                      uint64_t *const bytes) noexcept {
+  if (bytes == nullptr || m == 0U || n == 0U || m > UINT64_MAX / n) {
+    return false;
+  }
+  const uint64_t elements = m * n;
+  if (elements > UINT64_MAX / UINT64_C(4)) {
+    return false;
+  }
+  *bytes = elements * UINT64_C(4);
+  return true;
+}
+
+static_assert(!phase49_gfx1030_short_mixed_shape(8U, 2560U, 32U));
+static_assert(phase49_gfx1030_short_mixed_shape(9U, 2560U, 32U));
+static_assert(phase49_gfx1030_short_mixed_shape(17U, 2560U, 1024U));
+static_assert(phase49_gfx1030_short_mixed_shape(32U, 2560U, 248320U));
+static_assert(phase49_gfx1030_short_mixed_shape(63U, 4096U, 2560U));
+static_assert(!phase49_gfx1030_short_mixed_shape(64U, 2560U, 9216U));
+static_assert(!phase49_gfx1030_short_mixed_shape(17U, 2560U, 33U));
+static_assert(phase49_gfx1030_short_mixed_rocblas_solution(17U, 2560U, 9216U) ==
+              -473);
+static_assert(phase49_gfx1030_short_mixed_rocblas_solution(17U, 2560U, 1024U) ==
+              -473);
+static_assert(phase49_gfx1030_short_mixed_rocblas_solution(32U, 2560U, 1024U) ==
+              -473);
+static_assert(phase49_gfx1030_short_mixed_rocblas_solution(17U, 2560U,
+                                                           248320U) == 0);
+static_assert(phase49_gfx1030_short_mixed_rocblas_solution(16U, 2560U, 9216U) ==
+              0);
 
 inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
                                     const uint64_t n,
@@ -142,6 +289,22 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
     return target_is(target, "gfx942")
                ? KernelVariant::SerialRowsReductionWave64
                : KernelVariant::SerialRowsReduction;
+  }
+  const char *const disable_short_serial =
+      std::getenv("SLLM_MATMUL_GFX1030_SHORT_SERIAL");
+  const char *const disable_short_mixed =
+      std::getenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+  if (target_is(target, "gfx1030") &&
+      !(disable_short_mixed != nullptr &&
+        std::strcmp(disable_short_mixed, "0") == 0) &&
+      phase49_gfx1030_short_mixed_shape(m, k, n)) {
+    return KernelVariant::PrefillShortMixed;
+  }
+  if (target_is(target, "gfx1030") &&
+      !(disable_short_serial != nullptr &&
+        std::strcmp(disable_short_serial, "0") == 0) &&
+      phase49_gfx1030_short_serial_shape(m, k, n)) {
+    return KernelVariant::PrefillShortSerial;
   }
   if (m > 1U && (target_is(target, "gfx1201") || target_is(target, "gfx942"))) {
     return KernelVariant::HipBlas;
@@ -169,6 +332,10 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kMxfp4W4A4DecodeLogicalKernelId
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? kMxfp4W4A4PrefillLogicalKernelId
+         : variant == KernelVariant::PrefillShortSerial
+             ? kShortSerialLogicalKernelId
+         : variant == KernelVariant::PrefillShortMixed
+             ? kShortMixedLogicalKernelId
          : variant == KernelVariant::HipBlas ? kHipBlasLogicalKernelId
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64LogicalKernelId
@@ -197,7 +364,10 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kMxfp4W4A4DecodeDeviceSymbol
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? kMxfp4W4A4PrefillDeviceSymbol
-         : variant == KernelVariant::HipBlas ? kHipBlasDeviceSymbol
+         : variant == KernelVariant::PrefillShortSerial
+             ? kShortSerialDeviceSymbol
+         : variant == KernelVariant::PrefillShortMixed ? kShortMixedDeviceSymbol
+         : variant == KernelVariant::HipBlas           ? kHipBlasDeviceSymbol
          : variant == KernelVariant::DecodeReductionWave64
              ? kDecodeWave64DeviceSymbol
          : variant == KernelVariant::SerialRowsReductionWave64
@@ -224,6 +394,10 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Mxfp4W4A4Decode ? static_cast<uint32_t>(n)
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? static_cast<uint32_t>(m * n)
+         : variant == KernelVariant::PrefillShortSerial
+             ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
+         : variant == KernelVariant::PrefillShortMixed
+             ? static_cast<uint32_t>(n)
          : variant == KernelVariant::Fp8Emulation
              ? static_cast<uint32_t>((m * n + kWorkgroupSize - 1U) /
                                      kWorkgroupSize)
@@ -245,6 +419,11 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
 hipError_t launch(const uint16_t *activation, const uint16_t *weight,
                   uint16_t *output, uint64_t m, uint64_t k, uint64_t n,
                   KernelVariant variant, hipStream_t stream) noexcept;
+
+hipError_t launch_short_mixed_f32_to_bf16(const float *output_f32,
+                                          uint16_t *output,
+                                          uint64_t element_count,
+                                          hipStream_t stream) noexcept;
 
 hipError_t launch_fp8_quantize(const uint16_t *activation, uint8_t *quantized,
                                float *scales, uint64_t m, uint64_t k, bool fnuz,

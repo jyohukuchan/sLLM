@@ -181,14 +181,7 @@ fn raw_descriptor(
         op_version: sys::SLLM_HIP_ATTENTION_PREPROCESS_VERSION,
         start_position: contract.start_position(),
         reserved: [
-            match contract.position_payload_mode() {
-                sllm_core::AttentionPreprocessPositionPayloadModeV1::Contiguous => {
-                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1
-                }
-                sllm_core::AttentionPreprocessPositionPayloadModeV1::Explicit => {
-                    sys::SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
-                }
-            },
+            raw_position_payload_mode(contract.position_payload_mode()),
             0,
             0,
             0,
@@ -201,6 +194,22 @@ fn raw_descriptor(
         q_output,
         gate_output,
         k_output,
+    }
+}
+
+const fn raw_position_payload_mode(
+    mode: sllm_core::AttentionPreprocessPositionPayloadModeV1,
+) -> u32 {
+    match mode {
+        sllm_core::AttentionPreprocessPositionPayloadModeV1::Contiguous => {
+            sys::SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1
+        }
+        sllm_core::AttentionPreprocessPositionPayloadModeV1::DerivedContiguous => {
+            sys::SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1
+        }
+        sllm_core::AttentionPreprocessPositionPayloadModeV1::Explicit => {
+            sys::SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1
+        }
     }
 }
 
@@ -489,7 +498,9 @@ mod tests {
         }
     }
 
-    fn descriptor_fixture() -> (Context, AttentionPreprocessDescriptor) {
+    fn descriptor_fixture_with_mode(
+        position_payload_mode: sllm_core::AttentionPreprocessPositionPayloadModeV1,
+    ) -> (Context, AttentionPreprocessDescriptor) {
         let context = Context::test_without_native();
         let packed = Buffer::test_without_native(&context);
         let k = Buffer::test_without_native(&context);
@@ -499,10 +510,15 @@ mod tests {
         let q_output = Buffer::test_without_native(&context);
         let gate_output = Buffer::test_without_native(&context);
         let k_output = Buffer::test_without_native(&context);
-        let contract = AttentionPreprocessContract::new_qwen3_5(
+        let contract = AttentionPreprocessContract::new_qwen3_5_with_layout_and_context_and_position_payload_mode(
             AttentionPreprocessPositionMode::Prefill,
             0,
             3,
+            16,
+            4,
+            256,
+            AttentionPreprocessContract::MAX_POSITION_EMBEDDINGS,
+            position_payload_mode,
         )
         .expect("valid attention preprocess contract");
         let descriptor = AttentionPreprocessDescriptor::new(
@@ -518,6 +534,31 @@ mod tests {
         )
         .expect("valid attention preprocess descriptor");
         (context, descriptor)
+    }
+
+    fn descriptor_fixture() -> (Context, AttentionPreprocessDescriptor) {
+        descriptor_fixture_with_mode(
+            sllm_core::AttentionPreprocessPositionPayloadModeV1::Contiguous,
+        )
+    }
+
+    #[test]
+    fn derived_contiguous_mode_has_an_explicit_abi_identity() {
+        assert_eq!(
+            raw_position_payload_mode(
+                sllm_core::AttentionPreprocessPositionPayloadModeV1::DerivedContiguous
+            ),
+            sys::SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1
+        );
+    }
+
+    #[test]
+    fn wave32_candidate_has_explicit_dispatch_identity() {
+        assert_eq!(
+            sys::SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1,
+            2
+        );
+        assert_eq!(sys::SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE, 32);
     }
 
     #[test]

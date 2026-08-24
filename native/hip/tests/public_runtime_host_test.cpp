@@ -1,4 +1,5 @@
 #include "evidence_abi.h"
+#include "matmul_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_kernel_internal.hpp"
 
@@ -10,8 +11,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <string>
 #include <sys/mman.h>
 #include <thread>
 #include <unistd.h>
@@ -23,6 +27,14 @@ extern "C" void sllm_test_rmsnorm_execute_throw_after_reservation(
     uint32_t occurrences) noexcept;
 extern "C" void sllm_test_rmsnorm_execute_throw_after_registration(
     uint32_t occurrences) noexcept;
+extern "C" uint32_t sllm_test_select_causal_attention_gqa4(
+    uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
+    uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    const char *arch_name) noexcept;
+extern "C" uint32_t sllm_test_select_causal_attention_providers(
+    uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
+    uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    const char *arch_name) noexcept;
 
 namespace {
 
@@ -46,15 +58,21 @@ bool expect_status(const sllm_status_t actual, const sllm_status_t expected,
   return false;
 }
 
-bool create_context(sllm_context_t **const context) {
+bool create_context_for_arch(const char *const arch,
+                             sllm_context_t **const context) {
   sllm_context_create_info_t info{};
   info.struct_size = sizeof(info);
   info.abi_version = SLLM_HIP_ABI_VERSION;
   info.device_index = 0U;
-  std::memcpy(info.expected_gcn_arch_name, "gfx1201", sizeof("gfx1201"));
+  std::strncpy(info.expected_gcn_arch_name, arch,
+               sizeof(info.expected_gcn_arch_name) - 1U);
   Error error;
   return expect_status(sllm_context_create(&info, context, &error.sink),
                        SLLM_STATUS_OK, "sllm_context_create", error);
+}
+
+bool create_context(sllm_context_t **const context) {
+  return create_context_for_arch("gfx1201", context);
 }
 
 bool create_queue(const sllm_context_t *const context,
@@ -65,6 +83,304 @@ bool create_queue(const sllm_context_t *const context,
   Error error;
   return expect_status(sllm_queue_create(context, &info, queue, &error.sink),
                        SLLM_STATUS_OK, "sllm_queue_create", error);
+}
+
+bool causal_attention_gqa4_p32_selector_contract() {
+  constexpr const char *const p16_name =
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT";
+  constexpr const char *const p32_name =
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32";
+  constexpr const char *const gfx1201_p32_name =
+      "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
+  constexpr const char *const force_name =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  const char *const old_p16 = std::getenv(p16_name);
+  const char *const old_p32 = std::getenv(p32_name);
+  const char *const old_gfx1201_p32 = std::getenv(gfx1201_p32_name);
+  const char *const old_force = std::getenv(force_name);
+  const bool had_p16 = old_p16 != nullptr;
+  const bool had_p32 = old_p32 != nullptr;
+  const bool had_gfx1201_p32 = old_gfx1201_p32 != nullptr;
+  const bool had_force = old_force != nullptr;
+  const std::string old_p16_value = had_p16 ? old_p16 : "";
+  const std::string old_p32_value = had_p32 ? old_p32 : "";
+  const std::string old_gfx1201_p32_value =
+      had_gfx1201_p32 ? old_gfx1201_p32 : "";
+  const std::string old_force_value = had_force ? old_force : "";
+  const auto restore_environment = [&]() {
+    if (had_p16) {
+      setenv(p16_name, old_p16_value.c_str(), 1);
+    } else {
+      unsetenv(p16_name);
+    }
+    if (had_p32) {
+      setenv(p32_name, old_p32_value.c_str(), 1);
+    } else {
+      unsetenv(p32_name);
+    }
+    if (had_gfx1201_p32) {
+      setenv(gfx1201_p32_name, old_gfx1201_p32_value.c_str(), 1);
+    } else {
+      unsetenv(gfx1201_p32_name);
+    }
+    if (had_force) {
+      setenv(force_name, old_force_value.c_str(), 1);
+    } else {
+      unsetenv(force_name);
+    }
+  };
+  const auto select =
+      [](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
+         const uint32_t query_heads = 16U, const uint32_t kv_heads = 4U,
+         const uint32_t head_dim = 256U,
+         const char *const arch_name = "gfx1030") {
+        return sllm_test_select_causal_attention_gqa4(
+            expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+            SLLM_HIP_KV_ENCODING_FP16_V1, arch_name);
+      };
+
+  unsetenv(p16_name);
+  unsetenv(p32_name);
+  unsetenv(gfx1201_p32_name);
+  unsetenv(force_name);
+  bool valid = select(4095U) == 0U && select(4096U) == 2U &&
+               select(4097U) == 2U &&
+               select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U;
+
+  setenv(p32_name, "0", 1);
+  valid = valid && select(4096U) == 0U;
+  setenv(p32_name, "unknown", 1);
+  valid = valid && select(4096U) == 0U;
+  setenv(p32_name, "1", 1);
+  valid = valid && select(4096U) == 2U;
+  unsetenv(p32_name);
+  setenv(p16_name, "1", 1);
+  valid = valid && select(4096U) == 2U;
+  setenv(p32_name, "0", 1);
+  valid = valid && select(4096U) == 1U;
+  setenv(force_name, "1", 1);
+  valid = valid && select(4096U) == 0U;
+
+  unsetenv(force_name);
+  unsetenv(p16_name);
+  unsetenv(p32_name);
+  setenv(gfx1201_p32_name, "0", 1);
+  valid = valid && select(4095U, 1U, 16U, 4U, 256U, "gfx1201") == 0U &&
+          select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
+  setenv(gfx1201_p32_name, "unknown", 1);
+  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
+  setenv(gfx1201_p32_name, "1", 1);
+  valid = valid && select(4095U, 1U, 16U, 4U, 256U, "gfx1201") == 0U &&
+          select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U &&
+          select(4097U, 1U, 16U, 4U, 256U, "gfx1201") == 2U;
+  setenv(force_name, "1", 1);
+  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 0U;
+  unsetenv(force_name);
+  valid = valid && select(4096U, 2U, 16U, 4U, 256U, "gfx1201") == 0U &&
+          select(4096U, 1U, 8U, 4U, 256U, "gfx1201") == 0U &&
+          select(4096U, 1U, 16U, 8U, 256U, "gfx1201") == 0U &&
+          select(4096U, 1U, 16U, 4U, 128U, "gfx1201") == 0U &&
+          select(4096U, 1U, 16U, 4U, 256U, "gfx942") == 0U &&
+          select(4096U, 1U, 16U, 4U, 256U, "gfx9999") == 0U;
+  unsetenv(gfx1201_p32_name);
+  valid = valid && select(4096U, 1U, 16U, 4U, 256U, "gfx1201") == 2U &&
+          select(4096U, 1U, 16U, 4U, 256U, "gfx942") == 0U &&
+          select(4096U, 2U) == 0U && select(4096U, 1U, 8U) == 0U &&
+          select(4096U, 1U, 16U, 8U) == 0U &&
+          select(4096U, 1U, 16U, 4U, 128U) == 0U;
+  restore_environment();
+  return valid;
+}
+
+bool causal_attention_target_scoped_selector_contract() {
+  constexpr uint32_t kGfx1201Wave = 1U << 0U;
+  constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
+  constexpr uint32_t kDecodeGqa4SplitP32 = 1U << 4U;
+  constexpr uint32_t kPrefillGqa4 = 1U << 6U;
+  constexpr uint32_t kPrefillGqa4QTile4 = 1U << 7U;
+  constexpr const char *const kForceBaseline =
+      "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
+  constexpr const char *const kGfx1201Gqa4SplitP32 =
+      "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
+  constexpr std::array<const char *const, 9> kCandidateVariables = {
+      "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
+      "SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2",
+      kForceBaseline};
+  std::array<bool, kCandidateVariables.size()> had_old_value{};
+  std::array<std::string, kCandidateVariables.size()> old_values{};
+  for (std::size_t index = 0U; index < kCandidateVariables.size(); ++index) {
+    const char *const old_value = std::getenv(kCandidateVariables[index]);
+    had_old_value[index] = old_value != nullptr;
+    if (old_value != nullptr) {
+      old_values[index] = old_value;
+    }
+    unsetenv(kCandidateVariables[index]);
+  }
+  const char *const old_gfx1201_p32 = std::getenv(kGfx1201Gqa4SplitP32);
+  const bool had_old_gfx1201_p32 = old_gfx1201_p32 != nullptr;
+  const std::string old_gfx1201_p32_value =
+      had_old_gfx1201_p32 ? old_gfx1201_p32 : "";
+  unsetenv(kGfx1201Gqa4SplitP32);
+  const auto restore_environment = [&]() {
+    for (std::size_t index = 0U; index < kCandidateVariables.size(); ++index) {
+      if (had_old_value[index]) {
+        setenv(kCandidateVariables[index], old_values[index].c_str(), 1);
+      } else {
+        unsetenv(kCandidateVariables[index]);
+      }
+    }
+    if (had_old_gfx1201_p32) {
+      setenv(kGfx1201Gqa4SplitP32, old_gfx1201_p32_value.c_str(), 1);
+    } else {
+      unsetenv(kGfx1201Gqa4SplitP32);
+    }
+  };
+  const auto clear_environment = [&]() {
+    for (const char *const variable : kCandidateVariables) {
+      unsetenv(variable);
+    }
+    unsetenv(kGfx1201Gqa4SplitP32);
+  };
+  const auto select = [](const uint64_t expected_kv_length,
+                         const uint32_t query_count, const uint32_t query_heads,
+                         const uint32_t kv_heads, const uint32_t head_dim,
+                         const uint32_t encoding, const char *const arch_name) {
+    return sllm_test_select_causal_attention_providers(
+        expected_kv_length, query_count, query_heads, kv_heads, head_dim,
+        encoding, arch_name);
+  };
+  const auto expect_gfx942_zero =
+      [&](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
+          const uint32_t query_heads = 16U, const uint32_t kv_heads = 4U,
+          const uint32_t head_dim = 256U,
+          const uint32_t encoding = SLLM_HIP_KV_ENCODING_FP16_V1) {
+        const uint32_t actual =
+            select(expected_kv_length, query_count, query_heads, kv_heads,
+                   head_dim, encoding, "gfx942");
+        if (actual != 0U) {
+          std::cerr << "gfx942 selector mask " << actual << " at kv "
+                    << expected_kv_length << ", q " << query_count
+                    << ", qheads " << query_heads << ", kvheads " << kv_heads
+                    << ", dim " << head_dim << ", encoding " << encoding
+                    << '\n';
+        }
+        return actual == 0U;
+      };
+  const auto expect_gfx1201 =
+      [&](const uint64_t expected_kv_length, const uint32_t query_count,
+          const uint32_t expected_mask, const uint32_t query_heads = 16U,
+          const uint32_t kv_heads = 4U, const uint32_t head_dim = 256U,
+          const uint32_t encoding = SLLM_HIP_KV_ENCODING_FP16_V1) {
+        const uint32_t actual =
+            select(expected_kv_length, query_count, query_heads, kv_heads,
+                   head_dim, encoding, "gfx1201");
+        if (actual != expected_mask) {
+          std::cerr << "gfx1201 selector mask " << actual << ", expected "
+                    << expected_mask << " at kv " << expected_kv_length
+                    << ", q " << query_count << ", qheads " << query_heads
+                    << ", kvheads " << kv_heads << ", dim " << head_dim
+                    << ", encoding " << encoding << '\n';
+        }
+        return actual == expected_mask;
+      };
+
+  bool valid = true;
+  // Exercise every selector boundary with all target-gated candidates unset.
+  for (const uint64_t expected_kv_length :
+       {31U, 32U, 33U, 1023U, 1024U, 1025U, 4095U, 4096U, 4097U, 10001U}) {
+    for (const uint32_t query_count : {1U, 2U, 32U, 64U, 128U, 1024U}) {
+      valid = valid && expect_gfx942_zero(expected_kv_length, query_count);
+    }
+  }
+  valid = valid && expect_gfx942_zero(4096U, 1U, 8U, 4U, 256U) &&
+          expect_gfx942_zero(4096U, 1U, 16U, 8U, 256U) &&
+          expect_gfx942_zero(4096U, 1U, 16U, 4U, 128U) &&
+          expect_gfx942_zero(4096U, 1U, 16U, 4U, 256U,
+                             SLLM_HIP_KV_ENCODING_FP8_V1) &&
+          select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_FP16_V1,
+                 "gfx9999") == 0U;
+
+  // gfx1201 keeps the wave/prefill routes and now defaults the exact-shape
+  // GQA4 P32 candidate on.  The 4095/4096 boundary distinguishes it.
+  valid =
+      valid && expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
+      expect_gfx1201(4096U, 1U,
+                     kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa4SplitP32) &&
+      expect_gfx1201(4097U, 1U,
+                     kGfx1201Wave | kDecodeWaveSplit | kDecodeGqa4SplitP32) &&
+      expect_gfx1201(4096U, 2U, 0U) &&
+      expect_gfx1201(4096U, 32U, kGfx1201Wave) &&
+      expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
+      expect_gfx1201(4096U, 128U,
+                     kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
+      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 16U, 4U, 256U,
+                     SLLM_HIP_KV_ENCODING_FP8_V1) &&
+      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 8U, 4U,
+                     256U) &&
+      expect_gfx1201(4096U, 1U, kGfx1201Wave, 16U, 4U, 128U);
+
+  // Every environment spelling must remain inert for gfx942.  Test each
+  // candidate independently and then all candidates together.
+  constexpr std::array<const char *const, 4> kEnvironmentValues = {
+      "1", "0", "unknown", nullptr};
+  for (const char *const variable : kCandidateVariables) {
+    for (const char *const value : kEnvironmentValues) {
+      clear_environment();
+      if (value != nullptr) {
+        setenv(variable, value, 1);
+      }
+      valid = valid && expect_gfx942_zero(4095U) && expect_gfx942_zero(4096U) &&
+              expect_gfx942_zero(4097U) && expect_gfx942_zero(1024U, 1024U) &&
+              expect_gfx942_zero(10001U, 128U, 16U, 4U, 256U,
+                                 SLLM_HIP_KV_ENCODING_FP8_V1);
+    }
+  }
+  // The same environment matrix must not expose any gfx1030-only candidate
+  // on gfx1201.  FORCE_BASELINE only removes the qtile4 variant, matching the
+  // existing selector's allow_prefill_provider contract.
+  for (const char *const variable : kCandidateVariables) {
+    for (const char *const value : kEnvironmentValues) {
+      clear_environment();
+      if (value != nullptr) {
+        setenv(variable, value, 1);
+      }
+      const bool force_baseline = std::strcmp(variable, kForceBaseline) == 0 &&
+                                  value != nullptr &&
+                                  std::strcmp(value, "1") == 0;
+      valid = valid &&
+              expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
+              expect_gfx1201(4096U, 2U, 0U) &&
+              expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
+              expect_gfx1201(4096U, 128U,
+                             kGfx1201Wave | kPrefillGqa4 |
+                                 (force_baseline ? 0U : kPrefillGqa4QTile4));
+    }
+  }
+  clear_environment();
+  for (const char *const variable : kCandidateVariables) {
+    setenv(variable, "1", 1);
+  }
+  valid = valid && expect_gfx942_zero(4095U) && expect_gfx942_zero(4096U) &&
+          expect_gfx942_zero(4097U) && expect_gfx942_zero(1024U, 1024U) &&
+          expect_gfx942_zero(10001U, 128U);
+
+  // FORCE_BASELINE suppresses baseline-gated candidates but cannot make
+  // gfx942 select one; gfx1201 keeps its existing common prefill route.
+  clear_environment();
+  setenv(kForceBaseline, "1", 1);
+  valid = valid && expect_gfx942_zero(4096U) &&
+          expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
+          expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
+          expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4);
+
+  restore_environment();
+  return valid;
 }
 
 bool create_buffer(const sllm_context_t *const context,
@@ -88,6 +404,32 @@ bool create_buffer_sized(const sllm_context_t *const context,
   Error error;
   return expect_status(sllm_buffer_create(context, &info, buffer, &error.sink),
                        SLLM_STATUS_OK, "sllm_buffer_create", error);
+}
+
+bool mlp_gate_up_silu_bundle_abi_negative_contract() {
+  sllm_mlp_gate_up_silu_bundle_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_VERSION;
+  Error error;
+  sllm_mlp_gate_up_silu_bundle_plan_t *plan = nullptr;
+  if (!expect_status(sllm_mlp_gate_up_silu_bundle_prepare(nullptr, &descriptor,
+                                                          &plan, &error.sink),
+                     SLLM_STATUS_INVALID_ARGUMENT, "MLP bundle null context",
+                     error) ||
+      plan != nullptr) {
+    return false;
+  }
+  descriptor.struct_size = sizeof(descriptor) - 1U;
+  if (!expect_status(sllm_mlp_gate_up_silu_bundle_prepare(
+                         reinterpret_cast<const sllm_context_t *>(1),
+                         &descriptor, &plan, &error.sink),
+                     SLLM_STATUS_INVALID_ABI_VERSION,
+                     "MLP bundle malformed descriptor", error) ||
+      plan != nullptr) {
+    return false;
+  }
+  return true;
 }
 
 bool release_context(sllm_context_t **const context,
@@ -1700,6 +2042,101 @@ sllm_rmsnorm_dispatch_info_t rmsnorm_dispatch_info() {
   return info;
 }
 
+sllm_residual_rmsnorm_desc_t residual_rmsnorm_descriptor(
+    const sllm_buffer_t *const residual, const sllm_buffer_t *const addend,
+    const sllm_buffer_t *const scale,
+    const sllm_buffer_t *const residual_output,
+    const sllm_buffer_t *const output, const uint64_t rows = 2U,
+    const uint64_t columns = 3U) {
+  sllm_residual_rmsnorm_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_RESIDUAL_RMSNORM_VERSION;
+  descriptor.accumulation_dtype = SLLM_RMSNORM_ACCUMULATION_F32;
+  descriptor.scale_mode = SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE;
+  descriptor.alias_policy = SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP;
+  float epsilon = 1.0e-6F;
+  std::memcpy(&descriptor.epsilon_bits, &epsilon, sizeof(epsilon));
+  descriptor.residual = rmsnorm_binding(residual, 0U, rows, columns);
+  descriptor.addend = rmsnorm_binding(addend, 0U, rows, columns);
+  descriptor.raw_scale = rmsnorm_binding(scale, 0U, 1U, columns);
+  descriptor.residual_output =
+      rmsnorm_binding(residual_output, 0U, rows, columns);
+  descriptor.output = rmsnorm_binding(output, 0U, rows, columns);
+  return descriptor;
+}
+
+sllm_residual_rmsnorm_dispatch_info_t residual_rmsnorm_dispatch_info() {
+  sllm_residual_rmsnorm_dispatch_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_RESIDUAL_RMSNORM_DISPATCH_INFO_VERSION;
+  return info;
+}
+
+bool residual_rmsnorm_prepare_execute_lifetime_contract() {
+  fake_hip::reset();
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *residual = nullptr;
+  sllm_buffer_t *addend = nullptr;
+  sllm_buffer_t *scale = nullptr;
+  sllm_buffer_t *residual_output = nullptr;
+  sllm_buffer_t *output = nullptr;
+  constexpr uint64_t rows = 2U;
+  constexpr uint64_t columns = 257U;
+  const uint64_t matrix_bytes = rows * columns * sizeof(uint16_t);
+  const uint64_t scale_bytes = columns * sizeof(uint16_t);
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_buffer_sized(context, matrix_bytes, &residual) ||
+      !create_buffer_sized(context, matrix_bytes, &addend) ||
+      !create_buffer_sized(context, scale_bytes, &scale) ||
+      !create_buffer_sized(context, matrix_bytes, &residual_output) ||
+      !create_buffer_sized(context, matrix_bytes, &output)) {
+    return false;
+  }
+  sllm_residual_rmsnorm_desc_t descriptor = residual_rmsnorm_descriptor(
+      residual, addend, scale, residual_output, output, rows, columns);
+  sllm_residual_rmsnorm_plan_t *plan = nullptr;
+  Error error;
+  if (!expect_status(sllm_residual_rmsnorm_prepare(context, &descriptor, &plan,
+                                                   &error.sink),
+                     SLLM_STATUS_OK, "residual RMSNorm prepare", error) ||
+      plan == nullptr ||
+      !expect_status(sllm_buffer_release(&residual, &error.sink),
+                     SLLM_STATUS_PUBLIC_BUSY, "residual dependency busy",
+                     error)) {
+    return false;
+  }
+  sllm_completion_t *completion = nullptr;
+  sllm_residual_rmsnorm_dispatch_info_t info = residual_rmsnorm_dispatch_info();
+  if (!expect_status(sllm_residual_rmsnorm_execute(plan, queue, &completion,
+                                                   &info, &error.sink),
+                     SLLM_STATUS_OK, "residual RMSNorm execute", error) ||
+      completion == nullptr || info.dispatch_count != 1U ||
+      info.row_count != rows || info.normalized_size != columns ||
+      info.kernel_id != 1U ||
+      std::strcmp(info.kernel_symbol, "rmsnorm.residual_fused.wave32.v1") !=
+          0 ||
+      fake_hip::residual_rmsnorm_launch_calls() != 1U) {
+    return false;
+  }
+  if (!expect_status(sllm_residual_rmsnorm_plan_release(&plan, &error.sink),
+                     SLLM_STATUS_PUBLIC_BUSY, "residual in-flight release",
+                     error) ||
+      !query_completion(completion, SLLM_STATUS_OK) ||
+      !release_completion(&completion) ||
+      !expect_status(sllm_residual_rmsnorm_plan_release(&plan, &error.sink),
+                     SLLM_STATUS_OK, "residual plan release", error) ||
+      !release_queue(&queue) || !release_buffer(&residual) ||
+      !release_buffer(&addend) || !release_buffer(&scale) ||
+      !release_buffer(&residual_output) || !release_buffer(&output) ||
+      !release_context(&context)) {
+    return false;
+  }
+  return true;
+}
+
 bool rmsnorm_execute_metadata_and_reuse() {
   fake_hip::reset();
   sllm_context_t *context = nullptr;
@@ -2628,6 +3065,356 @@ sllm_matmul_dispatch_info_t matmul_dispatch_info() {
   return info;
 }
 
+bool gdn_projection_bundle_launch_failure_rolls_back_accounting() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+
+  constexpr std::array<uint64_t, 4> widths = {8192U, 4096U, 32U, 32U};
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  std::array<sllm_buffer_t *, 4> weights{};
+  std::array<sllm_buffer_t *, 4> outputs{};
+  sllm_gdn_projection_bundle_plan_t *plan = nullptr;
+
+  bool valid = create_context_for_arch("gfx1030", &context) &&
+               create_queue(context, &queue) &&
+               create_buffer_sized(context, UINT64_C(2560) * sizeof(uint16_t),
+                                   &activation);
+  for (std::size_t index = 0U; index != widths.size() && valid; ++index) {
+    valid = create_buffer_sized(
+                context, widths[index] * UINT64_C(2560) * sizeof(uint16_t),
+                &weights[index]) &&
+            create_buffer_sized(context, widths[index] * sizeof(uint16_t),
+                                &outputs[index]);
+  }
+
+  if (valid) {
+    sllm_gdn_projection_bundle_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_GDN_PROJECTION_BUNDLE_VERSION;
+    descriptor.activation = matmul_binding(activation, 0U, 1U, 2560U);
+    for (std::size_t index = 0U; index != widths.size(); ++index) {
+      descriptor.weights[index] =
+          matmul_binding(weights[index], 0U, widths[index], 2560U);
+      descriptor.outputs[index] =
+          matmul_binding(outputs[index], 0U, 1U, widths[index]);
+    }
+
+    Error error;
+    valid = expect_status(sllm_gdn_projection_bundle_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK, "GDN bundle launch-failure prepare",
+                          error) &&
+            plan != nullptr;
+    if (valid) {
+      sllm_gdn_projection_bundle_dispatch_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = SLLM_HIP_ABI_VERSION;
+      info.info_version = SLLM_HIP_GDN_PROJECTION_BUNDLE_DISPATCH_INFO_VERSION;
+      sllm_completion_t *completion =
+          reinterpret_cast<sllm_completion_t *>(static_cast<uintptr_t>(0xA1U));
+      valid = expect_status(sllm_gdn_projection_bundle_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                            "GDN bundle stub launch failure", error) &&
+              completion == nullptr;
+    }
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_gdn_projection_bundle_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "GDN bundle launch-failure plan release",
+                  error) &&
+              valid;
+    }
+  }
+
+  if (queue != nullptr) {
+    valid = release_queue(&queue) && valid;
+  }
+  for (sllm_buffer_t *&buffer : weights) {
+    if (buffer != nullptr) {
+      valid = release_buffer(&buffer) && valid;
+    }
+  }
+  for (sllm_buffer_t *&buffer : outputs) {
+    if (buffer != nullptr) {
+      valid = release_buffer(&buffer) && valid;
+    }
+  }
+  if (activation != nullptr) {
+    valid = release_buffer(&activation) && valid;
+  }
+  if (context != nullptr) {
+    valid = release_context(&context) && valid;
+  }
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool mlp_gate_up_silu_bundle_launch_failure_rolls_back_accounting() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+
+  constexpr uint64_t hidden_size = 2560U;
+  constexpr uint64_t mlp_width = 9216U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *gate_weight = nullptr;
+  sllm_buffer_t *up_weight = nullptr;
+  std::array<sllm_buffer_t *, 3> outputs{};
+  sllm_mlp_gate_up_silu_bundle_plan_t *plan = nullptr;
+
+  const uint64_t activation_bytes = hidden_size * sizeof(uint16_t);
+  const uint64_t weight_bytes = mlp_width * hidden_size * sizeof(uint16_t);
+  const uint64_t output_bytes = mlp_width * sizeof(uint16_t);
+  bool valid = create_context_for_arch("gfx1030", &context) &&
+               create_queue(context, &queue) &&
+               create_buffer_sized(context, activation_bytes, &activation) &&
+               create_buffer_sized(context, weight_bytes, &gate_weight) &&
+               create_buffer_sized(context, weight_bytes, &up_weight);
+  for (sllm_buffer_t *&output : outputs) {
+    if (valid) {
+      valid = create_buffer_sized(context, output_bytes, &output);
+    }
+  }
+
+  if (valid) {
+    sllm_mlp_gate_up_silu_bundle_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_VERSION;
+    descriptor.activation = matmul_binding(activation, 0U, 1U, hidden_size);
+    descriptor.gate_weight =
+        matmul_binding(gate_weight, 0U, mlp_width, hidden_size);
+    descriptor.up_weight =
+        matmul_binding(up_weight, 0U, mlp_width, hidden_size);
+    descriptor.gate_output = matmul_binding(outputs[0], 0U, 1U, mlp_width);
+    descriptor.up_output = matmul_binding(outputs[1], 0U, 1U, mlp_width);
+    descriptor.silu_output = matmul_binding(outputs[2], 0U, 1U, mlp_width);
+
+    Error error;
+    valid = expect_status(sllm_mlp_gate_up_silu_bundle_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK, "MLP bundle launch-failure prepare",
+                          error) &&
+            plan != nullptr;
+    if (valid) {
+      sllm_mlp_gate_up_silu_bundle_dispatch_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = SLLM_HIP_ABI_VERSION;
+      info.info_version =
+          SLLM_HIP_MLP_GATE_UP_SILU_BUNDLE_DISPATCH_INFO_VERSION;
+      sllm_completion_t *completion =
+          reinterpret_cast<sllm_completion_t *>(static_cast<uintptr_t>(0xA2U));
+      valid = expect_status(sllm_mlp_gate_up_silu_bundle_execute(
+                                plan, queue, &completion, &info, &error.sink),
+                            SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+                            "MLP bundle stub launch failure", error) &&
+              completion == nullptr;
+    }
+    if (plan != nullptr) {
+      valid = expect_status(
+                  sllm_mlp_gate_up_silu_bundle_plan_release(&plan, &error.sink),
+                  SLLM_STATUS_OK, "MLP bundle launch-failure plan release",
+                  error) &&
+              valid;
+    }
+  }
+
+  if (queue != nullptr) {
+    valid = release_queue(&queue) && valid;
+  }
+  for (sllm_buffer_t *&output : outputs) {
+    if (output != nullptr) {
+      valid = release_buffer(&output) && valid;
+    }
+  }
+  if (gate_weight != nullptr) {
+    valid = release_buffer(&gate_weight) && valid;
+  }
+  if (up_weight != nullptr) {
+    valid = release_buffer(&up_weight) && valid;
+  }
+  if (activation != nullptr) {
+    valid = release_buffer(&activation) && valid;
+  }
+  if (context != nullptr) {
+    valid = release_context(&context) && valid;
+  }
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool context_device_property_snapshot_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx9999");
+  sllm_context_t *rejected_context = nullptr;
+  sllm_context_create_info_t rejected_info{};
+  rejected_info.struct_size = sizeof(rejected_info);
+  rejected_info.abi_version = SLLM_HIP_ABI_VERSION;
+  rejected_info.device_index = 0U;
+  std::strncpy(rejected_info.expected_gcn_arch_name, "gfx1201",
+               sizeof(rejected_info.expected_gcn_arch_name) - 1U);
+  Error rejected_error;
+  const sllm_status_t rejected_status = sllm_context_create(
+      &rejected_info, &rejected_context, &rejected_error.sink);
+  if (!expect_status(rejected_status, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+                     "context property mismatch", rejected_error) ||
+      rejected_context != nullptr || fake_hip::device_property_calls() != 1U) {
+    std::cerr << "context property mismatch cleanup contract failed\n";
+    if (rejected_context != nullptr) {
+      (void)release_context(&rejected_context);
+    }
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+
+  fake_hip::set_gcn_arch_name("gfx1201");
+  sllm_context_t *first_context = nullptr;
+  if (!create_context(&first_context)) {
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+  fake_hip::set_gcn_arch_name("gfx1030");
+  sllm_context_t *second_context = nullptr;
+  if (!create_context_for_arch("gfx1030", &second_context)) {
+    (void)release_context(&first_context);
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+  if (fake_hip::device_property_calls() != 3U) {
+    std::cerr << "context property snapshot queried an unexpected count\n";
+    (void)release_context(&second_context);
+    (void)release_context(&first_context);
+    fake_hip::set_gcn_arch_name("gfx1201");
+    return false;
+  }
+
+  sllm_queue_t *first_queue = nullptr;
+  sllm_queue_t *second_queue = nullptr;
+  sllm_buffer_t *first_input0 = nullptr;
+  sllm_buffer_t *first_input1 = nullptr;
+  sllm_buffer_t *first_output = nullptr;
+  sllm_buffer_t *second_input0 = nullptr;
+  sllm_buffer_t *second_input1 = nullptr;
+  sllm_buffer_t *second_output = nullptr;
+  const uint64_t buffer_bytes = 64U;
+  const bool resources_ready =
+      create_queue(first_context, &first_queue) &&
+      create_queue(second_context, &second_queue) &&
+      create_buffer_sized(first_context, buffer_bytes, &first_input0) &&
+      create_buffer_sized(first_context, buffer_bytes, &first_input1) &&
+      create_buffer_sized(first_context, buffer_bytes, &first_output) &&
+      create_buffer_sized(second_context, buffer_bytes, &second_input0) &&
+      create_buffer_sized(second_context, buffer_bytes, &second_input1) &&
+      create_buffer_sized(second_context, buffer_bytes, &second_output);
+  bool valid = resources_ready;
+  sllm_elementwise_plan_t *first_plan = nullptr;
+  sllm_elementwise_plan_t *second_plan = nullptr;
+  sllm_completion_t *first_completion = nullptr;
+  sllm_completion_t *second_completion = nullptr;
+  if (resources_ready) {
+    Error error;
+    auto first_descriptor =
+        elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_COPY, first_input0,
+                               first_input1, first_output, 7U);
+    auto second_descriptor =
+        elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_COPY, second_input0,
+                               second_input1, second_output, 7U);
+    auto first_info = elementwise_dispatch_info();
+    auto second_info = elementwise_dispatch_info();
+    valid =
+        expect_status(sllm_elementwise_prepare(first_context, &first_descriptor,
+                                               &first_plan, &error.sink),
+                      SLLM_STATUS_OK, "snapshot first elementwise prepare",
+                      error) &&
+        expect_status(
+            sllm_elementwise_execute(first_plan, first_queue, &first_completion,
+                                     &first_info, &error.sink),
+            SLLM_STATUS_OK, "snapshot first elementwise execute", error) &&
+        first_completion != nullptr &&
+        std::strcmp(first_info.gcn_arch_name, "gfx1201") == 0;
+    if (first_completion != nullptr) {
+      valid = query_completion(first_completion, SLLM_STATUS_OK) &&
+              release_completion(&first_completion) && valid;
+    }
+    if (first_plan != nullptr) {
+      valid =
+          expect_status(sllm_elementwise_plan_release(&first_plan, &error.sink),
+                        SLLM_STATUS_OK,
+                        "snapshot first elementwise plan release", error) &&
+          valid;
+    }
+    if (valid) {
+      valid = expect_status(sllm_elementwise_prepare(second_context,
+                                                     &second_descriptor,
+                                                     &second_plan, &error.sink),
+                            SLLM_STATUS_OK,
+                            "snapshot second elementwise prepare", error) &&
+              expect_status(sllm_elementwise_execute(second_plan, second_queue,
+                                                     &second_completion,
+                                                     &second_info, &error.sink),
+                            SLLM_STATUS_OK,
+                            "snapshot second elementwise execute", error) &&
+              second_completion != nullptr &&
+              std::strcmp(second_info.gcn_arch_name, "gfx1030") == 0;
+    }
+    if (second_completion != nullptr) {
+      valid = query_completion(second_completion, SLLM_STATUS_OK) &&
+              release_completion(&second_completion) && valid;
+    }
+    if (second_plan != nullptr) {
+      valid = expect_status(
+                  sllm_elementwise_plan_release(&second_plan, &error.sink),
+                  SLLM_STATUS_OK, "snapshot second elementwise plan release",
+                  error) &&
+              valid;
+    }
+  }
+  valid = fake_hip::device_property_calls() == 3U && valid;
+  if (first_queue != nullptr && !release_queue(&first_queue)) {
+    valid = false;
+  }
+  if (second_queue != nullptr && !release_queue(&second_queue)) {
+    valid = false;
+  }
+  if (first_input0 != nullptr && !release_buffer(&first_input0)) {
+    valid = false;
+  }
+  if (first_input1 != nullptr && !release_buffer(&first_input1)) {
+    valid = false;
+  }
+  if (first_output != nullptr && !release_buffer(&first_output)) {
+    valid = false;
+  }
+  if (second_input0 != nullptr && !release_buffer(&second_input0)) {
+    valid = false;
+  }
+  if (second_input1 != nullptr && !release_buffer(&second_input1)) {
+    valid = false;
+  }
+  if (second_output != nullptr && !release_buffer(&second_output)) {
+    valid = false;
+  }
+  if (second_context != nullptr && !release_context(&second_context)) {
+    valid = false;
+  }
+  if (first_context != nullptr && !release_context(&first_context)) {
+    valid = false;
+  }
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
 bool matmul_prepare_execute_and_negative_contract() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
@@ -2769,6 +3556,151 @@ bool matmul_prepare_execute_and_negative_contract() {
   }
   return fake_hip::live_events() == 0U && fake_hip::live_streams() == 0U &&
          fake_hip::live_allocations() == 0U;
+}
+
+bool matmul_short_mixed_metadata_dispatch_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  unsetenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  constexpr uint64_t m = 9U;
+  constexpr uint64_t k = 4096U;
+  constexpr uint64_t n = 2560U;
+  if (!create_context_for_arch("gfx1030", &context) ||
+      !create_queue(context, &queue) ||
+      !create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) ||
+      !create_buffer_sized(context, n * k * sizeof(uint16_t), &weight) ||
+      !create_buffer_sized(context, m * n * sizeof(uint16_t), &output)) {
+    return false;
+  }
+  Error error;
+  auto descriptor =
+      matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+  sllm_matmul_plan_t *plan = nullptr;
+  sllm_completion_t *completion = nullptr;
+  auto info = matmul_dispatch_info();
+  const bool valid =
+      expect_status(
+          sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+          SLLM_STATUS_OK, "short mixed metadata prepare", error) &&
+      plan != nullptr &&
+      expect_status(
+          sllm_matmul_execute(plan, queue, &completion, &info, &error.sink),
+          SLLM_STATUS_OK, "short mixed metadata execute", error) &&
+      completion != nullptr && info.dispatch_count == 2U &&
+      info.kernel_id == 17U && info.grid_size_x == n && info.m == m &&
+      info.k == k && info.n == n && info.output_elements == m * n &&
+      std::strcmp(info.kernel_symbol,
+                  "matmul.bf16_fp32.prefill.short_mixed_bss.v2") == 0 &&
+      std::strcmp(info.device_symbol, "hipblasGemmExBbsF32Output") == 0 &&
+      std::strcmp(info.gcn_arch_name, "gfx1030") == 0 &&
+      fake_hip::matmul_launch_calls() == 1U &&
+      query_completion(completion, SLLM_STATUS_OK) &&
+      release_completion(&completion) &&
+      expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_OK, "short mixed metadata plan release",
+                    error) &&
+      plan == nullptr && release_queue(&queue) && release_buffer(&activation) &&
+      release_buffer(&weight) && release_buffer(&output) &&
+      release_context(&context);
+  fake_hip::set_gcn_arch_name("gfx1201");
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool matmul_short_mixed_rocblas_solution_selector_contract() {
+  const char *const solution_environment =
+      sllm_matmul_kernel::kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment;
+  const char *const old_solution = std::getenv(solution_environment);
+  const bool had_solution = old_solution != nullptr;
+  const std::string old_solution_value = had_solution ? old_solution : "";
+  const char *const old_force = std::getenv("SLLM_MATMUL_FORCE_BASELINE");
+  const bool had_force = old_force != nullptr;
+  const std::string old_force_value = had_force ? old_force : "";
+  const char *const old_short_mixed =
+      std::getenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+  const bool had_short_mixed = old_short_mixed != nullptr;
+  const std::string old_short_mixed_value =
+      had_short_mixed ? old_short_mixed : "";
+
+  const auto restore_environment = [&]() {
+    if (had_solution) {
+      setenv(solution_environment, old_solution_value.c_str(), 1);
+    } else {
+      unsetenv(solution_environment);
+    }
+    if (had_force) {
+      setenv("SLLM_MATMUL_FORCE_BASELINE", old_force_value.c_str(), 1);
+    } else {
+      unsetenv("SLLM_MATMUL_FORCE_BASELINE");
+    }
+    if (had_short_mixed) {
+      setenv("SLLM_MATMUL_GFX1030_SHORT_MIXED", old_short_mixed_value.c_str(),
+             1);
+    } else {
+      unsetenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+    }
+  };
+
+  constexpr uint64_t m17 = 17U;
+  constexpr uint64_t m32 = 32U;
+  constexpr uint64_t k2560 = 2560U;
+  constexpr uint64_t k4096 = 4096U;
+  constexpr uint64_t n9216 = 9216U;
+  constexpr uint64_t n4096 = 4096U;
+  constexpr uint64_t n8192 = 8192U;
+  constexpr uint64_t nVocab = 248320U;
+  bool valid = sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                   m17, k2560, n9216) == -473 &&
+               sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                   m17, k2560, n4096) == -472 &&
+               sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                   m32, k2560, n8192) == -473 &&
+               sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                   m32, k2560, nVocab) == 0 &&
+               sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_solution(
+                   16U, k2560, n9216) == 0;
+
+  unsetenv(solution_environment);
+  unsetenv("SLLM_MATMUL_FORCE_BASELINE");
+  unsetenv("SLLM_MATMUL_GFX1030_SHORT_MIXED");
+  valid = valid &&
+          sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+              "gfx1030", m17, k4096, 2560U) &&
+          sllm_matmul_kernel::select_variant(m17, k2560, n9216, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::PrefillShortMixed;
+
+  setenv(solution_environment, "1", 1);
+  valid =
+      valid && sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+                   "gfx1030", m17, k4096, 2560U);
+  setenv(solution_environment, "0", 1);
+  valid =
+      valid && !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+                   "gfx1030", m17, k4096, 2560U);
+  setenv(solution_environment, "unknown", 1);
+  valid =
+      valid && !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+                   "gfx1030", m17, k4096, 2560U);
+  unsetenv(solution_environment);
+  setenv("SLLM_MATMUL_FORCE_BASELINE", "1", 1);
+  valid = valid &&
+          !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+              "gfx1030", m17, k4096, 2560U) &&
+          sllm_matmul_kernel::select_variant(m17, k2560, n9216, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Baseline;
+  unsetenv("SLLM_MATMUL_FORCE_BASELINE");
+  valid =
+      valid && !sllm_matmul_kernel::phase49_gfx1030_short_mixed_rocblas_enabled(
+                   "gfx1201", m17, k4096, 2560U);
+
+  restore_environment();
+  return valid;
 }
 
 bool matmul_async_lifetime_and_cleanup() {
@@ -3008,6 +3940,21 @@ bool attention_preprocess_prepare_validation_and_old_abi() {
               "attention reserved rejection")) {
     return false;
   }
+  auto unknown_position_mode = descriptor;
+  unknown_position_mode.reserved[0] = 3U;
+  if (!expect(unknown_position_mode, SLLM_STATUS_RESERVED_NONZERO,
+              "unknown attention position mode rejection")) {
+    return false;
+  }
+  auto derived_overflow = descriptor;
+  derived_overflow.reserved[0] =
+      SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1;
+  derived_overflow.start_position =
+      static_cast<uint32_t>(std::numeric_limits<int32_t>::max());
+  if (!expect(derived_overflow, SLLM_STATUS_SHAPE_MISMATCH,
+              "derived attention I32 position overflow rejection")) {
+    return false;
+  }
   auto alias = descriptor;
   alias.q_output.buffer = alias.packed_q_gate.buffer;
   if (!expect(alias, SLLM_STATUS_ALIAS_OVERLAP, "attention alias rejection")) {
@@ -3131,6 +4078,45 @@ bool attention_preprocess_success_metadata_and_dispatch() {
       release_completion(&completion) &&
       expect_status(sllm_attention_preprocess_plan_release(&plan, &error.sink),
                     SLLM_STATUS_OK, "attention success plan release", error);
+  release_attention_buffers(&buffers);
+  return valid && release_queue(&queue) && release_context(&context);
+}
+
+bool attention_preprocess_derived_positions_skip_payload_validation() {
+  fake_hip::reset();
+  constexpr uint64_t m = 3U;
+  constexpr uint32_t start_position = 17U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  AttentionBuffers buffers{};
+  if (!create_attention_resources(&context, &queue, &buffers, m)) {
+    release_attention_buffers(&buffers);
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  std::vector<int32_t> malformed_positions = {-1, -1, -1};
+  Error error;
+  auto descriptor = attention_preprocess_descriptor(buffers, m, start_position);
+  descriptor.reserved[0] = SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1;
+  sllm_attention_preprocess_plan_t *plan = nullptr;
+  sllm_completion_t *completion = nullptr;
+  auto info = attention_preprocess_dispatch_info();
+  const bool valid =
+      upload_attention_positions(queue, buffers[4], malformed_positions) &&
+      expect_status(sllm_attention_preprocess_prepare(context, &descriptor,
+                                                      &plan, &error.sink),
+                    SLLM_STATUS_OK, "derived attention prepare", error) &&
+      plan != nullptr &&
+      expect_status(sllm_attention_preprocess_execute(plan, queue, &completion,
+                                                      &info, &error.sink),
+                    SLLM_STATUS_OK, "derived attention execute", error) &&
+      completion != nullptr && info.start_position == start_position &&
+      fake_hip::attention_preprocess_launch_calls() == 1U &&
+      query_completion(completion, SLLM_STATUS_OK) &&
+      release_completion(&completion) &&
+      expect_status(sllm_attention_preprocess_plan_release(&plan, &error.sink),
+                    SLLM_STATUS_OK, "derived attention plan release", error);
   release_attention_buffers(&buffers);
   return valid && release_queue(&queue) && release_context(&context);
 }
@@ -5672,6 +6658,10 @@ bool state_fork_vmm_and_linear_image_contract() {
 } // namespace
 
 int main() {
+  if (!mlp_gate_up_silu_bundle_abi_negative_contract()) {
+    std::cerr << "MLP gate/up/SiLU bundle ABI contract test failed\n";
+    return 1;
+  }
   if (!rmsnorm_bf16_rne_bit_contract()) {
     return 1;
   }
@@ -5683,13 +6673,22 @@ int main() {
     std::cerr << "embedding prepare/execute contract test failed\n";
     return 1;
   }
-  if (!matmul_prepare_execute_and_negative_contract() ||
+  if (!context_device_property_snapshot_contract() ||
+      !matmul_prepare_execute_and_negative_contract() ||
+      !matmul_short_mixed_metadata_dispatch_contract() ||
+      !matmul_short_mixed_rocblas_solution_selector_contract() ||
       !matmul_async_lifetime_and_cleanup()) {
     std::cerr << "matmul prepare/execute contract test failed\n";
     return 1;
   }
+  if (!gdn_projection_bundle_launch_failure_rolls_back_accounting() ||
+      !mlp_gate_up_silu_bundle_launch_failure_rolls_back_accounting()) {
+    std::cerr << "bundle launch-failure accounting test failed\n";
+    return 1;
+  }
   if (!attention_preprocess_prepare_validation_and_old_abi() ||
       !attention_preprocess_position_payload_mismatch_is_pre_dispatch() ||
+      !attention_preprocess_derived_positions_skip_payload_validation() ||
       !attention_preprocess_success_metadata_and_dispatch() ||
       !attention_preprocess_mrope_positions_dispatch()) {
     std::cerr << "attention preprocess public ABI contract test failed\n";
@@ -5701,6 +6700,15 @@ int main() {
   }
   if (!windowed_attention_prepare_execute_lifetime_and_negative_contract()) {
     std::cerr << "windowed attention public ABI contract test failed\n";
+    return 1;
+  }
+  if (!causal_attention_gqa4_p32_selector_contract()) {
+    std::cerr << "causal attention GQA4 P32 selector contract test failed\n";
+    return 1;
+  }
+  if (!causal_attention_target_scoped_selector_contract()) {
+    std::cerr
+        << "causal attention target-scoped selector contract test failed\n";
     return 1;
   }
   if (!bounded_counter_cas_contention_is_fail_closed() ||
@@ -5723,6 +6731,10 @@ int main() {
   }
   if (!rmsnorm_execute_metadata_and_reuse()) {
     std::cerr << "RMSNorm execute metadata/reuse test failed\n";
+    return 1;
+  }
+  if (!residual_rmsnorm_prepare_execute_lifetime_contract()) {
+    std::cerr << "residual RMSNorm prepare/execute lifetime test failed\n";
     return 1;
   }
   if (!rmsnorm_direct_scale_numerical_contract()) {

@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-21
+> 最終更新: 2026-08-24
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -286,6 +286,39 @@ FP16 child append後もsource K/Vは不変で、encoding別2/4/6 planeとlinear 
 [Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)、
 [archive plan](../plans/archive/2026/08/21-31/phase41-prefix-session-speculation.md)、
 [history](../history/2026/08/21-31/phase41-prefix-session-speculation.md)を正とする。
+
+### 2026-08-24 Phase49 exact `gfx1030`限定採用
+
+Phase 49はcanonical V620 exact `gfx1030`（UUID `GPU-76a08c022586fed6`、BDF `0000:03:00.0`）の性能候補だけを対象にし、GQA4 decodeのP32 partitionを
+KV長4,096以上、head dimension 256、FP16 KV、`M=1`へ限定して既定採用した。long-prefill v2とHIP Graphは
+既定経路へ採用せず、R9700 `gfx1201`とMI300X `gfx942`へこのselector、閾値、solution ID、wave32 binaryを
+自動展開しない。最終通常5行の正しさ・資源・HIP-only・cleanupを確認したが、長行を含む全7行同等は主張せず、
+未達行は後続Phaseの入力として保持する。lifecycleは`experimental`、evidenceは当該V620 scopeだけを
+`project-verified`とする。詳細は[Phase 49/50数値台帳](numerical-output-changes.md)と
+[Phase 49以降ロードマップ](../history/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を参照する。
+
+### 2026-08-24 Phase50 exact `gfx1201`狭い実機scope
+
+Phase 50でGPU性能を実証したのはcanonical R9700 1台のexact `gfx1201`だけである。UUID、BDF、HIP targetを
+相互照合した固定identityは、UUID `GPU-a8e9ddefa2d60f55`、BDF `0000:07:00.0`、`gfx1201`である。
+Residual RMSNorm、GDN projection、MLP gate/up/SiLU、GQA P32のA/B比較を、固定Qwen3.5-4B BF16、
+FP16 KV、`M=1`、単一requestのtarget専用selectorで確認し、最終通常行と長行の計測・未達判定をこのscopeへ限定して
+記録した。100,000-token prefillはOOMで完走せず、`project-verified`の成功scopeへ含めない。20,000-token decodeの
+完走結果は[Phase 50履歴](../history/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)とsummaryへ固定し、この方針文書では数値を重複しない。
+candidate分類と未達理由は履歴および[数値変更台帳](numerical-output-changes.md)を正とする。
+
+| target / scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| R9700 exact `gfx1201` Phase 50 Residual/GDN/MLP/P32 A/B、通常・長行 | `experimental` | `project-verified`（上記scopeのみ。100k OOM未達は除外） | HIP-only、fallbackなし、selector/cleanupを確認。別shape・別model・別SKU・別tupleへ一般化しない |
+| MI300X logical `gfx942` / feature付きdevice target `gfx942:sramecc+:xnack-` Phase 50 handoff | `experimental` | `unverified`（compile/host scope） | Code Object V6、wave64、`sramecc=on`/`xnack=off`のcompile/linkとhost selector非選択のみ。実機runtime/PASSはPhase 51待ち |
+
+Phase 50の固定local tupleはUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
+HIP `7.14.60850`、LLVM 23、Code Object V6、wave32である。R9700 buildはexact `gfx1201`専用とし、genericまたは
+multi-arch artifactを性能evidenceへ使わない。MI300Xは論理target `gfx942`、feature付きdevice/codegen target
+`gfx942:sramecc+:xnack-`、wave64、Code Object V6へ固定する。production Cargoの`CMAKE_HIP_ARCHITECTURES`はlogical `gfx942`を使い、
+feature suffix付きtargetはdirect CMake probeだけで扱う。gfx1201 providerがhost selectorで選択されないことを示す。このcompile/link結果は既存Hot Aisle MI300X runtime evidenceを
+拡張せず、Phase 51のfresh実機検証を待つ。Phase 50のいずれのscopeもlifecycleを`supported`へ昇格させず、
+RDNA4全体、CDNA3全体、他のOS・driver・ROCm・SKUへ互換性を推論しない。
 
 ### software.mdとの関係
 

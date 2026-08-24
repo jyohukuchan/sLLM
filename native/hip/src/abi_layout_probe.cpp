@@ -142,6 +142,26 @@ bool host_fault_state_tests() {
 }
 
 int main() {
+  static_assert(offsetof(sllm_gdn_projection_bundle_desc_t, activation) >
+                    offsetof(sllm_gdn_projection_bundle_desc_t, reserved),
+                "GDN bundle descriptor activation offset must follow prefix");
+  static_assert(sizeof(sllm_gdn_projection_bundle_desc_t) >=
+                    sizeof(sllm_tensor_binding_t) * 9U,
+                "GDN bundle descriptor must retain all bindings");
+  static_assert(
+      offsetof(sllm_gdn_projection_bundle_dispatch_info_t, widths) <
+          offsetof(sllm_gdn_projection_bundle_dispatch_info_t, kernel_symbol),
+      "GDN bundle dispatch widths must precede symbols");
+  static_assert(offsetof(sllm_mlp_gate_up_silu_bundle_desc_t, activation) >
+                    offsetof(sllm_mlp_gate_up_silu_bundle_desc_t, reserved),
+                "MLP bundle descriptor activation offset must follow prefix");
+  static_assert(sizeof(sllm_mlp_gate_up_silu_bundle_desc_t) >=
+                    sizeof(sllm_tensor_binding_t) * 6U,
+                "MLP bundle descriptor must retain six bindings");
+  static_assert(
+      offsetof(sllm_mlp_gate_up_silu_bundle_dispatch_info_t, n) <
+          offsetof(sllm_mlp_gate_up_silu_bundle_dispatch_info_t, kernel_symbol),
+      "MLP bundle dispatch dimensions must precede symbols");
   if (!host_fault_state_tests()) {
     return 1;
   }
@@ -371,9 +391,11 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM);

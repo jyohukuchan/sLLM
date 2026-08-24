@@ -38,6 +38,12 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *descriptor,
                              DescriptorMetadata *metadata,
                              sllm_error_sink_t *sink) noexcept;
 
+/* Shared BF16 contiguous tensor binding validation for semantic operations
+ * that use the same storage contract. */
+sllm_status_t validate_tensor_binding(const sllm_tensor_binding_t *binding,
+                                      TensorMetadata *metadata,
+                                      sllm_error_sink_t *sink) noexcept;
+
 bool intervals_overlap(const TensorMetadata &left,
                        const TensorMetadata &right) noexcept;
 

@@ -9,6 +9,7 @@
 #include "embedding_api.hpp"
 #include "embedding_kernel_internal.hpp"
 #include "evidence_abi.h"
+#include "gdn_projection_bundle_kernel_internal.hpp"
 #include "gemma_attention_kernel_internal.hpp"
 #include "kv_state_api.hpp"
 #include "kv_state_kernel_internal.hpp"
@@ -16,11 +17,13 @@
 #include "linear_attention_kernel_internal.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
+#include "mlp_gate_up_silu_bundle_kernel_internal.hpp"
 #include "moe_expert_api.hpp"
 #include "moe_expert_kernel_internal.hpp"
 #include "moe_route_api.hpp"
 #include "moe_route_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
+#include "residual_rmsnorm_api.hpp"
 #include "rmsnorm_api.hpp"
 #include "rmsnorm_kernel_internal.hpp"
 #include "rotary_api.hpp"
@@ -33,6 +36,15 @@
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 #include <hipblas/hipblas.h>
 #include <hipblaslt/hipblaslt.h>
+#include <rocblas/rocblas.h>
+extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
+    rocblas_handle handle, rocblas_operation trans_a, rocblas_operation trans_b,
+    rocblas_int m, rocblas_int n, rocblas_int k, const void *alpha,
+    const void *a, rocblas_datatype a_type, rocblas_int lda, const void *b,
+    rocblas_datatype b_type, rocblas_int ldb, const void *beta, const void *c,
+    rocblas_datatype c_type, rocblas_int ldc, void *d, rocblas_datatype d_type,
+    rocblas_int ldd, rocblas_datatype compute_type, rocblas_gemm_algo algorithm,
+    uint32_t flags, rocblas_int *solutions, rocblas_int *solution_count);
 #endif
 
 #include <array>
@@ -61,7 +73,36 @@ hipError_t launch(const uint16_t *const activation,
                                   normalized_size, row_count, epsilon,
                                   scale_mode, stream);
 }
+
+hipError_t launch_residual_fused(
+    const uint16_t *const residual, const uint16_t *const addend,
+    const uint16_t *const raw_scale, uint16_t *const residual_output,
+    uint16_t *const output, const uint32_t normalized_size,
+    const uint32_t row_count, const float epsilon, const uint32_t scale_mode,
+    const hipStream_t stream) noexcept {
+  return fake_hip::residual_rmsnorm_launch(
+      residual, addend, raw_scale, residual_output, output, normalized_size,
+      row_count, epsilon, scale_mode, stream);
+}
 } // namespace sllm_rmsnorm_kernel
+
+namespace sllm_gdn_projection_bundle_kernel {
+hipError_t launch(const uint16_t *const, const uint16_t *const,
+                  const uint16_t *const, const uint16_t *const,
+                  const uint16_t *const, uint16_t *const, uint16_t *const,
+                  uint16_t *const, uint16_t *const, const uint64_t,
+                  const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+} // namespace sllm_gdn_projection_bundle_kernel
+
+namespace sllm_mlp_gate_up_silu_bundle_kernel {
+hipError_t launch(const uint16_t *const, const uint16_t *const,
+                  const uint16_t *const, uint16_t *const, uint16_t *const,
+                  uint16_t *const, const uint64_t, const hipStream_t) noexcept {
+  return hipErrorNotSupported;
+}
+} // namespace sllm_mlp_gate_up_silu_bundle_kernel
 
 namespace sllm_elementwise_kernel {
 hipError_t launch_copy(const uint16_t *const input, uint16_t *const output,
@@ -150,6 +191,11 @@ hipError_t launch(const uint16_t *const activation,
   return fake_hip::matmul_launch(activation, weight, output, m, k, n, stream);
 }
 
+hipError_t launch_short_mixed_f32_to_bf16(const float *, uint16_t *, uint64_t,
+                                          hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
 hipError_t launch_fp8_quantize(const uint16_t *, uint8_t *, float *, uint64_t,
                                uint64_t, hipStream_t) noexcept {
   return hipErrorInvalidValue;
@@ -213,15 +259,16 @@ hipError_t launch(const uint16_t *const logits, int32_t *const output,
 } // namespace sllm_argmax_kernel
 
 namespace sllm_attention_preprocess_kernel {
-hipError_t launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
-                  const uint16_t *const q_raw_scale,
-                  const uint16_t *const k_raw_scale,
-                  const int32_t *const positions, uint16_t *const q_output,
-                  uint16_t *const gate_output, uint16_t *const k_output,
-                  const uint32_t m, const uint32_t q_heads,
-                  const uint32_t k_heads, const uint32_t head_dim,
-                  const uint32_t /*position_components*/,
-                  const hipStream_t stream) noexcept {
+hipError_t
+launch(const uint16_t *const packed_q_gate, const uint16_t *const k,
+       const uint16_t *const q_raw_scale, const uint16_t *const k_raw_scale,
+       const int32_t *const positions, uint16_t *const q_output,
+       uint16_t *const gate_output, uint16_t *const k_output, const uint32_t m,
+       const uint32_t q_heads, const uint32_t k_heads, const uint32_t head_dim,
+       const uint32_t /*position_components*/,
+       const uint32_t /*start_position*/,
+       const uint32_t /*position_payload_mode*/, const bool /*use_wave32*/,
+       const hipStream_t stream) noexcept {
   (void)q_heads;
   (void)k_heads;
   (void)head_dim;
@@ -288,6 +335,80 @@ hipError_t launch(const uint16_t *const key_input,
 } // namespace sllm_kv_state_kernel
 
 namespace sllm_causal_attention_kernel {
+hipError_t launch_decode_gqa4_split(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
+  (void)q_heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)static_key_scale;
+  (void)static_value_scale;
+  (void)workspace;
+  (void)workspace_bytes;
+  if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+    return hipErrorInvalidValue;
+  }
+  return fake_hip::causal_attention_launch(
+      query, static_cast<const uint16_t *>(key),
+      static_cast<const uint16_t *>(value), output, query_count,
+      committed_kv_length, start_position, committed_kv_length, stream);
+}
+
+hipError_t launch_decode_gqa4_split_p32(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, const hipStream_t stream) noexcept {
+  return launch_decode_gqa4_split(
+      query, key, value, key_scales, value_scales, key_outer_scales,
+      value_outer_scales, output, query_count, start_position,
+      committed_kv_length, q_heads, kv_heads, head_dim, encoding,
+      static_key_scale, static_value_scale, workspace, workspace_bytes, stream);
+}
+
+hipError_t launch_decode_wave_split_fp16_pair(
+    const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
+    uint16_t *const output, const uint32_t query_count,
+    const uint64_t start_position, const uint64_t committed_kv_length,
+    const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, const hipStream_t stream) noexcept {
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
+  (void)q_heads;
+  (void)kv_heads;
+  (void)head_dim;
+  (void)static_key_scale;
+  (void)static_value_scale;
+  if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
+    return hipErrorInvalidValue;
+  }
+  return fake_hip::causal_attention_launch(
+      query, static_cast<const uint16_t *>(key),
+      static_cast<const uint16_t *>(value), output, query_count,
+      committed_kv_length, start_position, committed_kv_length, stream);
+}
+
 hipError_t
 launch(const uint16_t *const query, const void *const key,
        const void *const value, const void *const key_scales,
@@ -298,7 +419,8 @@ launch(const uint16_t *const query, const void *const key,
        const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
        const uint32_t encoding, const float static_key_scale,
        const float static_value_scale, const bool use_gfx1201_wave_provider,
-       const bool use_decode_wave_split, const bool use_prefill_gqa4,
+       const bool use_decode_wave_split,
+       const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
        const bool use_prefill_gqa4_qtile4, const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
@@ -311,6 +433,7 @@ launch(const uint16_t *const query, const void *const key,
   (void)static_value_scale;
   (void)use_gfx1201_wave_provider;
   (void)use_decode_wave_split;
+  (void)use_decode_wave_split_q_preload;
   (void)use_prefill_gqa4;
   (void)use_prefill_gqa4_qtile4;
   if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
@@ -339,6 +462,17 @@ hipError_t launch_recurrent(const uint16_t *const, const uint16_t *const,
                             const uint32_t, const uint32_t, const uint32_t,
                             const uint32_t, const uint32_t,
                             const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_decode_pair(const uint16_t *const, const uint16_t *const,
+                              const uint16_t *const, const uint16_t *const,
+                              const float *const, const uint16_t *const,
+                              const float *const, const float *const,
+                              float *const, uint16_t *const, const uint32_t,
+                              const uint32_t, const uint32_t, const uint32_t,
+                              const uint32_t, const uint32_t,
+                              const hipStream_t) noexcept {
   return hipSuccess;
 }
 
@@ -378,6 +512,10 @@ bool matches_runtime_gcn_arch(const char *actual,
                               const char *expected) noexcept;
 
 struct Fp8LtPlan;
+struct Queue;
+struct Context;
+void destroy_causal_scaled_prefill_workspace(Context *context) noexcept;
+hipError_t free_allocation_with_fault_injection(void *allocation) noexcept;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 hipError_t create_fp8_lt_plan(hipblasLtHandle_t handle, Fp8LtPlan **plan,
                               float *activation_scales,
@@ -422,34 +560,53 @@ struct QuarantineNode {
 
 struct Context final : QuarantineNode {
   uint32_t device_index;
+  hipDeviceProp_t device_properties;
   sllm_public_runtime::AccountingState accounting;
   std::mutex accounting_mutex;
   bool release_active;
   std::atomic<bool> poisoned;
   uint64_t next_dispatch_id;
+  void *causal_scaled_prefill_workspace;
+  uint64_t causal_scaled_prefill_workspace_bytes;
+  uint64_t causal_scaled_prefill_workspace_high_water_bytes;
+  Queue *causal_scaled_prefill_owner_queue;
+  uint64_t causal_scaled_prefill_in_flight;
+  std::mutex causal_scaled_prefill_plan_mutex;
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
   hipblasHandle_t matmul_blas_handle;
+  rocblas_handle matmul_rocblas_handle;
+  std::vector<std::array<uint64_t, 3>> matmul_rocblas_primed_shapes;
   std::mutex matmul_blas_mutex;
   hipblasLtHandle_t matmul_lt_handle;
   std::mutex matmul_lt_mutex;
 #endif
 
-  explicit Context(const uint32_t device)
-      : QuarantineNode(HandleKind::Context), device_index(device), accounting(),
-        accounting_mutex(), release_active(false), poisoned(false),
-        next_dispatch_id(1U)
+  explicit Context(const uint32_t device, const hipDeviceProp_t &properties)
+      : QuarantineNode(HandleKind::Context), device_index(device),
+        device_properties(properties), accounting(), accounting_mutex(),
+        release_active(false), poisoned(false), next_dispatch_id(1U),
+        causal_scaled_prefill_workspace(nullptr),
+        causal_scaled_prefill_workspace_bytes(0U),
+        causal_scaled_prefill_workspace_high_water_bytes(0U),
+        causal_scaled_prefill_owner_queue(nullptr),
+        causal_scaled_prefill_in_flight(0U), causal_scaled_prefill_plan_mutex()
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
         ,
-        matmul_blas_handle(nullptr), matmul_blas_mutex(),
+        matmul_blas_handle(nullptr), matmul_rocblas_handle(nullptr),
+        matmul_rocblas_primed_shapes(), matmul_blas_mutex(),
         matmul_lt_handle(nullptr), matmul_lt_mutex()
 #endif
   {
   }
 
   ~Context() {
+    destroy_causal_scaled_prefill_workspace(this);
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     if (matmul_blas_handle != nullptr) {
       (void)hipblasDestroy(matmul_blas_handle);
+    }
+    if (matmul_rocblas_handle != nullptr) {
+      (void)rocblas_destroy_handle(matmul_rocblas_handle);
     }
     if (matmul_lt_handle != nullptr) {
       (void)hipblasLtDestroy(matmul_lt_handle);
@@ -1140,10 +1297,13 @@ struct Completion final : QuarantineNode {
   sllm_public_runtime::CompletionSafetyState safety;
   std::vector<uint8_t> host_storage;
   bool rmsnorm;
+  bool rmsnorm_fused;
   RmsNormPlan *rmsnorm_plan;
   Buffer *rmsnorm_activation;
   Buffer *rmsnorm_raw_scale;
   Buffer *rmsnorm_output;
+  Buffer *rmsnorm_addend;
+  Buffer *rmsnorm_residual_output;
   bool elementwise;
   ElementwisePlan *elementwise_plan;
   Buffer *elementwise_input0;
@@ -1154,6 +1314,16 @@ struct Completion final : QuarantineNode {
   Buffer *matmul_activation;
   Buffer *matmul_weight;
   Buffer *matmul_output;
+  bool gdn_bundle;
+  ElementwisePlan *gdn_bundle_plan;
+  Buffer *gdn_bundle_activation;
+  std::array<Buffer *, 4> gdn_bundle_weights;
+  std::array<Buffer *, 4> gdn_bundle_outputs;
+  bool mlp_bundle;
+  ElementwisePlan *mlp_bundle_plan;
+  Buffer *mlp_bundle_activation;
+  std::array<Buffer *, 2> mlp_bundle_weights;
+  std::array<Buffer *, 3> mlp_bundle_outputs;
   bool argmax;
   ElementwisePlan *argmax_plan;
   Buffer *argmax_logits;
@@ -1178,6 +1348,7 @@ struct Completion final : QuarantineNode {
   uint64_t kv_append_count;
   uint64_t kv_append_end;
   bool causal_attention;
+  bool causal_scaled_prefill_plan_acquired;
   KvState *causal_attention_state;
   CausalAttentionBuffers causal_attention_buffers;
   bool linear_attention;
@@ -1224,7 +1395,10 @@ struct Completion final : QuarantineNode {
              Buffer *const argmax_logits_value = nullptr,
              Buffer *const argmax_output_value = nullptr,
              Buffer *const d2d_source_value = nullptr,
-             Buffer *const d2d_destination_value = nullptr)
+             Buffer *const d2d_destination_value = nullptr,
+             const bool rmsnorm_fused_value = false,
+             Buffer *const rmsnorm_addend_value = nullptr,
+             Buffer *const rmsnorm_residual_output_value = nullptr)
       : QuarantineNode(HandleKind::Completion), context(context_value),
         queue(queue_value), buffer(buffer_value), event(nullptr),
         timing_start_event(nullptr), timing_elapsed_ns(0U), timing_valid(false),
@@ -1236,10 +1410,12 @@ struct Completion final : QuarantineNode {
         failure_status(hipErrorInvalidValue), api_pins(0U), wait_active(false),
         state_mutex(), safety(), host_storage(std::move(storage)),
         rmsnorm(rmsnorm_plan_value != nullptr),
-        rmsnorm_plan(rmsnorm_plan_value),
+        rmsnorm_fused(rmsnorm_fused_value), rmsnorm_plan(rmsnorm_plan_value),
         rmsnorm_activation(rmsnorm_activation_value),
         rmsnorm_raw_scale(rmsnorm_raw_scale_value),
         rmsnorm_output(rmsnorm_output_value),
+        rmsnorm_addend(rmsnorm_addend_value),
+        rmsnorm_residual_output(rmsnorm_residual_output_value),
         elementwise(elementwise_plan_value != nullptr),
         elementwise_plan(elementwise_plan_value),
         elementwise_input0(elementwise_input0_value),
@@ -1248,11 +1424,16 @@ struct Completion final : QuarantineNode {
         matmul(matmul_plan_value != nullptr), matmul_plan(matmul_plan_value),
         matmul_activation(matmul_activation_value),
         matmul_weight(matmul_weight_value), matmul_output(matmul_output_value),
-        argmax(argmax_plan_value != nullptr), argmax_plan(argmax_plan_value),
-        argmax_logits(argmax_logits_value), argmax_output(argmax_output_value),
-        token_selector(false), token_selector_plan(nullptr),
-        token_selector_logits(nullptr), token_selector_additive(nullptr),
-        token_selector_valid_mask(nullptr), token_selector_output(nullptr),
+        gdn_bundle(false), gdn_bundle_plan(nullptr),
+        gdn_bundle_activation(nullptr), gdn_bundle_weights{},
+        gdn_bundle_outputs{}, mlp_bundle(false), mlp_bundle_plan(nullptr),
+        mlp_bundle_activation(nullptr), mlp_bundle_weights{},
+        mlp_bundle_outputs{}, argmax(argmax_plan_value != nullptr),
+        argmax_plan(argmax_plan_value), argmax_logits(argmax_logits_value),
+        argmax_output(argmax_output_value), token_selector(false),
+        token_selector_plan(nullptr), token_selector_logits(nullptr),
+        token_selector_additive(nullptr), token_selector_valid_mask(nullptr),
+        token_selector_output(nullptr),
         array_operation(array_plan_value != nullptr),
         array_operation_plan(array_plan_value),
         array_operation_buffers(array_buffers_value),
@@ -1265,6 +1446,7 @@ struct Completion final : QuarantineNode {
         kv_append_count(kv_append_count_value),
         kv_append_end(kv_append_end_value),
         causal_attention(causal_attention_state_value != nullptr),
+        causal_scaled_prefill_plan_acquired(false),
         causal_attention_state(causal_attention_state_value),
         causal_attention_buffers(causal_attention_buffers_value),
         linear_attention(false), linear_attention_state(nullptr),
@@ -1295,6 +1477,10 @@ struct RmsNormPlan final : QuarantineNode {
   Buffer *raw_scale;
   Buffer *output;
   sllm_rmsnorm::DescriptorMetadata metadata;
+  bool fused;
+  Buffer *addend;
+  Buffer *residual_output;
+  sllm_residual_rmsnorm::DescriptorMetadata residual_metadata;
   bool release_active;
   bool in_flight;
 
@@ -1303,7 +1489,19 @@ struct RmsNormPlan final : QuarantineNode {
               const sllm_rmsnorm::DescriptorMetadata &metadata_value)
       : QuarantineNode(HandleKind::RmsNormPlan), context(context_value),
         activation(activation_value), raw_scale(raw_scale_value),
-        output(output_value), metadata(metadata_value), release_active(false),
+        output(output_value), metadata(metadata_value), fused(false),
+        addend(nullptr), residual_output(nullptr), residual_metadata(),
+        release_active(false), in_flight(false) {}
+
+  RmsNormPlan(Context *const context_value, Buffer *const residual_value,
+              Buffer *const addend_value, Buffer *const raw_scale_value,
+              Buffer *const residual_output_value, Buffer *const output_value,
+              const sllm_residual_rmsnorm::DescriptorMetadata &metadata_value)
+      : QuarantineNode(HandleKind::RmsNormPlan), context(context_value),
+        activation(residual_value), raw_scale(raw_scale_value),
+        output(output_value), metadata(), fused(true), addend(addend_value),
+        residual_output(residual_output_value),
+        residual_metadata(metadata_value), release_active(false),
         in_flight(false) {}
 };
 
@@ -1319,6 +1517,15 @@ struct ElementwisePlan final : QuarantineNode {
   sllm_moe_route::DescriptorMetadata moe_route_metadata;
   bool embedding;
   bool matmul;
+  bool gdn_bundle;
+  std::array<Buffer *, 4> gdn_weights;
+  std::array<Buffer *, 4> gdn_outputs;
+  std::array<sllm_matmul::DescriptorMetadata, 4> gdn_metadata;
+  bool mlp_bundle;
+  std::array<Buffer *, 2> mlp_weights;
+  std::array<Buffer *, 3> mlp_outputs;
+  std::array<sllm_matmul::DescriptorMetadata, 2> mlp_metadata;
+  sllm_matmul::TensorMetadata mlp_silu_metadata;
   bool argmax;
   void *matmul_workspace;
   uint64_t matmul_workspace_bytes;
@@ -1333,9 +1540,11 @@ struct ElementwisePlan final : QuarantineNode {
         input0(input0_value), input1(input1_value), output(output_value),
         metadata(metadata_value), embedding_metadata(), matmul_metadata(),
         argmax_metadata(), moe_route_metadata(), embedding(false),
-        matmul(false), argmax(false), matmul_workspace(nullptr),
-        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
-        in_flight(false) {}
+        matmul(false), gdn_bundle(false), gdn_weights{}, gdn_outputs{},
+        gdn_metadata(), mlp_bundle(false), mlp_weights{}, mlp_outputs{},
+        mlp_metadata(), mlp_silu_metadata(), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const weight_value,
                   Buffer *const token_ids_value, Buffer *const output_value,
@@ -1344,8 +1553,11 @@ struct ElementwisePlan final : QuarantineNode {
         input0(weight_value), input1(token_ids_value), output(output_value),
         metadata(), embedding_metadata(metadata_value), matmul_metadata(),
         argmax_metadata(), moe_route_metadata(), embedding(true), matmul(false),
-        argmax(false), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
+        mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
+        mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const activation_value,
                   Buffer *const weight_value, Buffer *const output_value,
@@ -1354,7 +1566,43 @@ struct ElementwisePlan final : QuarantineNode {
         input0(activation_value), input1(weight_value), output(output_value),
         metadata(), embedding_metadata(), matmul_metadata(metadata_value),
         argmax_metadata(), moe_route_metadata(), embedding(false), matmul(true),
-        argmax(false), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
+        mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
+        mlp_silu_metadata(), argmax(false), matmul_workspace(nullptr),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        in_flight(false) {}
+
+  ElementwisePlan(
+      Context *const context_value, Buffer *const activation_value,
+      const std::array<Buffer *, 4> &weights_value,
+      const std::array<Buffer *, 4> &outputs_value,
+      const std::array<sllm_matmul::DescriptorMetadata, 4> &metadata_value)
+      : QuarantineNode(HandleKind::MatmulPlan), context(context_value),
+        input0(activation_value), input1(weights_value[0]),
+        output(outputs_value[0]), metadata(), embedding_metadata(),
+        matmul_metadata(metadata_value[0]), argmax_metadata(),
+        moe_route_metadata(), embedding(false), matmul(false), gdn_bundle(true),
+        gdn_weights(weights_value), gdn_outputs(outputs_value),
+        gdn_metadata(metadata_value), mlp_bundle(false), mlp_weights{},
+        mlp_outputs{}, mlp_metadata(), mlp_silu_metadata(), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+
+  ElementwisePlan(
+      Context *const context_value, Buffer *const activation_value,
+      const std::array<Buffer *, 2> &weights_value,
+      const std::array<Buffer *, 3> &outputs_value,
+      const std::array<sllm_matmul::DescriptorMetadata, 2> &metadata_value)
+      : QuarantineNode(HandleKind::MatmulPlan), context(context_value),
+        input0(activation_value), input1(weights_value[0]),
+        output(outputs_value[0]), metadata(), embedding_metadata(),
+        matmul_metadata(metadata_value[0]), argmax_metadata(),
+        moe_route_metadata(), embedding(false), matmul(false),
+        gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
+        mlp_bundle(true), mlp_weights(weights_value),
+        mlp_outputs(outputs_value), mlp_metadata(metadata_value),
+        mlp_silu_metadata(metadata_value[0].output), argmax(false),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
         fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
@@ -1364,9 +1612,11 @@ struct ElementwisePlan final : QuarantineNode {
         input0(logits_value), input1(nullptr), output(output_value), metadata(),
         embedding_metadata(), matmul_metadata(),
         argmax_metadata(metadata_value), moe_route_metadata(), embedding(false),
-        matmul(false), argmax(true), matmul_workspace(nullptr),
-        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
-        in_flight(false) {}
+        matmul(false), gdn_bundle(false), gdn_weights{}, gdn_outputs{},
+        gdn_metadata(), mlp_bundle(false), mlp_weights{}, mlp_outputs{},
+        mlp_metadata(), mlp_silu_metadata(), argmax(true),
+        matmul_workspace(nullptr), matmul_workspace_bytes(0U),
+        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
 
   ElementwisePlan(Context *const context_value, Buffer *const logits_value,
                   Buffer *const output_value,
@@ -1375,8 +1625,11 @@ struct ElementwisePlan final : QuarantineNode {
         input0(logits_value), input1(nullptr), output(output_value), metadata(),
         embedding_metadata(), matmul_metadata(), argmax_metadata(),
         moe_route_metadata(metadata_value), embedding(false), matmul(false),
-        argmax(true), matmul_workspace(nullptr), matmul_workspace_bytes(0U),
-        fp8_lt_plan(nullptr), release_active(false), in_flight(false) {}
+        gdn_bundle(false), gdn_weights{}, gdn_outputs{}, gdn_metadata(),
+        mlp_bundle(false), mlp_weights{}, mlp_outputs{}, mlp_metadata(),
+        mlp_silu_metadata(), argmax(true), matmul_workspace(nullptr),
+        matmul_workspace_bytes(0U), fp8_lt_plan(nullptr), release_active(false),
+        in_flight(false) {}
 
   ~ElementwisePlan() {
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -1557,6 +1810,35 @@ private:
 };
 
 OrphanOwner orphan_owner;
+
+void destroy_causal_scaled_prefill_workspace(Context *const context) noexcept {
+  if (context == nullptr) {
+    return;
+  }
+  void *allocation = nullptr;
+  {
+    std::lock_guard<std::mutex> plan_lock(
+        context->causal_scaled_prefill_plan_mutex);
+    std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+    if (context->causal_scaled_prefill_in_flight != 0U) {
+      context->poisoned.store(true);
+      allocation = context->causal_scaled_prefill_workspace;
+      context->causal_scaled_prefill_workspace = nullptr;
+      context->causal_scaled_prefill_workspace_bytes = 0U;
+      context->causal_scaled_prefill_owner_queue = nullptr;
+      context->causal_scaled_prefill_in_flight = 0U;
+    } else {
+      allocation = context->causal_scaled_prefill_workspace;
+      context->causal_scaled_prefill_workspace = nullptr;
+      context->causal_scaled_prefill_workspace_bytes = 0U;
+      context->causal_scaled_prefill_owner_queue = nullptr;
+    }
+  }
+  if (allocation != nullptr &&
+      free_allocation_with_fault_injection(allocation) != hipSuccess) {
+    orphan_owner.retain_allocation(nullptr, allocation);
+  }
+}
 
 template <std::size_t Size>
 bool is_first_attention_buffer(const std::array<Buffer *, Size> &buffers,
@@ -1841,6 +2123,26 @@ bool release_causal_active(Queue *const queue, KvState *const state,
   return sllm_public_runtime::AccountingState::release_causal_active(
       queue->accounting, state->accounting, buffers[0]->accounting,
       buffers[1]->accounting);
+}
+
+bool release_causal_scaled_prefill_plan_reference(
+    Completion *const completion) noexcept {
+  if (completion == nullptr ||
+      !completion->causal_scaled_prefill_plan_acquired) {
+    return true;
+  }
+  Context *const context = completion->context;
+  if (context == nullptr || completion->queue == nullptr ||
+      context->causal_scaled_prefill_in_flight == 0U ||
+      context->causal_scaled_prefill_owner_queue != completion->queue) {
+    return false;
+  }
+  --context->causal_scaled_prefill_in_flight;
+  if (context->causal_scaled_prefill_in_flight == 0U) {
+    context->causal_scaled_prefill_owner_queue = nullptr;
+  }
+  completion->causal_scaled_prefill_plan_acquired = false;
+  return true;
 }
 
 bool rollback_causal_attention(Completion *const completion) noexcept {
@@ -2128,6 +2430,41 @@ validate_rmsnorm_dispatch_info(const sllm_rmsnorm_dispatch_info_t *const info,
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "RMSNorm dispatch info version or reserved fields are invalid");
+  }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t validate_residual_rmsnorm_dispatch_info(
+    const sllm_residual_rmsnorm_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "residual RMSNorm dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(*info)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "residual RMSNorm dispatch info has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "residual RMSNorm dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_RESIDUAL_RMSNORM_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "residual RMSNorm dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "residual RMSNorm dispatch info reserved fields must be zero");
+    }
   }
   return SLLM_STATUS_OK;
 }
@@ -2491,6 +2828,41 @@ void initialize_rmsnorm_dispatch_info(sllm_rmsnorm_dispatch_info_t *const info,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
 
+void initialize_residual_rmsnorm_dispatch_info(
+    sllm_residual_rmsnorm_dispatch_info_t *const info,
+    const uint64_t dispatch_id, const uint64_t row_count,
+    const uint64_t normalized_size, const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_RESIDUAL_RMSNORM_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 1U;
+  const bool wave64 =
+      arch_name != nullptr && std::strncmp(arch_name, "gfx942", 6U) == 0;
+  info->kernel_id = wave64 ? SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE64_V1
+                           : SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE32_V1;
+  info->workgroup_size_x = SLLM_HIP_RMSNORM_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(row_count);
+  info->row_count = row_count;
+  info->normalized_size = normalized_size;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_RMSNORM_KERNEL_SYMBOL_MAX,
+      wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64LogicalKernelId
+             : ::sllm_rmsnorm_kernel::kResidualLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_RMSNORM_DEVICE_SYMBOL_MAX,
+      wave64 ? ::sllm_rmsnorm_kernel::kResidualWave64DeviceSymbol
+             : ::sllm_rmsnorm_kernel::kResidualDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
 void initialize_elementwise_dispatch_info(
     sllm_elementwise_dispatch_info_t *const info, const uint64_t dispatch_id,
     const sllm_elementwise_operation_t operation, const uint64_t element_count,
@@ -2793,8 +3165,10 @@ void initialize_matmul_dispatch_info(
           : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
                                                  metadata.n, arch_name);
   info->dispatch_count =
-      metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ? 2U
-                                                                       : 1U;
+      metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+              variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed
+          ? 2U
+          : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
   info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -2920,7 +3294,7 @@ void initialize_attention_preprocess_dispatch_info(
     sllm_attention_preprocess_dispatch_info_t *const info,
     const uint64_t dispatch_id,
     const sllm_attention_preprocess::DescriptorMetadata &metadata,
-    const char *const arch_name) noexcept {
+    const bool use_wave32, const char *const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -2930,8 +3304,12 @@ void initialize_attention_preprocess_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1;
-  info->workgroup_size_x = SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE;
+  info->kernel_id =
+      use_wave32 ? SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1
+                 : SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1;
+  info->workgroup_size_x =
+      use_wave32 ? SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE
+                 : SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE;
   info->grid_size_x =
       static_cast<uint32_t>(metadata.m * (metadata.q_heads + metadata.k_heads));
   info->m = metadata.m;
@@ -2945,10 +3323,12 @@ void initialize_attention_preprocess_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX,
-      ::sllm_attention_preprocess_kernel::kLogicalKernelId);
+      use_wave32 ? ::sllm_attention_preprocess_kernel::kWave32LogicalKernelId
+                 : ::sllm_attention_preprocess_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX,
-      ::sllm_attention_preprocess_kernel::kDeviceSymbol);
+      use_wave32 ? ::sllm_attention_preprocess_kernel::kWave32DeviceSymbol
+                 : ::sllm_attention_preprocess_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -3068,6 +3448,19 @@ sllm_status_t get_device_properties(const uint32_t device_index,
   if (status != hipSuccess) {
     return hip_failure(sink, status, "hipGetDeviceProperties");
   }
+  return SLLM_STATUS_OK;
+}
+
+sllm_status_t
+get_context_device_properties(const Context *const context,
+                              hipDeviceProp_t *const properties,
+                              sllm_error_sink_t *const sink) noexcept {
+  if (context == nullptr || properties == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "context or device properties output is null");
+  }
+  *properties = context->device_properties;
   return SLLM_STATUS_OK;
 }
 
@@ -3216,9 +3609,19 @@ bool rollback_reserved_rmsnorm_submission(
     sllm_error_sink_t *const sink) noexcept {
   Context *const context = plan->context;
   std::lock_guard<std::mutex> lock(context->accounting_mutex);
-  if (sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
-          context->accounting, queue->accounting, plan->activation->accounting,
-          plan->raw_scale->accounting, plan->output->accounting)) {
+  const bool rolled_back =
+      plan->fused
+          ? sllm_public_runtime::AccountingState::
+                rollback_five_buffer_submission(
+                    context->accounting, queue->accounting,
+                    plan->activation->accounting, plan->addend->accounting,
+                    plan->raw_scale->accounting,
+                    plan->residual_output->accounting, plan->output->accounting)
+          : sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
+                context->accounting, queue->accounting,
+                plan->activation->accounting, plan->raw_scale->accounting,
+                plan->output->accounting);
+  if (rolled_back) {
     plan->in_flight = false;
     return true;
   }
@@ -3504,17 +3907,66 @@ bool release_submission_references(Completion *const completion) noexcept {
           sllm_public_runtime::AccountingState::release_queue_fence_active(
               completion->queue->accounting);
     } else if (completion->rmsnorm) {
-      released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
-          completion->queue->accounting,
-          completion->rmsnorm_activation->accounting,
-          completion->rmsnorm_raw_scale->accounting,
-          completion->rmsnorm_output->accounting);
+      if (completion->rmsnorm_fused) {
+        released =
+            sllm_public_runtime::AccountingState::release_five_buffer_active(
+                completion->queue->accounting,
+                completion->rmsnorm_activation->accounting,
+                completion->rmsnorm_addend->accounting,
+                completion->rmsnorm_raw_scale->accounting,
+                completion->rmsnorm_residual_output->accounting,
+                completion->rmsnorm_output->accounting);
+      } else {
+        released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
+            completion->queue->accounting,
+            completion->rmsnorm_activation->accounting,
+            completion->rmsnorm_raw_scale->accounting,
+            completion->rmsnorm_output->accounting);
+      }
     } else if (completion->elementwise) {
       released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
           completion->queue->accounting,
           completion->elementwise_input0->accounting,
           completion->elementwise_input1->accounting,
           completion->elementwise_output->accounting);
+    } else if (completion->gdn_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_active(
+              completion->queue->accounting,
+              completion->gdn_bundle_activation->accounting,
+              completion->gdn_bundle_weights[0]->accounting,
+              completion->gdn_bundle_weights[1]->accounting,
+              completion->gdn_bundle_weights[2]->accounting,
+              completion->gdn_bundle_weights[3]->accounting);
+      if (released) {
+        released =
+            sllm_public_runtime::AccountingState::release_five_buffer_active(
+                completion->queue->accounting,
+                completion->gdn_bundle_activation->accounting,
+                completion->gdn_bundle_outputs[0]->accounting,
+                completion->gdn_bundle_outputs[1]->accounting,
+                completion->gdn_bundle_outputs[2]->accounting,
+                completion->gdn_bundle_outputs[3]->accounting);
+      }
+    } else if (completion->mlp_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_active(
+              completion->queue->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_weights[0]->accounting,
+              completion->mlp_bundle_weights[1]->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_activation->accounting);
+      if (released) {
+        released =
+            sllm_public_runtime::AccountingState::release_five_buffer_active(
+                completion->queue->accounting,
+                completion->mlp_bundle_activation->accounting,
+                completion->mlp_bundle_outputs[0]->accounting,
+                completion->mlp_bundle_outputs[1]->accounting,
+                completion->mlp_bundle_outputs[2]->accounting,
+                completion->mlp_bundle_activation->accounting);
+      }
     } else if (completion->matmul) {
       released = sllm_public_runtime::AccountingState::release_rmsnorm_active(
           completion->queue->accounting,
@@ -3549,6 +4001,9 @@ bool release_submission_references(Completion *const completion) noexcept {
       released = release_causal_active(completion->queue,
                                        completion->causal_attention_state,
                                        completion->causal_attention_buffers);
+      if (released) {
+        released = release_causal_scaled_prefill_plan_reference(completion);
+      }
     } else if (completion->linear_attention) {
       released = release_linear_attention_active(
           completion->queue, completion->linear_attention_state,
@@ -3574,6 +4029,12 @@ bool release_submission_references(Completion *const completion) noexcept {
   }
   if (completion->elementwise && completion->elementwise_plan != nullptr) {
     completion->elementwise_plan->in_flight = false;
+  }
+  if (completion->gdn_bundle && completion->gdn_bundle_plan != nullptr) {
+    completion->gdn_bundle_plan->in_flight = false;
+  }
+  if (completion->mlp_bundle && completion->mlp_bundle_plan != nullptr) {
+    completion->mlp_bundle_plan->in_flight = false;
   }
   if (completion->matmul && completion->matmul_plan != nullptr) {
     completion->matmul_plan->in_flight = false;
@@ -3605,12 +4066,23 @@ bool rollback_submission_references(Completion *const completion) noexcept {
       released = sllm_public_runtime::AccountingState::rollback_queue_fence(
           completion->context->accounting, completion->queue->accounting);
     } else if (completion->rmsnorm) {
-      released =
-          sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
-              completion->context->accounting, completion->queue->accounting,
-              completion->rmsnorm_activation->accounting,
-              completion->rmsnorm_raw_scale->accounting,
-              completion->rmsnorm_output->accounting);
+      if (completion->rmsnorm_fused) {
+        released = sllm_public_runtime::AccountingState::
+            rollback_five_buffer_submission(
+                completion->context->accounting, completion->queue->accounting,
+                completion->rmsnorm_activation->accounting,
+                completion->rmsnorm_addend->accounting,
+                completion->rmsnorm_raw_scale->accounting,
+                completion->rmsnorm_residual_output->accounting,
+                completion->rmsnorm_output->accounting);
+      } else {
+        released =
+            sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
+                completion->context->accounting, completion->queue->accounting,
+                completion->rmsnorm_activation->accounting,
+                completion->rmsnorm_raw_scale->accounting,
+                completion->rmsnorm_output->accounting);
+      }
     } else if (completion->elementwise) {
       released =
           sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
@@ -3618,6 +4090,44 @@ bool rollback_submission_references(Completion *const completion) noexcept {
               completion->elementwise_input0->accounting,
               completion->elementwise_input1->accounting,
               completion->elementwise_output->accounting);
+    } else if (completion->gdn_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::rollback_five_buffer_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->gdn_bundle_activation->accounting,
+              completion->gdn_bundle_weights[0]->accounting,
+              completion->gdn_bundle_weights[1]->accounting,
+              completion->gdn_bundle_weights[2]->accounting,
+              completion->gdn_bundle_weights[3]->accounting);
+      if (released) {
+        released = sllm_public_runtime::AccountingState::
+            rollback_five_buffer_submission(
+                completion->context->accounting, completion->queue->accounting,
+                completion->gdn_bundle_activation->accounting,
+                completion->gdn_bundle_outputs[0]->accounting,
+                completion->gdn_bundle_outputs[1]->accounting,
+                completion->gdn_bundle_outputs[2]->accounting,
+                completion->gdn_bundle_outputs[3]->accounting);
+      }
+    } else if (completion->mlp_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::rollback_five_buffer_submission(
+              completion->context->accounting, completion->queue->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_weights[0]->accounting,
+              completion->mlp_bundle_weights[1]->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_activation->accounting);
+      if (released) {
+        released = sllm_public_runtime::AccountingState::
+            rollback_five_buffer_submission(
+                completion->context->accounting, completion->queue->accounting,
+                completion->mlp_bundle_activation->accounting,
+                completion->mlp_bundle_outputs[0]->accounting,
+                completion->mlp_bundle_outputs[1]->accounting,
+                completion->mlp_bundle_outputs[2]->accounting,
+                completion->mlp_bundle_activation->accounting);
+      }
     } else if (completion->matmul) {
       released =
           sllm_public_runtime::AccountingState::rollback_rmsnorm_submission(
@@ -3653,6 +4163,9 @@ bool rollback_submission_references(Completion *const completion) noexcept {
           completion->kv_value_buffer->accounting);
     } else if (completion->causal_attention) {
       released = rollback_causal_attention(completion);
+      if (released) {
+        released = release_causal_scaled_prefill_plan_reference(completion);
+      }
     } else if (completion->linear_attention) {
       released = rollback_linear_attention_submission(
           completion->context, completion->queue,
@@ -3689,6 +4202,12 @@ bool rollback_submission_references(Completion *const completion) noexcept {
     if (completion->elementwise && completion->elementwise_plan != nullptr) {
       completion->elementwise_plan->in_flight = false;
     }
+    if (completion->gdn_bundle && completion->gdn_bundle_plan != nullptr) {
+      completion->gdn_bundle_plan->in_flight = false;
+    }
+    if (completion->mlp_bundle && completion->mlp_bundle_plan != nullptr) {
+      completion->mlp_bundle_plan->in_flight = false;
+    }
     if (completion->matmul && completion->matmul_plan != nullptr) {
       completion->matmul_plan->in_flight = false;
     }
@@ -3722,12 +4241,23 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
           sllm_public_runtime::AccountingState::release_queue_fence_completion(
               completion->context->accounting, completion->queue->accounting);
     } else if (completion->rmsnorm) {
-      released =
-          sllm_public_runtime::AccountingState::release_rmsnorm_completion(
-              completion->context->accounting, completion->queue->accounting,
-              completion->rmsnorm_activation->accounting,
-              completion->rmsnorm_raw_scale->accounting,
-              completion->rmsnorm_output->accounting);
+      if (completion->rmsnorm_fused) {
+        released = sllm_public_runtime::AccountingState::
+            release_five_buffer_completion(
+                completion->context->accounting, completion->queue->accounting,
+                completion->rmsnorm_activation->accounting,
+                completion->rmsnorm_addend->accounting,
+                completion->rmsnorm_raw_scale->accounting,
+                completion->rmsnorm_residual_output->accounting,
+                completion->rmsnorm_output->accounting);
+      } else {
+        released =
+            sllm_public_runtime::AccountingState::release_rmsnorm_completion(
+                completion->context->accounting, completion->queue->accounting,
+                completion->rmsnorm_activation->accounting,
+                completion->rmsnorm_raw_scale->accounting,
+                completion->rmsnorm_output->accounting);
+      }
     } else if (completion->elementwise) {
       released =
           sllm_public_runtime::AccountingState::release_rmsnorm_completion(
@@ -3735,6 +4265,44 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
               completion->elementwise_input0->accounting,
               completion->elementwise_input1->accounting,
               completion->elementwise_output->accounting);
+    } else if (completion->gdn_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->gdn_bundle_activation->accounting,
+              completion->gdn_bundle_weights[0]->accounting,
+              completion->gdn_bundle_weights[1]->accounting,
+              completion->gdn_bundle_weights[2]->accounting,
+              completion->gdn_bundle_weights[3]->accounting);
+      if (released) {
+        released = sllm_public_runtime::AccountingState::
+            release_five_buffer_completion(
+                completion->context->accounting, completion->queue->accounting,
+                completion->gdn_bundle_activation->accounting,
+                completion->gdn_bundle_outputs[0]->accounting,
+                completion->gdn_bundle_outputs[1]->accounting,
+                completion->gdn_bundle_outputs[2]->accounting,
+                completion->gdn_bundle_outputs[3]->accounting);
+      }
+    } else if (completion->mlp_bundle) {
+      released =
+          sllm_public_runtime::AccountingState::release_five_buffer_completion(
+              completion->context->accounting, completion->queue->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_weights[0]->accounting,
+              completion->mlp_bundle_weights[1]->accounting,
+              completion->mlp_bundle_activation->accounting,
+              completion->mlp_bundle_activation->accounting);
+      if (released) {
+        released = sllm_public_runtime::AccountingState::
+            release_five_buffer_completion(
+                completion->context->accounting, completion->queue->accounting,
+                completion->mlp_bundle_activation->accounting,
+                completion->mlp_bundle_outputs[0]->accounting,
+                completion->mlp_bundle_outputs[1]->accounting,
+                completion->mlp_bundle_outputs[2]->accounting,
+                completion->mlp_bundle_activation->accounting);
+      }
     } else if (completion->matmul) {
       released =
           sllm_public_runtime::AccountingState::release_rmsnorm_completion(
@@ -3770,6 +4338,9 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
           completion->kv_value_buffer->accounting);
     } else if (completion->causal_attention) {
       released = release_causal_completion(completion);
+      if (released) {
+        released = release_causal_scaled_prefill_plan_reference(completion);
+      }
     } else if (completion->linear_attention) {
       released = release_linear_attention_completion(
           completion->context, completion->queue,
@@ -3865,6 +4436,7 @@ sllm_status_t poll_completion(Completion *const completion,
   }
   if (status == hipSuccess) {
     if (completion->rmsnorm || completion->elementwise || completion->matmul ||
+        completion->gdn_bundle || completion->mlp_bundle ||
         completion->argmax || completion->token_selector ||
         completion->array_operation || completion->kv_state_append ||
         completion->causal_attention || completion->linear_attention) {
@@ -5204,7 +5776,8 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     if (set_status != hipSuccess) {
       return hip_failure(error_sink, set_status, "hipSetDevice");
     }
-    std::unique_ptr<Context> candidate(new Context(info->device_index));
+    std::unique_ptr<Context> candidate(
+        new Context(info->device_index, properties));
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
     const bool create_matmul_blas =
         matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") ||
@@ -5213,6 +5786,17 @@ sllm_context_create(const sllm_context_create_info_t *const info,
     const bool create_matmul_lt =
         matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
         matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+    const char *const rocblas_solution_environment =
+        std::getenv("SLLM_MATMUL_GFX1030_ROCBLAS_SOLUTION_445");
+    const char *const short_mixed_rocblas_solution_environment =
+        std::getenv(::sllm_matmul_kernel::
+                        kPhase49Gfx1030ShortMixedRocblasSolutionEnvironment);
+    const bool create_matmul_rocblas =
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") &&
+        ((rocblas_solution_environment == nullptr ||
+          std::strcmp(rocblas_solution_environment, "1") == 0) ||
+         (short_mixed_rocblas_solution_environment == nullptr ||
+          std::strcmp(short_mixed_rocblas_solution_environment, "1") == 0));
     if (create_matmul_blas) {
       const hipblasStatus_t blas_status =
           hipblasCreate(&candidate->matmul_blas_handle);
@@ -5220,6 +5804,23 @@ sllm_context_create(const sllm_context_create_info_t *const info,
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
             "hipBLAS handle creation failed for the native matmul registry");
+      }
+    }
+    if (create_matmul_rocblas) {
+      const rocblas_status create_status =
+          rocblas_create_handle(&candidate->matmul_rocblas_handle);
+      if (create_status != rocblas_status_success) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "rocBLAS handle creation failed for the gfx1030 matmul candidate");
+      }
+      const rocblas_status pointer_mode_status = rocblas_set_pointer_mode(
+          candidate->matmul_rocblas_handle, rocblas_pointer_mode_host);
+      if (pointer_mode_status != rocblas_status_success) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+            "rocBLAS host pointer mode failed for the gfx1030 matmul "
+            "candidate");
       }
     }
     if (create_matmul_lt) {
@@ -5502,10 +6103,12 @@ sllm_queue_release(sllm_queue_t **const raw_queue,
             "queue context is poisoned by an unresolved cleanup failure");
       }
       if (queue->accounting.active_submissions != 0U ||
-          queue->accounting.completion_references != 0U) {
+          queue->accounting.completion_references != 0U ||
+          queue->accounting.child_count != 0U) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_BUSY,
-            "queue cannot be released while completion references exist");
+            "queue cannot be released while child resources or completion "
+            "references exist");
       }
       if (!sllm_public_runtime::AccountingState::reserve_lifetime_guard(
               queue->context->accounting)) {
@@ -6594,7 +7197,8 @@ sllm_completion_timing(sllm_completion_t *const raw_completion,
       return completion_status;
     }
     if (!completion->rmsnorm && !completion->elementwise &&
-        !completion->matmul && !completion->argmax &&
+        !completion->matmul && !completion->gdn_bundle &&
+        !completion->mlp_bundle && !completion->argmax &&
         !completion->array_operation && !completion->kv_state_append &&
         !completion->causal_attention && !completion->linear_attention) {
       return sllm_public_runtime::write_error(
@@ -6998,6 +7602,11 @@ sllm_rmsnorm_plan_release(sllm_rmsnorm_plan_t **const raw_plan,
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
             "RMSNorm plan handle is stale or has the wrong kind");
       }
+      if (plan->fused) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "RMSNorm plan handle refers to a residual RMSNorm plan");
+      }
       std::lock_guard<std::mutex> accounting_lock(
           plan->context->accounting_mutex);
       if (plan->release_active) {
@@ -7088,6 +7697,11 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
             error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
             "RMSNorm execute plan or queue handle is stale or wrong kind");
       }
+      if (plan->fused) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "RMSNorm execute received a residual RMSNorm plan");
+      }
       if (plan->context != queue->context) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
@@ -7174,8 +7788,8 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        plan->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status =
+        get_context_device_properties(plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -7344,6 +7958,494 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const raw_plan,
     return sllm_public_runtime::write_error(
         error_sink, SLLM_STATUS_INTERNAL_ERROR,
         "unexpected exception in RMSNorm execute");
+  }
+}
+
+extern "C" sllm_status_t sllm_residual_rmsnorm_prepare(
+    const sllm_context_t *const raw_context,
+    const sllm_residual_rmsnorm_desc_t *const descriptor,
+    sllm_residual_rmsnorm_plan_t **const raw_plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (raw_plan != nullptr) {
+      *raw_plan = nullptr;
+    }
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (raw_context == nullptr || raw_plan == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "residual RMSNorm context or plan output is null");
+    }
+    if (descriptor == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "residual RMSNorm descriptor is null");
+    }
+    const sllm_status_t prefix_status =
+        sllm_residual_rmsnorm::validate_descriptor_prefix(descriptor,
+                                                          error_sink);
+    if (prefix_status != SLLM_STATUS_OK)
+      return prefix_status;
+    const sllm_residual_rmsnorm_desc_t descriptor_copy = *descriptor;
+    sllm_residual_rmsnorm::DescriptorMetadata metadata{};
+    const sllm_status_t descriptor_status =
+        sllm_residual_rmsnorm::validate_and_copy_descriptor(
+            &descriptor_copy, &metadata, error_sink);
+    if (descriptor_status != SLLM_STATUS_OK)
+      return descriptor_status;
+
+    std::unique_ptr<RmsNormPlan> candidate;
+    uintptr_t token = 0U;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      Context *const context =
+          lookup<Context>(raw_context, HandleKind::Context);
+      Buffer *const residual =
+          lookup<Buffer>(descriptor_copy.residual.buffer, HandleKind::Buffer);
+      Buffer *const addend =
+          lookup<Buffer>(descriptor_copy.addend.buffer, HandleKind::Buffer);
+      Buffer *const raw_scale =
+          lookup<Buffer>(descriptor_copy.raw_scale.buffer, HandleKind::Buffer);
+      Buffer *const residual_output = lookup<Buffer>(
+          descriptor_copy.residual_output.buffer, HandleKind::Buffer);
+      Buffer *const output =
+          lookup<Buffer>(descriptor_copy.output.buffer, HandleKind::Buffer);
+      if (context == nullptr || residual == nullptr || addend == nullptr ||
+          raw_scale == nullptr || residual_output == nullptr ||
+          output == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "residual RMSNorm context or buffer handle is stale or wrong kind");
+      }
+      std::lock_guard<std::mutex> accounting_lock(context->accounting_mutex);
+      if (context->poisoned.load() || context->release_active ||
+          residual->release_active || addend->release_active ||
+          raw_scale->release_active || residual_output->release_active ||
+          output->release_active) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "residual RMSNorm cannot prepare while a context or buffer is "
+            "releasing");
+      }
+      if (residual->context != context || addend->context != context ||
+          raw_scale->context != context ||
+          residual_output->context != context || output->context != context) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_CONTEXT_OR_DEVICE_MISMATCH,
+            "residual RMSNorm buffers must belong to the supplied context");
+      }
+      const auto in_bounds = [](const sllm_rmsnorm::TensorMetadata &tensor,
+                                const Buffer *const buffer) {
+        return tensor.end_offset <= buffer->size_bytes;
+      };
+      if (!in_bounds(metadata.residual, residual) ||
+          !in_bounds(metadata.addend, addend) ||
+          !in_bounds(metadata.raw_scale, raw_scale) ||
+          !in_bounds(metadata.residual_output, residual_output) ||
+          !in_bounds(metadata.output, output)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
+            "residual RMSNorm tensor interval exceeds its backing buffer");
+      }
+      if (!sllm_public_runtime::AccountingState::
+              reserve_five_buffer_prepared_plan(
+                  context->accounting, residual->accounting, addend->accounting,
+                  raw_scale->accounting, residual_output->accounting,
+                  output->accounting)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "residual RMSNorm prepared-plan accounting is exhausted");
+      }
+      try {
+        candidate =
+            std::make_unique<RmsNormPlan>(context, residual, addend, raw_scale,
+                                          residual_output, output, metadata);
+        token = register_handle(candidate.get(), HandleKind::RmsNormPlan);
+      } catch (...) {
+        (void)sllm_public_runtime::AccountingState::
+            release_five_buffer_prepared_plan(
+                context->accounting, residual->accounting, addend->accounting,
+                raw_scale->accounting, residual_output->accounting,
+                output->accounting);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "residual RMSNorm prepared-plan allocation failed");
+      }
+      if (token == 0U) {
+        (void)sllm_public_runtime::AccountingState::
+            release_five_buffer_prepared_plan(
+                context->accounting, residual->accounting, addend->accounting,
+                raw_scale->accounting, residual_output->accounting,
+                output->accounting);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "residual RMSNorm prepared-plan handle allocation failed");
+      }
+    }
+    *raw_plan = reinterpret_cast<sllm_residual_rmsnorm_plan_t *>(token);
+    (void)candidate.release();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in residual RMSNorm prepare");
+  }
+}
+
+extern "C" sllm_status_t sllm_residual_rmsnorm_plan_release(
+    sllm_residual_rmsnorm_plan_t **const raw_plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (raw_plan == nullptr || *raw_plan == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "residual RMSNorm plan handle is null");
+    }
+    RmsNormPlan *plan = nullptr;
+    bool quarantine_plan = false;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      plan = lookup<RmsNormPlan>(*raw_plan, HandleKind::RmsNormPlan);
+      if (plan == nullptr || !plan->fused) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "residual RMSNorm plan handle is stale or wrong kind");
+      }
+      std::lock_guard<std::mutex> accounting_lock(
+          plan->context->accounting_mutex);
+      if (plan->release_active || plan->in_flight) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "residual RMSNorm plan is busy");
+      }
+      plan->release_active = true;
+      const bool accounting_released =
+          !sllm_public_runtime::FaultInjector::consume(
+              sllm_public_runtime::FaultPoint::AccountingFailure) &&
+          sllm_public_runtime::AccountingState::
+              release_five_buffer_prepared_plan(
+                  plan->context->accounting, plan->activation->accounting,
+                  plan->addend->accounting, plan->raw_scale->accounting,
+                  plan->residual_output->accounting, plan->output->accounting);
+      if (!accounting_released) {
+        plan->context->poisoned.store(true);
+        unregister_handle(*raw_plan);
+        *raw_plan = nullptr;
+        quarantine_plan = true;
+      } else {
+        unregister_handle(*raw_plan);
+        *raw_plan = nullptr;
+      }
+    }
+    if (quarantine_plan) {
+      poison_owner.retain(plan);
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "residual RMSNorm prepared-plan accounting release failed");
+    }
+    delete plan;
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in residual RMSNorm plan release");
+  }
+}
+
+extern "C" sllm_status_t sllm_residual_rmsnorm_execute(
+    const sllm_residual_rmsnorm_plan_t *const raw_plan,
+    const sllm_queue_t *const raw_queue,
+    sllm_completion_t **const completion_output,
+    sllm_residual_rmsnorm_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    const sllm_status_t sink_status =
+        sllm_public_runtime::validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (raw_plan == nullptr || raw_queue == nullptr ||
+        completion_output == nullptr || dispatch_info == nullptr) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "residual RMSNorm execute argument is null");
+    }
+    const sllm_status_t dispatch_status =
+        validate_residual_rmsnorm_dispatch_info(dispatch_info, error_sink);
+    if (dispatch_status != SLLM_STATUS_OK)
+      return dispatch_status;
+    RmsNormPlan *plan = nullptr;
+    Queue *queue = nullptr;
+    uint64_t row_count = 0U;
+    uint64_t normalized_size = 0U;
+    uint64_t dispatch_id = 0U;
+    {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      plan = lookup<RmsNormPlan>(raw_plan, HandleKind::RmsNormPlan);
+      queue = lookup<Queue>(raw_queue, HandleKind::Queue);
+      if (plan == nullptr || !plan->fused || queue == nullptr) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+            "residual RMSNorm execute handle is stale or wrong kind");
+      }
+      if (plan->context != queue->context) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+            "residual RMSNorm plan and queue have different contexts");
+      }
+      std::lock_guard<std::mutex> accounting_lock(
+          plan->context->accounting_mutex);
+      if (plan->context->poisoned.load() || plan->context->release_active ||
+          queue->release_active || plan->activation->release_active ||
+          plan->addend->release_active || plan->raw_scale->release_active ||
+          plan->residual_output->release_active ||
+          plan->output->release_active || plan->release_active ||
+          plan->in_flight) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_PUBLIC_BUSY,
+            "residual RMSNorm plan or dependency is busy");
+      }
+      const uint32_t rank = plan->residual_metadata.residual.rank;
+      normalized_size = plan->residual_metadata.residual.shape[rank - 1U];
+      row_count = 1U;
+      for (uint32_t index = 0U; index + 1U < rank; ++index) {
+        if (row_count > std::numeric_limits<uint64_t>::max() /
+                            plan->residual_metadata.residual.shape[index]) {
+          return sllm_public_runtime::write_error(
+              error_sink, SLLM_STATUS_METADATA_OVERFLOW,
+              "residual RMSNorm row count overflowed u64");
+        }
+        row_count *= plan->residual_metadata.residual.shape[index];
+      }
+      if (normalized_size == 0U || normalized_size > SLLM_HIP_RMSNORM_MAX_N ||
+          row_count == 0U || row_count > SLLM_HIP_RMSNORM_MAX_ROWS) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_UNSUPPORTED,
+            "residual RMSNorm shape exceeds the baseline kernel contract");
+      }
+      if (!sllm_public_runtime::AccountingState::reserve_five_buffer_submission(
+              plan->context->accounting, queue->accounting,
+              plan->activation->accounting, plan->addend->accounting,
+              plan->raw_scale->accounting, plan->residual_output->accounting,
+              plan->output->accounting)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "residual RMSNorm submission accounting is exhausted");
+      }
+      plan->in_flight = true;
+      dispatch_id = plan->context->next_dispatch_id;
+      if (dispatch_id == 0U) {
+        plan->in_flight = false;
+        (void)sllm_public_runtime::AccountingState::
+            rollback_five_buffer_submission(
+                plan->context->accounting, queue->accounting,
+                plan->activation->accounting, plan->addend->accounting,
+                plan->raw_scale->accounting, plan->residual_output->accounting,
+                plan->output->accounting);
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INTERNAL_ERROR,
+            "residual RMSNorm context dispatch id is exhausted");
+      }
+      if (dispatch_id == std::numeric_limits<uint64_t>::max()) {
+        plan->context->next_dispatch_id = 0U;
+      } else {
+        ++plan->context->next_dispatch_id;
+      }
+      *completion_output = nullptr;
+    }
+    std::unique_ptr<Completion> candidate;
+    NativeEventGuard event_guard;
+    RmsNormExecuteScopeGuard execute_guard(plan, queue, &candidate,
+                                           &event_guard, error_sink);
+    throw_after_rmsnorm_reservation_if_requested();
+    const sllm_status_t device_status =
+        select_context_device(plan->context, error_sink);
+    if (device_status != SLLM_STATUS_OK) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return device_status;
+    }
+    hipDeviceProp_t properties = {};
+    const sllm_status_t property_status =
+        get_context_device_properties(plan->context, &properties, error_sink);
+    if (property_status != SLLM_STATUS_OK) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return property_status;
+    }
+    char arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME] = {};
+    if (!copy_property(arch_name, sizeof(arch_name), properties.gcnArchName,
+                       sizeof(properties.gcnArchName))) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+          "HIP gcnArchName is invalid");
+    }
+    const int expected_wavefront =
+        matches_runtime_gcn_arch(properties.gcnArchName, "gfx942") ? 64 : 32;
+    if (properties.warpSize != expected_wavefront) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_UNSUPPORTED,
+          "residual RMSNorm provider wavefront differs from target");
+    }
+#if defined(SLLM_HIP_COMPILE_TARGET)
+    if (!matches_runtime_gcn_arch(arch_name, SLLM_HIP_COMPILE_TARGET)) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_DEVICE_MISMATCH,
+          "residual RMSNorm device target mismatch");
+    }
+#endif
+    try {
+      candidate = std::make_unique<Completion>(
+          plan->context, queue, plan->activation, 0U, false,
+          std::vector<uint8_t>{}, plan, plan->activation, plan->raw_scale,
+          plan->output);
+      candidate->rmsnorm_fused = true;
+      candidate->rmsnorm_addend = plan->addend;
+      candidate->rmsnorm_residual_output = plan->residual_output;
+      execute_guard.candidate_allocated();
+    } catch (...) {
+      if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+        execute_guard.disarm();
+        return SLLM_STATUS_INTERNAL_ERROR;
+      }
+      execute_guard.disarm();
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INTERNAL_ERROR,
+          "residual RMSNorm completion allocation failed");
+    }
+    if (queue_profiles_completions(queue)) {
+      hipEvent_t native_event = nullptr;
+      const hipError_t event_status =
+          hipEventCreateWithFlags(&native_event, 0U);
+      if (event_status != hipSuccess) {
+        if (!rollback_reserved_rmsnorm_submission(plan, queue, error_sink)) {
+          execute_guard.disarm();
+          return SLLM_STATUS_INTERNAL_ERROR;
+        }
+        execute_guard.disarm();
+        return hip_failure(error_sink, event_status, "hipEventCreateWithFlags");
+      }
+      event_guard.adopt(plan->context, native_event);
+      candidate->event = native_event;
+      hipEvent_t timing_start_event = nullptr;
+      const hipError_t timing_event_status =
+          hipEventCreateWithFlags(&timing_start_event, 0U);
+      if (timing_event_status != hipSuccess) {
+        execute_guard.disarm();
+        return rollback_unpublished_submission(
+            candidate, event_guard,
+            "residual RMSNorm timing event creation failed", error_sink);
+      }
+      candidate->timing_start_event = timing_start_event;
+    }
+    uintptr_t token = 0U;
+    try {
+      std::lock_guard<std::mutex> registry_lock(registry_mutex);
+      token = register_handle(candidate.get(), HandleKind::Completion);
+    } catch (...) {
+      execute_guard.disarm();
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "residual RMSNorm completion registry allocation failed", error_sink);
+    }
+    if (token == 0U) {
+      execute_guard.disarm();
+      return rollback_unpublished_submission(
+          candidate, event_guard,
+          "residual RMSNorm completion handle allocation failed", error_sink);
+    }
+    if (candidate->event != nullptr)
+      event_guard.release();
+    execute_guard.completion_registered(token);
+    throw_after_rmsnorm_registration_if_requested();
+    if (candidate->timing_start_event != nullptr) {
+      const hipError_t timing_record_status =
+          hipEventRecord(candidate->timing_start_event, queue->stream);
+      if (timing_record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, timing_record_status,
+                                         "hipEventRecord timing start", queue,
+                                         error_sink);
+      }
+    }
+    const auto byte_pointer = [](Buffer *const buffer,
+                                 const uint64_t offset) -> void * {
+      return static_cast<char *>(buffer->device_pointer) +
+             static_cast<std::size_t>(offset);
+    };
+    float epsilon = 0.0F;
+    std::memcpy(&epsilon, &plan->residual_metadata.epsilon_bits,
+                sizeof(epsilon));
+    const hipError_t launch_status =
+        ::sllm_rmsnorm_kernel::launch_residual_fused(
+            static_cast<const uint16_t *>(
+                byte_pointer(plan->activation,
+                             plan->residual_metadata.residual.byte_offset)),
+            static_cast<const uint16_t *>(byte_pointer(
+                plan->addend, plan->residual_metadata.addend.byte_offset)),
+            static_cast<const uint16_t *>(
+                byte_pointer(plan->raw_scale,
+                             plan->residual_metadata.raw_scale.byte_offset)),
+            static_cast<uint16_t *>(byte_pointer(
+                plan->residual_output,
+                plan->residual_metadata.residual_output.byte_offset)),
+            static_cast<uint16_t *>(byte_pointer(
+                plan->output, plan->residual_metadata.output.byte_offset)),
+            static_cast<uint32_t>(normalized_size),
+            static_cast<uint32_t>(row_count), epsilon,
+            plan->residual_metadata.scale_mode, queue->stream);
+    if (launch_status != hipSuccess) {
+      execute_guard.disarm();
+      return cleanup_failed_submission(candidate, token, launch_status,
+                                       "residual RMSNorm kernel launch", queue,
+                                       error_sink);
+    }
+    if (candidate->event != nullptr) {
+      const hipError_t record_status =
+          hipEventRecord(candidate->event, queue->stream);
+      if (record_status != hipSuccess) {
+        execute_guard.disarm();
+        return cleanup_failed_submission(candidate, token, record_status,
+                                         "hipEventRecord", queue, error_sink);
+      }
+    }
+    initialize_residual_rmsnorm_dispatch_info(
+        dispatch_info, dispatch_id, row_count, normalized_size, arch_name);
+    *completion_output = reinterpret_cast<sllm_completion_t *>(token);
+    (void)candidate.release();
+    execute_guard.disarm();
+    return SLLM_STATUS_OK;
+  } catch (...) {
+    return sllm_public_runtime::write_error(
+        error_sink, SLLM_STATUS_INTERNAL_ERROR,
+        "unexpected exception in residual RMSNorm execute");
   }
 }
 
@@ -7665,8 +8767,8 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        plan->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status =
+        get_context_device_properties(plan->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       if (!rollback_reserved_elementwise_submission(plan, queue, error_sink)) {
         execute_guard.disarm();
@@ -7868,7 +8970,9 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "attention_preprocess_runtime.inc"
 #include "causal_attention_runtime.inc"
 #include "embedding_runtime.inc"
+#include "gdn_projection_bundle_runtime.inc"
 #include "matmul_runtime.inc"
+#include "mlp_gate_up_silu_bundle_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
 #include "rotary_runtime.inc"
@@ -9152,8 +10256,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       return device_status;
     }
     hipDeviceProp_t properties = {};
-    const sllm_status_t property_status = get_device_properties(
-        state->context->device_index, &properties, error_sink);
+    const sllm_status_t property_status =
+        get_context_device_properties(state->context, &properties, error_sink);
     if (property_status != SLLM_STATUS_OK) {
       execute_guard.disarm();
       if (!rollback_reserved_kv_submission(state, queue, key_input, value_input,

@@ -15,7 +15,7 @@ use sllm_core::{
 };
 use sllm_hip::HipBackend;
 
-const CASE_TOKENS: [usize; 6] = [1, 3, 17, 127, 128, 129];
+const CASE_TOKENS: [usize; 7] = [1, 3, 17, 32, 127, 128, 129];
 const PHASE12_CASE_TOKENS: [usize; 3] = [1, 3, 17];
 const QK_HEADS: usize = 16;
 const VALUE_HEADS: usize = 32;
@@ -116,6 +116,31 @@ fn selected_case_tokens(phase12_subset: bool) -> &'static [usize] {
     } else {
         &CASE_TOKENS
     }
+}
+
+fn short_column_state_enabled(
+    target: &str,
+    tokens: usize,
+    force_baseline: bool,
+    opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    !force_baseline
+        && target == "gfx1030"
+        && opt_in.is_none_or(|value| value == "1")
+        && (17..128).contains(&tokens)
+        && QK_HEADS == 16
+        && VALUE_HEADS == 32
+        && HEAD_DIM == 128
+}
+
+fn column_provider_enabled(
+    target: &str,
+    tokens: usize,
+    force_baseline: bool,
+    short_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    (!force_baseline && tokens >= 128 && matches!(target, "gfx1030" | "gfx1201"))
+        || short_column_state_enabled(target, tokens, force_baseline, short_opt_in)
 }
 
 fn f32_to_bf16(value: f32) -> u16 {
@@ -439,14 +464,18 @@ fn run_case(
         .map_err(|error| format!("GDN submission failed: {error}"))?;
     let dispatch = submission.dispatch().clone();
     let force_baseline = env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
+    let short_opt_in = env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
     let use_column_provider =
-        tokens >= 128 && !force_baseline && matches!(target, "gfx1030" | "gfx1201");
+        column_provider_enabled(target, tokens, force_baseline, short_opt_in.as_deref());
+    let use_decode_pair_provider = tokens == 1 && !force_baseline && target == "gfx1030";
     if dispatch.dispatch_count != if use_column_provider { 4 } else { 2 }
         || dispatch.kernel_id != 2
-        || dispatch.workgroup_size_x != 128
+        || dispatch.workgroup_size_x != if use_decode_pair_provider { 256 } else { 128 }
         || dispatch.grid_size_x
             != if use_column_provider {
                 (VALUE_HEADS * HEAD_DIM / 4) as u32
+            } else if use_decode_pair_provider {
+                QK_HEADS as u32
             } else {
                 VALUE_HEADS as u32
             }
@@ -457,12 +486,16 @@ fn run_case(
         || dispatch.kernel_symbol
             != if use_column_provider {
                 "linear_attention.gdn.column_state.v2"
+            } else if use_decode_pair_provider {
+                "linear_attention.gdn.decode_pair.v1"
             } else {
                 "linear_attention.gdn.v1"
             }
         || dispatch.device_symbol
             != if use_column_provider {
                 "sllm_linear_attention_recurrent_column_state_v2"
+            } else if use_decode_pair_provider {
+                "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1"
             } else {
                 "sllm_linear_attention_recurrent_gated_norm_v1"
             }
@@ -613,7 +646,7 @@ mod tests {
             LinearAttentionLayout::new(QK_HEADS, VALUE_HEADS, HEAD_DIM, CONV_KERNEL).unwrap();
         assert_eq!(layout.qkv_width(), QKV_WIDTH);
         assert_eq!(layout.output_width(), OUTPUT_WIDTH);
-        assert_eq!(CASE_TOKENS, [1, 3, 17, 127, 128, 129]);
+        assert_eq!(CASE_TOKENS, [1, 3, 17, 32, 127, 128, 129]);
     }
 
     #[test]
@@ -663,5 +696,31 @@ mod tests {
             &output[..OUTPUT_WIDTH],
             &output[OUTPUT_WIDTH..2 * OUTPUT_WIDTH]
         );
+    }
+
+    #[test]
+    fn short_column_state_selector_covers_boundaries_and_guards() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        let unknown = Some(std::ffi::OsStr::new("unknown"));
+        for tokens in [16_usize, 17, 32, 33, 127, 128, 129] {
+            assert_eq!(
+                short_column_state_enabled("gfx1030", tokens, false, enabled),
+                (17..128).contains(&tokens)
+            );
+            assert_eq!(
+                short_column_state_enabled("gfx1030", tokens, false, None),
+                (17..128).contains(&tokens)
+            );
+        }
+        assert!(!short_column_state_enabled("gfx1030", 17, true, enabled));
+        assert!(!short_column_state_enabled("gfx1030", 17, false, disabled));
+        assert!(!short_column_state_enabled("gfx1030", 17, false, unknown));
+        assert!(!short_column_state_enabled("gfx1201", 17, false, enabled));
+        assert!(!short_column_state_enabled("unknown", 17, false, enabled));
+        assert!(column_provider_enabled("gfx1201", 128, false, disabled));
+        assert!(!column_provider_enabled("gfx1201", 17, false, enabled));
+        assert!(column_provider_enabled("gfx1030", 17, false, None));
+        assert!(!column_provider_enabled("gfx1030", 128, true, enabled));
     }
 }

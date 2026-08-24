@@ -304,6 +304,172 @@ bool run_case(const sllm_context_t *const context,
   return success;
 }
 
+bool run_residual_case(const sllm_context_t *const context,
+                       const sllm_queue_t *const queue, const uint64_t rows,
+                       const uint64_t columns) {
+  const uint64_t element_count = rows * columns;
+  std::vector<uint16_t> residual(static_cast<std::size_t>(element_count));
+  std::vector<uint16_t> addend(static_cast<std::size_t>(element_count));
+  std::vector<uint16_t> scale(static_cast<std::size_t>(columns));
+  constexpr std::array<float, 5> scale_pattern = {0.0F, 0.25F, 1.0F, -0.5F,
+                                                  2.0F};
+  for (uint64_t index = 0U; index != element_count; ++index) {
+    const int64_t residual_centered =
+        static_cast<int64_t>((index * 17U + 11U) % 61U) - 30;
+    const int64_t addend_centered =
+        static_cast<int64_t>((index * 29U + 5U) % 47U) - 23;
+    residual[static_cast<std::size_t>(index)] =
+        f32_to_bf16_rne(static_cast<float>(residual_centered) / 13.0F);
+    addend[static_cast<std::size_t>(index)] =
+        f32_to_bf16_rne(static_cast<float>(addend_centered) / 19.0F);
+  }
+  for (uint64_t column = 0U; column != columns; ++column) {
+    scale[static_cast<std::size_t>(column)] = f32_to_bf16_rne(
+        scale_pattern[static_cast<std::size_t>(column % scale_pattern.size())]);
+  }
+
+  /* The baseline comparator is explicit: F32 add, one BF16-RNE intermediate,
+   * then the ordinary RMSNorm stats/scale path over that BF16 intermediate.
+   * The fused kernel must match this bit-for-bit; no tolerance is accepted. */
+  std::vector<uint16_t> baseline_add(static_cast<std::size_t>(element_count));
+  std::vector<uint16_t> expected(static_cast<std::size_t>(element_count));
+  for (uint64_t row = 0U; row != rows; ++row) {
+    float sum = 0.0F;
+    for (uint64_t column = 0U; column != columns; ++column) {
+      const std::size_t index =
+          static_cast<std::size_t>(row * columns + column);
+      const float added =
+          bf16_to_f32(residual[index]) + bf16_to_f32(addend[index]);
+      baseline_add[index] = f32_to_bf16_rne(added);
+      const float intermediate = bf16_to_f32(baseline_add[index]);
+      sum += intermediate * intermediate;
+    }
+    const float inverse_rms =
+        1.0F / std::sqrt(sum / static_cast<float>(columns) + 1.0e-6F);
+    for (uint64_t column = 0U; column != columns; ++column) {
+      const std::size_t index =
+          static_cast<std::size_t>(row * columns + column);
+      expected[index] =
+          f32_to_bf16_rne(bf16_to_f32(baseline_add[index]) * inverse_rms *
+                          bf16_to_f32(scale[static_cast<std::size_t>(column)]));
+    }
+  }
+
+  const uint64_t matrix_bytes = element_count * sizeof(uint16_t);
+  const uint64_t scale_bytes = columns * sizeof(uint16_t);
+  sllm_buffer_t *residual_buffer = nullptr;
+  sllm_buffer_t *addend_buffer = nullptr;
+  sllm_buffer_t *scale_buffer = nullptr;
+  sllm_buffer_t *residual_output_buffer = nullptr;
+  sllm_buffer_t *output_buffer = nullptr;
+  Error error;
+  bool success =
+      create_buffer(context, matrix_bytes, &residual_buffer) &&
+      create_buffer(context, matrix_bytes, &addend_buffer) &&
+      create_buffer(context, scale_bytes, &scale_buffer) &&
+      create_buffer(context, matrix_bytes, &residual_output_buffer) &&
+      create_buffer(context, matrix_bytes, &output_buffer) &&
+      upload(queue, residual_buffer, residual.data(), matrix_bytes) &&
+      upload(queue, addend_buffer, addend.data(), matrix_bytes) &&
+      upload(queue, scale_buffer, scale.data(), scale_bytes);
+  if (!success) {
+    return false;
+  }
+
+  sllm_residual_rmsnorm_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_RESIDUAL_RMSNORM_VERSION;
+  descriptor.accumulation_dtype = SLLM_RMSNORM_ACCUMULATION_F32;
+  descriptor.scale_mode = SLLM_RMSNORM_SCALE_MODE_DIRECT;
+  descriptor.alias_policy = SLLM_RMSNORM_ALIAS_POLICY_REJECT_OVERLAP;
+  constexpr float epsilon = 1.0e-6F;
+  std::memcpy(&descriptor.epsilon_bits, &epsilon, sizeof(epsilon));
+  descriptor.residual = binding(residual_buffer, 2U, rows, columns);
+  descriptor.addend = binding(addend_buffer, 2U, rows, columns);
+  descriptor.raw_scale = binding(scale_buffer, 1U, 1U, columns);
+  descriptor.residual_output =
+      binding(residual_output_buffer, 2U, rows, columns);
+  descriptor.output = binding(output_buffer, 2U, rows, columns);
+  sllm_residual_rmsnorm_plan_t *plan = nullptr;
+  success = expect(
+      sllm_residual_rmsnorm_prepare(context, &descriptor, &plan, &error.sink),
+      SLLM_STATUS_OK, "sllm_residual_rmsnorm_prepare", error);
+  sllm_residual_rmsnorm_dispatch_info_t info{};
+  info.struct_size = sizeof(info);
+  info.abi_version = SLLM_HIP_ABI_VERSION;
+  info.info_version = SLLM_HIP_RESIDUAL_RMSNORM_DISPATCH_INFO_VERSION;
+  sllm_completion_t *completion = nullptr;
+  success =
+      success &&
+      expect(sllm_residual_rmsnorm_execute(plan, queue, &completion, &info,
+                                           &error.sink),
+             SLLM_STATUS_OK, "sllm_residual_rmsnorm_execute", error) &&
+      wait_and_release(&completion, "sllm_completion_wait(residual RMSNorm)");
+  success = success && info.backend == SLLM_BACKEND_HIP &&
+            info.dispatch_count == 1U &&
+            info.kernel_id == SLLM_HIP_RESIDUAL_RMSNORM_KERNEL_ID_WAVE32_V1 &&
+            info.workgroup_size_x == SLLM_HIP_RMSNORM_WORKGROUP_SIZE &&
+            info.grid_size_x == rows && info.row_count == rows &&
+            info.normalized_size == columns && info.fallback_allowed == 0U &&
+            info.fallback_used == 0U &&
+            std::strcmp(info.kernel_symbol,
+                        "rmsnorm.residual_fused.wave32.v1") == 0 &&
+            std::strcmp(info.device_symbol,
+                        "sllm_rmsnorm_residual_fused_wave32_v1") == 0 &&
+            std::strcmp(info.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0;
+
+  std::vector<uint16_t> observed_residual(
+      static_cast<std::size_t>(element_count));
+  std::vector<uint16_t> observed_output(
+      static_cast<std::size_t>(element_count));
+  success = success &&
+            download(queue, residual_output_buffer, &observed_residual) &&
+            download(queue, output_buffer, &observed_output);
+  if (success) {
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      const std::size_t position = static_cast<std::size_t>(index);
+      if (observed_residual[position] != baseline_add[position] ||
+          observed_output[position] != expected[position]) {
+        std::cerr << "residual RMSNorm bitwise oracle mismatch rows=" << rows
+                  << " columns=" << columns << " index=" << index
+                  << " intermediate=0x" << std::hex
+                  << observed_residual[position] << "/0x"
+                  << baseline_add[position] << " output=0x"
+                  << observed_output[position] << "/0x" << expected[position]
+                  << std::dec << '\n';
+        success = false;
+        break;
+      }
+    }
+  }
+  if (plan != nullptr) {
+    success =
+        expect(sllm_residual_rmsnorm_plan_release(&plan, &error.sink),
+               SLLM_STATUS_OK, "sllm_residual_rmsnorm_plan_release", error) &&
+        success;
+  }
+  success =
+      expect(sllm_buffer_release(&output_buffer, &error.sink), SLLM_STATUS_OK,
+             "sllm_buffer_release(residual output)", error) &&
+      success;
+  success =
+      expect(sllm_buffer_release(&residual_output_buffer, &error.sink),
+             SLLM_STATUS_OK, "sllm_buffer_release(intermediate)", error) &&
+      success;
+  success =
+      expect(sllm_buffer_release(&scale_buffer, &error.sink), SLLM_STATUS_OK,
+             "sllm_buffer_release(residual scale)", error) &&
+      success;
+  success = expect(sllm_buffer_release(&addend_buffer, &error.sink),
+                   SLLM_STATUS_OK, "sllm_buffer_release(addend)", error) &&
+            success;
+  success = expect(sllm_buffer_release(&residual_buffer, &error.sink),
+                   SLLM_STATUS_OK, "sllm_buffer_release(residual)", error) &&
+            success;
+  return success;
+}
+
 } // namespace
 
 int main() {
@@ -339,6 +505,15 @@ int main() {
       break;
     }
   }
+  constexpr std::array<std::array<uint64_t, 2>, 4> residual_cases = {
+      {{{1U, 2560U}}, {{2U, 255U}}, {{3U, 256U}}, {{3U, 257U}}}};
+  for (const auto &residual_case : residual_cases) {
+    if (!run_residual_case(context, queue, residual_case[0],
+                           residual_case[1])) {
+      success = false;
+      break;
+    }
+  }
   success = expect(sllm_queue_release(&queue, &error.sink), SLLM_STATUS_OK,
                    "sllm_queue_release", error) &&
             success;
@@ -347,7 +522,9 @@ int main() {
             success;
   if (success) {
     std::cout << "direct RMSNorm GPU test: PASS target="
-              << SLLM_TEST_EXPECTED_TARGET << " cases=" << widths.size()
+              << SLLM_TEST_EXPECTED_TARGET
+              << " baseline_cases=" << widths.size()
+              << " residual_cases=" << residual_cases.size()
               << " max_abs=" << max_abs << " max_rel=" << max_rel << '\n';
   }
   return success ? 0 : 1;

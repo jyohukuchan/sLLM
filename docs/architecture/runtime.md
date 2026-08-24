@@ -118,6 +118,45 @@ all-logits vocabulary shape、短Mは従来providerを維持し、gfx1201/gfx942
 MTP target verifyは実際のdecode block rowをすべてterminal outputとして保持する。long-prefill graph capacityを理由に
 speculative verify blockをlast-rowへ圧縮しない。通常prefill、通常decode、partial replayのterminal-row compactionは維持する。
 
+### Phase 49〜50のadditive semantic/provider契約
+
+Phase 49〜50では既存のversioned C ABIとsemantic opを壊さず、Qwen3.5の固定graphでだけ意味を持つ融合候補をadditiveに追加した。
+各descriptor、dispatch info、prepared planは`struct_size`、`abi_version`、`op_version`とゼロ予約fieldを検証し、prepare時にmetadataを
+native側へcopyする。opaque planはcontext、queue、全unique backing bufferをcompletionまで保持し、release中またはin-flightのownerを
+再利用しない。providerのdispatch infoにはexact target、kernel/provider、shape、fallback状態を残し、候補の失敗を別providerやCPUへ
+黙って切り替えない。
+
+- **Residual RMSNorm** はresidualとaddendをF32で加算し、BF16-RNEの中間`residual_output`を保持してから、raw scaleと明示epsilon・scale
+  modeによるRMSNormをF32 accumulatorで実行し、BF16の正規化結果を返す。中間と最終outputを別bindingとして扱い、alias、dtype、layout、
+  shapeをsemantic contractで固定する。これはgeneric elementwise fusionではなく、既存RMSNormの数値順序を変更しない固定opである。
+- **GDN projection bundle** は同じBF16 activationから独立したqkv、z、b、aの4 weight/output roleへ射影する固定bundleであり、Qwen shapeの
+  `K=2560`と幅`8192/4096/32/32`を契約に含める。native C ABIは`M=1`だけを受け付ける。`M>1`では同じqueue上の4つの通常Matmulへ
+  分解し、qkv→z→b→aの順序、各tensor boundary、BF16出力を保持する。この分解は実行失敗後のfallbackではなく、dispatch前に決まる
+  semantic loweringである。
+- **MLP gate/up/SiLU bundle** は`K=2560`、`N=9216`のgate/up projectionを一つのdecode workgroupへ束ね、gate、up、SiLU-multiplyの
+  3出力を明示的に保持する。native C ABIは`M=1`に限定し、`M>1`では2つの通常Matmulと既存SiLU multiplyへ分解して、projection出力の
+  BF16-RNE境界と依存順序を維持する。GDNと同様、任意のmulti-column matmulへ一般化しない。
+
+attention preprocessには`DerivedContiguous` position payload modeを追加した。これはABI/layout互換のためpositions bindingを残すが、
+text-onlyの連続位置ではkernelが`start_position + row`を導出し、位置payloadを読み込まない。context compaction、multimodal、その他の
+非連続位置は`Explicit` payloadを使う。payload modeはsemantic descriptorとprepared identityの一部であり、position/state依存の
+operationを別requestや別positionへ再利用しない。これにより不要な位置buffer転送を避けつつ、絶対位置とtransaction境界を維持する。
+
+候補selectorは`expected_target`をcontextからsession、semantic lowering、native dispatchまで伝播し、targetをshapeやpromptの代用にしない。
+`gfx1030`用と`gfx1201`用の環境変数は別名・別selectorとし、対応targetでのみunsetまたは`1`を有効、`0`または未知値を無効とする。
+force-baseline指定がある場合は候補selectorより優先し、gfx1030の環境設定をgfx1201へ継承しない。これらのwave32 candidateではexact
+`gfx942`やunknown targetでのpositive selectorを許可せず、scope外のM、head、dtype、KV、layoutは既存baselineまたは明示errorへ送る。ここでのbaseline/decomposeは
+fallbackではなく、selectorがprepare前に選ぶ契約上の経路である。unsupported shape、ABI mismatch、provider error、非同期failureは
+status errorとtransaction poisonへ変換し、CPU、別backend、別dtype/providerへのsilent fallbackを行わない。
+
+Phase 50のtarget scopeは、wave32候補をexact `gfx1030`と`gfx1201`へ個別に選択し、`gfx1030`で得たsolution ID、閾値、環境変数、
+kernel binaryを`gfx1201`へ流用しないことにある。`gfx942:sramecc+:xnack-`はこの段階ではwave64 compileとhost selector非選択の引継ぎ
+範囲であり、既存のFNUZ、`contiguous-resident` KV、model-lock identityを変更しない。Phase 51ではsemantic meaning、shape、数値順序、
+Residual RMSNormの意味契約と既存wave64 symbolは引継ぎ入力とするが、BF16-RNE/F32 accumulator、alias/lifetime、workspace、dispatch、rollbackを
+維持したまま、GDN/MLP reduction、GQA partition、attention preprocess、linear ownership、LDS/register、barrierをwave64向けに再設計する。
+wave32のlane ownership、block、閾値、solutionをそのまま
+選択することや、compile/host evidenceをMI300X実機の実行結果へ読み替えることはしない。詳細は[Phase 50保存済み計画](../plans/archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正とする。
+
 ### Model-neutral prepared execution制御
 
 model adapterはimmutableなnode列を`PreparedExecutionPlan<N>`へlowerし、requestごとのtoken数、開始position、
@@ -148,12 +187,15 @@ pending、timeout、query failure、partial mutation、guard dropではoutput/st
 Qwen3.5 adapterはgraph lowering、attention preprocess、GDN/KV descriptor、Argmax/logits解釈だけを所有し、独自のprepared
 cache、pending submission enum、flush loop、completion wait policyを持たない。
 
-Phase 31ではQwen text prefillをrequest-localな連続chunkへ分割できるようにした。device total VRAMが16 GiB以下では512、
-16 GiB超では16K/8K/4K/2K/512を大きい順に、model-resident bytes、全request終了時のKV/GDN state、candidate行数の
-workspace high-water、`max(total VRAMの5%, 1 GiB)` reserveからdispatch前に一度だけ選ぶ。promptがcandidateより短ければ
-actual prompt行数を使い、allocation失敗後の小bucket retryは行わない。absolute position、full-attention KV、GDN stateは
+Phase 31ではQwen text prefillをrequest-localな連続chunkへ分割できるようにした。Phase 50後に自動選択を修正し、固定SGLang参照の
+total GPU capacity tierを参考に、24 GiB未満では512、24〜35 GiB未満では2K、35〜60 GiB未満では4K、
+60〜160 GiB未満では8K、160 GiB以上では16Kを最大bucketとする。その最大値から512までの候補を大きい順に、
+model-resident bytes、全request終了時のKV/GDN state、candidate行数のworkspace high-water、
+`max(total VRAMの5%, 1 GiB)` reserveからdispatch前に一度だけ選ぶ。明示chunk指定はcapacity tierを上書きする。
+promptがcandidateより短ければactual prompt行数を使い、allocation失敗後の小bucket retryは行わない。absolute position、full-attention KV、GDN stateは
 chunk間で継続し、中間chunkではLM head/Argmax/visible outputを省略する。中間chunk末尾は同一queueのterminal fenceで
 submissionを完了させてから次chunkへstateとworkspace slotを渡し、最終chunkだけ通常decodeへ接続する。
+Phase 31 summaryは当時の16 GiB境界と実測を保存する履歴証拠であり、現在のselector contractとして書き換えない。
 
 Qwen dynamic intermediateはtensor別allocationの総和ではなく、graph use intervalをsubmission completion boundaryまで延長した
 liveness slotへ配置する。同時liveまたは同じcompletion segmentのtensorは別slotとし、backendがbuffer handle単位で保持する

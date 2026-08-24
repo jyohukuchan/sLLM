@@ -1,16 +1,22 @@
-# Phase 37以降: MI300X最適化とllama.cpp機能差解消計画
+# Phase 37以降: 性能・機能ロードマップ
 
 ## 目的
 
-Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的なGDNとFull Attentionから解消する。
-その後、2026-08-21に固定llama.cpp `b10453`と比較して棚卸しした、モデルアーキテクチャ・hardware・parallel以外の
-未実装機能を、共通基盤から公開surfaceへ依存順に実装する。
+2026-08-22のユーザー指示により、直近の性能最適化はV620 exact `gfx1030`だけで開始した。
+2026-08-23のユーザー指示により、Phase 49は全7比較行の同等達成を後続GPUの開始条件にせず、
+GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の退行を確認して完了した。
+Phase 50はR9700 exact `gfx1201`の限定採用とMI300X exact `gfx942` wave64引継ぎ準備を完了し、
+実機性能検証をPhase 51へ引き継ぐ。既定実行順は49→50→51だが、V620またはR9700の同等達成を後続GPU開始の必須条件にはしない。
 
-この計画は2026-08-21のユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
+2026-08-21に作成した旧Phase 37〜38のMI300X先行計画はコード変更・GPU実行前に再編し、その作業範囲を
+Phase 51へ吸収する。Phase 39〜45は完了済み、Phase 46〜48の機能計画は予約済みのまま保持する。
+番号は既存割当との衝突を避けるため49〜51を使うが、ユーザーが変更しない限り実行優先順位は49〜51を先とする。
+
+この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
 性能値は採用判断と再計画に用いる目標であり、数値未達を隠すために比較条件やモデルを変更しない。
 
-## 正本とbaseline
+## 正本と基準値
 
 - 製品要件: repository外の`sLLM.md`。
 - 全体計画: [main plan](../../../../main-plan.md)。
@@ -20,23 +26,30 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
   model state、HIP providerを分離する。
 - model identity: [model lock](../../../../../models/model-lock.md)。cache、adapter、checkpoint、dynamic model lifecycleで
   verified identityを弱めない。
-- MI300X baseline: [Phase 36 archive](../../../../archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)と
+- V620の計画開始値は[Phase 35 archive](../../../../archive/2026/08/11-20/phase35-long-context-full-attention-gdn-optimization.md)の
+  10,001/2 sLLM `22.683`秒を参考値とする。固定llama.cppを含む通常5行＋長時間2行の基準値はPhase 49開始時の同一source・同一測定で
+  取り直し、歴史値を新しい候補の比較値に流用しない。
+- R9700の直近比較は[R9700 E2E history](../../../../../history/2026/08/21-31/r9700-sllm-llama-e2e-comparison.md)の
+  10,001/2 sLLM `3.936429665`秒、固定llama.cpp `2.063845785`秒、比`1.90733x`である。これはPhase 50の
+  参考値であり、7行のPhase 50基準値を置き換えない。
+- MI300Xの参考値は[Phase 36 archive](../../../../archive/2026/08/11-20/phase36-mi300x-current-main-validation.md)と
   [Session D summary](../../../../../../ci/matrix/phase36-mi300x-session-d-summary-v1.json)。Qwen3.5-4B BF16、FP16 KV、
   input ID `23066`を10,001個、greedy 2 output、3 warmup＋10 measuredで、sLLM E2E中央値は
   `22.556130816`秒、fixed llama.cppは`0.8512540725`秒、E1比は`26.4975x`だった。
-- Session Dのrocprofv3 device shareはGDN `73.95%`、Full Attention `25.12%`、projection `0.70%`、other
-  `0.23%`。Phase 37はこの二familyを最優先する。
-- Phase 36のVMは削除済みである。新しいexact gfx942実機を確保するまではcompile、selector、host oracle準備だけを
-  draftとして進め、compile成功や過去のSession D証拠を新candidateのGPU PASSへ読み替えない。
-- 比較は同じupstream revision、token列、dtype、KV、GPU、warmup/反復、timing boundaryを固定する。
-  GGUF bytes/tensor setが異なる間はE1 system-equivalentとし、strict-identicalと表記しない。
+- Session Dのrocprofv3 GPU時間比はGDN `73.95%`、Full Attention `25.12%`、projection `0.70%`、other
+  `0.23%`。Phase 51では新しい7行profileを優先し、この値は候補選択の参考にだけ使う。
+- Phase 36のVMは削除済みである。Phase 51で新しいexact gfx942実機を確保するまではcompile、selector、host oracle準備だけを
+  draftとして進め、compile成功や過去のSession D証拠を新しい候補のGPU PASSへ読み替えない。
+- 比較は同じupstream revision、**input** token列、dtype、KV、GPU、warmup/反復、timing boundaryを固定する。
+  GGUF bytes/tensor setが異なる間はE1 system-equivalentとし、strict-identicalと表記しない。生成／visible token列とstop reasonは
+  各engine内の反復一致をhardに確認し、cross-engine差はbounded digest観測として扱う。
 
 ## 全体順序
 
 | Phase | 状態 | 主範囲 | 主要依存 |
 | --- | --- | --- | --- |
-| 37 | ready-host-prep | gfx942 GDN・Full Attention provider parity | Phase 36 profile。実機baseline/perfはVM再確保待ち |
-| 38 | planned | MI300X residual、FNUZ/GEMM、execution replay、最終peer比較 | Phase 37 fresh profile |
+| 37 | replanned-before-start | 旧gfx942 GDN・Full Attention計画をPhase 51へ吸収 | production source・GPU証拠の変更なし |
+| 38 | replanned-before-start | 旧MI300X残差計画をPhase 51へ吸収 | production source・GPU証拠の変更なし |
 | 39 | complete | service operability・認証・observability基盤 | 現行profile v1 |
 | 40 | complete | sampler chain、GPU sampling、logprobs、grammar/structured generation | 現行generation loop |
 | 41 | complete | prefix/KV reuse、session checkpoint、context shift、speculation | opaque KVとPhase 40 token selection |
@@ -47,11 +60,14 @@ Phase 36で確認したexact `gfx942`の大きな性能差を、まず支配的�
 | 46 | planned | conversion、quantization、benchmark、quality/debug tools | stable GGUF/model identities |
 | 47 | approval-required | 組込みtool/MCP実行 | Phase 39 security・Phase 43 tool protocol |
 | 48 | planned | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
+| 49 | complete-scoped-adoption | V620のGQA P32を限定採用、long-prefill v2とHIP Graphを棄却 | 3候補の関連実機行、通常5行退行確認、採否履歴 |
+| 50 | complete-limited-adoption | R9700 `gfx1201`採用とMI300X `gfx942` wave64引継ぎ準備 | Phase 49完了（充足済み） |
+| 51 | planned-next | Phase 49/50採用内容のMI300X wave64適用・実機検証 | MI300X VM。Phase 50引継ぎ台帳 |
 
-Phase 37–38はMI300X性能lane、Phase 39–48は機能laneである。MI300X VMを利用できない期間も、Phase 39以降の
-host-only設計・実装は独立branch/work unitとして進められ、Phase 37/38のGPU完了を開始・merge gateにしない。ただし同じ
-runtime領域を変更するcandidateは、統合時点のsourceでaffected host regressionを実行し、次のMI300X実機sessionでは
-fresh baselineから測定する。
+直近の性能laneの既定順はPhase 49→50→51である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
+MI300X wave64引継ぎ準備は完了し、次はPhase 51を開始できる。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
+採用routeをexact `gfx1201`へ限定した。Phase 50の全7行llama.cpp同等達成は後続Phase開始のgateではない。Phase 46〜48は内容と番号を保持するが、
+既定の実行優先順位は性能laneの後とする。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice
 state、Phase 41はassistant-prefill/state semantics、Phase 42はFIM/infill execution modeを所有する。Phase 42〜44の後続記述は、
@@ -72,77 +88,186 @@ state、Phase 41はassistant-prefill/state semantics、Phase 42はFIM/infill exe
 7. 既存gfx1030/gfx1201 routeを変更する共通sourceは該当targetのfocused regressionを行う。gfx942固有sourceだけなら
    RDNA GPU rerunを常に要求せず、compile/dispatch selector testで非選択を証明する。
 
-## Phase 37: gfx942 GDN・Full Attention provider parity
+## Phase 37〜38: 実装前の再編
 
-### Scope
+- 旧Phase 37のgfx942 GDN／Full Attentionと、旧Phase 38のMI300X残差解消は、production sourceやGPU証拠を
+  変更する前に中止し、Phase 51へ吸収した。完了または棄却した性能候補としては扱わない。
+- 旧計画で固定したwave64、FNUZ、4 KV encoding、`contiguous-resident`、数値変更分類、VM実測のfail-closed条件は
+  Phase 51へ引き継ぐ。Phase 36の履歴と証拠は変更しない。
 
-- `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14、Qwen3.5-4B BF16/FNUZ FP8、4 KV encodingを対象とする。
-- Phase 35のcolumn-state GDNとQ_TILE=4/GQA共有attentionがgfx1030/gfx1201にだけ選択され、gfx942でbaselineへ
-  戻る現状を解消する。
-- 現行GDN selectorはtoken 128以上でもgfx942をcolumn candidateへ送らず、baselineはvalue head 32 workgroupで
-  128 state要素をtoken loop内で走査する。Full Attention selectorもgfx942をcommon tiled providerへ送らず、
-  1 query×KV headごとにkey方向のreduction/barrierを反復する。Phase 37はこのroute差を明示baselineにする。
-- state layout、accepted-state transaction、opaque KV、`contiguous-resident`、public API、model/GGUF形式は維持する。
+## Phase 49〜51の共通性能契約
 
-### Work units
+### 比較対象
 
-1. P37-A0 baselineをfresh sourceで再取得する。これはexact gfx942 VMを再確保するまでdeferredとする。Phase 36の
-   10,001/2、operator境界、device family shareを再現し、
-   provider ID、kernel symbol、wavefront、dispatch/resource、binary bundleをsummaryへ結合する。
-2. P37-A1でwave64 column-state GDNを実装する。head×state-column ownership、norm/recurrent update/output projection、
-   state publicationをwave64向けに再配置し、token `1/3/17/127/128/129/255/256/257/2047/2048/2049/10001`、
-   width/column tail、nonzero start、zero/nonzero state、MTP rewind/replay、chunk境界を扱う。Phase 36でgfx942へ固定した
-   128項index順FP32 norm和を最初のN0 candidateでは維持する。
-3. P37-A2でgfx942向けtiled Full Attentionを実装する。複数query rowとGQA headでK/V tileを共有し、vector QK/PV、
-   online softmax、causal/chunk境界、FP16/dynamic FP8/static FP8/NVFP4 KVのunpack/scale共有を独立candidateにする。
-   `63/64/65`、`127/128/129`、`255/256/257`、`511/512/513`、`2047/2048/2049`、`4095/4096/4097`、
-   `8191/8192/8193`、`10001`とnonzero startをselector境界へ含め、Phase 35のthresholdを無検証でコピーしない。
-4. A1/A2は別route・別採否にし、一方の不成立で他方を捨てない。FP16/FP8 accumulatorやsoftmax順序変更はN0〜N3へ
-   分類し、N2以上はユーザー承認なしに性能だけで採用しない。
-5. P37-A3はP37-A0と同じくexact gfx942 VM再確保までdeferredとし、sLLM 4B BF16/FNUZ FP8のshort、decode-long、
-   prefill-long、10,001/2を3＋10反復する。fixed llama.cppとの
-   peer比較は、既存peer artifactとstrictに合わせられるBF16 weight＋FP16 KV行だけを同じVM・protocolで再取得する。
-   FNUZ FP8はsLLM内のBF16対照とし、対応peer artifactなしにllama.cpp比を作らない。
+- モデルはQwen3.5-4Bの固定revision `851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a`、BF16 weight、
+  FP16 KV、MTPなし、visionなし、greedyとする。sLLMとllama.cppのGGUFが異なる間はE1 system-equivalentと表記し、
+  strict-identicalとは表記しない。
+- 比較対象は固定llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`とする。
+  Phase開始時に両engineのsource、binary、model、runner、ROCm、GPU identityを固定する。
+- ここで「batchingなし」は要求batchと並行sequenceを1に固定する意味である。両engineとも単一GPU、active request 1、
+  parallel slot 1、要求の重なり0とし、continuous request batching、複数GPU、MTPを無効にする。
+- llama.cppの`--batch-size`やsLLMのchunked prefillのような、単一prompt内部の処理単位を1へ強制する意味ではない。
+  内部chunk／tileは各engineの実運用既定値を使い、測定前に固定・記録する。設定context長は両engineで揃える。
 
-### Acceptance
+### 固定比較matrix
 
-- operator oracleはGDN state digest、causal/GQA/future-key poison、NaN/Inf/subnormal、非整列/tailを含め全PASSし、
-  production rowはexact gfx942/HIP-only、fallback/partial offloadなし、cleanup 0、終了後process/HBM/GTT/ECCが
-  baselineへ戻る。
-- selectorはgfx942の承認shapeだけを新providerへ送り、gfx1030/gfx1201とshort shapeの既存routeを変えない。
-- 採用candidateは同じfamilyのdevice中央値がbaselineよりMADを越えて短縮し、E2Eを有意に悪化させない。
-- Phase終端でGDN、Full Attention、projection、other、host-visible E2Eを再分解する。peer未達でも残差の所在を固定して
-  Phase 38へ渡し、根拠なしに別kernelを追加しない。
+通常matrixはPhase 36 Session Dと同じinput token列／digestを再利用する5行とし、候補ごとの絞り込んだ性能回帰に使う。
 
-### Non-goals
+| 種別 | 行 | input token数 | output token数 | 主に見る領域 |
+| --- | --- | ---: | ---: | --- |
+| 通常 | `short-odd` | 17 | 17 | 短いprefillとdecode、非整列値 |
+| 通常 | `32-32` | 32 | 32 | 短い均衡形状 |
+| 通常 | `prefill-long` | 1,024 | 128 | prefill寄り |
+| 通常 | `decode-long` | 32 | 256 | decode寄り |
+| 通常 | `long-10001` | 10,001 | 2 | 長いcontextのprefill／attention |
 
-- multi-GPU、別CDNA SKU、一般的なFlashAttention 4製品claim、KV format変更、model architecture追加。
+長時間matrixは次の2行とする。実行時間が長いため候補ごとの通常回帰には含めず、Phase開始時の基準値、
+該当経路へ影響する候補群の採否前、Phase最終候補で実行する。
 
-## Phase 38: MI300X residual closureとpeer比較
+| 種別 | 行 | input token数 | output token数 | 主に見る領域 |
+| --- | --- | ---: | ---: | --- |
+| 長時間 | `long-100000` | 100,000 | 2 | 100k contextのprefill、attention、KV、memory |
+| 長時間 | `decode-20000` | 32 | 20,000 | 長時間decode、状態更新、同期、持続性能 |
 
-### Scope and selection
+`long-100000`はtoken ID `23066`を100,000個使う。`decode-20000`は`decode-long`と同じ32-token入力を使い、
+両engineでEOSと追加stopを無効化してmax output 20,000まで必ず実行する。長時間2行は両engineとも設定context長を
+`131,072`に固定する。実行前にVRAM見積りと空き容量を確認するが、OOMやtimeoutを行の省略やPASSへ読み替えない。
 
-Phase 37後のfresh profileだけを根拠に、E2E差へ寄与するcandidateをAmdahl上限順に選ぶ。候補は以下だが、shareが
-小さいものを実装gateにしない。
+単一行の改善、10,001/2だけのPASS、通常5行だけのPASSを「llama.cpp同等」と呼ばない。全7行で固定input token列、
+output budget、protocolを一致させる。各engine内の全warmup／measured反復では生成token列、visible token列、stop reasonの
+一致をhardに確認する。異なるGGUF tensor set／converterを使うE1 system-equivalent比較では、cross-engineの生成／visible／stop
+一致はdigestとboolで観測し、性能gateの阻害条件にはしない。cross-engineのinput列、output budget、protocol、各engine内の
+決定性・shape・stop形式・HIP／resource／cleanup契約は引き続きhardとする。
 
-1. wave64 MMVF/BF16 projectionとhipBLAS/hipBLASLt solution比較。ただしPhase 36でprojectionはdevice totalの
-   `0.70%`だけなので、Phase 37後もAmdahl上限が小さければ実装しない。
-2. FNUZ FP8の有限workspace、複数solution、shape/target別algorithm cache、queue別handle。
-3. 共通activationを消費するQ/K/V、gate/upのdynamic quantization共有、producer直結、quantize+matmul fusion。
-4. parameter update可能なcommand listまたはreusable HIP Graph、event/completion pool、registry lock、token/position H2Dと
-   token D2H boundaryの集約。requestごとのgraph instantiateは再導入しない。
-5. VMM=trueの実機で`contiguous-resident`とvirtual-contiguous/incremental commitを、同じopaque KV契約で比較する。
-6. loader/profileがcold-start差を支配する場合だけmmap、並列hash、double-buffered H2Dを別cold metricとして扱う。
+### 測定と同等判定
 
-### Acceptance
+1. 通常5行は各engineを3回warmup後に10回測定する。長時間2行は費用を抑えるため1回warmup後に3回測定し、
+   通常行より確度が低いことを要約へ明記する。いずれもengine順をcounterbalanceし、進行中のprocess、GPU health、
+   token進捗を監視する。進行している長時間runを任意の短いcheckpoint時間だけで終了しない。
+2. E2E、TTFT、prefill、TPOT、token/s、peak VRAM、GPU family時間、全反復値、median、MADを記録する。
+   長時間行のraw profilerは常時取得せず、候補群の分解または最終代表runだけで取得する。
+3. 全7行のE2Eで`sLLM median <= llama.cpp median + max(sLLM MAD, llama.cpp MAD)`を満たすことを
+   「測定上遅くない」と定義する。さらに全7行のTTFTと、output 17以上の5行のTPOTも同じ条件を満たす。
+4. 比率`median_sLLM / median_llama`を併記する。MAD幅を利用して明白な悪化を隠さず、外れ値除去、測定後の行変更、
+   測定後のchunk/context設定変更、失敗runの除外を行わない。
+5. 全行でHIP-only、fallbackなし、partial offloadなし、非finiteなし、cleanup 0、実行前後のhealthと資源復帰を確認する。
+6. Phase 49〜51では同じ7行と式で同等達成の有無を報告する。ただしPhase 49は3候補の採否と退行確認で完了でき、
+   全7行同等達成そのものを後続targetの開始条件にしない。Phase 50〜51でも同等達成を相互の開始条件に追加しない。
 
-- 各candidateはcorrectness、resource、target selectorを独立評価し、採用/棄却理由とAmdahl上限を記録する。
-- canonical 10,001/2 direct laneでsLLM BF16/FNUZ FP8を3＋10反復する。fixed llama.cpp E1比較はBF16 weight＋FP16 KVに
-  限定し、FNUZ FP8はsLLM BF16とのdtype内比較として別表示する。
-- 最終目標はsLLMの単一request E2E中央値を同条件fixed llama.cpp以下にすることとする。`<=1.0x`は性能目標であり、
-  correctnessを緩めて達成しない。届かない場合は残差上位family、必要な新scope、推定上限を示して同一work unitを
-  反復せず再計画する。
-- MI300X結果をMI300A/MI325X/別partitionへ一般化しない。
+## Phase 49: V620限定のllama.cpp同等化
+
+> 状態: complete-scoped-adoption（2026-08-23）。全7行同等達成ではなく、3候補の採否と通常5行退行確認で完了。
+
+### 範囲と作業単位
+
+1. exact `gfx1030`のV620 1台だけで通常5行＋長時間2行のsLLM／llama.cpp基準値とGPU profileを取り直す。R9700とMI300Xは
+   性能候補の実装・採否・GPU回帰へ使わない。
+2. 各行のE2E残差をGPU family、host wait、H2D/D2H、provider、shapeへ分解し、Amdahl上限の大きい順に一つずつ扱う。
+   Phase 35後に残るFull Attention、projection、実行時dispatch／同期、decode、loaderを候補一覧とするが、fresh profileで
+   上位でない候補は実装しない。
+3. 新providerは最初にexact `gfx1030`だけへrouteし、gfx1201/gfx942は既存baselineを維持する。共通algorithmを使える設計でも、
+   他targetのselectorをPhase 49で有効化しない。
+4. operator oracleは`1/3/17`、tile境界の`B-1/B/B+1`、tail、非整列shape、NaN/Inf、state/KV transactionを含める。
+   candidateごとに数値、資源、局所時間、通常5行を確認し、採否理由を記録する。長時間2行は個別candidateごとに実行せず、
+   100k prefill／KVまたは20k decodeへ影響する候補をまとめた採否時点で実行する。
+5. long-prefill v2、GQA P32、HIP Graphを現在の最終候補とし、それぞれ関連する実機行で採用または棄却する。
+   判定後は採用候補を含む通常5行で重大な退行がないことを確認し、残るllama.cpp差はPhase 50以降へ持ち越す。
+6. V620実行前にローカルQwen補助serviceを停止してV620 2台を解放する。性能測定はcanonical V620 1台だけを使い、
+   spare V620をtensor parallelや要求batchへ使わない。この期間の補助作業はnative Codex subagentを使う。
+
+### 完了条件
+
+- long-prefill v2、GQA P32、HIP Graphの3候補について、関連する実機性能、数値、fallback、後始末、selectorを確認し、
+  採用または棄却とその理由を固定する。性能未達や候補棄却は隠さないが、全7行同等達成は完了条件にしない。
+- 採用候補を含むcurrent candidateの通常5行で正しさ・資源条件をPASSし、Phase 49開始時または直前採用候補からの
+  原因不明な重大退行がないことを確認する。
+- exact `gfx1030`以外へ新しい性能routeを開かず、R9700／MI300Xの既存routeを変更していないことをselector testで示す。
+- 採用source、棄却candidate、取得済み7行測定、未達行と残差profileを履歴へ固定してからPhase 50／51を開始する。
+
+### 完了結果
+
+- GQA P32はexact `gfx1030`、decode、GQA4、head dimension 256、FP16 KV、KV長4,096以上へ限定して既定有効化した。
+  `32/20,000`ではE2E中央値を`934.262`秒から`529.331`秒へ43.34%短縮し、同一20,000-token digest、HIP-only、
+  fallbackなし、後始末0を確認した。
+- long-prefill v2はoperatorで10k入力まで52.96〜58.60%短縮したが、`100,000/2` full-modelの単一warmupが約33分を要し、
+  current controlの1 warmup＋3 measured合計より遅かったため不採用とした。実装は明示的opt-inへ隔離し、既定経路に入れない。
+- HIP Graphは無効時の`17/17`がPASSした一方、有効時にSIGSEGVしたため不採用とし、候補固有APIと実装を撤去した。
+- 最終通常5行は各3 warmup＋10 measuredで5/5 PASSした。E2E中央値は`17/17` 423.961 ms、`32/32` 750.651 ms、
+  `1,024/128` 4,214.241 ms、`32/256` 5,779.410 ms、`10,001/2` 13,507.666 msで、Phase 49開始時比24.24〜45.43%短縮した。
+  全行でexact `gfx1030`、HIP-only、fallbackなし、反復一致、要求後とprocess終了後の資源復帰を確認した。
+- 固定llama.cpp比のE2E残差は順に+0.78%、+2.16%、+3.04%、+6.65%、-9.45%である。全7行同等とは主張せず、
+  current controlの`100,000/2`約295.093秒対llama.cpp約194.121秒、P32採用後の`32/20,000`約529.331秒対
+  llama.cpp約428.989秒をPhase 50以降へ持ち越す。
+
+## Phase 50: R9700実機移植とMI300X wave64引継ぎ準備
+
+> 状態: complete-limited-adoption（2026-08-24）。R9700 `gfx1201`の採否とMI300X `gfx942` wave64引継ぎ準備を完了。
+
+### 範囲と作業単位
+
+1. exact `gfx1201`、ROCm 7.14、Code Object V6、wave32のtarget専用成果物でR9700の通常5行＋長時間2行と
+   固定llama.cpp baseline/profileを新規取得する。既存10,001/2比較は参考値だけとする。
+2. Phase 49変更をtarget共通、gfx1201で再測定するwave32候補、gfx1030限定、不採用、gfx942 wave64再設計へ分類する。
+   fresh profileの残差順にGQA split、decode融合、attention/linear、matmul、execution制御を個別採否し、全候補の実装を要求しない。
+3. 共通source変更時はV620通常5行、長時間経路へ影響する場合だけ該当長時間行を再確認する。gfx1201固有変更なら
+   gfx1030/gfx942非選択をselector testで示す。
+4. MI300Xはexact `gfx942:sramecc+:xnack-`／wave64 compile、host selector非選択、意味・数値・ABI・workspace引継ぎまでを扱う。
+   MI300X実機7行と性能採否はPhase 51に残し、compile成功をGPU PASSへ読み替えない。
+
+### 完了条件
+
+- R9700の7行で規定反復、正しさ、HIP-only、fallback、資源、固定llama.cpp差、未達理由を記録し、Phase 49変更を
+  gfx1201採用・target分離・baseline/decompose・不採用・gfx942再設計のいずれかへ分類する。
+- 共通source変更の影響範囲でV620 Phase 49 closeoutを維持し、gfx1030 P32経路を原因不明に退行させない。
+- exact gfx942 compile/link、host selector非選択、wave64引継ぎ台帳をPhase 51の入力として固定する。
+- R9700の全7行llama.cpp同等は目標と報告項目だが、Phase 50完了またはPhase 51開始のhard gateにしない。
+
+### 完了結果
+
+- R9700 exact `gfx1201`、Code Object V6、wave32の最終7行は6/7 PASS、1/7 FAILだった。PASS行は全てHIP-only、fallbackなし、
+  反復一致、cleanup 0である。E2E中央値（sLLM／固定llama.cpp、ms）は、`17/17` `407.915/332.726`、
+  `32/32` `759.729/604.069`、`1,024/128` `3,383.627/2,509.156`、`32/256` `5,959.860/4,712.364`、
+  `10,001/2` `4,002.834/2,072.476`、`32/20,000` `532,486.026/377,632.768`だった。
+  `100,000/2`はlayer 31のKV commitでOOMとなり、未達理由を記録した。最終比較と失敗を含む追跡済み要約は
+  [`ci/matrix/phase50-r9700-summary-v1.json`](../../../../../../ci/matrix/phase50-r9700-summary-v1.json)に固定した。
+- Phase 49変更は、target共通意味契約、exact `gfx1201`での residual RMSNorm、GDN projection bundle、MLP gate-up-SiLU bundle、
+  GQA4 P32（KV長4,096以上）を採用し、`gfx1030`限定経路、不採用経路、gfx942 wave64再設計へ分類した。llama.cpp同等未達は
+  残差として報告するが、完了条件にはしなかった。
+- 共通source変更後のV620 exact `gfx1030`通常5行は5/5 PASSで、Phase 49 closeout比は`-0.21〜+1.16%`に収まった。
+- exact `gfx942`のCargo build、feature compile/link probe、host selector非選択はPASSした。MI300X実機の7行性能検証と採否、
+  `project-verified`昇格は未実施であり、Phase 51が所有する。wave64ではwave32のlane ownership、block、LDS/register、barrier、
+  GQA partitionを直接流用せず再設計する。
+- Phase 50後の`100,000/2` OOM分析で、16 GiB超を一律16K候補から評価する自動prefill selectorを修正した。capacity tierは
+  24 GiB未満512、24〜35 GiB未満2K、35〜60 GiB未満4K、60〜160 GiB未満8K、160 GiB以上16Kであり、各tierの下位候補は
+  exact graph memory見積りで選ぶ。32 GiBのV620/R9700は2K開始へ変わるため、既存Phase 49/50測定は履歴として維持し、
+  current candidateの性能主張には再測定を要する。R9700 `100,000/2`再実機は未実施であり、Phase 51の開始gateにはしない。
+
+実行tuple、7行、selector境界、candidate順、停止／再計画条件、証拠は
+[Phase 50詳細計画](../../../../archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とする。
+
+## Phase 51: MI300Xへの適用と検証
+
+### 範囲と作業単位
+
+1. Hot AisleのMI300X VF x1、exact `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14 tupleを再確保し、
+   Phase 49完了candidateと、利用可能ならPhase 50の採用内容を含むcurrent candidateで通常5行＋長時間2行と新しいGPU profileを取得する。
+   単一VMの結果を別CDNA SKUへ一般化しない。
+2. Phase 49〜50のalgorithm／layout／同期削減をwave64へ移植する。wave32 kernel binaryや閾値をそのまま選択せず、
+   head／state column ownership、tile、reduction、barrier、LDS/registerをgfx942向けに再決定する。
+3. 旧Phase 37〜38のGDN column-state、tiled Full Attention、wave64 MMVF、FNUZ hipBLASLt solution、activation量子化共有、
+   command-list／graph replay、KV provider候補を、新しい7行profileのAmdahl上限順に評価する。
+4. FP16／FP8 accumulatorやsoftmax順序を変える候補は数値台帳のN0〜N3へ分類し、N2以上を性能だけで自動採用しない。
+5. 共通sourceを変更した場合はV620とR9700の通常5行をcurrent candidateで再実行し、長時間経路へ影響する場合と
+   Phase 51最終候補では長時間2行も再実行する。gfx942固有sourceだけなら、
+   両RDNA targetの非選択をselector testで示し、不要なGPU再実行は要求しない。
+
+### 完了条件
+
+- MI300Xの通常5行と長時間2行で正しさ・資源条件をPASSし、移植候補を採用・target分離・不採用のいずれかへ分類する。
+- llama.cpp同等条件の達成有無と残差を記録する。current candidateでV620のPhase 49 closeout状態を維持し、
+  Phase 50で確立したR9700経路がある場合はその正しさと性能を退行させない。
+- 全3 targetの最終7行比較、GPU family内訳、target selector、正しさ、資源、既知制約を一つの追跡済み要約へ固定する。
+- MI300A、MI325X、bare metal、複数GPU、FNUZ FP8のllama.cpp比較、他モデルを完了主張へ含めない。
 
 ## Phase 39: service operability・認証・observability
 
@@ -398,14 +523,14 @@ network/filesystem、confirmation、audit保持を明示承認するまで`appro
   RCCL/RDMAは今回のllama.cpp機能差計画へ含めない。
 - LMCache、RadixAttention、Paged Attention、TurboQuant、残るKV形式、MXの将来形式は今回のPhaseへ自動追加しない。
   Phase 41のcache/state ABIは後からproviderを追加できる形にする。
-- README整備、人間による発表、release packagingは別作業であり、Phase 37–48の機能受入をblockしない。
+- README整備、人間による発表、release packagingは別作業であり、Phase 37以降の受入をblockしない。
 - fixed llama.cppに存在する機能でも、外部仕様がないrerank、Anthropic、MCP、server extensionは「llama互換」を名乗らず、
   sLLM固有または別仕様pinとして公開する。
 
 ## Phase closeout
 
 各Phaseは、採用source、棄却candidate、test/evidence、既知制約、次Phaseへの入力をmatching historyへ記録する。完了または
-放棄時にこのplanをarchiveへ移し、main planのroadmap/current stateを更新する。Phase 37–48を一括commitにせず、独立して
+放棄時にこのplanをarchiveへ移し、main planのroadmap/current stateを更新する。Phase 37以降を一括commitにせず、独立して
 review・rollback可能なPhase/work unit単位で公開する。
 
 [全体計画](../../../../main-plan.md) / [対応する履歴](../../../../../history/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)

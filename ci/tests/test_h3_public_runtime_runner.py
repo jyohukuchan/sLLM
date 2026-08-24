@@ -2487,16 +2487,19 @@ Sections [
                 "/tmp/private-build/rmsnorm-kernel-" + target + ".o",
                 "/tmp/private-build/rmsnorm-api-" + target + ".o",
             ])
-            self.assertEqual(commands[-1][-3:], list(runner.PUBLIC_RUNTIME_LINK_LIBRARIES))
+            self.assertEqual(commands[-1][-4:], list(runner.PUBLIC_RUNTIME_LINK_LIBRARIES))
             self.assertNotIn(str(ROOT / "native/hip/src/rmsnorm_api.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/embedding_api.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/linear_attention_kernel.hip.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/gdn_projection_bundle_kernel.hip.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/residual_rmsnorm_api.cpp"), commands[-1])
             self.assertFalse(any("./" in token or "--run" in token for command in commands for token in command))
 
-    def test_native_link_contract_rejects_missing_hipblas_dependency(self) -> None:
+    def test_native_link_contract_rejects_missing_blas_dependency(self) -> None:
         cmake = (ROOT / "native/hip/CMakeLists.txt").read_text(encoding="utf-8")
         runner.validate_native_link_contract(cmake)
-        for library in ("libhipblas.so", "libhipblaslt.so"):
+        for library in ("libhipblas.so", "libhipblaslt.so", "librocblas.so"):
             with self.subTest(library=library):
                 with self.assertRaises(runner.RuntimeContractError):
                     runner.validate_native_link_contract(cmake.replace(library, "missing.so", 1))

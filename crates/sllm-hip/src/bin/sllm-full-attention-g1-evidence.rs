@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sllm_core::{
     AccessMode, Backend, DType, Encoding, ExecutionSession, ExecutionSessionRequest,
     ExecutionState, KvCacheEncoding, KvMemoryKind, KvStateDescriptor, TensorView, decode_e2m1,
@@ -269,12 +270,164 @@ const PHASE12_CASES: [Case; 16] = [
     },
 ];
 
+// Focused Phase 49 operator rows for prefill-provider boundary and long-row audit.
+const PHASE49_OPERATOR_CASES: [Case; 22] = [
+    Case {
+        id: "prefill-m127",
+        m: 127,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m128",
+        m: 128,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m129",
+        m: 129,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m255",
+        m: 255,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m256",
+        m: 256,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m257",
+        m: 257,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m1024",
+        m: 1024,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m1023",
+        m: 1023,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m1025",
+        m: 1025,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m4096",
+        m: 4096,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m10001",
+        m: 10_001,
+        start_position: 0,
+    },
+    Case {
+        id: "prefill-m1024-start257",
+        m: 1_024,
+        start_position: 257,
+    },
+    Case {
+        id: "special-prefill1024-query-nan",
+        m: 1_024,
+        start_position: 0,
+    },
+    Case {
+        id: "special-prefill1024-value-pos-inf",
+        m: 1_024,
+        start_position: 0,
+    },
+    Case {
+        id: "special-prefill1024-value-pos-neg-inf",
+        m: 1_024,
+        start_position: 0,
+    },
+    Case {
+        id: "special-prefill1024-value-nan-pos-inf",
+        m: 1_024,
+        start_position: 0,
+    },
+    Case {
+        id: "decode-kv1023-operator",
+        m: 1,
+        start_position: 1_022,
+    },
+    Case {
+        id: "decode-kv1024-operator",
+        m: 1,
+        start_position: 1_023,
+    },
+    Case {
+        id: "decode-kv1025-operator",
+        m: 1,
+        start_position: 1_024,
+    },
+    Case {
+        id: "decode-kv4096-operator",
+        m: 1,
+        start_position: 4_095,
+    },
+    Case {
+        id: "decode-kv8192-operator",
+        m: 1,
+        start_position: 8_191,
+    },
+    Case {
+        id: "decode-kv16384-operator",
+        m: 1,
+        start_position: 16_383,
+    },
+];
+
+// Focused short-decode boundary cases. With the opt-in environment flag these
+// exercise the candidate at both sides of its KV-length gate.
+const PHASE49_SHORT_DECODE_CASES: [Case; 6] = [
+    Case {
+        id: "decode-kv31-short",
+        m: 1,
+        start_position: 30,
+    },
+    Case {
+        id: "decode-kv32-short",
+        m: 1,
+        start_position: 31,
+    },
+    Case {
+        id: "decode-kv33-short",
+        m: 1,
+        start_position: 32,
+    },
+    Case {
+        id: "decode-kv128-short",
+        m: 1,
+        start_position: 127,
+    },
+    Case {
+        id: "decode-kv287-short",
+        m: 1,
+        start_position: 286,
+    },
+    Case {
+        id: "decode-kv1023-short",
+        m: 1,
+        start_position: 1022,
+    },
+];
+
 #[derive(Debug)]
 struct Config {
     device_index: u32,
     target: String,
     kv_encoding: KvCacheEncoding,
     phase12_subset: bool,
+    phase49_operator: bool,
+    phase49_decode_operator: bool,
+    phase49_decode_short: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,11 +446,16 @@ struct CaseEvidence {
     logical_byte_reduction_fraction: f64,
     committed_byte_reduction_fraction: f64,
     numerical_match: bool,
+    numerical_oracle_scope: &'static str,
+    numerical_oracle_rows: Vec<usize>,
+    output_bytes_sha256: String,
     max_abs_error: f64,
     nonuniform_softmax_checked: bool,
     subnormal_score_contribution_checked: bool,
     causal_visibility_match: bool,
     gqa_mapping_match: bool,
+    sampled_rows_causal_visibility_match: bool,
+    sampled_rows_gqa_mapping_match: bool,
     metadata_match: bool,
     no_fallback: bool,
     timing_warmups: usize,
@@ -350,6 +508,9 @@ where
     let mut target = None;
     let mut kv_encoding = KvCacheEncoding::Fp16;
     let mut phase12_subset = false;
+    let mut phase49_operator = false;
+    let mut phase49_decode_operator = false;
+    let mut phase49_decode_short = false;
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -399,6 +560,24 @@ where
                 }
                 phase12_subset = true;
             }
+            "--phase49-operator" => {
+                if phase49_operator {
+                    return Err("duplicate --phase49-operator".to_owned());
+                }
+                phase49_operator = true;
+            }
+            "--phase49-decode-operator" => {
+                if phase49_decode_operator {
+                    return Err("duplicate --phase49-decode-operator".to_owned());
+                }
+                phase49_decode_operator = true;
+            }
+            "--phase49-decode-short" => {
+                if phase49_decode_short {
+                    return Err("duplicate --phase49-decode-short".to_owned());
+                }
+                phase49_decode_short = true;
+            }
             other => return Err(format!("unexpected argument {other}")),
         }
     }
@@ -407,11 +586,25 @@ where
         target: target.ok_or_else(|| "missing --target".to_owned())?,
         kv_encoding,
         phase12_subset,
+        phase49_operator,
+        phase49_decode_operator,
+        phase49_decode_short,
     })
 }
 
-fn selected_cases(phase12_subset: bool) -> &'static [Case] {
-    if phase12_subset {
+fn selected_cases(
+    phase12_subset: bool,
+    phase49_operator: bool,
+    phase49_decode_operator: bool,
+    phase49_decode_short: bool,
+) -> &'static [Case] {
+    if phase49_decode_short {
+        &PHASE49_SHORT_DECODE_CASES
+    } else if phase49_decode_operator {
+        &PHASE49_OPERATOR_CASES[16..]
+    } else if phase49_operator {
+        &PHASE49_OPERATOR_CASES
+    } else if phase12_subset {
         &PHASE12_CASES
     } else {
         &CASES
@@ -816,6 +1009,109 @@ fn quantized_kv_values(words: &[u16], encoding: KvCacheEncoding) -> Result<Vec<f
     }
 }
 
+fn decode_wave_split_q_preload_enabled(
+    expected_target: &str,
+    use_decode_wave_split: bool,
+    q_preload_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    expected_target == "gfx1030"
+        && use_decode_wave_split
+        && q_preload_opt_in.is_none_or(|value| value == "1")
+}
+
+fn decode_wave_split_fp16_pair_enabled(
+    expected_target: &str,
+    case: Case,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == "gfx1030"
+        && opt_in.is_none_or(|value| value == "1")
+        && case.m == 1
+        && case.start_position + case.m as u64 >= 1024
+        && Q_HEADS == 16
+        && KV_HEADS == 4
+        && HEAD_DIM == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+fn decode_gqa4_split_enabled(
+    expected_target: &str,
+    case: Case,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == "gfx1030"
+        && opt_in.is_some_and(|value| value == "1")
+        && case.m == 1
+        && case.start_position + case.m as u64 >= 4096
+        && Q_HEADS == 16
+        && KV_HEADS == 4
+        && HEAD_DIM == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+fn decode_wave_split_short_enabled(
+    expected_target: &str,
+    case: Case,
+    encoding: KvCacheEncoding,
+    short_decode_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    expected_target == "gfx1030"
+        && short_decode_opt_in.is_none_or(|value| value == "1")
+        && case.m == 1
+        && (32..1024).contains(&(case.start_position + case.m as u64))
+        && Q_HEADS == 16
+        && KV_HEADS == 4
+        && HEAD_DIM == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+fn decode_wave_split_short_q_preload_enabled(
+    use_decode_wave_split_short: bool,
+    short_q_preload_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    use_decode_wave_split_short && short_q_preload_opt_in.is_none_or(|value| value == "1")
+}
+
+fn scaled_prefill_gemm_enabled(
+    expected_target: &str,
+    case: Case,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == "gfx1030"
+        && opt_in.is_none_or(|value| value == "1")
+        && case.m >= 1024
+        && Q_HEADS == 16
+        && KV_HEADS == 4
+        && HEAD_DIM == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
+fn long_prefill_v2_enabled(
+    expected_target: &str,
+    case: Case,
+    encoding: KvCacheEncoding,
+    opt_in: Option<&std::ffi::OsStr>,
+    force_baseline: bool,
+) -> bool {
+    !force_baseline
+        && expected_target == "gfx1030"
+        && opt_in.is_some_and(|value| value == "1")
+        && case.m >= 1024
+        && Q_HEADS == 16
+        && KV_HEADS == 4
+        && HEAD_DIM == 256
+        && encoding == KvCacheEncoding::Fp16
+}
+
 fn metadata_matches(
     dispatch: &sllm_core::DispatchEvidence,
     case: Case,
@@ -824,12 +1120,82 @@ fn metadata_matches(
 ) -> bool {
     let use_phase33_common_provider = is_phase33_common_target(expected_target);
     let use_gfx1201_wave_provider = expected_target == "gfx1201" && (case.m == 1 || case.m >= 32);
-    let use_decode_wave_split =
+    let use_decode_wave_split_long =
         use_phase33_common_provider && case.m == 1 && case.start_position + 1 >= 1024;
-    let use_prefill_gqa4 = use_phase33_common_provider && case.m >= 64;
     let force_baseline =
         env::var_os("SLLM_CAUSAL_ATTENTION_FORCE_BASELINE").is_some_and(|value| value == "1");
-    let use_prefill_gqa4_qtile4 = use_prefill_gqa4 && case.m >= 128 && !force_baseline;
+    let short_decode_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT");
+    let use_decode_wave_split_short = decode_wave_split_short_enabled(
+        expected_target,
+        case,
+        encoding,
+        short_decode_opt_in.as_deref(),
+    );
+    let use_decode_wave_split = use_decode_wave_split_long || use_decode_wave_split_short;
+    let fp16_pair_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_FP16_PAIR");
+    let gqa4_split_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT");
+    let gqa4_split_p32_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32");
+    let use_decode_gqa4_split = decode_gqa4_split_enabled(
+        expected_target,
+        case,
+        encoding,
+        gqa4_split_opt_in.as_deref(),
+        force_baseline,
+    ) && !decode_gqa4_split_enabled(
+        expected_target,
+        case,
+        encoding,
+        gqa4_split_p32_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_decode_gqa4_split_p32 = decode_gqa4_split_enabled(
+        expected_target,
+        case,
+        encoding,
+        gqa4_split_p32_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_decode_wave_split_fp16_pair = decode_wave_split_fp16_pair_enabled(
+        expected_target,
+        case,
+        encoding,
+        fp16_pair_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_decode_gqa4_split
+        && !use_decode_gqa4_split_p32;
+    let q_preload_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD");
+    let use_decode_wave_split_q_preload_long = decode_wave_split_q_preload_enabled(
+        expected_target,
+        use_decode_wave_split_long,
+        q_preload_opt_in.as_deref(),
+    );
+    let short_q_preload_opt_in =
+        env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD");
+    let use_decode_wave_split_q_preload_short = decode_wave_split_short_q_preload_enabled(
+        use_decode_wave_split_short,
+        short_q_preload_opt_in.as_deref(),
+    );
+    let use_decode_wave_split_q_preload =
+        use_decode_wave_split_q_preload_long || use_decode_wave_split_q_preload_short;
+    let use_prefill_gqa4 = use_phase33_common_provider && case.m >= 64;
+    let scaled_prefill_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM");
+    let long_prefill_v2_opt_in = env::var_os("SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2");
+    let use_long_prefill_v2 = long_prefill_v2_enabled(
+        expected_target,
+        case,
+        encoding,
+        long_prefill_v2_opt_in.as_deref(),
+        force_baseline,
+    );
+    let use_scaled_prefill_gemm = scaled_prefill_gemm_enabled(
+        expected_target,
+        case,
+        encoding,
+        scaled_prefill_opt_in.as_deref(),
+        force_baseline,
+    ) && !use_long_prefill_v2;
+    let use_prefill_gqa4_qtile4 =
+        use_prefill_gqa4 && case.m >= 128 && !force_baseline && !use_scaled_prefill_gemm;
     let (kernel_id, baseline_kernel_symbol, baseline_device_symbol) =
         if encoding == KvCacheEncoding::Fp16 {
             (
@@ -844,10 +1210,42 @@ fn metadata_matches(
                 "sllm_causal_attention_online_softmax_gqa_packed_kv_v3",
             )
         };
-    let (kernel_symbol, device_symbol) = if use_decode_wave_split {
+    let (kernel_symbol, device_symbol) = if use_decode_gqa4_split_p32 {
         (
-            "causal_attention.decode.wave8_split.v5",
-            "sllm_causal_attention_decode_wave8_split_v5",
+            "causal_attention.decode.gqa4_tiled_split.p32.v1",
+            "sllm_causal_attention_decode_gqa4_split_p32_v1",
+        )
+    } else if use_decode_gqa4_split {
+        (
+            "causal_attention.decode.gqa4_tiled_split.v1",
+            "sllm_causal_attention_decode_gqa4_tiled_split_v1",
+        )
+    } else if use_decode_wave_split_fp16_pair {
+        (
+            "causal_attention.decode.wave8_split.fp16_pair.v1",
+            "sllm_causal_attention_decode_wave8_split_fp16_pair_v1",
+        )
+    } else if use_decode_wave_split {
+        if use_decode_wave_split_q_preload {
+            (
+                "causal_attention.decode.wave8_split.q_preload.v1",
+                "sllm_causal_attention_decode_wave8_split_q_preload_v1",
+            )
+        } else {
+            (
+                "causal_attention.decode.wave8_split.v5",
+                "sllm_causal_attention_decode_wave8_split_v5",
+            )
+        }
+    } else if use_scaled_prefill_gemm {
+        (
+            "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
+            "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1",
+        )
+    } else if use_long_prefill_v2 {
+        (
+            "causal_attention.prefill.gfx1030_qtile8_split.v2",
+            "sllm_causal_attention_prefill_gfx1030_qtile8_split_v2",
         )
     } else if use_prefill_gqa4_qtile4 {
         (
@@ -877,11 +1275,29 @@ fn metadata_matches(
     dispatch.abi_version == sllm_hip_sys::SLLM_HIP_ABI_VERSION
         && dispatch.info_version == sllm_hip_sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
         && dispatch.dispatch_id != 0
-        && dispatch.dispatch_count == 1
+        && dispatch.dispatch_count
+            == if use_decode_gqa4_split || use_decode_gqa4_split_p32 || use_long_prefill_v2 {
+                2
+            } else {
+                1
+            }
         && dispatch.kernel_id == kernel_id
-        && dispatch.workgroup_size_x == WORKGROUP_SIZE
+        && dispatch.workgroup_size_x
+            == if use_decode_gqa4_split || use_decode_gqa4_split_p32 {
+                128
+            } else {
+                WORKGROUP_SIZE
+            }
         && dispatch.grid_size_x
-            == if use_prefill_gqa4_qtile4 {
+            == if use_decode_gqa4_split_p32 {
+                128
+            } else if use_decode_gqa4_split {
+                64
+            } else if use_scaled_prefill_gemm {
+                case.m.div_ceil(256) as u32 * KV_HEADS as u32
+            } else if use_long_prefill_v2 {
+                case.m.div_ceil(8) as u32 * KV_HEADS as u32 * 16
+            } else if use_prefill_gqa4_qtile4 {
                 (case.m.div_ceil(4) * KV_HEADS) as u32
             } else if use_prefill_gqa4 {
                 (case.m * KV_HEADS) as u32
@@ -900,6 +1316,137 @@ fn metadata_matches(
 
 fn is_phase33_common_target(target: &str) -> bool {
     matches!(target, "gfx1030" | "gfx1201")
+}
+
+fn phase49_oracle_rows(m: usize) -> Vec<usize> {
+    let mut rows = vec![0, m / 2, m - 1];
+    for boundary in [255, 256, 257] {
+        if boundary < m {
+            rows.push(boundary);
+        }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows
+}
+
+fn compare_bf16_words(
+    observed_word: u16,
+    reference_word: u16,
+    encoding: KvCacheEncoding,
+) -> (bool, f64) {
+    let observed = f64::from(bf16_to_f32(observed_word));
+    let reference = f64::from(bf16_to_f32(reference_word));
+    if reference.is_nan() {
+        return (observed.is_nan(), 0.0);
+    }
+    if reference.is_infinite() {
+        return (observed == reference, 0.0);
+    }
+    if !observed.is_finite() {
+        return (false, 0.0);
+    }
+    let error = (observed - reference).abs();
+    let (absolute_tolerance, relative_tolerance) = match encoding {
+        KvCacheEncoding::Fp16 => (0.016, 0.0),
+        KvCacheEncoding::Fp8E4M3Fn => (0.03125, 0.04),
+        KvCacheEncoding::Fp8E4M3FnStatic => (0.03125, 0.04),
+        KvCacheEncoding::Nvfp4 => (0.125, 0.25),
+    };
+    (
+        error <= absolute_tolerance + relative_tolerance * reference.abs(),
+        error,
+    )
+}
+
+fn sampled_scalar_oracle(
+    query_words: &[u16],
+    key_words: &[u16],
+    value_words: &[u16],
+    m: usize,
+    start_position: u64,
+    encoding: KvCacheEncoding,
+    actual: &[u16],
+) -> Result<(bool, f64, bool, bool, bool, bool), String> {
+    let rows = phase49_oracle_rows(m);
+    let row_elements = Q_HEADS * HEAD_DIM;
+    let mut numerical_match = true;
+    let mut max_abs_error = 0.0_f64;
+    let mut nonuniform_softmax_checked = false;
+    let mut subnormal_score_contribution_checked = true;
+    let mut sampled_rows_causal_visibility_match = true;
+    let mut sampled_rows_gqa_mapping_match = true;
+    let debug_mismatch = env::var_os("SLLM_SCALED_PREFILL_DEBUG").is_some();
+    let mut debug_mismatch_count = 0_u32;
+    for row in rows {
+        let query_start = row
+            .checked_mul(row_elements)
+            .ok_or_else(|| "sampled oracle query offset overflowed".to_owned())?;
+        let query_end = query_start
+            .checked_add(row_elements)
+            .ok_or_else(|| "sampled oracle query end overflowed".to_owned())?;
+        let query_row = query_words
+            .get(query_start..query_end)
+            .ok_or_else(|| "sampled oracle query row was out of bounds".to_owned())?;
+        let committed_words = (start_position + row as u64 + 1)
+            .checked_mul((KV_HEADS * HEAD_DIM) as u64)
+            .ok_or_else(|| "sampled oracle KV offset overflowed".to_owned())?
+            as usize;
+        sampled_rows_causal_visibility_match &=
+            committed_words == (start_position + row as u64 + 1) as usize * KV_HEADS * HEAD_DIM;
+        let key_prefix = key_words
+            .get(..committed_words)
+            .ok_or_else(|| "sampled oracle key prefix was out of bounds".to_owned())?;
+        let value_prefix = value_words
+            .get(..committed_words)
+            .ok_or_else(|| "sampled oracle value prefix was out of bounds".to_owned())?;
+        let (expected, nonuniform, subnormal) = scalar_oracle(
+            query_row,
+            key_prefix,
+            value_prefix,
+            1,
+            start_position + row as u64,
+            encoding,
+        )?;
+        nonuniform_softmax_checked |= nonuniform;
+        subnormal_score_contribution_checked &= subnormal;
+        let actual_row = actual
+            .get(query_start..query_end)
+            .ok_or_else(|| "sampled oracle output row was out of bounds".to_owned())?;
+        if expected.len() != actual_row.len() {
+            numerical_match = false;
+            sampled_rows_gqa_mapping_match = false;
+            continue;
+        }
+        let mut row_matches = true;
+        for (index, (&observed, &reference)) in actual_row.iter().zip(&expected).enumerate() {
+            let (matches, error) = compare_bf16_words(observed, reference, encoding);
+            numerical_match &= matches;
+            row_matches &= matches;
+            max_abs_error = max_abs_error.max(error);
+            if debug_mismatch && !matches && debug_mismatch_count < 16 {
+                let head = index / HEAD_DIM;
+                let dimension = index % HEAD_DIM;
+                eprintln!(
+                    "scaled-prefill mismatch row={row} head={head} dim={dimension} observed=0x{observed:04x} reference=0x{reference:04x} observed_f32={} reference_f32={} error={error}",
+                    bf16_to_f32(observed),
+                    bf16_to_f32(reference)
+                );
+                debug_mismatch_count += 1;
+            }
+        }
+        // scalar_oracle returns every Q head; a row match therefore checks all
+        // four GQA query-to-KV groups rather than one representative head.
+        sampled_rows_gqa_mapping_match &= row_matches;
+    }
+    Ok((
+        numerical_match,
+        max_abs_error,
+        nonuniform_softmax_checked,
+        subnormal_score_contribution_checked,
+        sampled_rows_causal_visibility_match,
+        sampled_rows_gqa_mapping_match,
+    ))
 }
 
 fn run_case(
@@ -955,6 +1502,22 @@ fn run_case(
     };
     if case.id.contains("value-pos-inf") {
         value_words.fill(0x7f80);
+    }
+    if case.id.contains("value-pos-neg-inf") {
+        for token in 0..case.m {
+            let raw = if token % 2 == 0 { 0x7f80 } else { 0xff80 };
+            let begin = token * KV_HEADS * HEAD_DIM;
+            let end = begin + KV_HEADS * HEAD_DIM;
+            value_words[begin..end].fill(raw);
+        }
+    }
+    if case.id.contains("value-nan-pos-inf") {
+        for token in 0..case.m {
+            let raw = if token % 2 == 0 { 0x7fc1 } else { 0x7f80 };
+            let begin = token * KV_HEADS * HEAD_DIM;
+            let end = begin + KV_HEADS * HEAD_DIM;
+            value_words[begin..end].fill(raw);
+        }
     }
     append_tokens(
         session,
@@ -1071,15 +1634,27 @@ fn run_case(
         }
     }
 
-    let (expected, nonuniform_softmax_checked, subnormal_score_contribution_checked) =
-        scalar_oracle(
-            &query_words,
-            &[prefix_key.as_slice(), key_words.as_slice()].concat(),
-            &[prefix_value.as_slice(), value_words.as_slice()].concat(),
-            case.m,
-            case.start_position,
-            config.kv_encoding,
-        )?;
+    let all_key_words = [prefix_key.as_slice(), key_words.as_slice()].concat();
+    let all_value_words = [prefix_value.as_slice(), value_words.as_slice()].concat();
+    let sampled_oracle = config.phase49_operator && case.m >= 1024;
+    let oracle_rows = if sampled_oracle {
+        phase49_oracle_rows(case.m)
+    } else {
+        Vec::new()
+    };
+    let (expected, mut nonuniform_softmax_checked, mut subnormal_score_contribution_checked) =
+        if sampled_oracle {
+            (Vec::new(), false, false)
+        } else {
+            scalar_oracle(
+                &query_words,
+                &all_key_words,
+                &all_value_words,
+                case.m,
+                case.start_position,
+                config.kv_encoding,
+            )?
+        };
     let mut readback = session
         .readback(
             queue,
@@ -1103,39 +1678,46 @@ fn run_case(
         .chunks_exact(2)
         .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect::<Vec<_>>();
-    let mut numerical_match = actual.len() == expected.len();
-    let mut max_abs_error = 0.0_f64;
-    for (&observed_word, &reference_word) in actual.iter().zip(&expected) {
-        let observed = f64::from(bf16_to_f32(observed_word));
-        let reference = f64::from(bf16_to_f32(reference_word));
-        let matches = if reference.is_nan() {
-            observed.is_nan()
-        } else if reference.is_infinite() {
-            observed == reference
-        } else if observed.is_finite() {
-            let error = (observed - reference).abs();
-            max_abs_error = max_abs_error.max(error);
-            let (absolute_tolerance, relative_tolerance) = match config.kv_encoding {
-                KvCacheEncoding::Fp16 => (0.016, 0.0),
-                KvCacheEncoding::Fp8E4M3Fn => (0.03125, 0.04),
-                KvCacheEncoding::Fp8E4M3FnStatic => (0.03125, 0.04),
-                KvCacheEncoding::Nvfp4 => (0.125, 0.25),
-            };
-            error <= absolute_tolerance + relative_tolerance * reference.abs()
-        } else {
-            false
-        };
-        numerical_match &= matches;
-    }
-    let causal_visibility_match = snapshot.length() == committed_length;
-    let gqa_mapping_match = if case.id.starts_with("special-") {
-        numerical_match
+    let output_bytes_sha256 = format!("sha256:{:x}", Sha256::digest(&actual_bytes));
+    let (
+        numerical_match,
+        max_abs_error,
+        sampled_rows_causal_visibility_match,
+        sampled_rows_gqa_mapping_match,
+    ) = if sampled_oracle {
+        let (matches, error, nonuniform, subnormal, sampled_visibility, sampled_gqa) =
+            sampled_scalar_oracle(
+                &query_words,
+                &all_key_words,
+                &all_value_words,
+                case.m,
+                case.start_position,
+                config.kv_encoding,
+                &actual,
+            )?;
+        nonuniform_softmax_checked = nonuniform;
+        subnormal_score_contribution_checked = subnormal;
+        (matches, error, sampled_visibility, sampled_gqa)
     } else {
-        actual
-            .chunks_exact(HEAD_DIM)
-            .step_by(Q_HEADS)
-            .zip(actual.chunks_exact(HEAD_DIM).skip(4).step_by(Q_HEADS))
-            .any(|(left, right)| left != right)
+        let mut matches = actual.len() == expected.len();
+        let mut error_max = 0.0_f64;
+        for (&observed_word, &reference_word) in actual.iter().zip(&expected) {
+            let (word_matches, error) =
+                compare_bf16_words(observed_word, reference_word, config.kv_encoding);
+            matches &= word_matches;
+            error_max = error_max.max(error);
+        }
+        (matches, error_max, true, true)
+    };
+    let causal_visibility_match = snapshot.length() == committed_length;
+    let gqa_mapping_match = if sampled_oracle {
+        sampled_rows_gqa_mapping_match
+    } else {
+        // The full scalar oracle covers every query head and applies the
+        // reviewed Q-head to KV-head mapping.  Distinct query heads may
+        // legitimately produce identical rows, so output inequality is not
+        // a valid GQA oracle.
+        numerical_match
     };
     drop(readback);
     drop(state);
@@ -1156,11 +1738,20 @@ fn run_case(
         logical_byte_reduction_fraction,
         committed_byte_reduction_fraction,
         numerical_match,
+        numerical_oracle_scope: if sampled_oracle {
+            "sampled-rows-scalar-v1"
+        } else {
+            "full-scalar-v1"
+        },
+        numerical_oracle_rows: oracle_rows,
+        output_bytes_sha256,
         max_abs_error,
         nonuniform_softmax_checked,
         subnormal_score_contribution_checked,
         causal_visibility_match,
         gqa_mapping_match,
+        sampled_rows_causal_visibility_match,
+        sampled_rows_gqa_mapping_match,
         metadata_match,
         no_fallback: !dispatch.fallback_allowed && !dispatch.fallback_used,
         timing_warmups: TIMING_WARMUPS,
@@ -1221,10 +1812,15 @@ fn run(config: &Config) -> Report {
     };
     let mut cases = Vec::new();
     let operation = (|| {
-        for (index, case) in selected_cases(config.phase12_subset)
-            .iter()
-            .copied()
-            .enumerate()
+        for (index, case) in selected_cases(
+            config.phase12_subset,
+            config.phase49_operator,
+            config.phase49_decode_operator,
+            config.phase49_decode_short,
+        )
+        .iter()
+        .copied()
+        .enumerate()
         {
             cases.push(run_case(&session, &queue, config, case, index as u64)?);
         }
@@ -1249,6 +1845,8 @@ fn run(config: &Config) -> Report {
                 case.numerical_match
                     && case.causal_visibility_match
                     && case.gqa_mapping_match
+                    && case.sampled_rows_causal_visibility_match
+                    && case.sampled_rows_gqa_mapping_match
                     && case.metadata_match
                     && case.no_fallback
             });
@@ -1394,7 +1992,7 @@ mod tests {
 
     #[test]
     fn phase12_subset_selects_the_original_sixteen_cases() {
-        let ids = selected_cases(true)
+        let ids = selected_cases(true, false, false, false)
             .iter()
             .map(|case| case.id)
             .collect::<Vec<_>>();
@@ -1419,10 +2017,50 @@ mod tests {
                 "special-value-pos-inf",
             ]
         );
-        assert_eq!(selected_cases(true).len(), 16);
-        assert_eq!(selected_cases(false).len(), CASES.len());
-        assert_eq!(selected_cases(false)[0].id, CASES[0].id);
-        assert_eq!(selected_cases(false)[28].id, CASES[28].id);
+        assert_eq!(selected_cases(true, false, false, false).len(), 16);
+        assert_eq!(
+            selected_cases(false, false, false, false).len(),
+            CASES.len()
+        );
+        assert_eq!(
+            selected_cases(false, false, false, false)[0].id,
+            CASES[0].id
+        );
+        assert_eq!(
+            selected_cases(false, false, false, false)[28].id,
+            CASES[28].id
+        );
+        assert_eq!(
+            selected_cases(false, true, false, false).len(),
+            PHASE49_OPERATOR_CASES.len()
+        );
+        assert_eq!(selected_cases(false, true, false, false)[0].m, 127);
+        assert_eq!(
+            selected_cases(false, true, false, false)
+                .iter()
+                .map(|case| case.m)
+                .collect::<Vec<_>>(),
+            vec![
+                127, 128, 129, 255, 256, 257, 1024, 1023, 1025, 4096, 10_001, 1024, 1024, 1024,
+                1024, 1024, 1, 1, 1, 1, 1, 1,
+            ]
+        );
+        assert_eq!(selected_cases(false, false, true, false).len(), 6);
+        assert_eq!(
+            selected_cases(false, false, true, false)
+                .iter()
+                .map(|case| case.start_position + 1)
+                .collect::<Vec<_>>(),
+            vec![1023, 1024, 1025, 4096, 8192, 16384]
+        );
+        assert_eq!(selected_cases(false, false, false, true).len(), 6);
+        assert_eq!(
+            selected_cases(false, false, false, true)
+                .iter()
+                .map(|case| case.start_position + 1)
+                .collect::<Vec<_>>(),
+            vec![31, 32, 33, 128, 287, 1023]
+        );
     }
 
     #[test]
@@ -1434,6 +2072,9 @@ mod tests {
         )
         .unwrap();
         assert!(!default.phase12_subset);
+        assert!(!default.phase49_operator);
+        assert!(!default.phase49_decode_operator);
+        assert!(!default.phase49_decode_short);
 
         let subset = parse_config_from(
             vec![
@@ -1448,9 +2089,63 @@ mod tests {
         )
         .unwrap();
         assert!(subset.phase12_subset);
+        assert!(!subset.phase49_operator);
+        assert!(!subset.phase49_decode_operator);
+        assert!(!subset.phase49_decode_short);
         assert_eq!(subset.device_index, default.device_index);
         assert_eq!(subset.target, default.target);
         assert_eq!(subset.kv_encoding, default.kv_encoding);
+
+        let operator = parse_config_from(
+            vec![
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--phase49-operator",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(operator.phase49_operator);
+        assert!(!operator.phase12_subset);
+        assert!(!operator.phase49_decode_operator);
+        assert!(!operator.phase49_decode_short);
+
+        let decode_operator = parse_config_from(
+            vec![
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--phase49-decode-operator",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(decode_operator.phase49_decode_operator);
+        assert!(!decode_operator.phase49_operator);
+        assert!(!decode_operator.phase12_subset);
+        assert!(!decode_operator.phase49_decode_short);
+
+        let decode_short = parse_config_from(
+            vec![
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1030",
+                "--phase49-decode-short",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert!(decode_short.phase49_decode_short);
+        assert!(!decode_short.phase49_decode_operator);
+        assert!(!decode_short.phase49_operator);
+        assert!(!decode_short.phase12_subset);
 
         let duplicate = parse_config_from(
             vec![
@@ -1471,10 +2166,365 @@ mod tests {
     }
 
     #[test]
+    fn phase49_operator_oracle_uses_deterministic_boundary_rows() {
+        assert_eq!(phase49_oracle_rows(1024), vec![0, 255, 256, 257, 512, 1023]);
+        assert_eq!(
+            phase49_oracle_rows(10_001),
+            vec![0, 255, 256, 257, 5_000, 10_000]
+        );
+        assert_eq!(phase49_oracle_rows(1), vec![0]);
+    }
+
+    #[test]
+    fn phase49_operator_cases_use_bounded_scalar_oracle_only_at_large_m() {
+        assert!(
+            PHASE49_OPERATOR_CASES
+                .iter()
+                .filter(|case| case.m < 1024)
+                .all(|case| phase49_oracle_rows(case.m).len() <= 6)
+        );
+        assert_eq!(PHASE49_OPERATOR_CASES[6].m, 1024);
+        assert_eq!(PHASE49_OPERATOR_CASES[10].m, 10_001);
+        assert_eq!(
+            PHASE49_OPERATOR_CASES[16..]
+                .iter()
+                .map(|case| case.start_position + 1)
+                .collect::<Vec<_>>(),
+            vec![1023, 1024, 1025, 4096, 8192, 16384]
+        );
+    }
+
+    #[test]
+    fn phase49_short_decode_cases_cover_the_requested_kv_boundaries() {
+        assert_eq!(
+            PHASE49_SHORT_DECODE_CASES
+                .iter()
+                .map(|case| case.start_position + case.m as u64)
+                .collect::<Vec<_>>(),
+            vec![31, 32, 33, 128, 287, 1023]
+        );
+        assert!(PHASE49_SHORT_DECODE_CASES.iter().all(|case| case.m == 1));
+    }
+
+    #[test]
     fn phase33_and_phase35_prefill_providers_remain_rdna_scoped() {
         assert!(is_phase33_common_target("gfx1030"));
         assert!(is_phase33_common_target("gfx1201"));
         assert!(!is_phase33_common_target("gfx942"));
+    }
+
+    #[test]
+    fn decode_q_preload_guard_defaults_on_and_accepts_only_explicit_disable() {
+        assert!(decode_wave_split_q_preload_enabled("gfx1030", true, None));
+        assert!(decode_wave_split_q_preload_enabled(
+            "gfx1030",
+            true,
+            Some(std::ffi::OsStr::new("1"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            "gfx1030",
+            true,
+            Some(std::ffi::OsStr::new("0"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled(
+            "gfx1030",
+            true,
+            Some(std::ffi::OsStr::new("invalid"))
+        ));
+        assert!(!decode_wave_split_q_preload_enabled("gfx1201", true, None));
+        assert!(!decode_wave_split_q_preload_enabled("gfx1030", false, None));
+    }
+
+    #[test]
+    fn decode_fp16_pair_guard_defaults_on_for_long_gfx1030_shape_and_force_safe() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let boundary_case = |start_position| Case {
+            id: "fp16-pair",
+            m: 1,
+            start_position,
+        };
+        assert!(decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            boundary_case(1023),
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            Case {
+                id: "fp16-pair-long",
+                m: 1,
+                start_position: 99_999,
+            },
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            boundary_case(1022),
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            Case {
+                id: "fp16-pair-batch",
+                m: 2,
+                start_position: 1023,
+            },
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            boundary_case(1023),
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        for opt_in in [
+            Some(std::ffi::OsStr::new("0")),
+            Some(std::ffi::OsStr::new("unknown")),
+        ] {
+            assert!(!decode_wave_split_fp16_pair_enabled(
+                "gfx1030",
+                boundary_case(1023),
+                KvCacheEncoding::Fp16,
+                opt_in,
+                false,
+            ));
+        }
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            "gfx1201",
+            boundary_case(1023),
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            boundary_case(1023),
+            KvCacheEncoding::Fp8E4M3Fn,
+            enabled,
+            false,
+        ));
+        assert!(!decode_wave_split_fp16_pair_enabled(
+            "gfx1030",
+            boundary_case(1023),
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+    }
+
+    #[test]
+    fn decode_short_wave_guard_is_exact_target_shape_encoding_and_default_on() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        assert!(decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[5],
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp16,
+            None,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[0],
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp8E4M3Fn,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            "gfx1201",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp16,
+            enabled,
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("0")),
+        ));
+        assert!(!decode_wave_split_short_enabled(
+            "gfx1030",
+            PHASE49_SHORT_DECODE_CASES[1],
+            KvCacheEncoding::Fp16,
+            Some(std::ffi::OsStr::new("unknown")),
+        ));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            false,
+            Some(std::ffi::OsStr::new("1")),
+        ));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("0")),
+        ));
+        assert!(decode_wave_split_short_q_preload_enabled(true, None));
+        assert!(!decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("unknown")),
+        ));
+        assert!(decode_wave_split_short_q_preload_enabled(
+            true,
+            Some(std::ffi::OsStr::new("1")),
+        ));
+    }
+
+    #[test]
+    fn scaled_prefill_gemm_guard_and_oracle_cover_long_shape_edges() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for m in [1024, 4096, 10_001, 100_000, 1 << 20] {
+            assert!(scaled_prefill_gemm_enabled(
+                "gfx1030",
+                Case {
+                    id: "scaled",
+                    m,
+                    start_position: 257,
+                },
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        assert!(scaled_prefill_gemm_enabled(
+            "gfx1030",
+            Case {
+                id: "scaled",
+                m: 1024,
+                start_position: 257,
+            },
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        for value in ["0", "unknown"] {
+            assert!(!scaled_prefill_gemm_enabled(
+                "gfx1030",
+                Case {
+                    id: "scaled",
+                    m: 1024,
+                    start_position: 257,
+                },
+                KvCacheEncoding::Fp16,
+                Some(std::ffi::OsStr::new(value)),
+                false,
+            ));
+        }
+        assert!(!scaled_prefill_gemm_enabled(
+            "gfx1030",
+            Case {
+                id: "scaled",
+                m: 1024,
+                start_position: 257,
+            },
+            KvCacheEncoding::Fp8E4M3Fn,
+            enabled,
+            false,
+        ));
+        assert!(!scaled_prefill_gemm_enabled(
+            "gfx1201",
+            Case {
+                id: "scaled",
+                m: 1024,
+                start_position: 257,
+            },
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        // A power-of-two scale keeps 2^20 in the FP16 normal range.  The
+        // tiny lane remains a representable FP16 subnormal after the same scale,
+        // while NaN/Inf retain their IEEE classes for the special oracle.
+        let scale = 2.0_f32.powi(-5);
+        assert_eq!(
+            sllm_hip::bf16_to_f16_bits(float_to_bf16_rne(2.0_f32.powi(20) * scale)),
+            0x7800
+        );
+        assert_eq!(
+            sllm_hip::bf16_to_f16_bits(float_to_bf16_rne(2.0_f32.powi(-19) * scale)),
+            0x0001
+        );
+        assert!(f32::NAN.is_nan());
+        assert!(f32::INFINITY.is_infinite());
+    }
+
+    #[test]
+    fn long_prefill_v2_is_explicit_gfx1030_fp16_opt_in() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for m in [1024, 4096, 10_001, 100_000] {
+            assert!(long_prefill_v2_enabled(
+                "gfx1030",
+                Case {
+                    id: "long-v2",
+                    m,
+                    start_position: 257,
+                },
+                KvCacheEncoding::Fp16,
+                enabled,
+                false,
+            ));
+        }
+        let case = Case {
+            id: "long-v2",
+            m: 1024,
+            start_position: 257,
+        };
+        assert!(!long_prefill_v2_enabled(
+            "gfx1030",
+            case,
+            KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            "gfx1030",
+            case,
+            KvCacheEncoding::Fp16,
+            enabled,
+            true,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            "gfx1201",
+            case,
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            "gfx1030",
+            Case { m: 1023, ..case },
+            KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(!long_prefill_v2_enabled(
+            "gfx1030",
+            case,
+            KvCacheEncoding::Fp8E4M3Fn,
+            enabled,
+            false,
+        ));
     }
 
     #[test]

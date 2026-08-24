@@ -20,7 +20,9 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 const HIP_BACKEND: u32 = 1;
 const ATTENTION_KERNEL_ID: u32 = 1;
+const WAVE32_KERNEL_ID: u32 = 2;
 const WORKGROUP_SIZE: u32 = 1;
+const WAVE32_WORKGROUP_SIZE: u32 = 32;
 const Q_HEADS: usize = 16;
 const K_HEADS: usize = 4;
 const HEAD_DIM: usize = 256;
@@ -31,6 +33,12 @@ const ROPE_THETA: f32 = 10_000_000.0;
 const FINITE_BF16_ULP_BOUND: u16 = 2;
 const KERNEL_SYMBOL: &str = "attention_preprocess.headwise_norm_rope.v1";
 const DEVICE_SYMBOL: &str = "sllm_attention_preprocess_headwise_norm_rope_v1";
+const WAVE32_KERNEL_SYMBOL: &str = "attention_preprocess.headwise_norm_rope.wave32.v1";
+const WAVE32_DEVICE_SYMBOL: &str = "sllm_attention_preprocess_headwise_norm_rope_wave32_v1";
+
+fn default_on_env(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_none_or(|value| value == "1")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Case {
@@ -139,6 +147,7 @@ struct Report {
     fallback: bool,
     fallback_allowed: bool,
     fallback_used: bool,
+    rounding_order_changed: bool,
     operations: usize,
     dispatch_count: usize,
     kernel_dispatches: usize,
@@ -462,20 +471,42 @@ fn validate_dispatch(dispatch: &DispatchEvidence, case: Case, target: &str) -> R
         .ok_or_else(|| "attention preprocess grid size overflowed usize".to_owned())?;
     let grid_size = u32::try_from(grid_size)
         .map_err(|_| "attention preprocess grid size does not fit u32".to_owned())?;
+    let wave32 = target == "gfx1030"
+        && default_on_env(env::var_os("SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32").as_deref());
+    let expected_kernel_id = if wave32 {
+        WAVE32_KERNEL_ID
+    } else {
+        ATTENTION_KERNEL_ID
+    };
+    let expected_workgroup = if wave32 {
+        WAVE32_WORKGROUP_SIZE
+    } else {
+        WORKGROUP_SIZE
+    };
+    let expected_kernel_symbol = if wave32 {
+        WAVE32_KERNEL_SYMBOL
+    } else {
+        KERNEL_SYMBOL
+    };
+    let expected_device_symbol = if wave32 {
+        WAVE32_DEVICE_SYMBOL
+    } else {
+        DEVICE_SYMBOL
+    };
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
         || dispatch.dispatch_count != 1
-        || dispatch.kernel_id != ATTENTION_KERNEL_ID
-        || dispatch.workgroup_size_x != WORKGROUP_SIZE
+        || dispatch.kernel_id != expected_kernel_id
+        || dispatch.workgroup_size_x != expected_workgroup
         || dispatch.grid_size_x != grid_size
         || dispatch.row_count != case.m as u64
         || dispatch.normalized_size != HEAD_DIM as u64
         || dispatch.backend != HIP_BACKEND
         || dispatch.fallback_allowed
         || dispatch.fallback_used
-        || dispatch.kernel_symbol != KERNEL_SYMBOL
-        || dispatch.device_symbol != DEVICE_SYMBOL
+        || dispatch.kernel_symbol != expected_kernel_symbol
+        || dispatch.device_symbol != expected_device_symbol
         || dispatch.target != target
     {
         return Err(format!(
@@ -763,6 +794,8 @@ fn run(config: &Config) -> Result<Report, String> {
         return Err("attention preprocess cleanup did not return to zero owned work".to_owned());
     }
     let operation_count = cases.len();
+    let rounding_order_changed = config.target == "gfx1030"
+        && default_on_env(env::var_os("SLLM_ATTENTION_PREPROCESS_GFX1030_WAVE32").as_deref());
     Ok(Report {
         schema_version: "attention-preprocess-g1-report-v1",
         state: "PASS",
@@ -774,6 +807,7 @@ fn run(config: &Config) -> Result<Report, String> {
         fallback: false,
         fallback_allowed: false,
         fallback_used: false,
+        rounding_order_changed,
         operations: operation_count,
         dispatch_count: operation_count,
         kernel_dispatches: operation_count,
@@ -813,6 +847,14 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wave32_gate_defaults_on_and_accepts_only_explicit_disable() {
+        assert!(default_on_env(None));
+        assert!(default_on_env(Some(std::ffi::OsStr::new("1"))));
+        assert!(!default_on_env(Some(std::ffi::OsStr::new("0"))));
+        assert!(!default_on_env(Some(std::ffi::OsStr::new("unknown"))));
+    }
 
     #[test]
     fn bf16_rne_ties_round_to_even_and_specials_are_stable() {

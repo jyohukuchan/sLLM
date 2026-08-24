@@ -1041,6 +1041,57 @@ sllm_rmsnorm_execute(const sllm_rmsnorm_plan_t *const plan,
   }
 }
 
+extern "C" sllm_status_t sllm_residual_rmsnorm_prepare(
+    const sllm_context_t *const context,
+    const sllm_residual_rmsnorm_desc_t *const descriptor,
+    sllm_residual_rmsnorm_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  try {
+    if (plan != nullptr)
+      *plan = nullptr;
+    const sllm_status_t sink_status = validate_error_sink(error_sink);
+    if (sink_status != SLLM_STATUS_OK)
+      return sink_status;
+    if (context == nullptr || descriptor == nullptr || plan == nullptr)
+      return write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "ResidualRmsNorm context, descriptor, or plan is null");
+    return unavailable(error_sink);
+  } catch (...) {
+    return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
+                       "unexpected exception in ResidualRmsNorm prepare stub");
+  }
+}
+
+extern "C" sllm_status_t sllm_residual_rmsnorm_plan_release(
+    sllm_residual_rmsnorm_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (plan == nullptr || *plan == nullptr)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "ResidualRmsNorm plan handle is null");
+  return write_error(
+      error_sink, SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+      "ResidualRmsNorm plan is not owned by the unavailable stub");
+}
+
+extern "C" sllm_status_t sllm_residual_rmsnorm_execute(
+    const sllm_residual_rmsnorm_plan_t *const plan,
+    const sllm_queue_t *const queue, sllm_completion_t **const completion,
+    sllm_residual_rmsnorm_dispatch_info_t *const dispatch_info,
+    sllm_error_sink_t *const error_sink) noexcept {
+  const sllm_status_t sink_status = validate_error_sink(error_sink);
+  if (sink_status != SLLM_STATUS_OK)
+    return sink_status;
+  if (plan == nullptr || queue == nullptr || completion == nullptr ||
+      dispatch_info == nullptr)
+    return write_error(error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+                       "ResidualRmsNorm execute input is null");
+  return unavailable(error_sink);
+}
+
 extern "C" sllm_status_t
 sllm_elementwise_prepare(const sllm_context_t *const context,
                          const sllm_elementwise_desc_t *const descriptor,
@@ -2695,4 +2746,56 @@ sllm_hip_kv_view_readback(const sllm_hip_kv_readback_request_t *const request,
     return write_error(error_sink, SLLM_STATUS_INTERNAL_ERROR,
                        "unexpected exception in KV evidence readback stub");
   }
+}
+
+extern "C" sllm_status_t sllm_gdn_projection_bundle_prepare(
+    const sllm_context_t *, const sllm_gdn_projection_bundle_desc_t *,
+    sllm_gdn_projection_bundle_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_gdn_projection_bundle_plan_release(
+    sllm_gdn_projection_bundle_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_gdn_projection_bundle_execute(
+    const sllm_gdn_projection_bundle_plan_t *, const sllm_queue_t *,
+    sllm_completion_t **, sllm_gdn_projection_bundle_dispatch_info_t *,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_mlp_gate_up_silu_bundle_prepare(
+    const sllm_context_t *, const sllm_mlp_gate_up_silu_bundle_desc_t *,
+    sllm_mlp_gate_up_silu_bundle_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_mlp_gate_up_silu_bundle_plan_release(
+    sllm_mlp_gate_up_silu_bundle_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_mlp_gate_up_silu_bundle_execute(
+    const sllm_mlp_gate_up_silu_bundle_plan_t *, const sllm_queue_t *,
+    sllm_completion_t **, sllm_mlp_gate_up_silu_bundle_dispatch_info_t *,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
 }

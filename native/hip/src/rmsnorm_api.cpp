@@ -58,9 +58,10 @@ bool multiply_overflows(const uint64_t left, const uint64_t right,
   return false;
 }
 
-sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
-                              TensorMetadata *const copied,
-                              sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+validate_tensor_binding_impl(const sllm_tensor_binding_t *const binding,
+                             TensorMetadata *const copied,
+                             sllm_error_sink_t *const sink) noexcept {
   if (binding == nullptr || copied == nullptr) {
     return sllm_public_runtime::write_error(sink,
                                             SLLM_STATUS_INVALID_TENSOR_BINDING,
@@ -162,6 +163,13 @@ bool equal_shape(const TensorMetadata &left,
 } // namespace
 
 sllm_status_t
+validate_tensor_binding(const sllm_tensor_binding_t *const binding,
+                        TensorMetadata *const metadata,
+                        sllm_error_sink_t *const sink) noexcept {
+  return validate_tensor_binding_impl(binding, metadata, sink);
+}
+
+sllm_status_t
 validate_descriptor_prefix(const sllm_rmsnorm_desc_t *const descriptor,
                            sllm_error_sink_t *const sink) noexcept {
   return validate_descriptor_prefix_impl(descriptor, sink);
@@ -213,16 +221,18 @@ validate_and_copy_descriptor(const sllm_rmsnorm_desc_t *const descriptor,
         sink, SLLM_STATUS_INVALID_EPSILON,
         "RMSNorm epsilon must be finite and positive");
   }
-  sllm_status_t status =
-      validate_tensor(&descriptor->activation, &metadata->activation, sink);
+  sllm_status_t status = validate_tensor_binding(&descriptor->activation,
+                                                 &metadata->activation, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(&descriptor->raw_scale, &metadata->raw_scale, sink);
+  status = validate_tensor_binding(&descriptor->raw_scale, &metadata->raw_scale,
+                                   sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(&descriptor->output, &metadata->output, sink);
+  status =
+      validate_tensor_binding(&descriptor->output, &metadata->output, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }

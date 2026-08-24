@@ -431,6 +431,53 @@ impl ExecutionSegment {
         self.pending.is_empty()
     }
 
+    pub(crate) fn is_deferred(&self) -> bool {
+        self.deferred.is_some()
+    }
+
+    /// Restores the shared queue's normal completion mode.  A deferred
+    /// segment is request-local, but Qwen resident models deliberately share
+    /// their queue across requests; leaving the queue deferred would make a
+    /// later profiled completion stay pending forever.  Keep the state when
+    /// restoration fails so `Drop` can retry and callers can fail closed.
+    fn restore_profiled(&mut self) -> Result<(), PreparedExecutionError> {
+        let Some((session, queue, _timeout)) = self.deferred.as_ref() else {
+            return Ok(());
+        };
+        session.set_queue_completion_mode(queue, QueueCompletionMode::Profiled)?;
+        self.deferred = None;
+        Ok(())
+    }
+
+    /// Drains a deferred segment after a failed execution without publishing
+    /// audit evidence or a boundary.
+    pub(crate) fn abort(&mut self) -> Result<(), PreparedExecutionError> {
+        let result = if let Some((session, queue, timeout)) = self.deferred.as_ref() {
+            if self.pending.is_empty() {
+                Ok(())
+            } else {
+                let mut fence = session.create_queue_fence(queue)?;
+                require_terminal_success("execution segment abort fence", fence.wait(*timeout)?)?;
+                for mut retained in self.pending.drain(..) {
+                    require_terminal_success(
+                        &retained.label,
+                        retained.owner.finalize_after_fence(&fence)?,
+                    )?;
+                }
+                Ok(())
+            }
+        } else {
+            self.pending.clear();
+            Ok(())
+        };
+        let restore = self.restore_profiled();
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(_), Err(restore_error)) => Err(restore_error),
+        }
+    }
+
     pub(crate) fn retain_semantic(&mut self, label: impl Into<String>, owner: Submission) {
         self.retain(label, owner);
     }
@@ -464,24 +511,31 @@ impl ExecutionSegment {
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
         let had_work = !self.pending.is_empty();
-        if let Some((session, queue, timeout)) = self.deferred.as_ref().filter(|_| had_work) {
-            let mut fence = session.create_queue_fence(queue)?;
-            require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
-            for mut retained in self.pending.drain(..) {
-                require_terminal_success(
-                    &retained.label,
-                    retained.owner.finalize_after_fence(&fence)?,
-                )?;
-                audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        let result = (|| {
+            if let Some((session, queue, timeout)) = self
+                .deferred
+                .as_ref()
+                .filter(|_| had_work)
+                .map(|(session, queue, timeout)| (session.clone(), queue.clone(), *timeout))
+            {
+                let mut fence = session.create_queue_fence(&queue)?;
+                require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+                self.finalize_deferred_pending(&fence, audit)?;
+            } else {
+                for mut retained in self.pending.drain(..) {
+                    require_terminal_success(&retained.label, retained.owner.query()?)?;
+                    audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+                }
             }
-        } else {
-            for mut retained in self.pending.drain(..) {
-                require_terminal_success(&retained.label, retained.owner.query()?)?;
-                audit.record_labeled(&retained.label, retained.owner.dispatch())?;
-            }
+            audit.record_boundary(boundary, had_work)?;
+            Ok(())
+        })();
+        let restore = self.restore_profiled();
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(_), Err(restore_error)) => Err(restore_error),
         }
-        audit.record_boundary(boundary, had_work)?;
-        Ok(())
     }
 
     pub(crate) fn flush_with_semantic(
@@ -491,27 +545,33 @@ impl ExecutionSegment {
         boundary: ExecutionBoundaryKind,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
-        let Some((session, queue, timeout)) = &self.deferred else {
-            let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
-            require_terminal_success(label, terminal.wait(timeout)?)?;
-            self.flush_without_boundary(audit)?;
+        let result = (|| {
+            let Some((session, queue, timeout)) = self
+                .deferred
+                .as_ref()
+                .map(|(session, queue, timeout)| (session.clone(), queue.clone(), *timeout))
+            else {
+                let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
+                require_terminal_success(label, terminal.wait(timeout)?)?;
+                self.flush_without_boundary(audit)?;
+                audit.record_labeled(label, terminal.dispatch())?;
+                audit.record_boundary(boundary, true)?;
+                return Ok(());
+            };
+            let mut fence = session.create_queue_fence(&queue)?;
+            require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+            self.finalize_deferred_pending(&fence, audit)?;
+            require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
             audit.record_boundary(boundary, true)?;
-            return Ok(());
-        };
-        let mut fence = session.create_queue_fence(queue)?;
-        require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
-        for mut retained in self.pending.drain(..) {
-            require_terminal_success(
-                &retained.label,
-                retained.owner.finalize_after_fence(&fence)?,
-            )?;
-            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+            Ok(())
+        })();
+        let restore = self.restore_profiled();
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(_), Err(restore_error)) => Err(restore_error),
         }
-        require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
-        audit.record_labeled(label, terminal.dispatch())?;
-        audit.record_boundary(boundary, true)?;
-        Ok(())
     }
 
     pub(crate) fn flush_with_kv_append(
@@ -521,32 +581,44 @@ impl ExecutionSegment {
         audited_boundary: Option<ExecutionBoundaryKind>,
         audit: &mut ExecutionAuditAccumulator,
     ) -> Result<(), PreparedExecutionError> {
-        let Some((session, queue, timeout)) = &self.deferred else {
-            let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
-            require_terminal_success(label, terminal.wait(timeout)?)?;
-            if let Some(boundary) = audited_boundary {
-                self.flush(boundary, audit)?;
-            } else {
-                self.flush_without_boundary(audit)?;
-            }
+        let result = (|| {
+            let Some((session, queue, timeout)) = self
+                .deferred
+                .as_ref()
+                .map(|(session, queue, timeout)| (session.clone(), queue.clone(), *timeout))
+            else {
+                let timeout = self.profiled_timeout.unwrap_or(Duration::ZERO);
+                require_terminal_success(label, terminal.wait(timeout)?)?;
+                if let Some(boundary) = audited_boundary {
+                    self.flush(boundary, audit)?;
+                } else {
+                    self.flush_without_boundary(audit)?;
+                }
+                audit.record_labeled(label, terminal.dispatch())?;
+                return Ok(());
+            };
+            let mut fence = session.create_queue_fence(&queue)?;
+            require_terminal_success("execution segment fence", fence.wait(timeout)?)?;
+            self.finalize_deferred_pending(&fence, audit)?;
+            require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
             audit.record_labeled(label, terminal.dispatch())?;
-            return Ok(());
+            if let Some(boundary) = audited_boundary {
+                audit.record_boundary(boundary, true)?;
+            }
+            Ok(())
+        })();
+        let restore = if result.is_err()
+            || audited_boundary != Some(ExecutionBoundaryKind::StatePublication)
+        {
+            self.restore_profiled()
+        } else {
+            Ok(())
         };
-        let mut fence = session.create_queue_fence(queue)?;
-        require_terminal_success("execution segment fence", fence.wait(*timeout)?)?;
-        for mut retained in self.pending.drain(..) {
-            require_terminal_success(
-                &retained.label,
-                retained.owner.finalize_after_fence(&fence)?,
-            )?;
-            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(_), Err(restore_error)) => Err(restore_error),
         }
-        require_terminal_success(label, terminal.finalize_after_fence(&fence)?)?;
-        audit.record_labeled(label, terminal.dispatch())?;
-        if let Some(boundary) = audited_boundary {
-            audit.record_boundary(boundary, true)?;
-        }
-        Ok(())
     }
 
     fn flush_without_boundary(
@@ -560,6 +632,26 @@ impl ExecutionSegment {
         Ok(())
     }
 
+    fn finalize_deferred_pending(
+        &mut self,
+        fence: &ExecutionQueueFence,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<(), PreparedExecutionError> {
+        self.finalize_deferred_pending_individually(fence, audit)
+    }
+
+    fn finalize_deferred_pending_individually(
+        &mut self,
+        fence: &ExecutionQueueFence,
+        audit: &mut ExecutionAuditAccumulator,
+    ) -> Result<(), PreparedExecutionError> {
+        for mut retained in self.pending.drain(..) {
+            require_terminal_success(&retained.label, retained.owner.finalize_after_fence(fence)?)?;
+            audit.record_labeled(&retained.label, retained.owner.dispatch())?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn retain_test_owner(
         &mut self,
@@ -567,6 +659,17 @@ impl ExecutionSegment {
         owner: impl SegmentCompletionOwner + 'static,
     ) {
         self.retain(label, owner);
+    }
+}
+
+impl Drop for ExecutionSegment {
+    fn drop(&mut self) {
+        if self.deferred.is_some() {
+            // Drop cannot return an error.  Abort drains eventless owners and
+            // retries PROFILED restoration; a failure is intentionally left
+            // fail-closed rather than silently claiming a reusable queue.
+            let _ = self.abort();
+        }
     }
 }
 

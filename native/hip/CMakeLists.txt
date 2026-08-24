@@ -349,6 +349,7 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/moe_route_api.cpp
     src/moe_expert_api.cpp
     src/rmsnorm_api.cpp
+    src/residual_rmsnorm_api.cpp
     src/attention_preprocess_api.cpp
     src/rotary_api.cpp
     src/windowed_attention_api.cpp
@@ -391,6 +392,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_ELEMENTWISE_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/elementwise_kernel.hip.o")
         set(SLLM_EMBEDDING_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/embedding_kernel.hip.o")
         set(SLLM_MATMUL_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/matmul_kernel.hip.o")
+        set(SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/mlp_gate_up_silu_bundle_kernel.hip.o")
         set(SLLM_ARGMAX_G1_KERNEL_OBJECT "${CMAKE_BINARY_DIR}/argmax_kernel.hip.o")
         set(SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/token_selector_kernel.hip.o")
@@ -416,6 +419,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/public_runtime.hip.cpp"
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
+                src/mlp_gate_up_silu_bundle_runtime.inc
+                src/mlp_gate_up_silu_bundle_kernel_internal.hpp
                 src/argmax_runtime.inc
                 src/token_selector_runtime.inc
                 src/moe_route_runtime.inc
@@ -484,6 +489,17 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/matmul_kernel.hip.cpp"
                 -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/mlp_gate_up_silu_bundle_kernel.hip.cpp"
+                -o "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
+            DEPENDS src/mlp_gate_up_silu_bundle_kernel.hip.cpp
+                src/mlp_gate_up_silu_bundle_kernel_internal.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -600,6 +616,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -617,6 +634,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ELEMENTWISE_G1_KERNEL_OBJECT}"
             "${SLLM_EMBEDDING_G1_KERNEL_OBJECT}"
             "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
+            "${SLLM_MLP_GATE_UP_SILU_BUNDLE_G1_KERNEL_OBJECT}"
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
@@ -634,6 +652,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/elementwise_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/matmul_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/gdn_projection_bundle_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/mlp_gate_up_silu_bundle_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -654,6 +674,8 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/elementwise_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/matmul_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/gdn_projection_bundle_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/mlp_gate_up_silu_bundle_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
@@ -706,6 +728,7 @@ if(SLLM_ENABLE_HIP_RUNTIME OR SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         target_link_libraries(sllm_hip_stub PRIVATE
             "${ROCM_PATH}/lib/libhipblas.so"
             "${ROCM_PATH}/lib/libhipblaslt.so"
+            "${ROCM_PATH}/lib/librocblas.so"
         )
     endif()
 endif()
@@ -789,6 +812,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
+        src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
         src/windowed_attention_api.cpp
@@ -835,6 +859,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
+        src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
         src/windowed_attention_api.cpp
@@ -875,6 +900,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
+        src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
         src/windowed_attention_api.cpp

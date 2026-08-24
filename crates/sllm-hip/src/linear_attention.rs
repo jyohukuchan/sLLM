@@ -29,6 +29,10 @@ const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "linear_attention.gdn.v1";
 const CONV_DEVICE_SYMBOL: &str = "sllm_linear_attention_causal_conv_silu_v1";
 const RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_gated_norm_v1";
+const DECODE_PAIR_KERNEL_SYMBOL: &str = "linear_attention.gdn.decode_pair.v1";
+const DECODE_PAIR_RECURRENT_DEVICE_SYMBOL: &str =
+    "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1";
+const DECODE_PAIR_WORKGROUP_SIZE: u32 = 256;
 const COLUMN_KERNEL_SYMBOL: &str = "linear_attention.gdn.column_state.v2";
 const COLUMN_RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_column_state_v2";
 
@@ -729,6 +733,23 @@ fn validate_dispatch(
     layout: LinearAttentionLayout,
     expected_target: Option<&str>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
+    let short_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
+    validate_dispatch_with_short_opt_in(
+        info,
+        descriptor,
+        layout,
+        expected_target,
+        short_opt_in.as_deref(),
+    )
+}
+
+fn validate_dispatch_with_short_opt_in(
+    info: &sys::sllm_linear_attention_dispatch_info_t,
+    descriptor: sllm_core::LinearAttentionDescriptor,
+    layout: LinearAttentionLayout,
+    expected_target: Option<&str>,
+    short_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<LinearAttentionEvidence, RuntimeError> {
     let observed_target = read_c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
     let kernel_symbol = read_c_string(&info.kernel_symbol);
@@ -737,12 +758,21 @@ fn validate_dispatch(
     let expected_conv_grid = convolution_grid_size(descriptor.token_count(), layout);
     let force_baseline =
         std::env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
-    let use_column_provider = descriptor.token_count() >= 128
-        && !force_baseline
-        && matches!(
-            logical_gcn_arch_name(&observed_target),
-            "gfx1030" | "gfx1201"
-        );
+    let use_column_provider = column_provider_enabled(
+        Some(logical_gcn_arch_name(&observed_target)),
+        descriptor.token_count(),
+        layout.qk_heads() as u32,
+        layout.value_heads() as u32,
+        layout.head_dim() as u32,
+        force_baseline,
+        short_opt_in,
+    );
+    let use_decode_pair_provider = !force_baseline
+        && descriptor.token_count() == 1
+        && layout.qk_heads() == 16
+        && layout.value_heads() == 32
+        && layout.head_dim() == 128
+        && logical_gcn_arch_name(&observed_target) == "gfx1030";
     let valid = info.struct_size as usize
         == size_of::<sys::sllm_linear_attention_dispatch_info_t>()
         && info.abi_version == sys::SLLM_HIP_ABI_VERSION
@@ -753,11 +783,18 @@ fn validate_dispatch(
         && info.conv_kernel_id == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1
         && info.recurrent_kernel_id
             == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
-        && info.workgroup_size_x == sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
+        && info.workgroup_size_x
+            == if use_decode_pair_provider {
+                DECODE_PAIR_WORKGROUP_SIZE
+            } else {
+                sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
+            }
         && expected_conv_grid == Some(info.conv_grid_size_x)
         && info.recurrent_grid_size_x
             == if use_column_provider {
                 (layout.value_heads() * layout.head_dim() / 4) as u32
+            } else if use_decode_pair_provider {
+                layout.qk_heads() as u32
             } else {
                 layout.value_heads() as u32
             }
@@ -772,6 +809,8 @@ fn validate_dispatch(
         && kernel_symbol
             == if use_column_provider {
                 COLUMN_KERNEL_SYMBOL
+            } else if use_decode_pair_provider {
+                DECODE_PAIR_KERNEL_SYMBOL
             } else {
                 KERNEL_SYMBOL
             }
@@ -779,6 +818,8 @@ fn validate_dispatch(
         && recurrent_device_symbol
             == if use_column_provider {
                 COLUMN_RECURRENT_DEVICE_SYMBOL
+            } else if use_decode_pair_provider {
+                DECODE_PAIR_RECURRENT_DEVICE_SYMBOL
             } else {
                 RECURRENT_DEVICE_SYMBOL
             }
@@ -837,6 +878,47 @@ fn read_c_string<const N: usize>(bytes: &[c_char; N]) -> String {
     .into_owned()
 }
 
+fn short_column_state_enabled(
+    expected_target: Option<&str>,
+    token_count: u64,
+    qk_heads: u32,
+    value_heads: u32,
+    head_dim: u32,
+    force_baseline: bool,
+    opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    !force_baseline
+        && expected_target == Some("gfx1030")
+        && opt_in.is_none_or(|value| value == "1")
+        && (17..128).contains(&token_count)
+        && qk_heads == sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
+        && value_heads == sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+        && head_dim == sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+}
+
+fn column_provider_enabled(
+    expected_target: Option<&str>,
+    token_count: u64,
+    qk_heads: u32,
+    value_heads: u32,
+    head_dim: u32,
+    force_baseline: bool,
+    short_opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    (!force_baseline
+        && token_count >= 128
+        && matches!(expected_target, Some("gfx1030" | "gfx1201")))
+        || short_column_state_enabled(
+            expected_target,
+            token_count,
+            qk_heads,
+            value_heads,
+            head_dim,
+            force_baseline,
+            short_opt_in,
+        )
+}
+
 fn completion_result() -> sys::sllm_completion_result_t {
     sys::sllm_completion_result_t {
         struct_size: size_of::<sys::sllm_completion_result_t>() as u32,
@@ -879,19 +961,27 @@ mod tests {
 
     fn valid_dispatch(
         descriptor: sllm_core::LinearAttentionDescriptor,
+        target: &str,
     ) -> sys::sllm_linear_attention_dispatch_info_t {
         let mut info = empty_dispatch_info();
         info.backend = sys::SLLM_BACKEND_HIP;
         info.dispatch_id = 7;
         let use_column_provider = descriptor.token_count() >= 128;
+        let use_decode_pair_provider = descriptor.token_count() == 1 && target == "gfx1030";
         info.dispatch_count = if use_column_provider { 4 } else { 2 };
         info.conv_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
         info.recurrent_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
-        info.workgroup_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
+        info.workgroup_size_x = if use_decode_pair_provider {
+            DECODE_PAIR_WORKGROUP_SIZE
+        } else {
+            sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
+        };
         let layout = LinearAttentionLayout::default();
         info.conv_grid_size_x = convolution_grid_size(descriptor.token_count(), layout).unwrap();
         info.recurrent_grid_size_x = if use_column_provider {
             sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS * sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM / 4
+        } else if use_decode_pair_provider {
+            sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
         } else {
             sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
         };
@@ -905,6 +995,8 @@ mod tests {
             &mut info.kernel_symbol,
             if use_column_provider {
                 COLUMN_KERNEL_SYMBOL
+            } else if use_decode_pair_provider {
+                DECODE_PAIR_KERNEL_SYMBOL
             } else {
                 KERNEL_SYMBOL
             },
@@ -914,11 +1006,30 @@ mod tests {
             &mut info.recurrent_device_symbol,
             if use_column_provider {
                 COLUMN_RECURRENT_DEVICE_SYMBOL
+            } else if use_decode_pair_provider {
+                DECODE_PAIR_RECURRENT_DEVICE_SYMBOL
             } else {
                 RECURRENT_DEVICE_SYMBOL
             },
         );
-        put(&mut info.gcn_arch_name, "gfx1201");
+        put(&mut info.gcn_arch_name, target);
+        info
+    }
+
+    fn valid_short_column_dispatch(
+        descriptor: sllm_core::LinearAttentionDescriptor,
+        target: &str,
+    ) -> sys::sllm_linear_attention_dispatch_info_t {
+        let mut info = valid_dispatch(descriptor, target);
+        info.dispatch_count = 4;
+        info.recurrent_grid_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+            * sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+            / 4;
+        put(&mut info.kernel_symbol, COLUMN_KERNEL_SYMBOL);
+        put(
+            &mut info.recurrent_device_symbol,
+            COLUMN_RECURRENT_DEVICE_SYMBOL,
+        );
         info
     }
 
@@ -926,7 +1037,7 @@ mod tests {
     fn dispatch_requires_exact_symbols_and_convolution_grid_formula() {
         let descriptor = sllm_core::LinearAttentionDescriptor::new(3, 17, 20).unwrap();
         let layout = LinearAttentionLayout::default();
-        let info = valid_dispatch(descriptor);
+        let info = valid_dispatch(descriptor, "gfx1201");
         assert!(validate_dispatch(&info, descriptor, layout, Some("gfx1201")).is_ok());
         assert_eq!(info.conv_grid_size_x, ((17_u32 + 3) * 8_192).div_ceil(128));
 
@@ -957,9 +1068,169 @@ mod tests {
         for token_count in [127_u64, 128, 129] {
             let descriptor =
                 sllm_core::LinearAttentionDescriptor::new(0, token_count, token_count).unwrap();
-            let info = valid_dispatch(descriptor);
+            let info = valid_dispatch(descriptor, "gfx1201");
             assert!(validate_dispatch(&info, descriptor, layout, Some("gfx1201")).is_ok());
             assert_eq!(info.dispatch_count, if token_count >= 128 { 4 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn decode_pair_provider_is_exact_gfx1030_single_token_only() {
+        let layout = LinearAttentionLayout::default();
+        let single = sllm_core::LinearAttentionDescriptor::new(9, 1, 10).unwrap();
+        let info = valid_dispatch(single, "gfx1030");
+        assert!(validate_dispatch(&info, single, layout, Some("gfx1030")).is_ok());
+        assert_eq!(info.dispatch_count, 2);
+        assert_eq!(info.workgroup_size_x, DECODE_PAIR_WORKGROUP_SIZE);
+        assert_eq!(info.recurrent_grid_size_x, layout.qk_heads() as u32);
+
+        let mut wrong_target = valid_dispatch(single, "gfx1201");
+        // The gfx1201 contract must remain on the generic one-row provider.
+        assert!(validate_dispatch(&wrong_target, single, layout, Some("gfx1201")).is_ok());
+        assert_eq!(
+            wrong_target.recurrent_grid_size_x,
+            layout.value_heads() as u32
+        );
+        put(&mut wrong_target.gcn_arch_name, "gfx1030");
+        assert!(validate_dispatch(&wrong_target, single, layout, Some("gfx1201")).is_err());
+
+        let two = sllm_core::LinearAttentionDescriptor::new(9, 2, 11).unwrap();
+        let two_info = valid_dispatch(two, "gfx1030");
+        assert!(validate_dispatch(&two_info, two, layout, Some("gfx1030")).is_ok());
+        assert_eq!(two_info.recurrent_grid_size_x, layout.value_heads() as u32);
+    }
+
+    #[test]
+    fn short_column_state_selector_is_exact_and_force_baseline_wins() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        let unknown = Some(std::ffi::OsStr::new("unknown"));
+        for token_count in [16_u64, 17, 32, 33, 127, 128, 129] {
+            let selected = short_column_state_enabled(
+                Some("gfx1030"),
+                token_count,
+                16,
+                32,
+                128,
+                false,
+                enabled,
+            );
+            assert_eq!(selected, (17..128).contains(&token_count));
+            assert_eq!(
+                short_column_state_enabled(Some("gfx1030"), token_count, 16, 32, 128, false, None,),
+                (17..128).contains(&token_count)
+            );
+        }
+        assert!(!short_column_state_enabled(
+            Some("gfx1030"),
+            17,
+            16,
+            32,
+            128,
+            true,
+            enabled,
+        ));
+        assert!(!short_column_state_enabled(
+            Some("gfx1030"),
+            17,
+            16,
+            32,
+            128,
+            false,
+            disabled,
+        ));
+        assert!(!short_column_state_enabled(
+            Some("gfx1030"),
+            17,
+            16,
+            32,
+            128,
+            false,
+            unknown,
+        ));
+        assert!(!short_column_state_enabled(
+            Some("gfx1201"),
+            17,
+            16,
+            32,
+            128,
+            false,
+            enabled,
+        ));
+        assert!(!short_column_state_enabled(
+            None, 17, 16, 32, 128, false, enabled,
+        ));
+        assert!(!short_column_state_enabled(
+            Some("gfx1030"),
+            17,
+            16,
+            16,
+            128,
+            false,
+            enabled,
+        ));
+        assert!(column_provider_enabled(
+            Some("gfx1030"),
+            128,
+            16,
+            32,
+            128,
+            false,
+            disabled,
+        ));
+        assert!(column_provider_enabled(
+            Some("gfx1030"),
+            17,
+            16,
+            32,
+            128,
+            false,
+            None,
+        ));
+        assert!(!column_provider_enabled(
+            Some("gfx1030"),
+            128,
+            16,
+            32,
+            128,
+            true,
+            enabled,
+        ));
+    }
+
+    #[test]
+    fn short_column_state_metadata_matches_selector_boundaries() {
+        let layout = LinearAttentionLayout::default();
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for token_count in [17_u64, 32, 33, 127] {
+            let descriptor =
+                sllm_core::LinearAttentionDescriptor::new(0, token_count, token_count).unwrap();
+            let info = valid_short_column_dispatch(descriptor, "gfx1030");
+            assert!(
+                validate_dispatch_with_short_opt_in(
+                    &info,
+                    descriptor,
+                    layout,
+                    Some("gfx1030"),
+                    enabled,
+                )
+                .is_ok()
+            );
+        }
+        for token_count in [16_u64, 128, 129] {
+            let descriptor =
+                sllm_core::LinearAttentionDescriptor::new(0, token_count, token_count).unwrap();
+            let info = valid_dispatch(descriptor, "gfx1030");
+            assert!(
+                validate_dispatch_with_short_opt_in(
+                    &info,
+                    descriptor,
+                    layout,
+                    Some("gfx1030"),
+                    enabled,
+                )
+                .is_ok()
+            );
         }
     }
 

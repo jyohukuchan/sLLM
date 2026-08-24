@@ -274,6 +274,16 @@ fn main() {
     let matmul_kernel_internal = source_dir.join("src/matmul_kernel_internal.hpp");
     let matmul_kernel = source_dir.join("src/matmul_kernel.hip.cpp");
     let matmul_runtime = source_dir.join("src/matmul_runtime.inc");
+    let mlp_gate_up_silu_bundle_kernel_internal =
+        source_dir.join("src/mlp_gate_up_silu_bundle_kernel_internal.hpp");
+    let mlp_gate_up_silu_bundle_kernel =
+        source_dir.join("src/mlp_gate_up_silu_bundle_kernel.hip.cpp");
+    let mlp_gate_up_silu_bundle_runtime =
+        source_dir.join("src/mlp_gate_up_silu_bundle_runtime.inc");
+    let gdn_projection_bundle_kernel_internal =
+        source_dir.join("src/gdn_projection_bundle_kernel_internal.hpp");
+    let gdn_projection_bundle_kernel = source_dir.join("src/gdn_projection_bundle_kernel.hip.cpp");
+    let gdn_projection_bundle_runtime = source_dir.join("src/gdn_projection_bundle_runtime.inc");
     let argmax_api_header = source_dir.join("src/argmax_api.hpp");
     let argmax_api = source_dir.join("src/argmax_api.cpp");
     let argmax_kernel_internal = source_dir.join("src/argmax_kernel_internal.hpp");
@@ -286,6 +296,8 @@ fn main() {
     let rmsnorm_api = source_dir.join("src/rmsnorm_api.cpp");
     let rmsnorm_kernel_internal = source_dir.join("src/rmsnorm_kernel_internal.hpp");
     let rmsnorm_kernel = source_dir.join("src/rmsnorm_kernel.hip.cpp");
+    let residual_rmsnorm_api_header = source_dir.join("src/residual_rmsnorm_api.hpp");
+    let residual_rmsnorm_api = source_dir.join("src/residual_rmsnorm_api.cpp");
     let rotary_api_header = source_dir.join("src/rotary_api.hpp");
     let rotary_api = source_dir.join("src/rotary_api.cpp");
     let rotary_kernel_internal = source_dir.join("src/rotary_kernel_internal.hpp");
@@ -399,6 +411,30 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", matmul_kernel.display());
     println!("cargo:rerun-if-changed={}", matmul_runtime.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        mlp_gate_up_silu_bundle_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        mlp_gate_up_silu_bundle_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        mlp_gate_up_silu_bundle_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        gdn_projection_bundle_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        gdn_projection_bundle_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        gdn_projection_bundle_runtime.display()
+    );
     println!("cargo:rerun-if-changed={}", argmax_api_header.display());
     println!("cargo:rerun-if-changed={}", argmax_api.display());
     println!(
@@ -420,6 +456,11 @@ fn main() {
         rmsnorm_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", rmsnorm_kernel.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        residual_rmsnorm_api_header.display()
+    );
+    println!("cargo:rerun-if-changed={}", residual_rmsnorm_api.display());
     println!("cargo:rerun-if-changed={}", rotary_api_header.display());
     println!("cargo:rerun-if-changed={}", rotary_api.display());
     println!(
@@ -727,6 +768,7 @@ fn main() {
         if public_runtime_enabled {
             println!("cargo:rustc-link-lib=dylib=hipblas");
             println!("cargo:rustc-link-lib=dylib=hipblaslt");
+            println!("cargo:rustc-link-lib=dylib=rocblas");
         }
     }
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
@@ -1239,9 +1281,11 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_VERSION={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_VERSION);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);\n\
+             println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_WAVE32_BF16_V1);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_WAVE32_WORKGROUP_SIZE);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_Q_HEADS);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_K_HEADS);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM);\n\

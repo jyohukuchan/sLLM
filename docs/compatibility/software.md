@@ -1,5 +1,7 @@
 # ソフトウェア互換性方針
 
+> 最終更新: 2026-08-24
+
 ## 目的
 
 この文書は、sLLM のビルドおよび実行に使う OS、ツールチェーン、ROCm の互換性契約を定義する。ここに記すバージョンは初期決定であり、実装や実機検証で問題が判明した場合は、コードだけを回避的に変更せず、この文書の tuple と判断理由も更新する。
@@ -433,6 +435,38 @@ fallbackなし、cleanup/process/ECC failure 0を確認した。このtupleはPh
 
 同じsourceはexact `gfx942:sramecc+:xnack-`、wave64でcompile/linkしたが、MI300X real runはVM再確保後へdeferredした。
 [Phase41 GPU summary](../../ci/matrix/phase41-state-gpu-summary-v1.json)を正とする。
+
+### 2026-08-24 Phase49 exact `gfx1030`限定性能tuple
+
+Phase 49の性能candidateはcanonical V620 exact `gfx1030`（UUID `GPU-76a08c022586fed6`、BDF `0000:03:00.0`）、Ubuntu 24.04.4、kernel `6.17.0-35-generic`、
+amdgpu `6.16.13`、ROCm build/runtime 7.14.0、HIP `7.14.60850`、LLVM 23、Code Object V6、wave32の
+target専用tupleに限定した。GQA4 decodeのP32 partitionだけをKV長4,096以上、head dimension 256、FP16 KV、
+`M=1`で既定採用し、long-prefill v2とHIP Graphは採用しなかった。これはV620の上記機能scopeだけを
+`project-verified`とする記録であり、software lifecycleは`experimental`のまま維持する。R9700/MI300X、
+別SKU、別driver/ROCm、generic artifactへselector・閾値・binaryを一般化しない。詳細は
+[数値変更台帳](numerical-output-changes.md)と[Phase 49以降ロードマップ](../history/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正とする。
+
+### 2026-08-24 Phase50 local R9700 / MI300X handoff tuple
+
+Phase 50のR9700実機tupleは、Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、
+HIP `7.14.60850`、LLVM 23、Code Object V6、wave32、canonical UUID `GPU-a8e9ddefa2d60f55`、BDF
+`0000:07:00.0`、exact `gfx1201`である。build/runtimeのROCm rootとloader pathを閉じ、generic/multi-arch
+artifactを性能evidenceへ混ぜない。
+
+このtupleで検証した実機scopeは、固定Qwen3.5-4B BF16、FP16 KV、`M=1`、単一active requestにおけるResidual RMSNorm、
+GDN projection、MLP gate/up/SiLU、GQA P32のA/B比較、最終通常行と長行の計測・未達判定である。R9700のこの機能scopeだけを
+`project-verified`とし、lifecycleは`experimental`のままとする。100,000-token prefillはOOMで完走せず、成功scopeへ含めない。
+20,000-token decodeの完走結果はPhase 50履歴とsummaryへ固定し、この方針文書では数値を重複しない。完了行、未達理由、candidate分類は
+[Phase 50履歴](../history/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)と
+[数値変更台帳](numerical-output-changes.md)を参照する。
+
+MI300X側は論理target `gfx942`、feature付きdevice/codegen target `gfx942:sramecc+:xnack-`、Code Object V6、wave64、
+`xnack=off`、`sramecc=on`のcompile/linkとhost selector非選択だけをPhase 50で検証する。production Cargoの
+`CMAKE_HIP_ARCHITECTURES`はlogical `gfx942`を使い、feature suffix付きtargetはdirect CMake probeだけで扱う。このevidenceはMI300X実機runtime/PASSではなく、
+Phase 51でfresh preflight・7行・wave64 providerを検証するためのhandoffである。既存Hot Aisle MI300Xの
+別tuple runtime evidenceを更新せず、Phase 50のcompile/host結果を`project-verified`へ昇格しない。
+R9700のscopeをRDNA4全体、MI300XのscopeをCDNA3全体、他OS・kernel・driver・ROCm・SKUへ推論せず、
+全tupleのlifecycleは`experimental`を維持する。
 
 ## 公式資料
 

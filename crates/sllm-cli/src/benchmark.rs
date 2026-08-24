@@ -5,7 +5,7 @@ use sllm_core::AllocationSnapshot;
 
 pub(crate) const RENDER_TOKENIZE_BENCHMARK_SCHEMA_VERSION: &str = "engine-performance-render-v1";
 
-pub(crate) const DIRECT_BENCHMARK_SCHEMA_VERSION: &str = "engine-performance-direct-v1";
+pub(crate) const DIRECT_BENCHMARK_SCHEMA_VERSION: &str = "engine-performance-direct-v2";
 
 // Keep the historical default for code paths and host fixtures that model the
 // pre-tokenized lane. The model layer emits the lane-specific schema version.

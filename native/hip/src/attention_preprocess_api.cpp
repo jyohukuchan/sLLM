@@ -209,7 +209,9 @@ sllm_status_t validate_and_copy_descriptor(
   }
   if ((descriptor->reserved[0] !=
            SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1 &&
-       descriptor->reserved[0] != SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1) ||
+       descriptor->reserved[0] != SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1 &&
+       descriptor->reserved[0] !=
+           SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1) ||
       !all_zero(descriptor->reserved + 1, 3U)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
@@ -299,12 +301,19 @@ sllm_status_t validate_and_copy_descriptor(
       head_dim != SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM ||
       static_cast<uint64_t>(descriptor->start_position) + m >
           SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION ||
+      (descriptor->reserved[0] ==
+           SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1 &&
+       static_cast<uint64_t>(descriptor->start_position) + m - 1U >
+           static_cast<uint64_t>(std::numeric_limits<int32_t>::max())) ||
       !exact_shape(metadata->packed_q_gate, 3U, packed_shape) ||
       !exact_shape(metadata->k, 3U, k_shape) ||
       !exact_shape(metadata->q_raw_scale, 2U, scale_q_shape) ||
       !exact_shape(metadata->k_raw_scale, 2U, scale_k_shape) ||
       (!exact_shape(metadata->positions, 1U, position_shape) &&
        !exact_shape(metadata->positions, 2U, mrope_position_shape)) ||
+      (descriptor->reserved[0] ==
+           SLLM_HIP_POSITION_PAYLOAD_MODE_DERIVED_CONTIGUOUS_V1 &&
+       !exact_shape(metadata->positions, 1U, position_shape)) ||
       !exact_shape(metadata->q_output, 3U, q_output_shape) ||
       !exact_shape(metadata->gate_output, 3U, q_output_shape) ||
       !exact_shape(metadata->k_output, 3U, k_shape)) {

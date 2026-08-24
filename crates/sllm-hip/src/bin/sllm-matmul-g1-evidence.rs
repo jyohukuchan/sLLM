@@ -21,6 +21,8 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(16);
 const HIP_BACKEND: u32 = 1;
 const WORKGROUP_SIZE: u32 = 256;
+const GFX1030_SHORT_MIXED_ROCBLAS_SOLUTION_ENV: &str =
+    "SLLM_MATMUL_GFX1030_SHORT_MIXED_ROCBLAS_SOLUTION";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CaseShape {
@@ -31,7 +33,7 @@ struct CaseShape {
 
 // Keep the boundary coverage broad without taking the Cartesian product of
 // all M/K/N values.  K=5 is retained as a small non-boundary reduction case.
-const CASES: [CaseShape; 18] = [
+const CASES: [CaseShape; 22] = [
     CaseShape { m: 1, k: 1, n: 1 },
     CaseShape { m: 1, k: 3, n: 17 },
     CaseShape { m: 3, k: 17, n: 3 },
@@ -74,7 +76,32 @@ const CASES: [CaseShape; 18] = [
         k: 9216,
         n: 2560,
     },
+    // Phase49 gfx1030 short-serial provider numeric endpoints.  K=4096,N=2560
+    // is one of the exact dense Qwen projection pairs.  The intermediate
+    // selector boundaries are covered by SHORT_SERIAL_BOUNDARIES below.
+    CaseShape {
+        m: 9,
+        k: 4096,
+        n: 2560,
+    },
+    CaseShape {
+        m: 17,
+        k: 4096,
+        n: 2560,
+    },
+    CaseShape {
+        m: 32,
+        k: 4096,
+        n: 2560,
+    },
+    CaseShape {
+        m: 63,
+        k: 4096,
+        n: 2560,
+    },
 ];
+#[cfg(test)]
+const SHORT_SERIAL_BOUNDARIES: [usize; 10] = [8, 9, 16, 17, 18, 31, 32, 33, 63, 64];
 // Phase 12's frozen BF16 matrix contains the first 17 shapes.  The final
 // M=1,K=9216,N=2560 shape was added later in commit 1def2b63 (Phase 22).
 const PHASE12_CASE_COUNT: usize = 17;
@@ -103,6 +130,10 @@ struct CaseEvidence {
     dispatch_id: u64,
     dispatch_count: u32,
     kernel_id: u32,
+    /// The Phase 49 gfx1030 short-mixed rocBLAS solution selected by the
+    /// native mirror, or null when the shape/target/environment stays on the
+    /// hipBLAS baseline.
+    rocblas_solution: Option<i32>,
     workgroup_size_x: u32,
     grid_size_x: u32,
     kernel_symbol: String,
@@ -449,6 +480,89 @@ fn wait_success(
     }
 }
 
+fn is_gfx1030_short_serial_shape(shape: CaseShape, disabled: bool) -> bool {
+    !disabled
+        && (9..=63).contains(&shape.m)
+        && ((shape.k == 2560 && matches!(shape.n, 9216 | 8192 | 4096))
+            || (shape.k == 9216 && shape.n == 2560)
+            || (shape.k == 4096 && shape.n == 2560))
+}
+
+fn is_gfx1030_short_mixed_shape(shape: CaseShape, disabled: bool) -> bool {
+    !disabled
+        && (9..=63).contains(&shape.m)
+        && ((shape.k == 2560 && matches!(shape.n, 32 | 1024 | 4096 | 8192 | 9216 | 248_320))
+            || (shape.k == 4096 && shape.n == 2560)
+            || (shape.k == 9216 && shape.n == 2560))
+}
+
+/// Keep the evidence selector in lockstep with the native Phase 49 table.
+/// `None` is the explicit baseline result: unsupported M/K/N, another target,
+/// force-baseline, and all values other than an unset/`1` solution override.
+fn phase49_gfx1030_short_mixed_rocblas_solution(shape: CaseShape) -> Option<i32> {
+    if shape.m != 17 && shape.m != 32 {
+        return None;
+    }
+    if shape.m == 32 {
+        if (shape.k == 2560 && matches!(shape.n, 32 | 1024 | 4096 | 8192 | 9216))
+            || (matches!(shape.k, 4096 | 9216) && shape.n == 2560)
+        {
+            return Some(-473);
+        }
+        return None;
+    }
+    if shape.k == 2560 {
+        if matches!(shape.n, 9216 | 8192 | 32 | 1024) {
+            return Some(-473);
+        }
+        if shape.n == 4096 {
+            return Some(-472);
+        }
+        return None;
+    }
+    if matches!(shape.k, 4096 | 9216) && shape.n == 2560 {
+        return Some(-472);
+    }
+    None
+}
+
+fn phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+    shape: CaseShape,
+    target: &str,
+    solution_environment: Option<&str>,
+    force_baseline: bool,
+) -> Option<i32> {
+    let enabled = solution_environment.is_none() || solution_environment == Some("1");
+    if force_baseline || target != "gfx1030" || !enabled {
+        return None;
+    }
+    phase49_gfx1030_short_mixed_rocblas_solution(shape)
+}
+
+fn phase49_gfx1030_short_mixed_rocblas_solution_for_environment(
+    shape: CaseShape,
+    target: &str,
+) -> Option<i32> {
+    phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+        shape,
+        target,
+        env::var(GFX1030_SHORT_MIXED_ROCBLAS_SOLUTION_ENV)
+            .ok()
+            .as_deref(),
+        env::var("SLLM_MATMUL_FORCE_BASELINE").as_deref() == Ok("1"),
+    )
+}
+
+fn phase34_gfx1030_hipblas_shape(m: usize, k: usize, n: usize) -> bool {
+    let main_projection = (k == 2560 && matches!(n, 4096 | 8192 | 9216))
+        || (k == 9216 && n == 2560)
+        || (k == 4096 && n == 2560);
+    if main_projection {
+        return m >= 128;
+    }
+    k == 2560 && n == 1024 && m >= 1024
+}
+
 fn validate_dispatch(
     dispatch: &DispatchEvidence,
     shape: CaseShape,
@@ -459,6 +573,12 @@ fn validate_dispatch(
         .checked_mul(shape.n)
         .ok_or_else(|| "output element count overflowed usize".to_owned())?;
     let forced_baseline = env::var("SLLM_MATMUL_FORCE_BASELINE").as_deref() == Ok("1");
+    let short_serial_disabled = env::var("SLLM_MATMUL_GFX1030_SHORT_SERIAL").as_deref() == Ok("0");
+    let short_mixed_disabled = env::var("SLLM_MATMUL_GFX1030_SHORT_MIXED").as_deref() == Ok("0");
+    let short_serial_shape =
+        target == "gfx1030" && is_gfx1030_short_serial_shape(shape, short_serial_disabled);
+    let short_mixed_shape =
+        target == "gfx1030" && is_gfx1030_short_mixed_shape(shape, short_mixed_disabled);
     let (expected_kernel, expected_grid, expected_symbol, expected_device_symbol) =
         if forced_baseline {
             (
@@ -481,7 +601,25 @@ fn validate_dispatch(
                 "matmul.bf16_fp32.decode.serial_rows.v1",
                 "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
             )
-        } else if shape.m > 1 && matches!(target, "gfx1201" | "gfx942") {
+        } else if short_mixed_shape && !short_mixed_disabled {
+            (
+                17,
+                shape.n as u32,
+                "matmul.bf16_fp32.prefill.short_mixed_bss.v2",
+                "hipblasGemmExBbsF32Output",
+            )
+        } else if short_serial_shape && !short_serial_disabled {
+            (
+                16,
+                shape.m.div_ceil(8) as u32 * shape.n as u32,
+                "matmul.bf16_fp32.prefill.short_serial.v1",
+                "sllm_matmul_bf16_fp32_prefill_short_serial_v1",
+            )
+        } else if shape.m > 1
+            && (matches!(target, "gfx1201" | "gfx942")
+                || (target == "gfx1030"
+                    && phase34_gfx1030_hipblas_shape(shape.m, shape.k, shape.n)))
+        {
             (
                 4,
                 shape.n as u32,
@@ -510,10 +648,11 @@ fn validate_dispatch(
                 "sllm_matmul_bf16_fp32_tiled16_v2",
             )
         };
+    let expected_dispatch_count = if expected_kernel == 17 { 2 } else { 1 };
     if dispatch.abi_version != 1
         || dispatch.info_version != 1
         || dispatch.dispatch_id == 0
-        || dispatch.dispatch_count != 1
+        || dispatch.dispatch_count != expected_dispatch_count
         || dispatch.kernel_id != expected_kernel
         || dispatch.workgroup_size_x != WORKGROUP_SIZE
         || dispatch.grid_size_x != expected_grid
@@ -544,6 +683,8 @@ fn run_case(
     let (activation_words, weight_words) = make_operands(shape, case_index)?;
     let (exact_reference, expected_words) =
         scalar_matmul_oracle(shape, &activation_words, &weight_words);
+    let rocblas_solution =
+        phase49_gfx1030_short_mixed_rocblas_solution_for_environment(shape, target);
     let activation_bytes = words_to_bytes(&activation_words);
     let weight_bytes = words_to_bytes(&weight_words);
     let output_bytes = words_to_bytes(&expected_words);
@@ -657,6 +798,7 @@ fn run_case(
         dispatch_id: dispatch.dispatch_id,
         dispatch_count: dispatch.dispatch_count,
         kernel_id: dispatch.kernel_id,
+        rocblas_solution,
         workgroup_size_x: dispatch.workgroup_size_x,
         grid_size_x: dispatch.grid_size_x,
         kernel_symbol: dispatch.kernel_symbol,
@@ -790,7 +932,7 @@ mod tests {
 
     #[test]
     fn required_case_coverage_is_bounded_and_non_cartesian() {
-        assert_eq!(CASES.len(), 18);
+        assert_eq!(CASES.len(), 22);
         assert!(CASES.iter().any(|case| case.m == 1));
         assert!(CASES.iter().any(|case| case.m == 3));
         assert!(CASES.iter().any(|case| case.m == 17));
@@ -800,6 +942,41 @@ mod tests {
         assert!(CASES.iter().any(|case| case.n == 1));
         assert!(CASES.iter().any(|case| case.n == 3));
         assert!(CASES.iter().any(|case| case.n == 17));
+        assert_eq!(
+            SHORT_SERIAL_BOUNDARIES,
+            [8, 9, 16, 17, 18, 31, 32, 33, 63, 64]
+        );
+        for boundary in SHORT_SERIAL_BOUNDARIES {
+            let shape = CaseShape {
+                m: boundary,
+                k: 4096,
+                n: 2560,
+            };
+            assert_eq!(
+                is_gfx1030_short_serial_shape(shape, false),
+                (9..=63).contains(&boundary)
+            );
+            assert_eq!(
+                is_gfx1030_short_mixed_shape(shape, false),
+                (9..=63).contains(&boundary)
+            );
+            assert!(!is_gfx1030_short_serial_shape(shape, true));
+            assert!(!is_gfx1030_short_mixed_shape(shape, true));
+        }
+        for (k, n) in [(2560, 32), (2560, 1024), (2560, 248_320)] {
+            let shape = CaseShape { m: 17, k, n };
+            assert!(is_gfx1030_short_mixed_shape(shape, false));
+            assert!(!is_gfx1030_short_mixed_shape(shape, true));
+            assert!(!is_gfx1030_short_serial_shape(shape, false));
+        }
+        assert!(!is_gfx1030_short_mixed_shape(
+            CaseShape {
+                m: 17,
+                k: 2560,
+                n: 33,
+            },
+            false
+        ));
         for boundary in [255, 256, 257] {
             assert!(CASES.iter().any(|case| case.m == boundary));
             assert!(CASES.iter().any(|case| case.k == boundary));
@@ -835,6 +1012,98 @@ mod tests {
             let (_, _, output) = shape_element_count(shape).unwrap();
             assert_eq!(output, shape.m * shape.n);
         }
+    }
+
+    #[test]
+    fn phase49_short_mixed_rocblas_selector_mirrors_native_table() {
+        let m17_n9216 = CaseShape {
+            m: 17,
+            k: 2560,
+            n: 9216,
+        };
+        let m17_n4096 = CaseShape {
+            m: 17,
+            k: 2560,
+            n: 4096,
+        };
+        let m32_n8192 = CaseShape {
+            m: 32,
+            k: 2560,
+            n: 8192,
+        };
+        let vocab = CaseShape {
+            m: 32,
+            k: 2560,
+            n: 248_320,
+        };
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution(m17_n9216),
+            Some(-473)
+        );
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution(m17_n4096),
+            Some(-472)
+        );
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution(m32_n8192),
+            Some(-473)
+        );
+        assert_eq!(phase49_gfx1030_short_mixed_rocblas_solution(vocab), None);
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution(CaseShape {
+                m: 16,
+                k: 2560,
+                n: 9216,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn phase49_short_mixed_rocblas_environment_is_fail_closed() {
+        let shape = CaseShape {
+            m: 17,
+            k: 4096,
+            n: 2560,
+        };
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+                shape, "gfx1030", None, false,
+            ),
+            Some(-472)
+        );
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+                shape,
+                "gfx1030",
+                Some("1"),
+                false,
+            ),
+            Some(-472)
+        );
+        for value in ["0", "unknown", "true"] {
+            assert_eq!(
+                phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+                    shape,
+                    "gfx1030",
+                    Some(value),
+                    false,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+                shape, "gfx1030", None, true,
+            ),
+            None
+        );
+        assert_eq!(
+            phase49_gfx1030_short_mixed_rocblas_solution_with_environment(
+                shape, "gfx1201", None, false,
+            ),
+            None
+        );
     }
 
     #[test]
@@ -880,8 +1149,8 @@ mod tests {
         ];
         assert_eq!(selected_cases(true), expected.as_slice());
         assert_eq!(selected_cases(true).len(), 17);
-        assert_eq!(CASES.len(), 18);
-        assert_eq!(CASES.last(), Some(&POST_PHASE12_CASE));
+        assert_eq!(CASES.len(), 22);
+        assert_eq!(CASES.get(PHASE12_CASE_COUNT), Some(&POST_PHASE12_CASE));
         assert!(!selected_cases(true).contains(&POST_PHASE12_CASE));
         assert_eq!(selected_cases(false), &CASES);
     }

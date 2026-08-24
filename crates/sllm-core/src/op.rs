@@ -9,11 +9,23 @@ pub enum SemanticOpKind {
     ScalarMul,
     Embedding,
     Matmul,
+    /// Fixed Qwen3.5 GDN projection bundle. This is intentionally not a
+    /// generic multi-column matmul: four independent BF16 outputs and weight
+    /// roles are part of the contract.
+    GdnProjectionBundle,
+    /// Fixed Qwen3.5 MLP gate/up projection followed by SiLU multiplication.
+    /// The two projection outputs remain explicit so the backend may preserve
+    /// the baseline graph's tensor boundaries while submitting one M=1 bundle.
+    MlpGateUpSiluBundle,
     SiluMul,
     GeluTanhMul,
     SigmoidMul,
     TanhSoftcap,
     RmsNorm,
+    /// F32 residual add with BF16-RNE intermediate followed by RMSNorm.
+    /// Inputs are residual, addend, and raw scale; outputs retain the BF16
+    /// add intermediate and the normalized BF16 result.
+    ResidualRmsNorm,
     Rotary,
     CausalAttention,
     AttentionPreprocess,
@@ -44,6 +56,9 @@ pub enum AttentionPreprocessPositionMode {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum AttentionPreprocessPositionPayloadModeV1 {
     Contiguous,
+    /// Derive `start_position + row` in the device kernel. The position
+    /// tensor remains bound for ABI/layout compatibility but is not read.
+    DerivedContiguous,
     Explicit,
 }
 
@@ -232,11 +247,14 @@ impl SemanticOpKind {
             Self::ScalarMul => "scalar_mul",
             Self::Embedding => "embedding",
             Self::Matmul => "matmul",
+            Self::GdnProjectionBundle => "gdn_projection_bundle",
+            Self::MlpGateUpSiluBundle => "mlp_gate_up_silu_bundle",
             Self::SiluMul => "silu_mul",
             Self::GeluTanhMul => "gelu_tanh_mul",
             Self::SigmoidMul => "sigmoid_mul",
             Self::TanhSoftcap => "tanh_softcap",
             Self::RmsNorm => "rms_norm",
+            Self::ResidualRmsNorm => "residual_rms_norm",
             Self::Rotary => "rotary",
             Self::CausalAttention => "causal_attention",
             Self::AttentionPreprocess => "attention_preprocess",
@@ -254,11 +272,14 @@ impl SemanticOpKind {
             Self::ScalarMul => (2, 1),
             Self::Embedding => (2, 1),
             Self::Matmul => (2, 1),
+            Self::GdnProjectionBundle => (5, 4),
+            Self::MlpGateUpSiluBundle => (3, 3),
             Self::SiluMul => (2, 1),
             Self::GeluTanhMul => (2, 1),
             Self::SigmoidMul => (2, 1),
             Self::TanhSoftcap => (2, 1),
             Self::RmsNorm => (2, 1),
+            Self::ResidualRmsNorm => (3, 2),
             Self::Rotary => (3, 2),
             Self::CausalAttention => (3, 1),
             Self::AttentionPreprocess => (5, 3),
@@ -345,6 +366,27 @@ pub enum RmsNormTensor {
     Activation,
     RawScale,
     Output,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum ResidualRmsNormTensor {
+    Residual,
+    Addend,
+    RawScale,
+    ResidualOutput,
+    NormalizedOutput,
+}
+
+impl fmt::Display for ResidualRmsNormTensor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Residual => "residual",
+            Self::Addend => "addend",
+            Self::RawScale => "raw scale",
+            Self::ResidualOutput => "residual output",
+            Self::NormalizedOutput => "normalized output",
+        })
+    }
 }
 
 impl fmt::Display for RmsNormTensor {
@@ -437,11 +479,59 @@ impl RmsNormContract {
     }
 }
 
+/// Fixed numerical and aliasing promises made by the fused residual-add and
+/// RMSNorm operation. The operation is intentionally narrower than a generic
+/// elementwise fusion: all activations and the retained intermediate are BF16
+/// storage, while both the add and RMS statistics are accumulated in F32.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ResidualRmsNormContract {
+    rms_norm: RmsNormContract,
+}
+
+impl ResidualRmsNormContract {
+    /// Creates the explicit fused contract. No epsilon or scale-mode default
+    /// is inferred; they are carried by the nested RMSNorm contract.
+    pub fn new(epsilon: f32, scale_mode: RmsNormScaleMode) -> Result<Self, OpError> {
+        Ok(Self {
+            rms_norm: RmsNormContract::new(epsilon, scale_mode)?,
+        })
+    }
+
+    pub const fn from_rms_norm(contract: RmsNormContract) -> Self {
+        Self { rms_norm: contract }
+    }
+
+    pub const fn rms_norm(self) -> RmsNormContract {
+        self.rms_norm
+    }
+
+    pub const fn epsilon(self) -> RmsNormEpsilon {
+        self.rms_norm.epsilon()
+    }
+
+    pub const fn scale_mode(self) -> RmsNormScaleMode {
+        self.rms_norm.scale_mode()
+    }
+
+    pub const fn accumulation_dtype(self) -> DType {
+        self.rms_norm.accumulation_dtype()
+    }
+
+    pub const fn output_dtype(self) -> DType {
+        self.rms_norm.output_dtype()
+    }
+
+    pub const fn alias_policy(self) -> RmsNormAliasPolicy {
+        self.rms_norm.alias_policy()
+    }
+}
+
 /// The complete backend-neutral C3a1 semantic contract.
 ///
 /// This descriptor carries the expected absolute position sequence as
-/// metadata. The later host-side dispatch boundary must compare the actual
-/// I32 position bytes with `start_position .. start_position + token_count`.
+/// metadata. `Contiguous` compares the actual I32 position bytes with
+/// `start_position .. start_position + token_count`; `DerivedContiguous`
+/// creates that sequence in the device kernel and avoids a host readback.
 /// Keeping the sequence here makes prefill reset and decode continuation
 /// distinct without pretending that a `TensorView` contains payload values.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1102,6 +1192,76 @@ impl WindowedCausalAttentionContract {
     }
 }
 
+/// Fixed numerical contract for the Qwen3.5 GDN projection bundle. Inputs are
+/// activation, qkv, z, b and a weights; outputs are independent qkv/z/b/a
+/// BF16 tensors. The role widths intentionally remain fixed to prevent this
+/// boundary from becoming a generic multi-column matmul.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GdnProjectionBundleContractV1 {
+    hidden_size: u32,
+    qkv_width: u32,
+    z_width: u32,
+    gate_width: u32,
+}
+
+impl GdnProjectionBundleContractV1 {
+    pub const HIDDEN_SIZE: u32 = 2_560;
+    pub const QKV_WIDTH: u32 = 8_192;
+    pub const Z_WIDTH: u32 = 4_096;
+    pub const GATE_WIDTH: u32 = 32;
+
+    pub fn qwen35() -> Self {
+        Self {
+            hidden_size: Self::HIDDEN_SIZE,
+            qkv_width: Self::QKV_WIDTH,
+            z_width: Self::Z_WIDTH,
+            gate_width: Self::GATE_WIDTH,
+        }
+    }
+
+    pub const fn hidden_size(self) -> u32 {
+        self.hidden_size
+    }
+    pub const fn qkv_width(self) -> u32 {
+        self.qkv_width
+    }
+    pub const fn z_width(self) -> u32 {
+        self.z_width
+    }
+    pub const fn gate_width(self) -> u32 {
+        self.gate_width
+    }
+}
+
+/// Fixed numerical contract for the Qwen3.5 dense MLP gate/up/SiLU bundle.
+/// Inputs are activation, gate weight, and up weight; outputs retain the gate,
+/// up, and SiLU-multiplication tensors from the baseline graph.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MlpGateUpSiluBundleContractV1 {
+    hidden_size: u32,
+    intermediate_size: u32,
+}
+
+impl MlpGateUpSiluBundleContractV1 {
+    pub const HIDDEN_SIZE: u32 = 2_560;
+    pub const INTERMEDIATE_SIZE: u32 = 9_216;
+
+    pub fn qwen35() -> Self {
+        Self {
+            hidden_size: Self::HIDDEN_SIZE,
+            intermediate_size: Self::INTERMEDIATE_SIZE,
+        }
+    }
+
+    pub const fn hidden_size(self) -> u32 {
+        self.hidden_size
+    }
+
+    pub const fn intermediate_size(self) -> u32 {
+        self.intermediate_size
+    }
+}
+
 /// A backend-independent operation contract containing only tensor metadata.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct SemanticOpDescriptor {
@@ -1109,11 +1269,14 @@ pub struct SemanticOpDescriptor {
     inputs: Vec<TensorView>,
     outputs: Vec<TensorView>,
     rms_norm_contract: Option<RmsNormContract>,
+    residual_rms_norm_contract: Option<ResidualRmsNormContract>,
     rotary_contract: Option<SplitHalfRotaryContract>,
     causal_attention_contract: Option<WindowedCausalAttentionContract>,
     attention_preprocess_contract: Option<AttentionPreprocessContract>,
     token_selector_contract: Option<TokenSelectorContractV1>,
     sparse_moe_contract: Option<SparseMoeContract>,
+    gdn_projection_bundle_contract: Option<GdnProjectionBundleContractV1>,
+    mlp_gate_up_silu_bundle_contract: Option<MlpGateUpSiluBundleContractV1>,
 }
 
 /// Short name for the semantic operation descriptor used by backend traits.
@@ -1130,11 +1293,14 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1162,11 +1328,51 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: Some(contract),
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Creates the fused residual-add/RMSNorm descriptor. Output zero is the
+    /// BF16-RNE residual intermediate and output one is the normalized BF16
+    /// result. Keeping both outputs explicit preserves the baseline graph's
+    /// tensor and access contracts.
+    pub fn new_residual_rms_norm(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        epsilon: f32,
+        scale_mode: RmsNormScaleMode,
+    ) -> Result<Self, OpError> {
+        let contract = ResidualRmsNormContract::new(epsilon, scale_mode)?;
+        Self::new_residual_rms_norm_with_contract(inputs, outputs, contract)
+    }
+
+    pub fn new_residual_rms_norm_with_contract(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: ResidualRmsNormContract,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::ResidualRmsNorm,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: Some(contract),
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1182,11 +1388,14 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: Some(contract),
             token_selector_contract: None,
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1202,11 +1411,14 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: Some(contract),
             causal_attention_contract: None,
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1222,11 +1434,14 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: Some(contract),
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1244,11 +1459,14 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
             token_selector_contract: Some(contract),
             sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1273,11 +1491,60 @@ impl SemanticOpDescriptor {
             inputs,
             outputs,
             rms_norm_contract: None,
+            residual_rms_norm_contract: None,
             rotary_contract: None,
             causal_attention_contract: None,
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: Some(contract),
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_gdn_projection_bundle(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: GdnProjectionBundleContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::GdnProjectionBundle,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            gdn_projection_bundle_contract: Some(contract),
+            mlp_gate_up_silu_bundle_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    pub fn new_mlp_gate_up_silu_bundle(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: MlpGateUpSiluBundleContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::MlpGateUpSiluBundle,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: Some(contract),
         };
         descriptor.validate()?;
         Ok(descriptor)
@@ -1303,6 +1570,10 @@ impl SemanticOpDescriptor {
         self.rms_norm_contract
     }
 
+    pub const fn residual_rms_norm_contract(&self) -> Option<ResidualRmsNormContract> {
+        self.residual_rms_norm_contract
+    }
+
     pub const fn rotary_contract(&self) -> Option<SplitHalfRotaryContract> {
         self.rotary_contract
     }
@@ -1321,6 +1592,14 @@ impl SemanticOpDescriptor {
 
     pub const fn sparse_moe_contract(&self) -> Option<SparseMoeContract> {
         self.sparse_moe_contract
+    }
+
+    pub const fn gdn_projection_bundle_contract(&self) -> Option<GdnProjectionBundleContractV1> {
+        self.gdn_projection_bundle_contract
+    }
+
+    pub const fn mlp_gate_up_silu_bundle_contract(&self) -> Option<MlpGateUpSiluBundleContractV1> {
+        self.mlp_gate_up_silu_bundle_contract
     }
 
     /// Returns the zero-copy rank-2 view consumed by the existing `o_proj`
@@ -1376,6 +1655,18 @@ impl SemanticOpDescriptor {
             SemanticOpKind::Matmul => {
                 validate_matmul(&self.inputs, &self.outputs)?;
             }
+            SemanticOpKind::GdnProjectionBundle => {
+                let contract = self
+                    .gdn_projection_bundle_contract
+                    .ok_or(OpError::GdnProjectionBundleContractRequired)?;
+                validate_gdn_projection_bundle(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::MlpGateUpSiluBundle => {
+                let contract = self
+                    .mlp_gate_up_silu_bundle_contract
+                    .ok_or(OpError::MlpGateUpSiluBundleContractRequired)?;
+                validate_mlp_gate_up_silu_bundle(&self.inputs, &self.outputs, contract)?;
+            }
             SemanticOpKind::SiluMul => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
             }
@@ -1393,6 +1684,12 @@ impl SemanticOpDescriptor {
                     .rms_norm_contract
                     .ok_or(OpError::RmsNormContractRequired)?;
                 validate_rms_norm(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::ResidualRmsNorm => {
+                let contract = self
+                    .residual_rms_norm_contract
+                    .ok_or(OpError::ResidualRmsNormContractRequired)?;
+                validate_residual_rms_norm(&self.inputs, &self.outputs, contract)?;
             }
             SemanticOpKind::Rotary => {
                 let contract = self
@@ -1430,6 +1727,105 @@ impl SemanticOpDescriptor {
         }
         Ok(())
     }
+}
+
+fn validate_gdn_projection_bundle(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: GdnProjectionBundleContractV1,
+) -> Result<(), OpError> {
+    let expected = [
+        contract.qkv_width as usize,
+        contract.z_width as usize,
+        contract.gate_width as usize,
+        contract.gate_width as usize,
+    ];
+    let mut tensors = Vec::with_capacity(9);
+    tensors.extend(inputs.iter());
+    tensors.extend(outputs.iter());
+    for tensor in tensors {
+        if tensor.shape().is_empty() || tensor.shape().contains(&0) {
+            return Err(OpError::GdnProjectionBundleZeroExtent);
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::GdnProjectionBundleNonContiguous);
+        }
+        if tensor.dtype() != DType::Bf16 {
+            return Err(OpError::GdnProjectionBundleUnsupportedDType {
+                actual: tensor.dtype(),
+            });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::GdnProjectionBundleUnsupportedEncoding {
+                actual: tensor.encoding(),
+            });
+        }
+    }
+    let activation = &inputs[0];
+    if activation.shape().len() != 2 || activation.shape()[1] != contract.hidden_size as usize {
+        return Err(OpError::GdnProjectionBundleShapeMismatch);
+    }
+    let m = activation.shape()[0];
+    for (output, width) in outputs.iter().zip(expected) {
+        if output.shape() != [m, width] {
+            return Err(OpError::GdnProjectionBundleShapeMismatch);
+        }
+    }
+    for (weight, width) in inputs[1..].iter().zip(expected) {
+        if weight.shape() != [width, contract.hidden_size as usize] {
+            return Err(OpError::GdnProjectionBundleShapeMismatch);
+        }
+    }
+    Ok(())
+}
+
+fn validate_mlp_gate_up_silu_bundle(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: MlpGateUpSiluBundleContractV1,
+) -> Result<(), OpError> {
+    let mut tensors = Vec::with_capacity(6);
+    tensors.extend(inputs.iter());
+    tensors.extend(outputs.iter());
+    for tensor in tensors {
+        if tensor.shape().is_empty() || tensor.shape().contains(&0) {
+            return Err(OpError::MlpGateUpSiluBundleZeroExtent);
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::MlpGateUpSiluBundleNonContiguous);
+        }
+        if tensor.dtype() != DType::Bf16 {
+            return Err(OpError::MlpGateUpSiluBundleUnsupportedDType {
+                actual: tensor.dtype(),
+            });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::MlpGateUpSiluBundleUnsupportedEncoding {
+                actual: tensor.encoding(),
+            });
+        }
+    }
+    let activation = &inputs[0];
+    if activation.shape().len() != 2 || activation.shape()[1] != contract.hidden_size as usize {
+        return Err(OpError::MlpGateUpSiluBundleShapeMismatch);
+    }
+    let m = activation.shape()[0];
+    for output in outputs {
+        if output.shape() != [m, contract.intermediate_size as usize] {
+            return Err(OpError::MlpGateUpSiluBundleShapeMismatch);
+        }
+    }
+    for weight in &inputs[1..] {
+        if weight.shape()
+            != [
+                contract.intermediate_size as usize,
+                contract.hidden_size as usize,
+            ]
+        {
+            return Err(OpError::MlpGateUpSiluBundleShapeMismatch);
+        }
+    }
+    Ok(())
 }
 
 fn validate_sparse_moe(
@@ -1941,6 +2337,55 @@ fn validate_rms_norm(
     Ok(())
 }
 
+fn validate_residual_rms_norm(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    _contract: ResidualRmsNormContract,
+) -> Result<(), OpError> {
+    let tensors = [
+        (&inputs[0], ResidualRmsNormTensor::Residual),
+        (&inputs[1], ResidualRmsNormTensor::Addend),
+        (&inputs[2], ResidualRmsNormTensor::RawScale),
+        (&outputs[0], ResidualRmsNormTensor::ResidualOutput),
+        (&outputs[1], ResidualRmsNormTensor::NormalizedOutput),
+    ];
+    for (tensor, role) in tensors {
+        if tensor.shape().is_empty() {
+            return Err(OpError::ResidualRmsNormRankZero { tensor: role });
+        }
+        if tensor.shape().contains(&0) {
+            return Err(OpError::ResidualRmsNormZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::ResidualRmsNormNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::ResidualRmsNormUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+        if tensor.dtype() != DType::Bf16 {
+            return Err(OpError::ResidualRmsNormUnsupportedDType {
+                tensor: role,
+                actual: tensor.dtype(),
+            });
+        }
+    }
+    if inputs[0].shape() != inputs[1].shape()
+        || inputs[0].shape() != outputs[0].shape()
+        || inputs[0].shape() != outputs[1].shape()
+    {
+        return Err(OpError::ResidualRmsNormShapeMismatch);
+    }
+    if inputs[2].shape().len() != 1
+        || inputs[2].shape()[0] != inputs[0].shape()[inputs[0].shape().len() - 1]
+    {
+        return Err(OpError::ResidualRmsNormScaleShapeMismatch);
+    }
+    Ok(())
+}
+
 fn validate_attention_preprocess(
     inputs: &[TensorView],
     outputs: &[TensorView],
@@ -2136,6 +2581,26 @@ pub enum OpError {
     RmsNormInvalidEpsilon {
         bits: u32,
     },
+    ResidualRmsNormContractRequired,
+    ResidualRmsNormRankZero {
+        tensor: ResidualRmsNormTensor,
+    },
+    ResidualRmsNormZeroExtent {
+        tensor: ResidualRmsNormTensor,
+    },
+    ResidualRmsNormNonContiguous {
+        tensor: ResidualRmsNormTensor,
+    },
+    ResidualRmsNormUnsupportedDType {
+        tensor: ResidualRmsNormTensor,
+        actual: DType,
+    },
+    ResidualRmsNormUnsupportedEncoding {
+        tensor: ResidualRmsNormTensor,
+        actual: Encoding,
+    },
+    ResidualRmsNormShapeMismatch,
+    ResidualRmsNormScaleShapeMismatch,
     RotaryContractRequired,
     RotaryInvalidConfig {
         field: &'static str,
@@ -2258,6 +2723,26 @@ pub enum OpError {
     },
     TokenSelectorShapeMismatch,
     TokenSelectorOutputShapeMismatch,
+    GdnProjectionBundleContractRequired,
+    GdnProjectionBundleZeroExtent,
+    GdnProjectionBundleNonContiguous,
+    GdnProjectionBundleUnsupportedDType {
+        actual: DType,
+    },
+    GdnProjectionBundleUnsupportedEncoding {
+        actual: Encoding,
+    },
+    GdnProjectionBundleShapeMismatch,
+    MlpGateUpSiluBundleContractRequired,
+    MlpGateUpSiluBundleZeroExtent,
+    MlpGateUpSiluBundleNonContiguous,
+    MlpGateUpSiluBundleUnsupportedDType {
+        actual: DType,
+    },
+    MlpGateUpSiluBundleUnsupportedEncoding {
+        actual: Encoding,
+    },
+    MlpGateUpSiluBundleShapeMismatch,
     SparseMoeContractRequired,
     SparseMoeInvalidContract,
     SparseMoeTensorContractMismatch,
@@ -2418,6 +2903,33 @@ impl fmt::Display for OpError {
                     "rms_norm epsilon is not finite and positive (bits 0x{bits:08x})"
                 )
             }
+            Self::ResidualRmsNormContractRequired => {
+                formatter.write_str("residual_rms_norm requires an explicit contract")
+            }
+            Self::ResidualRmsNormRankZero { tensor } => {
+                write!(formatter, "residual_rms_norm {tensor} must have rank at least one")
+            }
+            Self::ResidualRmsNormZeroExtent { tensor } => {
+                write!(formatter, "residual_rms_norm {tensor} must not have a zero extent")
+            }
+            Self::ResidualRmsNormNonContiguous { tensor } => {
+                write!(formatter, "residual_rms_norm {tensor} must be row-major contiguous")
+            }
+            Self::ResidualRmsNormUnsupportedDType { tensor, actual } => {
+                write!(formatter, "residual_rms_norm {tensor} must be bf16, got {actual}")
+            }
+            Self::ResidualRmsNormUnsupportedEncoding { tensor, actual } => {
+                write!(
+                    formatter,
+                    "residual_rms_norm {tensor} must use unquantized encoding, got {actual:?}"
+                )
+            }
+            Self::ResidualRmsNormShapeMismatch => formatter.write_str(
+                "residual_rms_norm residual, addend, intermediate, and output shapes must match",
+            ),
+            Self::ResidualRmsNormScaleShapeMismatch => formatter.write_str(
+                "residual_rms_norm raw scale must be rank one and match the final dimension",
+            ),
             Self::RotaryContractRequired => {
                 formatter.write_str("rotary requires an explicit split-half contract")
             }
@@ -2602,6 +3114,46 @@ impl fmt::Display for OpError {
             ),
             Self::TokenSelectorOutputShapeMismatch => formatter.write_str(
                 "token_select output must be a contiguous unquantized U8 [16] record"
+            ),
+            Self::GdnProjectionBundleContractRequired => {
+                formatter.write_str("gdn_projection_bundle requires an explicit contract")
+            }
+            Self::GdnProjectionBundleZeroExtent => {
+                formatter.write_str("gdn_projection_bundle tensors must have non-zero extents")
+            }
+            Self::GdnProjectionBundleNonContiguous => {
+                formatter.write_str("gdn_projection_bundle tensors must be row-major contiguous")
+            }
+            Self::GdnProjectionBundleUnsupportedDType { actual } => write!(
+                formatter,
+                "gdn_projection_bundle tensors must use bf16, got {actual}"
+            ),
+            Self::GdnProjectionBundleUnsupportedEncoding { actual } => write!(
+                formatter,
+                "gdn_projection_bundle tensors must use unquantized encoding, got {actual:?}"
+            ),
+            Self::GdnProjectionBundleShapeMismatch => formatter.write_str(
+                "gdn_projection_bundle requires activation [M,2560], weights [N,2560], outputs [M,N] for N=8192,4096,32,32",
+            ),
+            Self::MlpGateUpSiluBundleContractRequired => {
+                formatter.write_str("mlp_gate_up_silu_bundle requires an explicit contract")
+            },
+            Self::MlpGateUpSiluBundleZeroExtent => {
+                formatter.write_str("mlp_gate_up_silu_bundle tensors must have non-zero extents")
+            },
+            Self::MlpGateUpSiluBundleNonContiguous => formatter.write_str(
+                "mlp_gate_up_silu_bundle tensors must be row-major contiguous",
+            ),
+            Self::MlpGateUpSiluBundleUnsupportedDType { actual } => write!(
+                formatter,
+                "mlp_gate_up_silu_bundle tensors must use bf16, got {actual}"
+            ),
+            Self::MlpGateUpSiluBundleUnsupportedEncoding { actual } => write!(
+                formatter,
+                "mlp_gate_up_silu_bundle tensors must use unquantized encoding, got {actual:?}"
+            ),
+            Self::MlpGateUpSiluBundleShapeMismatch => formatter.write_str(
+                "mlp_gate_up_silu_bundle requires activation [M,2560], weights [9216,2560], outputs [M,9216]",
             ),
             Self::SparseMoeContractRequired => {
                 formatter.write_str("sparse_moe requires an explicit routing/expert contract")

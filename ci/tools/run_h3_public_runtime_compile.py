@@ -61,6 +61,7 @@ PUBLIC_RUNTIME_API_SOURCE_PATHS = (
     "native/hip/src/linear_attention_api.cpp",
     "native/hip/src/matmul_api.cpp",
     "native/hip/src/rmsnorm_api.cpp",
+    "native/hip/src/residual_rmsnorm_api.cpp",
     "native/hip/src/rotary_api.cpp",
     "native/hip/src/windowed_attention_api.cpp",
 )
@@ -70,10 +71,12 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/causal_attention_kernel.hip.cpp",
     "native/hip/src/elementwise_kernel.hip.cpp",
     "native/hip/src/embedding_kernel.hip.cpp",
+    "native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
     "native/hip/src/gemma_attention_kernel.hip.cpp",
     "native/hip/src/kv_state_kernel.hip.cpp",
     "native/hip/src/linear_attention_kernel.hip.cpp",
     "native/hip/src/matmul_kernel.hip.cpp",
+    "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
     "native/hip/src/rmsnorm_kernel.hip.cpp",
     "native/hip/src/rotary_kernel.hip.cpp",
 )
@@ -93,6 +96,8 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/embedding_kernel_internal.hpp",
     "native/hip/src/embedding_runtime.inc",
     "native/hip/src/evidence_abi.h",
+    "native/hip/src/gdn_projection_bundle_kernel_internal.hpp",
+    "native/hip/src/gdn_projection_bundle_runtime.inc",
     "native/hip/src/gemma_attention_kernel_internal.hpp",
     "native/hip/src/kv_state_api.hpp",
     "native/hip/src/kv_state_kernel_internal.hpp",
@@ -102,6 +107,9 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/matmul_api.hpp",
     "native/hip/src/matmul_kernel_internal.hpp",
     "native/hip/src/matmul_runtime.inc",
+    "native/hip/src/mlp_gate_up_silu_bundle_kernel_internal.hpp",
+    "native/hip/src/mlp_gate_up_silu_bundle_runtime.inc",
+    "native/hip/src/residual_rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
     "native/hip/src/rotary_api.hpp",
@@ -147,6 +155,9 @@ PUBLIC_SYMBOLS = tuple(sorted({
     "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release",
     "sllm_matmul_prepare", "sllm_query_version", "sllm_queue_create", "sllm_queue_fence", "sllm_queue_release", "sllm_queue_set_completion_mode",
     "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
+    "sllm_residual_rmsnorm_execute", "sllm_residual_rmsnorm_plan_release", "sllm_residual_rmsnorm_prepare",
+    "sllm_gdn_projection_bundle_execute", "sllm_gdn_projection_bundle_plan_release", "sllm_gdn_projection_bundle_prepare",
+    "sllm_mlp_gate_up_silu_bundle_execute", "sllm_mlp_gate_up_silu_bundle_plan_release", "sllm_mlp_gate_up_silu_bundle_prepare",
     "sllm_rotary_execute", "sllm_rotary_plan_release", "sllm_rotary_prepare",
     "sllm_windowed_attention_execute", "sllm_windowed_attention_plan_release", "sllm_windowed_attention_prepare",
 }))
@@ -718,6 +729,7 @@ PUBLIC_RUNTIME_LINK_LIBRARIES = (
     "/opt/rocm/lib/libamdhip64.so",
     "/opt/rocm/lib/libhipblas.so",
     "/opt/rocm/lib/libhipblaslt.so",
+    "/opt/rocm/lib/librocblas.so",
 )
 
 
@@ -726,11 +738,12 @@ def validate_native_link_contract(cmake_text: str) -> None:
         target_link_libraries(sllm_hip_stub PRIVATE
             \"${ROCM_PATH}/lib/libhipblas.so\"
             \"${ROCM_PATH}/lib/libhipblaslt.so\"
+            \"${ROCM_PATH}/lib/librocblas.so\"
         )
     endif()"""
     if expected not in cmake_text:
         raise RuntimeContractError(
-            "native public-runtime link contract must include hipBLAS then hipBLASLt"
+            "native public-runtime link contract must include hipBLAS then hipBLASLt then rocBLAS"
         )
 
 

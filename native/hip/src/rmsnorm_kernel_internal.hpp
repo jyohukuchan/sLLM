@@ -11,6 +11,14 @@ constexpr const char *kLogicalKernelId = "rmsnorm.baseline.wave32.v1";
 constexpr const char *kDeviceSymbol = "sllm_rmsnorm_baseline_wave32_v1";
 constexpr const char *kWave64LogicalKernelId = "rmsnorm.baseline.wave64.v1";
 constexpr const char *kWave64DeviceSymbol = "sllm_rmsnorm_baseline_wave64_v1";
+constexpr const char *kResidualLogicalKernelId =
+    "rmsnorm.residual_fused.wave32.v1";
+constexpr const char *kResidualDeviceSymbol =
+    "sllm_rmsnorm_residual_fused_wave32_v1";
+constexpr const char *kResidualWave64LogicalKernelId =
+    "rmsnorm.residual_fused.wave64.v1";
+constexpr const char *kResidualWave64DeviceSymbol =
+    "sllm_rmsnorm_residual_fused_wave64_v1";
 
 #if defined(__HIPCC__) || defined(__CUDACC__)
 #define SLLM_RMSNORM_HOST_DEVICE __host__ __device__
@@ -68,6 +76,14 @@ hipError_t launch(const uint16_t *activation, const uint16_t *raw_scale,
                   uint16_t *output, uint32_t normalized_size,
                   uint32_t row_count, float epsilon, uint32_t scale_mode,
                   hipStream_t stream) noexcept;
+
+hipError_t launch_residual_fused(const uint16_t *residual,
+                                 const uint16_t *addend,
+                                 const uint16_t *raw_scale,
+                                 uint16_t *residual_output, uint16_t *output,
+                                 uint32_t normalized_size, uint32_t row_count,
+                                 float epsilon, uint32_t scale_mode,
+                                 hipStream_t stream) noexcept;
 
 } // namespace sllm_rmsnorm_kernel
 
