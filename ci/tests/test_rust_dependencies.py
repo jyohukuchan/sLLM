@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "ci/tools"))
 
 from common import ContractError, read_json  # noqa: E402
+from validate_rust import b0_cargo_environment, command_for_mode  # noqa: E402
 from validate_rust_dependencies import (  # noqa: E402
     B0_ABSENT_ENVIRONMENT_VARIABLES,
     B0_DISABLED_HIP_FLAGS,
@@ -25,6 +26,7 @@ from validate_rust_dependencies import (  # noqa: E402
     SECTION_NAMES,
     MSRV_AUTHORITY,
     MSRV_TARGET,
+    _cargo_environment,
     _cargo_metadata,
     _find_declared_dependency,
     run_cargo_check,
@@ -264,6 +266,14 @@ class RustDependencyPolicyTests(unittest.TestCase):
 
         with self.assertRaises(ContractError):
             run_cargo_check(ROOT, runner=failed_runner)
+
+    def test_msrv_gate_and_dependency_validator_share_b0_contract(self) -> None:
+        self.assertEqual(command_for_mode("msrv"), [
+            "cargo", f"+{MSRV_AUTHORITY}", "check", "--jobs", "1", "--workspace",
+            "--all-targets", "--locked", "--offline", "--target", MSRV_TARGET,
+        ])
+        with patch.dict(os.environ, HOSTILE_CARGO_ENVIRONMENT, clear=False):
+            self.assertEqual(b0_cargo_environment(), _cargo_environment())
 
 
 def main() -> int:

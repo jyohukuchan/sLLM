@@ -12,7 +12,104 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEV_RUST_VERSION = "1.97.1"
 MSRV_RUST_VERSION = "1.85.0"
+MSRV_TARGET = "x86_64-unknown-linux-gnu"
 RUSTUP_AUTO_INSTALL = "0"
+B0_DISABLED_HIP_FLAGS = frozenset({
+    "SLLM_ENABLE_HIP_COMPILE_PROBE",
+    "SLLM_ENABLE_HIP_RUNTIME",
+    "SLLM_ENABLE_PUBLIC_HIP_RUNTIME",
+})
+B0_ABSENT_ENVIRONMENT_VARIABLES = frozenset({
+    "CARGO_BUILD_TARGET",
+    "CARGO_BUILD_RUSTC",
+    "CARGO_BUILD_RUSTC_WRAPPER",
+    "CARGO_BUILD_RUSTFLAGS",
+    "CARGO_BUILD_RUSTDOCFLAGS",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
+    "ROCM_PATH",
+    "HIP_PATH",
+    "CMAKE_HIP_ARCHITECTURES",
+    "SLLM_HIP_CODEGEN_FEATURES",
+    "SLLM_SEMANTIC_G1_AUTHORITY",
+    "SLLM_HIP_COMPILER",
+    "SLLM_HIP_COMPILER_LOGICAL",
+    "SLLM_HIP_COMPILER_BROKER_SOCKET",
+    "SLLM_HIP_COMPILER_BROKER_SESSION",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256",
+    "SLLM_HIP_COMPILER_BROKER_CLIENT_FD",
+    "SLLM_HIP_COMPILER_BROKER_TOKEN",
+    "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR",
+    "CXX",
+    "CMAKE_HIP_COMPILER",
+    "CMAKE_C_COMPILER",
+    "CMAKE_CXX_COMPILER",
+    "CMAKE_TOOLCHAIN_FILE",
+    "CMAKE_PREFIX_PATH",
+    "CMAKE_GENERATOR",
+    "CMAKE_GENERATOR_PLATFORM",
+    "CMAKE_GENERATOR_TOOLSET",
+    "CMAKE_MAKE_PROGRAM",
+    "CC",
+    "HIPCC",
+    "HIPCXX",
+    "CFLAGS",
+    "CXXFLAGS",
+    "CPPFLAGS",
+    "LDFLAGS",
+    "CPATH",
+    "C_INCLUDE_PATH",
+    "CPLUS_INCLUDE_PATH",
+    "OBJC_INCLUDE_PATH",
+    "GCC_EXEC_PREFIX",
+    "COMPILER_PATH",
+    "LIBRARY_PATH",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "RUSTC",
+    "RUSTC_BOOTSTRAP",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_ENCODED_RUSTDOCFLAGS",
+})
+B0_SANITIZED_ENVIRONMENT_VARIABLES = B0_DISABLED_HIP_FLAGS | B0_ABSENT_ENVIRONMENT_VARIABLES
+
+
+def b0_cargo_environment() -> dict[str, str]:
+    """Return the sanitized offline environment shared by B0 Rust checks."""
+
+    environment = os.environ.copy()
+    for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
+        environment.pop(name, None)
+    for name in B0_DISABLED_HIP_FLAGS:
+        environment[name] = "0"
+    environment["CARGO_NET_OFFLINE"] = "true"
+    environment["RUSTUP_AUTO_INSTALL"] = RUSTUP_AUTO_INSTALL
+    return environment
+
+
+def msrv_check_command() -> list[str]:
+    """Return the exact B0 MSRV cargo check command."""
+
+    return [
+        "cargo",
+        f"+{MSRV_RUST_VERSION}",
+        "check",
+        "--jobs",
+        "1",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--target",
+        MSRV_TARGET,
+    ]
 
 
 def command_for_mode(mode: str) -> list[str]:
@@ -44,16 +141,7 @@ def command_for_mode(mode: str) -> list[str]:
             "warnings",
         ]
     if mode == "msrv":
-        return [
-            "cargo",
-            f"+{MSRV_RUST_VERSION}",
-            "check",
-            "--jobs",
-            "1",
-            "--workspace",
-            "--locked",
-            "--offline",
-        ]
+        return msrv_check_command()
     raise ValueError(f"unknown Rust validation mode: {mode}")
 
 
@@ -76,8 +164,9 @@ def main() -> int:
         return 0
     command = command_for_mode(args.mode)
     validate_command_registration(args.mode, command)
-    environment = os.environ.copy()
-    environment["RUSTUP_AUTO_INSTALL"] = RUSTUP_AUTO_INSTALL
+    environment = b0_cargo_environment() if args.mode == "msrv" else os.environ.copy()
+    if args.mode != "msrv":
+        environment["RUSTUP_AUTO_INSTALL"] = RUSTUP_AUTO_INSTALL
     try:
         result = subprocess.run(
             command,

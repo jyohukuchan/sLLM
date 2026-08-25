@@ -146,7 +146,7 @@ The top-level build entry point is Cargo. CMake output produced by `sllm-hip-sys
 cargo +1.97.1 build --workspace --locked --offline
 cargo +1.97.1 test --workspace --locked --offline
 cargo +1.97.1 clippy --workspace --all-targets --all-features --locked --offline -- -D warnings
-cargo +1.85.0 check --workspace --locked --offline
+cargo +1.85.0 check --jobs 1 --workspace --all-targets --locked --offline --target x86_64-unknown-linux-gnu
 ```
 
 ## Repository hygiene

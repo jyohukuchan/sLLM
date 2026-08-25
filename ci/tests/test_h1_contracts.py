@@ -22,7 +22,7 @@ from common import (  # noqa: E402
 )
 from local_hygiene import WARN_WORKTREES, classify_worktrees  # noqa: E402
 from validate_matrix import main as validate_matrix_main  # noqa: E402
-from validate_rust import RUSTUP_AUTO_INSTALL, command_for_mode  # noqa: E402
+from validate_rust import MSRV_TARGET, RUSTUP_AUTO_INSTALL, command_for_mode  # noqa: E402
 
 
 class HostContractTests(unittest.TestCase):
@@ -103,7 +103,8 @@ class HostContractTests(unittest.TestCase):
             msrv_command,
             [
                 "cargo", f"+{MSRV_RUST_VERSION}", "check", "--jobs", "1",
-                "--workspace", "--locked", "--offline",
+                "--workspace", "--all-targets", "--locked", "--offline",
+                "--target", MSRV_TARGET,
             ],
         )
         self.assertEqual(list(zip(msrv_command, msrv_command[1:])).count(("--jobs", "1")), 1)

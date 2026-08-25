@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import os
 import platform
 import re
 import subprocess
@@ -24,14 +23,22 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import ContractError, ROOT, read_json  # noqa: E402
+from validate_rust import (  # noqa: E402
+    B0_ABSENT_ENVIRONMENT_VARIABLES,
+    B0_DISABLED_HIP_FLAGS,
+    B0_SANITIZED_ENVIRONMENT_VARIABLES,
+    MSRV_RUST_VERSION,
+    MSRV_TARGET,
+    b0_cargo_environment,
+    msrv_check_command,
+)
 
 POLICY_PATH = Path("ci/dependencies/rust-workspace-v1.json")
 SCHEMA_PATH = Path("ci/schema/rust-dependency-policy-v1.schema.json")
 REGISTRY_SOURCE = "registry+https://github.com/rust-lang/crates.io-index"
 EXPECTED_SCHEMA_VERSION = "rust-dependency-policy-v1"
 EXPECTED_POLICY_ID = "rust-workspace-v1"
-MSRV_AUTHORITY = "1.85.0"
-MSRV_TARGET = "x86_64-unknown-linux-gnu"
+MSRV_AUTHORITY = MSRV_RUST_VERSION
 ALLOWED_EDGE_KINDS = {"normal", "build", "dev"}
 PACKAGE_SOURCES = {REGISTRY_SOURCE, "workspace"}
 TOKENIZERS_ALLOWED_FEATURES = ["onig"]
@@ -107,71 +114,6 @@ SERVER_RUNTIME_DEPENDENCIES = [
         "uses_default_features": False,
     },
 ]
-B0_DISABLED_HIP_FLAGS = frozenset({
-    "SLLM_ENABLE_HIP_COMPILE_PROBE",
-    "SLLM_ENABLE_HIP_RUNTIME",
-    "SLLM_ENABLE_PUBLIC_HIP_RUNTIME",
-})
-B0_ABSENT_ENVIRONMENT_VARIABLES = frozenset({
-    "CARGO_BUILD_TARGET",
-    "CARGO_BUILD_RUSTC",
-    "CARGO_BUILD_RUSTC_WRAPPER",
-    "CARGO_BUILD_RUSTFLAGS",
-    "CARGO_BUILD_RUSTDOCFLAGS",
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTDOCFLAGS",
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
-    "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER",
-    "ROCM_PATH",
-    "HIP_PATH",
-    "CMAKE_HIP_ARCHITECTURES",
-    "SLLM_HIP_CODEGEN_FEATURES",
-    "SLLM_SEMANTIC_G1_AUTHORITY",
-    "SLLM_HIP_COMPILER",
-    "SLLM_HIP_COMPILER_LOGICAL",
-    "SLLM_HIP_COMPILER_BROKER_SOCKET",
-    "SLLM_HIP_COMPILER_BROKER_SESSION",
-    "SLLM_HIP_COMPILER_BROKER_CLIENT",
-    "SLLM_HIP_COMPILER_BROKER_CLIENT_SHA256",
-    "SLLM_HIP_COMPILER_BROKER_CLIENT_FD",
-    "SLLM_HIP_COMPILER_BROKER_TOKEN",
-    "SLLM_SEMANTIC_G1_NATIVE_HIP_BUILD_DIR",
-    "CXX",
-    "CMAKE_HIP_COMPILER",
-    "CMAKE_C_COMPILER",
-    "CMAKE_CXX_COMPILER",
-    "CMAKE_TOOLCHAIN_FILE",
-    "CMAKE_PREFIX_PATH",
-    "CMAKE_GENERATOR",
-    "CMAKE_GENERATOR_PLATFORM",
-    "CMAKE_GENERATOR_TOOLSET",
-    "CMAKE_MAKE_PROGRAM",
-    "CC",
-    "HIPCC",
-    "HIPCXX",
-    "CFLAGS",
-    "CXXFLAGS",
-    "CPPFLAGS",
-    "LDFLAGS",
-    "CPATH",
-    "C_INCLUDE_PATH",
-    "CPLUS_INCLUDE_PATH",
-    "OBJC_INCLUDE_PATH",
-    "GCC_EXEC_PREFIX",
-    "COMPILER_PATH",
-    "LIBRARY_PATH",
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "RUSTC",
-    "RUSTC_BOOTSTRAP",
-    "RUSTC_WRAPPER",
-    "RUSTC_WORKSPACE_WRAPPER",
-    "RUSTFLAGS",
-    "RUSTDOCFLAGS",
-    "CARGO_ENCODED_RUSTFLAGS",
-    "CARGO_ENCODED_RUSTDOCFLAGS",
-})
-B0_SANITIZED_ENVIRONMENT_VARIABLES = B0_DISABLED_HIP_FLAGS | B0_ABSENT_ENVIRONMENT_VARIABLES
 SECTION_NAMES = ("workspace", "workspace_members", "packages", "edges", "counts")
 VERSION_RE = re.compile(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$")
 IDENTITY_RE = re.compile(r"^(registry|workspace):[^:@\x00]+@[^\x00]+$")
@@ -815,14 +757,7 @@ def validate_manifest_against_observed(
 def _cargo_environment() -> dict[str, str]:
     """Return Cargo's offline, host-only B0 environment."""
 
-    environment = os.environ.copy()
-    for name in B0_ABSENT_ENVIRONMENT_VARIABLES:
-        environment.pop(name, None)
-    for name in B0_DISABLED_HIP_FLAGS:
-        environment[name] = "0"
-    environment["CARGO_NET_OFFLINE"] = "true"
-    environment["RUSTUP_AUTO_INSTALL"] = "0"
-    return environment
+    return b0_cargo_environment()
 
 
 def _cargo_metadata(
@@ -844,10 +779,7 @@ def _cargo_metadata(
 def run_cargo_check(repo: Path = ROOT, runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run) -> None:
     """Run the exact B0 MSRV check; a command failure is never a pass."""
 
-    command = [
-        "cargo", f"+{MSRV_AUTHORITY}", "check", "--jobs", "1", "--workspace", "--all-targets", "--locked", "--offline",
-        "--target", MSRV_TARGET,
-    ]
+    command = msrv_check_command()
     process = runner(command, cwd=repo, text=True, capture_output=True, check=False, env=_cargo_environment())
     if process.returncode != 0:
         detail = (process.stderr or process.stdout or "").strip()
