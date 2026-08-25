@@ -1,6 +1,7 @@
 //! Model-free numerical evidence for the public Qwen3.5 GDN state path.
 
 use std::env;
+use std::ffi::OsString;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,11 +55,56 @@ struct Report {
     model_used: bool,
     layout: [usize; 4],
     cases: Vec<CaseEvidence>,
+    continuation: Option<ContinuationEvidence>,
     fallback_allowed: bool,
     fallback_used: bool,
     cpu_fallback_used: bool,
     cleanup_retryable: usize,
     cleanup_durable: usize,
+}
+
+#[derive(Serialize)]
+struct ContinuationEvidence {
+    first_tokens: usize,
+    second_tokens: usize,
+    first_kernel_symbol: String,
+    first_recurrent_device_symbol: String,
+    second_kernel_symbol: String,
+    second_recurrent_device_symbol: String,
+    second_max_abs_error: f32,
+    second_max_rel_error: f32,
+    state_length_after_first: u64,
+    final_state_length: u64,
+    final_state_layout: [usize; 4],
+}
+
+struct EnvironmentRestore {
+    name: &'static str,
+    value: Option<OsString>,
+}
+
+impl EnvironmentRestore {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = env::var_os(name);
+        // This evidence binary performs submissions serially on the main
+        // thread. The temporary mutation is scoped across exactly one native
+        // dispatch and restored on every return path.
+        unsafe { env::set_var(name, value) };
+        Self {
+            name,
+            value: previous,
+        }
+    }
+}
+
+impl Drop for EnvironmentRestore {
+    fn drop(&mut self) {
+        if let Some(value) = &self.value {
+            unsafe { env::set_var(self.name, value) };
+        } else {
+            unsafe { env::remove_var(self.name) };
+        }
+    }
 }
 
 fn parse_config_from<I, S>(arguments: I) -> Result<Config, String>
@@ -138,9 +184,26 @@ fn column_provider_enabled(
     tokens: usize,
     force_baseline: bool,
     short_opt_in: Option<&std::ffi::OsStr>,
+    gfx942_wave64_opt_in: Option<&std::ffi::OsStr>,
 ) -> bool {
     (!force_baseline && tokens >= 128 && matches!(target, "gfx1030" | "gfx1201"))
         || short_column_state_enabled(target, tokens, force_baseline, short_opt_in)
+        || gfx942_wave64_column_state_enabled(target, tokens, force_baseline, gfx942_wave64_opt_in)
+}
+
+fn gfx942_wave64_column_state_enabled(
+    target: &str,
+    tokens: usize,
+    force_baseline: bool,
+    opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    !force_baseline
+        && target == "gfx942:sramecc+:xnack-"
+        && opt_in.is_some_and(|value| value == "1")
+        && tokens >= 128
+        && QK_HEADS == 16
+        && VALUE_HEADS == 32
+        && HEAD_DIM == 128
 }
 
 fn f32_to_bf16(value: f32) -> u16 {
@@ -209,6 +272,110 @@ fn upload_binding(
         .bind(&buffer, view, access)
         .map_err(|error| format!("binding failed: {error}"))?;
     Ok((buffer, binding))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upload_continuation_bindings(
+    session: &sllm_core::ExecutionSession,
+    queue: &sllm_core::ExecutionQueue,
+    tokens: usize,
+    qkv: &[u16],
+    z: &[u16],
+    b_input: &[u16],
+    a_input: &[u16],
+    conv_weight: &[u16],
+    a_log: &[f32],
+    dt_bias: &[u16],
+    norm_weight: &[f32],
+) -> Result<(LinearAttentionBindings, sllm_core::ExecutionBuffer), String> {
+    let (_, qkv_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, QKV_WIDTH],
+        AccessMode::Read,
+        bf16_bytes(qkv),
+    )?;
+    let (_, z_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, OUTPUT_WIDTH],
+        AccessMode::Read,
+        bf16_bytes(z),
+    )?;
+    let (_, b_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(b_input),
+    )?;
+    let (_, a_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[tokens, VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(a_input),
+    )?;
+    let (_, conv_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[QKV_WIDTH, 1, CONV_KERNEL],
+        AccessMode::Read,
+        bf16_bytes(conv_weight),
+    )?;
+    let (_, a_log_binding) = upload_binding(
+        session,
+        queue,
+        DType::F32,
+        &[VALUE_HEADS],
+        AccessMode::Read,
+        f32_bytes(a_log),
+    )?;
+    let (_, dt_binding) = upload_binding(
+        session,
+        queue,
+        DType::Bf16,
+        &[VALUE_HEADS],
+        AccessMode::Read,
+        bf16_bytes(dt_bias),
+    )?;
+    let (_, norm_binding) = upload_binding(
+        session,
+        queue,
+        DType::F32,
+        &[HEAD_DIM],
+        AccessMode::Read,
+        f32_bytes(norm_weight),
+    )?;
+    let output_bytes = tokens * OUTPUT_WIDTH * 2;
+    let output_buffer = session
+        .allocate(output_bytes as u64)
+        .map_err(|error| format!("continuation output allocation failed: {error}"))?;
+    let output_view =
+        TensorView::with_encoding(DType::Bf16, Encoding::Unquantized, &[tokens, OUTPUT_WIDTH])
+            .map_err(|error| error.to_string())?;
+    let output_binding = session
+        .bind(&output_buffer, output_view, AccessMode::Write)
+        .map_err(|error| format!("continuation output binding failed: {error}"))?;
+    Ok((
+        LinearAttentionBindings::new(
+            qkv_binding,
+            z_binding,
+            b_binding,
+            a_binding,
+            conv_binding,
+            a_log_binding,
+            dt_binding,
+            norm_binding,
+            output_binding,
+        ),
+        output_buffer,
+    ))
 }
 
 #[allow(clippy::type_complexity)]
@@ -465,12 +632,34 @@ fn run_case(
     let dispatch = submission.dispatch().clone();
     let force_baseline = env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
     let short_opt_in = env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
-    let use_column_provider =
-        column_provider_enabled(target, tokens, force_baseline, short_opt_in.as_deref());
+    let gfx942_wave64_opt_in = env::var_os("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE");
+    let selection_target = if target == "gfx942" {
+        "gfx942:sramecc+:xnack-"
+    } else {
+        target
+    };
+    let use_gfx942_wave64_column_provider = gfx942_wave64_column_state_enabled(
+        selection_target,
+        tokens,
+        force_baseline,
+        gfx942_wave64_opt_in.as_deref(),
+    );
+    let use_column_provider = column_provider_enabled(
+        selection_target,
+        tokens,
+        force_baseline,
+        short_opt_in.as_deref(),
+        gfx942_wave64_opt_in.as_deref(),
+    );
     let use_decode_pair_provider = tokens == 1 && !force_baseline && target == "gfx1030";
     if dispatch.dispatch_count != if use_column_provider { 4 } else { 2 }
         || dispatch.kernel_id != 2
-        || dispatch.workgroup_size_x != if use_decode_pair_provider { 256 } else { 128 }
+        || dispatch.workgroup_size_x
+            != if use_gfx942_wave64_column_provider || use_decode_pair_provider {
+                256
+            } else {
+                128
+            }
         || dispatch.grid_size_x
             != if use_column_provider {
                 (VALUE_HEADS * HEAD_DIM / 4) as u32
@@ -484,7 +673,9 @@ fn run_case(
         || dispatch.fallback_allowed
         || dispatch.fallback_used
         || dispatch.kernel_symbol
-            != if use_column_provider {
+            != if use_gfx942_wave64_column_provider {
+                "linear_attention.gdn.column_state.gfx942_wave64.v3"
+            } else if use_column_provider {
                 "linear_attention.gdn.column_state.v2"
             } else if use_decode_pair_provider {
                 "linear_attention.gdn.decode_pair.v1"
@@ -492,7 +683,9 @@ fn run_case(
                 "linear_attention.gdn.v1"
             }
         || dispatch.device_symbol
-            != if use_column_provider {
+            != if use_gfx942_wave64_column_provider {
+                "sllm_linear_attention_column_state_wave64_v3"
+            } else if use_column_provider {
                 "sllm_linear_attention_recurrent_column_state_v2"
             } else if use_decode_pair_provider {
                 "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1"
@@ -565,6 +758,210 @@ fn run_case(
     })
 }
 
+fn run_gfx942_mixed_provider_continuation(
+    session: &sllm_core::ExecutionSession,
+    queue: &sllm_core::ExecutionQueue,
+    target: &str,
+) -> Result<Option<ContinuationEvidence>, String> {
+    const FIRST_TOKENS: usize = 128;
+    const SECOND_TOKENS: usize = 128;
+    const TOTAL_TOKENS: usize = FIRST_TOKENS + SECOND_TOKENS;
+    const FORCE_NAME: &str = "SLLM_GDN_FORCE_BASELINE";
+    let candidate_opt_in = env::var_os("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE")
+        .is_some_and(|value| value == "1");
+    let force_baseline = env::var_os(FORCE_NAME).is_some_and(|value| value == "1");
+    if target != "gfx942" || !candidate_opt_in || force_baseline {
+        return Ok(None);
+    }
+
+    let (qkv, z, b_input, a_input, conv_weight, a_log, dt_bias, norm_weight) = inputs(TOTAL_TOKENS);
+    let expected = oracle(
+        TOTAL_TOKENS,
+        &qkv,
+        &z,
+        &b_input,
+        &a_input,
+        &a_log,
+        &dt_bias,
+        &norm_weight,
+    );
+    let state_descriptor = LinearAttentionStateDescriptor::new_with_layout(
+        13,
+        TOTAL_TOKENS as u64,
+        QK_HEADS,
+        VALUE_HEADS,
+        HEAD_DIM,
+        CONV_KERNEL,
+    )
+    .map_err(|error| error.to_string())?;
+    let state = session
+        .create_linear_attention_state(state_descriptor)
+        .map_err(|error| format!("continuation state creation failed: {error}"))?;
+
+    let (first_bindings, first_output) = upload_continuation_bindings(
+        session,
+        queue,
+        FIRST_TOKENS,
+        &qkv[..FIRST_TOKENS * QKV_WIDTH],
+        &z[..FIRST_TOKENS * OUTPUT_WIDTH],
+        &b_input[..FIRST_TOKENS * VALUE_HEADS],
+        &a_input[..FIRST_TOKENS * VALUE_HEADS],
+        &conv_weight,
+        &a_log,
+        &dt_bias,
+        &norm_weight,
+    )?;
+    let first_descriptor =
+        LinearAttentionDescriptor::new(0, FIRST_TOKENS as u64, FIRST_TOKENS as u64)
+            .map_err(|error| error.to_string())?;
+    let mut first_submission = session
+        .linear_attention(&state, queue, first_bindings, first_descriptor)
+        .map_err(|error| format!("continuation candidate submission failed: {error}"))?;
+    let first_dispatch = first_submission.dispatch().clone();
+    if first_dispatch.dispatch_count != 4
+        || first_dispatch.workgroup_size_x != 256
+        || first_dispatch.grid_size_x != (VALUE_HEADS * HEAD_DIM / 4) as u32
+        || first_dispatch.kernel_symbol != "linear_attention.gdn.column_state.gfx942_wave64.v3"
+        || first_dispatch.device_symbol != "sllm_linear_attention_column_state_wave64_v3"
+        || first_dispatch.target != "gfx942"
+        || first_dispatch.fallback_allowed
+        || first_dispatch.fallback_used
+    {
+        return Err(format!(
+            "continuation first dispatch did not select exact gfx942 v3: {first_dispatch:?}"
+        ));
+    }
+    wait_success(
+        first_submission.wait(WAIT),
+        "continuation candidate completion",
+    )?;
+    let first_snapshot = state
+        .snapshot(session)
+        .map_err(|error| format!("continuation first snapshot failed: {error}"))?;
+    if first_snapshot.length() != FIRST_TOKENS as u64
+        || first_snapshot.descriptor() != state_descriptor
+    {
+        return Err("continuation first state publication/layout mismatch".to_owned());
+    }
+    drop(first_submission);
+    drop(first_output);
+
+    let qkv_offset = FIRST_TOKENS * QKV_WIDTH;
+    let output_offset = FIRST_TOKENS * OUTPUT_WIDTH;
+    let scalar_offset = FIRST_TOKENS * VALUE_HEADS;
+    let (second_bindings, second_output) = upload_continuation_bindings(
+        session,
+        queue,
+        SECOND_TOKENS,
+        &qkv[qkv_offset..qkv_offset + SECOND_TOKENS * QKV_WIDTH],
+        &z[output_offset..output_offset + SECOND_TOKENS * OUTPUT_WIDTH],
+        &b_input[scalar_offset..scalar_offset + SECOND_TOKENS * VALUE_HEADS],
+        &a_input[scalar_offset..scalar_offset + SECOND_TOKENS * VALUE_HEADS],
+        &conv_weight,
+        &a_log,
+        &dt_bias,
+        &norm_weight,
+    )?;
+    let second_descriptor = LinearAttentionDescriptor::new(
+        FIRST_TOKENS as u64,
+        SECOND_TOKENS as u64,
+        TOTAL_TOKENS as u64,
+    )
+    .map_err(|error| error.to_string())?;
+    let force_restore = EnvironmentRestore::set(FORCE_NAME, "1");
+    let mut second_submission = session
+        .linear_attention(&state, queue, second_bindings, second_descriptor)
+        .map_err(|error| format!("continuation forced-baseline submission failed: {error}"))?;
+    let second_dispatch = second_submission.dispatch().clone();
+    if second_dispatch.dispatch_count != 2
+        || second_dispatch.workgroup_size_x != 128
+        || second_dispatch.grid_size_x != VALUE_HEADS as u32
+        || second_dispatch.kernel_symbol != "linear_attention.gdn.v1"
+        || second_dispatch.device_symbol != "sllm_linear_attention_recurrent_gated_norm_v1"
+        || second_dispatch.target != "gfx942"
+        || second_dispatch.fallback_allowed
+        || second_dispatch.fallback_used
+    {
+        return Err(format!(
+            "continuation second dispatch did not force baseline: {second_dispatch:?}"
+        ));
+    }
+    wait_success(
+        second_submission.wait(WAIT),
+        "continuation forced-baseline completion",
+    )?;
+    let final_snapshot = state
+        .snapshot(session)
+        .map_err(|error| format!("continuation final snapshot failed: {error}"))?;
+    if final_snapshot.length() != TOTAL_TOKENS as u64
+        || final_snapshot.descriptor() != state_descriptor
+    {
+        return Err("continuation final state publication/layout mismatch".to_owned());
+    }
+    let second_output_bytes = SECOND_TOKENS * OUTPUT_WIDTH * 2;
+    let mut readback = session
+        .readback(
+            queue,
+            second_output
+                .range(0, second_output_bytes as u64)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| format!("continuation output readback failed: {error}"))?;
+    wait_success(readback.wait(WAIT), "continuation output readback")?;
+    let mut actual_bytes = vec![0_u8; second_output_bytes];
+    readback
+        .read_into(&mut actual_bytes)
+        .map_err(|error| format!("continuation output read failed: {error}"))?;
+    let actual = actual_bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+    let expected_second = &expected[output_offset..];
+    let mut max_abs_error = 0.0_f32;
+    let mut max_rel_error = 0.0_f32;
+    for (actual_bits, &expected_bits) in actual.zip(expected_second) {
+        let actual_value = bf16_to_f32(actual_bits);
+        let expected_value = bf16_to_f32(expected_bits);
+        let absolute = (actual_value - expected_value).abs();
+        let relative = if expected_value == 0.0 {
+            absolute
+        } else {
+            absolute / expected_value.abs()
+        };
+        max_abs_error = max_abs_error.max(absolute);
+        max_rel_error = max_rel_error.max(relative);
+        if absolute > 0.015625 + 0.03125 * expected_value.abs() {
+            return Err(format!(
+                "continuation second output mismatch: actual={actual_value} expected={expected_value}"
+            ));
+        }
+    }
+    let layout = final_snapshot.descriptor().layout();
+    let evidence = ContinuationEvidence {
+        first_tokens: FIRST_TOKENS,
+        second_tokens: SECOND_TOKENS,
+        first_kernel_symbol: first_dispatch.kernel_symbol,
+        first_recurrent_device_symbol: first_dispatch.device_symbol,
+        second_kernel_symbol: second_dispatch.kernel_symbol,
+        second_recurrent_device_symbol: second_dispatch.device_symbol,
+        second_max_abs_error: max_abs_error,
+        second_max_rel_error: max_rel_error,
+        state_length_after_first: first_snapshot.length(),
+        final_state_length: final_snapshot.length(),
+        final_state_layout: [
+            layout.qk_heads(),
+            layout.value_heads(),
+            layout.head_dim(),
+            layout.conv_kernel_size(),
+        ],
+    };
+    drop(readback);
+    drop(second_submission);
+    drop(second_output);
+    drop(force_restore);
+    drop(state);
+    Ok(Some(evidence))
+}
+
 fn run(config: &Config) -> Result<Report, String> {
     let backend = HipBackend::connect().map_err(|error| format!("HIP connect failed: {error}"))?;
     let session = backend
@@ -573,7 +970,7 @@ fn run(config: &Config) -> Result<Report, String> {
                 .map_err(|error| error.to_string())?,
         )
         .map_err(|error| format!("session open failed: {error}"))?;
-    let result = (|| {
+    let result: Result<(Vec<CaseEvidence>, Option<ContinuationEvidence>), String> = (|| {
         let queue = session
             .create_queue()
             .map_err(|error| format!("queue creation failed: {error}"))?;
@@ -581,9 +978,11 @@ fn run(config: &Config) -> Result<Report, String> {
             .iter()
             .copied()
             .map(|tokens| run_case(&session, &queue, tokens, &config.target))
-            .collect::<Result<Vec<_>, _>>();
+            .collect::<Result<Vec<_>, _>>()?;
+        let continuation =
+            run_gfx942_mixed_provider_continuation(&session, &queue, &config.target)?;
         drop(queue);
-        cases
+        Ok((cases, continuation))
     })();
     let cleanup = match session.shutdown(Duration::from_secs(16)) {
         Ok(cleanup) => cleanup,
@@ -596,7 +995,7 @@ fn run(config: &Config) -> Result<Report, String> {
             });
         }
     };
-    let cases = result?;
+    let (cases, continuation) = result?;
     if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
         return Err("GDN cleanup did not return to zero".to_owned());
     }
@@ -609,6 +1008,7 @@ fn run(config: &Config) -> Result<Report, String> {
         model_used: false,
         layout: [QK_HEADS, VALUE_HEADS, HEAD_DIM, CONV_KERNEL],
         cases,
+        continuation,
         fallback_allowed: false,
         fallback_used: false,
         cpu_fallback_used: false,
@@ -718,9 +1118,62 @@ mod tests {
         assert!(!short_column_state_enabled("gfx1030", 17, false, unknown));
         assert!(!short_column_state_enabled("gfx1201", 17, false, enabled));
         assert!(!short_column_state_enabled("unknown", 17, false, enabled));
-        assert!(column_provider_enabled("gfx1201", 128, false, disabled));
-        assert!(!column_provider_enabled("gfx1201", 17, false, enabled));
-        assert!(column_provider_enabled("gfx1030", 17, false, None));
-        assert!(!column_provider_enabled("gfx1030", 128, true, enabled));
+        assert!(column_provider_enabled(
+            "gfx1201", 128, false, disabled, None
+        ));
+        assert!(!column_provider_enabled(
+            "gfx1201", 17, false, enabled, None
+        ));
+        assert!(column_provider_enabled("gfx1030", 17, false, None, None));
+        assert!(!column_provider_enabled(
+            "gfx1030", 128, true, enabled, None
+        ));
+    }
+
+    #[test]
+    fn gfx942_wave64_column_selector_requires_exact_suffix_and_opt_in() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        for tokens in [127_usize, 128, 129] {
+            assert_eq!(
+                gfx942_wave64_column_state_enabled(
+                    "gfx942:sramecc+:xnack-",
+                    tokens,
+                    false,
+                    enabled,
+                ),
+                tokens >= 128
+            );
+        }
+        for target in [
+            "gfx942",
+            "gfx942:sramecc-:xnack-",
+            "gfx942:sramecc+:xnack+",
+            "gfx1030",
+            "gfx1201",
+            "unknown",
+        ] {
+            assert!(!gfx942_wave64_column_state_enabled(
+                target, 128, false, enabled,
+            ));
+        }
+        assert!(!gfx942_wave64_column_state_enabled(
+            "gfx942:sramecc+:xnack-",
+            128,
+            true,
+            enabled,
+        ));
+        assert!(!gfx942_wave64_column_state_enabled(
+            "gfx942:sramecc+:xnack-",
+            128,
+            false,
+            None,
+        ));
+        assert!(!gfx942_wave64_column_state_enabled(
+            "gfx942:sramecc+:xnack-",
+            128,
+            false,
+            disabled,
+        ));
     }
 }

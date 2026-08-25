@@ -35,6 +35,11 @@ const DECODE_PAIR_RECURRENT_DEVICE_SYMBOL: &str =
 const DECODE_PAIR_WORKGROUP_SIZE: u32 = 256;
 const COLUMN_KERNEL_SYMBOL: &str = "linear_attention.gdn.column_state.v2";
 const COLUMN_RECURRENT_DEVICE_SYMBOL: &str = "sllm_linear_attention_recurrent_column_state_v2";
+const GFX942_WAVE64_COLUMN_KERNEL_SYMBOL: &str =
+    "linear_attention.gdn.column_state.gfx942_wave64.v3";
+const GFX942_WAVE64_COLUMN_RECURRENT_DEVICE_SYMBOL: &str =
+    "sllm_linear_attention_column_state_wave64_v3";
+const GFX942_WAVE64_COLUMN_WORKGROUP_SIZE: u32 = 256;
 
 struct LinearAttentionStateInner {
     raw: usize,
@@ -734,21 +739,42 @@ fn validate_dispatch(
     expected_target: Option<&str>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
     let short_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
-    validate_dispatch_with_short_opt_in(
+    let gfx942_wave64_opt_in = std::env::var_os("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE");
+    validate_dispatch_with_opt_ins(
         info,
         descriptor,
         layout,
         expected_target,
         short_opt_in.as_deref(),
+        gfx942_wave64_opt_in.as_deref(),
     )
 }
 
+#[cfg(test)]
 fn validate_dispatch_with_short_opt_in(
     info: &sys::sllm_linear_attention_dispatch_info_t,
     descriptor: sllm_core::LinearAttentionDescriptor,
     layout: LinearAttentionLayout,
     expected_target: Option<&str>,
     short_opt_in: Option<&std::ffi::OsStr>,
+) -> Result<LinearAttentionEvidence, RuntimeError> {
+    validate_dispatch_with_opt_ins(
+        info,
+        descriptor,
+        layout,
+        expected_target,
+        short_opt_in,
+        None,
+    )
+}
+
+fn validate_dispatch_with_opt_ins(
+    info: &sys::sllm_linear_attention_dispatch_info_t,
+    descriptor: sllm_core::LinearAttentionDescriptor,
+    layout: LinearAttentionLayout,
+    expected_target: Option<&str>,
+    short_opt_in: Option<&std::ffi::OsStr>,
+    gfx942_wave64_opt_in: Option<&std::ffi::OsStr>,
 ) -> Result<LinearAttentionEvidence, RuntimeError> {
     let observed_target = read_c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -759,13 +785,23 @@ fn validate_dispatch_with_short_opt_in(
     let force_baseline =
         std::env::var_os("SLLM_GDN_FORCE_BASELINE").is_some_and(|value| value == "1");
     let use_column_provider = column_provider_enabled(
-        Some(logical_gcn_arch_name(&observed_target)),
+        Some(&observed_target),
         descriptor.token_count(),
         layout.qk_heads() as u32,
         layout.value_heads() as u32,
         layout.head_dim() as u32,
         force_baseline,
         short_opt_in,
+        gfx942_wave64_opt_in,
+    );
+    let use_gfx942_wave64_column_provider = gfx942_wave64_column_state_enabled(
+        Some(&observed_target),
+        descriptor.token_count(),
+        layout.qk_heads() as u32,
+        layout.value_heads() as u32,
+        layout.head_dim() as u32,
+        force_baseline,
+        gfx942_wave64_opt_in,
     );
     let use_decode_pair_provider = !force_baseline
         && descriptor.token_count() == 1
@@ -784,7 +820,9 @@ fn validate_dispatch_with_short_opt_in(
         && info.recurrent_kernel_id
             == sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1
         && info.workgroup_size_x
-            == if use_decode_pair_provider {
+            == if use_gfx942_wave64_column_provider {
+                GFX942_WAVE64_COLUMN_WORKGROUP_SIZE
+            } else if use_decode_pair_provider {
                 DECODE_PAIR_WORKGROUP_SIZE
             } else {
                 sys::SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE
@@ -807,7 +845,9 @@ fn validate_dispatch_with_short_opt_in(
         && info.fallback_allowed == 0
         && info.fallback_used == 0
         && kernel_symbol
-            == if use_column_provider {
+            == if use_gfx942_wave64_column_provider {
+                GFX942_WAVE64_COLUMN_KERNEL_SYMBOL
+            } else if use_column_provider {
                 COLUMN_KERNEL_SYMBOL
             } else if use_decode_pair_provider {
                 DECODE_PAIR_KERNEL_SYMBOL
@@ -816,7 +856,9 @@ fn validate_dispatch_with_short_opt_in(
             }
         && conv_device_symbol == CONV_DEVICE_SYMBOL
         && recurrent_device_symbol
-            == if use_column_provider {
+            == if use_gfx942_wave64_column_provider {
+                GFX942_WAVE64_COLUMN_RECURRENT_DEVICE_SYMBOL
+            } else if use_column_provider {
                 COLUMN_RECURRENT_DEVICE_SYMBOL
             } else if use_decode_pair_provider {
                 DECODE_PAIR_RECURRENT_DEVICE_SYMBOL
@@ -896,6 +938,7 @@ fn short_column_state_enabled(
         && head_dim == sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
 }
 
+#[allow(clippy::too_many_arguments)]
 fn column_provider_enabled(
     expected_target: Option<&str>,
     token_count: u64,
@@ -904,6 +947,7 @@ fn column_provider_enabled(
     head_dim: u32,
     force_baseline: bool,
     short_opt_in: Option<&std::ffi::OsStr>,
+    gfx942_wave64_opt_in: Option<&std::ffi::OsStr>,
 ) -> bool {
     (!force_baseline
         && token_count >= 128
@@ -917,6 +961,33 @@ fn column_provider_enabled(
             force_baseline,
             short_opt_in,
         )
+        || gfx942_wave64_column_state_enabled(
+            expected_target,
+            token_count,
+            qk_heads,
+            value_heads,
+            head_dim,
+            force_baseline,
+            gfx942_wave64_opt_in,
+        )
+}
+
+fn gfx942_wave64_column_state_enabled(
+    observed_target: Option<&str>,
+    token_count: u64,
+    qk_heads: u32,
+    value_heads: u32,
+    head_dim: u32,
+    force_baseline: bool,
+    opt_in: Option<&std::ffi::OsStr>,
+) -> bool {
+    !force_baseline
+        && observed_target == Some("gfx942:sramecc+:xnack-")
+        && opt_in.is_some_and(|value| value == "1")
+        && token_count >= 128
+        && qk_heads == sys::SLLM_HIP_LINEAR_ATTENTION_QK_HEADS
+        && value_heads == sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+        && head_dim == sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
 }
 
 fn completion_result() -> sys::sllm_completion_result_t {
@@ -954,6 +1025,7 @@ mod tests {
     use std::thread;
 
     fn put<const N: usize>(destination: &mut [c_char; N], value: &str) {
+        destination.fill(0);
         for (output, input) in destination.iter_mut().zip(value.bytes()) {
             *output = input as c_char;
         }
@@ -966,7 +1038,8 @@ mod tests {
         let mut info = empty_dispatch_info();
         info.backend = sys::SLLM_BACKEND_HIP;
         info.dispatch_id = 7;
-        let use_column_provider = descriptor.token_count() >= 128;
+        let use_column_provider =
+            descriptor.token_count() >= 128 && matches!(target, "gfx1030" | "gfx1201");
         let use_decode_pair_provider = descriptor.token_count() == 1 && target == "gfx1030";
         info.dispatch_count = if use_column_provider { 4 } else { 2 };
         info.conv_kernel_id = sys::SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_CAUSAL_CONV_SILU_V1;
@@ -1029,6 +1102,23 @@ mod tests {
         put(
             &mut info.recurrent_device_symbol,
             COLUMN_RECURRENT_DEVICE_SYMBOL,
+        );
+        info
+    }
+
+    fn valid_gfx942_wave64_column_dispatch(
+        descriptor: sllm_core::LinearAttentionDescriptor,
+    ) -> sys::sllm_linear_attention_dispatch_info_t {
+        let mut info = valid_dispatch(descriptor, "gfx942:sramecc+:xnack-");
+        info.dispatch_count = 4;
+        info.workgroup_size_x = GFX942_WAVE64_COLUMN_WORKGROUP_SIZE;
+        info.recurrent_grid_size_x = sys::SLLM_HIP_LINEAR_ATTENTION_VALUE_HEADS
+            * sys::SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM
+            / 4;
+        put(&mut info.kernel_symbol, GFX942_WAVE64_COLUMN_KERNEL_SYMBOL);
+        put(
+            &mut info.recurrent_device_symbol,
+            GFX942_WAVE64_COLUMN_RECURRENT_DEVICE_SYMBOL,
         );
         info
     }
@@ -1177,6 +1267,7 @@ mod tests {
             128,
             false,
             disabled,
+            None,
         ));
         assert!(column_provider_enabled(
             Some("gfx1030"),
@@ -1185,6 +1276,7 @@ mod tests {
             32,
             128,
             false,
+            None,
             None,
         ));
         assert!(!column_provider_enabled(
@@ -1195,6 +1287,7 @@ mod tests {
             128,
             true,
             enabled,
+            None,
         ));
     }
 
@@ -1232,6 +1325,136 @@ mod tests {
                 .is_ok()
             );
         }
+    }
+
+    #[test]
+    fn gfx942_wave64_column_selector_is_exact_opt_in_and_shape_bounded() {
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        let disabled = Some(std::ffi::OsStr::new("0"));
+        for token_count in [127_u64, 128, 129] {
+            assert_eq!(
+                gfx942_wave64_column_state_enabled(
+                    Some("gfx942:sramecc+:xnack-"),
+                    token_count,
+                    16,
+                    32,
+                    128,
+                    false,
+                    enabled,
+                ),
+                token_count >= 128
+            );
+        }
+        for target in [
+            Some("gfx942"),
+            Some("gfx942:sramecc-:xnack-"),
+            Some("gfx942:sramecc+:xnack+"),
+            Some("gfx1030"),
+            Some("gfx1201"),
+            Some("unknown"),
+            None,
+        ] {
+            assert!(!gfx942_wave64_column_state_enabled(
+                target, 128, 16, 32, 128, false, enabled,
+            ));
+        }
+        assert!(!gfx942_wave64_column_state_enabled(
+            Some("gfx942:sramecc+:xnack-"),
+            128,
+            16,
+            32,
+            128,
+            true,
+            enabled,
+        ));
+        assert!(!gfx942_wave64_column_state_enabled(
+            Some("gfx942:sramecc+:xnack-"),
+            128,
+            16,
+            32,
+            128,
+            false,
+            None,
+        ));
+        assert!(!gfx942_wave64_column_state_enabled(
+            Some("gfx942:sramecc+:xnack-"),
+            128,
+            16,
+            32,
+            128,
+            false,
+            disabled,
+        ));
+        for (qk_heads, value_heads, head_dim) in
+            [(8, 32, 128), (16, 16, 128), (16, 32, 64), (16, 32, 256)]
+        {
+            assert!(!gfx942_wave64_column_state_enabled(
+                Some("gfx942:sramecc+:xnack-"),
+                128,
+                qk_heads,
+                value_heads,
+                head_dim,
+                false,
+                enabled,
+            ));
+        }
+    }
+
+    #[test]
+    fn gfx942_wave64_column_metadata_requires_exact_v3_ids() {
+        let layout = LinearAttentionLayout::default();
+        let enabled = Some(std::ffi::OsStr::new("1"));
+        for token_count in [128_u64, 129] {
+            let descriptor =
+                sllm_core::LinearAttentionDescriptor::new(0, token_count, token_count).unwrap();
+            let info = valid_gfx942_wave64_column_dispatch(descriptor);
+            assert!(
+                validate_dispatch_with_opt_ins(
+                    &info,
+                    descriptor,
+                    layout,
+                    Some("gfx942"),
+                    None,
+                    enabled,
+                )
+                .is_ok()
+            );
+            for field in 0..2 {
+                let mut wrong = info;
+                if field == 0 {
+                    put(&mut wrong.kernel_symbol, COLUMN_KERNEL_SYMBOL);
+                } else {
+                    put(
+                        &mut wrong.recurrent_device_symbol,
+                        COLUMN_RECURRENT_DEVICE_SYMBOL,
+                    );
+                }
+                assert!(
+                    validate_dispatch_with_opt_ins(
+                        &wrong,
+                        descriptor,
+                        layout,
+                        Some("gfx942"),
+                        None,
+                        enabled,
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let descriptor = sllm_core::LinearAttentionDescriptor::new(0, 127, 127).unwrap();
+        let info = valid_dispatch(descriptor, "gfx942:sramecc+:xnack-");
+        assert!(
+            validate_dispatch_with_opt_ins(
+                &info,
+                descriptor,
+                layout,
+                Some("gfx942"),
+                None,
+                enabled,
+            )
+            .is_ok()
+        );
     }
 
     #[test]

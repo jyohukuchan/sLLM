@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "three-target-gpu-summary-v1.schema.json",
+  "title": "Final three-target seven-row GPU comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "matrix", "targets", "gpu_family_breakdown", "target_selector", "correctness", "resources", "known_constraints"],
+  "properties": {
+    "schema_version": {"const": "three-target-gpu-summary-v1"},
+    "state": {"const": "PASS"},
+    "matrix": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cases", "row_count", "target_count"],
+      "properties": {
+        "cases": {"type": "array", "const": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001", "long-100000", "decode-20000"]},
+        "row_count": {"const": 7},
+        "target_count": {"const": 3}
+      }
+    },
+    "targets": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/target"}},
+    "gpu_family_breakdown": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/family"}},
+    "target_selector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "fallback_allowed", "default_target", "targets"],
+      "properties": {
+        "kind": {"const": "exact-gfx-target"},
+        "fallback_allowed": {"const": false},
+        "default_target": {"type": "null"},
+        "targets": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/selector_target"}}
+      }
+    },
+    "correctness": {"$ref": "#/$defs/disposition"},
+    "resources": {"$ref": "#/$defs/disposition"},
+    "known_constraints": {"type": "array", "items": {"$ref": "#/$defs/constraint"}}
+  },
+  "$defs": {
+    "target_name": {"enum": ["gfx1030", "gfx1201", "gfx942"]},
+    "family_name": {"enum": ["RDNA2", "RDNA4", "CDNA3"]},
+    "phase_name": {"enum": ["phase49", "phase50", "phase51"]},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "schema_version", "kind"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "schema_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "kind": {"enum": ["aggregate-summary", "per-row-inputs"]}
+      }
+    },
+    "identity": {"type": "object", "additionalProperties": true},
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target", "family", "phase", "source", "state", "identity_scope", "identity", "row_sources", "matrix", "rows"],
+      "properties": {
+        "target": {"$ref": "#/$defs/target_name"},
+        "family": {"$ref": "#/$defs/family_name"},
+        "phase": {"$ref": "#/$defs/phase_name"},
+        "source": {"$ref": "#/$defs/source"},
+        "state": {"enum": ["PASS", "FAIL"]},
+        "identity_scope": {"enum": ["single-summary", "per-row-mixed"]},
+        "identity": {"$ref": "#/$defs/identity"},
+        "row_sources": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/row_source"}},
+        "matrix": {"$ref": "#/$defs/matrix"},
+        "rows": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/row"}}
+      }
+    },
+    "matrix": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cases", "row_count"],
+      "properties": {
+        "cases": {"type": "array", "const": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001", "long-100000", "decode-20000"]},
+        "row_count": {"const": 7}
+      }
+    },
+    "protocol": {
+      "type": "object", "additionalProperties": false,
+      "required": ["warmups", "measured", "context_length", "ignore_eos"],
+      "properties": {
+        "warmups": {"type": "integer", "minimum": 1, "maximum": 3},
+        "measured": {"type": "integer", "minimum": 1, "maximum": 10},
+        "context_length": {"type": "integer", "minimum": 1},
+        "ignore_eos": {"type": "boolean"}
+      }
+    },
+    "stats": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["median", "mad", "count", "min", "max"],
+      "properties": {
+        "median": {"type": "number", "exclusiveMinimum": 0},
+        "mad": {"type": "number", "minimum": 0},
+        "count": {"type": "integer", "minimum": 1, "maximum": 10},
+        "min": {"type": "number", "exclusiveMinimum": 0},
+        "max": {"type": "number", "exclusiveMinimum": 0}
+      }
+    },
+    "engine_stats": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["e2e_ns", "ttft_ns", "tpot_ns"],
+      "properties": {"e2e_ns": {"$ref": "#/$defs/stats"}, "ttft_ns": {"$ref": "#/$defs/stats"}, "tpot_ns": {"$ref": "#/$defs/stats"}}
+    },
+    "metric_gate": {
+      "type": ["object", "null"], "additionalProperties": false,
+      "required": ["sllm_median", "sllm_mad", "llama_median", "llama_mad", "limit", "pass"],
+      "properties": {
+        "sllm_median": {"type": "number", "exclusiveMinimum": 0}, "sllm_mad": {"type": "number", "minimum": 0},
+        "llama_median": {"type": "number", "exclusiveMinimum": 0}, "llama_mad": {"type": "number", "minimum": 0},
+        "limit": {"type": "number", "exclusiveMinimum": 0}, "pass": {"type": ["boolean", "null"]}
+      }
+    },
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "input_token_count", "requested_output_tokens", "protocol", "row_ids", "measured_sample_count", "tokens", "metrics", "gates", "row_state", "failures"],
+      "properties": {
+        "case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001", "long-100000", "decode-20000"]},
+        "input_token_count": {"type": "integer", "minimum": 1},
+        "requested_output_tokens": {"type": "integer", "minimum": 1},
+        "protocol": {"$ref": "#/$defs/protocol"},
+        "row_ids": {"type": "object", "additionalProperties": false, "required": ["sllm", "llama"], "properties": {"sllm": {"type": "string", "minLength": 1, "maxLength": 256}, "llama": {"type": "string", "minLength": 1, "maxLength": 256}}},
+        "measured_sample_count": {"type": "object", "additionalProperties": false, "required": ["sllm", "llama"], "properties": {"sllm": {"type": "integer", "minimum": 0, "maximum": 10}, "llama": {"type": "integer", "minimum": 0, "maximum": 10}}},
+        "tokens": {
+          "type": "object", "additionalProperties": false,
+          "required": ["input_sha256", "generated_equal", "visible_equal", "stop_equal", "generated_sha256", "visible_sha256", "stop_sha256"],
+          "properties": {
+            "input_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "generated_equal": {"type": ["boolean", "null"]}, "visible_equal": {"type": ["boolean", "null"]}, "stop_equal": {"type": ["boolean", "null"]},
+            "generated_sha256": {"$ref": "#/$defs/engine_digest"}, "visible_sha256": {"$ref": "#/$defs/engine_digest"}, "stop_sha256": {"$ref": "#/$defs/engine_digest"}
+          }
+        },
+        "metrics": {"type": "object", "additionalProperties": false, "required": ["sllm", "llama"], "properties": {"sllm": {"$ref": "#/$defs/engine_stats"}, "llama": {"$ref": "#/$defs/engine_stats"}}},
+        "gates": {"type": "object", "additionalProperties": false, "required": ["e2e_ns", "ttft_ns", "tpot_ns"], "properties": {"e2e_ns": {"$ref": "#/$defs/metric_gate"}, "ttft_ns": {"$ref": "#/$defs/metric_gate"}, "tpot_ns": {"$ref": "#/$defs/metric_gate"}}},
+        "row_state": {"enum": ["PASS", "FAIL"]},
+        "failures": {"type": ["object", "null"]}
+      }
+    },
+    "engine_digest": {
+      "type": "object", "additionalProperties": false, "required": ["sllm", "llama"],
+      "properties": {"sllm": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "llama": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}}
+    },
+    "selector_target": {
+      "type": "object", "additionalProperties": false, "required": ["target", "family", "phase"],
+      "properties": {"target": {"$ref": "#/$defs/target_name"}, "family": {"$ref": "#/$defs/family_name"}, "phase": {"$ref": "#/$defs/phase_name"}}
+    },
+    "row_source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "sllm", "llama", "artifact_sha256", "llama_artifact_sha256", "identity_scope", "comparability", "notes"],
+      "properties": {
+        "case_id": {"enum": ["short-odd", "32-32", "prefill-long", "decode-long", "long-10001", "long-100000", "decode-20000"]},
+        "sllm": {"$ref": "#/$defs/evidence_ref"},
+        "llama": {"$ref": "#/$defs/evidence_ref"},
+        "artifact_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "llama_artifact_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "identity_scope": {"enum": ["final-adopted", "non-adopted-v2", "binary-sha-unavailable", "llama-control", "aggregate-summary"]},
+        "comparability": {"enum": ["comparable", "non-comparable"]},
+        "notes": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    },
+    "evidence_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 4096}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "family": {
+      "type": "object", "additionalProperties": false, "required": ["family", "targets", "row_count", "source_states", "correctness", "resources"],
+      "properties": {
+        "family": {"$ref": "#/$defs/family_name"},
+        "targets": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/target_name"}},
+        "row_count": {"const": 7},
+        "source_states": {"type": "array", "items": {"enum": ["PASS", "FAIL"]}},
+        "correctness": {"enum": ["PASS", "FAIL"]},
+        "resources": {"enum": ["PASS", "FAIL"]}
+      }
+    },
+    "disposition": {
+      "type": "object", "additionalProperties": false, "required": ["by_target", "all_pass"],
+      "properties": {
+        "by_target": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/target_disposition"}},
+        "all_pass": {"type": "boolean"}
+      }
+    },
+    "target_disposition": {
+      "type": "object", "additionalProperties": false, "required": ["target", "status", "evidence", "constraint_count"],
+      "properties": {"target": {"$ref": "#/$defs/target_name"}, "status": {"enum": ["PASS", "FAIL"]}, "evidence": {"const": "bounded-seven-row-summary"}, "constraint_count": {"type": "integer", "minimum": 0}}
+    },
+    "constraint": {
+      "type": "object", "additionalProperties": false, "required": ["id", "target", "scope", "reason"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "maxLength": 128},
+        "target": {"anyOf": [{"$ref": "#/$defs/target_name"}, {"const": "all"}]},
+        "scope": {"type": "string", "minLength": 1, "maxLength": 128},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+      }
+    }
+  }
+}

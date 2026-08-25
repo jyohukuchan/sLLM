@@ -55,6 +55,29 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-25-P51-GDN-W64: gfx942 wave64 column-state候補（N1・明示opt-in）
+
+- scope: logical target `gfx942`でruntime実体が厳密に`gfx942:sramecc+:xnack-`、Q/K heads 16、value heads 32、
+  head/state dim 128、BF16 activation、FP32 recurrent state、token count 128以上。`gfx1030`、`gfx1201`、suffixなし／別suffix、
+  unknown target、shape外、127以下は既存providerを維持する。
+- baseline/candidate: baselineはvalue head当たり128 threadで各output columnの128 state項を逐次走査する。candidateは
+  256 threadの4 wave64でwave当たり1 column、lane当たり2 state dimensionをregisterへ保持し、tokenを逐次処理する。
+  recurrent kernelはLDSとbarrierを使用せず、`S^T k`と`S^T q`だけをwave64 treeへ変更する。Q/K L2 normとoutput RMSNormは
+  gfx942 baselineと同じ128項index順FP32逐次和、同じBF16-RNE stageを維持する。
+- 分類: **N1**。real-number式、128項、FP32 accumulator、decay/state update、transactional state publicationを維持し、
+  recurrent projectionの加算依存深さだけを127段からlane local 2項＋wave64 treeへ短縮する。数値差はこの2 reductionへ局所化する。
+- selection/identity: `SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE=1`の明示opt-inだけで
+  `linear_attention.gdn.column_state.gfx942_wave64.v3` / `sllm_linear_attention_column_state_wave64_v3`を選ぶ。
+  `SLLM_GDN_FORCE_BASELINE=1`が常に優先する。compile sourceはCMakeがexact `gfx942:sramecc+:xnack-`にだけ設定する
+  `SLLM_HIP_COMPILE_WAVE64=1`へ限定する。
+- correctness/performance: host/Rust selector、127/128/129境界、shape、target suffix、force-baseline、metadata identityとHIP compileを
+  確認した。MI300X operator 7 shapeと、同じstateへのcandidate 128 token→force-baseline 128 token継続はPASSし、second outputを
+  256 token逐次scalar oracle、publication length/layoutを128/256境界へ照合した。最大絶対／相対誤差は
+  `0.00390625`／`0.014705882`でbaselineと同一、fallbackなし、cleanup 0だった。full-model `10,001/2`は出力完全一致で、
+  prefill中央値を`22.718162442`秒から`6.410255551`秒へ3.54403x短縮した。候補入り全7行は未取得のため、default採用せず
+  exact gfx942の明示opt-in `target-separated`候補とする。
+- rollback: opt-inを設定しないか`SLLM_GDN_FORCE_BASELINE=1`を設定する。恒久rollbackはv3 selectorと3 stage launch/symbolを除去する。
+
 ### OUT-2026-08-24-P52: RDNA長context KV providerとVMM append rollback（N0）
 
 - scope: exact `gfx1030`/`gfx1201`のlogical capacity 65,536以上と、共通virtual-contiguous KV append/COW。

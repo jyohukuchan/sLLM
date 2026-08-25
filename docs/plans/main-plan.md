@@ -379,7 +379,7 @@
 | 計画済み | 48 | 公開APIだけを使う最小WebUI・管理画面 |
 | 完了・限定採用 | 49 | V620 `gfx1030`でGQA P32を限定採用し、long-prefill v2とHIP Graphを棄却。通常5行の退行確認まで完了 |
 | 完了・限定採用 | 50 | R9700 `gfx1201`でPhase 49変更を採否し、MI300X `gfx942`向けwave64引継ぎを準備 |
-| 一時保留 | 51 | フェーズ49/50の採用内容をMI300X `gfx942`へwave64対応で適用し、同じ7行で検証 |
+| 完了・target分離 | 51 | MI300X `gfx942`の7行とprofileをPASSし、GDN wave64候補を既定無効でtarget分離 |
 | 完了 | 52 | R9700 `gfx1201`の長capacityをresident KVへ限定routeし、`10,001/2`と`100,000/2`の自動経路を再検証 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
@@ -387,8 +387,8 @@
 直近の性能経路は番号上の既定順をフェーズ49→50→51→52とする。フェーズ49はV620の全7行同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の正しさ・資源・通常5行の退行確認を終えて完了した。
 フェーズ50はR9700 `gfx1201`の限定採用とMI300X `gfx942` wave64引継ぎ準備を終え、実機性能検証をフェーズ51へ引き継ぐ。
-ユーザー指示によりフェーズ51は一時保留し、フェーズ52を先に完了した。R9700の同等達成はMI300X再開の必須条件にせず、
-フェーズ51は別のユーザー指示があるまで自動再開しない。
+ユーザー指示によりフェーズ51を一時保留してフェーズ52を先に完了した後、2026-08-25のユーザー指示でフェーズ51を再開し完了した。
+R9700の同等達成はMI300X再開の必須条件にしない。
 フェーズ46〜48は予約済みの機能経路として保持するが、ユーザーが優先順位を変更しない限り性能経路の後に扱う。
 フェーズ37〜38はコード変更や実機検証へ着手する前にこの性能経路へ再編した。
 フェーズ37以降の詳細な依存関係と受入条件は
@@ -661,8 +661,12 @@ LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を
   profiled abortのbounded drainもhost failure injectionで固定した。
 - フェーズ50ではexact `gfx1201`のresidual RMSNorm、GDN projection bundle、MLP gate-up-SiLU bundle、GQA4 P32（KV長4,096以上）を採用し、
   `gfx1030`限定経路、不採用経路、gfx942 wave64再設計を分類した。共通source変更後のV620 exact `gfx1030`通常5行は5/5 PASSで、
-  フェーズ49 closeout比`-0.21〜+1.16%`だった。exact `gfx942` Cargo/probe/host selectorはPASSしたが、MI300X実機は未検証であり、
-  次のフェーズ51で実施する。
+  フェーズ49 closeout比`-0.21〜+1.16%`だった。
+- フェーズ51はMI300X exact `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14.0でsLLM／固定llama.cppの7行を7/7 PASSした。
+  fresh profileはGDN `72.72469%`、Full Attention `26.36458%`で、GDN wave64 column-state候補は`10,001/2` prefillを
+  3.54403x改善した。全7行candidate再取得前のため既定無効の`target-separated`候補とし、性能同等未達を残差として記録した。
+  追跡済み要約は[Phase 51 MI300X summary](../../ci/matrix/phase51-mi300x-summary-v1.json)と
+  [3 target summary](../../ci/matrix/three-target-gpu-summary-v1.json)を正本とする。
 
 ### 次に進める独立経路
 
@@ -670,14 +674,14 @@ LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を
    rollback、bounded cleanup、selector/KV physical evidenceを採用した。詳細は
    [フェーズ52保存済み計画](archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)と
    [追跡summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正本とする。
-2. **フェーズ51・MI300X適用（一時保留）**: ユーザーが再開した後、フェーズ49/50の成果と引継ぎ台帳をexact `gfx942`へwave64対応で適用し、
-   同じ7行で検証する。旧フェーズ37〜38のGDN、Full Attention、FNUZ/GEMM、実行再生、KV残差もここへ統合する。
+2. **フェーズ51・MI300X適用（完了）**: exact `gfx942`の7行、fresh profile、GDN wave64候補のtarget分離、
+   全3 target追跡要約までを完了した。Full Attention以下は新しい残差順の後続候補として保持する。
 3. **フェーズ46〜48・機能経路**: ツール、承認制の組込みtool/MCP、WebUIの計画は保持するが、直近の既定優先順位では
    フェーズ49〜52の後に扱う。フェーズ47だけは引き続き明示承認を必要とする。
 
 フェーズ37以降の作業単位、依存関係、受入条件、除外範囲は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
-フェーズ49の3候補判定、フェーズ50のR9700採否、フェーズ52の100k OOM解消を完了した。フェーズ51は一時保留を維持する。
+フェーズ49の3候補判定、フェーズ50のR9700採否、フェーズ51のMI300X実機検証、フェーズ52の100k OOM解消を完了した。
 フェーズ50の詳細計画は[保存済み計画](archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とし、
 番号上の既定実行順は50→51→52だが、フェーズ51と52は相互に待たず、フェーズ49または50の全7行llama.cpp同等達成を
 後続フェーズの開始条件にはしない。

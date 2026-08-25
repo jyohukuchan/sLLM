@@ -35,6 +35,9 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers(
     uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
     uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
     const char *arch_name) noexcept;
+extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
+    uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
+    uint32_t head_dim, const char *arch_name) noexcept;
 
 namespace {
 
@@ -83,6 +86,67 @@ bool create_queue(const sllm_context_t *const context,
   Error error;
   return expect_status(sllm_queue_create(context, &info, queue, &error.sink),
                        SLLM_STATUS_OK, "sllm_queue_create", error);
+}
+
+bool linear_attention_gfx942_wave64_column_selector_contract() {
+  constexpr const char *const opt_in_name =
+      "SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE";
+  constexpr const char *const force_name = "SLLM_GDN_FORCE_BASELINE";
+  const char *const old_opt_in = std::getenv(opt_in_name);
+  const char *const old_force = std::getenv(force_name);
+  const bool had_opt_in = old_opt_in != nullptr;
+  const bool had_force = old_force != nullptr;
+  const std::string old_opt_in_value = had_opt_in ? old_opt_in : "";
+  const std::string old_force_value = had_force ? old_force : "";
+  const auto restore = [&]() {
+    if (had_opt_in) {
+      setenv(opt_in_name, old_opt_in_value.c_str(), 1);
+    } else {
+      unsetenv(opt_in_name);
+    }
+    if (had_force) {
+      setenv(force_name, old_force_value.c_str(), 1);
+    } else {
+      unsetenv(force_name);
+    }
+  };
+  const auto select = [](const uint64_t tokens, const uint32_t qk_heads,
+                         const uint32_t value_heads, const uint32_t head_dim,
+                         const char *const target) {
+    return sllm_test_select_linear_attention_gfx942_wave64_column(
+        tokens, qk_heads, value_heads, head_dim, target);
+  };
+  unsetenv(force_name);
+  unsetenv(opt_in_name);
+  bool valid = select(128U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U;
+  setenv(opt_in_name, "1", 1);
+  valid = valid &&
+          select(127U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U &&
+          select(128U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 1U &&
+          select(129U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 1U;
+  constexpr const char *const rejected_targets[] = {"gfx942",
+                                                    "gfx942:sramecc-:xnack-",
+                                                    "gfx942:sramecc+:xnack+",
+                                                    "gfx1030",
+                                                    "gfx1201",
+                                                    "unknown"};
+  for (const char *const target : rejected_targets) {
+    valid = valid && select(128U, 16U, 32U, 128U, target) == 0U;
+  }
+  valid = valid &&
+          select(128U, 8U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U &&
+          select(128U, 16U, 16U, 128U, "gfx942:sramecc+:xnack-") == 0U &&
+          select(128U, 16U, 32U, 64U, "gfx942:sramecc+:xnack-") == 0U &&
+          select(128U, 16U, 32U, 256U, "gfx942:sramecc+:xnack-") == 0U;
+  setenv(opt_in_name, "0", 1);
+  valid = valid && select(128U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U;
+  setenv(opt_in_name, "unexpected", 1);
+  valid = valid && select(128U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U;
+  setenv(opt_in_name, "1", 1);
+  setenv(force_name, "1", 1);
+  valid = valid && select(128U, 16U, 32U, 128U, "gfx942:sramecc+:xnack-") == 0U;
+  restore();
+  return valid;
 }
 
 bool causal_attention_gqa4_p32_selector_contract() {
@@ -7041,6 +7105,11 @@ int main() {
   }
   if (!rmsnorm_execute_flattens_rank_one_through_eight()) {
     std::cerr << "RMSNorm execute rank-flatten test failed\n";
+    return 1;
+  }
+  if (!linear_attention_gfx942_wave64_column_selector_contract()) {
+    std::cerr << "linear attention gfx942 wave64 column selector contract "
+                 "test failed\n";
     return 1;
   }
 #define SLLM_RUN_KV_CONTRACT(test_name)                                        \

@@ -50,6 +50,10 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_TEST_IDS = [
     "p50.r9700.runner-identity",
     "p50.r9700.summary",
     "p52.r9700.kv-commit-summary",
+    "p51.mi300x.runner-identity",
+    "p51.mi300x.profile",
+    "p51.mi300x.summary",
+    "p51.three-target.summary",
 ]
 EXPECTED_ENGINE_PERFORMANCE_RENDER_TEST_IDS = ["p1.engine-performance.render"]
 EXPECTED_LLAMA_PHASE5_TEST_IDS = ["p3.llama.phase5"]
@@ -139,6 +143,18 @@ EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES = {
     "ci/tests/test_phase50_r9700_runner_identity.py",
     "ci/tests/test_phase50_r9700_summary.py",
     "ci/tests/test_phase52_r9700_summary.py",
+    "ci/schema/phase51-mi300x-summary-v1.schema.json",
+    "ci/tools/aggregate_phase51_mi300x.py",
+    "ci/tools/run_phase51_mi300x_sllm.py",
+    "ci/tools/run_phase51_mi300x_llama.py",
+    "ci/tools/phase51_mi300x_profile.py",
+    "ci/tests/test_phase51_mi300x_runner_identity.py",
+    "ci/tests/test_phase51_mi300x_profile.py",
+    "ci/tests/test_phase51_mi300x_summary.py",
+    "ci/schema/three-target-gpu-summary-v1.schema.json",
+    "ci/matrix/three-target-gpu-summary-v1.json",
+    "ci/tools/aggregate_three_target_summary.py",
+    "ci/tests/test_three_target_summary.py",
 }
 EXPECTED_ENGINE_PERFORMANCE_RENDER_PATH_RULES = {
     "ci/matrix/engine-performance-render-v1.json",
@@ -804,6 +820,10 @@ def validate_phase5_suite_registration(
                 "ci.tests.test_phase50_r9700_runner_identity",
                 "ci.tests.test_phase50_r9700_summary",
                 "ci.tests.test_phase52_r9700_summary",
+                "ci.tests.test_phase51_mi300x_runner_identity",
+                "ci.tests.test_phase51_mi300x_profile",
+                "ci.tests.test_phase51_mi300x_summary",
+                "ci.tests.test_three_target_summary",
             ]},
             EXPECTED_ENGINE_PERFORMANCE_DIRECT_PATH_RULES,
         ),

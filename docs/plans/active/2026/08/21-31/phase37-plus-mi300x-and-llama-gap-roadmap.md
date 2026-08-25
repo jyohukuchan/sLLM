@@ -6,7 +6,7 @@
 2026-08-23のユーザー指示により、Phase 49は全7比較行の同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の退行を確認して完了した。
 Phase 50はR9700 exact `gfx1201`の限定採用とMI300X exact `gfx942` wave64引継ぎ準備を完了し、
-実機性能検証をPhase 51へ引き継いだが、同Phaseはユーザー指示により一時保留している。Phase 52はR9700
+実機性能検証をPhase 51へ引き継いだ。2026-08-25のユーザー指示でPhase 51を再開して完了し、Phase 52はR9700
 `100,000/2`に残ったKV物理コミットOOMを解消して完了した。
 番号上の既定順は49→50→51→52だが、Phase 51と52は独立に開始でき、V620またはR9700の同等達成を後続GPU開始の必須条件にはしない。
 
@@ -64,11 +64,11 @@ Phase 51へ吸収する。Phase 39〜45は完了済み、Phase 46〜48の機能�
 | 48 | planned | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
 | 49 | complete-scoped-adoption | V620のGQA P32を限定採用、long-prefill v2とHIP Graphを棄却 | 3候補の関連実機行、通常5行退行確認、採否履歴 |
 | 50 | complete-limited-adoption | R9700 `gfx1201`採用とMI300X `gfx942` wave64引継ぎ準備 | Phase 49完了（充足済み） |
-| 51 | on-hold | Phase 49/50採用内容のMI300X wave64適用・実機検証 | ユーザー指示により一時保留。MI300X VM。Phase 50引継ぎ台帳 |
+| 51 | completed-target-separated | Phase 49/50採用内容のMI300X wave64適用・実機検証 | MI300X 7/7 PASS、GDN候補を既定無効でtarget分離 |
 | 52 | complete | R9700 `100,000/2`のKV物理コミットOOM解消 | 自動経路4/4 PASS、10,001 regression 13/13 PASS |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
-MI300X wave64引継ぎ準備は完了した。ユーザー指示によりPhase 51は一時保留し、R9700限定のPhase 52を先に完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
+MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
 採用routeをexact `gfx1201`へ限定した。Phase 50の全7行llama.cpp同等達成は後続Phase開始のgateではない。Phase 46〜48は内容と番号を保持するが、
 既定の実行優先順位は性能laneの後とする。
 
@@ -253,7 +253,7 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
 
 ## Phase 51: MI300Xへの適用と検証
 
-> 状態: on-hold（2026-08-24のユーザー指示。Phase 52完了後も自動再開しない）
+> 状態: completed-target-separated（2026-08-25）
 
 ### 範囲と作業単位
 
@@ -277,6 +277,20 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
 - 全3 targetの最終7行比較、GPU family内訳、target selector、正しさ、資源、既知制約を一つの追跡済み要約へ固定する。
 - MI300A、MI325X、bare metal、複数GPU、FNUZ FP8のllama.cpp比較、他モデルを完了主張へ含めない。
 
+### 完了結果
+
+- MI300X exact `gfx942:sramecc+:xnack-`、wave64、ROCm 7.14.0でsLLMと固定llama.cppの7行を規定反復で実行し、
+  両engineとも7/7 PASSした。sLLMはHIP-only、fallbackなし、反復一致、cleanup 0、資源復帰を満たした。
+- fresh profileはGDN `72.72469%`、Full Attention `26.36458%`だった。GDN wave64 column-state v3はoperatorと
+  model A/BをPASSし、`10,001/2` prefill中央値を`22.718162442`秒から`6.410255551`秒へ3.54403x改善した。
+  全7行candidate再実行は行わず、既定無効のexact gfx942 opt-in候補として`target-separated`に分類した。
+- llama.cpp性能同等gateは7行とも未達であり、残差を省略していない。追跡済みMI300X要約は
+  [`ci/matrix/phase51-mi300x-summary-v1.json`](../../../../../../ci/matrix/phase51-mi300x-summary-v1.json)、3 target要約は
+  [`ci/matrix/three-target-gpu-summary-v1.json`](../../../../../../ci/matrix/three-target-gpu-summary-v1.json)を正本とする。
+  gfx1030の長時間2行はsingle final identityではないため行別出典とnon-comparable制約を保持し、gfx1201の100k OOMも維持した。
+
+[Phase 51実行履歴](../../../../../history/2026/08/21-31/phase51-mi300x-application-and-validation.md)
+
 ## Phase 52: R9700 100k KV物理コミットOOMの解消
 
 > 状態: complete（2026-08-24）
@@ -292,7 +306,7 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
   HBM／GTT復帰を確認する。llama.cpp性能同等は報告するが完了gateにしない。
 - 固定tuple、仮説順、failure injection、証拠schema、停止条件は
   [Phase 52保存済み計画](../../../../archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)を正本とする。
-  Phase 51はユーザーが再開するまで一時保留を維持する。
+  Phase 51はこのPhase 52完了時点では一時保留だったが、2026-08-25のユーザー指示で再開して完了した。
 
 ### Phase 52完了結果
 

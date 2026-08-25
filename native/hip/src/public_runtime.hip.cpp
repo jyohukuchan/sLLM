@@ -504,6 +504,29 @@ hipError_t launch_column_postprocess(const uint16_t *const, const float *const,
                                      const hipStream_t) noexcept {
   return hipSuccess;
 }
+
+hipError_t launch_gfx942_wave64_column_preprocess(
+    uint16_t *const, const uint16_t *const, const uint16_t *const,
+    const float *const, const uint16_t *const, float *const, float *const,
+    const uint32_t, const uint32_t, const uint32_t, const uint32_t,
+    const uint32_t, const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_gfx942_wave64_column_recurrent(
+    const uint16_t *const, const float *const, const float *const,
+    const float *const, float *const, uint16_t *const, const uint32_t,
+    const uint32_t, const uint32_t, const uint32_t, const uint32_t,
+    const uint32_t, const hipStream_t) noexcept {
+  return hipSuccess;
+}
+
+hipError_t launch_gfx942_wave64_column_postprocess(
+    const uint16_t *const, const float *const, uint16_t *const, const uint32_t,
+    const uint32_t, const uint32_t, const uint32_t,
+    const hipStream_t) noexcept {
+  return hipSuccess;
+}
 } // namespace sllm_linear_attention_kernel
 #endif
 

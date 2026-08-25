@@ -17,16 +17,45 @@ bool short_column_state_opt_in(const uint64_t token_count,
          arch_name != nullptr && std::strcmp(arch_name, "gfx1030") == 0;
 }
 
-bool short_column_state_shape_opt_in(const uint64_t token_count,
-                                     const uint32_t qk_heads,
-                                     const uint32_t value_heads,
-                                     const uint32_t head_dim,
-                                     const char *const force_baseline) noexcept {
+bool short_column_state_shape_opt_in(
+    const uint64_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const char *const force_baseline) noexcept {
   const char *const opt_in =
       std::getenv("SLLM_LINEAR_ATTENTION_GFX1030_SHORT_COLUMN_STATE");
   return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
          (opt_in == nullptr || std::strcmp(opt_in, "1") == 0) &&
          token_count >= 17U && token_count < 128U &&
+         qk_heads == ::sllm_linear_attention_kernel::kQkHeads &&
+         value_heads == ::sllm_linear_attention_kernel::kValueHeads &&
+         head_dim == ::sllm_linear_attention_kernel::kHeadDim;
+}
+
+bool gfx942_wave64_column_state_opt_in(
+    const uint64_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const char *const arch_name, const char *const force_baseline) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE");
+  return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+         opt_in != nullptr && std::strcmp(opt_in, "1") == 0 &&
+         token_count >= 128U &&
+         qk_heads == ::sllm_linear_attention_kernel::kQkHeads &&
+         value_heads == ::sllm_linear_attention_kernel::kValueHeads &&
+         head_dim == ::sllm_linear_attention_kernel::kHeadDim &&
+         arch_name != nullptr &&
+         std::strcmp(arch_name, "gfx942:sramecc+:xnack-") == 0;
+}
+
+bool gfx942_wave64_column_state_shape_opt_in(
+    const uint64_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const char *const force_baseline) noexcept {
+  const char *const opt_in =
+      std::getenv("SLLM_LINEAR_ATTENTION_GFX942_WAVE64_COLUMN_STATE");
+  return (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
+         opt_in != nullptr && std::strcmp(opt_in, "1") == 0 &&
+         token_count >= 128U &&
          qk_heads == ::sllm_linear_attention_kernel::kQkHeads &&
          value_heads == ::sllm_linear_attention_kernel::kValueHeads &&
          head_dim == ::sllm_linear_attention_kernel::kHeadDim;
@@ -176,6 +205,7 @@ void fill_linear_attention_dispatch_info(
     const uint64_t dispatch_id,
     const sllm_linear_attention::DescriptorMetadata &metadata,
     const char *const arch_name, const bool use_column_provider,
+    const bool use_gfx942_wave64_column_provider,
     const bool use_decode_pair_provider) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
@@ -191,7 +221,9 @@ void fill_linear_attention_dispatch_info(
   info->recurrent_kernel_id =
       SLLM_HIP_LINEAR_ATTENTION_KERNEL_ID_RECURRENT_GATED_NORM_V1;
   info->workgroup_size_x =
-      use_decode_pair_provider
+      use_gfx942_wave64_column_provider
+          ? ::sllm_linear_attention_kernel::kGfx942Wave64ColumnWorkgroupSize
+      : use_decode_pair_provider
           ? ::sllm_linear_attention_kernel::kDecodePairWorkgroupSize
           : SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE;
   const uint64_t conv_elements =
@@ -201,10 +233,9 @@ void fill_linear_attention_dispatch_info(
       (conv_elements + SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE - 1U) /
       SLLM_HIP_LINEAR_ATTENTION_WORKGROUP_SIZE);
   info->recurrent_grid_size_x =
-      use_column_provider ? metadata.value_heads * metadata.head_dim / 4U
-          : use_decode_pair_provider
-                ? metadata.qk_heads
-                : metadata.value_heads;
+      use_column_provider        ? metadata.value_heads * metadata.head_dim / 4U
+      : use_decode_pair_provider ? metadata.qk_heads
+                                 : metadata.value_heads;
   info->token_count = metadata.token_count;
   info->start_position = metadata.start_position;
   info->expected_length = metadata.expected_length;
@@ -215,22 +246,27 @@ void fill_linear_attention_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_LINEAR_ATTENTION_KERNEL_SYMBOL_MAX,
-      use_column_provider
+      use_gfx942_wave64_column_provider
+          ? ::sllm_linear_attention_kernel::kGfx942Wave64ColumnLogicalKernelId
+      : use_column_provider
           ? ::sllm_linear_attention_kernel::kColumnLogicalKernelId
-          : use_decode_pair_provider
-                ? ::sllm_linear_attention_kernel::kDecodePairLogicalKernelId
-                : ::sllm_linear_attention_kernel::kLogicalKernelId);
+      : use_decode_pair_provider
+          ? ::sllm_linear_attention_kernel::kDecodePairLogicalKernelId
+          : ::sllm_linear_attention_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->conv_device_symbol, SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
       ::sllm_linear_attention_kernel::kConvDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(
       info->recurrent_device_symbol,
       SLLM_HIP_LINEAR_ATTENTION_DEVICE_SYMBOL_MAX,
-      use_column_provider
+      use_gfx942_wave64_column_provider
+          ? ::sllm_linear_attention_kernel::
+                kGfx942Wave64ColumnRecurrentDeviceSymbol
+      : use_column_provider
           ? ::sllm_linear_attention_kernel::kColumnRecurrentDeviceSymbol
-          : use_decode_pair_provider
-                ? ::sllm_linear_attention_kernel::kDecodePairDeviceSymbol
-                : ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
+      : use_decode_pair_provider
+          ? ::sllm_linear_attention_kernel::kDecodePairDeviceSymbol
+          : ::sllm_linear_attention_kernel::kRecurrentDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -262,6 +298,19 @@ void *linear_binding_pointer(Buffer *const buffer,
 }
 
 } // namespace
+
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
+    const uint64_t token_count, const uint32_t qk_heads,
+    const uint32_t value_heads, const uint32_t head_dim,
+    const char *const arch_name) noexcept {
+  return gfx942_wave64_column_state_opt_in(
+             token_count, qk_heads, value_heads, head_dim, arch_name,
+             std::getenv("SLLM_GDN_FORCE_BASELINE"))
+             ? 1U
+             : 0U;
+}
+#endif
 
 extern "C" sllm_status_t sllm_linear_attention_state_create(
     const sllm_context_t *const raw_context,
@@ -786,8 +835,12 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     const char *const force_baseline = std::getenv("SLLM_GDN_FORCE_BASELINE");
     const bool column_candidate_by_shape =
         (metadata.token_count >= 128U &&
-         (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0)) ||
-        short_column_state_shape_opt_in(
+         (force_baseline == nullptr ||
+          std::strcmp(force_baseline, "1") != 0)) ||
+        short_column_state_shape_opt_in(metadata.token_count, metadata.qk_heads,
+                                        metadata.value_heads, metadata.head_dim,
+                                        force_baseline) ||
+        gfx942_wave64_column_state_shape_opt_in(
             metadata.token_count, metadata.qk_heads, metadata.value_heads,
             metadata.head_dim, force_baseline);
     constexpr uint64_t kMaxU64 = std::numeric_limits<uint64_t>::max();
@@ -864,8 +917,13 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
         (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
         (std::strcmp(arch_name, "gfx1030") == 0 ||
          std::strcmp(arch_name, "gfx1201") == 0);
-    const bool use_column_provider =
-        use_short_column_provider || use_long_column_provider;
+    const bool use_gfx942_wave64_column_provider =
+        gfx942_wave64_column_state_opt_in(
+            metadata.token_count, metadata.qk_heads, metadata.value_heads,
+            metadata.head_dim, arch_name, force_baseline);
+    const bool use_column_provider = use_short_column_provider ||
+                                     use_long_column_provider ||
+                                     use_gfx942_wave64_column_provider;
     const bool use_decode_pair_provider =
         (force_baseline == nullptr || std::strcmp(force_baseline, "1") != 0) &&
         metadata.token_count == 1U && metadata.qk_heads == 16U &&
@@ -983,6 +1041,49 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
             "linear attention decode-pair recurrent launch", queue,
             error_sink);
       }
+    } else if (use_gfx942_wave64_column_provider) {
+      auto *const scalar_base = reinterpret_cast<float *>(
+          static_cast<char *>(state->scratch) + convolved_scratch);
+      float *const beta = scalar_base;
+      float *const decay =
+          scalar_base + metadata.token_count * metadata.value_heads;
+      const hipError_t preprocess_status = ::sllm_linear_attention_kernel::
+          launch_gfx942_wave64_column_preprocess(
+              static_cast<uint16_t *>(state->scratch), b_input, a_input, a_log,
+              dt_bias, beta, decay, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, queue->stream);
+      if (preprocess_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, preprocess_status,
+            "linear attention gfx942 wave64 column preprocess launch", queue,
+            error_sink);
+      }
+      const hipError_t recurrent_status =
+          ::sllm_linear_attention_kernel::launch_gfx942_wave64_column_recurrent(
+              static_cast<const uint16_t *>(state->scratch), beta, decay,
+              static_cast<const float *>(state->recurrent_state[active_slot]),
+              static_cast<float *>(state->recurrent_state[inactive_slot]),
+              output, static_cast<uint32_t>(metadata.token_count),
+              metadata.qk_heads, metadata.value_heads, metadata.head_dim,
+              metadata.qkv_width, metadata.output_width, queue->stream);
+      if (recurrent_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, recurrent_status,
+            "linear attention gfx942 wave64 column recurrent launch", queue,
+            error_sink);
+      }
+      const hipError_t postprocess_status = ::sllm_linear_attention_kernel::
+          launch_gfx942_wave64_column_postprocess(
+              z, norm_weight, output,
+              static_cast<uint32_t>(metadata.token_count), metadata.value_heads,
+              metadata.head_dim, metadata.output_width, queue->stream);
+      if (postprocess_status != hipSuccess) {
+        return cleanup_failed_submission(
+            candidate, token, postprocess_status,
+            "linear attention gfx942 wave64 column postprocess launch", queue,
+            error_sink);
+      }
     } else if (use_column_provider) {
       auto *const scalar_base = reinterpret_cast<float *>(
           static_cast<char *>(state->scratch) + convolved_scratch);
@@ -1050,7 +1151,7 @@ extern "C" sllm_status_t sllm_linear_attention_execute(
     }
     fill_linear_attention_dispatch_info(
         dispatch_info, dispatch_id, metadata, arch_name, use_column_provider,
-        use_decode_pair_provider);
+        use_gfx942_wave64_column_provider, use_decode_pair_provider);
     *completion_output = reinterpret_cast<sllm_completion_t *>(token);
     (void)candidate.release();
     execute_guard.disarm();

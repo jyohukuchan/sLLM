@@ -29,6 +29,11 @@ constexpr const char *kColumnLogicalKernelId =
     "linear_attention.gdn.column_state.v2";
 constexpr const char *kColumnRecurrentDeviceSymbol =
     "sllm_linear_attention_recurrent_column_state_v2";
+constexpr uint32_t kGfx942Wave64ColumnWorkgroupSize = 256U;
+constexpr const char *kGfx942Wave64ColumnLogicalKernelId =
+    "linear_attention.gdn.column_state.gfx942_wave64.v3";
+constexpr const char *kGfx942Wave64ColumnRecurrentDeviceSymbol =
+    "sllm_linear_attention_column_state_wave64_v3";
 
 hipError_t launch_convolution(const uint16_t *qkv, const uint16_t *conv_weight,
                               const uint16_t *previous_conv_state,
@@ -74,6 +79,26 @@ hipError_t launch_column_postprocess(const uint16_t *z,
                                      uint32_t token_count, uint32_t value_heads,
                                      uint32_t head_dim, uint32_t output_width,
                                      hipStream_t stream) noexcept;
+
+// Exact gfx942:sramecc+:xnack- wave64 route. The recurrent stage keeps one
+// complete state column per wave in registers across the serial token loop.
+hipError_t launch_gfx942_wave64_column_preprocess(
+    uint16_t *convolved_qkv, const uint16_t *b_input, const uint16_t *a_input,
+    const float *a_log, const uint16_t *dt_bias, float *beta, float *decay,
+    uint32_t token_count, uint32_t qk_heads, uint32_t value_heads,
+    uint32_t head_dim, uint32_t qkv_width, hipStream_t stream) noexcept;
+
+hipError_t launch_gfx942_wave64_column_recurrent(
+    const uint16_t *convolved_qkv, const float *beta, const float *decay,
+    const float *previous_recurrent_state, float *next_recurrent_state,
+    uint16_t *output, uint32_t token_count, uint32_t qk_heads,
+    uint32_t value_heads, uint32_t head_dim, uint32_t qkv_width,
+    uint32_t output_width, hipStream_t stream) noexcept;
+
+hipError_t launch_gfx942_wave64_column_postprocess(
+    const uint16_t *z, const float *norm_weight, uint16_t *output,
+    uint32_t token_count, uint32_t value_heads, uint32_t head_dim,
+    uint32_t output_width, hipStream_t stream) noexcept;
 
 } // namespace sllm_linear_attention_kernel
 
