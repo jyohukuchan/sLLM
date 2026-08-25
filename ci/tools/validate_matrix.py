@@ -981,8 +981,8 @@ def main() -> int:
             raise ContractError("path-to-suite-v1 has unknown or missing top-level key")
         if suites.get("schema_version") != "suites-v1" or suites.get("revision") != 31:
             raise ContractError("suites-v1 identity is not revision 31")
-        if host.get("schema_version") != "host-v1" or host.get("revision") != 20:
-            raise ContractError("host-v1 identity is not revision 20")
+        if host.get("schema_version") != "host-v1" or host.get("revision") != 21:
+            raise ContractError("host-v1 identity is not revision 21")
         if paths.get("schema_version") != "path-to-suite-v1" or paths.get("revision") != 45:
             raise ContractError("path-to-suite-v1 identity is not revision 45")
         for suite in suites["suites"]:

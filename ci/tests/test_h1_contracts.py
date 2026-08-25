@@ -51,8 +51,9 @@ class HostContractTests(unittest.TestCase):
         rows = {row["row_id"]: row for row in host["rows"]}
         # Hosted runners can need more than two minutes for a cold Cargo
         # compile, but the row and command caps remain finite and below the
-        # required workflow's 15-minute hard limit.
-        self.assertEqual(rows["h0"]["timeout_seconds"], 600)
+        # required workflow's 15-minute hard limit. H0 has a 12-minute row
+        # hard limit; H1 retains its 10-minute row budget.
+        self.assertEqual(rows["h0"]["timeout_seconds"], 720)
         self.assertEqual(rows["h0"]["max_command_seconds"], 300)
         self.assertEqual(rows["h1"]["timeout_seconds"], 600)
         self.assertEqual(rows["h1"]["max_command_seconds"], 300)
