@@ -1,6 +1,6 @@
 # Phase XA: CI修正・公開・push後確認
 
-> 状態: in-progress（2026-08-25）
+> 状態: completed（2026-08-25）
 > 対象: `main`のhost-required CI、public-runtime H3 compile-only、Phase 52 closeoutを含む未公開ローカルcommit
 
 ## 目的
@@ -62,7 +62,9 @@ numerics、performance、runtime supportのPASSへ読み替えない。
 
 ## closeout
 
-完了時にこのplanをarchiveへ移し、原因、採用修正、検証、commit、push先、push後workflow URLと結果をmatching historyへ記録する。
-失敗workflowを再実行せず無視すること、non-required H3を未確認のまま完了すること、またはローカルPASSだけで公開後確認を代替することはしない。
+`2c28cf0811f09b9e346c6f58250289912790a83b`までをforceなしで`origin/main`へpushし、host-required、通常H3、
+public-runtime H3の全workflowがPASSした。host-requiredはH0/H1/H2とaggregate、通常H3とpublic-runtime H3は
+`gfx1030`/`gfx1201`とaggregateを完了した。原因、採用修正、ローカル検証、公開commit、失敗した中間run、最終成功runは
+matching historyへ記録した。GPU実行、numerics、performanceのPASSは主張しない。
 
 [全体計画](../../../../main-plan.md) / [対応する履歴](../../../../../history/2026/08/21-31/phase-xa-ci-repair-and-push.md)

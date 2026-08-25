@@ -382,7 +382,7 @@
 | 一時保留 | 51 | フェーズ49/50の採用内容をMI300X `gfx942`へwave64対応で適用し、同じ7行で検証 |
 | 完了 | 52 | R9700 `gfx1201`の長capacityをresident KVへ限定routeし、`10,001/2`と`100,000/2`の自動経路を再検証 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
-| 進行中 | XA | host-required／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
+| 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
 直近の性能経路は番号上の既定順をフェーズ49→50→51→52とする。フェーズ49はV620の全7行同等達成を後続GPUの開始条件にせず、
 GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路の正しさ・資源・通常5行の退行確認を終えて完了した。
