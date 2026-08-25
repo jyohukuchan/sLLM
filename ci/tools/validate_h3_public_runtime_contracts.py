@@ -301,7 +301,7 @@ def validate_static(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[st
     if sorted(matrix["sources"]["canonical_order"]) != list(matrix["sources"]["canonical_order"]):
         raise ContractError("source canonical order is not sorted")
     if matrix["direct_compile_sources"]["canonical_order"] != list(EXPECTED_DIRECT_COMPILE_SOURCE_PATHS):
-        raise ContractError("direct compile source canonical order is not exactly the eight audited files")
+        raise ContractError("direct compile source canonical order is not exactly the audited public-runtime closure")
     if sorted(matrix["direct_compile_sources"]["canonical_order"]) != list(matrix["direct_compile_sources"]["canonical_order"]):
         raise ContractError("direct compile source canonical order is not sorted")
     if matrix["public_abi_symbols"] != sorted(PUBLIC_SYMBOLS):

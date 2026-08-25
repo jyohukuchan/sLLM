@@ -43,8 +43,8 @@ bool expect(const sllm_status_t actual, const sllm_status_t expected,
   if (actual == expected) {
     return true;
   }
-  std::cerr << operation << " returned " << actual << ", expected "
-            << expected << ": " << error.message << '\n';
+  std::cerr << operation << " returned " << actual << ", expected " << expected
+            << ": " << error.message << '\n';
   return false;
 }
 
@@ -156,12 +156,14 @@ bool wait_and_release(sllm_completion_t **const completion,
   const bool waited = expect(
       sllm_completion_wait(*completion, UINT32_MAX, &result, &error.sink),
       SLLM_STATUS_OK, operation, error);
-  const bool successful = waited && result.state == SLLM_COMPLETION_STATE_SUCCESS;
+  const bool successful =
+      waited && result.state == SLLM_COMPLETION_STATE_SUCCESS;
   if (waited && !successful) {
     std::cerr << operation << " completed with state " << result.state << '\n';
   }
-  const bool released = expect(sllm_completion_release(completion, &error.sink),
-                               SLLM_STATUS_OK, "sllm_completion_release", error);
+  const bool released =
+      expect(sllm_completion_release(completion, &error.sink), SLLM_STATUS_OK,
+             "sllm_completion_release", error);
   return successful && released;
 }
 
@@ -230,15 +232,14 @@ bool download(const sllm_queue_t *const queue,
 
 std::vector<uint16_t> make_input(const uint32_t rows) {
   constexpr std::array<std::array<float, kWidth>, 3> values{{
-      {{-3.5F, -1.0F, -0.75F, -0.5F, -0.125F, -0.03125F, -0.001F,
-        0.0F, 0.001F, 0.03125F, 0.125F, 0.5F, 1.0F, 3.5F, 17.0F,
-        -17.0F, 65504.0F}},
+      {{-3.5F, -1.0F, -0.75F, -0.5F, -0.125F, -0.03125F, -0.001F, 0.0F, 0.001F,
+        0.03125F, 0.125F, 0.5F, 1.0F, 3.5F, 17.0F, -17.0F, 65504.0F}},
       {{17.0F, -17.0F, 1.5F, -1.5F, 0.25F, -0.25F, 0.0625F, -0.0625F,
-        0.0078125F, -0.0078125F, 0.0005F, -0.0005F, 2.0F, -2.0F,
-        32768.0F, -32768.0F, -65504.0F}},
-      {{-65504.0F, 65504.0F, -31.0F, 31.0F, -7.0F, 7.0F, -0.25F,
-        0.25F, -0.015625F, 0.015625F, -0.002F, 0.002F, -4.0F, 4.0F,
-        -128.0F, 128.0F, 0.0F}},
+        0.0078125F, -0.0078125F, 0.0005F, -0.0005F, 2.0F, -2.0F, 32768.0F,
+        -32768.0F, -65504.0F}},
+      {{-65504.0F, 65504.0F, -31.0F, 31.0F, -7.0F, 7.0F, -0.25F, 0.25F,
+        -0.015625F, 0.015625F, -0.002F, 0.002F, -4.0F, 4.0F, -128.0F, 128.0F,
+        0.0F}},
   }};
   std::vector<uint16_t> result(static_cast<std::size_t>(rows) * kWidth);
   for (uint32_t row = 0U; row != rows; ++row) {
@@ -251,10 +252,9 @@ std::vector<uint16_t> make_input(const uint32_t rows) {
 }
 
 std::vector<uint16_t> make_vector() {
-  constexpr std::array<float, kWidth> values{{
-      1.0F, -1.0F, 0.5F, -0.5F, 0.25F, -0.25F, 0.125F, -0.125F, 0.03125F,
-      -0.03125F, 0.001F, -0.001F, 17.0F, -17.0F, 65504.0F, -65504.0F,
-      0.003F}};
+  constexpr std::array<float, kWidth> values{
+      {1.0F, -1.0F, 0.5F, -0.5F, 0.25F, -0.25F, 0.125F, -0.125F, 0.03125F,
+       -0.03125F, 0.001F, -0.001F, 17.0F, -17.0F, 65504.0F, -65504.0F, 0.003F}};
   std::vector<uint16_t> result(kWidth);
   for (uint32_t index = 0U; index != kWidth; ++index) {
     result[index] = f32_to_bf16_rne(values[index]);
@@ -266,8 +266,8 @@ std::vector<uint16_t> reference(const std::vector<uint16_t> &input,
                                 const std::vector<uint16_t> &vector) {
   std::vector<uint16_t> result(input.size());
   for (std::size_t index = 0U; index != input.size(); ++index) {
-    result[index] = f32_to_bf16_rne(
-        bf16_to_f32(input[index]) + bf16_to_f32(vector[index % kWidth]));
+    result[index] = f32_to_bf16_rne(bf16_to_f32(input[index]) +
+                                    bf16_to_f32(vector[index % kWidth]));
   }
   return result;
 }
@@ -275,9 +275,8 @@ std::vector<uint16_t> reference(const std::vector<uint16_t> &input,
 bool validate_metadata(const sllm_elementwise_dispatch_info_t &info,
                        const uint32_t rows) {
   const uint64_t element_count = static_cast<uint64_t>(rows) * kWidth;
-  const uint32_t expected_grid =
-      static_cast<uint32_t>((element_count + kWorkgroupSize - 1U) /
-                            kWorkgroupSize);
+  const uint32_t expected_grid = static_cast<uint32_t>(
+      (element_count + kWorkgroupSize - 1U) / kWorkgroupSize);
   const bool valid =
       info.backend == SLLM_BACKEND_HIP && info.dispatch_id != 0U &&
       info.operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD &&
@@ -333,9 +332,9 @@ bool run_case(const sllm_context_t *const context,
     descriptor.input0 = tensor_binding(buffers[0], {rows, kWidth});
     descriptor.input1 = tensor_binding(buffers[1], {kWidth});
     descriptor.output = tensor_binding(buffers[2], {rows, kWidth});
-    success = expect(sllm_elementwise_prepare(context, &descriptor, &plan,
-                                               &error.sink),
-                     SLLM_STATUS_OK, "sllm_elementwise_prepare", error);
+    success = expect(
+        sllm_elementwise_prepare(context, &descriptor, &plan, &error.sink),
+        SLLM_STATUS_OK, "sllm_elementwise_prepare", error);
   }
   sllm_elementwise_dispatch_info_t info{};
   info.struct_size = sizeof(info);
@@ -401,10 +400,11 @@ int main(const int argc, char **const argv) {
   }
   const std::string actual_arch(device.properties.gcnArchName);
   const char *const visible_devices = std::getenv("HIP_VISIBLE_DEVICES");
-  std::cout << "device index=" << device.index << " visible_count="
-            << device.count << " name=\"" << device.properties.name
-            << "\" arch=" << actual_arch << " expected="
-            << SLLM_TEST_EXPECTED_TARGET << " HIP_VISIBLE_DEVICES=\""
+  std::cout << "device index=" << device.index
+            << " visible_count=" << device.count << " name=\""
+            << device.properties.name << "\" arch=" << actual_arch
+            << " expected=" << SLLM_TEST_EXPECTED_TARGET
+            << " HIP_VISIBLE_DEVICES=\""
             << (visible_devices == nullptr ? "" : visible_devices) << "\"\n";
   if (actual_arch != SLLM_TEST_EXPECTED_TARGET) {
     std::cerr << "architecture mismatch; refusing to run a non-exact GPU "
@@ -437,9 +437,9 @@ int main(const int argc, char **const argv) {
   queue_info.struct_size = sizeof(queue_info);
   queue_info.abi_version = SLLM_HIP_ABI_VERSION;
   sllm_queue_t *queue = nullptr;
-  bool success = expect(sllm_queue_create(context, &queue_info, &queue,
-                                          &error.sink),
-                        SLLM_STATUS_OK, "sllm_queue_create", error);
+  bool success =
+      expect(sllm_queue_create(context, &queue_info, &queue, &error.sink),
+             SLLM_STATUS_OK, "sllm_queue_create", error);
   uint64_t mismatch_count = 0U;
   constexpr std::array<uint32_t, 2> rows{{1U, 3U}};
   for (const uint32_t row_count : rows) {
@@ -461,33 +461,32 @@ int main(const int argc, char **const argv) {
   }
   std::size_t free_after = 0U;
   std::size_t total_after = 0U;
-  const bool memory_read = hip_expect(
-      hipMemGetInfo(&free_after, &total_after), hipSuccess,
-      "hipMemGetInfo(after)");
+  const bool memory_read = hip_expect(hipMemGetInfo(&free_after, &total_after),
+                                      hipSuccess, "hipMemGetInfo(after)");
   /* HIP/hipBLAS lazily retain a bounded module/handle cache after the final
    * context release.  Account for that runtime-owned cache while still
    * failing on a material test-owned leak. */
   constexpr std::size_t kRuntimeCacheTolerance =
       static_cast<std::size_t>(512U) * 1024U * 1024U;
   const bool cleanup =
-      memory_read &&
-      (free_after >= free_before ||
-       free_before - free_after <= kRuntimeCacheTolerance);
+      memory_read && (free_after >= free_before ||
+                      free_before - free_after <= kRuntimeCacheTolerance);
   if (!cleanup) {
     std::cerr << "cleanup memory check failed: free_before=" << free_before
-              << " free_after=" << free_after << " total_before="
-              << total_memory << " total_after=" << total_after << '\n';
+              << " free_after=" << free_after
+              << " total_before=" << total_memory
+              << " total_after=" << total_after << '\n';
   }
   success = success && cleanup && mismatch_count == 0U;
   if (success) {
     std::cout << "phase45 broadcast_add GPU PASS target="
-              << SLLM_TEST_EXPECTED_TARGET << " device_index="
-              << device.index << " device_name=\"" << device.properties.name
+              << SLLM_TEST_EXPECTED_TARGET << " device_index=" << device.index
+              << " device_name=\"" << device.properties.name
               << "\" cases=" << rows.size() << " M=1,3 H=" << kWidth
               << " mismatches=" << mismatch_count
               << " fallback=false cleanup=PASS free_before=" << free_before
-              << " free_after=" << free_after << " cache_tolerance="
-              << kRuntimeCacheTolerance
+              << " free_after=" << free_after
+              << " cache_tolerance=" << kRuntimeCacheTolerance
               << " kernel=elementwise.broadcast_add.bf16_fp32.v1"
               << " symbol=sllm_elementwise_broadcast_add_bf16_fp32_v1\n";
   }

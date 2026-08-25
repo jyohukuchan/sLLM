@@ -46,6 +46,20 @@ class HostContractTests(unittest.TestCase):
         self.assertEqual(sha256_json(first), sha256_json(second))
         self.assertEqual([row["seed"] for row in first["rows"]], [1729, 2718, 314159])
 
+    def test_cargo_host_rows_have_bounded_cold_build_budget(self) -> None:
+        _, host, _ = load_manifests(ROOT)
+        rows = {row["row_id"]: row for row in host["rows"]}
+        # Hosted runners can need more than two minutes for a cold Cargo
+        # compile, but the row and command caps remain finite and below the
+        # required workflow's 15-minute hard limit.
+        self.assertEqual(rows["h0"]["timeout_seconds"], 600)
+        self.assertEqual(rows["h0"]["max_command_seconds"], 300)
+        self.assertEqual(rows["h1"]["timeout_seconds"], 600)
+        self.assertEqual(rows["h1"]["max_command_seconds"], 300)
+        self.assertEqual(rows["h1"]["max_rss_bytes"], 4 * 1024**3)
+        self.assertEqual(rows["h2"]["timeout_seconds"], 480)
+        self.assertEqual(rows["h2"]["max_command_seconds"], 120)
+
     def test_commands_are_local_and_network_free(self) -> None:
         suites, _, _ = load_manifests(ROOT)
         for suite in suites["suites"]:
@@ -64,7 +78,8 @@ class HostContractTests(unittest.TestCase):
         self.assertEqual(
             cargo_commands,
             [("h1-host-contract", "cargo-test-workspace", [
-                "cargo", f"+{DEV_RUST_VERSION}", "test", "--workspace", "--locked", "--offline",
+                "cargo", f"+{DEV_RUST_VERSION}", "test", "--workspace", "--jobs", "4",
+                "--locked", "--offline", "--", "--test-threads=4",
             ])],
         )
         self.assertNotIn(f"+{MSRV_RUST_VERSION}", json.dumps(suites, sort_keys=True))

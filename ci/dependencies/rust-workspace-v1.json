@@ -112,6 +112,20 @@
           "doctest": false
         },
         {
+          "name": "gdn_projection_bundle_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "gguf_contract",
           "kind": [
             "test"

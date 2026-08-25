@@ -449,6 +449,10 @@ class H3AggregateContractTests(unittest.TestCase):
         with self.assertRaises(CommonContractError):
             validate_host_workflow(host_path, host)
         host = copy.deepcopy(documents[host_path])
+        host["jobs"]["h1"]["timeout-minutes"] = 14
+        with self.assertRaises(CommonContractError):
+            validate_host_workflow(host_path, host)
+        host = copy.deepcopy(documents[host_path])
         host["jobs"]["host-required"]["needs"].append("h3-gfx1030")
         with self.assertRaises(CommonContractError):
             validate_host_workflow(host_path, host)

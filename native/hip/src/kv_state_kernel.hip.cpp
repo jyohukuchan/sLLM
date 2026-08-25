@@ -161,8 +161,8 @@ extern "C" __global__ __launch_bounds__(
     1) void sllm_kv_state_bf16_to_fp8_token_major_v1(Bf16Input key_input,
                                                      Bf16Input value_input,
                                                      uint8_t *const key_output,
-                                                     uint8_t *const
-                                                         value_output,
+                                                     uint8_t
+                                                         *const value_output,
                                                      float *const key_scales,
                                                      float *const value_scales,
                                                      const uint32_t token_count,
@@ -295,10 +295,10 @@ extern "C" __global__ __launch_bounds__(
     SLLM_HIP_KV_WORKGROUP_SIZE,
     1) void sllm_kv_state_bf16_to_nvfp4_token_major_v1(Bf16Input key_input,
                                                        Bf16Input value_input,
-                                                       uint8_t *const
-                                                           key_output,
-                                                       uint8_t *const
-                                                           value_output,
+                                                       uint8_t
+                                                           *const key_output,
+                                                       uint8_t
+                                                           *const value_output,
                                                        uint8_t *const
                                                            key_block_scales,
                                                        uint8_t *const
@@ -335,8 +335,8 @@ extern "C" __global__ __launch_bounds__(
     1) void sllm_kv_state_bf16_to_f16_token_major_v2(Bf16Input key_input,
                                                      Bf16Input value_input,
                                                      uint16_t *const key_output,
-                                                     uint16_t *const
-                                                         value_output,
+                                                     uint16_t
+                                                         *const value_output,
                                                      const uint32_t token_count,
                                                      const uint64_t
                                                      /*capacity_tokens*/,

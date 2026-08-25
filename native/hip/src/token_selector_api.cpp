@@ -1,5 +1,5 @@
-#include "public_runtime_internal.hpp"
 #include "token_selector_api.hpp"
+#include "public_runtime_internal.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -30,8 +30,7 @@ bool multiply_overflows(const uint64_t left, const uint64_t right,
 sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
                               const uint32_t expected_dtype,
                               const uint64_t element_bytes,
-                              const uint64_t expected_v,
-                              const bool output,
+                              const uint64_t expected_v, const bool output,
                               TensorMetadata *const copied,
                               sllm_error_sink_t *const sink) noexcept {
   if (binding.struct_size != sizeof(binding)) {
@@ -108,9 +107,9 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t &binding,
 
 } // namespace
 
-sllm_status_t validate_descriptor_prefix(
-    const sllm_token_selector_desc_t *const descriptor,
-    sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+validate_descriptor_prefix(const sllm_token_selector_desc_t *const descriptor,
+                           sllm_error_sink_t *const sink) noexcept {
   if (descriptor == nullptr) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR,
@@ -131,28 +130,31 @@ sllm_status_t validate_descriptor_prefix(
   return SLLM_STATUS_OK;
 }
 
-sllm_status_t validate_and_copy_descriptor(
-    const sllm_token_selector_desc_t *const descriptor,
-    DescriptorMetadata *const metadata,
-    sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+validate_and_copy_descriptor(const sllm_token_selector_desc_t *const descriptor,
+                             DescriptorMetadata *const metadata,
+                             sllm_error_sink_t *const sink) noexcept {
   if (metadata == nullptr) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR,
         "token selector metadata output is null");
   }
-  const sllm_status_t prefix_status = validate_descriptor_prefix(descriptor, sink);
+  const sllm_status_t prefix_status =
+      validate_descriptor_prefix(descriptor, sink);
   if (prefix_status != SLLM_STATUS_OK) {
     return prefix_status;
   }
   if (descriptor->op_version != SLLM_HIP_TOKEN_SELECTOR_VERSION ||
       !all_zero(descriptor->reserved, sizeof(descriptor->reserved))) {
     return sllm_public_runtime::write_error(
-        sink, descriptor->op_version != SLLM_HIP_TOKEN_SELECTOR_VERSION
-                  ? SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR
-                  : SLLM_STATUS_RESERVED_NONZERO,
+        sink,
+        descriptor->op_version != SLLM_HIP_TOKEN_SELECTOR_VERSION
+            ? SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR
+            : SLLM_STATUS_RESERVED_NONZERO,
         "token selector descriptor version or reserved fields are invalid");
   }
-  if (!std::isfinite(descriptor->temperature) || descriptor->temperature <= 0.0F) {
+  if (!std::isfinite(descriptor->temperature) ||
+      descriptor->temperature <= 0.0F) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE,
         "token selector temperature must be finite and positive");
@@ -163,9 +165,9 @@ sllm_status_t validate_and_copy_descriptor(
         sink, SLLM_STATUS_UNSUPPORTED,
         "token selector vocabulary exceeds the baseline launch contract");
   }
-  sllm_status_t status = validate_tensor(
-      descriptor->logits, SLLM_TENSOR_DTYPE_BF16, UINT64_C(2), vocab_size,
-      false, &metadata->logits, sink);
+  sllm_status_t status =
+      validate_tensor(descriptor->logits, SLLM_TENSOR_DTYPE_BF16, UINT64_C(2),
+                      vocab_size, false, &metadata->logits, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -175,20 +177,20 @@ sllm_status_t validate_and_copy_descriptor(
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(descriptor->valid_mask, SLLM_TENSOR_DTYPE_U8,
-                           UINT64_C(1), vocab_size, false,
-                           &metadata->valid_mask, sink);
+  status =
+      validate_tensor(descriptor->valid_mask, SLLM_TENSOR_DTYPE_U8, UINT64_C(1),
+                      vocab_size, false, &metadata->valid_mask, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status = validate_tensor(descriptor->output, SLLM_TENSOR_DTYPE_U8,
-                           UINT64_C(1), vocab_size, true, &metadata->output,
-                           sink);
+  status =
+      validate_tensor(descriptor->output, SLLM_TENSOR_DTYPE_U8, UINT64_C(1),
+                      vocab_size, true, &metadata->output, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  if ((descriptor->output.byte_offset % alignof(sllm_token_selector_record_t)) !=
-      0U) {
+  if ((descriptor->output.byte_offset %
+       alignof(sllm_token_selector_record_t)) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_MISALIGNED_OFFSET,
         "token selector output record is not naturally aligned");

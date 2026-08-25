@@ -22,8 +22,12 @@ constexpr float kLogprobTolerance = 5.0e-3F;
 
 struct Error final {
   char message[512]{};
-  sllm_error_sink_t sink{sizeof(sllm_error_sink_t), SLLM_HIP_ABI_VERSION,
-                         message, sizeof(message), 0U, {0U, 0U}};
+  sllm_error_sink_t sink{sizeof(sllm_error_sink_t),
+                         SLLM_HIP_ABI_VERSION,
+                         message,
+                         sizeof(message),
+                         0U,
+                         {0U, 0U}};
 };
 
 bool expect(const sllm_status_t actual, const sllm_status_t expected,
@@ -59,11 +63,15 @@ sllm_tensor_binding_t binding(const sllm_buffer_t *const buffer,
 bool wait_release(sllm_completion_t **const completion,
                   const char *const label) {
   Error error;
-  sllm_completion_result_t result{sizeof(result), SLLM_HIP_ABI_VERSION,
-                                  SLLM_COMPLETION_STATE_PENDING, 0U, 0U, 0U,
+  sllm_completion_result_t result{sizeof(result),
+                                  SLLM_HIP_ABI_VERSION,
+                                  SLLM_COMPLETION_STATE_PENDING,
+                                  0U,
+                                  0U,
+                                  0U,
                                   {0U, 0U, 0U, 0U}};
   return expect(sllm_completion_wait(*completion, UINT32_MAX, &result,
-                                      &error.sink),
+                                     &error.sink),
                 SLLM_STATUS_OK, label, error) &&
          expect(sllm_completion_release(completion, &error.sink),
                 SLLM_STATUS_OK, "completion release", error);
@@ -71,8 +79,11 @@ bool wait_release(sllm_completion_t **const completion,
 
 bool upload(const sllm_queue_t *const queue, const sllm_buffer_t *const buffer,
             const void *const data, const uint64_t bytes) {
-  sllm_transfer_desc_t transfer{sizeof(transfer), SLLM_HIP_ABI_VERSION,
-                                const_cast<void *>(data), 0U, bytes,
+  sllm_transfer_desc_t transfer{sizeof(transfer),
+                                SLLM_HIP_ABI_VERSION,
+                                const_cast<void *>(data),
+                                0U,
+                                bytes,
                                 {0U, 0U, 0U, 0U}};
   sllm_completion_t *completion = nullptr;
   Error error;
@@ -88,8 +99,9 @@ bool download_record(const sllm_queue_t *const queue,
   // This helper intentionally transfers exactly the fixed selected record;
   // no full-vocabulary D2H path is allowed in this correctness test.
   std::vector<uint8_t> bytes(SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES);
-  sllm_transfer_desc_t transfer{sizeof(transfer), SLLM_HIP_ABI_VERSION, nullptr,
-                                0U, bytes.size(), {0U, 0U, 0U, 0U}};
+  sllm_transfer_desc_t transfer{sizeof(transfer), SLLM_HIP_ABI_VERSION,
+                                nullptr,          0U,
+                                bytes.size(),     {0U, 0U, 0U, 0U}};
   sllm_completion_t *completion = nullptr;
   Error error;
   if (!expect(sllm_buffer_copy_d2h(queue, buffer, &transfer, &completion,
@@ -97,12 +109,16 @@ bool download_record(const sllm_queue_t *const queue,
               SLLM_STATUS_OK, "record d2h", error)) {
     return false;
   }
-  sllm_completion_result_t result{sizeof(result), SLLM_HIP_ABI_VERSION,
-                                  SLLM_COMPLETION_STATE_PENDING, 0U, 0U, 0U,
+  sllm_completion_result_t result{sizeof(result),
+                                  SLLM_HIP_ABI_VERSION,
+                                  SLLM_COMPLETION_STATE_PENDING,
+                                  0U,
+                                  0U,
+                                  0U,
                                   {0U, 0U, 0U, 0U}};
-  if (!expect(sllm_completion_wait(completion, UINT32_MAX, &result,
-                                   &error.sink),
-              SLLM_STATUS_OK, "record d2h completion", error)) {
+  if (!expect(
+          sllm_completion_wait(completion, UINT32_MAX, &result, &error.sink),
+          SLLM_STATUS_OK, "record d2h completion", error)) {
     (void)sllm_completion_release(&completion, &error.sink);
     return false;
   }
@@ -112,9 +128,9 @@ bool download_record(const sllm_queue_t *const queue,
                                   &written, &error.sink),
              SLLM_STATUS_OK, "record d2h read", error) &&
       written == SLLM_HIP_TOKEN_SELECTOR_OUTPUT_BYTES;
-  const bool release_ok = expect(sllm_completion_release(&completion,
-                                                          &error.sink),
-                                 SLLM_STATUS_OK, "record d2h release", error);
+  const bool release_ok =
+      expect(sllm_completion_release(&completion, &error.sink), SLLM_STATUS_OK,
+             "record d2h release", error);
   if (read_ok && release_ok) {
     std::memcpy(output, bytes.data(), sizeof(*output));
   }
@@ -174,8 +190,8 @@ Oracle cpu_oracle(const std::vector<uint16_t> &logits,
   double sum = 0.0;
   for (std::size_t index = 0U; index != logits.size(); ++index) {
     if (mask[index] != 0U) {
-      sum += std::exp(static_cast<double>(
-                          bf16_to_float(logits[index]) + additive[index] - maximum) /
+      sum += std::exp(static_cast<double>(bf16_to_float(logits[index]) +
+                                          additive[index] - maximum) /
                       static_cast<double>(temperature));
     }
   }
@@ -186,8 +202,8 @@ Oracle cpu_oracle(const std::vector<uint16_t> &logits,
   const uint64_t gamma = UINT64_C(0x9e3779b97f4a7c15);
   const uint64_t draw_state = seed + (counter + UINT64_C(1)) * gamma;
   const uint64_t random_bits = splitmix64(draw_state);
-  const double unit = static_cast<double>(random_bits >> 11U) *
-                      (1.0 / 9007199254740992.0);
+  const double unit =
+      static_cast<double>(random_bits >> 11U) * (1.0 / 9007199254740992.0);
   const double target = unit * sum;
   double cumulative = 0.0;
   std::size_t selected = logits.size() - 1U;
@@ -200,21 +216,21 @@ Oracle cpu_oracle(const std::vector<uint16_t> &logits,
     }
     order.push_back(index);
   }
-  std::sort(order.begin(), order.end(), [&](const std::size_t left,
-                                            const std::size_t right) {
-    const float left_value =
-        bf16_to_float(logits[left]) + additive[left];
-    const float right_value =
-        bf16_to_float(logits[right]) + additive[right];
-    if (left_value != right_value) {
-      return left_value > right_value;
-    }
-    return left < right;
-  });
+  std::sort(order.begin(), order.end(),
+            [&](const std::size_t left, const std::size_t right) {
+              const float left_value =
+                  bf16_to_float(logits[left]) + additive[left];
+              const float right_value =
+                  bf16_to_float(logits[right]) + additive[right];
+              if (left_value != right_value) {
+                return left_value > right_value;
+              }
+              return left < right;
+            });
   for (const std::size_t index : order) {
     const double probability =
-        std::exp(static_cast<double>(
-                     bf16_to_float(logits[index]) + additive[index] - maximum) /
+        std::exp(static_cast<double>(bf16_to_float(logits[index]) +
+                                     additive[index] - maximum) /
                  static_cast<double>(temperature));
     cumulative += probability;
     if (target < cumulative) {
@@ -249,10 +265,8 @@ void fill_inputs(const uint64_t vocab, std::vector<uint16_t> *const logits,
     const float base = static_cast<float>(centered) * 0.0625F;
     (*logits)[index] = float_to_bf16(base);
     (*additive)[index] = static_cast<float>(centered) * 0.03125F;
-    (*mask)[index] = (vocab == 1U ||
-                      ((index % 7U) != 1U && (index % 13U) != 5U))
-                         ? 1U
-                         : 0U;
+    (*mask)[index] =
+        (vocab == 1U || ((index % 7U) != 1U && (index % 13U) != 5U)) ? 1U : 0U;
   }
 }
 
@@ -270,9 +284,10 @@ bool execute_and_compare(
     const sllm_context_t *const context, const sllm_queue_t *const queue,
     const uint64_t vocab, const float temperature, const uint64_t seed,
     const uint64_t counter, const std::vector<uint16_t> &host_logits,
-    const std::vector<float> &host_additive, const std::vector<uint8_t> &host_mask,
-    sllm_buffer_t *const logits, sllm_buffer_t *const additive,
-    sllm_buffer_t *const mask, sllm_buffer_t *const output) {
+    const std::vector<float> &host_additive,
+    const std::vector<uint8_t> &host_mask, sllm_buffer_t *const logits,
+    sllm_buffer_t *const additive, sllm_buffer_t *const mask,
+    sllm_buffer_t *const output) {
   Error error;
   sllm_token_selector_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
@@ -289,9 +304,9 @@ bool execute_and_compare(
   descriptor.seed = seed;
   descriptor.counter = counter;
   sllm_token_selector_plan_t *plan = nullptr;
-  bool ok = expect(sllm_token_selector_prepare(context, &descriptor, &plan,
-                                                &error.sink),
-                   SLLM_STATUS_OK, "selector prepare", error);
+  bool ok = expect(
+      sllm_token_selector_prepare(context, &descriptor, &plan, &error.sink),
+      SLLM_STATUS_OK, "selector prepare", error);
   sllm_token_selector_record_t first{};
   sllm_token_selector_record_t second{};
   sllm_token_selector_dispatch_info_t info{};
@@ -300,9 +315,10 @@ bool execute_and_compare(
   info.info_version = SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION;
   for (sllm_token_selector_record_t *const record : {&first, &second}) {
     sllm_completion_t *completion = nullptr;
-    ok = ok && expect(sllm_token_selector_execute(plan, queue, &completion,
-                                                  &info, &error.sink),
-                      SLLM_STATUS_OK, "selector execute", error) &&
+    ok = ok &&
+         expect(sllm_token_selector_execute(plan, queue, &completion, &info,
+                                            &error.sink),
+                SLLM_STATUS_OK, "selector execute", error) &&
          wait_release(&completion, "selector completion") &&
          download_record(queue, output, record);
     if (!ok) {
@@ -338,8 +354,9 @@ bool execute_status_case(const sllm_context_t *const context,
                          const sllm_queue_t *const queue, const uint64_t vocab,
                          const float temperature, const uint64_t seed,
                          const uint64_t counter, sllm_buffer_t *const logits,
-                         sllm_buffer_t *const additive, sllm_buffer_t *const mask,
-                         sllm_buffer_t *const output, const uint32_t expected) {
+                         sllm_buffer_t *const additive,
+                         sllm_buffer_t *const mask, sllm_buffer_t *const output,
+                         const uint32_t expected) {
   Error error;
   sllm_token_selector_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
@@ -356,23 +373,24 @@ bool execute_status_case(const sllm_context_t *const context,
   descriptor.seed = seed;
   descriptor.counter = counter;
   sllm_token_selector_plan_t *plan = nullptr;
-  bool ok = expect(sllm_token_selector_prepare(context, &descriptor, &plan,
-                                                &error.sink),
-                   SLLM_STATUS_OK, "status selector prepare", error);
+  bool ok = expect(
+      sllm_token_selector_prepare(context, &descriptor, &plan, &error.sink),
+      SLLM_STATUS_OK, "status selector prepare", error);
   sllm_token_selector_dispatch_info_t info{};
   info.struct_size = sizeof(info);
   info.abi_version = SLLM_HIP_ABI_VERSION;
   info.info_version = SLLM_HIP_TOKEN_SELECTOR_DISPATCH_INFO_VERSION;
   sllm_completion_t *completion = nullptr;
-  ok = ok && expect(sllm_token_selector_execute(plan, queue, &completion, &info,
-                                                &error.sink),
-                    SLLM_STATUS_OK, "status selector execute", error) &&
+  ok = ok &&
+       expect(sllm_token_selector_execute(plan, queue, &completion, &info,
+                                          &error.sink),
+              SLLM_STATUS_OK, "status selector execute", error) &&
        wait_release(&completion, "status selector completion");
   sllm_token_selector_record_t record{};
-  ok = ok && download_record(queue, output, &record) && validate_info(info, vocab) &&
-       record.status == expected && record.token_id == -1 &&
-       record.reserved0 == 0U && std::isinf(record.logprob) &&
-       record.logprob < 0.0F;
+  ok = ok && download_record(queue, output, &record) &&
+       validate_info(info, vocab) && record.status == expected &&
+       record.token_id == -1 && record.reserved0 == 0U &&
+       std::isinf(record.logprob) && record.logprob < 0.0F;
   if (plan != nullptr) {
     ok = expect(sllm_token_selector_plan_release(&plan, &error.sink),
                 SLLM_STATUS_OK, "status selector plan release", error) &&
@@ -381,8 +399,9 @@ bool execute_status_case(const sllm_context_t *const context,
   return ok;
 }
 
-bool run_case(const sllm_context_t *const context, const sllm_queue_t *const queue,
-              const uint64_t vocab, const uint64_t seed) {
+bool run_case(const sllm_context_t *const context,
+              const sllm_queue_t *const queue, const uint64_t vocab,
+              const uint64_t seed) {
   const float temperature = 0.7F;
   std::vector<uint16_t> host_logits;
   std::vector<float> host_additive;
@@ -395,10 +414,10 @@ bool run_case(const sllm_context_t *const context, const sllm_queue_t *const que
                    float_to_bf16(2.0F)};
     host_additive.assign(3U, 0.0F);
     host_mask.assign(3U, 1U);
-    if (cpu_oracle(host_logits, host_additive, host_mask, temperature, seed,
-                   0U)
+    if (cpu_oracle(host_logits, host_additive, host_mask, temperature, seed, 0U)
             .token_id != 1) {
-      std::cerr << "legacy categorical order fixture oracle did not select token 1\n";
+      std::cerr
+          << "legacy categorical order fixture oracle did not select token 1\n";
       return false;
     }
   } else {
@@ -406,8 +425,9 @@ bool run_case(const sllm_context_t *const context, const sllm_queue_t *const que
   }
   Error error;
   auto create = [&](const uint64_t bytes, sllm_buffer_t **const out) {
-    sllm_buffer_create_info_t info{sizeof(info), SLLM_HIP_ABI_VERSION, bytes,
-                                   0U, 0U, {0U, 0U, 0U, 0U, 0U}};
+    sllm_buffer_create_info_t info{sizeof(info), SLLM_HIP_ABI_VERSION,
+                                   bytes,        0U,
+                                   0U,           {0U, 0U, 0U, 0U, 0U}};
     return expect(sllm_buffer_create(context, &info, out, &error.sink),
                   SLLM_STATUS_OK, "buffer create", error);
   };
@@ -440,8 +460,9 @@ bool run_case(const sllm_context_t *const context, const sllm_queue_t *const que
   nonfinite[0U] = std::numeric_limits<float>::quiet_NaN();
   std::vector<uint8_t> one_mask(vocab, 0U);
   one_mask[0U] = 1U;
-  ok = ok && upload(queue, additive, nonfinite.data(),
-                    nonfinite.size() * sizeof(float)) &&
+  ok = ok &&
+       upload(queue, additive, nonfinite.data(),
+              nonfinite.size() * sizeof(float)) &&
        upload(queue, mask, one_mask.data(), one_mask.size()) &&
        execute_status_case(context, queue, vocab, temperature, seed, 0U, logits,
                            additive, mask, output,
@@ -478,8 +499,7 @@ bool run_case(const sllm_context_t *const context, const sllm_queue_t *const que
 int main() {
   // The last case exercises the Gemma/Qwen vocabulary-sized path while the
   // smaller values cover alignment boundaries and non-power-of-two launches.
-  constexpr uint64_t vocabularies[] = {1U, 3U, 17U, 255U,
-                                       256U, 257U, 248320U};
+  constexpr uint64_t vocabularies[] = {1U, 3U, 17U, 255U, 256U, 257U, 248320U};
   constexpr uint64_t seed = UINT64_C(0x123456789abcdef0);
   Error error;
   sllm_context_create_info_t context_info{};
@@ -492,8 +512,8 @@ int main() {
               SLLM_STATUS_OK, "context create", error)) {
     return 1;
   }
-  sllm_queue_create_info_t queue_info{sizeof(queue_info), SLLM_HIP_ABI_VERSION,
-                                      0U, {0U, 0U, 0U, 0U, 0U}};
+  sllm_queue_create_info_t queue_info{
+      sizeof(queue_info), SLLM_HIP_ABI_VERSION, 0U, {0U, 0U, 0U, 0U, 0U}};
   sllm_queue_t *queue = nullptr;
   bool ok = expect(sllm_queue_create(context, &queue_info, &queue, &error.sink),
                    SLLM_STATUS_OK, "queue create", error);
@@ -515,13 +535,13 @@ int main() {
               "context release", error) &&
        ok;
   if (ok) {
-    std::cout << "{\"state\":\"PASS\",\"target\":\""
-              << SLLM_TEST_EXPECTED_TARGET
-              << "\",\"vocabularies\":[1,3,17,255,256,257,248320]"
-                 ",\"counters\":[0,1],\"record_bytes\":16"
-                 ",\"d2h_bytes\":16,\"status_cases\":[\"all_masked\",\"nonfinite\"]"
-                 ",\"fallback_allowed\":0,\"fallback_used\":0"
-                 ",\"oracle_logprob_tolerance\":0.005}\n";
+    std::cout
+        << "{\"state\":\"PASS\",\"target\":\"" << SLLM_TEST_EXPECTED_TARGET
+        << "\",\"vocabularies\":[1,3,17,255,256,257,248320]"
+           ",\"counters\":[0,1],\"record_bytes\":16"
+           ",\"d2h_bytes\":16,\"status_cases\":[\"all_masked\",\"nonfinite\"]"
+           ",\"fallback_allowed\":0,\"fallback_used\":0"
+           ",\"oracle_logprob_tolerance\":0.005}\n";
   }
   return ok ? 0 : 1;
 }

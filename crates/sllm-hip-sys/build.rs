@@ -291,7 +291,9 @@ fn main() {
     let argmax_runtime = source_dir.join("src/argmax_runtime.inc");
     let token_selector_kernel_internal = source_dir.join("src/token_selector_kernel_internal.hpp");
     let token_selector_kernel = source_dir.join("src/token_selector_kernel.hip.cpp");
+    let token_selector_api_header = source_dir.join("src/token_selector_api.hpp");
     let token_selector_api = source_dir.join("src/token_selector_api.cpp");
+    let token_selector_runtime = source_dir.join("src/token_selector_runtime.inc");
     let rmsnorm_api_header = source_dir.join("src/rmsnorm_api.hpp");
     let rmsnorm_api = source_dir.join("src/rmsnorm_api.cpp");
     let rmsnorm_kernel_internal = source_dir.join("src/rmsnorm_kernel_internal.hpp");
@@ -448,7 +450,15 @@ fn main() {
         token_selector_kernel_internal.display()
     );
     println!("cargo:rerun-if-changed={}", token_selector_kernel.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_api_header.display()
+    );
     println!("cargo:rerun-if-changed={}", token_selector_api.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        token_selector_runtime.display()
+    );
     println!("cargo:rerun-if-changed={}", rmsnorm_api_header.display());
     println!("cargo:rerun-if-changed={}", rmsnorm_api.display());
     println!(

@@ -368,6 +368,17 @@ class DirectBoundedProcessTests(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "malformed procfs stat"):
                 host_runner.process_group_snapshot(777)
 
+    def test_procfs_snapshot_retries_a_transient_partial_stat(self) -> None:
+        entry = Path("/proc/123")
+        fields = [b"S", b"1", b"777", *([b"0"] * 18), b"1"]
+        valid_stat = b"123 (snapshot test) " + b" ".join(fields)
+        with (
+            patch.object(Path, "iterdir", return_value=[entry]),
+            patch.object(Path, "read_bytes", side_effect=[b"123 (snapshot", valid_stat]),
+        ):
+            snapshot = host_runner.process_group_snapshot(777)
+        self.assertEqual(snapshot.live_members, (123,))
+
     def test_procfs_inspection_failure_still_reaps_process_group_leader(self) -> None:
         real_popen = subprocess.Popen
         children: list[subprocess.Popen[bytes]] = []

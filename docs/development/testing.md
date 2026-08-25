@@ -165,7 +165,7 @@ python3 ci/tools/local_hygiene.py --output .local-artifacts/ci/local-hygiene.jso
 
 ## GitHub Actions
 
-`.github/workflows/host-required.yml` runs H0, H1, and H2 as independent GitHub-hosted CPU jobs with hard timeouts of 8, 10, and 8 minutes. It checks out `github.sha` without persisted credentials, installs the hash-locked host environment before testing, and invokes every row in strict identity mode. The `host-required` job always runs and is the stable branch-protection check. Official actions are pinned to complete commit SHAs. The workflow does not use a self-hosted or GPU runner and does not run H3.
+`.github/workflows/host-required.yml` runs H0, H1, and H2 as independent GitHub-hosted CPU jobs with hard timeouts of 15, 15, and 8 minutes. H0 and H1 retain a 10-minute row budget inside that setup-aware job cap; the required workflow as a whole keeps its p95 10-minute target and 15-minute hard ceiling. It checks out `github.sha` without persisted credentials, installs the hash-locked host environment before testing, and invokes every row in strict identity mode. The `host-required` job always runs and is the stable branch-protection check. Official actions are pinned to complete commit SHAs. The workflow does not use a self-hosted or GPU runner and does not run H3.
 
 `.github/workflows/phase7-lifecycle.yml` is a manual control-plane entry point. Its versioned profile
 source remains `ci/matrix/phase7-ci-profiles-v1.json`:

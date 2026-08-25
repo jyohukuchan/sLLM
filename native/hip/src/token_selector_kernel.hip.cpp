@@ -26,9 +26,8 @@ uint64_t splitmix64(uint64_t value) noexcept {
 uint32_t ordered_key(const float value) noexcept {
   uint32_t bits = 0U;
   std::memcpy(&bits, &value, sizeof(bits));
-  return (bits & UINT32_C(0x80000000)) != 0U
-             ? ~bits
-             : (bits ^ UINT32_C(0x80000000));
+  return (bits & UINT32_C(0x80000000)) != 0U ? ~bits
+                                             : (bits ^ UINT32_C(0x80000000));
 }
 
 hipError_t select_host(const uint16_t *const bf16_logits,
@@ -47,7 +46,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (!std::isfinite(value)) {
       output->status = SLLM_STATUS_TOKEN_SELECTOR_NONFINITE;
       return hipSuccess;
@@ -64,8 +64,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
   double sum = 0.0;
   for (uint64_t index = 0U; index != vocab_size; ++index) {
     if (valid_mask[index] != 0U) {
-      sum += std::exp(static_cast<double>(
-                          bf16_to_float(bf16_logits[index]) + additive_logits[index] - maximum) /
+      sum += std::exp(static_cast<double>(bf16_to_float(bf16_logits[index]) +
+                                          additive_logits[index] - maximum) /
                       static_cast<double>(temperature));
     }
   }
@@ -76,11 +76,10 @@ hipError_t select_host(const uint16_t *const bf16_logits,
   // Keep the device draw stream bit-identical to OsSamplingRandom: counter
   // zero is the first post-seed SplitMix increment.
   const uint64_t gamma = UINT64_C(0x9e3779b97f4a7c15);
-  const uint64_t draw_state =
-      seed + (counter + UINT64_C(1)) * gamma;
+  const uint64_t draw_state = seed + (counter + UINT64_C(1)) * gamma;
   const uint64_t random_bits = splitmix64(draw_state);
-  const double unit = static_cast<double>(random_bits >> 11U) *
-                      (1.0 / 9007199254740992.0);
+  const double unit =
+      static_cast<double>(random_bits >> 11U) * (1.0 / 9007199254740992.0);
   const double target = unit * sum;
   uint32_t minimum_key = UINT32_MAX;
   uint32_t maximum_key = 0U;
@@ -88,7 +87,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     const uint32_t key = ordered_key(value);
     minimum_key = std::min(minimum_key, key);
     maximum_key = std::max(maximum_key, key);
@@ -132,7 +132,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     const uint32_t key = ordered_key(value);
     if (key <= best && key > cutoff_key) {
       cutoff_key = key;
@@ -143,7 +144,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (ordered_key(value) > cutoff_key) {
       cumulative += std::exp(static_cast<double>(value - maximum) /
                              static_cast<double>(temperature));
@@ -155,7 +157,8 @@ hipError_t select_host(const uint16_t *const bf16_logits,
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (ordered_key(value) != cutoff_key) {
       continue;
     }
@@ -175,13 +178,13 @@ hipError_t select_host(const uint16_t *const bf16_logits,
       if (valid_mask[index] == 0U) {
         continue;
       }
-      const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+      const float value =
+          bf16_to_float(bf16_logits[index]) + additive_logits[index];
       if (ordered_key(value) == cutoff_key) {
         selected = index;
-        selected_probability =
-            std::exp(static_cast<double>(value - maximum) /
-                     static_cast<double>(temperature)) /
-            sum;
+        selected_probability = std::exp(static_cast<double>(value - maximum) /
+                                        static_cast<double>(temperature)) /
+                               sum;
       }
     }
   }
@@ -236,12 +239,20 @@ __device__ uint32_t ordered_key(const float value) noexcept {
              : (converted.bits ^ UINT32_C(0x80000000));
 }
 
-extern "C" __global__ __launch_bounds__(SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE, 1)
-void sllm_token_selector_bf16_f32_mask_v1(
-    const uint16_t *const bf16_logits, const float *const additive_logits,
-    const uint8_t *const valid_mask, const uint64_t vocab_size,
-    const float temperature, const uint64_t seed, const uint64_t counter,
-    sllm_token_selector_record_t *const output) {
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_TOKEN_SELECTOR_WORKGROUP_SIZE,
+    1) void sllm_token_selector_bf16_f32_mask_v1(const uint16_t
+                                                     *const bf16_logits,
+                                                 const float
+                                                     *const additive_logits,
+                                                 const uint8_t
+                                                     *const valid_mask,
+                                                 const uint64_t vocab_size,
+                                                 const float temperature,
+                                                 const uint64_t seed,
+                                                 const uint64_t counter,
+                                                 sllm_token_selector_record_t
+                                                     *const output) {
   if (threadIdx.x != 0U) {
     return;
   }
@@ -259,7 +270,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (!isfinite(value)) {
       output->status = SLLM_STATUS_TOKEN_SELECTOR_NONFINITE;
       return;
@@ -276,8 +288,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
   double sum = 0.0;
   for (uint64_t index = 0U; index != vocab_size; ++index) {
     if (valid_mask[index] != 0U) {
-      sum += exp(static_cast<double>(
-                     bf16_to_float(bf16_logits[index]) + additive_logits[index] - maximum) /
+      sum += exp(static_cast<double>(bf16_to_float(bf16_logits[index]) +
+                                     additive_logits[index] - maximum) /
                  static_cast<double>(temperature));
     }
   }
@@ -288,11 +300,10 @@ void sllm_token_selector_bf16_f32_mask_v1(
   // Keep the device draw stream bit-identical to OsSamplingRandom: counter
   // zero is the first post-seed SplitMix increment.
   const uint64_t gamma = UINT64_C(0x9e3779b97f4a7c15);
-  const uint64_t draw_state =
-      seed + (counter + UINT64_C(1)) * gamma;
+  const uint64_t draw_state = seed + (counter + UINT64_C(1)) * gamma;
   const uint64_t random_bits = splitmix64(draw_state);
-  const double unit = static_cast<double>(random_bits >> 11U) *
-                      (1.0 / 9007199254740992.0);
+  const double unit =
+      static_cast<double>(random_bits >> 11U) * (1.0 / 9007199254740992.0);
   const double target = unit * sum;
   uint32_t minimum_key = UINT32_MAX;
   uint32_t maximum_key = 0U;
@@ -300,7 +311,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     const uint32_t key = ordered_key(value);
     minimum_key = key < minimum_key ? key : minimum_key;
     maximum_key = key > maximum_key ? key : maximum_key;
@@ -343,7 +355,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     const uint32_t key = ordered_key(value);
     if (key <= best && key > cutoff_key) {
       cutoff_key = key;
@@ -354,7 +367,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (ordered_key(value) > cutoff_key) {
       cumulative += exp(static_cast<double>(value - maximum) /
                         static_cast<double>(temperature));
@@ -366,7 +380,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
     if (valid_mask[index] == 0U) {
       continue;
     }
-    const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+    const float value =
+        bf16_to_float(bf16_logits[index]) + additive_logits[index];
     if (ordered_key(value) != cutoff_key) {
       continue;
     }
@@ -384,7 +399,8 @@ void sllm_token_selector_bf16_f32_mask_v1(
       if (valid_mask[index] == 0U) {
         continue;
       }
-      const float value = bf16_to_float(bf16_logits[index]) + additive_logits[index];
+      const float value =
+          bf16_to_float(bf16_logits[index]) + additive_logits[index];
       if (ordered_key(value) == cutoff_key) {
         selected = index;
         selected_probability = exp(static_cast<double>(value - maximum) /

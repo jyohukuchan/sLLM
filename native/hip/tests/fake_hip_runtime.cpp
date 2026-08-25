@@ -2,8 +2,8 @@
 
 #include "sllm/hip.h"
 
-#include <cmath>
 #include <array>
+#include <cmath>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
@@ -90,8 +90,8 @@ vmm_index(const fake_hip::VmmOperation operation) noexcept {
   return static_cast<std::size_t>(operation);
 }
 
-hipError_t consume_vmm_failure_locked(
-    const fake_hip::VmmOperation operation) noexcept {
+hipError_t
+consume_vmm_failure_locked(const fake_hip::VmmOperation operation) noexcept {
   const std::size_t index = vmm_index(operation);
   ++state.vmm_operation_calls[index];
   uint64_t &remaining = state.vmm_failure_after[index];

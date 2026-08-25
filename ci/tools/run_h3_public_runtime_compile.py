@@ -60,9 +60,12 @@ PUBLIC_RUNTIME_API_SOURCE_PATHS = (
     "native/hip/src/kv_state_api.cpp",
     "native/hip/src/linear_attention_api.cpp",
     "native/hip/src/matmul_api.cpp",
+    "native/hip/src/moe_expert_api.cpp",
+    "native/hip/src/moe_route_api.cpp",
     "native/hip/src/rmsnorm_api.cpp",
     "native/hip/src/residual_rmsnorm_api.cpp",
     "native/hip/src/rotary_api.cpp",
+    "native/hip/src/token_selector_api.cpp",
     "native/hip/src/windowed_attention_api.cpp",
 )
 PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
@@ -77,8 +80,11 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/linear_attention_kernel.hip.cpp",
     "native/hip/src/matmul_kernel.hip.cpp",
     "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
+    "native/hip/src/moe_expert_kernel.hip.cpp",
+    "native/hip/src/moe_route_kernel.hip.cpp",
     "native/hip/src/rmsnorm_kernel.hip.cpp",
     "native/hip/src/rotary_kernel.hip.cpp",
+    "native/hip/src/token_selector_kernel.hip.cpp",
 )
 PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/argmax_api.hpp",
@@ -109,12 +115,21 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/matmul_runtime.inc",
     "native/hip/src/mlp_gate_up_silu_bundle_kernel_internal.hpp",
     "native/hip/src/mlp_gate_up_silu_bundle_runtime.inc",
+    "native/hip/src/moe_expert_api.hpp",
+    "native/hip/src/moe_expert_kernel_internal.hpp",
+    "native/hip/src/moe_expert_runtime.inc",
+    "native/hip/src/moe_route_api.hpp",
+    "native/hip/src/moe_route_kernel_internal.hpp",
+    "native/hip/src/moe_route_runtime.inc",
     "native/hip/src/residual_rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
     "native/hip/src/rotary_api.hpp",
     "native/hip/src/rotary_kernel_internal.hpp",
     "native/hip/src/rotary_runtime.inc",
+    "native/hip/src/token_selector_api.hpp",
+    "native/hip/src/token_selector_kernel_internal.hpp",
+    "native/hip/src/token_selector_runtime.inc",
     "native/hip/src/windowed_attention_api.hpp",
     "native/hip/src/windowed_attention_runtime.inc",
 )
@@ -142,57 +157,144 @@ _TMPFILE_FLAGS = (
 PUBLIC_SYMBOLS = tuple(sorted({
     "sllm_argmax_execute", "sllm_argmax_plan_release", "sllm_argmax_prepare",
     "sllm_attention_preprocess_execute", "sllm_attention_preprocess_plan_release", "sllm_attention_preprocess_prepare",
-    "sllm_backend_probe", "sllm_buffer_copy_d2h", "sllm_buffer_copy_h2d", "sllm_buffer_create",
-    "sllm_buffer_release", "sllm_buffer_size", "sllm_causal_attention_execute",
-    "sllm_completion_finalize_after", "sllm_completion_query", "sllm_completion_read", "sllm_completion_release", "sllm_completion_timing",
-    "sllm_completion_wait", "sllm_context_create", "sllm_context_probe", "sllm_context_release",
-    "sllm_device_count", "sllm_device_query", "sllm_elementwise_execute", "sllm_elementwise_plan_release",
-    "sllm_elementwise_prepare", "sllm_embedding_execute", "sllm_embedding_plan_release", "sllm_embedding_prepare",
-    "sllm_event_create", "sllm_event_release", "sllm_get_abi_version", "sllm_kv_state_append",
-    "sllm_kv_state_append_cancel", "sllm_kv_state_create", "sllm_kv_state_query", "sllm_kv_state_release",
-    "sllm_kv_state_snapshot", "sllm_kv_view_query", "sllm_kv_view_release", "sllm_linear_attention_cancel",
-    "sllm_linear_attention_execute", "sllm_linear_attention_state_create", "sllm_linear_attention_state_query",
-    "sllm_linear_attention_state_release", "sllm_matmul_execute", "sllm_matmul_plan_release",
-    "sllm_matmul_prepare", "sllm_query_version", "sllm_queue_create", "sllm_queue_fence", "sllm_queue_release", "sllm_queue_set_completion_mode",
-    "sllm_rmsnorm_execute", "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare",
-    "sllm_residual_rmsnorm_execute", "sllm_residual_rmsnorm_plan_release", "sllm_residual_rmsnorm_prepare",
+    "sllm_backend_probe", "sllm_buffer_copy_d2d", "sllm_buffer_copy_d2h",
+    "sllm_buffer_copy_h2d", "sllm_buffer_create", "sllm_buffer_release",
+    "sllm_buffer_size", "sllm_causal_attention_execute", "sllm_completion_finalize_after",
+    "sllm_completion_query", "sllm_completion_read", "sllm_completion_release",
+    "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create",
+    "sllm_context_probe", "sllm_context_release", "sllm_device_count",
+    "sllm_device_query", "sllm_elementwise_execute", "sllm_elementwise_plan_release",
+    "sllm_elementwise_prepare", "sllm_embedding_execute", "sllm_embedding_plan_release",
+    "sllm_embedding_prepare", "sllm_event_create", "sllm_event_release",
     "sllm_gdn_projection_bundle_execute", "sllm_gdn_projection_bundle_plan_release", "sllm_gdn_projection_bundle_prepare",
+    "sllm_get_abi_version", "sllm_kv_state_append", "sllm_kv_state_append_cancel",
+    "sllm_kv_state_create", "sllm_kv_state_create_v2", "sllm_kv_state_export",
+    "sllm_kv_state_fork", "sllm_kv_state_fork_query", "sllm_kv_state_image_plane_size",
+    "sllm_kv_state_image_query", "sllm_kv_state_import", "sllm_kv_state_import_finalize",
+    "sllm_kv_state_query", "sllm_kv_state_release", "sllm_kv_state_rewind_last",
+    "sllm_kv_state_snapshot", "sllm_kv_view_query", "sllm_kv_view_release",
+    "sllm_linear_attention_cancel", "sllm_linear_attention_execute", "sllm_linear_attention_state_create",
+    "sllm_linear_attention_state_export", "sllm_linear_attention_state_fork", "sllm_linear_attention_state_image_plane_size",
+    "sllm_linear_attention_state_image_query", "sllm_linear_attention_state_import", "sllm_linear_attention_state_import_finalize",
+    "sllm_linear_attention_state_query", "sllm_linear_attention_state_release", "sllm_linear_attention_state_rewind_last",
+    "sllm_matmul_execute", "sllm_matmul_plan_release", "sllm_matmul_prepare",
     "sllm_mlp_gate_up_silu_bundle_execute", "sllm_mlp_gate_up_silu_bundle_plan_release", "sllm_mlp_gate_up_silu_bundle_prepare",
-    "sllm_rotary_execute", "sllm_rotary_plan_release", "sllm_rotary_prepare",
-    "sllm_windowed_attention_execute", "sllm_windowed_attention_plan_release", "sllm_windowed_attention_prepare",
+    "sllm_moe_expert_execute", "sllm_moe_expert_plan_release", "sllm_moe_expert_prepare",
+    "sllm_moe_route_execute", "sllm_moe_route_plan_release", "sllm_moe_route_prepare",
+    "sllm_query_version", "sllm_queue_create", "sllm_queue_fence",
+    "sllm_queue_release", "sllm_queue_set_completion_mode", "sllm_residual_rmsnorm_execute",
+    "sllm_residual_rmsnorm_plan_release", "sllm_residual_rmsnorm_prepare", "sllm_rmsnorm_execute",
+    "sllm_rmsnorm_plan_release", "sllm_rmsnorm_prepare", "sllm_rotary_execute",
+    "sllm_rotary_plan_release", "sllm_rotary_prepare", "sllm_token_selector_execute",
+    "sllm_token_selector_plan_release", "sllm_token_selector_prepare", "sllm_windowed_attention_execute",
+    "sllm_windowed_attention_plan_release", "sllm_windowed_attention_prepare",
 }))
+
+
+def declared_public_symbols(repo: Path) -> tuple[str, ...]:
+    """Extract the canonical public C ABI declarations from the umbrella header."""
+
+    header = repo / "include/sllm/hip.h"
+    try:
+        source = header.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeContractError(f"public ABI header cannot be read: {header}") from exc
+    start_marker = 'extern "C" {'
+    end_marker = '} /* extern "C" */'
+    start = source.find(start_marker)
+    end = source.find(end_marker, start + len(start_marker)) if start >= 0 else -1
+    if start < 0 or end < 0 or source.find(start_marker, start + len(start_marker)) >= 0:
+        raise RuntimeContractError("public ABI header must contain exactly one closed extern C block")
+    names = re.findall(r"\b(sllm_[A-Za-z0-9_]+)\s*\(", source[start + len(start_marker) : end])
+    if not names or len(names) != len(set(names)):
+        raise RuntimeContractError("public ABI header declarations are missing or duplicated")
+    declared = tuple(sorted(names))
+    if declared != PUBLIC_SYMBOLS:
+        missing = sorted(set(PUBLIC_SYMBOLS) - set(declared))
+        extra = sorted(set(declared) - set(PUBLIC_SYMBOLS))
+        raise RuntimeContractError(f"public ABI header symbol set drift: missing={missing}, extra={extra}")
+    return declared
+
+
+def validate_public_symbol_contract(repo: Path) -> None:
+    declared_public_symbols(repo)
+
+
 KERNEL_SYMBOLS = (
     "sllm_argmax_bf16_f32_v1",
     "sllm_attention_preprocess_headwise_norm_rope_v1",
+    "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
     "sllm_elementwise_add_bf16_fp32_v1",
+    "sllm_elementwise_broadcast_add_bf16_fp32_v1",
     "sllm_elementwise_copy_bf16_v1",
+    "sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1",
+    "sllm_elementwise_scalar_mul_bf16_fp32_v1",
     "sllm_elementwise_sigmoid_mul_bf16_fp32_v1",
     "sllm_elementwise_silu_mul_bf16_fp32_v1",
-    "sllm_elementwise_scalar_mul_bf16_fp32_v1",
-    "sllm_elementwise_gelu_tanh_mul_bf16_fp32_v1",
     "sllm_elementwise_tanh_softcap_bf16_fp32_v1",
     "sllm_embedding_gather_bf16_i32_v1",
+    "sllm_gdn_projection_bundle_bf16_fp32_decode_v1",
     "sllm_gemma_causal_attention_online_softmax_gqa_bf16_v1",
     "sllm_kv_state_bf16_to_f16_token_major_v2",
+    "sllm_kv_state_bf16_to_fp8_token_major_v1",
+    "sllm_kv_state_bf16_to_nvfp4_token_major_v1",
     "sllm_linear_attention_causal_conv_silu_v1",
+    "sllm_linear_attention_column_postprocess_v2",
+    "sllm_linear_attention_column_preprocess_v2",
+    "sllm_linear_attention_recurrent_column_state_v2",
+    "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1",
     "sllm_linear_attention_recurrent_gated_norm_v1",
+    "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
+    "sllm_matmul_bf16_fp32_decode_serial_rows_wave64_v1",
     "sllm_matmul_bf16_fp32_decode_v4",
     "sllm_matmul_bf16_fp32_decode_wave64_v1",
+    "sllm_matmul_bf16_fp32_prefill_short_serial_v1",
     "sllm_matmul_bf16_fp32_tiled16_v2",
     "sllm_matmul_bf16_fp32_v1",
     "sllm_matmul_bf16_to_fp8_outer_v1",
     "sllm_matmul_bf16_to_fp8_outer_v2",
+    "sllm_matmul_bf16_to_mxfp4_block32_even_v1",
+    "sllm_matmul_bf16_to_nvfp4_block16_v1",
+    "sllm_matmul_fp32_to_bf16_short_mixed_v1",
     "sllm_matmul_fp8_outer_emulation_v1",
-    "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2",
+    "sllm_matmul_mxfp4_w4a4_block32_decode_v1",
+    "sllm_matmul_mxfp4_w4a4_block32_prefill_v1",
     "sllm_matmul_nvfp4_block16_packed_dequant_v1",
+    "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2",
+    "sllm_matmul_nvfp4_w4a4_block16_packed_v1",
+    "sllm_mlp_gate_up_silu_bundle_bf16_fp32_decode_v1",
+    "sllm_moe_down_combine_v1",
+    "sllm_moe_route_bf16_stable_topk_v1",
+    "sllm_moe_route_stable_group_v1",
+    "sllm_moe_routed_gateup_v1",
+    "sllm_moe_shared_gateup_v1",
     "sllm_rmsnorm_baseline_wave32_v1",
     "sllm_rmsnorm_baseline_wave64_v1",
+    "sllm_rmsnorm_residual_fused_wave32_v1",
+    "sllm_rmsnorm_residual_fused_wave64_v1",
     "sllm_rotary_split_half_bf16_fp32_v1",
+    "sllm_token_selector_bf16_f32_mask_v1",
 )
 INTERNAL_RUNTIME_SYMBOLS = ("sllm_hip_kv_view_readback",)
-CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL = (
-    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138"
-    "__device_stub__causal_attention_kernelEPKtS2_S2_Ptjmmmjjj"
+CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS = (
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138__device_stub__causal_attention_kernelILb0EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmmmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138__device_stub__causal_attention_kernelILb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmmmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_combine_kernelEPfPKfPKtS5_PKmS5_jjmmjjjj",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_pack_kv_kernelEPKtS2_PtS3_Pmmjjj",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_scatter_kernelEPKfPtjjjjjj",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_147__device_stub__scaled_prefill_pack_query_kernelEPKtPtPfjjjjjj",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_149__device_stub__scaled_prefill_softmax_fp16_kernelEPfPtS2_jmmjjPKff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_156__device_stub__causal_attention_decode_wave_split_kernelILb0EEEvPKtPKvS5_S5_S5_PKfS7_Ptmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_156__device_stub__causal_attention_decode_wave_split_kernelILb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_qtile4_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_shared_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_161__device_stub__causal_attention_long_prefill_v2_stage1_kernelEPKtS2_S2_jmmmjjPf",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_162__device_stub__causal_attention_long_prefill_v2_combine_kernelEPKfPtjjm",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj16EEEvPKtS3_S3_PtmPf",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj32EEEvPKtS3_S3_PtmPf",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj16EEEvPKtPtjPKf",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj32EEEvPKtPtjPKf",
+    "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_wave_split_fp16_pair_kernelEPKtPKvS4_S4_S4_PKfS6_Ptmjjjjff",
 )
 EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "__hipPopCallConfiguration",
@@ -220,10 +322,13 @@ EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS = (
     "hipMemGetInfo",
     "hipMemMap",
     "hipMemRelease",
+    "hipMemRetainAllocationHandle",
     "hipMemSetAccess",
     "hipMemUnmap",
+    "hipMemcpy",
     "hipMemcpyAsync",
     "hipMemset",
+    "hipMemsetAsync",
     "hipSetDevice",
     "hipStreamCreateWithFlags",
     "hipStreamDestroy",
@@ -797,11 +902,12 @@ def expected_build_commands() -> list[list[str]]:
 
 def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     validate_native_link_contract((repo / "native/hip/CMakeLists.txt").read_text(encoding="utf-8"))
+    validate_public_symbol_contract(repo)
     matrix = read_json(repo / "ci/matrix/hip-runtime-compile-v1.json")
     toolchain = read_json(repo / "ci/toolchains/rocm-7.14.0.json")
     if set(matrix) != {"$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"}:
         raise RuntimeContractError("public-runtime matrix has missing or unknown top-level fields")
-    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 7:
+    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 8:
         raise RuntimeContractError("public-runtime matrix identity is invalid")
     if matrix.get("toolchain_id") != "rocm-7.14.0" or matrix.get("targets") != list(TARGETS):
         raise RuntimeContractError("public-runtime matrix is not bound to ROCm 7.14.0 and the exact two targets")
@@ -2494,7 +2600,7 @@ def _require_host_symbols(output: str) -> list[str]:
     # are not the forbidden public_runtime_stub translation unit. Every other
     # symbol containing "stub" remains a hard failure.
     compiler_stub_symbols = {f"__device_stub__{name}" for name in (probe_name, *KERNEL_SYMBOLS)}
-    compiler_stub_symbols.add(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOL)
+    compiler_stub_symbols.update(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)
     stub_symbols = sorted(
         {
             record["name"]

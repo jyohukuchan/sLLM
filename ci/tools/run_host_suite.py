@@ -454,26 +454,42 @@ def process_group_snapshot(pgid: int) -> ProcessGroupSnapshot:
     for entry in proc_entries:
         if not entry.name.isdigit():
             continue
-        try:
-            stat = (entry / "stat").read_bytes()
-        except OSError as exc:
-            if exc.errno in {errno.ENOENT, errno.ESRCH}:
-                continue
-            raise OSError(exc.errno, f"cannot inspect {entry / 'stat'}: {exc.strerror}") from exc
-        command_start = stat.find(b"(")
-        command_end = stat.rfind(b")")
-        fields = stat[command_end + 2 :].split() if command_end >= 0 else []
-        valid_state = len(fields) >= 22 and len(fields[0]) == 1
-        if (
-            command_start <= 0
-            or command_end <= command_start
-            or stat[:command_start].strip() != entry.name.encode("ascii")
-            or not valid_state
-            or fields[0].decode("ascii", "ignore") not in PROC_LIVE_STATES | {"Z", "X", "x"}
-            or not fields[2].isdigit()
-            or not fields[21].isdigit()
-        ):
-            raise OSError(errno.EPROTO, f"malformed procfs stat for PID {entry.name}")
+        # A process may exit or be replaced between ``iterdir`` and the stat
+        # read.  Linux can expose a short/partial stat record for that narrow
+        # window; retrying the same entry keeps the snapshot fail-closed for a
+        # persistent malformed record while avoiding spurious INFRA_ERROR on a
+        # transient procfs race during a busy Cargo build.
+        stat: bytes | None = None
+        fields: list[bytes] = []
+        for attempt in range(3):
+            try:
+                candidate = (entry / "stat").read_bytes()
+            except OSError as exc:
+                if exc.errno in {errno.ENOENT, errno.ESRCH}:
+                    stat = None
+                    break
+                raise OSError(exc.errno, f"cannot inspect {entry / 'stat'}: {exc.strerror}") from exc
+            command_start = candidate.find(b"(")
+            command_end = candidate.rfind(b")")
+            candidate_fields = candidate[command_end + 2 :].split() if command_end >= 0 else []
+            valid_state = len(candidate_fields) >= 22 and len(candidate_fields[0]) == 1
+            valid = (
+                command_start > 0
+                and command_end > command_start
+                and candidate[:command_start].strip() == entry.name.encode("ascii")
+                and valid_state
+                and candidate_fields[0].decode("ascii", "ignore") in PROC_LIVE_STATES | {"Z", "X", "x"}
+                and candidate_fields[2].isdigit()
+                and candidate_fields[21].isdigit()
+            )
+            if valid:
+                stat = candidate
+                fields = candidate_fields
+                break
+            if attempt == 2:
+                raise OSError(errno.EPROTO, f"malformed procfs stat for PID {entry.name}")
+        if stat is None:
+            continue
         state = fields[0].decode("ascii")
         if int(fields[2]) == pgid:
             members.append(ProcessGroupMember(

@@ -24,9 +24,13 @@ from run_h3_public_runtime_compile import (  # noqa: E402
     EXPECTED_FEATURES,
     EXPECTED_DIRECT_COMPILE_SOURCE_PATHS,
     EXPECTED_SOURCE_PATHS,
+    EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS,
+    CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS,
+    KERNEL_SYMBOLS,
     PUBLIC_SYMBOLS,
     RuntimeContractError,
     TARGETS,
+    declared_public_symbols,
     render_commands,
     require_clean_checkout,
     main as run_h3_public_runtime_main,
@@ -649,6 +653,87 @@ class ArtifactFixture:
 
 
 class H3PublicRuntimeContractTests(unittest.TestCase):
+    def test_kernel_symbols_cover_the_full_gfx1030_direct_closure(self) -> None:
+        expected_additions = {
+            "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+            "sllm_elementwise_broadcast_add_bf16_fp32_v1",
+            "sllm_gdn_projection_bundle_bf16_fp32_decode_v1",
+            "sllm_kv_state_bf16_to_fp8_token_major_v1",
+            "sllm_kv_state_bf16_to_nvfp4_token_major_v1",
+            "sllm_linear_attention_column_postprocess_v2",
+            "sllm_linear_attention_column_preprocess_v2",
+            "sllm_linear_attention_recurrent_column_state_v2",
+            "sllm_linear_attention_recurrent_gated_norm_decode_pair_v1",
+            "sllm_matmul_bf16_fp32_decode_serial_rows_v1",
+            "sllm_matmul_bf16_fp32_decode_serial_rows_wave64_v1",
+            "sllm_matmul_bf16_fp32_prefill_short_serial_v1",
+            "sllm_matmul_bf16_to_mxfp4_block32_even_v1",
+            "sllm_matmul_bf16_to_nvfp4_block16_v1",
+            "sllm_matmul_fp32_to_bf16_short_mixed_v1",
+            "sllm_matmul_mxfp4_w4a4_block32_decode_v1",
+            "sllm_matmul_mxfp4_w4a4_block32_prefill_v1",
+            "sllm_matmul_nvfp4_w4a4_block16_packed_v1",
+            "sllm_mlp_gate_up_silu_bundle_bf16_fp32_decode_v1",
+            "sllm_moe_down_combine_v1",
+            "sllm_moe_route_bf16_stable_topk_v1",
+            "sllm_moe_route_stable_group_v1",
+            "sllm_moe_routed_gateup_v1",
+            "sllm_moe_shared_gateup_v1",
+            "sllm_rmsnorm_residual_fused_wave32_v1",
+            "sllm_rmsnorm_residual_fused_wave64_v1",
+            "sllm_token_selector_bf16_f32_mask_v1",
+        }
+        self.assertEqual(len(KERNEL_SYMBOLS), 53)
+        self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
+        self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
+        self.assertEqual(len(expected_additions), 27)
+
+    def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
+        expected = (
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138__device_stub__causal_attention_kernelILb0EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmmmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_138__device_stub__causal_attention_kernelILb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptjmmmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_combine_kernelEPfPKfPKtS5_PKmS5_jjmmjjjj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_pack_kv_kernelEPKtS2_PtS3_Pmmjjj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_144__device_stub__scaled_prefill_scatter_kernelEPKfPtjjjjjj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_147__device_stub__scaled_prefill_pack_query_kernelEPKtPtPfjjjjjj",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_149__device_stub__scaled_prefill_softmax_fp16_kernelEPfPtS2_jmmjjPKff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_156__device_stub__causal_attention_decode_wave_split_kernelILb0EEEvPKtPKvS5_S5_S5_PKfS7_Ptmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_156__device_stub__causal_attention_decode_wave_split_kernelILb1EEEvPKtPKvS5_S5_S5_PKfS7_Ptmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_qtile4_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_158__device_stub__causal_attention_prefill_gqa4_shared_kernelEPKtPKvS4_S4_S4_PKfS6_Ptjmjjjjff",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_161__device_stub__causal_attention_long_prefill_v2_stage1_kernelEPKtS2_S2_jmmmjjPf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_162__device_stub__causal_attention_long_prefill_v2_combine_kernelEPKfPtjjm",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj16EEEvPKtS3_S3_PtmPf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage1_kernelILj32EEEvPKtS3_S3_PtmPf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj16EEEvPKtPtjPKf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_163__device_stub__causal_attention_decode_gqa4_split_stage2_kernelILj32EEEvPKtPtjPKf",
+            "_ZN28sllm_causal_attention_kernel12_GLOBAL__N_166__device_stub__causal_attention_decode_wave_split_fp16_pair_kernelEPKtPKvS4_S4_S4_PKfS6_Ptmjjjjff",
+        )
+        self.assertEqual(len(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS), 18)
+        self.assertEqual(len(set(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)), 18)
+        self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, expected)
+        self.assertEqual(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS, tuple(sorted(CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS)))
+
+    def test_host_hip_undefined_closure_includes_the_three_gfx1030_additions(self) -> None:
+        additions = {"hipMemRetainAllocationHandle", "hipMemcpy", "hipMemsetAsync"}
+        self.assertEqual(len(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS), 52)
+        self.assertEqual(len(set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)), 52)
+        self.assertEqual(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS, tuple(sorted(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS)))
+        self.assertEqual(additions, additions & set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS))
+
+    def test_public_symbols_are_exactly_the_umbrella_header_extern_c_set(self) -> None:
+        self.assertEqual(len(PUBLIC_SYMBOLS), 98)
+        self.assertEqual(declared_public_symbols(ROOT), PUBLIC_SYMBOLS)
+        with tempfile.TemporaryDirectory(prefix="sllm-h3-public-symbol-header-") as directory:
+            repo = Path(directory)
+            header = repo / "include/sllm/hip.h"
+            header.parent.mkdir(parents=True)
+            source = (ROOT / "include/sllm/hip.h").read_text(encoding="utf-8")
+            source = source.replace("SLLM_HIP_API sllm_status_t sllm_buffer_copy_d2d(", "SLLM_HIP_API sllm_status_t sllm_buffer_copy_d2d_removed(", 1)
+            header.write_text(source, encoding="utf-8")
+            with self.assertRaises(RuntimeContractError):
+                declared_public_symbols(repo)
+
     def test_public_runtime_exact_one_job_serial_profile_and_adversarial_mutations(self) -> None:
         workflow_path = ROOT / ".github/workflows/h3-public-runtime-compile.yml"
         workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))

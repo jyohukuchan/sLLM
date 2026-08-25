@@ -75,8 +75,8 @@ fake backendはscheduler、execution plan、resource lifetime、error propagatio
 
 | ID | 階層 | 実行環境 | 検証対象 | 初期予算 |
 | --- | --- | --- | --- | --- |
-| H0 | 静的検証 | GitHub-hosted CPU | format、lint、Markdown/link、schema、license、workflow構文、tracked tree hygiene | hard timeout 8分/job |
-| H1 | host contract | GitHub-hosted CPU | Rustのparser、model lock、scheduler、sampling、descriptor、layout、fake backend、C ABIのerror mapping、API validation | hard timeout 10分/job、通常1秒未満/test |
+| H0 | 静的検証 | GitHub-hosted CPU | format、lint、Markdown/link、schema、license、workflow構文、tracked tree hygiene | row 10分、setup込みhard timeout 15分/job |
+| H1 | host contract | GitHub-hosted CPU | Rustのparser、model lock、scheduler、sampling、descriptor、layout、fake backend、C ABIのerror mapping、API validation | row 10分、setup込みhard timeout 15分/job、通常1秒未満/test |
 | H2 | tiny oracle | GitHub-hosted CPU | Python+NumPyによる極小op、dtype変換、KV indexing、sampling helperの独立参照 | hard timeout 8分/job、通常2秒未満/case |
 | H3 | HIP compile-only | GPUなし、固定ROCm toolchain | C++/HIP構文、target別codegen、CMake/Cargo integration、ABI static assertion、binding差分 | 5分/target、15分/job |
 | G0 | runner preflight | 対象AMD GPU | exact target、driver/runtime/library、device health、binary key、capability probe | 5分/tuple |

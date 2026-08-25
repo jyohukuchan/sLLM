@@ -38,8 +38,10 @@ def validate(document: object) -> None:
         "malformed-json",
         "unsupported-tools",
         "invalid-n",
+        "top-logprobs-without-logprobs",
+        "unsupported-json-schema-keyword",
         "tool-message",
-        "multipart-content",
+        "multipart-non-user-content",
         "unknown-model",
     }
     if set(ids) != required:

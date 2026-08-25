@@ -12,6 +12,13 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Mapping, NoReturn, Sequence
 
+# The Phase 52 aggregator is also loaded directly by host tests with
+# ``importlib.util.spec_from_file_location``.  In that mode Python does not
+# add this script's directory to ``sys.path``, so importing the Phase 50
+# producer would otherwise depend on whichever test happened to run first.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import run_phase50_r9700_sllm as phase50
 
 

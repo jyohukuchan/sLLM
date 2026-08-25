@@ -2369,6 +2369,15 @@ Sections [
             with patch.object(runner, "readobj", return_value=host_text + compiler_stub_text):
                 compiler_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             self.assertEqual(compiler_stub_report["stub_symbols"], [])
+            causal_stub_text = "\n".join(
+                f"  Symbol {{\n    Name: {name}\n    Binding: Local (0x0)\n    Type: Function (0x2)\n    Other: 0\n    Section: .text\n  }}"
+                for name in runner.CAUSAL_ATTENTION_DEVICE_STUB_SYMBOLS
+            )
+            with patch.object(runner, "readobj", return_value=host_text + causal_stub_text):
+                causal_stub_report = runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
+            self.assertEqual(causal_stub_report["stub_symbols"], [])
+            with patch.object(runner, "readobj", return_value=host_text + causal_stub_text.replace("scaled_prefill_scatter_kernel", "scaled_prefill_scatter_kernel_extra", 1)), self.assertRaises(runner.RuntimeContractError):
+                runner.inspect_host(path, Path("/fake/llvm-readobj"), row, expected_bundles)
             hip_mutations = (
                 (host_text.replace(host_symbol("hipMalloc", "None (0x0)", "Undefined (0x0)"), "", 1), "missing HIP runtime symbol"),
                 (host_text + host_symbol("hipUnexpectedRuntimeEntry", "None (0x0)", "Undefined (0x0)"), "extra HIP runtime symbol"),
@@ -2377,6 +2386,9 @@ Sections [
                 (host_text + host_symbol("hipMallocExtra", "None (0x0)", "Undefined (0x0)"), "near-prefix HIP runtime symbol"),
                 (host_text + host_symbol("hipMalloc<T>", "None (0x0)", "Undefined (0x0)"), "template-like HIP runtime symbol"),
                 (host_text + host_symbol("__hipRegisterFunctionSuffix", "None (0x0)", "Undefined (0x0)"), "near-prefix compiler runtime symbol"),
+                (host_text + host_symbol("hipMemRetainAllocationHandleExtra", "None (0x0)", "Undefined (0x0)"), "near-prefix memory runtime symbol"),
+                (host_text + host_symbol("hipMemcpyExtra", "None (0x0)", "Undefined (0x0)"), "near-prefix copy runtime symbol"),
+                (host_text + host_symbol("hipMemsetAsyncExtra", "None (0x0)", "Undefined (0x0)"), "near-prefix memset runtime symbol"),
             )
             for mutated, label in hip_mutations:
                 with self.subTest(label=label), patch.object(runner, "readobj", return_value=mutated), self.assertRaises(runner.RuntimeContractError):
@@ -2493,7 +2505,13 @@ Sections [
             self.assertIn(str(ROOT / "native/hip/src/linear_attention_kernel.hip.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/gdn_projection_bundle_kernel.hip.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/moe_expert_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/moe_expert_kernel.hip.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/moe_route_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/moe_route_kernel.hip.cpp"), commands[-1])
             self.assertIn(str(ROOT / "native/hip/src/residual_rmsnorm_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/token_selector_api.cpp"), commands[-1])
+            self.assertIn(str(ROOT / "native/hip/src/token_selector_kernel.hip.cpp"), commands[-1])
             self.assertFalse(any("./" in token or "--run" in token for command in commands for token in command))
 
     def test_native_link_contract_rejects_missing_blas_dependency(self) -> None:

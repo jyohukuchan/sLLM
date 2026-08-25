@@ -708,7 +708,7 @@ def validate_host_workflow(path: Path, document: dict[str, object]) -> list[str]
         raise ContractError(f"{path.relative_to(ROOT)}: workflow name is missing")
     _require_trigger(path, document)
     warnings: list[str] = []
-    minimum_timeouts = {"h0": 15, "h1": 10, "h2": 8}
+    minimum_timeouts = {"h0": 15, "h1": 15, "h2": 8}
     for row_id in ("h0", "h1", "h2"):
         job = jobs[row_id]
         if not isinstance(job, dict) or not isinstance(job.get("steps"), list) or not job.get("runs-on"):

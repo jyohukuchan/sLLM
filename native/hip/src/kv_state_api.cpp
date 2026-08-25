@@ -1,7 +1,7 @@
 #include "kv_state_api.hpp"
 
-#include <cstring>
 #include <cmath>
+#include <cstring>
 #include <limits>
 
 namespace sllm_kv_state {
@@ -88,9 +88,8 @@ sllm_status_t validate_tensor(const sllm_tensor_binding_t *const binding,
   if (binding->rank != 3U ||
       (binding->shape[1] != 1U && binding->shape[1] != 2U &&
        binding->shape[1] != 4U && binding->shape[1] != 8U) ||
-      binding->shape[2] == 0U ||
-      binding->shape[2] > SLLM_HIP_KV_MAX_HEAD_DIM || binding->shape[0] == 0U ||
-      binding->shape[0] > SLLM_HIP_KV_MAX_M) {
+      binding->shape[2] == 0U || binding->shape[2] > SLLM_HIP_KV_MAX_HEAD_DIM ||
+      binding->shape[0] == 0U || binding->shape[0] > SLLM_HIP_KV_MAX_M) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
         "KV append inputs must have reviewed [M, Hkv, D] geometry");
@@ -206,8 +205,7 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
   std::memcpy(&static_value_scale, &info->reserved[1], sizeof(float));
   const bool fp8_static =
       info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
-      info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
-      info->block_size == 0U &&
+      info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN && info->block_size == 0U &&
       info->scale_dtype == SLLM_TENSOR_DTYPE_F32 &&
       std::isfinite(static_key_scale) && static_key_scale > 0.0F &&
       std::isfinite(static_value_scale) && static_value_scale > 0.0F;
@@ -221,10 +219,8 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
       (info->create_info_version ==
            SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION &&
        fp8_static && all_zero(info->reserved + 2U, 2U));
-  if (!version_matches ||
-      info->reserved0 != 0U ||
-      info->flags != 0U || info->session_id == 0U ||
-      info->capacity_tokens == 0U ||
+  if (!version_matches || info->reserved0 != 0U || info->flags != 0U ||
+      info->session_id == 0U || info->capacity_tokens == 0U ||
       info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
       (head_count != 1U && head_count != 2U && head_count != 4U &&
        head_count != 8U) ||
@@ -236,9 +232,8 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
       (!fp16 && !fp8 && !fp8_static && !nvfp4)) {
     return sllm_public_runtime::write_error(
         sink,
-        info->reserved0 != 0U
-            ? SLLM_STATUS_RESERVED_NONZERO
-            : SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+        info->reserved0 != 0U ? SLLM_STATUS_RESERVED_NONZERO
+                              : SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
         "KV state v2 create info has an invalid version, shape, provider, or "
         "encoding recipe");
   }

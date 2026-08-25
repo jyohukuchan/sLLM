@@ -47,8 +47,8 @@ extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
     uint32_t flags, rocblas_int *solutions, rocblas_int *solution_count);
 #endif
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -922,8 +922,9 @@ struct KvVmmPlane final {
   static constexpr uint8_t kCowPending = 2U;
 
   bool has_pending_cow() const noexcept {
-    return std::any_of(shared_pages.begin(), shared_pages.end(),
-                       [](const uint8_t value) { return value == kCowPending; });
+    return std::any_of(
+        shared_pages.begin(), shared_pages.end(),
+        [](const uint8_t value) { return value == kCowPending; });
   }
 
   /* Make all shared pages intersecting [start_bytes, end_bytes) private.  Old
@@ -1021,8 +1022,7 @@ struct KvVmmPlane final {
       const hipError_t temporary_unmap =
           hipMemUnmap(temporary, static_cast<std::size_t>(page_bytes));
       const hipError_t temporary_free =
-          hipMemAddressFree(temporary,
-                            static_cast<std::size_t>(page_bytes));
+          hipMemAddressFree(temporary, static_cast<std::size_t>(page_bytes));
       if (temporary_unmap != hipSuccess || temporary_free != hipSuccess) {
         return temporary_unmap != hipSuccess ? temporary_unmap : temporary_free;
       }
@@ -1035,9 +1035,8 @@ struct KvVmmPlane final {
                           const hipMemAccessDesc &rw_access) noexcept {
     hipMemAccessDesc shared_access = rw_access;
     shared_access.flags = hipMemAccessFlagsProtRead;
-    const hipError_t status =
-        make_private(start_bytes, end_bytes, properties, rw_access,
-                     shared_access);
+    const hipError_t status = make_private(start_bytes, end_bytes, properties,
+                                           rw_access, shared_access);
     if (status != hipSuccess) {
       return status;
     }
@@ -1066,8 +1065,8 @@ struct KvVmmPlane final {
     return first;
   }
 
-  hipError_t rollback_pending_cow(
-      const hipMemAccessDesc &shared_access) noexcept {
+  hipError_t
+  rollback_pending_cow(const hipMemAccessDesc &shared_access) noexcept {
     if (handles.size() != shared_pages.size() ||
         cow_old_handles.size() != handles.size()) {
       return hipErrorInvalidValue;
@@ -1117,8 +1116,8 @@ struct KvVmmPlane final {
   }
 
   hipError_t rollback_growth_to(const uint64_t target_mapped_bytes) noexcept {
-    if (contiguous || target_mapped_bytes > mapped_bytes ||
-        page_bytes == 0U || target_mapped_bytes % page_bytes != 0U ||
+    if (contiguous || target_mapped_bytes > mapped_bytes || page_bytes == 0U ||
+        target_mapped_bytes % page_bytes != 0U ||
         handles.size() != shared_pages.size() ||
         cow_old_handles.size() != handles.size()) {
       return target_mapped_bytes == mapped_bytes ? hipSuccess
@@ -1356,17 +1355,18 @@ struct KvVmmAppendTransaction final {
 
   KvVmmAppendTransaction(KvState *const state_value,
                          const hipMemAccessDesc &shared_access_value) noexcept
-      : state(state_value),
-        planes{&state_value->key_plane, &state_value->value_plane,
-               &state_value->key_scale_plane,
-               &state_value->value_scale_plane,
-               &state_value->key_outer_scale_plane,
-               &state_value->value_outer_scale_plane},
+      : state(state_value), planes{&state_value->key_plane,
+                                   &state_value->value_plane,
+                                   &state_value->key_scale_plane,
+                                   &state_value->value_scale_plane,
+                                   &state_value->key_outer_scale_plane,
+                                   &state_value->value_outer_scale_plane},
         mapped_before{}, shared_access(shared_access_value),
         mapped_token_capacity_before(state_value->mapped_token_capacity),
         committed_bytes_before(state_value->committed_bytes_per_plane),
         shared_page_count_before(state_value->shared_page_count),
-        cow_copied_bytes_before(state_value->cow_copied_bytes), finished(false) {
+        cow_copied_bytes_before(state_value->cow_copied_bytes),
+        finished(false) {
     for (std::size_t index = 0U; index != planes.size(); ++index) {
       mapped_before[index] = planes[index]->mapped_bytes;
     }

@@ -279,7 +279,7 @@ output budget、protocolを一致させる。各engine内の全warmup／measured
 
 ## Phase 52: R9700 100k KV物理コミットOOMの解消
 
-> 状態: in-progress（2026-08-24）
+> 状態: complete（2026-08-24）
 
 - exact `gfx1201`、Qwen3.5-4B BF16／FP16 KV、単一要求の`100,000/2`に限定し、自動prefillの実効chunk、
   KV memory kind、K／V／scale各planeのmapped／committed量、VMM page／extent／handle、grow失敗位置を失敗時にも保存する。

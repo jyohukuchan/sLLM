@@ -80,7 +80,7 @@
     "path": "ci/dependencies/rust-workspace-v1.json",
     "schema_version": "rust-dependency-policy-v1",
     "workspace_package": "workspace:sllm-server@0.1.0",
-    "counts": {"packages": 132, "registry_packages": 126, "workspace_packages": 6, "edges": 309},
+    "counts": {"packages": 190, "registry_packages": 184, "workspace_packages": 6, "edges": 447},
     "offline_validator": "ci/tools/validate_rust_dependencies.py"
   }
 }

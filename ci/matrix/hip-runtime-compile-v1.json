@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json",
   "schema_version": "hip-runtime-compile-v1",
   "matrix_id": "hip-runtime-compile-v1",
-  "revision": 7,
+  "revision": 8,
   "toolchain_id": "rocm-7.14.0",
   "container": {
     "image_reference": "docker.io/rocm/dev-ubuntu-24.04@sha256:439edaa8f0c4be4a3728e528f87b8a2ea1f051f34cf10b27caa4bd94f562eda7",
@@ -33,14 +33,14 @@
       },
       {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "82d6c3a6b05002a74742ebae73658910a23375cb88ef64c862360bb500d6a2af"
+        "sha256": "ffceb5d80785f3452e30af617e5ee1996ea5466627ddb90d8c7fab670e1bde3b"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
         "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
       }
     ],
-    "source_set_sha256": "5f33ca2f716f696b85d0f00a08089bcb9ca8b7db80b5db96dc952c3f8185f443"
+    "source_set_sha256": "aad08f6f2a708f6e58ef5884866857633fd48219f1c9635e60dfc065b237c772"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -93,6 +93,16 @@
       "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
       "native/hip/src/mlp_gate_up_silu_bundle_kernel_internal.hpp",
       "native/hip/src/mlp_gate_up_silu_bundle_runtime.inc",
+      "native/hip/src/moe_expert_api.cpp",
+      "native/hip/src/moe_expert_api.hpp",
+      "native/hip/src/moe_expert_kernel.hip.cpp",
+      "native/hip/src/moe_expert_kernel_internal.hpp",
+      "native/hip/src/moe_expert_runtime.inc",
+      "native/hip/src/moe_route_api.cpp",
+      "native/hip/src/moe_route_api.hpp",
+      "native/hip/src/moe_route_kernel.hip.cpp",
+      "native/hip/src/moe_route_kernel_internal.hpp",
+      "native/hip/src/moe_route_runtime.inc",
       "native/hip/src/public_runtime.hip.cpp",
       "native/hip/src/public_runtime_internal.hpp",
       "native/hip/src/residual_rmsnorm_api.cpp",
@@ -106,6 +116,11 @@
       "native/hip/src/rotary_kernel.hip.cpp",
       "native/hip/src/rotary_kernel_internal.hpp",
       "native/hip/src/rotary_runtime.inc",
+      "native/hip/src/token_selector_api.cpp",
+      "native/hip/src/token_selector_api.hpp",
+      "native/hip/src/token_selector_kernel.hip.cpp",
+      "native/hip/src/token_selector_kernel_internal.hpp",
+      "native/hip/src/token_selector_runtime.inc",
       "native/hip/src/windowed_attention_api.cpp",
       "native/hip/src/windowed_attention_api.hpp",
       "native/hip/src/windowed_attention_runtime.inc"
@@ -241,7 +256,7 @@
       },
       {
         "path": "native/hip/src/kv_state_api.cpp",
-        "sha256": "dd42248f8dac7438b9684dac0eb4cf8795fb40fbc6dc9169386fbaaad03e1069"
+        "sha256": "a165c750ea3c5b9862be6ef5b0d229a241191e257b22d737aa1578a08330ae39"
       },
       {
         "path": "native/hip/src/kv_state_api.hpp",
@@ -249,7 +264,7 @@
       },
       {
         "path": "native/hip/src/kv_state_kernel.hip.cpp",
-        "sha256": "d008275593d19d71643e7530619b7b1a97c0591f2eca11668d6175818e12f92f"
+        "sha256": "bac52c1cb7d887506d9c1177b2414ac9830d25cebc22e3a56471af9b6ffb036c"
       },
       {
         "path": "native/hip/src/kv_state_kernel_internal.hpp",
@@ -308,8 +323,48 @@
         "sha256": "b532575110f06707862524f03c0b972df2d24b3e6cb92828ce5ee8dca03b4500"
       },
       {
+        "path": "native/hip/src/moe_expert_api.cpp",
+        "sha256": "0234744dc2abbfbdfb04d0f1f3aabae51816eed18fc7e58bd572f25b8e3c3b59"
+      },
+      {
+        "path": "native/hip/src/moe_expert_api.hpp",
+        "sha256": "09334a4ea89f3022f76120ff878424a230743c47c95c932460f5f48a8e64d66c"
+      },
+      {
+        "path": "native/hip/src/moe_expert_kernel.hip.cpp",
+        "sha256": "266e3405001097689fddb5f7b3fe74e45ad3ba3f136f343ff1e07ce7e2eb075d"
+      },
+      {
+        "path": "native/hip/src/moe_expert_kernel_internal.hpp",
+        "sha256": "161155d6cf4910acb6b15cf0f498cc15fce824e04ae97bd6b38a6fa6b355883f"
+      },
+      {
+        "path": "native/hip/src/moe_expert_runtime.inc",
+        "sha256": "22514ff7df61c2bb6e3b65a896db282bd13e5e540c454eec1adbae867a871496"
+      },
+      {
+        "path": "native/hip/src/moe_route_api.cpp",
+        "sha256": "a476ae2e46b733fa73522865262c0dc037d8a5897b19118912d0d91517a730d6"
+      },
+      {
+        "path": "native/hip/src/moe_route_api.hpp",
+        "sha256": "4fa8fa88d9aefe18cdb4ce63fb0a9b9d0ec051ea4fe29ee4a5c455755dfa71d9"
+      },
+      {
+        "path": "native/hip/src/moe_route_kernel.hip.cpp",
+        "sha256": "21256789f5fc0c690a0fbb87d6c881f99df00743be2ab3c9de4972e2bd54728d"
+      },
+      {
+        "path": "native/hip/src/moe_route_kernel_internal.hpp",
+        "sha256": "6fb6e6fedf89e8cf240a6ff16f44ad6e4fbc3ea6be2c8368aa7838008177e1a4"
+      },
+      {
+        "path": "native/hip/src/moe_route_runtime.inc",
+        "sha256": "ea92dc6a7f387f93c9f224e906ac571029584cd16ab15c02f7188ae777bccdda"
+      },
+      {
         "path": "native/hip/src/public_runtime.hip.cpp",
-        "sha256": "82d6c3a6b05002a74742ebae73658910a23375cb88ef64c862360bb500d6a2af"
+        "sha256": "ffceb5d80785f3452e30af617e5ee1996ea5466627ddb90d8c7fab670e1bde3b"
       },
       {
         "path": "native/hip/src/public_runtime_internal.hpp",
@@ -360,6 +415,26 @@
         "sha256": "28a6e9e7356e90759318ea1e74e9ffd2673111ec2b85b013ab82e9a1b941da0e"
       },
       {
+        "path": "native/hip/src/token_selector_api.cpp",
+        "sha256": "2bfa3fc3003dd97bc50fb773cdc4f0c47dc3481af1b58c72d709a955275356f1"
+      },
+      {
+        "path": "native/hip/src/token_selector_api.hpp",
+        "sha256": "45d1d04eb0f2143df536f4e78fa5d8a8d303e0c8953bd193d07a3f2a7e9ff0c4"
+      },
+      {
+        "path": "native/hip/src/token_selector_kernel.hip.cpp",
+        "sha256": "4b06dd997b063b951275dd6ecabfc10899f97c86ab53f5f6addacec4b527da46"
+      },
+      {
+        "path": "native/hip/src/token_selector_kernel_internal.hpp",
+        "sha256": "b49a46082f780da9f817f9dc6d7dd1703c61bf76d0e310bedb1cb01c35086648"
+      },
+      {
+        "path": "native/hip/src/token_selector_runtime.inc",
+        "sha256": "8438b4ae7691e61c0f2e09766de4dc37c6dc5aca9062ae392ccd8700de46b86e"
+      },
+      {
         "path": "native/hip/src/windowed_attention_api.cpp",
         "sha256": "9be20542f9b4ce8bc8ad48703fafd014a829f919639418fb2da83430bc38d254"
       },
@@ -372,7 +447,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "574848a9de652ffe13157a72af1c5dd7662ba5caa17c382982032de62beb01b1"
+    "source_set_sha256": "dde94fa3fa7ac7a9c175c919c1a4786dd260802209504706414e4d737ae18b0e"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",
@@ -382,6 +457,7 @@
     "sllm_attention_preprocess_plan_release",
     "sllm_attention_preprocess_prepare",
     "sllm_backend_probe",
+    "sllm_buffer_copy_d2d",
     "sllm_buffer_copy_d2h",
     "sllm_buffer_copy_h2d",
     "sllm_buffer_create",
@@ -414,22 +490,44 @@
     "sllm_kv_state_append",
     "sllm_kv_state_append_cancel",
     "sllm_kv_state_create",
+    "sllm_kv_state_create_v2",
+    "sllm_kv_state_export",
+    "sllm_kv_state_fork",
+    "sllm_kv_state_fork_query",
+    "sllm_kv_state_image_plane_size",
+    "sllm_kv_state_image_query",
+    "sllm_kv_state_import",
+    "sllm_kv_state_import_finalize",
     "sllm_kv_state_query",
     "sllm_kv_state_release",
+    "sllm_kv_state_rewind_last",
     "sllm_kv_state_snapshot",
     "sllm_kv_view_query",
     "sllm_kv_view_release",
     "sllm_linear_attention_cancel",
     "sllm_linear_attention_execute",
     "sllm_linear_attention_state_create",
+    "sllm_linear_attention_state_export",
+    "sllm_linear_attention_state_fork",
+    "sllm_linear_attention_state_image_plane_size",
+    "sllm_linear_attention_state_image_query",
+    "sllm_linear_attention_state_import",
+    "sllm_linear_attention_state_import_finalize",
     "sllm_linear_attention_state_query",
     "sllm_linear_attention_state_release",
+    "sllm_linear_attention_state_rewind_last",
     "sllm_matmul_execute",
     "sllm_matmul_plan_release",
     "sllm_matmul_prepare",
     "sllm_mlp_gate_up_silu_bundle_execute",
     "sllm_mlp_gate_up_silu_bundle_plan_release",
     "sllm_mlp_gate_up_silu_bundle_prepare",
+    "sllm_moe_expert_execute",
+    "sllm_moe_expert_plan_release",
+    "sllm_moe_expert_prepare",
+    "sllm_moe_route_execute",
+    "sllm_moe_route_plan_release",
+    "sllm_moe_route_prepare",
     "sllm_query_version",
     "sllm_queue_create",
     "sllm_queue_fence",
@@ -444,6 +542,9 @@
     "sllm_rotary_execute",
     "sllm_rotary_plan_release",
     "sllm_rotary_prepare",
+    "sllm_token_selector_execute",
+    "sllm_token_selector_plan_release",
+    "sllm_token_selector_prepare",
     "sllm_windowed_attention_execute",
     "sllm_windowed_attention_plan_release",
     "sllm_windowed_attention_prepare"
@@ -594,8 +695,11 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/moe_expert_api.cpp",
+            "{repo}/native/hip/src/moe_route_api.cpp",
             "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
             "{repo}/native/hip/src/rotary_api.cpp",
+            "{repo}/native/hip/src/token_selector_api.cpp",
             "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
             "hip",
@@ -610,7 +714,10 @@
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
+            "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
+            "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
             "-x",
             "none",
             "-o",
@@ -795,8 +902,11 @@
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/moe_expert_api.cpp",
+            "{repo}/native/hip/src/moe_route_api.cpp",
             "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
             "{repo}/native/hip/src/rotary_api.cpp",
+            "{repo}/native/hip/src/token_selector_api.cpp",
             "{repo}/native/hip/src/windowed_attention_api.cpp",
             "-x",
             "hip",
@@ -811,7 +921,10 @@
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
+            "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
+            "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/rotary_kernel.hip.cpp",
+            "{repo}/native/hip/src/token_selector_kernel.hip.cpp",
             "-x",
             "none",
             "-o",
