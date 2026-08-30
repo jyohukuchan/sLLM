@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value};
+use sllm_core::KvCacheEncoding;
 
 pub const MODEL_MANIFEST_SCHEMA_VERSION_V1: &str = "sllm-model-manifest-v1";
 pub const MAX_MODEL_MANIFEST_BYTES_V1: usize = 1024 * 1024;
@@ -104,6 +105,7 @@ pub struct ModelManifestEntryV1 {
     derived_lock: PathBuf,
     device_index: u32,
     target: String,
+    kv_cache_encoding: Option<KvCacheEncoding>,
     declared_resident_bytes: u64,
     preload: bool,
     adapters: Vec<ModelArtifactManifestV1>,
@@ -119,6 +121,10 @@ impl fmt::Debug for ModelManifestEntryV1 {
             .field("derived_lock", &"<redacted-path>")
             .field("device_index", &self.device_index)
             .field("target", &self.target)
+            .field(
+                "kv_cache_encoding",
+                &self.kv_cache_encoding.map(KvCacheEncoding::canonical_name),
+            )
             .field("declared_resident_bytes", &self.declared_resident_bytes)
             .field("preload", &self.preload)
             .field("adapters", &self.adapters.len())
@@ -146,6 +152,10 @@ impl ModelManifestEntryV1 {
 
     pub fn target(&self) -> &str {
         &self.target
+    }
+
+    pub const fn kv_cache_encoding(&self) -> Option<KvCacheEncoding> {
+        self.kv_cache_encoding
     }
 
     pub const fn declared_resident_bytes(&self) -> u64 {
@@ -206,6 +216,8 @@ struct WireModelManifestV1 {
     derived_lock: String,
     device_index: u32,
     target: String,
+    #[serde(default)]
+    kv_cache_encoding: Option<String>,
     declared_resident_bytes: u64,
     preload: bool,
     #[serde(default)]
@@ -297,6 +309,11 @@ fn build_manifest(wire: WireManifestV1) -> Result<ModelManifestV1, ModelManifest
         if model.declared_resident_bytes == 0 || !valid_target(&model.target) {
             return Err(ModelManifestErrorV1::InvalidValue);
         }
+        let kv_cache_encoding = model
+            .kv_cache_encoding
+            .as_deref()
+            .map(parse_kv_cache_encoding)
+            .transpose()?;
         let gguf = validate_artifact_path(&model.gguf)?;
         let derived_lock = validate_artifact_path(&model.derived_lock)?;
         let mut artifact_aliases = BTreeSet::new();
@@ -308,6 +325,7 @@ fn build_manifest(wire: WireManifestV1) -> Result<ModelManifestV1, ModelManifest
             derived_lock,
             device_index: model.device_index,
             target: model.target,
+            kv_cache_encoding,
             declared_resident_bytes: model.declared_resident_bytes,
             preload: model.preload,
             adapters,
@@ -363,7 +381,55 @@ fn validate_alias(alias: &str) -> Result<(), ModelManifestErrorV1> {
 }
 
 fn valid_target(target: &str) -> bool {
-    matches!(target, "gfx1030" | "gfx1201" | "gfx942")
+    matches!(
+        target,
+        "gfx1030" | "gfx1201" | "gfx942" | "gfx942:sramecc+:xnack-"
+    )
+}
+
+fn parse_kv_cache_encoding(value: &str) -> Result<KvCacheEncoding, ModelManifestErrorV1> {
+    match value {
+        "fp16" => Ok(KvCacheEncoding::Fp16),
+        "fp8" => Ok(KvCacheEncoding::Fp8E4M3Fn),
+        "fp8-static" => Ok(KvCacheEncoding::Fp8E4M3FnStatic),
+        "nvfp4" => Ok(KvCacheEncoding::Nvfp4),
+        "kv-mxfp8-e4" => Ok(KvCacheEncoding::Mxfp8E4),
+        "kv-mxfp8-e5" => Ok(KvCacheEncoding::Mxfp8E5),
+        _ => Err(ModelManifestErrorV1::InvalidValue),
+    }
+}
+
+#[cfg(test)]
+mod kv_cache_encoding_tests {
+    use super::*;
+
+    #[test]
+    fn model_entry_accepts_canonical_names_and_rejects_derived_aliases() {
+        for (name, expected) in [
+            ("fp16", KvCacheEncoding::Fp16),
+            ("fp8", KvCacheEncoding::Fp8E4M3Fn),
+            ("fp8-static", KvCacheEncoding::Fp8E4M3FnStatic),
+            ("nvfp4", KvCacheEncoding::Nvfp4),
+            ("kv-mxfp8-e4", KvCacheEncoding::Mxfp8E4),
+            ("kv-mxfp8-e5", KvCacheEncoding::Mxfp8E5),
+        ] {
+            assert_eq!(parse_kv_cache_encoding(name), Ok(expected));
+        }
+        for alias in [
+            "fp8-e4-block16",
+            "kv-fp8-e4m3-block16",
+            "kv-fp8-e5m2-block16",
+            "KV-FP8-E4-BLOCK16",
+            "mxfp8-e4",
+            "kv-mxfp8-e4-block32",
+            "KV-MXFP8-E4",
+        ] {
+            assert_eq!(
+                parse_kv_cache_encoding(alias),
+                Err(ModelManifestErrorV1::InvalidValue)
+            );
+        }
+    }
 }
 
 fn validate_artifact_path(value: &str) -> Result<PathBuf, ModelManifestErrorV1> {

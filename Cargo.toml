@@ -7,6 +7,7 @@ members = [
     "crates/sllm-cli",
     "crates/sllm-frontend",
     "crates/sllm-server",
+    "crates/sllm-tools",
 ]
 
 [workspace.package]
@@ -36,3 +37,4 @@ sllm-frontend = { path = "crates/sllm-frontend" }
 sllm-hip = { path = "crates/sllm-hip" }
 sllm-hip-sys = { path = "crates/sllm-hip-sys" }
 sllm-server = { path = "crates/sllm-server" }
+sllm-tools = { path = "crates/sllm-tools" }

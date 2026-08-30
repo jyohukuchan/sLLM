@@ -574,6 +574,36 @@ canonical R9700で`100,000/2`を1 warmup＋3 measured、`10,001/2`を3 warmup＋
 | --- | --- | --- | --- |
 | R9700 exact `gfx1201` Phase 52 Qwen3.5-4B BF16 `100,000/2` | `experimental` | `project-verified`（固定長context scope） | resident KV、自動2K、4/4 PASS、HIP-only、fallback/cleanup 0、資源復帰 |
 
+### 2026-08-27 Phase53 descriptor v1判定履歴とv2 follow-up
+
+R9700 exact `gfx1201`はdescriptor v1の`kv-fp8-e4-block16`／`kv-mxfp8-e4`、V620 exact `gfx1030`は
+`kv-fp8-e5-block16`／`kv-mxfp8-e5`のpadded value／scale byte oracle、GPU append 6、direct attention 1、
+HIP-only、fallback 0、cleanup 0をPASSした。前者はhead-dimension方向block 16、後者はstandard OCP block 32で、
+いずれもtoken内E8M0 scaleを使う。標準MXFP8はexplicit-onlyでdefault候補ではない。
+
+完全直列3 repeat品質測定のblock16 KLD p99はgfx1201 `0.0038687249522990803`、gfx1030
+`0.04331390780013198`だった。一方top-1／long-contextはそれぞれ`0.85`／`0.08333333333333337`と
+`0.8`／`0.16666666666666663`でfreeze済みthresholdを満たさず、両製品を`retain-fp16`とした。
+early-stopによりperformance/resourceは未実行で、format correctness以外へ`project-verified`を広げない。
+
+MI300X exact `gfx942:sramecc+:xnack-`はfresh Phase 53 reportがなく`insufficient-evidence`である。
+E4M3 FNUZのblock16候補を過去Phaseの別evidenceでPASSとせず、standard OCP MXFP8はFNUZ byte列と非互換なのでunsupportedとする。
+2026-08-27のユーザー指示により、この実機検証は追加のMI300X項目がまとまった時点の一括実行へ延期した。固定IPへの疎通は
+VM存在またはGPU availabilityの証拠にしない。
+summary `external:phase53/phase53-kv-default-summary-v3.json`のSHA-256は
+`2440fd7726fca24919731abdcbd2b0f74fdd9d663ecca850b369b5ae3e69dd2b`で、詳細は
+[Phase 53履歴](../history/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正とする。
+
+### 2026-08-30 current KV policy
+
+block16 E4/E5の実装・数値結果は履歴へ固定し、production admissionを廃止した。reviewed Qwen3.5-4B BF16 dense text／
+full attention／single GPU／head dim 256の省略時KVはstandard OCP MXFP8 E4M3である。V620 `gfx1030`、R9700
+`gfx1201`、MI300X `gfx942:sramecc+:xnack-`を同じOCP E4M3FN value／block 32／E8M0 scale contractへ結合する。
+MI300XでもFNUZへbyte reinterpretせずsoftware OCP encode/decodeを使う。明示`fp16`はrollbackである。
+host/fake-HIP admissionに加え、V620 `gfx1030`とR9700 `gfx1201`のdirect GPU byte／attention oracleはPASSした。
+一回のQwen3.5-4B測定ではKLD p99は両方`0.004945428206833837`、top-1一致はgfx1030 `1.0`、gfx1201 `0.85`で、
+gfx1201はfreeze済み品質閾値未達である。このtarget splitを保持し、MI300X `gfx942`はfresh実機取得まで`unverified`とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

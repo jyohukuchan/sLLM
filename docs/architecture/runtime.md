@@ -264,14 +264,24 @@ KV cache は通常の tensor descriptor に加え、layer、K/V の分離また�
 schedulerとgeneration serviceはopaqueなKV state/resource、logical token range、versioned view metadataだけを扱い、value/scale pointer、内部pointer arithmetic、VMM handle、block table、backend page sizeを所有しない。appendは新規BF16 K/Vだけを一度量子化し、K/Vと全scale planeの完了後にlogical lengthをatomicに公開する。causal attentionはFP16、packed FP8、packed NVFP4をstateから直接読み、request全体のFP16/BF16 mirrorを作らない。legacy create/readback ABIはFP16のまま維持し、additive create v2で低bit recipeを指定する。旧evidence readbackへ低bit stateを渡した場合はpacked bytesをFP16と誤認せず`unsupported encoding`でfail-closedにする。Paged Attention production backendは未実装である。詳細は[KV memory decision](kv-memory.md)を正とする。
 
 Phase 31はBF16 weight graphとKV encodingの選択を分離し、Qwen CLI/serverへ`fp16`、dynamic `fp8`、
-`fp8-static`、`nvfp4`の明示設定を通した。省略時は引き続きFP16である。static FP8は明示選択時の固定K/V scale 1.0を
+`fp8-static`、`nvfp4`の明示設定を通した。static FP8は明示選択時の固定K/V scale 1.0を
 descriptorへ入れ、zero scaleをfail-closedする。low-bit選択時は未検証のMTP/multimodal/MoE組合せを拒否し、別encodingへの
 fallbackを行わない。この公開選択はlow-bit KVの長context検証を可能にするが、全modelのdefault昇格や品質保証を意味しない。
+
+Phase 53/54のblock16 experimentは履歴へ固定し、`kv-fp8-e4-block16`／`kv-fp8-e5-block16`をpublic parser、selector、
+graph builder、Rust→HIP lowering、native state createの各境界で拒否する。ABI定数とdescriptor型は旧stateを誤認しないための
+予約identityとして残し、kernel sourceが残っていてもproduction dispatchへ到達させない。
+
+2026-08-30以降、reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256の省略時KVは
+standard OCP `kv-mxfp8-e4`である。valueはE4M3FN、block sizeは32、scaleはE8M0で、K/V別のpadded value／scale planeを
+opaque ownerが持つ。exact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`を許可し、gfx942もOCP byteをsoftware
+encode/decodeしてFNUZへ再解釈しない。明示`fp16`はrollback、対象外model/laneはfixed FP16 recipeである。
+requested／resolved encoding、OCP physical variant、descriptor version、exact target、selection sourceをstate identityへ結合する。
 
 Phase 32はFP8 appendのsemantic kernel、256-thread workgroup、grid、scale recipe、value/scale plane、publicationを維持し、
 最終F32→OCP E4M3FN encodeだけをexact `gfx1201` device compileでnative scalar conversionへlowerする。NaN、Inf、signed zero、
 448 saturationはsoftware contractへ明示補正する。exact `gfx1030`は同じsourceからsoftware helperを生成し、FP16/NVFP4、
-public ABI、KV format、default FP16は変えない。native packed pair/128-thread候補はproductionへ採用しない。
+public ABIと既存KV formatは変えない。native packed pair/128-thread候補はproductionへ採用しない。
 
 Phase 11でVMM非対応が想定されるMI300X `gfx942`向けに、同じopaque resource、token-major FP16 layout、
 contiguous attention pointerを保つ`contiguous-resident` providerを追加した。logical capacity分を通常のdevice

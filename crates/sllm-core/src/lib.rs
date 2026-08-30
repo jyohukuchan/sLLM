@@ -21,6 +21,9 @@ mod gguf_writer;
 mod grammar;
 mod handles;
 mod inference_embedding;
+mod kv_cache_selection;
+mod kv_fp8;
+mod kv_mxfp8;
 mod kv_state;
 mod linear_attention;
 mod model;
@@ -29,6 +32,12 @@ mod mxfp;
 mod nvfp4;
 mod nvfp4_sidecar;
 mod op;
+#[cfg(feature = "phase54-research")]
+mod phase54_kq_transform;
+#[cfg(feature = "phase54-research")]
+mod phase54_kv_attribution;
+#[cfg(feature = "phase54-research")]
+mod phase54_vo_transform;
 mod prefix_cache;
 mod prepared_execution;
 mod quantized_model;
@@ -148,10 +157,25 @@ pub use inference_embedding::{
     EmbeddingPoolError, EmbeddingPoolV1, EmbeddingRerankError, EmbeddingRerankResultV1,
     EmbeddingRowsV1, EmbeddingVectorV1,
 };
+pub use kv_cache_selection::{
+    KV_CACHE_SELECTION_POLICY_VERSION_V1, KV_CACHE_SELECTION_POLICY_VERSION_V2, KvCacheSelection,
+    KvCacheSelectionError, KvCacheSelectionRequest, KvCacheSelectionSource,
+    resolve_kv_cache_selection,
+};
+pub use kv_fp8::{
+    E5M2_MAX, KvFp8CodecError, QuantizedKvFp8Block16, decode_e5m2, decode_kv_fp8_block16,
+    encode_e5m2, quantize_kv_fp8_block16,
+};
+#[cfg(feature = "phase54-research")]
+pub use kv_fp8::{
+    KvFp8ResearchBlockStats, KvFp8ResearchScaleRecipe, quantize_kv_fp8_block16_research,
+};
+pub use kv_mxfp8::{KvMxfp8CodecError, QuantizedKvMxfp8, decode_kv_mxfp8, quantize_kv_mxfp8};
 pub use kv_state::{
-    CausalAttentionDescriptor, KvCacheEncoding, KvMemoryKind, KvPhysicalMemorySnapshot,
-    KvStateAppendRequest, KvStateDescriptor, KvStateError, KvStateLayout, KvStateSnapshot,
-    StateForkAuditV1, StateForkModeV1,
+    CausalAttentionDescriptor, KV_FP8_BLOCK_SIZE, KV_MXFP8_BLOCK_SIZE, KvCacheEncoding,
+    KvFp8Block16Descriptor, KvFp8PhysicalVariant, KvFp8ScaleEncoding, KvMemoryKind,
+    KvMxfp8Descriptor, KvPhysicalMemorySnapshot, KvStateAppendRequest, KvStateDescriptor,
+    KvStateError, KvStateLayout, KvStateSnapshot, StateForkAuditV1, StateForkModeV1,
 };
 pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
@@ -195,6 +219,31 @@ pub use op::{
     SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
     TokenSelectorContractV1, TokenSelectorTensor, WindowedCausalAttentionContract,
 };
+#[cfg(feature = "phase54-research")]
+pub use phase54_kq_transform::{
+    PHASE54_KQ_TRANSFORM_CANONICAL, PHASE54_KQ_TRANSFORM_DIGEST, PHASE54_KQ_TRANSFORM_ENV,
+    PHASE54_KQ_TRANSFORM_HEAD_DIM, PHASE54_KQ_TRANSFORM_LAYERS, PHASE54_KQ_TRANSFORM_SEMANTICS,
+    Phase54KqTransformConfig, Phase54KqTransformError, Phase54KqTransformMode,
+    Phase54KqTransformTarget, transpose_bf16_bytes, transpose_bf16_words, transpose16x16_index,
+};
+#[cfg(feature = "phase54-research")]
+pub use phase54_kv_attribution::{
+    PHASE54_KV_ATTRIBUTION_ALLOWED_LAYERS, PHASE54_KV_ATTRIBUTION_FIXED_LAYER,
+    PHASE54_KV_ATTRIBUTION_LAYER_ENV, PHASE54_KV_ATTRIBUTION_SEMANTICS, Phase54KvAttributionConfig,
+    Phase54KvAttributionError, Phase54KvAttributionMode, Phase54KvAttributionSelector,
+    is_allowed_layer, parse_layer, physical_variant_for_target, roundtrip_bf16_plane,
+};
+#[cfg(feature = "phase54-research")]
+pub use phase54_vo_transform::{
+    PHASE54_VO_TRANSFORM_BACKEND, PHASE54_VO_TRANSFORM_CANONICAL, PHASE54_VO_TRANSFORM_DIGEST,
+    PHASE54_VO_TRANSFORM_ENV, PHASE54_VO_TRANSFORM_HEAD_DIM, PHASE54_VO_TRANSFORM_KV_HEADS,
+    PHASE54_VO_TRANSFORM_LAYERS, PHASE54_VO_TRANSFORM_LAYERS_19_31_CANONICAL,
+    PHASE54_VO_TRANSFORM_LAYERS_19_31_DIGEST, PHASE54_VO_TRANSFORM_LAYERS_19_31_LAYERS,
+    PHASE54_VO_TRANSFORM_LAYERS_19_31_SELECTOR, PHASE54_VO_TRANSFORM_LAYERS_19_31_SEMANTICS,
+    PHASE54_VO_TRANSFORM_Q_HEADS, PHASE54_VO_TRANSFORM_SELECTOR, PHASE54_VO_TRANSFORM_SEMANTICS,
+    Phase54VoTransformConfig, Phase54VoTransformError, Phase54VoTransformMode,
+    Phase54VoTransformTarget,
+};
 pub use prefix_cache::{
     DEFAULT_PREFIX_CACHE_MAX_ENTRIES, DEFAULT_PREFIX_CACHE_MAX_LOGICAL_TOKENS,
     DEFAULT_PREFIX_CACHE_MAX_RESIDENT_BYTES, MAX_PREFIX_IDENTITY_BYTES, PrefixCacheAuditSnapshot,
@@ -230,9 +279,10 @@ pub use qwen_graph::{
     QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
     build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
     build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_qwen35_nvfp4_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_nvfp4_graph_with_kv_cache_encoding,
 };
 pub use qwen_mtp::{
     QWEN35_MTP_DRAFT_WIDTH, QWEN35_MTP_HIDDEN_SIZE, QWEN35_MTP_INTERMEDIATE_SIZE,

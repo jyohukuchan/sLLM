@@ -960,8 +960,8 @@ pub fn build_qwen35_graph(
 }
 
 /// Builds the reviewed BF16-weight graph with an explicitly selected KV
-/// encoding. Production callers default to FP16; bounded evidence and later
-/// policy layers use this entry point without coupling KV storage to weights.
+/// encoding. Production callers resolve the target-aware KV policy before
+/// using this compatibility entry point.
 pub fn build_qwen35_graph_with_kv_cache_encoding(
     lock: &ModelLock,
     plan: &WeightLoadPlan,
@@ -975,6 +975,36 @@ pub fn build_qwen35_graph_with_kv_cache_encoding(
         token_count,
         state_capacity,
         kv_cache_encoding,
+        AttentionPreprocessPositionPayloadModeV1::Contiguous,
+    )
+}
+
+/// Builds the reviewed BF16-weight graph from a resolved, target-aware KV
+/// selection. Unlike the encoding-only compatibility API, this preserves the
+/// exact OCP/FNUZ/E5M2 resident byte variant through every graph state and KV
+/// append descriptor.
+pub fn build_qwen35_graph_with_kv_cache_selection(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+    selection: crate::KvCacheSelection,
+) -> Result<QwenGraph, QwenGraphError> {
+    if let Some(validated_model) = selection.validated_model_fingerprint() {
+        if lock.fingerprint() != validated_model {
+            return Err(QwenGraphError::InvalidModel(
+                "resolved KV selection belongs to a different model lock".to_owned(),
+            ));
+        }
+    }
+    build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
+        lock,
+        plan,
+        token_count,
+        state_capacity,
+        selection.resolved(),
+        selection.block16_descriptor(),
+        selection.mxfp8_descriptor(),
         AttentionPreprocessPositionPayloadModeV1::Contiguous,
     )
 }
@@ -1008,6 +1038,50 @@ fn build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
     kv_cache_encoding: crate::KvCacheEncoding,
     position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
 ) -> Result<QwenGraph, QwenGraphError> {
+    build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
+        lock,
+        plan,
+        token_count,
+        state_capacity,
+        kv_cache_encoding,
+        crate::KvFp8Block16Descriptor::canonical_for_encoding(kv_cache_encoding),
+        crate::KvMxfp8Descriptor::canonical_for_encoding(kv_cache_encoding),
+        position_payload_mode,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+    kv_fp8_block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
+    kv_mxfp8_descriptor: Option<crate::KvMxfp8Descriptor>,
+    position_payload_mode: AttentionPreprocessPositionPayloadModeV1,
+) -> Result<QwenGraph, QwenGraphError> {
+    if kv_cache_encoding.is_kv_fp8_block16() {
+        return Err(QwenGraphError::InvalidPlan(
+            "KV FP8 block16 has been retired; use standard OCP MXFP8 E4M3 or explicit FP16"
+                .to_owned(),
+        ));
+    }
+    if kv_fp8_block16_descriptor
+        .is_some_and(|descriptor| descriptor.encoding() != kv_cache_encoding)
+        || (kv_cache_encoding.is_kv_fp8_block16() && kv_fp8_block16_descriptor.is_none())
+    {
+        return Err(QwenGraphError::InvalidPlan(
+            "KV block16 logical encoding and physical descriptor differ".to_owned(),
+        ));
+    }
+    if kv_mxfp8_descriptor.is_some_and(|descriptor| descriptor.encoding() != kv_cache_encoding)
+        || (kv_cache_encoding.is_kv_mxfp8() && kv_mxfp8_descriptor.is_none())
+    {
+        return Err(QwenGraphError::InvalidPlan(
+            "KV MXFP8 logical encoding and physical descriptor differ".to_owned(),
+        ));
+    }
     let spec = validate_reviewed_model(lock)?;
     let dimensions = QwenGraphDimensions::from_spec(spec)?;
     if token_count == 0 {
@@ -1030,7 +1104,7 @@ fn build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
     }
 
     let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
-    let builder = GraphBuilder::new(GraphBuilderConfig {
+    let mut builder = GraphBuilder::new(GraphBuilderConfig {
         layer_types: lock.model.architecture.text_config.layer_types.clone(),
         dimensions,
         token_count,
@@ -1048,6 +1122,8 @@ fn build_qwen35_graph_with_kv_cache_encoding_and_position_payload_mode(
         moe: false,
         position_payload_mode,
     })?;
+    builder.kv_fp8_block16_descriptor = kv_fp8_block16_descriptor;
+    builder.kv_mxfp8_descriptor = kv_mxfp8_descriptor;
     builder.build()
 }
 
@@ -2519,9 +2595,29 @@ fn qwen_kv_state_descriptor(
     heads: usize,
     head_dim: usize,
     encoding: crate::KvCacheEncoding,
+    block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
+    mxfp8_descriptor: Option<crate::KvMxfp8Descriptor>,
 ) -> Result<KvStateDescriptor, QwenGraphError> {
     let descriptor = if encoding == crate::KvCacheEncoding::Fp8E4M3FnStatic {
         KvStateDescriptor::new_with_static_fp8(layer, capacity, heads, head_dim, 1.0, 1.0)
+    } else if let Some(block16) = block16_descriptor {
+        KvStateDescriptor::new_with_kv_fp8_block16(
+            layer,
+            capacity,
+            heads,
+            head_dim,
+            encoding,
+            block16.physical_variant(),
+        )
+    } else if let Some(mxfp8) = mxfp8_descriptor {
+        KvStateDescriptor::new_with_kv_mxfp8(
+            layer,
+            capacity,
+            heads,
+            head_dim,
+            encoding,
+            mxfp8.physical_variant(),
+        )
     } else {
         KvStateDescriptor::new_with_storage(layer, capacity, heads, head_dim, encoding)
     };
@@ -2541,6 +2637,8 @@ struct GraphBuilder {
     fp8_dtype: Option<DType>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
+    kv_fp8_block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
+    kv_mxfp8_descriptor: Option<crate::KvMxfp8Descriptor>,
     mtp: bool,
     multimodal: bool,
     moe: bool,
@@ -2602,6 +2700,12 @@ impl GraphBuilder {
             fp8_dtype,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
+            kv_fp8_block16_descriptor: crate::KvFp8Block16Descriptor::canonical_for_encoding(
+                kv_cache_encoding,
+            ),
+            kv_mxfp8_descriptor: crate::KvMxfp8Descriptor::canonical_for_encoding(
+                kv_cache_encoding,
+            ),
             mtp,
             multimodal,
             moe,
@@ -2655,6 +2759,8 @@ impl GraphBuilder {
                         usize::try_from(self.dimensions.head_dim)
                             .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
                         self.kv_cache_encoding,
+                        self.kv_fp8_block16_descriptor,
+                        self.kv_mxfp8_descriptor,
                     )?;
                     self.add_state(
                         layer,
@@ -2719,6 +2825,8 @@ impl GraphBuilder {
             usize::try_from(self.dimensions.head_dim)
                 .map_err(|_| QwenGraphError::Overflow("MTP head dimension"))?,
             self.kv_cache_encoding,
+            self.kv_fp8_block16_descriptor,
+            self.kv_mxfp8_descriptor,
         )?;
         self.add_state(
             QWEN35_MTP_CONSUMER_LAYER as u32,
@@ -3792,6 +3900,8 @@ impl GraphBuilder {
             usize::try_from(self.dimensions.head_dim)
                 .map_err(|_| QwenGraphError::Overflow("KV head dimension"))?,
             self.kv_cache_encoding,
+            self.kv_fp8_block16_descriptor,
+            self.kv_mxfp8_descriptor,
         )?;
         let kv_node = self.add_typed(
             &format!("layer.{layer}.kv_append"),
@@ -4839,6 +4949,8 @@ mod tests {
             crate::KvCacheEncoding::Fp8E4M3Fn,
             crate::KvCacheEncoding::Fp8E4M3FnStatic,
             crate::KvCacheEncoding::Nvfp4,
+            crate::KvCacheEncoding::Mxfp8E4,
+            crate::KvCacheEncoding::Mxfp8E5,
         ] {
             let graph =
                 build_qwen35_graph_with_kv_cache_encoding(&lock, &plan, 17, 2_049, encoding)
@@ -4865,6 +4977,84 @@ mod tests {
                 );
             }
             assert!(graph.total_state_bytes() < fp16.total_state_bytes());
+        }
+        for encoding in [
+            crate::KvCacheEncoding::Fp8E4M3Block16,
+            crate::KvCacheEncoding::Fp8E5M2Block16,
+        ] {
+            let error =
+                build_qwen35_graph_with_kv_cache_encoding(&lock, &plan, 17, 2_049, encoding)
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("retired"));
+        }
+    }
+
+    #[test]
+    fn target_aware_selection_reaches_state_and_append_descriptors() {
+        let lock = fixed_lock();
+        let plan = synthetic_canonical_load_plan(&lock);
+        let cases = [
+            (
+                crate::KvCacheEncoding::Mxfp8E4,
+                "gfx942:sramecc+:xnack-",
+                crate::KvFp8PhysicalVariant::OcpE4M3Fn,
+            ),
+            (
+                crate::KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                crate::KvFp8PhysicalVariant::OcpE4M3Fn,
+            ),
+            (
+                crate::KvCacheEncoding::Mxfp8E4,
+                "gfx1030",
+                crate::KvFp8PhysicalVariant::OcpE4M3Fn,
+            ),
+            (
+                crate::KvCacheEncoding::Mxfp8E5,
+                "gfx1030",
+                crate::KvFp8PhysicalVariant::OcpE5M2,
+            ),
+        ];
+        for (encoding, target, physical_variant) in cases {
+            let selection = crate::resolve_kv_cache_selection(crate::KvCacheSelectionRequest::new(
+                Some(encoding),
+                target,
+                lock.fingerprint(),
+                true,
+                true,
+                true,
+                256,
+            ))
+            .unwrap();
+            let graph =
+                build_qwen35_graph_with_kv_cache_selection(&lock, &plan, 17, 2_049, selection)
+                    .unwrap();
+            let expected_block16 = selection.block16_descriptor();
+            let expected_mxfp8 = selection.mxfp8_descriptor();
+            for state in graph.states() {
+                if let QwenGraphStateDescriptor::Kv(descriptor) = state.descriptor() {
+                    assert_eq!(descriptor.cache_encoding(), encoding);
+                    assert_eq!(descriptor.kv_fp8_block16_descriptor(), expected_block16);
+                    assert_eq!(descriptor.kv_mxfp8_descriptor(), expected_mxfp8);
+                    let actual_physical_variant = descriptor
+                        .kv_fp8_block16_descriptor()
+                        .map(crate::KvFp8Block16Descriptor::physical_variant)
+                        .or_else(|| {
+                            descriptor
+                                .kv_mxfp8_descriptor()
+                                .map(crate::KvMxfp8Descriptor::physical_variant)
+                        });
+                    assert_eq!(actual_physical_variant, Some(physical_variant));
+                }
+            }
+            for node in graph.nodes() {
+                if let QwenGraphNodeKind::FullKvAppend { state, .. } = node.kind() {
+                    assert_eq!(state.cache_encoding(), encoding);
+                    assert_eq!(state.kv_fp8_block16_descriptor(), expected_block16);
+                    assert_eq!(state.kv_mxfp8_descriptor(), expected_mxfp8);
+                }
+            }
         }
     }
 

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase46-debug-dump-v1.schema.json",
+  "title": "sLLM Phase 46 bounded debug dump v1",
+  "description": "Opt-in token/logit/intermediate dump. Raw prompt/response, credentials, pointers, addresses, and model payloads are excluded by the closed metadata vocabulary.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "struct_size", "manifest", "metadata", "tokens", "tensors", "logits", "extensions"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase46-debug-dump-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase46-debug-dump-v1"},
+    "struct_size": {"const": 8},
+    "manifest": {"$ref": "#/$defs/manifest"},
+    "metadata": {"$ref": "#/$defs/metadata"},
+    "tokens": {"type": "array", "maxItems": 4096, "items": {"type": "integer", "minimum": 0}},
+    "tensors": {"type": "array", "maxItems": 128, "items": {"$ref": "#/$defs/tensor"}},
+    "logits": {"type": "array", "maxItems": 4096, "items": {"$ref": "#/$defs/logits"}},
+    "extensions": {"type": "object", "additionalProperties": true}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prefixed_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "file": {"type": "object", "additionalProperties": false, "required": ["role", "logical_name", "size_bytes", "sha256"], "properties": {"role": {"type": "string", "minLength": 1, "maxLength": 256}, "logical_name": {"type": "string", "minLength": 1, "maxLength": 256}, "size_bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/digest"}}},
+    "string_map": {"type": "object", "propertyNames": {"minLength": 1, "maxLength": 256}, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 16384}},
+    "tool": {"type": "object", "additionalProperties": false, "required": ["repository", "commit", "package", "version", "executable_sha256", "arguments", "environment"], "properties": {"repository": {"type": "string", "minLength": 1, "maxLength": 256}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "package": {"type": "string", "minLength": 1, "maxLength": 256}, "version": {"type": "string", "minLength": 1, "maxLength": 256}, "executable_sha256": {"$ref": "#/$defs/digest"}, "arguments": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 16384}}, "environment": {"$ref": "#/$defs/string_map"}}},
+    "recipe": {"type": "object", "additionalProperties": false, "required": ["id", "version", "config_sha256"], "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "version": {"type": "string", "minLength": 1, "maxLength": 256}, "config_sha256": {"$ref": "#/$defs/digest"}}},
+    "manifest": {"type": "object", "additionalProperties": false, "required": ["schema_version", "struct_size", "canonicalization", "operation", "state", "selected_count", "tool", "recipe", "sources", "outputs", "raw_evidence", "identities", "metrics", "extensions"], "properties": {"schema_version": {"const": "sllm-phase46-tool-run-v1"}, "struct_size": {"const": 13}, "canonicalization": {"const": "sllm-sorted-json-v1"}, "operation": {"type": "string", "minLength": 1, "maxLength": 256}, "state": {"enum": ["PASS", "FAIL", "INSUFFICIENT-EVIDENCE"]}, "selected_count": {"type": "integer", "minimum": 1}, "tool": {"$ref": "#/$defs/tool"}, "recipe": {"$ref": "#/$defs/recipe"}, "sources": {"type": "array", "minItems": 1, "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "outputs": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "raw_evidence": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "identities": {"$ref": "#/$defs/string_map"}, "metrics": {"type": "object", "additionalProperties": true}, "extensions": {"type": "object", "additionalProperties": true}}},
+    "metadata": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "schema_version": {"type": "string", "minLength": 1}, "run_id": {"type": "string", "minLength": 1}, "model_id": {"type": "string", "minLength": 1}, "model_fingerprint": {"$ref": "#/$defs/prefixed_digest"}, "target": {"type": "string", "minLength": 1}, "backend": {"type": "string", "minLength": 1}, "device": {"type": "string", "minLength": 1}, "encoding": {"type": "string", "minLength": 1}, "kv_encoding": {"type": "string", "minLength": 1}, "dtype": {"type": "string", "minLength": 1}, "shape": {"type": ["array", "object"]}, "layout": {"type": "string", "minLength": 1}, "endianness": {"type": "string", "minLength": 1}, "quantization": {"type": ["string", "object", "null"]}, "quantization_descriptor": {"type": ["string", "object", "null"]}, "scale_plane": {"type": ["string", "object", "null"]}, "submission_id": {"type": "string", "minLength": 1}, "token_count": {"type": "integer", "minimum": 0}, "token_digest": {"$ref": "#/$defs/prefixed_digest"}, "artifact_digest": {"$ref": "#/$defs/prefixed_digest"}, "policy_digest": {"$ref": "#/$defs/prefixed_digest"}, "dataset_digest": {"$ref": "#/$defs/prefixed_digest"}, "manifest_sha256": {"$ref": "#/$defs/prefixed_digest"}, "provider": {"type": "string", "minLength": 1}
+      }
+    },
+    "tensor": {"type": "object", "additionalProperties": false, "required": ["name", "dtype", "shape", "layout", "endianness", "quantization", "scale_plane", "values"], "properties": {"name": {"type": "string", "minLength": 1}, "dtype": {"type": "string", "minLength": 1}, "shape": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 1}}, "layout": {"type": "string", "minLength": 1}, "endianness": {"type": "string", "minLength": 1}, "quantization": {"type": ["string", "null"]}, "scale_plane": {"type": ["string", "null"]}, "values": {"type": "array", "minItems": 1, "items": {"type": "number"}}}},
+    "logit": {"type": "object", "additionalProperties": false, "required": ["token_index", "logit"], "properties": {"token_index": {"type": "integer", "minimum": 0}, "logit": {"type": "number"}}},
+    "logits": {"type": "object", "additionalProperties": false, "required": ["layer", "position", "top_k"], "properties": {"layer": {"type": "integer", "minimum": 0}, "position": {"type": "integer", "minimum": 0}, "top_k": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"$ref": "#/$defs/logit"}}}}
+  }
+}

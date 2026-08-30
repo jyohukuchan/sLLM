@@ -74,11 +74,14 @@ hipError_t launch(const uint16_t *query, const void *key, const void *value,
                   bool use_prefill_gqa4_qtile4, hipStream_t stream) noexcept;
 
 hipError_t launch_scaled_prefill_gemm(
-    const uint16_t *query, const void *key, const void *value, uint16_t *output,
-    uint32_t query_count, uint64_t start_position, uint64_t committed_kv_length,
-    uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim, void *workspace,
-    uint64_t workspace_bytes, void *blas_handle, void *blas_mutex,
-    hipStream_t stream) noexcept;
+    const uint16_t *query, const void *key, const void *value,
+    const void *key_scales, const void *value_scales,
+    const float *key_outer_scales, const float *value_outer_scales,
+    uint16_t *output, uint32_t query_count, uint64_t start_position,
+    uint64_t committed_kv_length, uint32_t q_heads, uint32_t kv_heads,
+    uint32_t head_dim, uint32_t encoding, float static_key_scale,
+    float static_value_scale, void *workspace, uint64_t workspace_bytes,
+    void *blas_handle, void *blas_mutex, hipStream_t stream) noexcept;
 
 hipError_t launch_long_prefill_v2(
     const uint16_t *query, const void *key, const void *value, uint16_t *output,

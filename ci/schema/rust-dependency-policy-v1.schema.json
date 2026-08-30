@@ -14,15 +14,15 @@
     "policy_id": {"const": "rust-workspace-v1"},
     "workspace": {"$ref": "#/$defs/workspace"},
     "workspace_members": {
-      "type": "array", "minItems": 6, "maxItems": 6,
+      "type": "array", "minItems": 7, "maxItems": 7,
       "items": {"$ref": "#/$defs/workspace_member"}
     },
     "packages": {
-      "type": "array", "minItems": 190, "maxItems": 190,
+      "type": "array", "minItems": 191, "maxItems": 191,
       "items": {"$ref": "#/$defs/package"}
     },
     "edges": {
-      "type": "array", "minItems": 447, "maxItems": 447,
+      "type": "array", "minItems": 453, "maxItems": 453,
       "items": {"$ref": "#/$defs/edge"}
     },
     "counts": {"$ref": "#/$defs/counts"},
@@ -68,8 +68,8 @@
       "properties": {
         "root": {"const": "."},
         "resolver": {"const": 3},
-        "members": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}},
-        "default_members": {"type": "array", "minItems": 6, "maxItems": 6, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}}
+        "members": {"type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}},
+        "default_members": {"type": "array", "minItems": 7, "maxItems": 7, "uniqueItems": true, "items": {"$ref": "#/$defs/relative_path"}}
       }
     },
     "workspace_member": {
@@ -112,10 +112,10 @@
       "type": "object", "additionalProperties": false,
       "required": ["packages", "registry_packages", "workspace_packages", "edges", "edge_kinds", "target_specific_edges", "target_expressions"],
       "properties": {
-        "packages": {"const": 190}, "registry_packages": {"const": 184}, "workspace_packages": {"const": 6}, "edges": {"const": 447},
+        "packages": {"const": 191}, "registry_packages": {"const": 184}, "workspace_packages": {"const": 7}, "edges": {"const": 453},
         "edge_kinds": {
           "type": "object", "additionalProperties": false, "required": ["build", "dev", "normal"],
-          "properties": {"build": {"const": 14}, "dev": {"const": 1}, "normal": {"const": 432}}
+          "properties": {"build": {"const": 14}, "dev": {"const": 1}, "normal": {"const": 438}}
         },
         "target_specific_edges": {"const": 66}, "target_expressions": {"const": 37}
       }

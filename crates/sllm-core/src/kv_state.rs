@@ -17,21 +17,52 @@ use crate::{DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 /// runtime chooses it from the loaded model recipe and target capabilities.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum KvCacheEncoding {
-    #[default]
     Fp16,
     Fp8E4M3Fn,
     /// Provider-supplied layer-static E4M3 decode scales. Scale values live on
     /// [`KvStateDescriptor`], not in this encoding tag.
     Fp8E4M3FnStatic,
     Nvfp4,
+    /// Logical E4M3 KV values with one E8M0 scale for each consecutive 16
+    /// head-dimension lanes. The physical OCP/FNUZ variant is descriptor
+    /// metadata and must never be inferred by reinterpreting resident bytes.
+    Fp8E4M3Block16,
+    /// Logical E5M2 KV values with one E8M0 scale for each consecutive 16
+    /// head-dimension lanes.
+    Fp8E5M2Block16,
+    /// Standard OCP MXFP8 using E4M3FN values and one E8M0 scale per 32
+    /// consecutive head-dimension lanes.
+    #[default]
+    Mxfp8E4,
+    /// Standard OCP MXFP8 using E5M2 values and one E8M0 scale per 32
+    /// consecutive head-dimension lanes.
+    Mxfp8E5,
 }
 
 impl KvCacheEncoding {
+    /// Canonical public spelling. Existing spellings and meanings are stable.
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::Fp16 => "fp16",
+            Self::Fp8E4M3Fn => "fp8",
+            Self::Fp8E4M3FnStatic => "fp8-static",
+            Self::Nvfp4 => "nvfp4",
+            Self::Fp8E4M3Block16 => "kv-fp8-e4-block16",
+            Self::Fp8E5M2Block16 => "kv-fp8-e5-block16",
+            Self::Mxfp8E4 => "kv-mxfp8-e4",
+            Self::Mxfp8E5 => "kv-mxfp8-e5",
+        }
+    }
+
     pub const fn dtype(self) -> DType {
         match self {
             Self::Fp16 => DType::F16,
             Self::Fp8E4M3Fn | Self::Fp8E4M3FnStatic => DType::F8E4M3Fn,
             Self::Nvfp4 => DType::U8,
+            Self::Fp8E4M3Block16 => DType::F8E4M3Fn,
+            Self::Fp8E5M2Block16 => DType::F8E5M2,
+            Self::Mxfp8E4 => DType::F8E4M3Fn,
+            Self::Mxfp8E5 => DType::F8E5M2,
         }
     }
 
@@ -47,7 +78,246 @@ impl KvCacheEncoding {
                 block_size: 16,
                 scale_dtype: DType::F8E4M3Fn,
             },
+            Self::Fp8E4M3Block16 | Self::Fp8E5M2Block16 => Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::KBlock {
+                    block_size: KV_FP8_BLOCK_SIZE,
+                },
+                scale_dtype: DType::U8,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
+            Self::Mxfp8E4 | Self::Mxfp8E5 => Encoding::Fp8Scaled {
+                granularity: Fp8ScaleGranularity::KBlock {
+                    block_size: KV_MXFP8_BLOCK_SIZE,
+                },
+                scale_dtype: DType::U8,
+                resident: Fp8ResidentRepresentation::PackedBytes,
+            },
         }
+    }
+
+    pub const fn is_kv_fp8_block16(self) -> bool {
+        matches!(self, Self::Fp8E4M3Block16 | Self::Fp8E5M2Block16)
+    }
+
+    pub const fn is_kv_mxfp8(self) -> bool {
+        matches!(self, Self::Mxfp8E4 | Self::Mxfp8E5)
+    }
+}
+
+/// Number of consecutive head-dimension values sharing one E8M0 scale.
+pub const KV_FP8_BLOCK_SIZE: usize = 16;
+/// Standard OCP MXFP8 block size along the head-dimension axis.
+pub const KV_MXFP8_BLOCK_SIZE: usize = 32;
+
+/// Exact resident byte encoding for a logical KV FP8 block16 format.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum KvFp8PhysicalVariant {
+    OcpE4M3Fn,
+    E4M3FnuZ,
+    OcpE5M2,
+}
+
+/// Scale byte encoding for KV FP8 block16. It is distinct from arithmetic
+/// `u8` even though both occupy one resident byte.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum KvFp8ScaleEncoding {
+    E8M0,
+}
+
+impl KvFp8PhysicalVariant {
+    pub const fn dtype(self) -> DType {
+        match self {
+            Self::OcpE4M3Fn => DType::F8E4M3Fn,
+            Self::E4M3FnuZ => DType::F8E4M3FnuZ,
+            Self::OcpE5M2 => DType::F8E5M2,
+        }
+    }
+
+    pub const fn identity_tag(self) -> u8 {
+        match self {
+            Self::OcpE4M3Fn => 1,
+            Self::E4M3FnuZ => 2,
+            Self::OcpE5M2 => 3,
+        }
+    }
+}
+
+/// Additive versioned descriptor for the two logical KV FP8 block16 formats.
+/// E8M0 is represented as raw `u8` because it is a scale encoding rather than
+/// an arithmetic scalar dtype.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KvFp8Block16Descriptor {
+    encoding: KvCacheEncoding,
+    physical_variant: KvFp8PhysicalVariant,
+    scale_recipe_tag: u8,
+}
+
+/// Versioned descriptor for standard OCP MXFP8 KV storage. FNUZ is excluded:
+/// a target-native FNUZ byte stream is not standard OCP MXFP8 and cannot be
+/// reinterpreted through this descriptor.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct KvMxfp8Descriptor {
+    encoding: KvCacheEncoding,
+    physical_variant: KvFp8PhysicalVariant,
+}
+
+impl KvMxfp8Descriptor {
+    pub const FORMAT_VERSION: u8 = 1;
+
+    pub const fn new(
+        encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> Result<Self, KvStateError> {
+        let compatible = matches!(
+            (encoding, physical_variant),
+            (KvCacheEncoding::Mxfp8E4, KvFp8PhysicalVariant::OcpE4M3Fn)
+                | (KvCacheEncoding::Mxfp8E5, KvFp8PhysicalVariant::OcpE5M2)
+        );
+        if !compatible {
+            return Err(KvStateError::InvalidMxfp8Variant);
+        }
+        Ok(Self {
+            encoding,
+            physical_variant,
+        })
+    }
+
+    pub const fn canonical_for_encoding(encoding: KvCacheEncoding) -> Option<Self> {
+        match encoding {
+            KvCacheEncoding::Mxfp8E4 => Some(Self {
+                encoding,
+                physical_variant: KvFp8PhysicalVariant::OcpE4M3Fn,
+            }),
+            KvCacheEncoding::Mxfp8E5 => Some(Self {
+                encoding,
+                physical_variant: KvFp8PhysicalVariant::OcpE5M2,
+            }),
+            _ => None,
+        }
+    }
+
+    pub const fn format_version(self) -> u8 {
+        Self::FORMAT_VERSION
+    }
+
+    pub const fn encoding(self) -> KvCacheEncoding {
+        self.encoding
+    }
+
+    pub const fn physical_variant(self) -> KvFp8PhysicalVariant {
+        self.physical_variant
+    }
+
+    pub const fn block_size(self) -> usize {
+        KV_MXFP8_BLOCK_SIZE
+    }
+
+    pub const fn scale_dtype(self) -> DType {
+        DType::U8
+    }
+
+    pub const fn scale_encoding(self) -> KvFp8ScaleEncoding {
+        KvFp8ScaleEncoding::E8M0
+    }
+
+    pub const fn blocks_per_head(self, head_dim: usize) -> usize {
+        head_dim.div_ceil(KV_MXFP8_BLOCK_SIZE)
+    }
+
+    pub const fn padded_head_dim(self, head_dim: usize) -> usize {
+        self.blocks_per_head(head_dim) * KV_MXFP8_BLOCK_SIZE
+    }
+}
+
+impl KvFp8Block16Descriptor {
+    /// Version 2 replaces the original minimal-non-overflow scale selection
+    /// with the standard MX floor-power E8M0 rule. Public encoding names stay
+    /// stable, while state/checkpoint identities must not alias v1 payloads.
+    pub const FORMAT_VERSION: u8 = 2;
+    /// Stable identity tag for the v2 `floor_log2(amax) - element_power`
+    /// E8M0 scale recipe shared with standard OCP MXFP8.
+    pub const STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE_TAG: u8 = 1;
+    /// Human-readable recipe identity paired with the numeric identity tag.
+    pub const STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE: &'static str = "StandardMxFloorPowerV1";
+
+    pub const fn new(
+        encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> Result<Self, KvStateError> {
+        let compatible = matches!(
+            (encoding, physical_variant),
+            (
+                KvCacheEncoding::Fp8E4M3Block16,
+                KvFp8PhysicalVariant::OcpE4M3Fn | KvFp8PhysicalVariant::E4M3FnuZ
+            ) | (
+                KvCacheEncoding::Fp8E5M2Block16,
+                KvFp8PhysicalVariant::OcpE5M2
+            )
+        );
+        if !compatible {
+            return Err(KvStateError::InvalidFp8Block16Variant);
+        }
+        Ok(Self {
+            encoding,
+            physical_variant,
+            scale_recipe_tag: Self::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE_TAG,
+        })
+    }
+
+    pub const fn canonical_for_encoding(encoding: KvCacheEncoding) -> Option<Self> {
+        match encoding {
+            KvCacheEncoding::Fp8E4M3Block16 => Some(Self {
+                encoding,
+                physical_variant: KvFp8PhysicalVariant::OcpE4M3Fn,
+                scale_recipe_tag: Self::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE_TAG,
+            }),
+            KvCacheEncoding::Fp8E5M2Block16 => Some(Self {
+                encoding,
+                physical_variant: KvFp8PhysicalVariant::OcpE5M2,
+                scale_recipe_tag: Self::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE_TAG,
+            }),
+            _ => None,
+        }
+    }
+
+    pub const fn format_version(self) -> u8 {
+        Self::FORMAT_VERSION
+    }
+
+    pub const fn encoding(self) -> KvCacheEncoding {
+        self.encoding
+    }
+
+    pub const fn physical_variant(self) -> KvFp8PhysicalVariant {
+        self.physical_variant
+    }
+
+    pub const fn scale_recipe(self) -> &'static str {
+        Self::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE
+    }
+
+    pub const fn scale_recipe_identity_tag(self) -> u8 {
+        self.scale_recipe_tag
+    }
+
+    pub const fn block_size(self) -> usize {
+        KV_FP8_BLOCK_SIZE
+    }
+
+    pub const fn scale_dtype(self) -> DType {
+        DType::U8
+    }
+
+    pub const fn scale_encoding(self) -> KvFp8ScaleEncoding {
+        KvFp8ScaleEncoding::E8M0
+    }
+
+    pub const fn blocks_per_head(self, head_dim: usize) -> usize {
+        head_dim.div_ceil(KV_FP8_BLOCK_SIZE)
+    }
+
+    pub const fn padded_head_dim(self, head_dim: usize) -> usize {
+        self.blocks_per_head(head_dim) * KV_FP8_BLOCK_SIZE
     }
 }
 
@@ -223,6 +493,8 @@ pub enum KvStateError {
     LengthOutOfBounds { length: u64, capacity: u64 },
     InvalidPhysicalMemory,
     InvalidForkAudit,
+    InvalidFp8Block16Variant,
+    InvalidMxfp8Variant,
 }
 
 impl fmt::Display for KvStateError {
@@ -250,6 +522,11 @@ impl fmt::Display for KvStateError {
                 "KV physical-memory metadata must be page-aligned and within logical capacity",
             ),
             Self::InvalidForkAudit => formatter.write_str("invalid opaque-state fork audit"),
+            Self::InvalidFp8Block16Variant => formatter.write_str(
+                "KV FP8 block16 physical variant is incompatible with its logical encoding",
+            ),
+            Self::InvalidMxfp8Variant => formatter
+                .write_str("KV MXFP8 physical variant is incompatible with standard OCP MXFP8"),
         }
     }
 }
@@ -265,6 +542,8 @@ pub struct KvStateDescriptor {
     cache_encoding: KvCacheEncoding,
     static_key_scale_bits: u32,
     static_value_scale_bits: u32,
+    kv_fp8_block16: Option<KvFp8Block16Descriptor>,
+    kv_mxfp8: Option<KvMxfp8Descriptor>,
 }
 
 impl KvStateDescriptor {
@@ -277,6 +556,8 @@ impl KvStateDescriptor {
             cache_encoding: KvCacheEncoding::Fp16,
             static_key_scale_bits: 0,
             static_value_scale_bits: 0,
+            kv_fp8_block16: None,
+            kv_mxfp8: None,
         })
     }
 
@@ -294,6 +575,8 @@ impl KvStateDescriptor {
             cache_encoding: KvCacheEncoding::Fp16,
             static_key_scale_bits: 0,
             static_value_scale_bits: 0,
+            kv_fp8_block16: None,
+            kv_mxfp8: None,
         })
     }
 
@@ -312,7 +595,42 @@ impl KvStateDescriptor {
             cache_encoding,
             static_key_scale_bits: 0,
             static_value_scale_bits: 0,
+            kv_fp8_block16: KvFp8Block16Descriptor::canonical_for_encoding(cache_encoding),
+            kv_mxfp8: KvMxfp8Descriptor::canonical_for_encoding(cache_encoding),
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_kv_fp8_block16(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+        cache_encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> Result<Self, KvStateError> {
+        let mut descriptor =
+            Self::new_with_storage(layer_id, capacity, heads, head_dim, cache_encoding)?;
+        descriptor.kv_fp8_block16 = Some(KvFp8Block16Descriptor::new(
+            cache_encoding,
+            physical_variant,
+        )?);
+        Ok(descriptor)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_kv_mxfp8(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+        cache_encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> Result<Self, KvStateError> {
+        let mut descriptor =
+            Self::new_with_storage(layer_id, capacity, heads, head_dim, cache_encoding)?;
+        descriptor.kv_mxfp8 = Some(KvMxfp8Descriptor::new(cache_encoding, physical_variant)?);
+        Ok(descriptor)
     }
 
     pub fn new_with_static_fp8(
@@ -359,7 +677,13 @@ impl KvStateDescriptor {
     }
 
     pub const fn dtype(self) -> DType {
-        self.cache_encoding.dtype()
+        match self.kv_fp8_block16 {
+            Some(descriptor) => descriptor.physical_variant().dtype(),
+            None => match self.kv_mxfp8 {
+                Some(descriptor) => descriptor.physical_variant().dtype(),
+                None => self.cache_encoding.dtype(),
+            },
+        }
     }
 
     pub const fn encoding(self) -> Encoding {
@@ -368,6 +692,14 @@ impl KvStateDescriptor {
 
     pub const fn cache_encoding(self) -> KvCacheEncoding {
         self.cache_encoding
+    }
+
+    pub const fn kv_fp8_block16_descriptor(self) -> Option<KvFp8Block16Descriptor> {
+        self.kv_fp8_block16
+    }
+
+    pub const fn kv_mxfp8_descriptor(self) -> Option<KvMxfp8Descriptor> {
+        self.kv_mxfp8
     }
 
     pub fn static_fp8_scales(self) -> Option<(f32, f32)> {
@@ -396,6 +728,12 @@ impl KvStateDescriptor {
                 .checked_mul(head_dim.div_ceil(2))?
                 .checked_add(heads.checked_mul(head_dim.div_ceil(16))?)?
                 .checked_add(heads.checked_mul(4)?)?,
+            KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => heads
+                .checked_mul(head_dim.div_ceil(KV_FP8_BLOCK_SIZE as u64))?
+                .checked_mul((KV_FP8_BLOCK_SIZE + 1) as u64)?,
+            KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => heads
+                .checked_mul(head_dim.div_ceil(KV_MXFP8_BLOCK_SIZE as u64))?
+                .checked_mul((KV_MXFP8_BLOCK_SIZE + 1) as u64)?,
         };
         capacity.checked_mul(bytes_per_token)
     }
@@ -685,6 +1023,128 @@ mod tests {
         assert_eq!(fp8.dtype(), DType::F8E4M3Fn);
         assert_eq!(nvfp4.dtype(), DType::U8);
         assert_ne!(fp16, fp8);
+    }
+
+    #[test]
+    fn block16_descriptor_accounts_for_tail_padding_and_physical_variant() {
+        for head_dim in [15_usize, 16, 17, 255, 256, 257] {
+            let descriptor = KvStateDescriptor::new_with_storage(
+                0,
+                3,
+                2,
+                head_dim,
+                KvCacheEncoding::Fp8E4M3Block16,
+            )
+            .unwrap();
+            let blocks = head_dim.div_ceil(KV_FP8_BLOCK_SIZE) as u64;
+            assert_eq!(
+                descriptor.resident_bytes_per_plane(),
+                Some(3 * 2 * blocks * 17)
+            );
+            assert_eq!(descriptor.dtype(), DType::F8E4M3Fn);
+            let block16 = descriptor.kv_fp8_block16_descriptor().unwrap();
+            assert_eq!(block16.scale_dtype(), DType::U8);
+            assert_eq!(block16.scale_encoding(), KvFp8ScaleEncoding::E8M0);
+            assert_eq!(block16.format_version(), 2);
+            assert_eq!(block16.scale_recipe(), "StandardMxFloorPowerV1");
+            assert_eq!(block16.scale_recipe_identity_tag(), 1);
+        }
+
+        let fnuz = KvStateDescriptor::new_with_kv_fp8_block16(
+            0,
+            257,
+            4,
+            256,
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::E4M3FnuZ,
+        )
+        .unwrap();
+        let e5 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp8E5M2Block16)
+                .unwrap();
+        assert_eq!(fnuz.dtype(), DType::F8E4M3FnuZ);
+        assert_eq!(e5.dtype(), DType::F8E5M2);
+        for descriptor in [fnuz, e5] {
+            let block16 = descriptor.kv_fp8_block16_descriptor().unwrap();
+            assert_eq!(block16.format_version(), 2);
+            assert_eq!(
+                block16.scale_recipe(),
+                KvFp8Block16Descriptor::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE
+            );
+            assert_eq!(
+                block16.scale_recipe_identity_tag(),
+                KvFp8Block16Descriptor::STANDARD_MX_FLOOR_POWER_V1_SCALE_RECIPE_TAG
+            );
+        }
+        assert_eq!(fnuz.resident_bytes_per_plane(), Some(257 * 1088));
+        assert_eq!(e5.resident_bytes_per_plane(), Some(257 * 1088));
+        assert_eq!(
+            KvStateDescriptor::new_with_kv_fp8_block16(
+                0,
+                1,
+                1,
+                16,
+                KvCacheEncoding::Fp8E5M2Block16,
+                KvFp8PhysicalVariant::E4M3FnuZ,
+            ),
+            Err(KvStateError::InvalidFp8Block16Variant)
+        );
+    }
+
+    #[test]
+    fn mxfp8_descriptor_accounts_for_block32_tails_and_excludes_fnuz() {
+        for head_dim in [15_usize, 16, 17, 31, 32, 33, 255, 256, 257] {
+            for encoding in [KvCacheEncoding::Mxfp8E4, KvCacheEncoding::Mxfp8E5] {
+                let descriptor =
+                    KvStateDescriptor::new_with_storage(0, 3, 2, head_dim, encoding).unwrap();
+                let mx = descriptor.kv_mxfp8_descriptor().unwrap();
+                let blocks = head_dim.div_ceil(KV_MXFP8_BLOCK_SIZE) as u64;
+                assert_eq!(mx.blocks_per_head(head_dim), blocks as usize);
+                assert_eq!(mx.padded_head_dim(head_dim), blocks as usize * 32);
+                assert_eq!(mx.block_size(), 32);
+                assert_eq!(mx.scale_dtype(), DType::U8);
+                assert_eq!(mx.scale_encoding(), KvFp8ScaleEncoding::E8M0);
+                assert_eq!(descriptor.kv_fp8_block16_descriptor(), None);
+                assert_eq!(
+                    descriptor.resident_bytes_per_plane(),
+                    Some(3 * 2 * blocks * 33)
+                );
+            }
+        }
+
+        let e4 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Mxfp8E4).unwrap();
+        let e5 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Mxfp8E5).unwrap();
+        assert_eq!(e4.dtype(), DType::F8E4M3Fn);
+        assert_eq!(e5.dtype(), DType::F8E5M2);
+        assert_eq!(e4.resident_bytes_per_plane(), Some(257 * 1056));
+        assert_eq!(e5.resident_bytes_per_plane(), Some(257 * 1056));
+        assert_eq!(
+            KvMxfp8Descriptor::new(KvCacheEncoding::Mxfp8E4, KvFp8PhysicalVariant::E4M3FnuZ,),
+            Err(KvStateError::InvalidMxfp8Variant)
+        );
+    }
+
+    #[test]
+    fn canonical_names_and_existing_meanings_remain_stable() {
+        assert_eq!(KvCacheEncoding::Fp16.canonical_name(), "fp16");
+        assert_eq!(KvCacheEncoding::Fp8E4M3Fn.canonical_name(), "fp8");
+        assert_eq!(
+            KvCacheEncoding::Fp8E4M3FnStatic.canonical_name(),
+            "fp8-static"
+        );
+        assert_eq!(KvCacheEncoding::Nvfp4.canonical_name(), "nvfp4");
+        assert_eq!(
+            KvCacheEncoding::Fp8E4M3Block16.canonical_name(),
+            "kv-fp8-e4-block16"
+        );
+        assert_eq!(
+            KvCacheEncoding::Fp8E5M2Block16.canonical_name(),
+            "kv-fp8-e5-block16"
+        );
+        assert_eq!(KvCacheEncoding::Mxfp8E4.canonical_name(), "kv-mxfp8-e4");
+        assert_eq!(KvCacheEncoding::Mxfp8E5.canonical_name(), "kv-mxfp8-e5");
     }
 
     #[test]

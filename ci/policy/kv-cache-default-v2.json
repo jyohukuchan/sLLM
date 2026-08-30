@@ -1,0 +1,107 @@
+{
+  "$schema": "https://sllm.dev/schema/kv-cache-default-v2.schema.json",
+  "schema_version": "kv-cache-default-v2",
+  "policy_id": "kv-cache-default-v2",
+  "scope": {
+    "model": {
+      "repo_id": "Qwen/Qwen3.5-4B",
+      "dtype": "BF16",
+      "model_lock": {
+        "path": "docs/models/locks/qwen3.5-4b-bf16.json",
+        "fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"
+      },
+      "derived_lock": {
+        "status": "required-for-candidate",
+        "path": null,
+        "fingerprint": null
+      }
+    },
+    "promotion_scope": "first-promotion-qwen35-4b-bf16-dense-text-full-attention-single-gpu",
+    "unverified_model_default": "fp16",
+    "allowed_encodings": ["fp16", "kv-fp8-e4-block16", "kv-fp8-e5-block16"]
+  },
+  "freeze": {
+    "basis": "fp16-only-baseline",
+    "candidate_excluded": true,
+    "rationale": "Thresholds, aggregation, dataset, and FP16 baseline are inherited unchanged from the pre-candidate kv-cache-default-v1 freeze; only the candidate descriptor advances to block16 v2 for the standard MX floor-power scale recipe, and unmeasured targets retain an independent baseline requirement.",
+    "frozen_at": "2026-08-27",
+    "dataset": {
+      "id": "phase46-kv-quality-baseline-v1",
+      "digest": "sha256:a2252d882ffd7e1fbb546d86b2b573bd2410467382c7da874f4fbd3dc8adc77d",
+      "license": "CC0-1.0",
+      "seed": 1729,
+      "sample_order": "listed"
+    },
+    "context_matrix": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513],
+    "metrics": ["perplexity", "kld", "top1", "task", "long-context"],
+    "repeats": {"count": 3, "aggregation": "median-mad", "minimum_completed": 3},
+    "baseline_requirements": [
+      "FP16 only and no candidate observations",
+      "same model lock, tokenizer, target tuple, provider, and context matrix for every repeat",
+      "early, middle, tail, K, V, layer, KV-head, and block-tail long-context coverage",
+      "all selected counts and metric sample counts are nonzero and finite"
+    ]
+  },
+  "thresholds": {
+    "perplexity_relative_delta": {"value": 0.01, "comparison": "inclusive", "unit": "relative"},
+    "kld_p99": {"value": 0.05, "comparison": "exclusive", "unit": "nats"},
+    "top1_agreement": {"value": 0.99, "comparison": "inclusive", "unit": "fraction"},
+    "task_score_delta": {"value": 0.02, "comparison": "inclusive", "unit": "absolute-score-loss"},
+    "long_context_score_delta": {"value": 0.02, "comparison": "inclusive", "unit": "absolute-score-loss"}
+  },
+  "failure_rules": {
+    "missing": "fail",
+    "nonfinite": "fail",
+    "zero_selected": "fail",
+    "zero_metric_samples": "fail",
+    "reruns": {"minimum": 3, "maximum": 5, "on_variance": "repeat", "same_identity": true},
+    "candidate_freeze": "immutable-after-baseline"
+  },
+  "targets": [
+    {
+      "target": "gfx942:sramecc+:xnack-",
+      "rocm": "7.14.0",
+      "hip": "7.14.60850",
+      "code_object": "Code Object V6",
+      "wave": 64,
+      "binary": null,
+      "kv_descriptor": "kv-fp8-e4-block16-v2",
+      "provider": "hip",
+      "physical_variant": "E4M3-FNUZ",
+      "baseline": {"status": "required-before-candidate", "dataset": {"id": "phase46-kv-quality-baseline-v1", "digest": "sha256:a2252d882ffd7e1fbb546d86b2b573bd2410467382c7da874f4fbd3dc8adc77d", "license": "CC0-1.0", "seed": 1729, "sample_order": "listed"}, "context_matrix": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513], "repeats": 3, "metrics": ["perplexity", "kld", "top1", "task", "long-context"], "evidence": null},
+      "candidate": null,
+      "decisions": {"correctness": "insufficient-evidence", "quality": "insufficient-evidence", "performance": "insufficient-evidence", "memory": "insufficient-evidence", "fallback": "insufficient-evidence", "cleanup": "insufficient-evidence"},
+      "decision": "insufficient-evidence"
+    },
+    {
+      "target": "gfx1201",
+      "rocm": "7.14.0",
+      "hip": "7.14.60850",
+      "code_object": "Code Object V6",
+      "wave": 32,
+      "binary": null,
+      "kv_descriptor": "kv-fp8-e4-block16-v2",
+      "provider": "hip",
+      "physical_variant": "E4M3-OCP",
+      "baseline": {"status": "required-before-candidate", "dataset": {"id": "phase46-kv-quality-baseline-v1", "digest": "sha256:a2252d882ffd7e1fbb546d86b2b573bd2410467382c7da874f4fbd3dc8adc77d", "license": "CC0-1.0", "seed": 1729, "sample_order": "listed"}, "context_matrix": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513], "repeats": 3, "metrics": ["perplexity", "kld", "top1", "task", "long-context"], "evidence": null},
+      "candidate": null,
+      "decisions": {"correctness": "insufficient-evidence", "quality": "insufficient-evidence", "performance": "insufficient-evidence", "memory": "insufficient-evidence", "fallback": "insufficient-evidence", "cleanup": "insufficient-evidence"},
+      "decision": "insufficient-evidence"
+    },
+    {
+      "target": "gfx1030",
+      "rocm": "7.14.0",
+      "hip": "7.14.60850",
+      "code_object": "Code Object V6",
+      "wave": 32,
+      "binary": null,
+      "kv_descriptor": "kv-fp8-e5-block16-v2",
+      "provider": "software",
+      "physical_variant": "E5M2-software",
+      "baseline": {"status": "frozen", "dataset": {"id": "phase46-kv-quality-baseline-v1", "digest": "sha256:a2252d882ffd7e1fbb546d86b2b573bd2410467382c7da874f4fbd3dc8adc77d", "license": "CC0-1.0", "seed": 1729, "sample_order": "listed"}, "context_matrix": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513], "repeats": 3, "metrics": ["perplexity", "kld", "top1", "task", "long-context"], "evidence": {"report": {"path": "external:phase46/qwen35-fp16-quality-gfx1030-v2.json", "sha256": "sha256:6276fbab00d50bff0618467537eec0d02f4d9061a950e9e6ab75d12dfb14f934"}, "executable": {"path": "target/release/sllm-qwen35-quality-baseline", "sha256": "sha256:25b6ddc8227c9ed3f55075a6457b3e3409c1bd70d3cd9d15521c2776793178b8"}, "sample_count": 20, "aggregate_perplexity": 235993.6527695604, "repeat_max_relative_delta": 0.0, "kld_max": 0.0, "top1_agreement": 1.0, "task_score": 0.0, "task_semantics": "synthetic-next-token-correctness", "long_context_coverage": 1.0, "cleanup_empty": true}},
+      "candidate": null,
+      "decisions": {"correctness": "insufficient-evidence", "quality": "insufficient-evidence", "performance": "insufficient-evidence", "memory": "insufficient-evidence", "fallback": "insufficient-evidence", "cleanup": "insufficient-evidence"},
+      "decision": "insufficient-evidence"
+    }
+  ]
+}

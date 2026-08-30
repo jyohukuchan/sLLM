@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase53-external-hbm-observation-v1.schema.json",
+  "title": "sLLM Phase 53 external HBM/GTT observation",
+  "type": "object", "additionalProperties": false,
+  "required": ["$schema", "schema_version", "target", "binary_sha256", "cases"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase53-external-hbm-observation-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase53-external-hbm-observation-v1"},
+    "target": {"enum": ["gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]},
+    "binary_sha256": {"$ref": "#/$defs/digest"},
+    "cases": {
+      "type": "array", "minItems": 7, "maxItems": 7,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "short-odd"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "32-32"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "prefill-long"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "decode-long"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "long-10001"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "long-100000"}}}]},
+        {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "decode-20000"}}}]}
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "run": {
+      "type": "object", "additionalProperties": false,
+      "required": ["direct_report_sha256", "started_ns", "completed_ns", "baseline_hbm_bytes", "peak_hbm_bytes", "settled_hbm_bytes", "baseline_gtt_bytes", "peak_gtt_bytes", "settled_gtt_bytes", "monitor_samples", "process_group_gone", "settled"],
+      "properties": {
+        "direct_report_sha256": {"$ref": "#/$defs/digest"}, "started_ns": {"type": "integer", "minimum": 0}, "completed_ns": {"type": "integer", "minimum": 1},
+        "baseline_hbm_bytes": {"type": "integer", "minimum": 0}, "peak_hbm_bytes": {"type": "integer", "minimum": 0}, "settled_hbm_bytes": {"type": "integer", "minimum": 0},
+        "baseline_gtt_bytes": {"type": "integer", "minimum": 0}, "peak_gtt_bytes": {"type": "integer", "minimum": 0}, "settled_gtt_bytes": {"type": "integer", "minimum": 0},
+        "monitor_samples": {"type": "integer", "minimum": 1}, "process_group_gone": {"const": true}, "settled": {"const": true}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "execution_order", "fp16", "candidate"],
+      "properties": {"case_id": {"type": "string"}, "execution_order": {"const": ["fp16", "block16"]}, "fp16": {"$ref": "#/$defs/run"}, "candidate": {"$ref": "#/$defs/run"}}
+    }
+  }
+}

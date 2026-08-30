@@ -11,7 +11,8 @@
       "crates/sllm-frontend/Cargo.toml",
       "crates/sllm-hip-sys/Cargo.toml",
       "crates/sllm-hip/Cargo.toml",
-      "crates/sllm-server/Cargo.toml"
+      "crates/sllm-server/Cargo.toml",
+      "crates/sllm-tools/Cargo.toml"
     ],
     "default_members": [
       "crates/sllm-cli/Cargo.toml",
@@ -19,7 +20,8 @@
       "crates/sllm-frontend/Cargo.toml",
       "crates/sllm-hip-sys/Cargo.toml",
       "crates/sllm-hip/Cargo.toml",
-      "crates/sllm-server/Cargo.toml"
+      "crates/sllm-server/Cargo.toml",
+      "crates/sllm-tools/Cargo.toml"
     ]
   },
   "workspace_members": [
@@ -702,6 +704,36 @@
           "doctest": false
         },
         {
+          "name": "sllm-kv-fp8-block16-research-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [
+            "phase54-research"
+          ],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-kv-mxfp8-e4-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-kv-state-g1-evidence",
           "kind": [
             "bin"
@@ -926,6 +958,64 @@
           "doctest": false
         },
         {
+          "name": "sllm-qwen35-kv-attribution-research",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [
+            "phase54-research"
+          ],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-kv-quality-candidate",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-kv-quality-probe",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-kv-quality-research",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
           "name": "sllm-qwen35-moe-admission",
           "kind": [
             "bin"
@@ -941,6 +1031,20 @@
         },
         {
           "name": "sllm-qwen35-moe-execution-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-quality-baseline",
           "kind": [
             "bin"
           ],
@@ -1189,6 +1293,128 @@
         },
         {
           "name": "sllm_server",
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": true
+        }
+      ]
+    },
+    {
+      "identity": {
+        "name": "sllm-tools",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "manifest": "crates/sllm-tools/Cargo.toml",
+      "targets": [
+        {
+          "name": "artifact_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "build-script-build",
+          "kind": [
+            "custom-build"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": false,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "cli_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "quality_debug_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "sllm-artifact",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-bench",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-eval",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm_tools",
           "kind": [
             "lib"
           ],
@@ -3736,12 +3962,25 @@
       },
       "license": "MIT",
       "rust_version": "1.85.0",
-      "features": [],
+      "features": [
+        "default"
+      ],
       "checksum": null
     },
     {
       "identity": {
         "name": "sllm-server",
+        "version": "0.1.0",
+        "source": "workspace"
+      },
+      "license": "MIT",
+      "rust_version": "1.85.0",
+      "features": [],
+      "checksum": null
+    },
+    {
+      "identity": {
+        "name": "sllm-tools",
         "version": "0.1.0",
         "source": "workspace"
       },
@@ -8858,6 +9097,18 @@
       "rename": null
     },
     {
+      "from": "workspace:sllm-cli@0.1.0",
+      "to": "workspace:sllm-tools@0.1.0",
+      "name": "sllm-tools",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
       "from": "workspace:sllm-core@0.1.0",
       "to": "registry:libc@0.2.186",
       "name": "libc",
@@ -9341,17 +9592,81 @@
       "uses_default_features": true,
       "optional": false,
       "rename": null
+    },
+    {
+      "from": "workspace:sllm-tools@0.1.0",
+      "to": "registry:libc@0.2.186",
+      "name": "libc",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.2.186",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-tools@0.1.0",
+      "to": "registry:serde@1.0.228",
+      "name": "serde",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.228",
+      "requested_features": [
+        "derive"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-tools@0.1.0",
+      "to": "registry:serde_json@1.0.150",
+      "name": "serde_json",
+      "kind": "normal",
+      "target": null,
+      "req": "=1.0.150",
+      "requested_features": [
+        "preserve_order"
+      ],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-tools@0.1.0",
+      "to": "registry:sha2@0.10.9",
+      "name": "sha2",
+      "kind": "normal",
+      "target": null,
+      "req": "=0.10.9",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
+    },
+    {
+      "from": "workspace:sllm-tools@0.1.0",
+      "to": "workspace:sllm-core@0.1.0",
+      "name": "sllm-core",
+      "kind": "normal",
+      "target": null,
+      "req": "*",
+      "requested_features": [],
+      "uses_default_features": true,
+      "optional": false,
+      "rename": null
     }
   ],
   "counts": {
-    "packages": 190,
+    "packages": 191,
     "registry_packages": 184,
-    "workspace_packages": 6,
-    "edges": 447,
+    "workspace_packages": 7,
+    "edges": 453,
     "edge_kinds": {
       "build": 14,
       "dev": 1,
-      "normal": 432
+      "normal": 438
     },
     "target_specific_edges": 66,
     "target_expressions": 37

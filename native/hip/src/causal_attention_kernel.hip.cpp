@@ -67,6 +67,22 @@ __device__ float2 load_fp16_pair(const uint16_t *const values) noexcept {
 __device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
 #if defined(__gfx1201__)
   return __builtin_amdgcn_cvt_f32_fp8(static_cast<int>(bits), 0);
+#elif defined(__gfx1030__) && SLLM_ENABLE_PHASE54_KV_RESEARCH
+  const uint32_t sign = (static_cast<uint32_t>(bits) & 0x80U) << 24U;
+  const uint32_t magnitude = static_cast<uint32_t>(bits) & 0x7fU;
+  const uint32_t exponent = magnitude >> 3U;
+  const uint32_t mantissa = magnitude & 0x07U;
+  if (exponent == 0U) {
+    return mantissa == 0U ? __uint_as_float(sign)
+                          : (sign == 0U ? 1.0F : -1.0F) *
+                                static_cast<float>(mantissa) * 0x1p-9F;
+  }
+  if (magnitude == 0x7fU) {
+    return __uint_as_float(sign | 0x7fc00000U);
+  }
+  // All nonzero E4M3FN exponent fields, including finite exponent 15,
+  // become normal binary32 values after rebiasing from 7 to 127.
+  return __uint_as_float(sign | ((exponent + 120U) << 23U) | (mantissa << 20U));
 #else
   const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
   const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
@@ -82,6 +98,58 @@ __device__ float e4m3fn_to_f32(const uint8_t bits) noexcept {
   return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
          ldexpf(1.0F, static_cast<int>(exponent) - 7);
 #endif
+}
+
+#if defined(__gfx942__)
+__device__ float e4m3fnuz_to_f32(const uint8_t bits) noexcept {
+  if (bits == UINT8_C(0x80)) {
+    return NAN;
+  }
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
+  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
+  if (exponent == 0U) {
+    return sign * static_cast<float>(mantissa) * ldexpf(1.0F, -10);
+  }
+  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
+         ldexpf(1.0F, static_cast<int>(exponent) - 8);
+}
+#endif
+
+__device__ float e5m2_to_f32(const uint8_t bits) noexcept {
+#if defined(__gfx1030__) && SLLM_ENABLE_PHASE54_KV_RESEARCH
+  // OCP E5M2 and IEEE binary16 have the same sign and five-bit exponent,
+  // including the exponent bias.  Moving the two mantissa bits into the top
+  // of binary16's mantissa is therefore an exact representation mapping for
+  // every finite value and preserves the encoded Inf/NaN classes.  Keep this
+  // candidate research-only until its generated ISA and V620 performance have
+  // been compared with the format-neutral scalar decoder below.
+  __half_raw half_bits{};
+  half_bits.x = static_cast<uint16_t>(static_cast<uint16_t>(bits) << 8U);
+  return __half2float(__half{half_bits});
+#else
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 2U) & 0x1fU);
+  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x03U);
+  if (exponent == 0U) {
+    return mantissa == 0U
+               ? copysignf(0.0F, sign)
+               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -16);
+  }
+  if (exponent == UINT8_C(0x1f)) {
+    return mantissa == 0U ? copysignf(INFINITY, sign) : NAN;
+  }
+  return sign * (1.0F + static_cast<float>(mantissa) / 4.0F) *
+         ldexpf(1.0F, static_cast<int>(exponent) - 15);
+#endif
+}
+
+__device__ float e8m0_to_f32(const uint8_t bits) noexcept {
+  if (bits == UINT8_C(0xff)) {
+    return NAN;
+  }
+  return bits == 0U ? __uint_as_float(UINT32_C(0x00400000))
+                    : __uint_as_float(static_cast<uint32_t>(bits) << 23U);
 }
 
 __device__ float e2m1_to_f32(const uint8_t bits) noexcept {
@@ -109,6 +177,41 @@ __device__ float load_kv(const void *const values, const void *const scales,
                values)[row * head_dim + dimension]) *
            scale;
   }
+  if (encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2) {
+    const uint64_t blocks_per_row =
+        (static_cast<uint64_t>(head_dim) + 15U) / 16U;
+    const uint64_t padded_head_dim = blocks_per_row * 16U;
+    const uint8_t value =
+        static_cast<const uint8_t *>(values)[row * padded_head_dim + dimension];
+    const float decoded = encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                              ? e5m2_to_f32(value)
+#if defined(__gfx942__)
+                              : e4m3fnuz_to_f32(value);
+#else
+                              : e4m3fn_to_f32(value);
+#endif
+    const uint8_t scale = static_cast<const uint8_t *>(
+        scales)[row * blocks_per_row + dimension / 16U];
+    return decoded * e8m0_to_f32(scale);
+  }
+  if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+    const uint64_t blocks_per_row =
+        (static_cast<uint64_t>(head_dim) + 31U) / 32U;
+    const uint64_t padded_head_dim = blocks_per_row * 32U;
+    const uint8_t value =
+        static_cast<const uint8_t *>(values)[row * padded_head_dim + dimension];
+    const float decoded = encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                              ? e5m2_to_f32(value)
+                              : e4m3fn_to_f32(value);
+    const uint8_t scale = static_cast<const uint8_t *>(
+        scales)[row * blocks_per_row + dimension / 32U];
+    return decoded * e8m0_to_f32(scale);
+  }
+  if (encoding != SLLM_HIP_KV_ENCODING_NVFP4_V1) {
+    return NAN;
+  }
   const uint64_t packed_per_row = (static_cast<uint64_t>(head_dim) + 1U) / 2U;
   const uint64_t blocks_per_row = (static_cast<uint64_t>(head_dim) + 15U) / 16U;
   const uint8_t packed = static_cast<const uint8_t *>(
@@ -118,6 +221,39 @@ __device__ float load_kv(const void *const values, const void *const scales,
          e4m3fn_to_f32(static_cast<const uint8_t *>(
              scales)[row * blocks_per_row + dimension / 16U]) *
          outer_scales[row];
+}
+
+// The qtile4 provider assigns one 32-lane wave to each 32-value MX block.
+// Load and decode the shared E8M0 scale once per wave instead of repeating the
+// same work in every lane.  Other providers keep the format-neutral loader
+// because their lane-to-dimension mapping is not guaranteed to match a block.
+__device__ float
+load_kv_qtile4(const void *const values, const void *const scales,
+               const float *const outer_scales, const uint32_t encoding,
+               const uint64_t row, const uint32_t dimension,
+               const uint32_t head_dim, const float static_scale) noexcept {
+  if (encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+      encoding != SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+    return load_kv(values, scales, outer_scales, encoding, row, dimension,
+                   head_dim, static_scale);
+  }
+  constexpr uint32_t kBlockSize = 32U;
+  const uint64_t blocks_per_row =
+      (static_cast<uint64_t>(head_dim) + kBlockSize - 1U) / kBlockSize;
+  const uint64_t padded_head_dim = blocks_per_row * kBlockSize;
+  const uint8_t value =
+      static_cast<const uint8_t *>(values)[row * padded_head_dim + dimension];
+  const float decoded = encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                            ? e5m2_to_f32(value)
+                            : e4m3fn_to_f32(value);
+  float scale = 0.0F;
+  if ((dimension & (kBlockSize - 1U)) == 0U) {
+    const uint8_t scale_bits = static_cast<const uint8_t *>(
+        scales)[row * blocks_per_row + dimension / kBlockSize];
+    scale = e8m0_to_f32(scale_bits);
+  }
+  scale = __shfl(scale, 0U, kBlockSize);
+  return decoded * scale;
 }
 
 __device__ uint16_t f32_to_bf16_rne(const float value) noexcept {
@@ -933,11 +1069,11 @@ __launch_bounds__(256, 1) void causal_attention_prefill_gqa4_qtile4_kernel(
     const uint64_t kv_row = key_position * kv_heads + kv_head;
     if (dimension < head_dim) {
       key_tile[dimension] =
-          load_kv(key, key_scales, key_outer_scales, encoding, kv_row,
-                  dimension, head_dim, static_key_scale);
+          load_kv_qtile4(key, key_scales, key_outer_scales, encoding, kv_row,
+                         dimension, head_dim, static_key_scale);
       value_tile[dimension] =
-          load_kv(value, value_scales, value_outer_scales, encoding, kv_row,
-                  dimension, head_dim, static_value_scale);
+          load_kv_qtile4(value, value_scales, value_outer_scales, encoding,
+                         kv_row, dimension, head_dim, static_value_scale);
     }
     __syncthreads();
 
@@ -1413,10 +1549,14 @@ __global__ __launch_bounds__(256, 1) void scaled_prefill_pack_query_kernel(
 }
 
 __global__ __launch_bounds__(256, 1) void scaled_prefill_pack_kv_kernel(
-    const uint16_t *const key, const uint16_t *const value,
+    const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
     uint16_t *const key_pack, uint16_t *const value_pack,
     uint64_t *const special_first, const uint64_t key_length,
-    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t kv_head) {
+    const uint32_t kv_heads, const uint32_t head_dim, const uint32_t kv_head,
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale) {
   const uint64_t index =
       static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const uint64_t elements = key_length * static_cast<uint64_t>(head_dim);
@@ -1425,11 +1565,23 @@ __global__ __launch_bounds__(256, 1) void scaled_prefill_pack_kv_kernel(
   }
   const uint64_t token = index / head_dim;
   const uint32_t dimension = static_cast<uint32_t>(index % head_dim);
-  const uint64_t source =
-      (token * kv_heads + kv_head) * static_cast<uint64_t>(head_dim) +
-      dimension;
-  key_pack[index] = key[source];
-  const uint16_t value_raw = value[source];
+  const uint64_t source_row = token * kv_heads + kv_head;
+  uint16_t key_raw = 0U;
+  uint16_t value_raw = 0U;
+  if (encoding == SLLM_HIP_KV_ENCODING_FP16_V1) {
+    const uint64_t source =
+        source_row * static_cast<uint64_t>(head_dim) + dimension;
+    key_raw = static_cast<const uint16_t *>(key)[source];
+    value_raw = static_cast<const uint16_t *>(value)[source];
+  } else {
+    key_raw = scaled_f32_to_f16_rne(load_kv(key, key_scales, key_outer_scales,
+                                            encoding, source_row, dimension,
+                                            head_dim, static_key_scale));
+    value_raw = scaled_f32_to_f16_rne(
+        load_kv(value, value_scales, value_outer_scales, encoding, source_row,
+                dimension, head_dim, static_value_scale));
+  }
+  key_pack[index] = key_raw;
   const uint32_t value_bits = static_cast<uint32_t>(value_raw);
   const uint32_t exponent = (value_bits >> 10U) & 0x1fU;
   const uint32_t fraction = value_bits & 0x03ffU;
@@ -1528,10 +1680,12 @@ __global__ __launch_bounds__(256, 1) void scaled_prefill_softmax_fp16_kernel(
 __global__ __launch_bounds__(256, 1) void scaled_prefill_combine_kernel(
     float *const output, const float *const residual_output,
     const uint16_t *const probabilities, const uint16_t *const residuals,
-    const uint64_t *const special_first, const uint16_t *const value,
+    const uint64_t *const special_first, const void *const value,
+    const void *const value_scales, const float *const value_outer_scales,
     const uint32_t rows, const uint32_t kv_heads, const uint64_t key_length,
     const uint64_t start_position, const uint32_t row_offset,
-    const uint32_t q_group, const uint32_t head_dim, const uint32_t kv_head) {
+    const uint32_t q_group, const uint32_t head_dim, const uint32_t kv_head,
+    const uint32_t encoding, const float static_value_scale) {
   constexpr float kResidualScale = 1024.0F;
   const uint64_t index =
       static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -1568,15 +1722,15 @@ __global__ __launch_bounds__(256, 1) void scaled_prefill_combine_kernel(
       if (!positive_probability(token)) {
         continue;
       }
-      const uint16_t raw =
-          value[(token * kv_heads + kv_head) * head_dim + dimension];
-      const uint32_t bits = static_cast<uint32_t>(raw);
-      if (((bits >> 10U) & 0x1fU) != 0x1fU) {
+      const float raw = load_kv(value, value_scales, value_outer_scales,
+                                encoding, token * kv_heads + kv_head, dimension,
+                                head_dim, static_value_scale);
+      if (isfinite(raw)) {
         continue;
       }
-      if ((bits & 0x03ffU) != 0U) {
+      if (isnan(raw)) {
         nan_visible = true;
-      } else if ((bits & 0x8000U) != 0U) {
+      } else if (signbit(raw)) {
         negative_visible = true;
       } else {
         positive_visible = true;
@@ -1807,16 +1961,23 @@ hipError_t launch_long_prefill_v2(
 
 hipError_t launch_scaled_prefill_gemm(
     const uint16_t *const query, const void *const key, const void *const value,
+    const void *const key_scales, const void *const value_scales,
+    const float *const key_outer_scales, const float *const value_outer_scales,
     uint16_t *const output, const uint32_t query_count,
     const uint64_t start_position, const uint64_t committed_kv_length,
     const uint32_t q_heads, const uint32_t kv_heads, const uint32_t head_dim,
-    void *const workspace, const uint64_t workspace_bytes,
-    void *const blas_handle, void *const blas_mutex,
-    const hipStream_t stream) noexcept {
+    const uint32_t encoding, const float static_key_scale,
+    const float static_value_scale, void *const workspace,
+    const uint64_t workspace_bytes, void *const blas_handle,
+    void *const blas_mutex, const hipStream_t stream) noexcept {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
   (void)query;
   (void)key;
   (void)value;
+  (void)key_scales;
+  (void)value_scales;
+  (void)key_outer_scales;
+  (void)value_outer_scales;
   (void)output;
   (void)query_count;
   (void)start_position;
@@ -1824,6 +1985,9 @@ hipError_t launch_scaled_prefill_gemm(
   (void)q_heads;
   (void)kv_heads;
   (void)head_dim;
+  (void)encoding;
+  (void)static_key_scale;
+  (void)static_value_scale;
   (void)workspace;
   (void)workspace_bytes;
   (void)blas_handle;
@@ -1842,8 +2006,12 @@ hipError_t launch_scaled_prefill_gemm(
       output == nullptr || workspace == nullptr || blas_handle == nullptr ||
       blas_mutex == nullptr || query_count < 1024U ||
       q_heads != kExpectedQHeads || kv_heads != kExpectedKvHeads ||
-      head_dim != kExpectedHeadDim || committed_kv_length == 0U ||
-      committed_kv_length < query_count ||
+      head_dim != kExpectedHeadDim ||
+      (encoding != SLLM_HIP_KV_ENCODING_FP16_V1 &&
+       encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) ||
+      (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+       (key_scales == nullptr || value_scales == nullptr)) ||
+      committed_kv_length == 0U || committed_kv_length < query_count ||
       start_position > UINT64_MAX - query_count ||
       start_position + query_count != committed_kv_length ||
       committed_kv_length > static_cast<uint64_t>(INT32_MAX) ||
@@ -1966,9 +2134,10 @@ hipError_t launch_scaled_prefill_gemm(
     hipLaunchKernelGGL(
         scaled_prefill_pack_kv_kernel,
         dim3(static_cast<uint32_t>((packed_kv_elements + 255U) / 256U)),
-        dim3(256U), 0U, stream, static_cast<const uint16_t *>(key),
-        static_cast<const uint16_t *>(value), key_pack, value_pack,
-        special_first, committed_kv_length, kv_heads, head_dim, kv_head);
+        dim3(256U), 0U, stream, key, value, key_scales, value_scales,
+        key_outer_scales, value_outer_scales, key_pack, value_pack,
+        special_first, committed_kv_length, kv_heads, head_dim, kv_head,
+        encoding, static_key_scale, static_value_scale);
     status = hipGetLastError();
     for (uint32_t row_offset = 0U;
          status == hipSuccess && row_offset < query_count;
@@ -2024,10 +2193,10 @@ hipError_t launch_scaled_prefill_gemm(
           scaled_prefill_combine_kernel,
           dim3(static_cast<uint32_t>((scatter_elements + 255U) / 256U)),
           dim3(256U), 0U, stream, output_f32, residual_output_f32,
-          probabilities, residuals, special_first,
-          static_cast<const uint16_t *>(value), rows, kv_heads,
-          committed_kv_length, start_position, row_offset, kQGroup, head_dim,
-          kv_head);
+          probabilities, residuals, special_first, value, value_scales,
+          value_outer_scales, rows, kv_heads, committed_kv_length,
+          start_position, row_offset, kQGroup, head_dim, kv_head, encoding,
+          static_value_scale);
       status = hipGetLastError();
       if (status != hipSuccess) {
         break;
@@ -2057,14 +2226,27 @@ launch(const uint16_t *const query, const void *const key,
        const bool use_decode_wave_split,
        const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
        const bool use_prefill_gqa4_qtile4, const hipStream_t stream) noexcept {
+  const bool known_encoding =
+      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
+      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1;
   if (query == nullptr || key == nullptr || value == nullptr ||
-      output == nullptr || query_count == 0U ||
+      output == nullptr || !known_encoding || query_count == 0U ||
       query_count > SLLM_HIP_CAUSAL_ATTENTION_MAX_M || capacity_tokens == 0U ||
       committed_kv_length == 0U || q_heads == 0U || kv_heads == 0U ||
       q_heads % kv_heads != 0U || head_dim == 0U ||
       head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
       ((encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-        encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1) &&
+        encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
+        encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+        encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
+        encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+        encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) &&
        (key_scales == nullptr || value_scales == nullptr)) ||
       (encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
        (!std::isfinite(static_key_scale) || static_key_scale <= 0.0F ||

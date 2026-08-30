@@ -946,7 +946,11 @@ fn gemma_kv_plane_kinds(encoding: KvCacheEncoding) -> &'static [StatePlaneKindV1
     use StatePlaneKindV1::*;
     match encoding {
         KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => &[KvKey, KvValue],
-        KvCacheEncoding::Fp8E4M3Fn => &[KvKey, KvValue, KvKeyScale, KvValueScale],
+        KvCacheEncoding::Fp8E4M3Fn
+        | KvCacheEncoding::Fp8E4M3Block16
+        | KvCacheEncoding::Fp8E5M2Block16
+        | KvCacheEncoding::Mxfp8E4
+        | KvCacheEncoding::Mxfp8E5 => &[KvKey, KvValue, KvKeyScale, KvValueScale],
         KvCacheEncoding::Nvfp4 => &[
             KvKey,
             KvValue,
@@ -1009,6 +1013,10 @@ fn gemma_checkpoint_descriptor_digest_from_parts(
         KvCacheEncoding::Fp8E4M3Fn => 2,
         KvCacheEncoding::Fp8E4M3FnStatic => 3,
         KvCacheEncoding::Nvfp4 => 4,
+        KvCacheEncoding::Fp8E4M3Block16 => 5,
+        KvCacheEncoding::Fp8E5M2Block16 => 6,
+        KvCacheEncoding::Mxfp8E4 => 7,
+        KvCacheEncoding::Mxfp8E5 => 8,
     }]);
     digest.update((full_layers.len() as u64).to_le_bytes());
     for (&layer, &descriptor) in full_layers {
@@ -1025,6 +1033,18 @@ fn gemma_checkpoint_descriptor_digest_from_parts(
                 digest.update(value.to_bits().to_le_bytes());
             }
             None => digest.update([0]),
+        }
+        if let Some(block16) = descriptor.kv_fp8_block16_descriptor() {
+            digest.update([
+                block16.format_version(),
+                block16.physical_variant().identity_tag(),
+            ]);
+        }
+        if let Some(mxfp8) = descriptor.kv_mxfp8_descriptor() {
+            digest.update([
+                mxfp8.format_version(),
+                mxfp8.physical_variant().identity_tag(),
+            ]);
         }
     }
     digest.update((sliding_layers.len() as u64).to_le_bytes());
@@ -6330,5 +6350,17 @@ mod tests {
             .unwrap()
             .retention_window += 1;
         assert_ne!(changed.kv_descriptor_digest().unwrap(), baseline);
+
+        let block16 = synthetic_state_image(KvCacheEncoding::Fp8E4M3Block16)
+            .kv_descriptor_digest()
+            .unwrap();
+        let mx_e4 = synthetic_state_image(KvCacheEncoding::Mxfp8E4)
+            .kv_descriptor_digest()
+            .unwrap();
+        let mx_e5 = synthetic_state_image(KvCacheEncoding::Mxfp8E5)
+            .kv_descriptor_digest()
+            .unwrap();
+        assert_ne!(mx_e4, block16);
+        assert_ne!(mx_e4, mx_e5);
     }
 }

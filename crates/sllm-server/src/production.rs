@@ -17,8 +17,9 @@ use sllm_core::{
     DrySamplingConfigV1 as CoreDrySamplingConfigV1, DynamicTemperatureV1, EmbeddingPoolV1,
     ExecutionSession, ExecutionSessionRequest, GEMMA4_HIDDEN_SIZE,
     GEMMA4_RECOMMENDED_CONTEXT_TOKENS, Gemma4ModelLock, Gemma4PrefixForkAuditV1,
-    Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding, LogitBiasV1 as CoreLogitBiasV1,
-    LoraAdapterLockV1, LoraAdapterSelectionV1, MirostatModeV1,
+    Gemma4PrefixStateV1, Gemma4ResidentModel, KvCacheEncoding, KvCacheSelection,
+    KvCacheSelectionSource, KvFp8PhysicalVariant, KvStateDescriptor,
+    LogitBiasV1 as CoreLogitBiasV1, LoraAdapterLockV1, LoraAdapterSelectionV1, MirostatModeV1,
     MirostatSamplingConfigV1 as CoreMirostatSamplingConfigV1, ModelLock, NgramDraftProviderV1,
     OsSamplingRandom, PrefixCacheConfigV1, PrefixCacheKeyV1, PrefixCacheV1, PrefixCacheValueV1,
     PrefixEntryIdV1, PrefixKvLayoutV1, PrefixLeaseV1, PrefixLookupKind, PrefixStateIdentityV1,
@@ -33,13 +34,13 @@ use sllm_core::{
     assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
     build_qwen35_gguf_moe_execution_graph, build_qwen35_graph_with_kv_cache_encoding,
-    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    parse_control_vector_lock_v1, parse_lora_lock_v1, qwen_graph_memory_estimate,
-    qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    verify_derived_gguf, verify_gguf_qwen35_moe,
+    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
+    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
+    build_qwen35_nvfp4_graph, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, parse_control_vector_lock_v1, parse_lora_lock_v1,
+    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
+    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, GenerationCancellationV1, GenerationExecutorV1,
@@ -281,14 +282,9 @@ fn qwen_embedding_graph_for_rows(
         })?;
         match (&state.sidecar, state.fp8_provider.as_deref()) {
             (Some(_), Some("converted-bf16")) | (None, None) => {
-                build_qwen35_graph_with_kv_cache_encoding(
-                    lock,
-                    &state.plan,
-                    target_rows,
-                    state_capacity,
-                    state.kv_cache_encoding,
+                build_qwen_dense_state_graph(state, lock, target_rows, state_capacity).map_err(
+                    |error| BackendErrorV1::new(format!("embedding graph failed: {error}")),
                 )
-                .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
             }
             (Some(sidecar), Some("native-fnuz")) => {
                 build_qwen35_fp8_fnuz_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
@@ -306,6 +302,30 @@ fn qwen_embedding_graph_for_rows(
                 "validated Qwen embedding state has no supported weight source",
             )),
         }
+    }
+}
+
+fn build_qwen_dense_state_graph(
+    state: &QwenBackendStateV1,
+    lock: &ModelLock,
+    token_count: u64,
+    state_capacity: u64,
+) -> Result<QwenGraph, sllm_core::QwenGraphError> {
+    match state.kv_cache_resolved_selection {
+        Some(selection) => build_qwen35_graph_with_kv_cache_selection(
+            lock,
+            &state.plan,
+            token_count,
+            state_capacity,
+            selection,
+        ),
+        None => build_qwen35_graph_with_kv_cache_encoding(
+            lock,
+            &state.plan,
+            token_count,
+            state_capacity,
+            state.kv_cache_encoding,
+        ),
     }
 }
 
@@ -1056,8 +1076,107 @@ pub struct QwenBackendConfigV1 {
     pub shutdown_timeout: Duration,
     pub context_length: u32,
     pub kv_cache_encoding: KvCacheEncoding,
+    pub kv_cache_resolved_selection: Option<KvCacheSelection>,
+    /// Public selection metadata resolved once after the model and exact
+    /// target are known. Internal callers that predate this report may omit
+    /// it; production entrypoints always provide it.
+    pub kv_cache_selection: Option<KvCacheSelectionReportV1>,
     pub phase41: Phase41ProductionConfigV1,
     pub adapter_catalog: Option<QwenAdapterCatalogConfigV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum KvCacheExplicitSourceV1 {
+    Process,
+    ModelEntry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct KvCacheSelectionReportV1 {
+    pub requested: String,
+    pub resolved: String,
+    pub selection_source: String,
+    pub reason: String,
+    pub physical_variant: Option<String>,
+    pub descriptor_id: Option<String>,
+    pub policy_version: u32,
+}
+
+impl KvCacheSelectionReportV1 {
+    pub fn from_core(
+        selection: KvCacheSelection,
+        explicit_source: KvCacheExplicitSourceV1,
+    ) -> Self {
+        let selection_source = match selection.source() {
+            KvCacheSelectionSource::Explicit => match explicit_source {
+                KvCacheExplicitSourceV1::Process => "process-explicit",
+                KvCacheExplicitSourceV1::ModelEntry => "model-entry-explicit",
+            },
+            KvCacheSelectionSource::Mxfp8E4Default => "mxfp8-e4-default",
+            KvCacheSelectionSource::ModelFixedFp16 => "model-fixed-fp16",
+        };
+        let physical_variant = selection
+            .physical_variant()
+            .map(|variant| {
+                kv_physical_variant_name(variant, selection.mxfp8_descriptor().is_some())
+            })
+            .map(str::to_owned);
+        let descriptor_id = selection
+            .block16_descriptor()
+            .map(|descriptor| {
+                format!(
+                    "{}-v{}",
+                    descriptor.encoding().canonical_name(),
+                    descriptor.format_version(),
+                )
+            })
+            .or_else(|| {
+                selection.mxfp8_descriptor().map(|descriptor| {
+                    format!(
+                        "{}-v{}",
+                        descriptor.encoding().canonical_name(),
+                        descriptor.format_version(),
+                    )
+                })
+            });
+        Self {
+            requested: selection
+                .requested()
+                .map(KvCacheEncoding::canonical_name)
+                .unwrap_or("auto")
+                .to_owned(),
+            resolved: selection.resolved().canonical_name().to_owned(),
+            selection_source: selection_source.to_owned(),
+            reason: selection.reason().to_owned(),
+            physical_variant,
+            descriptor_id,
+            policy_version: selection.policy_version(),
+        }
+    }
+
+    fn explicit_legacy(encoding: KvCacheEncoding) -> Self {
+        Self {
+            requested: encoding.canonical_name().to_owned(),
+            resolved: encoding.canonical_name().to_owned(),
+            selection_source: "process-explicit".to_owned(),
+            reason: "legacy internal caller supplied an already-resolved KV encoding".to_owned(),
+            physical_variant: None,
+            descriptor_id: None,
+            policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+        }
+    }
+}
+
+const fn kv_physical_variant_name(
+    variant: KvFp8PhysicalVariant,
+    standard_mxfp8: bool,
+) -> &'static str {
+    match (variant, standard_mxfp8) {
+        (KvFp8PhysicalVariant::OcpE5M2, true) => "E5M2-OCP",
+        (KvFp8PhysicalVariant::OcpE4M3Fn, _) => "E4M3-OCP",
+        (KvFp8PhysicalVariant::E4M3FnuZ, _) => "E4M3-FNUZ",
+        (KvFp8PhysicalVariant::OcpE5M2, false) => "E5M2-software",
+    }
 }
 
 /// Configuration for one persistent dense-BF16 Qwen chat owner.  The owner
@@ -1597,6 +1716,7 @@ pub struct ProductionRequestAuditV1 {
     pub target: String,
     pub weight_encoding: String,
     pub kv_cache_encoding: String,
+    pub kv_cache_selection: KvCacheSelectionReportV1,
     pub fp8_provider: Option<String>,
     pub prompt_tokens: u64,
     pub requested_max_completion_tokens: u32,
@@ -2003,6 +2123,8 @@ struct QwenBackendStateV1 {
     vision_resident: Option<QwenVisionResidentModel>,
     completion_timeout: Duration,
     kv_cache_encoding: KvCacheEncoding,
+    kv_cache_resolved_selection: Option<KvCacheSelection>,
+    kv_cache_selection: KvCacheSelectionReportV1,
     phase41: Phase41ProductionConfigV1,
     prefix_cache: QwenPrefixCacheRuntimeV1,
     checkpoint: Option<QwenCheckpointRuntimeV1>,
@@ -2134,6 +2256,61 @@ fn context_policy_identity_version(config: &ContextWindowStartupConfigV1) -> u32
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prefix_identity_for_kv_descriptor(
+    model_lock_fingerprint: impl AsRef<[u8]>,
+    derived_artifact_identity: impl AsRef<[u8]>,
+    adapter_identity: impl AsRef<[u8]>,
+    renderer_template_digest: impl AsRef<[u8]>,
+    tokenizer_identity: impl AsRef<[u8]>,
+    descriptor: KvStateDescriptor,
+    target_semantics: impl AsRef<[u8]>,
+    context_policy_version: u32,
+) -> Result<PrefixStateIdentityV1, BackendErrorV1> {
+    let layout = descriptor.layout();
+    let heads = u32::try_from(layout.heads())
+        .map_err(|_| BackendErrorV1::new("prefix KV head count overflowed u32"))?;
+    let head_dim = u32::try_from(layout.head_dim())
+        .map_err(|_| BackendErrorV1::new("prefix KV head dimension overflowed u32"))?;
+    let layout = PrefixKvLayoutV1::new(heads, head_dim)
+        .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+    let identity = if let Some(block16) = descriptor.kv_fp8_block16_descriptor() {
+        PrefixStateIdentityV1::new_with_kv_fp8_block16(
+            model_lock_fingerprint,
+            derived_artifact_identity,
+            adapter_identity,
+            renderer_template_digest,
+            tokenizer_identity,
+            descriptor.cache_encoding(),
+            block16.physical_variant(),
+            layout,
+            target_semantics,
+            context_policy_version,
+        )
+    } else {
+        PrefixStateIdentityV1::new(
+            model_lock_fingerprint,
+            derived_artifact_identity,
+            adapter_identity,
+            renderer_template_digest,
+            tokenizer_identity,
+            descriptor.cache_encoding(),
+            layout,
+            target_semantics,
+            context_policy_version,
+        )
+    }
+    .map_err(|error| BackendErrorV1::new(error.to_string()))?;
+    if identity.kv_fp8_block16_descriptor() != descriptor.kv_fp8_block16_descriptor()
+        || identity.kv_mxfp8_descriptor() != descriptor.kv_mxfp8_descriptor()
+    {
+        return Err(BackendErrorV1::new(
+            "prefix KV physical descriptor differs from the graph",
+        ));
+    }
+    Ok(identity)
+}
+
 fn qwen_prefix_identity(
     state: &QwenBackendStateV1,
     graph: &QwenGraph,
@@ -2148,11 +2325,6 @@ fn qwen_prefix_identity(
             QwenGraphStateDescriptor::Linear(_) => None,
         })
         .ok_or_else(|| BackendErrorV1::new("Qwen prefix identity has no KV descriptor"))?;
-    let layout = descriptor.layout();
-    let heads = u32::try_from(layout.heads())
-        .map_err(|_| BackendErrorV1::new("Qwen KV head count overflowed u32"))?;
-    let head_dim = u32::try_from(layout.head_dim())
-        .map_err(|_| BackendErrorV1::new("Qwen KV head dimension overflowed u32"))?;
     let derived_identity = format!("{}:capacity={state_capacity}", state.plan.digest_hex());
     let renderer_identity = format!(
         "qwen35-chat-v{}:{}",
@@ -2164,19 +2336,16 @@ fn qwen_prefix_identity(
         state.target,
         state.fp8_provider.as_deref().unwrap_or("bf16")
     );
-    PrefixStateIdentityV1::new(
+    prefix_identity_for_kv_descriptor(
         state.plan.lock_fingerprint.as_bytes(),
         derived_identity.as_bytes(),
         adapter_identity.as_bytes(),
         renderer_identity.as_bytes(),
         state.tokenizer.snapshot().fingerprint().as_bytes(),
-        state.kv_cache_encoding,
-        PrefixKvLayoutV1::new(heads, head_dim)
-            .map_err(|error| BackendErrorV1::new(error.to_string()))?,
+        descriptor,
         target_semantics.as_bytes(),
         context_policy_identity_version(&state.phase41.context_window),
     )
-    .map_err(|error| BackendErrorV1::new(error.to_string()))
 }
 
 fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
@@ -2186,6 +2355,14 @@ fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
             descriptors.insert(state.layer(), descriptor);
         }
     }
+    qwen_kv_descriptor_digest(descriptors)
+}
+
+fn qwen_kv_descriptor_digest(
+    descriptors: impl IntoIterator<Item = (u32, KvStateDescriptor)>,
+) -> [u8; 32] {
+    let mut descriptors = descriptors.into_iter().collect::<Vec<_>>();
+    descriptors.sort_by_key(|(layer, _)| *layer);
     let mut digest = Sha256::new();
     digest.update(b"sllm-qwen-kv-descriptor-v1");
     digest.update((descriptors.len() as u64).to_le_bytes());
@@ -2200,6 +2377,10 @@ fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
             KvCacheEncoding::Fp8E4M3Fn => 1_u8,
             KvCacheEncoding::Fp8E4M3FnStatic => 2_u8,
             KvCacheEncoding::Nvfp4 => 3_u8,
+            KvCacheEncoding::Fp8E4M3Block16 => 4_u8,
+            KvCacheEncoding::Fp8E5M2Block16 => 5_u8,
+            KvCacheEncoding::Mxfp8E4 => 6_u8,
+            KvCacheEncoding::Mxfp8E5 => 7_u8,
         };
         digest.update([encoding]);
         if let Some((key, value)) = descriptor.static_fp8_scales() {
@@ -2208,6 +2389,18 @@ fn qwen_checkpoint_kv_descriptor_digest(graph: &QwenGraph) -> [u8; 32] {
             digest.update(value.to_bits().to_le_bytes());
         } else {
             digest.update([0]);
+        }
+        if let Some(block16) = descriptor.kv_fp8_block16_descriptor() {
+            digest.update([
+                block16.format_version(),
+                block16.physical_variant().identity_tag(),
+            ]);
+        }
+        if let Some(mxfp8) = descriptor.kv_mxfp8_descriptor() {
+            digest.update([
+                mxfp8.format_version(),
+                mxfp8.physical_variant().identity_tag(),
+            ]);
         }
     }
     digest.finalize().into()
@@ -2543,7 +2736,43 @@ fn require_prompt_only_prefix(
 impl QwenChatBackendV1 {
     pub fn open(config: QwenBackendConfigV1) -> Result<Self, BackendErrorV1> {
         config.validate()?;
+        let kv_cache_selection = config
+            .kv_cache_selection
+            .clone()
+            .unwrap_or_else(|| KvCacheSelectionReportV1::explicit_legacy(config.kv_cache_encoding));
+        if kv_cache_selection.resolved != config.kv_cache_encoding.canonical_name() {
+            return Err(BackendErrorV1::new(
+                "Qwen resolved KV selection report differs from its graph encoding",
+            ));
+        }
+        if config
+            .kv_cache_resolved_selection
+            .is_some_and(|selection| selection.resolved() != config.kv_cache_encoding)
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen resolved KV selection differs from its graph encoding",
+            ));
+        }
+        if config
+            .kv_cache_resolved_selection
+            .and_then(KvCacheSelection::validated_exact_target)
+            .is_some_and(|target| target != config.target)
+        {
+            return Err(BackendErrorV1::new(
+                "Qwen resolved KV selection belongs to a different exact target",
+            ));
+        }
         validate_qwen_phase41_operational_config(&config.phase41)?;
+        if (config.kv_cache_encoding.is_kv_fp8_block16() || config.kv_cache_encoding.is_kv_mxfp8())
+            && !matches!(
+                config.phase41.context_window,
+                ContextWindowStartupConfigV1::Disabled
+            )
+        {
+            return Err(BackendErrorV1::new(
+                "block-scaled KV FP8 context shift is not yet a verified production branch",
+            ));
+        }
         let derived = read_derived_gguf_lock(&config.derived_lock_path).map_err(|error| {
             BackendErrorV1::new(format!("derived GGUF lock validation failed: {error}"))
         })?;
@@ -2585,6 +2814,13 @@ impl QwenChatBackendV1 {
         })?;
         let adapter_catalog =
             load_qwen_adapter_catalog(config.adapter_catalog.as_ref(), &lock, &plan)?;
+        if (config.kv_cache_encoding.is_kv_fp8_block16() || config.kv_cache_encoding.is_kv_mxfp8())
+            && (source.has_fp8_recipe() || adapter_catalog.is_some())
+        {
+            return Err(BackendErrorV1::new(
+                "block-scaled KV FP8 is currently scoped to the unadapted Qwen3.5-4B BF16 text model",
+            ));
+        }
         if source.has_fp8_recipe() && adapter_catalog.is_some() {
             return Err(BackendErrorV1::new(
                 "Qwen adapter catalog requires the dense BF16 GGUF artifact",
@@ -2616,6 +2852,14 @@ impl QwenChatBackendV1 {
                 u64::from(config.context_length),
                 gguf_fp8_dtype(gguf_fp8_provider.expect("validated GGUF FP8 provider")),
                 config.kv_cache_encoding,
+            )
+        } else if let Some(selection) = config.kv_cache_resolved_selection {
+            build_qwen35_graph_with_kv_cache_selection(
+                &lock,
+                &plan,
+                1,
+                u64::from(config.context_length),
+                selection,
             )
         } else {
             build_qwen35_graph_with_kv_cache_encoding(
@@ -2736,6 +2980,8 @@ impl QwenChatBackendV1 {
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
                 kv_cache_encoding: config.kv_cache_encoding,
+                kv_cache_resolved_selection: config.kv_cache_resolved_selection,
+                kv_cache_selection,
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint,
@@ -2840,6 +3086,10 @@ impl QwenChatBackendV1 {
                 vision_resident: None,
                 completion_timeout: config.completion_timeout,
                 kv_cache_encoding: KvCacheEncoding::Fp16,
+                kv_cache_resolved_selection: config.kv_cache_resolved_selection,
+                kv_cache_selection: config.kv_cache_selection.clone().unwrap_or_else(|| {
+                    KvCacheSelectionReportV1::explicit_legacy(KvCacheEncoding::Fp16)
+                }),
                 phase41: config.phase41,
                 prefix_cache,
                 checkpoint: None,
@@ -2868,7 +3118,6 @@ impl QwenChatBackendV1 {
                 .gguf_source
                 .as_ref()
                 .is_none_or(|source| source.has_fp8_recipe())
-            || state.kv_cache_encoding != KvCacheEncoding::Fp16
             || !matches!(
                 state.phase41.prefix_cache,
                 PrefixCacheStartupConfigV1::Disabled
@@ -3982,12 +4231,11 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
             } else {
                 match (&state.sidecar, state.fp8_provider.as_deref()) {
                     (Some(_), Some("converted-bf16")) | (None, None) => {
-                        build_qwen35_graph_with_kv_cache_encoding(
+                        build_qwen_dense_state_graph(
+                            state,
                             state.lock.as_ref().expect("dense Qwen lock"),
-                            &state.plan,
                             target_rows,
                             state_capacity,
-                            state.kv_cache_encoding,
                         )
                     }
                     (Some(sidecar), Some("native-fnuz")) => build_qwen35_fp8_fnuz_graph(
@@ -4503,13 +4751,8 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("ocp-mxfp4-w4a4-mixed") => "ocp-mxfp4-e2m1-block32-e8m0-mixed".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
-            kv_cache_encoding: match state.kv_cache_encoding {
-                KvCacheEncoding::Fp16 => "fp16",
-                KvCacheEncoding::Fp8E4M3Fn => "fp8",
-                KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static",
-                KvCacheEncoding::Nvfp4 => "nvfp4",
-            }
-            .to_owned(),
+            kv_cache_encoding: state.kv_cache_encoding.canonical_name().to_owned(),
+            kv_cache_selection: state.kv_cache_selection.clone(),
             fp8_provider: state.fp8_provider.clone(),
             prompt_tokens,
             requested_max_completion_tokens: generation.max_new_tokens(),
@@ -5345,6 +5588,15 @@ impl ChatGenerationBackendV1 for Gemma4ChatBackendV1 {
             target: state.target.clone(),
             weight_encoding: state.weight_encoding.clone(),
             kv_cache_encoding: "fp8-static".to_owned(),
+            kv_cache_selection: KvCacheSelectionReportV1 {
+                requested: "fp8-static".to_owned(),
+                resolved: "fp8-static".to_owned(),
+                selection_source: "model-recipe-explicit".to_owned(),
+                reason: "Gemma uses its fixed reviewed KV recipe".to_owned(),
+                physical_variant: None,
+                descriptor_id: None,
+                policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+            },
             fp8_provider: None,
             prompt_tokens,
             requested_max_completion_tokens: generation.max_new_tokens(),
@@ -6520,6 +6772,90 @@ mod tests {
             payload,
         )
         .unwrap()
+    }
+
+    fn lowbit_descriptor(
+        encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> KvStateDescriptor {
+        if encoding.is_kv_fp8_block16() {
+            KvStateDescriptor::new_with_kv_fp8_block16(0, 17, 4, 257, encoding, physical_variant)
+                .unwrap()
+        } else {
+            KvStateDescriptor::new_with_kv_mxfp8(0, 17, 4, 257, encoding, physical_variant).unwrap()
+        }
+    }
+
+    fn prefix_identity(descriptor: KvStateDescriptor) -> PrefixStateIdentityV1 {
+        prefix_identity_for_kv_descriptor(
+            b"model",
+            b"artifact",
+            b"adapter",
+            b"renderer",
+            b"tokenizer",
+            descriptor,
+            b"target",
+            1,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn qwen_prefix_identity_preserves_exact_block16_and_mxfp8_descriptors() {
+        let ocp = lowbit_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        );
+        let fnuz = lowbit_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::E4M3FnuZ,
+        );
+        let mx_e4 = lowbit_descriptor(KvCacheEncoding::Mxfp8E4, KvFp8PhysicalVariant::OcpE4M3Fn);
+        let mx_e5 = lowbit_descriptor(KvCacheEncoding::Mxfp8E5, KvFp8PhysicalVariant::OcpE5M2);
+
+        let ocp_identity = prefix_identity(ocp);
+        let fnuz_identity = prefix_identity(fnuz);
+        assert_eq!(
+            ocp_identity.kv_fp8_block16_descriptor(),
+            ocp.kv_fp8_block16_descriptor()
+        );
+        assert_eq!(
+            fnuz_identity.kv_fp8_block16_descriptor(),
+            fnuz.kv_fp8_block16_descriptor()
+        );
+        assert_ne!(
+            ocp_identity.kv_fp8_block16_descriptor(),
+            fnuz_identity.kv_fp8_block16_descriptor()
+        );
+        for descriptor in [mx_e4, mx_e5] {
+            let identity = prefix_identity(descriptor);
+            assert_eq!(
+                identity.kv_mxfp8_descriptor(),
+                descriptor.kv_mxfp8_descriptor()
+            );
+            assert_eq!(identity.kv_fp8_block16_descriptor(), None);
+        }
+    }
+
+    #[test]
+    fn qwen_checkpoint_descriptor_digest_separates_physical_block16_and_mxfp8() {
+        let ocp = lowbit_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        );
+        let fnuz = lowbit_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::E4M3FnuZ,
+        );
+        let mx_e4 = lowbit_descriptor(KvCacheEncoding::Mxfp8E4, KvFp8PhysicalVariant::OcpE4M3Fn);
+        let mx_e5 = lowbit_descriptor(KvCacheEncoding::Mxfp8E5, KvFp8PhysicalVariant::OcpE5M2);
+        let digests = [ocp, fnuz, mx_e4, mx_e5]
+            .map(|descriptor| qwen_kv_descriptor_digest([(0, descriptor)]));
+        for left in 0..digests.len() {
+            for right in (left + 1)..digests.len() {
+                assert_ne!(digests[left], digests[right]);
+            }
+        }
     }
 
     #[test]

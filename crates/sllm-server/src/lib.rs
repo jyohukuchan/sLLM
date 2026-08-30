@@ -69,12 +69,12 @@ pub use phase43_transport::{
 };
 pub use production::{
     CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
-    Gemma4BackendConfigV1, Gemma4ChatBackendV1, Phase41ProductionConfigV1,
-    PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1, ProductionCheckpointResultV1,
-    ProductionDraftProviderV1, ProductionPhase41AuditV1, ProductionPrefixCacheResultV1,
-    ProductionRequestAuditV1, ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1,
-    QwenAdapterCatalogConfigV1, QwenBackendConfigV1, QwenChatBackendV1,
-    QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
+    Gemma4BackendConfigV1, Gemma4ChatBackendV1, KvCacheExplicitSourceV1, KvCacheSelectionReportV1,
+    Phase41ProductionConfigV1, PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1,
+    ProductionCheckpointResultV1, ProductionDraftProviderV1, ProductionPhase41AuditV1,
+    ProductionPrefixCacheResultV1, ProductionRequestAuditV1, ProductionShutdownAuditV1,
+    QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1, QwenBackendConfigV1,
+    QwenChatBackendV1, QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
     QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1, QwenPersistentChatTurnResultV1,
     dynamic_model_plan_digest_preflight, qwen_adapter_catalog_identity_preflight,
 };

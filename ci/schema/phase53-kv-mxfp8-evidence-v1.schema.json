@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase53-kv-mxfp8-evidence-v1.schema.json",
+  "title": "sLLM Phase 53 standard OCP MXFP8 KV host/GPU oracle evidence",
+  "type": "object", "additionalProperties": false,
+  "required": ["$schema", "schema_version", "state", "target", "device_index", "encoding", "physical_variant", "policy_sha256", "binary_sha256", "host", "cases", "execution", "cleanup", "error"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase53-kv-mxfp8-evidence-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase53-kv-mxfp8-evidence-v1"},
+    "state": {"enum": ["PASS", "FAIL", "UNAVAILABLE"]},
+    "target": {"enum": ["gfx942", "gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]}, "device_index": {"type": "integer", "minimum": 0},
+    "encoding": {"const": "kv-mxfp8-e4"}, "physical_variant": {"const": "E4M3-OCP"},
+    "policy_sha256": {"$ref": "#/$defs/digest"}, "binary_sha256": {"$ref": "#/$defs/digest"},
+    "host": {
+      "type": "object", "additionalProperties": false,
+      "required": ["pass", "variants", "head_dimensions", "special_values", "tail_padding_zero", "key_value_scales_independent"],
+      "properties": {
+        "pass": {"type": "boolean"}, "variants": {"const": ["E4M3-OCP"]}, "head_dimensions": {"const": [31, 32, 33, 255, 256, 257]},
+        "special_values": {"const": ["zero", "tiny", "max-finite", "nan", "positive-infinity", "negative-infinity", "positive-zero", "negative-zero"]},
+        "tail_padding_zero": {"type": "boolean"}, "key_value_scales_independent": {"type": "boolean"}
+      }
+    },
+    "cases": {"type": "array", "maxItems": 6, "items": {"$ref": "#/$defs/case"}},
+    "execution": {"type": "object", "additionalProperties": false, "required": ["selected_backend", "gpu_execution", "fallback_allowed", "fallback_used", "append_dispatches", "attention_dispatches"], "properties": {"selected_backend": {"const": "hip"}, "gpu_execution": {"type": "boolean"}, "fallback_allowed": {"const": false}, "fallback_used": {"const": false}, "append_dispatches": {"type": "integer", "minimum": 0}, "attention_dispatches": {"type": "integer", "minimum": 0}}},
+    "cleanup": {"type": "object", "additionalProperties": false, "required": ["retryable", "durable", "terminal_zero"], "properties": {"retryable": {"type": "integer", "minimum": 0}, "durable": {"type": "integer", "minimum": 0}, "terminal_zero": {"type": "boolean"}}},
+    "error": {"type": ["string", "null"], "minLength": 1}
+  },
+  "allOf": [
+    {"if": {"properties": {"state": {"const": "PASS"}}}, "then": {"properties": {"host": {"properties": {"pass": {"const": true}, "tail_padding_zero": {"const": true}, "key_value_scales_independent": {"const": true}}}, "cases": {"minItems": 6, "maxItems": 6}, "execution": {"properties": {"gpu_execution": {"const": true}, "append_dispatches": {"minimum": 6}, "attention_dispatches": {"minimum": 1}}}, "cleanup": {"properties": {"retryable": {"const": 0}, "durable": {"const": 0}, "terminal_zero": {"const": true}}}, "error": {"type": "null"}}}}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "case": {"type": "object", "additionalProperties": false, "required": ["head_dim", "value_bytes_exact", "key_scales_exact", "value_scales_exact", "key_value_scales_independent", "tail_padding_zero", "append_direct", "attention_direct", "numerical_match"], "properties": {"head_dim": {"enum": [31, 32, 33, 255, 256, 257]}, "value_bytes_exact": {"type": "boolean"}, "key_scales_exact": {"type": "boolean"}, "value_scales_exact": {"type": "boolean"}, "key_value_scales_independent": {"type": "boolean"}, "tail_padding_zero": {"type": "boolean"}, "append_direct": {"type": "boolean"}, "attention_direct": {"type": "boolean"}, "numerical_match": {"type": "boolean"}}}
+  }
+}

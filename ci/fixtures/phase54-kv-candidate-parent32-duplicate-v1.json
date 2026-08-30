@@ -1,0 +1,11 @@
+{
+  "schema_version": "sllm-phase54-kv-candidate-spec-v1",
+  "candidate_id": "phase54-k-parent32-duplicate-v-parent32-duplicate-v1",
+  "scale_selector": "independent-k-v-closed-enum-v1",
+  "rounding": "nearest-even",
+  "k_recipe": "parent32-duplicate",
+  "v_recipe": "parent32-duplicate",
+  "transform": "none",
+  "calibration_digest": null,
+  "descriptor_compatibility": "research-build-semantic-override-not-v2-compatible"
+}

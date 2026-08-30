@@ -186,6 +186,15 @@ format、encoding、handoffの正本は[GGUF format contract](../formats/gguf.md
 [P20-A0 manifest](../../ci/matrix/phase20-gguf-a0-v1.json)とする。公開runtimeはderived lockのsource fingerprintをbuild内の
 reviewed lockへ解決するため、変換元lockを別のユーザー入力として要求しない。
 
+Phase 46の変換toolはこのderived lockを`model.gguf`と同じatomic directory transactionで公開し、さらに
+`sllm-phase46-tool-run-v1`の`run-manifest.json`を同梱する。共通manifestはsource lock、使用file、converterの
+40-hex commit、実行binary SHA-256、完全な引数、recipe、GGUFとderived lockのsize/SHA-256を結合する。
+`run-manifest.json`自身は循環digestを避けるためoutputsへ含めず、bundle全体の存在をpublication boundaryとする。
+非dry-run変換は`--output-bundle`だけを許可する。別々の`--output`/`--derived-lock`はGGUFとlockを
+一つのatomic transactionとしてpublishできないため拒否する。
+split/merge、LoRA、repack、quantize、imatrixも同じ共通identityを持つが、変換成功だけでruntime supportや
+品質defaultを宣言しない。詳細は[Phase 46 tools](../development/phase46-tools.md)を正本とする。
+
 `model-lock-v1` only represents original upstream snapshots and therefore
 requires `derivation: null`. The requirements below define the information that
 a future derived-artifact schema must preserve; they are not accepted fields in
@@ -425,3 +434,21 @@ fixture records the host contract and rejection matrix. Exact RDNA `gfx1030`/`gf
 evidence pass with bitwise two-run repeatability, HIP-only dispatch, fallback false, resident/request-workspace baseline restoration, and zero
 pre/final allocations; the compact [GPU summary](../../ci/matrix/phase45-adapter-lifecycle-gpu-summary-v1.json) records bounded identity prefixes and
 dispatch counts without tracking raw artifacts. `gfx942`/MI300X runtime remains deferred.
+
+## Phase 53 KV encoding selection identity
+
+Phase 53のKV default判定はsource model lockやderived artifact lockを変更しない。固定Qwen3.5-4B BF16 model lock fingerprint
+`sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae`、model lock SHA-256
+`4071e1b36901e523a3c5c65559f2cecda7c9cc258185770f049886f52d1fe678`、derived lock fingerprint
+`d553db4d10df5655b681b067ac0e8359defe85ab384e805c97f8a296854b4c12`、derived lock SHA-256
+`821e43dc1c568f4c5b0fdea8d831a15177a6c652e9f5c0390b5aba0b99b47547`を品質evidenceへ結合する。
+
+runtime state identityはrequested／resolved KV encoding、canonical descriptor、descriptor version、block size、E8M0 scale recipe、
+physical OCP／FNUZ／software variant、exact target semantics、policy version/digest、selection sourceを含む。block16 v1/v2 identityは
+履歴payloadを誤認しないため残すが、2026-08-30以降は新規state生成を拒否する。current default identityは
+`kv-mxfp8-e4-v1`、OCP E4M3FN、block 32、E8M0、`mxfp8-e4-default`を結合する。
+model lock alias、path、request length、空きHBMはselection identityを代替しない。
+
+descriptor v1/v2のgfx1201／gfx1030 correctness／品質と空mappingはPhase 53/54の履歴である。2026-08-30の明示決定により、
+reviewed Qwen3.5-4B BF16 dense text scopeではexact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`をstandard OCP
+MXFP8 E4M3 defaultへmappingする。このpolicy変更はmodel weight lockの新revisionではない。明示`fp16`はrollbackである。

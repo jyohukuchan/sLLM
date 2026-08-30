@@ -1,0 +1,311 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase54-qwen35-kv-quality-research-v1.schema.json",
+  "title": "sLLM Phase 54 Qwen3.5 KV quality research report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "schema_version", "state", "identity", "target", "device_index",
+    "encoding", "candidate_spec", "repeat_count", "reference_encoding", "session_scope",
+    "sequential_residents", "repeats", "cleanup"
+  ],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase54-qwen35-kv-quality-research-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase54-qwen35-kv-quality-research-v1"},
+    "state": {"const": "PASS"},
+    "identity": {"$ref": "#/$defs/identity"},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "device_index": {"type": "integer", "minimum": 0},
+    "encoding": {"enum": ["kv-fp8-e5-block16", "kv-fp8-e4-block16"]},
+    "candidate_spec": {"$ref": "#/$defs/candidate_spec"},
+    "repeat_count": {"enum": [1, 3]},
+    "reference_encoding": {"const": "fp16"},
+    "session_scope": {"const": "single-process-single-hip-execution-session"},
+    "sequential_residents": {"const": true},
+    "repeats": {"type": "array", "minItems": 1, "maxItems": 3, "items": {"$ref": "#/$defs/repeat"}},
+    "cleanup": {"$ref": "#/$defs/cleanup"}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["target"], "properties": {"target": {"const": "gfx1030"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e5-block16"},
+        "identity": {"properties": {
+          "production_descriptor_id": {"const": "kv-fp8-e5-block16-v2"},
+          "candidate_descriptor_id": {"pattern": "^kv-fp8-e5-block16-v2(?:-phase54-k-(?:floor|ceil|nearest-even)-v-(?:floor|ceil|nearest-even)-v1|-phase54-k-parent32-duplicate-v-parent32-duplicate-v1|-phase54-kq-transpose16x16-all-full-v1|-phase54-vo-transpose16x16-layer19-v1|-phase54-vo-transpose16x16-layers19-31-v1)?$"}
+        }},
+        "repeats": {"items": {"properties": {
+          "production_control": {"properties": {"encoding": {"const": "kv-fp8-e5-block16"}, "descriptor_id": {"const": "kv-fp8-e5-block16-v2"}}},
+          "candidate": {"properties": {"encoding": {"const": "kv-fp8-e5-block16"}, "descriptor_id": {"pattern": "^kv-fp8-e5-block16-v2(?:-phase54-k-(?:floor|ceil|nearest-even)-v-(?:floor|ceil|nearest-even)-v1|-phase54-k-parent32-duplicate-v-parent32-duplicate-v1|-phase54-kq-transpose16x16-all-full-v1|-phase54-vo-transpose16x16-layer19-v1|-phase54-vo-transpose16x16-layers19-31-v1)?$"}}},
+          "mxfp8": {"properties": {"encoding": {"const": "kv-mxfp8-e5"}, "descriptor_id": {"const": "kv-mxfp8-e5-v1"}}}
+        }}}
+      }}
+    },
+    {
+      "if": {"required": ["target"], "properties": {"target": {"const": "gfx1201"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e4-block16"},
+        "identity": {"properties": {
+          "production_descriptor_id": {"const": "kv-fp8-e4-block16-v2"},
+          "candidate_descriptor_id": {"pattern": "^kv-fp8-e4-block16-v2(?:-phase54-k-(?:floor|ceil|nearest-even)-v-(?:floor|ceil|nearest-even)-v1|-phase54-k-parent32-duplicate-v-parent32-duplicate-v1|-phase54-kq-transpose16x16-all-full-v1|-phase54-vo-transpose16x16-layer19-v1|-phase54-vo-transpose16x16-layers19-31-v1)?$"}
+        }},
+        "repeats": {"items": {"properties": {
+          "production_control": {"properties": {"encoding": {"const": "kv-fp8-e4-block16"}, "descriptor_id": {"const": "kv-fp8-e4-block16-v2"}}},
+          "candidate": {"properties": {"encoding": {"const": "kv-fp8-e4-block16"}, "descriptor_id": {"pattern": "^kv-fp8-e4-block16-v2(?:-phase54-k-(?:floor|ceil|nearest-even)-v-(?:floor|ceil|nearest-even)-v1|-phase54-k-parent32-duplicate-v-parent32-duplicate-v1|-phase54-kq-transpose16x16-all-full-v1|-phase54-vo-transpose16x16-layer19-v1|-phase54-vo-transpose16x16-layers19-31-v1)?$"}}},
+          "mxfp8": {"properties": {"encoding": {"const": "kv-mxfp8-e4"}, "descriptor_id": {"const": "kv-mxfp8-e4-v1"}}}
+        }}}
+      }}
+    },
+    {
+      "if": {"required": ["repeat_count"], "properties": {"repeat_count": {"const": 1}}},
+      "then": {"properties": {"repeats": {
+        "minItems": 1, "maxItems": 1,
+        "prefixItems": [{"allOf": [{"$ref": "#/$defs/repeat"}, {"properties": {"repeat": {"const": 1}}}]}]
+      }}}
+    },
+    {
+      "if": {"required": ["repeat_count"], "properties": {"repeat_count": {"const": 3}}},
+      "then": {"properties": {"repeats": {
+        "minItems": 3, "maxItems": 3,
+        "prefixItems": [
+          {"allOf": [{"$ref": "#/$defs/repeat"}, {"properties": {"repeat": {"const": 1}}}]},
+          {"allOf": [{"$ref": "#/$defs/repeat"}, {"properties": {"repeat": {"const": 2}}}]},
+          {"allOf": [{"$ref": "#/$defs/repeat"}, {"properties": {"repeat": {"const": 3}}}]}
+        ]
+      }}}
+    },
+    {
+      "if": {"required": ["candidate_spec"], "properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "production-control-v2"}}}}},
+      "then": {"properties": {
+        "identity": {"properties": {
+          "candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]},
+          "descriptor_compatibility": {"const": "exact-production-v2"}
+        }},
+        "repeats": {"items": {"properties": {"candidate": {"properties": {
+          "descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]}
+        }}}}}
+      }},
+      "else": {"properties": {"identity": {"properties": {
+        "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}
+      }}}}
+    },
+    {"$ref": "#/$defs/candidate_identity_pairing"}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "finite_nonnegative": {
+      "type": "number", "minimum": 0, "maximum": 1.7976931348623157e308,
+      "oneOf": [{"minimum": 0}, {"exclusiveMaximum": 0}]
+    },
+    "finite_number": {
+      "type": "number", "minimum": -1.7976931348623157e308, "maximum": 1.7976931348623157e308,
+      "oneOf": [{"minimum": 0}, {"exclusiveMaximum": 0}]
+    },
+    "finite_unit": {
+      "type": "number", "minimum": 0, "maximum": 1,
+      "oneOf": [{"minimum": 0}, {"exclusiveMaximum": 0}]
+    },
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "policy_sha256", "dataset_sha256", "model_lock_fingerprint", "model_lock_sha256",
+        "derived_lock_fingerprint", "derived_lock_sha256", "binary_sha256",
+        "candidate_spec_sha256", "production_descriptor_id", "candidate_descriptor_id",
+        "descriptor_compatibility"
+      ],
+      "properties": {
+        "policy_sha256": {"$ref": "#/$defs/digest"},
+        "dataset_sha256": {"$ref": "#/$defs/digest"},
+        "model_lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"},
+        "model_lock_sha256": {"$ref": "#/$defs/digest"},
+        "derived_lock_fingerprint": {"$ref": "#/$defs/digest"},
+        "derived_lock_sha256": {"$ref": "#/$defs/digest"},
+        "binary_sha256": {"$ref": "#/$defs/digest"},
+        "candidate_spec_sha256": {"$ref": "#/$defs/digest"},
+        "production_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]},
+        "candidate_descriptor_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "descriptor_compatibility": {"enum": ["exact-production-v2", "research-build-semantic-override-not-v2-compatible"]}
+      }
+    },
+    "candidate_spec": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "candidate_id", "scale_selector", "rounding", "k_recipe", "v_recipe", "transform", "calibration_digest", "descriptor_compatibility"],
+      "properties": {
+        "schema_version": {"const": "sllm-phase54-kv-candidate-spec-v1"},
+        "candidate_id": {"pattern": "^(?:production-control-v2|phase54-k-(?:floor|ceil|nearest-even)-v-(?:floor|ceil|nearest-even)-v1|phase54-k-parent32-duplicate-v-parent32-duplicate-v1|phase54-kq-transpose16x16-all-full-v1|phase54-vo-transpose16x16-layer19-v1|phase54-vo-transpose16x16-layers19-31-v1)$"},
+        "scale_selector": {"const": "independent-k-v-closed-enum-v1"},
+        "rounding": {"const": "nearest-even"},
+        "k_recipe": {"enum": ["floor", "ceil", "nearest-even", "parent32-duplicate"]},
+        "v_recipe": {"enum": ["floor", "ceil", "nearest-even", "parent32-duplicate"]},
+        "transform": {"enum": ["none", "transpose16x16-all-full", "transpose16x16-v-layer19-output-inverse", "transpose16x16-v-layers19-31-output-inverse"]},
+        "calibration_digest": {"type": "null"},
+        "descriptor_compatibility": {"enum": ["exact-production-v2", "research-build-semantic-override-not-v2-compatible"]}
+      },
+      "allOf": [{"$ref": "#/$defs/candidate_spec_pairing"}]
+    },
+    "candidate_spec_pairing": {
+      "oneOf": [
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "production-control-v2"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "exact-production-v2"}}},
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "ceil"}, "candidate_id": {"const": "phase54-k-floor-v-ceil-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "nearest-even"}, "candidate_id": {"const": "phase54-k-floor-v-nearest-even-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "phase54-k-ceil-v-floor-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "ceil"}, "candidate_id": {"const": "phase54-k-ceil-v-ceil-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "nearest-even"}, "candidate_id": {"const": "phase54-k-ceil-v-nearest-even-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "phase54-k-nearest-even-v-floor-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "ceil"}, "candidate_id": {"const": "phase54-k-nearest-even-v-ceil-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "nearest-even"}, "candidate_id": {"const": "phase54-k-nearest-even-v-nearest-even-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "parent32-duplicate"}, "v_recipe": {"const": "parent32-duplicate"}, "candidate_id": {"const": "phase54-k-parent32-duplicate-v-parent32-duplicate-v1"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "phase54-kq-transpose16x16-all-full-v1"}, "transform": {"const": "transpose16x16-all-full"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "phase54-vo-transpose16x16-layer19-v1"}, "transform": {"const": "transpose16x16-v-layer19-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "candidate_id": {"const": "phase54-vo-transpose16x16-layers19-31-v1"}, "transform": {"const": "transpose16x16-v-layers19-31-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}
+      ]
+    },
+    "candidate_identity_pairing": {
+      "oneOf": [
+        {"$ref": "#/$defs/pair_control"},
+        {"$ref": "#/$defs/pair_floor_ceil"},
+        {"$ref": "#/$defs/pair_floor_nearest"},
+        {"$ref": "#/$defs/pair_ceil_floor"},
+        {"$ref": "#/$defs/pair_ceil_ceil"},
+        {"$ref": "#/$defs/pair_ceil_nearest"},
+        {"$ref": "#/$defs/pair_nearest_floor"},
+        {"$ref": "#/$defs/pair_nearest_ceil"},
+        {"$ref": "#/$defs/pair_nearest_nearest"},
+        {"$ref": "#/$defs/pair_parent32_duplicate"},
+        {"$ref": "#/$defs/pair_kq_transpose"},
+        {"$ref": "#/$defs/pair_vo_transpose"},
+        {"$ref": "#/$defs/pair_vo_transpose_layers19_31"}
+      ]
+    },
+    "pair_control": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "production-control-v2"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]}}}}}}}},
+    "pair_floor_ceil": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-floor-v-ceil-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-floor-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-floor-v-ceil-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-floor-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-floor-v-ceil-v1"]}}}}}}}},
+    "pair_floor_nearest": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-floor-v-nearest-even-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-floor-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-floor-v-nearest-even-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-floor-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-floor-v-nearest-even-v1"]}}}}}}}},
+    "pair_ceil_floor": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-floor-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-floor-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-floor-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-floor-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-floor-v1"]}}}}}}}},
+    "pair_ceil_ceil": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-ceil-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-ceil-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-ceil-v1"]}}}}}}}},
+    "pair_ceil_nearest": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-nearest-even-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-nearest-even-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-ceil-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-ceil-v-nearest-even-v1"]}}}}}}}},
+    "pair_nearest_floor": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-floor-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-floor-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-floor-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-floor-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-floor-v1"]}}}}}}}},
+    "pair_nearest_ceil": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-ceil-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-ceil-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-ceil-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-ceil-v1"]}}}}}}}},
+    "pair_nearest_nearest": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-nearest-even-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-nearest-even-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-nearest-even-v-nearest-even-v1", "kv-fp8-e4-block16-v2-phase54-k-nearest-even-v-nearest-even-v1"]}}}}}}}},
+    "pair_parent32_duplicate": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-parent32-duplicate-v-parent32-duplicate-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-parent32-duplicate-v-parent32-duplicate-v1", "kv-fp8-e4-block16-v2-phase54-k-parent32-duplicate-v-parent32-duplicate-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-k-parent32-duplicate-v-parent32-duplicate-v1", "kv-fp8-e4-block16-v2-phase54-k-parent32-duplicate-v-parent32-duplicate-v1"]}}}}}}}},
+    "pair_kq_transpose": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-kq-transpose16x16-all-full-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-kq-transpose16x16-all-full-v1", "kv-fp8-e4-block16-v2-phase54-kq-transpose16x16-all-full-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-kq-transpose16x16-all-full-v1", "kv-fp8-e4-block16-v2-phase54-kq-transpose16x16-all-full-v1"]}}}}}}}},
+    "pair_vo_transpose": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layer19-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-vo-transpose16x16-layer19-v1", "kv-fp8-e4-block16-v2-phase54-vo-transpose16x16-layer19-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-vo-transpose16x16-layer19-v1", "kv-fp8-e4-block16-v2-phase54-vo-transpose16x16-layer19-v1"]}}}}}}}},
+    "pair_vo_transpose_layers19_31": {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layers19-31-v1"}}}, "identity": {"properties": {"candidate_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-vo-transpose16x16-layers19-31-v1", "kv-fp8-e4-block16-v2-phase54-vo-transpose16x16-layers19-31-v1"]}}}, "repeats": {"items": {"properties": {"candidate": {"properties": {"descriptor_id": {"enum": ["kv-fp8-e5-block16-v2-phase54-vo-transpose16x16-layers19-31-v1", "kv-fp8-e4-block16-v2-phase54-vo-transpose16x16-layers19-31-v1"]}}}}}}}},
+    "repeat": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repeat", "completely_sequential_order", "fp16_released_before_production_control", "production_control_released_before_candidate", "candidate_released_before_mxfp8", "mxfp8_released_after_repeat", "production_control", "candidate", "mxfp8"],
+      "properties": {
+        "repeat": {"type": "integer", "minimum": 1, "maximum": 3},
+        "completely_sequential_order": {"const": ["fp16", "production-control-block16", "candidate-block16", "mxfp8"]},
+        "fp16_released_before_production_control": {"const": true},
+        "production_control_released_before_candidate": {"const": true},
+        "candidate_released_before_mxfp8": {"const": true},
+        "mxfp8_released_after_repeat": {"const": true},
+        "production_control": {"$ref": "#/$defs/comparison"},
+        "candidate": {"$ref": "#/$defs/comparison"},
+        "mxfp8": {"$ref": "#/$defs/comparison"}
+      }
+    },
+    "comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["encoding", "descriptor_id", "aggregate", "cases"],
+      "properties": {
+        "encoding": {"enum": ["kv-fp8-e5-block16", "kv-fp8-e4-block16", "kv-mxfp8-e5", "kv-mxfp8-e4"]},
+        "descriptor_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "aggregate": {"$ref": "#/$defs/aggregate"},
+        "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}}
+      }
+    },
+    "aggregate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_count", "metric_sample_counts", "perplexity_relative_delta", "kld_p99", "top1_agreement", "task_score_delta", "long_context_score_delta", "first_top1_divergence", "maximum_logit_delta", "finite", "hip_dispatches", "fallback_used", "all_dispatches_hip"],
+      "properties": {
+        "selected_count": {"type": "integer", "minimum": 1},
+        "metric_sample_counts": {"$ref": "#/$defs/metric_sample_counts"},
+        "perplexity_relative_delta": {"$ref": "#/$defs/finite_number"},
+        "kld_p99": {"$ref": "#/$defs/finite_nonnegative"},
+        "top1_agreement": {"$ref": "#/$defs/finite_unit"},
+        "task_score_delta": {"$ref": "#/$defs/finite_unit"},
+        "long_context_score_delta": {"$ref": "#/$defs/finite_unit"},
+        "first_top1_divergence": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/top1_divergence"}]},
+        "maximum_logit_delta": {"$ref": "#/$defs/logit_delta_locator"},
+        "finite": {"const": true},
+        "hip_dispatches": {"type": "integer", "minimum": 1},
+        "fallback_used": {"const": false},
+        "all_dispatches_hip": {"const": true}
+      }
+    },
+    "metric_sample_counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["perplexity", "kld", "top1", "task", "long-context"],
+      "properties": {
+        "perplexity": {"type": "integer", "minimum": 1},
+        "kld": {"type": "integer", "minimum": 1},
+        "top1": {"type": "integer", "minimum": 1},
+        "task": {"type": "integer", "minimum": 1},
+        "long-context": {"type": "integer", "minimum": 1}
+      }
+    },
+    "top1_divergence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "row", "measured_row_index", "reference_top1", "observed_top1"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^b[0-9]{3}$"},
+        "row": {"enum": ["prefill", "decode"]},
+        "measured_row_index": {"type": "integer", "minimum": 0},
+        "reference_top1": {"type": "integer", "minimum": 0},
+        "observed_top1": {"type": "integer", "minimum": 0}
+      }
+    },
+    "logit_delta_locator": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "row", "measured_row_index", "logit_index", "max_abs_logit_delta"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^b[0-9]{3}$"},
+        "row": {"enum": ["prefill", "decode"]},
+        "measured_row_index": {"type": "integer", "minimum": 0},
+        "logit_index": {"type": "integer", "minimum": 0},
+        "max_abs_logit_delta": {"$ref": "#/$defs/finite_nonnegative"}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["case_id", "length", "long", "prefill_nll", "prefill", "decode"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^b[0-9]{3}$"},
+        "length": {"type": "integer", "minimum": 1},
+        "long": {"type": "boolean"},
+        "prefill_nll": {"$ref": "#/$defs/nll"},
+        "prefill": {"$ref": "#/$defs/row"},
+        "decode": {"$ref": "#/$defs/row"}
+      }
+    },
+    "nll": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference", "observed", "delta"],
+      "properties": {
+        "reference": {"$ref": "#/$defs/finite_nonnegative"},
+        "observed": {"$ref": "#/$defs/finite_nonnegative"},
+        "delta": {"$ref": "#/$defs/finite_number"}
+      }
+    },
+    "row": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reference_top1", "observed_top1", "top1_match", "kld", "max_abs_logit_delta", "max_abs_logit_index", "reference_finite", "observed_finite"],
+      "properties": {
+        "reference_top1": {"type": "integer", "minimum": 0},
+        "observed_top1": {"type": "integer", "minimum": 0},
+        "top1_match": {"type": "boolean"},
+        "kld": {"$ref": "#/$defs/finite_nonnegative"},
+        "max_abs_logit_delta": {"$ref": "#/$defs/finite_nonnegative"},
+        "max_abs_logit_index": {"type": "integer", "minimum": 0},
+        "reference_finite": {"const": true},
+        "observed_finite": {"const": true}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["retryable", "durable", "poisoned", "terminal_zero"],
+      "properties": {"retryable": {"const": 0}, "durable": {"const": 0}, "poisoned": {"const": false}, "terminal_zero": {"const": true}}
+    }
+  }
+}

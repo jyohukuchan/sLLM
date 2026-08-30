@@ -29,7 +29,7 @@ use sllm_core::{
 use crate::argmax::{ArgmaxDispatchInfo, ArgmaxSubmission, PreparedArgmax};
 use crate::kv_state::{
     CausalAttentionCompletion, CausalAttentionEvidence, KvAppendCompletion, KvAppendEvidence,
-    KvStateResource,
+    KvStateResource, native_kv_storage,
 };
 use crate::linear_attention::{
     LinearAttentionCompletion, LinearAttentionEvidence, LinearAttentionStateResource,
@@ -73,7 +73,14 @@ fn kv_image_planes(encoding: KvCacheEncoding, count: u32) -> Vec<(u32, StatePlan
             StatePlaneKindV1::KvValue,
         ),
     ];
-    if matches!(encoding, KvCacheEncoding::Fp8E4M3Fn) {
+    if matches!(
+        encoding,
+        KvCacheEncoding::Fp8E4M3Fn
+            | KvCacheEncoding::Fp8E4M3Block16
+            | KvCacheEncoding::Fp8E5M2Block16
+            | KvCacheEncoding::Mxfp8E4
+            | KvCacheEncoding::Mxfp8E5
+    ) {
         planes.extend([
             (
                 sys::SLLM_HIP_KV_STATE_PLANE_KEY_SCALE,
@@ -551,32 +558,9 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         let resource = access.downcast_kv_state_payload::<KvStateResource>(state)?;
         let info = resource.image_query().map_err(map_backend_error)?;
         let encoding = state.descriptor().cache_encoding();
-        let (dtype, native_encoding, _, _) = match encoding {
-            KvCacheEncoding::Fp16 => (
-                sys::SLLM_TENSOR_DTYPE_F16,
-                sys::SLLM_HIP_KV_ENCODING_FP16_V1,
-                0,
-                0,
-            ),
-            KvCacheEncoding::Fp8E4M3Fn => (
-                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-                sys::SLLM_HIP_KV_ENCODING_FP8_V1,
-                0,
-                0,
-            ),
-            KvCacheEncoding::Fp8E4M3FnStatic => (
-                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-                sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
-                0,
-                0,
-            ),
-            KvCacheEncoding::Nvfp4 => (
-                sys::SLLM_TENSOR_DTYPE_U8,
-                sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
-                0,
-                0,
-            ),
-        };
+        let (dtype, native_encoding, _, _) =
+            native_kv_storage(state.descriptor(), self.context.expected_target())
+                .map_err(map_backend_error)?;
         if info.session_id != access.session_id().raw()
             || info.layer_id != state.layer_id()
             || info.dtype != dtype
@@ -634,19 +618,9 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         }
         let encoding = state.descriptor().cache_encoding();
         let planes = kv_image_planes(encoding, info.plane_count);
-        let expected_dtype = match encoding {
-            KvCacheEncoding::Fp16 => sys::SLLM_TENSOR_DTYPE_F16,
-            KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => {
-                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN
-            }
-            KvCacheEncoding::Nvfp4 => sys::SLLM_TENSOR_DTYPE_U8,
-        };
-        let expected_encoding = match encoding {
-            KvCacheEncoding::Fp16 => sys::SLLM_HIP_KV_ENCODING_FP16_V1,
-            KvCacheEncoding::Fp8E4M3Fn => sys::SLLM_HIP_KV_ENCODING_FP8_V1,
-            KvCacheEncoding::Fp8E4M3FnStatic => sys::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1,
-            KvCacheEncoding::Nvfp4 => sys::SLLM_HIP_KV_ENCODING_NVFP4_V1,
-        };
+        let (expected_dtype, expected_encoding, _, _) =
+            native_kv_storage(state.descriptor(), self.context.expected_target())
+                .map_err(map_backend_error)?;
         if info.session_id != access.session_id().raw()
             || info.layer_id != state.layer_id()
             || info.capacity_tokens != state.capacity()

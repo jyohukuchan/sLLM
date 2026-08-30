@@ -9351,6 +9351,23 @@ validate_kv_append_info_input(const sllm_kv_append_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+// Token-major low-bit block formats own a physically padded value row while
+// retaining the logical head_dim in their public shape.  Keep this helper in
+// the ABI owner so allocation, view strides, and page accounting cannot drift
+// from the device kernels' row addressing.
+uint64_t kv_value_row_stride(const uint32_t head_dim,
+                             const uint32_t encoding) noexcept {
+  if (encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+      encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2) {
+    return ((static_cast<uint64_t>(head_dim) + 15U) / 16U) * 16U;
+  }
+  if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+      encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+    return ((static_cast<uint64_t>(head_dim) + 31U) / 32U) * 32U;
+  }
+  return static_cast<uint64_t>(head_dim);
+}
+
 void fill_kv_view_info(const KvState *const state, const uint64_t length,
                        const uint64_t generation, const uint64_t context_id,
                        const uint64_t state_id,
@@ -9362,10 +9379,17 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->encoding =
       state->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
           ? SLLM_TENSOR_ENCODING_UNQUANTIZED
-          : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-                     state->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
-                 ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
-                 : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);
+          : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                     state->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                 ? SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0
+                 : (state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                            state->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                        ? SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
+                        : (state->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
+                                   state->encoding ==
+                                       SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                               ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+                               : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32)));
   info->head_count = state->head_count;
   info->head_dim = state->head_dim;
   info->memory_kind = state->memory_kind;
@@ -9379,13 +9403,15 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
   info->tokens_per_page = state->tokens_per_page;
   info->mapped_token_capacity = state->mapped_token_capacity;
   info->committed_bytes_per_plane = state->committed_bytes_per_plane;
+  const uint64_t value_row_stride =
+      kv_value_row_stride(state->head_dim, state->encoding);
   info->k_stride_elements[0] =
-      static_cast<uint64_t>(state->head_count) * state->head_dim;
-  info->k_stride_elements[1] = state->head_dim;
+      static_cast<uint64_t>(state->head_count) * value_row_stride;
+  info->k_stride_elements[1] = value_row_stride;
   info->k_stride_elements[2] = 1U;
   info->v_stride_elements[0] =
-      static_cast<uint64_t>(state->head_count) * state->head_dim;
-  info->v_stride_elements[1] = state->head_dim;
+      static_cast<uint64_t>(state->head_count) * value_row_stride;
+  info->v_stride_elements[1] = value_row_stride;
   info->v_stride_elements[2] = 1U;
 }
 
@@ -9405,6 +9431,14 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
                  ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1
              : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                  ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                 ? SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1
                  : SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
   info->workgroup_size_x = SLLM_HIP_KV_WORKGROUP_SIZE;
   info->grid_size_x =
@@ -9427,6 +9461,14 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
                  ? ::sllm_kv_state_kernel::kFp8LogicalKernelId
              : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                  ? ::sllm_kv_state_kernel::kFp8StaticLogicalKernelId
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
+                 ? ::sllm_kv_state_kernel::kFp8E4Block16LogicalKernelIdV2
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                 ? ::sllm_kv_state_kernel::kFp8E5Block16LogicalKernelIdV2
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
+                 ? ::sllm_kv_state_kernel::kMxfp8E4LogicalKernelId
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                 ? ::sllm_kv_state_kernel::kMxfp8E5LogicalKernelId
                  : ::sllm_kv_state_kernel::kNvfp4LogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_KV_DEVICE_SYMBOL_MAX,
@@ -9436,6 +9478,14 @@ void fill_kv_append_info(sllm_kv_append_info_t *const info,
                  ? ::sllm_kv_state_kernel::kFp8DeviceSymbol
              : encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                  ? ::sllm_kv_state_kernel::kFp8StaticDeviceSymbol
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2
+                 ? ::sllm_kv_state_kernel::kFp8E4Block16DeviceSymbolV2
+             : encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                 ? ::sllm_kv_state_kernel::kFp8E5Block16DeviceSymbolV2
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
+                 ? ::sllm_kv_state_kernel::kMxfp8E4DeviceSymbol
+             : encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                 ? ::sllm_kv_state_kernel::kMxfp8E5DeviceSymbol
                  : ::sllm_kv_state_kernel::kNvfp4DeviceSymbol));
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
@@ -9649,26 +9699,99 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
                            "KV state provisional accounting rollback failed");
       return device_status;
     }
+    if (info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+        info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+      hipDeviceProp_t properties{};
+      const hipError_t property_status =
+          hipGetDeviceProperties(&properties,
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+                                 context->device_index
+#else
+                                 static_cast<int>(context->device_index)
+#endif
+          );
+      const bool e4_ocp =
+          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 &&
+          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+          (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201")
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+           || matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030")
+#endif
+          );
+      const bool e4_fnuz =
+          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 &&
+          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ &&
+          matches_runtime_gcn_arch(properties.gcnArchName, "gfx942");
+      const bool e5_software =
+          info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 &&
+          info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 &&
+          matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030");
+      const bool mxfp8_e4_ocp =
+          info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+          info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+          info->block_size == 32U &&
+          (matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030") ||
+           matches_runtime_gcn_arch(properties.gcnArchName, "gfx1201") ||
+           matches_runtime_gcn_arch(properties.gcnArchName, "gfx942"));
+      const bool mxfp8_e5_software =
+          info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 &&
+          info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 && info->block_size == 32U &&
+          matches_runtime_gcn_arch(properties.gcnArchName, "gfx1030");
+      if (property_status != hipSuccess ||
+          (!e4_ocp && !e4_fnuz && !e5_software && !mxfp8_e4_ocp &&
+           !mxfp8_e5_software)) {
+        (void)rollback_child(
+            context, error_sink,
+            "KV state target-recipe provisional accounting rollback failed");
+        return property_status != hipSuccess
+                   ? hip_failure(error_sink, property_status,
+                                 "query target for FP8 KV recipe")
+                   : sllm_public_runtime::write_error(
+                         error_sink, SLLM_STATUS_UNSUPPORTED,
+                         "FP8 KV encoding recipe is unsupported on the "
+                         "selected exact target");
+      }
+    }
     const uint32_t head_count =
         info->head_count == 0U ? SLLM_HIP_KV_HEAD_COUNT : info->head_count;
     const uint32_t head_dim =
         info->head_dim == 0U ? SLLM_HIP_KV_HEAD_DIM : info->head_dim;
-    const uint64_t row_elements = static_cast<uint64_t>(head_count) * head_dim;
+    const uint64_t row_stride = kv_value_row_stride(head_dim, info->encoding);
+    const uint64_t row_elements =
+        static_cast<uint64_t>(head_count) * row_stride;
     const uint64_t value_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_FP16_V1
             ? row_elements * UINT64_C(2)
             : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
-                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
+                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
+                       info->encoding ==
+                           SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                       info->encoding ==
+                           SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 ||
+                       info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                       info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
                    ? row_elements
                    : static_cast<uint64_t>(head_count) *
                          ((static_cast<uint64_t>(head_dim) + 1U) / 2U));
     const uint64_t scale_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_FP8_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
-            : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+            : (info->encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                       info->encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
                    ? static_cast<uint64_t>(head_count) *
                          ((static_cast<uint64_t>(head_dim) + 15U) / 16U)
-                   : 0U);
+                   : (info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                              info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                          ? static_cast<uint64_t>(head_count) *
+                                ((static_cast<uint64_t>(head_dim) + 31U) / 32U)
+                          : (info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
+                                 ? static_cast<uint64_t>(head_count) *
+                                       ((static_cast<uint64_t>(head_dim) +
+                                         15U) /
+                                        16U)
+                                 : 0U)));
     const uint64_t outer_scale_bytes_per_token =
         info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase53-runtime-mapping-candidate-v1.schema.json",
+  "title": "sLLM Phase 53 non-authoritative runtime mapping candidate",
+  "type": "object", "additionalProperties": false,
+  "required": ["$schema", "schema_version", "status", "policy_sha256", "safety_default", "promotion_scope", "mappings"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase53-runtime-mapping-candidate-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase53-runtime-mapping-candidate-v1"}, "status": {"const": "candidate-not-runtime-policy"},
+    "policy_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "safety_default": {"const": "fp16"},
+    "promotion_scope": {"const": "first-promotion-qwen35-4b-bf16-dense-text-full-attention-single-gpu"},
+    "mappings": {"type": "array", "maxItems": 3, "items": {"type": "object", "additionalProperties": false, "required": ["target", "encoding", "model_lock_fingerprint"], "properties": {"target": {"enum": ["gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]}, "encoding": {"enum": ["kv-fp8-e4-block16", "kv-fp8-e5-block16"]}, "model_lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"}}}}
+  }
+}

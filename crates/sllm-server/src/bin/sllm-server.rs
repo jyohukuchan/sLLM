@@ -11,19 +11,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const MAX_TLS_PEM_BYTES: usize = 1024 * 1024;
 
 use sllm_core::{
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, QWEN35_MOE_MODEL_FINGERPRINT,
-    QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock, builtin_reviewed_model_lock,
-    read_derived_gguf_lock,
+    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, KvCacheSelectionRequest,
+    QWEN35_MOE_MODEL_FINGERPRINT, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
+    builtin_reviewed_model_lock, read_derived_gguf_lock, resolve_kv_cache_selection,
 };
 use sllm_server::{
     ChatGenerationBackendV1, CheckpointStartupConfigV1, ContextWindowStartupConfigV1,
     CredentialStoreV1, DraftStartupConfigV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
-    ModelLifecycleConfigV1, ModelLifecycleDescriptorV1, ModelLifecycleLoadedV1,
-    ModelLifecycleRegistryV1, ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1,
-    PrefixCacheStartupConfigV1, ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1,
-    QwenAdapterCatalogConfigV1, QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1,
-    SchedulerConfigV1, SchedulerV1, ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1,
-    ServerMetricsV1, build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
+    KvCacheExplicitSourceV1, KvCacheSelectionReportV1, ModelLifecycleConfigV1,
+    ModelLifecycleDescriptorV1, ModelLifecycleLoadedV1, ModelLifecycleRegistryV1,
+    ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
+    ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1,
+    QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1,
+    ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1,
+    build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
     qwen_adapter_catalog_identity_preflight, read_model_manifest_v1,
 };
 
@@ -62,7 +63,7 @@ struct Config {
     completion_timeout: Duration,
     shutdown_timeout: Duration,
     context_length: Option<u32>,
-    kv_cache_encoding: KvCacheEncoding,
+    kv_cache_encoding: Option<KvCacheEncoding>,
     phase41: Phase41ProductionConfigV1,
 }
 
@@ -201,21 +202,10 @@ where
     if context_length == Some(0) {
         return Err("context length must be nonzero".to_owned());
     }
-    let kv_cache_encoding = match values
+    let kv_cache_encoding = values
         .remove("--kv-cache-encoding")
-        .unwrap_or_else(|| "fp16".to_owned())
-        .as_str()
-    {
-        "fp16" => KvCacheEncoding::Fp16,
-        "fp8" => KvCacheEncoding::Fp8E4M3Fn,
-        "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
-        "nvfp4" => KvCacheEncoding::Nvfp4,
-        value => {
-            return Err(format!(
-                "KV cache encoding must be fp16, fp8, fp8-static, or nvfp4: {value}"
-            ));
-        }
-    };
+        .map(|value| parse_kv_cache_encoding(&value))
+        .transpose()?;
 
     let prefix_cache_mode = values
         .remove("--prefix-cache")
@@ -443,28 +433,51 @@ fn run(config: Config) -> Result<(), String> {
                     .map_err(|error| format!("built-in model lock resolution failed: {error}"))?,
             )
         };
-        let backend = if gguf_moe {
-            ActiveBackend::Qwen(Arc::new(
-                QwenChatBackendV1::open(QwenBackendConfigV1 {
-                    gguf_path: config.gguf,
-                    derived_lock_path: config.derived_lock,
-                    device_index: config.device_index,
-                    target: config.target,
-                    completion_timeout: config.completion_timeout,
-                    shutdown_timeout: config.shutdown_timeout,
-                    context_length: config
-                        .context_length
-                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    kv_cache_encoding: config.kv_cache_encoding,
-                    phase41: config.phase41.clone(),
-                    adapter_catalog: None,
-                })
-                .map_err(|error| error.to_string())?,
-            ))
+        let (backend, startup_kv_selection) = if gguf_moe {
+            let (kv_cache_resolved_selection, kv_cache_selection) = resolve_server_kv_selection(
+                config.kv_cache_encoding,
+                &config.target,
+                QWEN35_MOE_MODEL_FINGERPRINT,
+                false,
+                KvCacheExplicitSourceV1::Process,
+            )?;
+            let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+            let backend_config = QwenBackendConfigV1 {
+                gguf_path: config.gguf,
+                derived_lock_path: config.derived_lock,
+                device_index: config.device_index,
+                target: config.target,
+                completion_timeout: config.completion_timeout,
+                shutdown_timeout: config.shutdown_timeout,
+                context_length: config
+                    .context_length
+                    .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                kv_cache_encoding,
+                kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                kv_cache_selection: Some(kv_cache_selection.clone()),
+                phase41: config.phase41.clone(),
+                adapter_catalog: None,
+            };
+            (
+                ActiveBackend::Qwen(Arc::new(
+                    QwenChatBackendV1::open(backend_config)
+                        .map_err(|error| error.to_string())?,
+                )),
+                kv_cache_selection,
+            )
         } else {
             match reviewed.expect("non-MoE GGUF resolved a reviewed lock") {
-                ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
-                    QwenChatBackendV1::open(QwenBackendConfigV1 {
+                ReviewedModelLock::Qwen35(lock) => {
+                    let (kv_cache_resolved_selection, kv_cache_selection) =
+                        resolve_server_kv_selection(
+                        config.kv_cache_encoding,
+                        &config.target,
+                        lock.fingerprint(),
+                        true,
+                        KvCacheExplicitSourceV1::Process,
+                        )?;
+                    let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                    let backend_config = QwenBackendConfigV1 {
                         gguf_path: config.gguf,
                         derived_lock_path: config.derived_lock,
                         device_index: config.device_index,
@@ -474,21 +487,46 @@ fn run(config: Config) -> Result<(), String> {
                         context_length: config
                             .context_length
                             .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                        kv_cache_encoding: config.kv_cache_encoding,
+                        kv_cache_encoding,
+                        kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                        kv_cache_selection: Some(kv_cache_selection.clone()),
                         phase41: config.phase41.clone(),
                         adapter_catalog: None,
-                    })
-                    .map_err(|error| error.to_string())?,
-                )),
+                    };
+                    (
+                        ActiveBackend::Qwen(Arc::new(
+                            QwenChatBackendV1::open(backend_config)
+                                .map_err(|error| error.to_string())?,
+                        )),
+                        kv_cache_selection,
+                    )
+                }
                 ReviewedModelLock::Gemma4(_) => {
-                    if config.kv_cache_encoding != KvCacheEncoding::Fp16 {
+                    if config
+                        .kv_cache_encoding
+                        .is_some_and(|encoding| encoding != KvCacheEncoding::Fp16)
+                    {
                         return Err(
                             "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
                                 .to_owned(),
                         );
                     }
-                    ActiveBackend::Gemma(Arc::new(Gemma4ChatBackendV1::open(
-                        Gemma4BackendConfigV1 {
+                    let kv_cache_selection = KvCacheSelectionReportV1 {
+                        requested: config
+                            .kv_cache_encoding
+                            .map(KvCacheEncoding::canonical_name)
+                            .unwrap_or("auto")
+                            .to_owned(),
+                        resolved: KvCacheEncoding::Fp8E4M3FnStatic
+                            .canonical_name()
+                            .to_owned(),
+                        selection_source: "model-recipe-explicit".to_owned(),
+                        reason: "Gemma uses its fixed reviewed KV recipe".to_owned(),
+                        physical_variant: None,
+                        descriptor_id: None,
+                        policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+                    };
+                    let backend_config = Gemma4BackendConfigV1 {
                         gguf_path: config.gguf,
                         derived_lock_path: config.derived_lock,
                         device_index: config.device_index,
@@ -499,9 +537,14 @@ fn run(config: Config) -> Result<(), String> {
                             .context_length
                             .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
                         phase41: config.phase41.clone(),
-                        },
+                    };
+                    (
+                        ActiveBackend::Gemma(Arc::new(
+                            Gemma4ChatBackendV1::open(backend_config)
+                                .map_err(|error| error.to_string())?,
+                        )),
+                        kv_cache_selection,
                     )
-                    .map_err(|error| error.to_string())?))
                 }
             }
         };
@@ -580,6 +623,7 @@ fn run(config: Config) -> Result<(), String> {
                 "compatibility_profile": if config.openwebui_compatibility { "openwebui" } else { "strict" },
                 "context_length": backend.context_length(),
                 "official_recommended_context_tokens": backend.recommended_context_tokens(),
+                "kv_cache_selection": startup_kv_selection,
                 "tls": tls.is_some(),
                 "authentication": config.api_key_env.is_some() || config.api_key_file.is_some(),
                 "metrics": config.metrics,
@@ -803,6 +847,16 @@ async fn run_dynamic_manifest(
             if adapter_catalog.is_some() {
                 return Err("MoE models do not support adapter catalogs".to_owned());
             }
+            let (requested_kv, explicit_source) =
+                effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
+            let (kv_cache_resolved_selection, kv_cache_selection) = resolve_server_kv_selection(
+                requested_kv,
+                entry.target(),
+                QWEN35_MOE_MODEL_FINGERPRINT,
+                false,
+                explicit_source,
+            )?;
+            let kv_cache_encoding = kv_cache_resolved_selection.resolved();
             ActiveBackend::Qwen(Arc::new(
                 QwenChatBackendV1::open(QwenBackendConfigV1 {
                     gguf_path: entry.gguf().to_owned(),
@@ -813,7 +867,9 @@ async fn run_dynamic_manifest(
                     shutdown_timeout: load_shutdown_timeout,
                     context_length: load_context_length
                         .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    kv_cache_encoding: load_kv,
+                    kv_cache_encoding,
+                    kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                    kv_cache_selection: Some(kv_cache_selection),
                     phase41: load_phase41.clone(),
                     adapter_catalog: None,
                 })
@@ -823,27 +879,52 @@ async fn run_dynamic_manifest(
             match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
                 .map_err(|error| format!("reviewed model lock resolution failed: {error}"))?
             {
-                ReviewedModelLock::Qwen35(_) => ActiveBackend::Qwen(Arc::new(
-                    QwenChatBackendV1::open(QwenBackendConfigV1 {
-                        gguf_path: entry.gguf().to_owned(),
-                        derived_lock_path: entry.derived_lock().to_owned(),
-                        device_index: entry.device_index(),
-                        target: entry.target().to_owned(),
-                        completion_timeout: load_completion_timeout,
-                        shutdown_timeout: load_shutdown_timeout,
-                        context_length: load_context_length
-                            .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                        kv_cache_encoding: load_kv,
-                        phase41: load_phase41.clone(),
-                        adapter_catalog,
-                    })
-                    .map_err(|error| error.to_string())?,
-                )),
-                ReviewedModelLock::Gemma4(_) => {
+                ReviewedModelLock::Qwen35(lock) => {
+                    let (requested_kv, explicit_source) =
+                        effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
+                    let (kv_cache_resolved_selection, kv_cache_selection) =
+                        resolve_server_kv_selection(
+                            requested_kv,
+                            entry.target(),
+                            lock.fingerprint(),
+                            true,
+                            explicit_source,
+                        )?;
+                    let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                    ActiveBackend::Qwen(Arc::new(
+                        QwenChatBackendV1::open(QwenBackendConfigV1 {
+                            gguf_path: entry.gguf().to_owned(),
+                            derived_lock_path: entry.derived_lock().to_owned(),
+                            device_index: entry.device_index(),
+                            target: entry.target().to_owned(),
+                            completion_timeout: load_completion_timeout,
+                            shutdown_timeout: load_shutdown_timeout,
+                            context_length: load_context_length
+                                .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                            kv_cache_encoding,
+                            kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                            kv_cache_selection: Some(kv_cache_selection),
+                            phase41: load_phase41.clone(),
+                            adapter_catalog,
+                        })
+                        .map_err(|error| error.to_string())?,
+                    ))
+                }
+                ReviewedModelLock::Gemma4(lock) => {
                     if adapter_catalog.is_some() {
                         return Err("Gemma models do not support adapter catalogs".to_owned());
                     }
-                    if load_kv != KvCacheEncoding::Fp16 {
+                    let (requested_kv, explicit_source) =
+                        effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
+                    let (kv_cache_resolved_selection, _) = resolve_server_kv_selection(
+                        requested_kv,
+                        entry.target(),
+                        lock.fingerprint(),
+                        false,
+                        explicit_source,
+                    )?;
+                    let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                    if kv_cache_encoding != KvCacheEncoding::Fp16 {
                         return Err(
                             "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
                                 .to_owned(),
@@ -1307,6 +1388,53 @@ fn parse_value<T: std::str::FromStr>(value: &str, name: &str) -> Result<T, Strin
         .map_err(|_| format!("invalid {name}: {value}"))
 }
 
+fn parse_kv_cache_encoding(value: &str) -> Result<KvCacheEncoding, String> {
+    match value {
+        "fp16" => Ok(KvCacheEncoding::Fp16),
+        "fp8" => Ok(KvCacheEncoding::Fp8E4M3Fn),
+        "fp8-static" => Ok(KvCacheEncoding::Fp8E4M3FnStatic),
+        "nvfp4" => Ok(KvCacheEncoding::Nvfp4),
+        "kv-mxfp8-e4" => Ok(KvCacheEncoding::Mxfp8E4),
+        "kv-mxfp8-e5" => Ok(KvCacheEncoding::Mxfp8E5),
+        _ => Err(format!(
+            "KV cache encoding must be fp16, fp8, fp8-static, nvfp4, kv-mxfp8-e4, or kv-mxfp8-e5: {value}"
+        )),
+    }
+}
+
+fn resolve_server_kv_selection(
+    requested: Option<KvCacheEncoding>,
+    exact_target: &str,
+    model_fingerprint: &str,
+    dense_text: bool,
+    explicit_source: KvCacheExplicitSourceV1,
+) -> Result<(sllm_core::KvCacheSelection, KvCacheSelectionReportV1), String> {
+    let selection = resolve_kv_cache_selection(KvCacheSelectionRequest::new(
+        requested,
+        exact_target,
+        model_fingerprint,
+        dense_text,
+        dense_text,
+        true,
+        256,
+    ))
+    .map_err(|error| error.to_string())?;
+    Ok((
+        selection,
+        KvCacheSelectionReportV1::from_core(selection, explicit_source),
+    ))
+}
+
+fn effective_server_kv_request(
+    model_entry: Option<KvCacheEncoding>,
+    process: Option<KvCacheEncoding>,
+) -> (Option<KvCacheEncoding>, KvCacheExplicitSourceV1) {
+    match model_entry {
+        Some(encoding) => (Some(encoding), KvCacheExplicitSourceV1::ModelEntry),
+        None => (process, KvCacheExplicitSourceV1::Process),
+    }
+}
+
 fn reject_disabled_options(
     values: &BTreeMap<String, String>,
     options: &[&str],
@@ -1319,7 +1447,7 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server (--models PATH | --gguf PATH --derived-lock PATH --device-index N --target GFX) [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server (--models PATH | --gguf PATH --derived-lock PATH --device-index N --target GFX) [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (default for reviewed Qwen3.5-4B BF16 dense text: kv-mxfp8-e4; rollback: fp16) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
@@ -1328,11 +1456,13 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        context_length_warning, parse_args_from, read_private_key_file, read_tls_cert_file,
+        context_length_warning, effective_server_kv_request, parse_args_from,
+        read_private_key_file, read_tls_cert_file, resolve_server_kv_selection, usage,
     };
+    use sllm_core::{KvCacheEncoding, QWEN35_4B_FINGERPRINT};
     use sllm_server::{
         CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
-        PrefixCacheStartupConfigV1,
+        KvCacheExplicitSourceV1, PrefixCacheStartupConfigV1,
     };
 
     fn base_args(extra: &[&str]) -> Vec<String> {
@@ -1364,6 +1494,7 @@ mod tests {
     #[test]
     fn phase41_cli_defaults_every_opt_in_disabled() {
         let config = parse_args_from(base_args(&[])).expect("default CLI should parse");
+        assert_eq!(config.kv_cache_encoding, None);
         assert!(matches!(
             config.phase41.prefix_cache,
             PrefixCacheStartupConfigV1::Disabled
@@ -1380,6 +1511,159 @@ mod tests {
             config.phase41.draft,
             DraftStartupConfigV1::Disabled
         ));
+    }
+
+    #[test]
+    fn kv_cli_preserves_auto_retires_block16_and_accepts_mxfp8_names() {
+        let explicit_fp16 = parse_args_from(base_args(&["--kv-cache-encoding", "fp16"]))
+            .expect("explicit fp16 should parse");
+        assert_eq!(explicit_fp16.kv_cache_encoding, Some(KvCacheEncoding::Fp16));
+        for (name, expected) in [
+            ("kv-mxfp8-e4", KvCacheEncoding::Mxfp8E4),
+            ("kv-mxfp8-e5", KvCacheEncoding::Mxfp8E5),
+        ] {
+            let config = parse_args_from(base_args(&["--kv-cache-encoding", name]))
+                .expect("canonical MXFP8 spelling should parse");
+            assert_eq!(config.kv_cache_encoding, Some(expected));
+        }
+        for alias in [
+            "fp8-e4-block16",
+            "kv-fp8-e4m3-block16",
+            "kv-fp8-e5m2-block16",
+            "KV-FP8-E4-BLOCK16",
+            "mxfp8-e4",
+            "kv-mxfp8-e4-block32",
+            "KV-MXFP8-E4",
+        ] {
+            assert!(
+                parse_args_from(base_args(&["--kv-cache-encoding", alias])).is_err(),
+                "derived alias must be rejected: {alias}"
+            );
+        }
+        assert!(usage().contains("kv-mxfp8-e4|kv-mxfp8-e5"));
+        assert!(!usage().contains("kv-fp8-e4-block16|"));
+        assert!(usage().contains("default for reviewed Qwen3.5-4B BF16 dense text: kv-mxfp8-e4"));
+    }
+
+    #[test]
+    fn server_selection_reports_source_and_fails_closed_outside_exact_scope() {
+        let (resolved, auto) = resolve_server_kv_selection(
+            None,
+            "gfx1201",
+            QWEN35_4B_FINGERPRINT,
+            true,
+            KvCacheExplicitSourceV1::Process,
+        )
+        .unwrap();
+        assert_eq!(resolved.resolved(), KvCacheEncoding::Mxfp8E4);
+        assert_eq!(auto.requested, "auto");
+        assert_eq!(auto.selection_source, "mxfp8-e4-default");
+
+        assert!(
+            resolve_server_kv_selection(
+                Some(KvCacheEncoding::Fp8E4M3Block16),
+                "gfx1201",
+                QWEN35_4B_FINGERPRINT,
+                true,
+                KvCacheExplicitSourceV1::ModelEntry,
+            )
+            .is_err()
+        );
+
+        assert!(
+            resolve_server_kv_selection(
+                Some(KvCacheEncoding::Fp8E4M3Block16),
+                "gfx942",
+                QWEN35_4B_FINGERPRINT,
+                true,
+                KvCacheExplicitSourceV1::Process,
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_server_kv_selection(
+                Some(KvCacheEncoding::Fp8E4M3Block16),
+                "gfx1201",
+                QWEN35_4B_FINGERPRINT,
+                false,
+                KvCacheExplicitSourceV1::Process,
+            )
+            .is_err()
+        );
+
+        for (encoding, target, physical_variant) in [
+            (KvCacheEncoding::Mxfp8E4, "gfx1201", "E4M3-OCP"),
+            (KvCacheEncoding::Mxfp8E5, "gfx1030", "E5M2-OCP"),
+        ] {
+            let (resolved, report) = resolve_server_kv_selection(
+                Some(encoding),
+                target,
+                QWEN35_4B_FINGERPRINT,
+                true,
+                KvCacheExplicitSourceV1::Process,
+            )
+            .unwrap();
+            assert_eq!(resolved.resolved(), encoding);
+            assert_eq!(report.selection_source, "process-explicit");
+            assert_eq!(report.physical_variant.as_deref(), Some(physical_variant));
+            let descriptor_id = format!("{}-v1", encoding.canonical_name());
+            assert_eq!(
+                report.descriptor_id.as_deref(),
+                Some(descriptor_id.as_str())
+            );
+        }
+        for target in ["gfx1030", "gfx1201", "gfx942:sramecc+:xnack-"] {
+            let (resolved, report) = resolve_server_kv_selection(
+                Some(KvCacheEncoding::Mxfp8E4),
+                target,
+                QWEN35_4B_FINGERPRINT,
+                true,
+                KvCacheExplicitSourceV1::Process,
+            )
+            .unwrap();
+            assert_eq!(resolved.resolved(), KvCacheEncoding::Mxfp8E4);
+            assert_eq!(report.physical_variant.as_deref(), Some("E4M3-OCP"));
+        }
+        for (encoding, target, fingerprint, dense) in [
+            (
+                KvCacheEncoding::Mxfp8E5,
+                "gfx1201",
+                QWEN35_4B_FINGERPRINT,
+                true,
+            ),
+            (KvCacheEncoding::Mxfp8E4, "gfx1201", "wrong-model", true),
+            (
+                KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                QWEN35_4B_FINGERPRINT,
+                false,
+            ),
+        ] {
+            assert!(
+                resolve_server_kv_selection(
+                    Some(encoding),
+                    target,
+                    fingerprint,
+                    dense,
+                    KvCacheExplicitSourceV1::Process,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn model_entry_kv_encoding_precedes_process_selection() {
+        let (requested, source) = effective_server_kv_request(
+            Some(KvCacheEncoding::Mxfp8E4),
+            Some(KvCacheEncoding::Fp16),
+        );
+        assert_eq!(requested, Some(KvCacheEncoding::Mxfp8E4));
+        assert_eq!(source, KvCacheExplicitSourceV1::ModelEntry);
+
+        let (requested, source) = effective_server_kv_request(None, Some(KvCacheEncoding::Mxfp8E5));
+        assert_eq!(requested, Some(KvCacheEncoding::Mxfp8E5));
+        assert_eq!(source, KvCacheExplicitSourceV1::Process);
     }
 
     #[test]

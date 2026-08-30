@@ -55,6 +55,62 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-08-30-MXFP8-E4-DEFAULT: block16廃止とstandard OCP MXFP8 E4既定化（N2）
+
+- scope: reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256、exact `gfx1030`、`gfx1201`、
+  `gfx942:sramecc+:xnack-`。対象外model/laneのfixed recipeは変更しない。
+- change: `kv-fp8-e4-block16`／`kv-fp8-e5-block16`を全production admission境界で拒否し、省略時を
+  `kv-mxfp8-e4-v1`（OCP E4M3FN、block 32、E8M0）へ変更する。gfx942でもFNUZへ再解釈しない。
+- classification: KV resident量子化とattention decode値がFP16から変わるためN2。明示`fp16`をrollbackとして残す。
+- direct GPU: ROCm 7.14.0のV620 exact `gfx1030`とR9700 exact `gfx1201`で、head dim
+  `31/32/33/255/256/257`のvalue／scale byte oracle、append 6、head dim 256のpacked direct attention 1をPASSした。
+  いずれもHIP-only、fallback 0、cleanup 0である。gfx942実機は未実施であり、他tupleへ一般化しない。
+- full-model draft quality: 同じQwen3.5-4B lockと10 case／20 logit rowの一回測定で、KLD p99は両targetとも
+  `0.004945428206833837`、KV request-state peakは`68,354,048`から`60,195,840` byte（11.935%減）だった。
+  top-1一致はgfx1030 `1.0`、gfx1201 `0.85`で、gfx1201はfreeze済み`>=0.99`を満たさない。これは実行correctnessと
+  memory効果のdraft evidenceであり、品質gate PASSへ読み替えない。report SHA-256はgfx1030
+  `d342b7755857848741d67d3ae37a580dcc6bb6442fabfbe49321fa03f013b9c2`、gfx1201
+  `1280e6e0172bc25be1c69a370d6f449e8455c3d4d6108aaaa91f96d8b6e471c0`である。candidateは明示形式ではなく
+  省略時resolverからtarget-aware graphへlowerした。
+- decision: gfx1201品質未達を隠さずN2として保持した上で、2026-08-30のユーザー明示決定を採用根拠としてdefault変更を維持する。
+  release品質昇格は主張せず、明示`fp16`をrollbackとする。
+- history: Phase 53/54のblock16 correctness／quality／early-stop evidenceは削除せず、今回の採用根拠には使わない。
+
+### OUT-2026-08-27-P53: KV FP8 block16 target別default判定（N2・旧recipe非採用、follow-up active）
+
+- scope: reviewed Qwen3.5-4B BF16 dense text/full attention/single GPU、exact `gfx1201`の
+  `kv-fp8-e4-block16`とexact `gfx1030`の`kv-fp8-e5-block16`。標準OCP `kv-mxfp8-e4`／
+  `kv-mxfp8-e5`はreference-onlyのexplicit比較である。
+- baseline/candidate: baselineはFP16 KV。block16はtoken内head-dimension方向16値ごと、標準MXFP8は32値ごとに
+  独立E8M0 scaleを持つ。append/outputはBF16、attention accumulatorはFP32を維持するが、KV量子化recipeを
+  変更するため**N2**とする。
+- superseded recipe: 以下のcorrectness、quality、metrics、summary、digestは、有限値を飽和させない最小scaleを使った
+  `kv-fp8-e4-block16-v1`／`kv-fp8-e5-block16-v1`へ結合する。このevidenceは監査履歴として保持するが、
+  descriptor v2のcorrectness、品質、default採否を決めない。
+- correctness: gfx1201／gfx1030でblock16とMXFP8のpadded value／scale byte oracle、append 6、direct attention 1、
+  HIP-only、fallback 0、cleanup 0をPASSした。gfx942はfresh Phase 53 reportがなく、standard OCP MXFP8はFNUZ非互換のためunsupportedである。
+- quality: FP16→block16→MXFP8をresident完全解放付きで3 repeatした。gfx1201 block16はKLD p99
+  `0.0038687249522990803`、top-1 `0.85`、long-context loss `0.08333333333333337`、gfx1030 block16はKLD p99
+  `0.04331390780013198`、top-1 `0.8`、long-context loss `0.16666666666666663`だった。全repeatは同値で、
+  reference-only MXFP8 KLD p99はgfx1201 `0.004945428206833837`、gfx1030 `0.03218873133110086`だった。
+- E5 analysis: gfx1030の逆転はscale recipeが第一候補である。E5M2 block16は最大有限値`1.75 * 2^15`を飽和させないため、
+  block amaxの仮数が`1.75`を超えるとscaleを標準MXFP8より一段大きくする。標準MXFP8は最大側をSATし得る代わりに残りへ
+  2倍細かい刻みを保つ。仮数2 bitではこの差がblock16の局所性を上回ったと推定するが、scale/SAT/layer別countは未取得である。
+- decision: freeze済みpolicyのtop-1 `>=0.99`とlong-context loss `<=0.02`を両targetが満たさず、gfx1201／gfx1030は
+  旧recipeについて`retain-fp16`。gfx942は`insufficient-evidence`のまま将来のMI300X一括検証へ延期した。明確な品質FAIL後の
+  early-stopにより旧recipeの7行performance/resourceを実行しない。
+- follow-up: ユーザー決定によりblock16はblock size 16を維持し、descriptorを`kv-fp8-e4-block16-v2`／
+  `kv-fp8-e5-block16-v2`、scale recipeを`StandardMxFloorPowerV1`へ変更する。有限amaxの最大2冪をE4では256、
+  E5では32768で割ってE8M0範囲へ収め、RNE＋SATする。fresh correctnessはgfx1201／gfx1030でPASSしたが、block16 KLD p99は
+  それぞれ`0.006562189165612111`／`0.03659844555378746`、top-1とlong-contextがthreshold未達で両方`retain-fp16`とした。
+  default mappingは空、MI300Xは引き続きdeferredである。
+- rollback: mapping候補は空で省略時FP16を変更していない。explicit新形式とstate identityは残し、unsupported scopeをsilent fallbackしない。
+- evidence: v2 summary `external:phase53/phase53-kv-default-summary-standardmx-v2.json` SHA-256
+  `c259e81bc76fb341e9dbba8cdcc0c132456a0762585b471556267cdc59165e10`、空mapping候補
+  `external:phase53/phase53-runtime-mapping-standardmx-v2.json` SHA-256
+  `283911d387c67d7ba25546ce702fd89ee6a25db482d9e62bf0b61854d5613e77`。個別report digestは
+  [Phase 53履歴](../history/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正とする。
+
 ### OUT-2026-08-25-P51-GDN-W64: gfx942 wave64 column-state候補（N1・明示opt-in）
 
 - scope: logical target `gfx942`でruntime実体が厳密に`gfx942:sramecc+:xnack-`、Q/K heads 16、value heads 32、

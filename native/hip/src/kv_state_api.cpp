@@ -213,6 +213,14 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
                      info->dtype == SLLM_TENSOR_DTYPE_U8 &&
                      info->block_size == 16U &&
                      info->scale_dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  const bool mxfp8_e4 = info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+                        info->dtype == SLLM_TENSOR_DTYPE_F8_E4M3_FN &&
+                        info->block_size == 32U &&
+                        info->scale_dtype == SLLM_TENSOR_DTYPE_U8;
+  const bool mxfp8_e5 = info->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1 &&
+                        info->dtype == SLLM_TENSOR_DTYPE_F8_E5M2 &&
+                        info->block_size == 32U &&
+                        info->scale_dtype == SLLM_TENSOR_DTYPE_U8;
   const bool version_matches =
       (info->create_info_version == SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION &&
        !fp8_static && all_zero(info->reserved, 4U)) ||
@@ -229,7 +237,7 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
       info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR ||
-      (!fp16 && !fp8 && !fp8_static && !nvfp4)) {
+      (!fp16 && !fp8 && !fp8_static && !nvfp4 && !mxfp8_e4 && !mxfp8_e5)) {
     return sllm_public_runtime::write_error(
         sink,
         info->reserved0 != 0U ? SLLM_STATUS_RESERVED_NONZERO

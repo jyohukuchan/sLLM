@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase46-kv-quality-dataset-v1.schema.json",
+  "title": "sLLM Phase 46 KV quality baseline dataset v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "dataset_id", "license", "provenance", "seed", "token_generator", "sample_order", "cases", "coverage"],
+  "properties": {
+    "schema_version": {"const": "sllm-phase46-kv-quality-dataset-v1"},
+    "dataset_id": {"const": "phase46-kv-quality-baseline-v1"},
+    "license": {"const": "CC0-1.0"},
+    "provenance": {"type": "string", "minLength": 1},
+    "seed": {"const": 1729},
+    "token_generator": {"const": "token[i] = 1 + ((start + i * step + seed) mod 200000)"},
+    "sample_order": {"const": "listed"},
+    "cases": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "length", "start", "step", "expected_next", "band", "block_tail"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^b[0-9]{3}$"},
+          "length": {"enum": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513]},
+          "start": {"type": "integer", "minimum": 0},
+          "step": {"type": "integer", "minimum": 1},
+          "expected_next": {"type": "integer", "minimum": 1, "maximum": 200000},
+          "band": {"enum": ["early", "middle", "tail"]},
+          "block_tail": {"type": "boolean"}
+        }
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kv_planes", "layers", "kv_heads", "position_bands", "boundaries"],
+      "properties": {
+        "kv_planes": {"const": ["K", "V"]},
+        "layers": {"const": [0, 13, 27]},
+        "kv_heads": {"const": [0, 1, 3]},
+        "position_bands": {"const": ["early", "middle", "tail"]},
+        "boundaries": {"const": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513]}
+      }
+    }
+  }
+}

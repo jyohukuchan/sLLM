@@ -78,10 +78,37 @@ class HostContractTests(unittest.TestCase):
         ]
         self.assertEqual(
             cargo_commands,
-            [("h1-host-contract", "cargo-test-workspace", [
-                "cargo", f"+{DEV_RUST_VERSION}", "test", "--workspace", "--jobs", "4",
-                "--locked", "--offline", "--", "--test-threads=4",
-            ])],
+            [
+                (
+                    "h0-phase46-tools-contract",
+                    "phase46-tools-rust",
+                    [
+                        "cargo",
+                        f"+{DEV_RUST_VERSION}",
+                        "test",
+                        "-p",
+                        "sllm-tools",
+                        "--locked",
+                        "--offline",
+                    ],
+                ),
+                (
+                    "h1-host-contract",
+                    "cargo-test-workspace",
+                    [
+                        "cargo",
+                        f"+{DEV_RUST_VERSION}",
+                        "test",
+                        "--workspace",
+                        "--jobs",
+                        "4",
+                        "--locked",
+                        "--offline",
+                        "--",
+                        "--test-threads=4",
+                    ],
+                ),
+            ],
         )
         self.assertNotIn(f"+{MSRV_RUST_VERSION}", json.dumps(suites, sort_keys=True))
         self.assertEqual(

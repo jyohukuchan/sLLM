@@ -1,0 +1,475 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase54-kv-fp8-block16-research-evidence-v1.schema.json",
+  "title": "sLLM Phase 54 direct KV FP8 block16 research evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "schema_version", "state", "target", "device_index", "encoding",
+    "physical_variant", "descriptor_compatibility", "candidate_spec",
+    "candidate_spec_sha256", "binary_sha256", "host", "cases", "execution",
+    "cleanup", "error"
+  ],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase54-kv-fp8-block16-research-evidence-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase54-kv-fp8-block16-research-evidence-v1"},
+    "state": {"enum": ["PASS", "FAIL", "UNAVAILABLE"]},
+    "target": {"enum": ["gfx1030", "gfx1201"]},
+    "device_index": {"type": "integer", "minimum": 0},
+    "encoding": {"enum": ["kv-fp8-e5-block16", "kv-fp8-e4-block16"]},
+    "physical_variant": {"enum": ["E5M2-software", "E4M3-OCP"]},
+    "production_descriptor_id": {"enum": ["kv-fp8-e5-block16-v2", "kv-fp8-e4-block16-v2"]},
+    "descriptor_compatibility": {
+      "enum": ["exact-production-v2", "research-build-semantic-override-not-v2-compatible"]
+    },
+    "candidate_spec": {"$ref": "#/$defs/candidate_spec"},
+    "candidate_spec_sha256": {"$ref": "#/$defs/digest"},
+    "binary_sha256": {"$ref": "#/$defs/digest"},
+    "host": {"$ref": "#/$defs/host"},
+    "cases": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/case"}
+    },
+    "transform_evidence": {"$ref": "#/$defs/transform_evidence"},
+    "execution": {"$ref": "#/$defs/execution"},
+    "cleanup": {"$ref": "#/$defs/cleanup"},
+    "error": {"type": ["string", "null"], "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"target": {"const": "gfx1030"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e5-block16"},
+        "physical_variant": {"const": "E5M2-software"},
+        "production_descriptor_id": {"const": "kv-fp8-e5-block16-v2"}
+      }}
+    },
+    {
+      "if": {"properties": {"target": {"const": "gfx1201"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e4-block16"},
+        "physical_variant": {"const": "E4M3-OCP"},
+        "production_descriptor_id": {"const": "kv-fp8-e4-block16-v2"}
+      }}
+    },
+    {"$ref": "#/$defs/report_recipe_pairing"},
+    {"$ref": "#/$defs/host_recipe_pairing"},
+    {
+      "if": {"properties": {"candidate_spec": {"properties": {"transform": {"const": "transpose16x16-all-full"}}}}},
+      "then": {
+        "required": ["transform_evidence"],
+        "properties": {
+          "transform_evidence": {"$ref": "#/$defs/kq_transform_evidence"},
+          "cases": {"prefixItems": [
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": true}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}}
+          ]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"candidate_spec": {"properties": {"transform": {"const": "transpose16x16-v-layer19-output-inverse"}}}}},
+      "then": {
+        "required": ["transform_evidence"],
+        "properties": {
+          "transform_evidence": {"$ref": "#/$defs/vo_transform_evidence"},
+          "cases": {"prefixItems": [
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": true}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}}
+          ]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"candidate_spec": {"properties": {"transform": {"const": "transpose16x16-v-layers19-31-output-inverse"}}}}},
+      "then": {
+        "required": ["transform_evidence"],
+        "properties": {
+          "transform_evidence": {"$ref": "#/$defs/vo_layers19_31_transform_evidence"},
+          "cases": {"prefixItems": [
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": true}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}},
+            {"required": ["transform_applied"], "properties": {"transform_applied": {"const": false}}}
+          ]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"candidate_spec": {"properties": {"transform": {"const": "none"}}}}},
+      "then": {
+        "not": {"required": ["transform_evidence"]},
+        "properties": {"cases": {"items": {"properties": {"transform_applied": {"const": false}}}}}
+      }
+    },
+    {
+      "if": {"properties": {"state": {"const": "PASS"}, "candidate_spec": {"properties": {"transform": {"const": "transpose16x16-all-full"}}}}},
+      "then": {"properties": {"transform_evidence": {"$ref": "#/$defs/kq_transform_evidence_pass"}}}
+    },
+    {
+      "if": {"properties": {"state": {"const": "PASS"}, "candidate_spec": {"properties": {"transform": {"const": "transpose16x16-v-layer19-output-inverse"}}}}},
+      "then": {"properties": {"transform_evidence": {"$ref": "#/$defs/vo_transform_evidence_pass"}}}
+    },
+    {
+      "if": {"properties": {"state": {"const": "PASS"}, "candidate_spec": {"properties": {"transform": {"const": "transpose16x16-v-layers19-31-output-inverse"}}}}},
+      "then": {"properties": {"transform_evidence": {"$ref": "#/$defs/vo_layers19_31_transform_evidence_pass"}}}
+    },
+    {
+      "if": {"properties": {"state": {"const": "PASS"}}},
+      "then": {
+        "properties": {
+          "host": {"properties": {
+            "pass": {"const": true},
+            "head_dimensions": {"const": [15, 16, 17, 255, 256, 257]},
+            "signed_zero_only": {"const": true},
+            "tail_padding_zero": {"const": true},
+            "finite": {"const": true}
+          }},
+          "cases": {
+            "minItems": 8,
+            "maxItems": 8,
+            "prefixItems": [
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "append-head-dim-15"}, "head_dim": {"const": 15},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "append-head-dim-16"}, "head_dim": {"const": 16},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "append-head-dim-17"}, "head_dim": {"const": 17},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "append-head-dim-255"}, "head_dim": {"const": 255},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "attention-kv2"}, "head_dim": {"const": 256},
+                "token_count": {"const": 2}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": true}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": true}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "append-head-dim-257"}, "head_dim": {"const": 257},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "signed-zero-only"}, "head_dim": {"const": 16},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": true},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]},
+              {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {
+                "id": {"const": "recipe-distinguishing"}, "head_dim": {"enum": [16, 32]},
+                "token_count": {"const": 1}, "signed_zero_only": {"const": false},
+                "recipe_distinguishing": {"const": true},
+                "key_values_exact": {"const": true}, "value_values_exact": {"const": true},
+                "key_scales_exact": {"const": true}, "value_scales_exact": {"const": true},
+                "tail_padding_zero": {"const": true}, "append_direct": {"const": true},
+                "attention_direct": {"const": false}, "attention_numerical_match": {"const": true},
+                "attention_key_contributes": {"const": false}, "finite": {"const": true}
+              }}]}
+            ],
+            "items": {"$ref": "#/$defs/case"}
+          },
+          "execution": {"properties": {
+            "selected_backend": {"const": "hip"}, "gpu_execution": {"const": true},
+            "fallback_allowed": {"const": false}, "fallback_used": {"const": false},
+            "append_dispatches": {"const": 8}, "attention_dispatches": {"const": 1},
+            "sequential_residents": {"const": true}
+          }},
+          "cleanup": {"properties": {
+            "retryable": {"const": 0}, "durable": {"const": 0}, "terminal_zero": {"const": true}
+          }},
+          "error": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "recipe": {"enum": ["floor", "ceil", "nearest-even", "parent32-duplicate"]},
+    "candidate_spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "candidate_id", "scale_selector", "rounding", "k_recipe",
+        "v_recipe", "transform", "calibration_digest", "descriptor_compatibility"
+      ],
+      "properties": {
+        "schema_version": {"const": "sllm-phase54-kv-candidate-spec-v1"},
+        "candidate_id": {"type": "string"},
+        "scale_selector": {"const": "independent-k-v-closed-enum-v1"},
+        "rounding": {"const": "nearest-even"},
+        "k_recipe": {"$ref": "#/$defs/recipe"},
+        "v_recipe": {"$ref": "#/$defs/recipe"},
+        "transform": {"enum": ["none", "transpose16x16-all-full", "transpose16x16-v-layer19-output-inverse", "transpose16x16-v-layers19-31-output-inverse"]},
+        "calibration_digest": {"type": "null"},
+        "descriptor_compatibility": {
+          "enum": ["exact-production-v2", "research-build-semantic-override-not-v2-compatible"]
+        }
+      },
+      "allOf": [{"$ref": "#/$defs/candidate_pairing"}]
+    },
+    "candidate_pairing": {
+      "oneOf": [
+        {"properties": {"candidate_id": {"const": "production-control-v2"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "exact-production-v2"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-floor-v-ceil-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "ceil"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-floor-v-nearest-even-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "nearest-even"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-floor-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "floor"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-ceil-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "ceil"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-nearest-even-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "nearest-even"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-floor-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "floor"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-ceil-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "ceil"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-nearest-even-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "nearest-even"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-k-parent32-duplicate-v-parent32-duplicate-v1"}, "k_recipe": {"const": "parent32-duplicate"}, "v_recipe": {"const": "parent32-duplicate"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-kq-transpose16x16-all-full-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-all-full"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layer19-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-v-layer19-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}},
+        {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layers19-31-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-v-layers19-31-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}
+      ]
+    },
+    "report_recipe_pairing": {
+      "oneOf": [
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "production-control-v2"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "descriptor_compatibility": {"const": "exact-production-v2"}}}, "descriptor_compatibility": {"const": "exact-production-v2"}, "host": {"properties": {"recipes": {"const": ["floor", "floor"]}}}}, "required": ["production_descriptor_id"]},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-floor-v-ceil-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "ceil"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-floor-v-nearest-even-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "nearest-even"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-floor-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "floor"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-ceil-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "ceil"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-ceil-v-nearest-even-v1"}, "k_recipe": {"const": "ceil"}, "v_recipe": {"const": "nearest-even"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-floor-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "floor"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-ceil-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "ceil"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-nearest-even-v-nearest-even-v1"}, "k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "nearest-even"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-k-parent32-duplicate-v-parent32-duplicate-v1"}, "k_recipe": {"const": "parent32-duplicate"}, "v_recipe": {"const": "parent32-duplicate"}, "transform": {"const": "none"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-kq-transpose16x16-all-full-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-all-full"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}, "host": {"properties": {"recipes": {"const": ["floor", "floor"]}}}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layer19-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-v-layer19-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}, "host": {"properties": {"recipes": {"const": ["floor", "floor"]}}}}, "not": {"required": ["production_descriptor_id"]}},
+        {"properties": {"candidate_spec": {"properties": {"candidate_id": {"const": "phase54-vo-transpose16x16-layers19-31-v1"}, "k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}, "transform": {"const": "transpose16x16-v-layers19-31-output-inverse"}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}}}, "descriptor_compatibility": {"const": "research-build-semantic-override-not-v2-compatible"}, "host": {"properties": {"recipes": {"const": ["floor", "floor"]}}}}, "not": {"required": ["production_descriptor_id"]}}
+      ]
+    },
+    "host_recipe_pairing": {
+      "oneOf": [
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "floor"}}}, "host": {"properties": {"recipes": {"const": ["floor", "floor"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "ceil"}}}, "host": {"properties": {"recipes": {"const": ["floor", "ceil"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "floor"}, "v_recipe": {"const": "nearest-even"}}}, "host": {"properties": {"recipes": {"const": ["floor", "nearest-even"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "floor"}}}, "host": {"properties": {"recipes": {"const": ["ceil", "floor"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "ceil"}}}, "host": {"properties": {"recipes": {"const": ["ceil", "ceil"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "ceil"}, "v_recipe": {"const": "nearest-even"}}}, "host": {"properties": {"recipes": {"const": ["ceil", "nearest-even"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "floor"}}}, "host": {"properties": {"recipes": {"const": ["nearest-even", "floor"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "ceil"}}}, "host": {"properties": {"recipes": {"const": ["nearest-even", "ceil"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "nearest-even"}, "v_recipe": {"const": "nearest-even"}}}, "host": {"properties": {"recipes": {"const": ["nearest-even", "nearest-even"]}}}}},
+        {"properties": {"candidate_spec": {"properties": {"k_recipe": {"const": "parent32-duplicate"}, "v_recipe": {"const": "parent32-duplicate"}}}, "host": {"properties": {"recipes": {"const": ["parent32-duplicate", "parent32-duplicate"]}}}}}
+      ]
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pass", "head_dimensions", "recipes", "signed_zero_only", "recipe_distinguishing", "tail_padding_zero", "finite"],
+      "properties": {
+        "pass": {"type": "boolean"},
+        "head_dimensions": {"const": [15, 16, 17, 255, 256, 257]},
+        "recipes": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/recipe"}},
+        "signed_zero_only": {"type": "boolean"},
+        "recipe_distinguishing": {"type": "boolean"},
+        "tail_padding_zero": {"type": "boolean"},
+        "finite": {"type": "boolean"}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "head_dim", "token_count", "signed_zero_only", "recipe_distinguishing",
+        "key_values_exact", "value_values_exact", "key_scales_exact", "value_scales_exact",
+        "tail_padding_zero", "append_direct", "attention_direct", "attention_numerical_match",
+        "attention_key_contributes", "finite"
+      ],
+      "properties": {
+        "id": {"enum": ["append-head-dim-15", "append-head-dim-16", "append-head-dim-17", "append-head-dim-255", "attention-kv2", "append-head-dim-257", "signed-zero-only", "recipe-distinguishing"]},
+        "head_dim": {"enum": [15, 16, 17, 32, 255, 256, 257]},
+        "token_count": {"type": "integer", "minimum": 1},
+        "transform_applied": {"type": "boolean"},
+        "signed_zero_only": {"type": "boolean"},
+        "recipe_distinguishing": {"type": "boolean"},
+        "key_values_exact": {"type": "boolean"},
+        "value_values_exact": {"type": "boolean"},
+        "key_scales_exact": {"type": "boolean"},
+        "value_scales_exact": {"type": "boolean"},
+        "tail_padding_zero": {"type": "boolean"},
+        "append_direct": {"type": "boolean"},
+        "attention_direct": {"type": "boolean"},
+        "attention_numerical_match": {"type": "boolean"},
+        "attention_key_contributes": {"type": "boolean"},
+        "finite": {"type": "boolean"}
+      }
+    },
+    "transform_evidence": {
+      "oneOf": [
+        {"$ref": "#/$defs/kq_transform_evidence"},
+        {"$ref": "#/$defs/vo_transform_evidence"},
+        {"$ref": "#/$defs/vo_layers19_31_transform_evidence"}
+      ]
+    },
+    "kq_transform_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "semantics", "digest", "key_rows_transformed", "query_rows_transformed", "value_untransformed", "qk_invariant", "qk_max_abs_delta"],
+      "properties": {
+        "identity": {"const": "transpose16x16-all-full"},
+        "semantics": {"const": "kq-fixed-permutation/transpose16x16-v1"},
+        "digest": {"const": "sha256:806cc66a1135d36fe594c96c78b1329efb955f94a30e9664c20e3d0e41c0cef6"},
+        "key_rows_transformed": {"type": "boolean"},
+        "query_rows_transformed": {"type": "boolean"},
+        "value_untransformed": {"type": "boolean"},
+        "qk_invariant": {"type": "boolean"},
+        "qk_max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1e-12}
+      }
+    },
+    "kq_transform_evidence_pass": {
+      "allOf": [
+        {"$ref": "#/$defs/kq_transform_evidence"},
+        {"properties": {
+          "key_rows_transformed": {"const": true},
+          "query_rows_transformed": {"const": true},
+          "value_untransformed": {"const": true},
+          "qk_invariant": {"const": true}
+        }}
+      ]
+    },
+    "vo_transform_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "semantics", "digest", "key_rows_transformed", "query_rows_transformed", "value_untransformed", "qk_invariant", "qk_max_abs_delta", "value_rows_transformed", "output_rows_inverse_transformed", "vo_invariant", "vo_max_abs_delta", "semantic_layer"],
+      "properties": {
+        "identity": {"const": "transpose16x16-v-layer19-output-inverse"},
+        "semantics": {"const": "vo-fixed-permutation/transpose16x16-layer19-v1"},
+        "digest": {"const": "sha256:7da862b274ac32124e4a7b2550ed947fe865140ddaa2fd940a89ebfa9d8c4ad4"},
+        "key_rows_transformed": {"const": false},
+        "query_rows_transformed": {"const": false},
+        "value_untransformed": {"const": false},
+        "qk_invariant": {"type": "boolean"},
+        "qk_max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1e-12},
+        "value_rows_transformed": {"type": "boolean"},
+        "output_rows_inverse_transformed": {"type": "boolean"},
+        "vo_invariant": {"type": "boolean"},
+        "vo_max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1e-12},
+        "semantic_layer": {"const": 19}
+      }
+    },
+    "vo_transform_evidence_pass": {
+      "allOf": [
+        {"$ref": "#/$defs/vo_transform_evidence"},
+        {"properties": {
+          "qk_invariant": {"const": true},
+          "value_rows_transformed": {"const": true},
+          "output_rows_inverse_transformed": {"const": true},
+          "vo_invariant": {"const": true}
+        }}
+      ]
+    },
+    "vo_layers19_31_transform_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "semantics", "digest", "key_rows_transformed", "query_rows_transformed", "value_untransformed", "qk_invariant", "qk_max_abs_delta", "value_rows_transformed", "output_rows_inverse_transformed", "vo_invariant", "vo_max_abs_delta", "semantic_layers"],
+      "properties": {
+        "identity": {"const": "transpose16x16-v-layers19-31-output-inverse"},
+        "semantics": {"const": "vo-fixed-permutation/transpose16x16-layers19-31-v1"},
+        "digest": {"const": "sha256:5439e11e91b4c2acfd060fb1ec4d8f5fee2f1244e28c3e6588f2202fbe8e9a74"},
+        "key_rows_transformed": {"const": false},
+        "query_rows_transformed": {"const": false},
+        "value_untransformed": {"const": false},
+        "qk_invariant": {"type": "boolean"},
+        "qk_max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1e-12},
+        "value_rows_transformed": {"type": "boolean"},
+        "output_rows_inverse_transformed": {"type": "boolean"},
+        "vo_invariant": {"type": "boolean"},
+        "vo_max_abs_delta": {"type": "number", "minimum": 0, "maximum": 1e-12},
+        "semantic_layers": {"const": [19, 31]}
+      }
+    },
+    "vo_layers19_31_transform_evidence_pass": {
+      "allOf": [
+        {"$ref": "#/$defs/vo_layers19_31_transform_evidence"},
+        {"properties": {
+          "qk_invariant": {"const": true},
+          "value_rows_transformed": {"const": true},
+          "output_rows_inverse_transformed": {"const": true},
+          "vo_invariant": {"const": true}
+        }}
+      ]
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selected_backend", "gpu_execution", "fallback_allowed", "fallback_used", "append_dispatches", "attention_dispatches", "sequential_residents"],
+      "properties": {
+        "selected_backend": {"const": "hip"},
+        "gpu_execution": {"type": "boolean"},
+        "fallback_allowed": {"const": false},
+        "fallback_used": {"const": false},
+        "append_dispatches": {"type": "integer", "minimum": 0},
+        "attention_dispatches": {"type": "integer", "minimum": 0},
+        "sequential_residents": {"const": true}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retryable", "durable", "terminal_zero"],
+      "properties": {
+        "retryable": {"type": "integer", "minimum": 0},
+        "durable": {"type": "integer", "minimum": 0},
+        "terminal_zero": {"type": "boolean"}
+      }
+    }
+  }
+}

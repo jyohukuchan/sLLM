@@ -108,8 +108,20 @@
 - NVFP4。
 - [MXFP4。]
 - FP8。
-- [MXFP8。]
+- MXFP8。
 - FP16。
+- Phase 53/54で評価した`kv-fp8-e4-block16`／`kv-fp8-e5-block16`は、2026-08-30のユーザー決定で廃止した。
+  public parser、target selector、Qwen graph構築、Rust→HIP state生成、native state-create ABIでfail-closedに拒否する。
+  既存のABI番号と履歴evidenceは予約値・監査履歴として残すが、production経路として再利用しない。
+- reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256では、KV指定省略時を
+  standard OCP `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）へ変更する。対象はexact `gfx1030`、
+  `gfx1201`、`gfx942:sramecc+:xnack-`で、`gfx942`でもFNUZへ再解釈せずOCP E4M3 byteをsoftware encode/decodeする。
+  明示`fp16`をrollbackとして残し、対象外model/laneは既存のfixed FP16 recipeを維持する。
+  V620 `gfx1030`／R9700 `gfx1201`のdirect GPU byte・packed attention oracleはHIP-only、fallback 0、cleanup 0でPASSした。
+  Qwen3.5-4B 10 case／20 rowの一回測定はKLD p99が両target`0.004945428206833837`、top-1一致がgfx1030 `1.0`、
+  gfx1201 `0.85`で、gfx1201は旧品質閾値`>=0.99`に未達である。これは隠さずN2台帳へ記録し、default変更は
+  品質自動昇格ではなくユーザー明示決定として扱う。gfx942実機は未実施である。
+- `kv-mxfp8-e5`はexact `gfx1030`の明示比較形式として残し、既定にはしない。
 
 ### モデルの数値形式
 
@@ -374,13 +386,15 @@
 | 完了 | 43 | Responses、Anthropic Messages、function/tool protocolを実装。tool実行は分離 |
 | 完了 | 44 | 汎用template、reasoning制御、対話CLI、reverse promptを実装 |
 | 完了（ホスト＋RDNA GPU、MI300X保留） | 45 | LoRA/control vector、複数モデル台帳、動的load/unload/cacheを実装 |
-| 計画済み | 46 | 変換、量子化、imatrix、分割・結合、ベンチマーク、品質・デバッグ用ツール |
+| 完了 | 46 | 変換、量子化、imatrix、分割・結合、ベンチマーク、品質・デバッグ用ツールとKV default品質policy |
 | 要承認 | 47 | 組込みtool/MCP実行。別worker/sandboxと信頼境界の承認前は開始しない |
 | 計画済み | 48 | 公開APIだけを使う最小WebUI・管理画面 |
 | 完了・限定採用 | 49 | V620 `gfx1030`でGQA P32を限定採用し、long-prefill v2とHIP Graphを棄却。通常5行の退行確認まで完了 |
 | 完了・限定採用 | 50 | R9700 `gfx1201`でPhase 49変更を採否し、MI300X `gfx942`向けwave64引継ぎを準備 |
 | 完了・target分離 | 51 | MI300X `gfx942`の7行とprofileをPASSし、GDN wave64候補を既定無効でtarget分離 |
 | 完了 | 52 | R9700 `gfx1201`の長capacityをresident KVへ限定routeし、`10,001/2`と`100,000/2`の自動経路を再検証 |
+| 完了・target分離 | 53 | block16 descriptor v2／`StandardMxFloorPowerV1`を実装・再検証。gfx1201／gfx1030は品質未達で`retain-fp16`、gfx942実機は延期 |
+| 完了・経路廃止 | 54 | exact gfx1030でblock16候補を評価したがMXFP8を上回らず、2026-08-30決定でblock16経路を廃止 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -389,7 +403,13 @@ GQA P32を限定採用、long-prefill v2とHIP Graphを棄却し、採用経路�
 フェーズ50はR9700 `gfx1201`の限定採用とMI300X `gfx942` wave64引継ぎ準備を終え、実機性能検証をフェーズ51へ引き継ぐ。
 ユーザー指示によりフェーズ51を一時保留してフェーズ52を先に完了した後、2026-08-25のユーザー指示でフェーズ51を再開し完了した。
 R9700の同等達成はMI300X再開の必須条件にしない。
-フェーズ46〜48は予約済みの機能経路として保持するが、ユーザーが優先順位を変更しない限り性能経路の後に扱う。
+フェーズ46も完了した。フェーズ53のdescriptor v1／旧scale recipeはgfx1201／gfx1030でtarget別判定まで行ったが、
+2026-08-27のユーザー決定でblock16をdescriptor v2／`StandardMxFloorPowerV1`へ変更したため、旧correctness／品質は
+superseded履歴となった。v2のfresh correctnessは両local targetでPASSしたが品質thresholdに未達だったため、両方を`retain-fp16`として
+フェーズ53を完了した。その後2026-08-30のユーザー決定でblock16経路を廃止し、同じreviewed Qwen3.5-4B BF16 dense scopeの
+省略時KVをstandard OCP MXFP8 E4M3へ変更した。Phase 53/54のblock16 evidenceは採用根拠ではなく履歴としてのみ保持する。
+gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
+フェーズ47〜48は予約済みの機能経路として保持し、フェーズ47の開始には引き続き明示承認を要する。
 フェーズ37〜38はコード変更や実機検証へ着手する前にこの性能経路へ再編した。
 フェーズ37以降の詳細な依存関係と受入条件は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
@@ -464,6 +484,19 @@ R9700の同等達成はMI300X再開の必須条件にしない。
 - V620 `gfx1030`／R9700 `gfx1201`のrelease buildでQwen BF16の無効・LoRA・control・併用をbitwise一致でPASSし、HIPのみ、fallbackなし、資源の基準値復帰を確認した。BroadcastAdd単体も両targetでPASSした。
 - `gfx942`／MI300X実行だけを保留し、VM再確保後の独立経路にする。正本は[保存済み計画](archive/2026/08/21-31/phase45-adapter-dynamic-model-lifecycle.md)、[履歴](../history/2026/08/21-31/phase45-adapter-dynamic-model-lifecycle.md)、[machine profile](../../tests/fixtures/phase45_adapter_lifecycle_v1.json)、[GPU要約](../../ci/matrix/phase45-adapter-lifecycle-gpu-summary-v1.json)とする。
 
+### フェーズ46: conversion・quantization・benchmark・品質評価tool（完了）
+
+- 共通run manifestとatomic bundle、Qwen3.5 HF→GGUF、GGUF split/merge、LoRA conversion、repack、
+  FP8/NVFP4/MXFP4 quantize、imatrix、`sllm-bench`、`sllm-eval`、bounded debug dumpを実装した。
+- Qwen3.5-4B BF16の738 tensor／9,343,583,936-byte GGUFとderived lockを実変換し、exact `gfx1030`で
+  10境界case×3反復のFP16 baselineをHIP-only、fallbackなし、cleanup 0でPASSした。`gfx1201`の同runnerは
+  kernel image errorのためfail-closedとし、`gfx942`とともにtarget別baselineを未充足のまま維持した。
+- candidate観測前のdataset、threshold、再測定規則とgfx1030 baseline evidenceを
+  `kv-cache-default-v1`へfreezeした。新KV形式、kernel、selector、target別default採否はPhase 53が所有する。
+  正本は[保存済み計画](archive/2026/08/21-31/phase46-conversion-quantization-benchmark-quality-tools.md)、
+  [履歴](../history/2026/08/21-31/phase46-conversion-quantization-benchmark-quality-tools.md)、
+  [tool文書](../development/phase46-tools.md)とする。
+
 ### llama.cppとの差分棚卸しと割当状況
 
 - 2026-08-21に、固定参照llama.cpp `b10453` / `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`と
@@ -485,7 +518,7 @@ R9700の同等達成はMI300X再開の必須条件にしない。
 | adapter・読込み管理 | 事前読込みLoRAのscale／要求切替、control vector、モデルcache／offline制御、routerによるload/unload/cache | フェーズ45で固定情報・成果物の事前検査、順序付きLoRA/control選択、別名だけを扱う動的registry、load/unload/LRU/quarantineをホスト・API・CLIへ実装した。V620／R9700のモデル全体とBroadcastAddはPASS、MI300X実行は保留である |
 | template・対話UX | 任意Jinja／custom templateとkwargs、reasoning制御、実行中reasoning制御API、対話、reverse prompt、prompt file、WebUI | フェーズ44でsandbox化したMiniJinja汎用template、bounded kwargs／digest identity、reasoning制御、`chat`の型付き履歴・reverse prompt・prompt fileを実装した。フェーズ41checkpointへ接続し、既存Qwen/Gemmaと一回実行の`generate`を維持する。WebUIはフェーズ48、生成途中・wire sessionの再開は後続である |
 | service運用・可観測性 | HTTP health/readiness、任意Prometheus metrics、props/slots、再開可能stream、CORS/TLS、key file／複数key、server UI | フェーズ39でhealth/readiness、上限付きmetrics／実行時memory、秘匿化props/slots、管理者取消し、任意の再開可能SSE、厳密CORS、Rustls、複数user/admin keyとrotationを実装した。server UIだけをフェーズ48に残す |
-| 周辺tool・品質評価 | 汎用HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task評価、debug dump | 固定converter、モデル固定、範囲限定benchmark／証拠は実装済み。汎用変換・評価toolは未割当である。未対応量子化形式を自動的に製品範囲へ追加しない |
+| 周辺tool・品質評価 | 汎用HF-to-GGUF、quantize/imatrix、GGUF split/merge、LoRA conversion、llama-bench、perplexity/KL/task評価、debug dump | フェーズ46でreviewed capability方式の変換、split/merge、LoRA、repack/quantize/imatrix、benchmark、quality/debug toolとKV default品質policyを実装した。未対応architecture／量子化形式は自動的に製品範囲へ追加しない |
 
 - この棚卸しは機能差の事実を残し、後続フェーズへの割当は上記進行中計画で管理する。割当はフェーズ36の範囲変更、
   完了済みフェーズの再開、全機能の一括実装、組込みtool/MCP実行のsecurity承認を意味しない。
@@ -493,9 +526,10 @@ R9700の同等達成はMI300X再開の必須条件にしない。
   lifecycle matrixをそのまま実行し、上表の未実装機能を未実行FAIL、追加受入条件、またはフェーズ36の阻害条件として扱わない。
 
 KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、Responses APIはフェーズ43で完了した。WebUIはフェーズ48へ割り当てた。
-TurboQuantを含む残りKV形式、残るモデルfamily、複数GPU／Infinity Fabric／RDMA、README整備、人間による発表、
-LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を割り当てない。これらを初期versionの完了条件へ
-読み替えず、完了済みのフェーズ18へ後続範囲を逆流させない。
+`kv-fp8-e4-block16`／`kv-fp8-e5-block16`はフェーズ53/54の履歴へ固定してproduction経路を廃止し、standard OCP MXFP8 E4M3を
+上記限定scopeの既定へ採用した。TurboQuantを含むその他の残りKV形式、残るモデルfamily、
+複数GPU／Infinity Fabric／RDMA、README整備、人間による発表、LMCache、RadixAttention、その他の将来MX形式には現時点で
+フェーズ番号を割り当てない。これらを初期versionの完了条件へ読み替えず、完了済みのフェーズ18へ後続範囲を逆流させない。
 
 ### 性能最適化の残課題
 
@@ -676,12 +710,40 @@ LMCache、RadixAttention、将来MX形式には現時点でフェーズ番号を
    [追跡summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正本とする。
 2. **フェーズ51・MI300X適用（完了）**: exact `gfx942`の7行、fresh profile、GDN wave64候補のtarget分離、
    全3 target追跡要約までを完了した。Full Attention以下は新しい残差順の後続候補として保持する。
-3. **フェーズ46〜48・機能経路**: ツール、承認制の組込みtool/MCP、WebUIの計画は保持するが、直近の既定優先順位では
-   フェーズ49〜52の後に扱う。フェーズ47だけは引き続き明示承認を必要とする。
+3. **フェーズ46・tool／品質評価基盤（完了）**: converter、quantization、benchmark、quality/debug toolと、
+   FP16 baselineだけからfreezeしたKV default判定policyを実装した。詳細は
+   [フェーズ46保存済み計画](archive/2026/08/21-31/phase46-conversion-quantization-benchmark-quality-tools.md)を正本とする。
+4. **フェーズ53・KV FP8 block16実装とdefault採用（完了・target分離）**: block16をdescriptor v2／
+   `StandardMxFloorPowerV1`へ更新した。descriptor v1のgfx1201／gfx1030 correctness・品質・非採用判定はsupersededで、
+   v2のfresh correctnessは両targetでPASS、品質はthreshold未達で両方`retain-fp16`とした。gfx942は今後の一括実機検証へ延期し、
+   空mappingとFP16 safety defaultを維持する。詳細は
+   [フェーズ53保存済み計画](archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正本とする。
+   E5M2限定のscale selector診断ではlocal MSEとparent32-guard付きMSEがともにKLD p99 `0.04063529273873547`で、
+   production v2 `0.03659844555378746`とMXFP8 block32 `0.03218873133110086`に未達だったため棄却した。詳細は
+   [保存済み診断計画](archive/2026/08/21-31/phase53-e5-block16-scale-selector-experiment.md)を正本とする。
+5. **フェーズ54・KV FP8 block16精度改善研究（完了・no-improvement）**: exact gfx1030／E5M2でK/V・layer attribution、
+   scale recipe、Q/K固定変換、V/O layer 19／layers 19+31を段階評価した。V/O layers 19+31はKLD p99を
+   `0.03337377972334127`へ改善したがMXFP8 `0.03218873133110086`未達かつtop-1 `0.8`へ悪化し、layer 19単独も
+   `0.033918254226008415`でMXFP8未達だった。finalistなしのため3-repeat／gfx1201 transfer／MI300Xは実行せず、
+   当時の判定としてFP16 default、空mapping、descriptor v2を維持した（2026-08-30のMXFP8 E4既定化でsuperseded）。詳細は
+   [Phase 54保存済み計画](archive/2026/08/21-31/phase54-kv-fp8-block16-accuracy-research.md)を正本とする。
+   完了後のMXFP8再現follow-upでは、parent32 scaleを2個のblock16 childへ複製するresearch-only controlがOCP E4／E5の
+   host論理byte、exact gfx1030／gfx1201 direct GPU oracle、Qwen3.5-4B全prefill／decode logitのFP32 bit列でMXFP8と
+   完全一致した。これは一致controlであり精度優位候補ではないため、当時のproduction v2とdefault判定は変更しなかった。
+   続くV620速度follow-upの最初のscalar decoder比較ではE5M2がshort `1.885%`、long `3.431%`遅かったが、E5M2から
+   FP16へのexact bit mappingを使わない未最適化baselineだったためformat選定には無効と訂正した。E5M2を8 bit左shift＋
+   `v_cvt_f32_f16`、E4M3もnormal値のFP32 bit直接構築へ最適化したresearch-only再測定では、全case／全pairでE5M2が速く、
+   short 6 caseの幾何平均で`5.259%`、long 6 caseで`11.870%`高速だった。attention単体でappend／全model throughputと
+   同一V620品質は未比較なのでproduction mappingは変更せず、次の判断単位をfull-model品質とend-to-end A/Bとする。
+6. **フェーズ47〜48・残る機能経路**: 承認制の組込みtool/MCPとWebUIを予約済みのまま保持する。フェーズ47だけは
+   引き続き明示承認を必要とし、フェーズ46／53の完了条件へ混ぜない。
 
 フェーズ37以降の作業単位、依存関係、受入条件、除外範囲は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
 フェーズ49の3候補判定、フェーズ50のR9700採否、フェーズ51のMI300X実機検証、フェーズ52の100k OOM解消を完了した。
+Phase 53 descriptor v2のgfx1201／gfx1030 fresh correctness・品質とPhase 54の精度改善研究は完了した。
+Phase 47は承認制、Phase 48は予約済みの独立laneとして維持し、ここでは新しい既定laneを自動選択しない。
+gfx942のPhase 53相当実機証拠は、追加のMI300X検証項目がまとまった時点の一括実行候補へ移した。
 フェーズ50の詳細計画は[保存済み計画](archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とし、
 番号上の既定実行順は50→51→52だが、フェーズ51と52は相互に待たず、フェーズ49または50の全7行llama.cpp同等達成を
 後続フェーズの開始条件にはしない。

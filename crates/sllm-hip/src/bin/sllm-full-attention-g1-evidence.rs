@@ -14,8 +14,9 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sllm_core::{
     AccessMode, Backend, DType, Encoding, ExecutionSession, ExecutionSessionRequest,
-    ExecutionState, KvCacheEncoding, KvMemoryKind, KvStateDescriptor, TensorView, decode_e2m1,
-    decode_e4m3fn, encode_e2m1, encode_e4m3fn,
+    ExecutionState, KvCacheEncoding, KvFp8PhysicalVariant, KvMemoryKind, KvMxfp8Descriptor,
+    KvStateDescriptor, TensorView, decode_e2m1, decode_e4m3fn, encode_e2m1, encode_e4m3fn,
+    quantize_kv_fp8_block16, quantize_kv_mxfp8,
 };
 use sllm_hip::HipBackend;
 
@@ -547,9 +548,13 @@ where
                     "fp8" => KvCacheEncoding::Fp8E4M3Fn,
                     "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
                     "nvfp4" => KvCacheEncoding::Nvfp4,
+                    "e4-block16" => KvCacheEncoding::Fp8E4M3Block16,
+                    "e5-block16" => KvCacheEncoding::Fp8E5M2Block16,
+                    "mxfp8-e4" => KvCacheEncoding::Mxfp8E4,
                     _ => {
                         return Err(
-                            "--kv-encoding must be fp16, fp8, fp8-static, or nvfp4".to_owned()
+                            "--kv-encoding must be fp16, fp8, fp8-static, nvfp4, e4-block16, e5-block16, or mxfp8-e4"
+                                .to_owned(),
                         );
                     }
                 };
@@ -617,6 +622,10 @@ fn kv_encoding_name(encoding: KvCacheEncoding) -> &'static str {
         KvCacheEncoding::Fp8E4M3Fn => "kv-fp8-v1",
         KvCacheEncoding::Fp8E4M3FnStatic => "kv-fp8-static-v1",
         KvCacheEncoding::Nvfp4 => "kv-nvfp4-v1",
+        KvCacheEncoding::Fp8E4M3Block16 => "kv-fp8-e4-block16-v1",
+        KvCacheEncoding::Fp8E5M2Block16 => "kv-fp8-e5-block16-v1",
+        KvCacheEncoding::Mxfp8E4 => "kv-mxfp8-e4-v1",
+        KvCacheEncoding::Mxfp8E5 => "kv-mxfp8-e5-v1",
     }
 }
 
@@ -1006,6 +1015,25 @@ fn quantized_kv_values(words: &[u16], encoding: KvCacheEncoding) -> Result<Vec<f
             }
             Ok(output)
         }
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            let variant = if encoding == KvCacheEncoding::Fp8E4M3Block16 {
+                KvFp8PhysicalVariant::OcpE4M3Fn
+            } else {
+                KvFp8PhysicalVariant::OcpE5M2
+            };
+            quantize_kv_fp8_block16(&input, input.len() / HEAD_DIM, HEAD_DIM, variant)
+                .map_err(|error| format!("block16 reference quantization failed: {error}"))?
+                .dequantize()
+                .map_err(|error| format!("block16 reference decode failed: {error}"))
+        }
+        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
+            let descriptor = KvMxfp8Descriptor::canonical_for_encoding(encoding)
+                .ok_or_else(|| "MXFP8 descriptor construction failed".to_owned())?;
+            quantize_kv_mxfp8(&input, input.len() / HEAD_DIM, HEAD_DIM, descriptor)
+                .map_err(|error| format!("MXFP8 reference quantization failed: {error}"))?
+                .dequantize()
+                .map_err(|error| format!("MXFP8 reference decode failed: {error}"))
+        }
     }
 }
 
@@ -1087,12 +1115,15 @@ fn scaled_prefill_gemm_enabled(
 ) -> bool {
     !force_baseline
         && expected_target == "gfx1030"
-        && opt_in.is_none_or(|value| value == "1")
         && case.m >= 1024
         && Q_HEADS == 16
         && KV_HEADS == 4
         && HEAD_DIM == 256
-        && encoding == KvCacheEncoding::Fp16
+        && match encoding {
+            KvCacheEncoding::Fp16 => opt_in.is_none_or(|value| value == "1"),
+            KvCacheEncoding::Mxfp8E4 => opt_in.is_some_and(|value| value == "1"),
+            _ => false,
+        }
 }
 
 fn long_prefill_v2_enabled(
@@ -1352,6 +1383,10 @@ fn compare_bf16_words(
         KvCacheEncoding::Fp8E4M3Fn => (0.03125, 0.04),
         KvCacheEncoding::Fp8E4M3FnStatic => (0.03125, 0.04),
         KvCacheEncoding::Nvfp4 => (0.125, 0.25),
+        KvCacheEncoding::Fp8E4M3Block16 => (0.03125, 0.04),
+        KvCacheEncoding::Fp8E5M2Block16 => (0.0625, 0.08),
+        KvCacheEncoding::Mxfp8E4 => (0.03125, 0.04),
+        KvCacheEncoding::Mxfp8E5 => (0.0625, 0.08),
     };
     (
         error <= absolute_tolerance + relative_tolerance * reference.abs(),
@@ -2147,6 +2182,27 @@ mod tests {
         assert!(!decode_short.phase49_operator);
         assert!(!decode_short.phase12_subset);
 
+        for (name, expected) in [
+            ("e4-block16", KvCacheEncoding::Fp8E4M3Block16),
+            ("e5-block16", KvCacheEncoding::Fp8E5M2Block16),
+        ] {
+            let block16 = parse_config_from(
+                vec![
+                    "--device-index",
+                    "0",
+                    "--target",
+                    "gfx1030",
+                    "--kv-encoding",
+                    name,
+                    "--phase49-decode-short",
+                ]
+                .into_iter()
+                .map(String::from),
+            )
+            .unwrap();
+            assert_eq!(block16.kv_encoding, expected);
+        }
+
         let duplicate = parse_config_from(
             vec![
                 "--device-index",
@@ -2416,6 +2472,28 @@ mod tests {
             },
             KvCacheEncoding::Fp16,
             None,
+            false,
+        ));
+        assert!(!scaled_prefill_gemm_enabled(
+            "gfx1030",
+            Case {
+                id: "scaled-mxfp8-e4",
+                m: 1024,
+                start_position: 257,
+            },
+            KvCacheEncoding::Mxfp8E4,
+            None,
+            false,
+        ));
+        assert!(scaled_prefill_gemm_enabled(
+            "gfx1030",
+            Case {
+                id: "scaled-mxfp8-e4-explicit",
+                m: 1024,
+                start_position: 257,
+            },
+            KvCacheEncoding::Mxfp8E4,
+            enabled,
             false,
         ));
         for value in ["0", "unknown"] {

@@ -158,13 +158,27 @@
         "greedy": {"const": true},
         "warmups": {"enum": [1, 3]}, "measured": {"enum": [3, 10]},
         "lane": {"const": "direct"}, "tokenizer": {"const": false}, "render": {"const": false},
-        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4"]},
+        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "kv_cache_selection": {"$ref": "#/$defs/kv_cache_selection"},
         "stop_policy": {"$ref": "#/$defs/stop_policy"}
       },
       "oneOf": [
         {"properties": {"warmups": {"const": 3}, "measured": {"const": 10}}},
         {"properties": {"warmups": {"const": 1}, "measured": {"const": 3}}}
       ]
+    },
+    "kv_cache_selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "resolved", "selection_source", "reason", "physical_variant", "descriptor_id", "policy_version"],
+      "properties": {
+        "requested": {"enum": ["auto", "fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "resolved": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "selection_source": {"enum": ["model-entry-explicit", "process-explicit", "mxfp8-e4-default", "model-fixed-fp16"]},
+        "reason": {"type": "string", "minLength": 1},
+        "physical_variant": {"type": ["string", "null"], "enum": [null, "E4M3-FNUZ", "E4M3-OCP", "E5M2-software", "E5M2-OCP"]},
+        "descriptor_id": {"type": ["string", "null"], "enum": [null, "kv-mxfp8-e4-v1", "kv-mxfp8-e5-v1"]},
+        "policy_version": {"type": "integer", "minimum": 1}
+      }
     },
     "category": {
       "type": "object", "additionalProperties": false,

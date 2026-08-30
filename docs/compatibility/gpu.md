@@ -336,6 +336,46 @@ RDNA4全SKU、別driver/ROCm、batch/parallel、Paged Attentionへ一般化せ�
 | --- | --- | --- | --- |
 | R9700 exact `gfx1201` Phase 52 Qwen3.5-4B BF16 `100,000/2` | `experimental` | `project-verified`（固定単一request scope） | 自動2K、resident KV、4/4 PASS、生成一致、HIP-only、fallback/cleanup 0、資源復帰 |
 
+### 2026-08-27 Phase53 descriptor v1履歴とv2 follow-up
+
+exact `gfx1201`ではdescriptor v1の`kv-fp8-e4-block16`とexplicit-only `kv-mxfp8-e4`、exact `gfx1030`では
+`kv-fp8-e5-block16`とexplicit-only `kv-mxfp8-e5`のGPU append／direct attentionを独立byte／数値oracleへ照合した。
+両target、両形式ともappend 6、attention 1、HIP-only、fallback 0、terminal cleanup 0でPASSし、このformat correctness scopeだけを
+`project-verified`とする。block16はtoken内head-dimension方向16値、標準MXFP8は32値ごとにE8M0 scaleを持つ。
+
+Qwen3.5-4B BF16品質はFP16→block16→MXFP8をresident完全解放付きで3 repeatし、全repeatが同値だった。しかしblock16の
+top-1／long-contextはgfx1201で`0.85`／`0.08333333333333337`、gfx1030で`0.8`／`0.16666666666666663`となり、
+freeze済みgate `>=0.99`／`<=0.02`を満たさないため両targetとも`retain-fp16`である。明確な品質FAIL後のearly-stopにより
+7行performance/resourceは未実行で、性能・physical memoryを検証済みと扱わない。runtime mapping候補は空である。
+
+| target / Phase 53 scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| exact `gfx1201` descriptor v1 block16 E4／MXFP8 E4 format correctness | `experimental` | `project-verified`（旧format correctnessのみ） | superseded。旧quality FAIL／`retain-fp16`、performance/resource未実行 |
+| exact `gfx1030` descriptor v1 block16 E5／MXFP8 E5 format correctness | `experimental` | `project-verified`（旧format correctnessのみ） | superseded。旧quality FAIL／`retain-fp16`、performance/resource未実行 |
+| exact `gfx942:sramecc+:xnack-` Phase 53 | `experimental` | `unverified` | fresh correctness／qualityなしで`insufficient-evidence`。standard OCP MXFP8はFNUZ非互換のためunsupported |
+
+gfx942のPhase 53実機検証は2026-08-27のユーザー指示で追加検証項目がまとまるまで延期した。Hot Aisleの固定IPへの疎通を
+VM存在またはGPU evidenceとして扱わず、この延期によって過去証拠やcompile-onlyをPASSへ昇格しない。
+
+raw summaryは`external:phase53/phase53-kv-default-summary-v3.json`、SHA-256
+`2440fd7726fca24919731abdcbd2b0f74fdd9d663ecca850b369b5ae3e69dd2b`、空mapping候補は
+`external:phase53/phase53-runtime-mapping-v3.json`、SHA-256
+`ecc05a91899c9275a7dc1234f418555ad860b18680c2ad15ea7eb745b7127dff`である。個別report digestは
+[Phase 53履歴](../history/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正とし、別GPU、SKU、tuple、model、shapeへ一般化しない。
+
+### 2026-08-30 block16廃止とMXFP8 E4既定化
+
+2026-08-30のユーザー決定は上記Phase 53/54の採否をsupersedeする。block16 ABI値と旧evidenceは監査履歴として残すが、
+public parser、selector、Qwen graph、Rust→HIP lowering、native state createで拒否し、新しいstateを生成しない。
+reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256では、省略時をstandard OCP
+`kv-mxfp8-e4-v1`へ変更する。exact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`はいずれもE4M3FN value、
+block 32、E8M0 scaleを使う。gfx942はnative FNUZ byteへ置換せず、OCP E4M3FNをsoftware encode/decodeする。
+明示`fp16`をrollbackとして保持する。host/fake-HIP契約に加え、ROCm 7.14.0のV620 exact `gfx1030`とR9700 exact
+`gfx1201`で非整列head dimを含むMXFP8 value／scale byte、append、packed direct attentionをHIP-only／fallback 0／cleanup 0で
+PASSした。Qwen3.5-4Bの一回測定はKLD p99 `0.004945428206833837`、KV request-state peak 11.935%減だったが、top-1一致は
+gfx1030 `1.0`、gfx1201 `0.85`であり、gfx1201はfreeze済み品質閾値`>=0.99`に未達である。default変更はこの品質結果による
+自動昇格ではなくユーザー明示決定であり、gfx942と別tupleは引き続き`unverified`とする。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

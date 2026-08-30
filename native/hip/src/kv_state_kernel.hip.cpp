@@ -133,6 +133,162 @@ float_to_e4m3fn_fp8_append(const float value) {
 #endif
 }
 
+__device__ __forceinline__ float e4m3fnuz_to_float(const uint8_t bits) {
+  if (bits == UINT8_C(0x80)) {
+    return NAN;
+  }
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
+  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
+  if (exponent == 0U) {
+    return sign * static_cast<float>(mantissa) * ldexpf(1.0F, -10);
+  }
+  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
+         ldexpf(1.0F, static_cast<int>(exponent) - 8);
+}
+
+__device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) {
+  if (isnan(value)) {
+    return UINT8_C(0x80);
+  }
+  const bool negative = signbit(value);
+  value = fabsf(value);
+  if (value == 0.0F) {
+    return 0U;
+  }
+  if (!isfinite(value) || value >= 240.0F) {
+    return negative ? UINT8_C(0xff) : UINT8_C(0x7f);
+  }
+  uint32_t low = 0U;
+  uint32_t high = UINT32_C(0x7f);
+  while (low < high) {
+    const uint32_t middle = (low + high) >> 1U;
+    if (e4m3fnuz_to_float(static_cast<uint8_t>(middle)) < value) {
+      low = middle + 1U;
+    } else {
+      high = middle;
+    }
+  }
+  const uint8_t upper = static_cast<uint8_t>(low);
+  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
+  const float lower_error = value - e4m3fnuz_to_float(lower);
+  const float upper_error = e4m3fnuz_to_float(upper) - value;
+  const uint8_t selected =
+      upper_error < lower_error || (upper_error == lower_error &&
+                                    (upper & 1U) == 0U && (lower & 1U) != 0U)
+          ? upper
+          : lower;
+  return negative && selected != 0U ? static_cast<uint8_t>(selected | 0x80U)
+                                    : selected;
+}
+
+__device__ __forceinline__ float e5m2_to_float(const uint8_t bits) {
+  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint8_t exponent = static_cast<uint8_t>((bits >> 2U) & 0x1fU);
+  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x03U);
+  if (exponent == 0U) {
+    return mantissa == 0U
+               ? copysignf(0.0F, sign)
+               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -16);
+  }
+  if (exponent == UINT8_C(0x1f)) {
+    return mantissa == 0U ? copysignf(INFINITY, sign) : NAN;
+  }
+  return sign * (1.0F + static_cast<float>(mantissa) / 4.0F) *
+         ldexpf(1.0F, static_cast<int>(exponent) - 15);
+}
+
+__device__ __forceinline__ uint8_t float_to_e5m2(float value) {
+  if (isnan(value)) {
+    return UINT8_C(0x7f);
+  }
+  const uint8_t sign = signbit(value) ? UINT8_C(0x80) : 0U;
+  value = fabsf(value);
+  if (value == 0.0F) {
+    return sign;
+  }
+  if (!isfinite(value) || value >= 57344.0F) {
+    return static_cast<uint8_t>(sign | UINT8_C(0x7b));
+  }
+  uint32_t low = 0U;
+  uint32_t high = UINT32_C(0x7b);
+  while (low < high) {
+    const uint32_t middle = (low + high) >> 1U;
+    if (e5m2_to_float(static_cast<uint8_t>(middle)) < value) {
+      low = middle + 1U;
+    } else {
+      high = middle;
+    }
+  }
+  const uint8_t upper = static_cast<uint8_t>(low);
+  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
+  const float lower_error = value - e5m2_to_float(lower);
+  const float upper_error = e5m2_to_float(upper) - value;
+  const bool upper_selected =
+      upper_error < lower_error ||
+      (upper_error == lower_error && (upper & 1U) == 0U && (lower & 1U) != 0U);
+  return static_cast<uint8_t>(sign | (upper_selected ? upper : lower));
+}
+
+__device__ __forceinline__ float e8m0_to_float(const uint8_t bits) {
+  if (bits == UINT8_C(0xff)) {
+    return NAN;
+  }
+  return bits == 0U ? __uint_as_float(UINT32_C(0x00400000))
+                    : __uint_as_float(static_cast<uint32_t>(bits) << 23U);
+}
+
+// OCP MX uses one E8M0 power-of-two scale for each block.  The exponent is
+// the block amax's floor power-of-two divided by the largest power-of-two
+// representable by the element format (2^8 for E4M3, 2^15 for E5M2), then
+// clamped to the finite E8M0 exponent range.  This rule is shared by the
+// block16 KV format and standard MXFP8; physical E4 FNUZ encoding remains
+// independent of the scale calculation.
+__device__ __forceinline__ uint8_t ocp_mxfp8_e8m0_scale(const float maximum,
+                                                        const bool e5) {
+  if (!(maximum > 0.0F) || !isfinite(maximum)) {
+    return UINT8_C(127);
+  }
+  const int32_t floor_exponent = ilogbf(maximum);
+  const int32_t denominator_exponent = e5 ? 15 : 8;
+  const int32_t scale_exponent = floor_exponent - denominator_exponent;
+  const int32_t clamped = max(-127, min(127, scale_exponent));
+  return static_cast<uint8_t>(clamped + 127);
+}
+
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+__device__ __forceinline__ uint8_t phase54_block16_e8m0_scale(
+    const float maximum, const bool e5, const uint32_t recipe) {
+  if (!(maximum > 0.0F) || !isfinite(maximum)) {
+    return UINT8_C(127);
+  }
+  const int32_t denominator_exponent = e5 ? 15 : 8;
+  const int32_t floor_maximum_exponent = ilogbf(maximum);
+  int32_t selected_maximum_exponent = floor_maximum_exponent;
+  if (recipe == sllm_kv_state_kernel::kPhase54KvRecipeCeilExponent) {
+    if (maximum != ldexpf(1.0F, floor_maximum_exponent)) {
+      ++selected_maximum_exponent;
+    }
+  } else if (recipe ==
+             sllm_kv_state_kernel::kPhase54KvRecipeNearestEvenExponent) {
+    // Compare against the geometric midpoint between adjacent powers of two.
+    // At the exact midpoint, round the resulting scale exponent to even.
+    constexpr float kSqrtTwo = 0x1.6a09e6p+0F;
+    const float normalized = ldexpf(maximum, -floor_maximum_exponent);
+    const int32_t floor_scale_exponent =
+        floor_maximum_exponent - denominator_exponent;
+    if (normalized > kSqrtTwo ||
+        (normalized == kSqrtTwo && (floor_scale_exponent & 1) != 0)) {
+      ++selected_maximum_exponent;
+    }
+  }
+  const int32_t scale_exponent =
+      selected_maximum_exponent - denominator_exponent;
+  const int32_t clamped = max(-127, min(127, scale_exponent));
+  return static_cast<uint8_t>(clamped + 127);
+}
+#endif
+
 __device__ __forceinline__ uint8_t float_to_e2m1(float value) {
   constexpr float positive[8] = {0.0F, 0.5F, 1.0F, 1.5F,
                                  2.0F, 3.0F, 4.0F, 6.0F};
@@ -233,6 +389,425 @@ extern "C" __global__ __launch_bounds__(
         bf16_to_float(value_input[input_base + current]) / value_scale);
   }
 }
+
+template <bool Key>
+__device__ void
+quantize_fp8_block16_row(const uint16_t *const input, uint8_t *const output,
+                         uint8_t *const scales, const uint64_t input_base,
+                         const uint64_t output_row, const uint32_t head_dim,
+                         const uint32_t encoding) {
+  if (threadIdx.x != 0U) {
+    return;
+  }
+  const uint64_t blocks_per_row = (static_cast<uint64_t>(head_dim) + 15U) / 16U;
+  const uint64_t padded_head_dim = blocks_per_row * 16U;
+  const bool e5 = encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V1 ||
+                  encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2;
+#if defined(__gfx942__)
+  constexpr bool e4_fnuz = true;
+#else
+  constexpr bool e4_fnuz = false;
+#endif
+  for (uint64_t block = 0U; block != blocks_per_row; ++block) {
+    const uint32_t begin = static_cast<uint32_t>(block * 16U);
+    const uint32_t end = min(begin + 16U, head_dim);
+    float maximum = 0.0F;
+    bool all_zero = true;
+    for (uint32_t dimension = begin; dimension != end; ++dimension) {
+      const float value = bf16_to_float(input[input_base + dimension]);
+      all_zero = all_zero && value == 0.0F;
+      if (isfinite(value)) {
+        maximum = fmaxf(maximum, fabsf(value));
+      }
+    }
+    const uint8_t scale_bits = ocp_mxfp8_e8m0_scale(maximum, e5);
+    const float scale = e8m0_to_float(scale_bits);
+    scales[output_row * blocks_per_row + block] = scale_bits;
+    for (uint32_t dimension = begin; dimension != end; ++dimension) {
+      if (all_zero) {
+        output[output_row * padded_head_dim + dimension] = 0U;
+        continue;
+      }
+      const float normalized =
+          bf16_to_float(input[input_base + dimension]) / scale;
+      output[output_row * padded_head_dim + dimension] =
+          e5 ? float_to_e5m2(normalized)
+             : (e4_fnuz ? float_to_e4m3fnuz(normalized)
+                        : float_to_e4m3fn_fp8_append(normalized));
+    }
+    // Physical rows are block padded.  Clear the invalid tail lanes on every
+    // append so stale bytes from a prior resident row cannot leak into the
+    // canonical state image.
+    for (uint32_t dimension = end;
+         dimension != static_cast<uint32_t>((block + 1U) * 16U); ++dimension) {
+      output[output_row * padded_head_dim + dimension] = 0U;
+    }
+  }
+  (void)Key;
+}
+
+template <bool E5>
+__device__ void
+quantize_mxfp8_pair(const uint16_t *const key_input,
+                    const uint16_t *const value_input,
+                    uint8_t *const key_output, uint8_t *const value_output,
+                    uint8_t *const key_scales, uint8_t *const value_scales,
+                    const uint64_t input_base, const uint64_t output_row,
+                    const uint32_t head_dim) {
+  constexpr uint32_t kBlockSize = 32U;
+  constexpr uint32_t kWaveSize = 32U;
+  const uint64_t blocks_per_row =
+      (static_cast<uint64_t>(head_dim) + kBlockSize - 1U) / kBlockSize;
+  const uint64_t padded_head_dim = blocks_per_row * kBlockSize;
+  const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
+  const uint32_t wave = threadIdx.x / kWaveSize;
+  const uint32_t wave_count = blockDim.x / kWaveSize;
+  for (uint64_t block = wave; block < blocks_per_row; block += wave_count) {
+    const uint32_t dimension = static_cast<uint32_t>(block * kBlockSize) + lane;
+    const bool active = dimension < head_dim;
+    const float key_value =
+        active ? bf16_to_float(key_input[input_base + dimension]) : 0.0F;
+    const float value_value =
+        active ? bf16_to_float(value_input[input_base + dimension]) : 0.0F;
+    float key_maximum = isfinite(key_value) ? fabsf(key_value) : 0.0F;
+    float value_maximum = isfinite(value_value) ? fabsf(value_value) : 0.0F;
+    uint32_t key_all_zero = !active || key_value == 0.0F ? 1U : 0U;
+    uint32_t value_all_zero = !active || value_value == 0.0F ? 1U : 0U;
+    for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
+      key_maximum =
+          fmaxf(key_maximum, __shfl_down(key_maximum, offset, kWaveSize));
+      value_maximum =
+          fmaxf(value_maximum, __shfl_down(value_maximum, offset, kWaveSize));
+      key_all_zero &= __shfl_down(key_all_zero, offset, kWaveSize);
+      value_all_zero &= __shfl_down(value_all_zero, offset, kWaveSize);
+    }
+    uint32_t key_scale_bits = 0U;
+    uint32_t value_scale_bits = 0U;
+    float key_scale = 1.0F;
+    float value_scale = 1.0F;
+    if (lane == 0U) {
+      key_scale_bits = ocp_mxfp8_e8m0_scale(key_maximum, E5);
+      value_scale_bits = ocp_mxfp8_e8m0_scale(value_maximum, E5);
+      key_scales[output_row * blocks_per_row + block] =
+          static_cast<uint8_t>(key_scale_bits);
+      value_scales[output_row * blocks_per_row + block] =
+          static_cast<uint8_t>(value_scale_bits);
+      key_scale = e8m0_to_float(static_cast<uint8_t>(key_scale_bits));
+      value_scale = e8m0_to_float(static_cast<uint8_t>(value_scale_bits));
+    }
+    key_all_zero = __shfl(key_all_zero, 0U, kWaveSize);
+    value_all_zero = __shfl(value_all_zero, 0U, kWaveSize);
+    key_scale = __shfl(key_scale, 0U, kWaveSize);
+    value_scale = __shfl(value_scale, 0U, kWaveSize);
+    if (dimension < padded_head_dim) {
+      key_output[output_row * padded_head_dim + dimension] =
+          !active || key_all_zero != 0U
+              ? 0U
+              : (E5 ? float_to_e5m2(key_value / key_scale)
+                    : float_to_e4m3fn_fp8_append(key_value / key_scale));
+      value_output[output_row * padded_head_dim + dimension] =
+          !active || value_all_zero != 0U
+              ? 0U
+              : (E5 ? float_to_e5m2(value_value / value_scale)
+                    : float_to_e4m3fn_fp8_append(value_value / value_scale));
+    }
+  }
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_KV_WORKGROUP_SIZE,
+    1) void sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1(Bf16Input key_input,
+                                                          Bf16Input value_input,
+                                                          uint8_t
+                                                              *const key_output,
+                                                          uint8_t *const
+                                                              value_output,
+                                                          uint8_t
+                                                              *const key_scales,
+                                                          uint8_t *const
+                                                              value_scales,
+                                                          const uint32_t
+                                                              token_count,
+                                                          const uint64_t
+                                                              start_position,
+                                                          const uint32_t
+                                                              head_count,
+                                                          const uint32_t
+                                                              head_dim,
+                                                          const uint32_t /*encoding*/) {
+  const uint64_t row = blockIdx.x;
+  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+    return;
+  }
+  const uint64_t token = row / head_count;
+  const uint64_t head = row % head_count;
+  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t input_base = row * head_dim;
+  quantize_mxfp8_pair<false>(key_input, value_input, key_output, value_output,
+                             key_scales, value_scales, input_base, output_row,
+                             head_dim);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_KV_WORKGROUP_SIZE,
+    1) void sllm_kv_state_bf16_to_mxfp8_e5_token_major_v1(Bf16Input key_input,
+                                                          Bf16Input value_input,
+                                                          uint8_t
+                                                              *const key_output,
+                                                          uint8_t *const
+                                                              value_output,
+                                                          uint8_t
+                                                              *const key_scales,
+                                                          uint8_t *const
+                                                              value_scales,
+                                                          const uint32_t
+                                                              token_count,
+                                                          const uint64_t
+                                                              start_position,
+                                                          const uint32_t
+                                                              head_count,
+                                                          const uint32_t
+                                                              head_dim,
+                                                          const uint32_t /*encoding*/) {
+  const uint64_t row = blockIdx.x;
+  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+    return;
+  }
+  const uint64_t token = row / head_count;
+  const uint64_t head = row % head_count;
+  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t input_base = row * head_dim;
+  quantize_mxfp8_pair<true>(key_input, value_input, key_output, value_output,
+                            key_scales, value_scales, input_base, output_row,
+                            head_dim);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_KV_WORKGROUP_SIZE,
+    1) void sllm_kv_state_bf16_to_fp8_block16_token_major_v1(Bf16Input
+                                                                 key_input,
+                                                             Bf16Input
+                                                                 value_input,
+                                                             uint8_t *const
+                                                                 key_output,
+                                                             uint8_t *const
+                                                                 value_output,
+                                                             uint8_t *const
+                                                                 key_scales,
+                                                             uint8_t *const
+                                                                 value_scales,
+                                                             const uint32_t
+                                                                 token_count,
+                                                             const uint64_t
+                                                                 start_position,
+                                                             const uint32_t
+                                                                 head_count,
+                                                             const uint32_t
+                                                                 head_dim,
+                                                             const uint32_t
+                                                                 encoding) {
+  const uint64_t row = blockIdx.x;
+  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+    return;
+  }
+  const uint64_t token = row / head_count;
+  const uint64_t head = row % head_count;
+  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t input_base = row * head_dim;
+  quantize_fp8_block16_row<true>(key_input, key_output, key_scales, input_base,
+                                 output_row, head_dim, encoding);
+  quantize_fp8_block16_row<false>(value_input, value_output, value_scales,
+                                  input_base, output_row, head_dim, encoding);
+}
+
+template <bool E5>
+__device__ void quantize_fp8_block16_v2_pair(
+    Bf16Input key_input, Bf16Input value_input, uint8_t *const key_output,
+    uint8_t *const value_output, uint8_t *const key_scales,
+    uint8_t *const value_scales, const uint64_t row, const uint32_t token_count,
+    const uint64_t start_position, const uint32_t head_count,
+    const uint32_t head_dim) {
+  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+    return;
+  }
+  const uint64_t token = row / head_count;
+  const uint64_t head = row % head_count;
+  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t input_base = row * head_dim;
+  constexpr uint32_t kEncoding = E5 ? SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                                    : SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2;
+  quantize_fp8_block16_row<true>(key_input, key_output, key_scales, input_base,
+                                 output_row, head_dim, kEncoding);
+  quantize_fp8_block16_row<false>(value_input, value_output, value_scales,
+                                  input_base, output_row, head_dim, kEncoding);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_KV_WORKGROUP_SIZE,
+    1) void sllm_kv_state_bf16_to_fp8_e4_block16_token_major_v2(Bf16Input
+                                                                    key_input,
+                                                                Bf16Input
+                                                                    value_input,
+                                                                uint8_t *const
+                                                                    key_output,
+                                                                uint8_t *const
+                                                                    value_output,
+                                                                uint8_t *const
+                                                                    key_scales,
+                                                                uint8_t *const
+                                                                    value_scales,
+                                                                const uint32_t
+                                                                    token_count,
+                                                                const uint64_t
+                                                                    start_position,
+                                                                const uint32_t
+                                                                    head_count,
+                                                                const uint32_t
+                                                                    head_dim,
+                                                                const uint32_t /*encoding*/) {
+  quantize_fp8_block16_v2_pair<false>(key_input, value_input, key_output,
+                                      value_output, key_scales, value_scales,
+                                      blockIdx.x, token_count, start_position,
+                                      head_count, head_dim);
+}
+
+extern "C" __global__ __launch_bounds__(
+    SLLM_HIP_KV_WORKGROUP_SIZE,
+    1) void sllm_kv_state_bf16_to_fp8_e5_block16_token_major_v2(Bf16Input
+                                                                    key_input,
+                                                                Bf16Input
+                                                                    value_input,
+                                                                uint8_t *const
+                                                                    key_output,
+                                                                uint8_t *const
+                                                                    value_output,
+                                                                uint8_t *const
+                                                                    key_scales,
+                                                                uint8_t *const
+                                                                    value_scales,
+                                                                const uint32_t
+                                                                    token_count,
+                                                                const uint64_t
+                                                                    start_position,
+                                                                const uint32_t
+                                                                    head_count,
+                                                                const uint32_t
+                                                                    head_dim,
+                                                                const uint32_t /*encoding*/) {
+  quantize_fp8_block16_v2_pair<true>(key_input, value_input, key_output,
+                                     value_output, key_scales, value_scales,
+                                     blockIdx.x, token_count, start_position,
+                                     head_count, head_dim);
+}
+
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+template <bool E5>
+__device__ void quantize_fp8_block16_phase54_research_row(
+    const uint16_t *const input, uint8_t *const output, uint8_t *const scales,
+    const uint64_t input_base, const uint64_t output_row,
+    const uint32_t head_dim, const uint32_t recipe) {
+  if (threadIdx.x != 0U) {
+    return;
+  }
+  const uint64_t blocks_per_row = (static_cast<uint64_t>(head_dim) + 15U) / 16U;
+  const uint64_t padded_head_dim = blocks_per_row * 16U;
+#if defined(__gfx942__)
+  constexpr bool e4_fnuz = true;
+#else
+  constexpr bool e4_fnuz = false;
+#endif
+  for (uint64_t block = 0U; block != blocks_per_row; ++block) {
+    const uint32_t begin = static_cast<uint32_t>(block * 16U);
+    const uint32_t end = min(begin + 16U, head_dim);
+    const bool duplicate_parent32 =
+        recipe == sllm_kv_state_kernel::kPhase54KvRecipeParent32Duplicate;
+    const uint32_t scale_begin =
+        duplicate_parent32 ? static_cast<uint32_t>((block / 2U) * 32U) : begin;
+    const uint32_t scale_end =
+        duplicate_parent32 ? min(scale_begin + 32U, head_dim) : end;
+    float maximum = 0.0F;
+    bool all_zero = true;
+    for (uint32_t dimension = scale_begin; dimension != scale_end;
+         ++dimension) {
+      const float value = bf16_to_float(input[input_base + dimension]);
+      all_zero = all_zero && value == 0.0F;
+      if (isfinite(value)) {
+        maximum = fmaxf(maximum, fabsf(value));
+      }
+    }
+    const uint8_t scale_bits = phase54_block16_e8m0_scale(maximum, E5, recipe);
+    const float scale = e8m0_to_float(scale_bits);
+    scales[output_row * blocks_per_row + block] = scale_bits;
+    for (uint32_t dimension = begin; dimension != end; ++dimension) {
+      if (all_zero) {
+        output[output_row * padded_head_dim + dimension] = 0U;
+        continue;
+      }
+      const float normalized =
+          bf16_to_float(input[input_base + dimension]) / scale;
+      output[output_row * padded_head_dim + dimension] =
+          E5 ? float_to_e5m2(normalized)
+             : (e4_fnuz ? float_to_e4m3fnuz(normalized)
+                        : float_to_e4m3fn_fp8_append(normalized));
+    }
+    for (uint32_t dimension = end;
+         dimension != static_cast<uint32_t>((block + 1U) * 16U); ++dimension) {
+      output[output_row * padded_head_dim + dimension] = 0U;
+    }
+  }
+}
+
+template <bool E5>
+__device__ void quantize_fp8_block16_phase54_research_pair(
+    Bf16Input key_input, Bf16Input value_input, uint8_t *const key_output,
+    uint8_t *const value_output, uint8_t *const key_scales,
+    uint8_t *const value_scales, const uint64_t row, const uint32_t token_count,
+    const uint64_t start_position, const uint32_t head_count,
+    const uint32_t head_dim, const uint32_t key_recipe,
+    const uint32_t value_recipe) {
+  if (row >= static_cast<uint64_t>(token_count) * head_count) {
+    return;
+  }
+  const uint64_t token = row / head_count;
+  const uint64_t head = row % head_count;
+  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t input_base = row * head_dim;
+  quantize_fp8_block16_phase54_research_row<E5>(
+      key_input, key_output, key_scales, input_base, output_row, head_dim,
+      key_recipe);
+  quantize_fp8_block16_phase54_research_row<E5>(
+      value_input, value_output, value_scales, input_base, output_row, head_dim,
+      value_recipe);
+}
+
+extern "C" __global__
+__launch_bounds__(SLLM_HIP_KV_WORKGROUP_SIZE, 1) void sllm_kv_state_bf16_to_fp8_e4_block16_phase54_research_v1(
+    Bf16Input key_input, Bf16Input value_input, uint8_t *const key_output,
+    uint8_t *const value_output, uint8_t *const key_scales,
+    uint8_t *const value_scales, const uint32_t token_count,
+    const uint64_t start_position, const uint32_t head_count,
+    const uint32_t head_dim, const uint32_t key_recipe,
+    const uint32_t value_recipe) {
+  quantize_fp8_block16_phase54_research_pair<false>(
+      key_input, value_input, key_output, value_output, key_scales,
+      value_scales, blockIdx.x, token_count, start_position, head_count,
+      head_dim, key_recipe, value_recipe);
+}
+
+extern "C" __global__
+__launch_bounds__(SLLM_HIP_KV_WORKGROUP_SIZE, 1) void sllm_kv_state_bf16_to_fp8_e5_block16_phase54_research_v1(
+    Bf16Input key_input, Bf16Input value_input, uint8_t *const key_output,
+    uint8_t *const value_output, uint8_t *const key_scales,
+    uint8_t *const value_scales, const uint32_t token_count,
+    const uint64_t start_position, const uint32_t head_count,
+    const uint32_t head_dim, const uint32_t key_recipe,
+    const uint32_t value_recipe) {
+  quantize_fp8_block16_phase54_research_pair<true>(
+      key_input, value_input, key_output, value_output, key_scales,
+      value_scales, blockIdx.x, token_count, start_position, head_count,
+      head_dim, key_recipe, value_recipe);
+}
+#endif
 
 template <bool Key>
 __device__ void
@@ -404,6 +979,78 @@ hipError_t launch(const uint16_t *const key_input,
         static_cast<uint8_t *>(key_scales),
         static_cast<uint8_t *>(value_scales), key_outer_scales,
         value_outer_scales, token_count, start_position, head_count, head_dim);
+  } else if (encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2) {
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+    uint32_t key_recipe = sllm_kv_state_kernel::kPhase54KvRecipeFloor;
+    uint32_t value_recipe = sllm_kv_state_kernel::kPhase54KvRecipeFloor;
+    (void)sllm_phase54_kv_research_get_recipe_pair_v1(&key_recipe,
+                                                      &value_recipe);
+    if (key_recipe != sllm_kv_state_kernel::kPhase54KvRecipeFloor ||
+        value_recipe != sllm_kv_state_kernel::kPhase54KvRecipeFloor) {
+      hipLaunchKernelGGL(
+          sllm_kv_state_bf16_to_fp8_e4_block16_phase54_research_v1, grid, block,
+          0U, stream, key_input, value_input,
+          static_cast<uint8_t *>(key_output),
+          static_cast<uint8_t *>(value_output),
+          static_cast<uint8_t *>(key_scales),
+          static_cast<uint8_t *>(value_scales), token_count, start_position,
+          head_count, head_dim, key_recipe, value_recipe);
+    } else {
+#endif
+      hipLaunchKernelGGL(sllm_kv_state_bf16_to_fp8_e4_block16_token_major_v2,
+                         grid, block, 0U, stream, key_input, value_input,
+                         static_cast<uint8_t *>(key_output),
+                         static_cast<uint8_t *>(value_output),
+                         static_cast<uint8_t *>(key_scales),
+                         static_cast<uint8_t *>(value_scales), token_count,
+                         start_position, head_count, head_dim, encoding);
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+    }
+#endif
+  } else if (encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2) {
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+    uint32_t key_recipe = sllm_kv_state_kernel::kPhase54KvRecipeFloor;
+    uint32_t value_recipe = sllm_kv_state_kernel::kPhase54KvRecipeFloor;
+    (void)sllm_phase54_kv_research_get_recipe_pair_v1(&key_recipe,
+                                                      &value_recipe);
+    if (key_recipe != sllm_kv_state_kernel::kPhase54KvRecipeFloor ||
+        value_recipe != sllm_kv_state_kernel::kPhase54KvRecipeFloor) {
+      hipLaunchKernelGGL(
+          sllm_kv_state_bf16_to_fp8_e5_block16_phase54_research_v1, grid, block,
+          0U, stream, key_input, value_input,
+          static_cast<uint8_t *>(key_output),
+          static_cast<uint8_t *>(value_output),
+          static_cast<uint8_t *>(key_scales),
+          static_cast<uint8_t *>(value_scales), token_count, start_position,
+          head_count, head_dim, key_recipe, value_recipe);
+    } else {
+#endif
+      hipLaunchKernelGGL(sllm_kv_state_bf16_to_fp8_e5_block16_token_major_v2,
+                         grid, block, 0U, stream, key_input, value_input,
+                         static_cast<uint8_t *>(key_output),
+                         static_cast<uint8_t *>(value_output),
+                         static_cast<uint8_t *>(key_scales),
+                         static_cast<uint8_t *>(value_scales), token_count,
+                         start_position, head_count, head_dim, encoding);
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+    }
+#endif
+  } else if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) {
+    hipLaunchKernelGGL(sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1, grid,
+                       block, 0U, stream, key_input, value_input,
+                       static_cast<uint8_t *>(key_output),
+                       static_cast<uint8_t *>(value_output),
+                       static_cast<uint8_t *>(key_scales),
+                       static_cast<uint8_t *>(value_scales), token_count,
+                       start_position, head_count, head_dim, encoding);
+  } else if (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) {
+    hipLaunchKernelGGL(sllm_kv_state_bf16_to_mxfp8_e5_token_major_v1, grid,
+                       block, 0U, stream, key_input, value_input,
+                       static_cast<uint8_t *>(key_output),
+                       static_cast<uint8_t *>(value_output),
+                       static_cast<uint8_t *>(key_scales),
+                       static_cast<uint8_t *>(value_scales), token_count,
+                       start_position, head_count, head_dim, encoding);
   } else {
     return hipErrorInvalidValue;
   }

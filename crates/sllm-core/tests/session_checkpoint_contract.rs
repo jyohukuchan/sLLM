@@ -156,6 +156,10 @@ fn every_kv_encoding_preserves_value_scale_and_outer_planes_exactly() {
         KvCacheEncoding::Fp8E4M3Fn,
         KvCacheEncoding::Fp8E4M3FnStatic,
         KvCacheEncoding::Nvfp4,
+        KvCacheEncoding::Fp8E4M3Block16,
+        KvCacheEncoding::Fp8E5M2Block16,
+        KvCacheEncoding::Mxfp8E4,
+        KvCacheEncoding::Mxfp8E5,
     ] {
         let mut original = checkpoint();
         original.header.identity.kv_encoding = encoding;
@@ -163,7 +167,11 @@ fn every_kv_encoding_preserves_value_scale_and_outer_planes_exactly() {
             KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {
                 &[StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue]
             }
-            KvCacheEncoding::Fp8E4M3Fn => &[
+            KvCacheEncoding::Fp8E4M3Fn
+            | KvCacheEncoding::Fp8E4M3Block16
+            | KvCacheEncoding::Fp8E5M2Block16
+            | KvCacheEncoding::Mxfp8E4
+            | KvCacheEncoding::Mxfp8E5 => &[
                 StatePlaneKindV1::KvKey,
                 StatePlaneKindV1::KvValue,
                 StatePlaneKindV1::KvKeyScale,
@@ -211,6 +219,50 @@ fn every_kv_encoding_preserves_value_scale_and_outer_planes_exactly() {
             SessionCheckpoint::decode_with_identity(&bytes, Some(&original.header.identity))
                 .expect("restore exact encoding");
         assert_eq!(restored, original);
+    }
+}
+
+#[test]
+fn lowbit_checkpoint_tags_and_descriptor_digests_do_not_collide() {
+    let mut original = checkpoint();
+    original.header.identity.kv_encoding = KvCacheEncoding::Fp8E4M3Block16;
+    original.header.identity.kv_descriptor_digest = [0xe4; 32];
+    let bytes = original.encode().unwrap();
+
+    let mut wrong_logical = original.header.identity.clone();
+    wrong_logical.kv_encoding = KvCacheEncoding::Fp8E5M2Block16;
+    assert!(matches!(
+        SessionCheckpoint::decode_with_identity(&bytes, Some(&wrong_logical)),
+        Err(CheckpointError::IdentityMismatch {
+            field: "kv_encoding",
+            ..
+        })
+    ));
+
+    let mut wrong_physical_descriptor = original.header.identity.clone();
+    wrong_physical_descriptor.kv_descriptor_digest = [0xf0; 32];
+    assert!(matches!(
+        SessionCheckpoint::decode_with_identity(&bytes, Some(&wrong_physical_descriptor)),
+        Err(CheckpointError::IdentityMismatch {
+            field: "kv_descriptor_digest",
+            ..
+        })
+    ));
+
+    let mut mx = checkpoint();
+    mx.header.identity.kv_encoding = KvCacheEncoding::Mxfp8E4;
+    mx.header.identity.kv_descriptor_digest = [0x4d; 32];
+    let mx_bytes = mx.encode().unwrap();
+    for wrong_encoding in [KvCacheEncoding::Mxfp8E5, KvCacheEncoding::Fp8E4M3Block16] {
+        let mut wrong = mx.header.identity.clone();
+        wrong.kv_encoding = wrong_encoding;
+        assert!(matches!(
+            SessionCheckpoint::decode_with_identity(&mx_bytes, Some(&wrong)),
+            Err(CheckpointError::IdentityMismatch {
+                field: "kv_encoding",
+                ..
+            })
+        ));
     }
 }
 

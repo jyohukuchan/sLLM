@@ -1,0 +1,11 @@
+{
+  "schema_version": "sllm-phase54-kv-candidate-spec-v1",
+  "candidate_id": "production-control-v2",
+  "scale_selector": "independent-k-v-closed-enum-v1",
+  "rounding": "nearest-even",
+  "k_recipe": "floor",
+  "v_recipe": "floor",
+  "transform": "none",
+  "calibration_digest": null,
+  "descriptor_compatibility": "exact-production-v2"
+}

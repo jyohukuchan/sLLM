@@ -8,6 +8,7 @@ description = "Backend-independent sLLM runtime descriptors and contracts"
 
 [features]
 reviewed-qwen35-external-cache = []
+phase54-research = []
 
 [dependencies]
 serde.workspace = true

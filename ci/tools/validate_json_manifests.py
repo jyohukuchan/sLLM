@@ -172,6 +172,34 @@ ENGINE_PERFORMANCE_MATRIX_FILES = {
     "ci/matrix/engine-performance-render-v1.json",
     "ci/matrix/llama-phase5-v1.json",
 }
+PHASE46_SCHEMA_FILES = {
+    "ci/schema/phase46-tool-run-v1.schema.json",
+    "ci/schema/phase46-quality-result-v1.schema.json",
+    "ci/schema/phase46-benchmark-result-v1.schema.json",
+    "ci/schema/phase46-debug-dump-v1.schema.json",
+    "ci/schema/phase46-kv-quality-dataset-v1.schema.json",
+    "ci/schema/phase46-qwen35-quality-baseline-v1.schema.json",
+    "ci/schema/kv-cache-default-v1.schema.json",
+}
+PHASE46_POLICY_SCHEMA = "ci/schema/kv-cache-default-v1.schema.json"
+PHASE46_POLICY = "ci/policy/kv-cache-default-v1.json"
+PHASE46_DATASET_SCHEMA = "ci/schema/phase46-kv-quality-dataset-v1.schema.json"
+PHASE46_DATASET = "ci/fixtures/phase46-kv-quality-baseline-v1.json"
+PHASE53_REVISED_RECIPE_SCHEMA_FILES = {
+    "ci/schema/kv-cache-default-v2.schema.json",
+    "ci/schema/phase53-kv-fp8-block16-evidence-v2.schema.json",
+    "ci/schema/phase53-qwen35-kv-quality-candidate-v2.schema.json",
+    "ci/schema/phase53-performance-resource-evidence-v2.schema.json",
+    "ci/schema/phase53-kv-default-summary-v2.schema.json",
+    "ci/schema/phase53-runtime-mapping-candidate-v2.schema.json",
+}
+PHASE53_REVISED_RECIPE_POLICY_SCHEMA = "ci/schema/kv-cache-default-v2.schema.json"
+PHASE53_REVISED_RECIPE_POLICY = "ci/policy/kv-cache-default-v2.json"
+PHASE54_SCHEMA_FILES = {
+    "ci/schema/phase54-qwen35-kv-quality-research-v1.schema.json",
+    "ci/schema/phase54-kv-fp8-block16-research-evidence-v1.schema.json",
+    "ci/schema/phase54-qwen35-kv-attribution-research-v1.schema.json",
+}
 
 
 def h3_workspace_expectations() -> dict[str, object]:
@@ -1531,6 +1559,18 @@ def main() -> int:
             raise ContractError("Phase 6 A2 schema/contract is not registered for manifest validation")
         if not ENGINE_PERFORMANCE_SCHEMA_FILES.issubset(schema_names):
             raise ContractError("Phase 5 engine-performance schemas are not registered for manifest validation")
+        if not PHASE46_SCHEMA_FILES.issubset(schema_names):
+            raise ContractError("Phase 46 tool, result, debug-dump, quality, and KV-cache schemas are not registered for manifest validation")
+        if not PHASE53_REVISED_RECIPE_SCHEMA_FILES.issubset(schema_names):
+            raise ContractError("Phase 53 revised block16 recipe schemas are not registered for manifest validation")
+        if not PHASE54_SCHEMA_FILES.issubset(schema_names):
+            raise ContractError("Phase 54 KV-quality research schemas are not registered for manifest validation")
+        if not (ROOT / PHASE46_POLICY).is_file():
+            raise ContractError("Phase 46 KV-cache policy is not registered for manifest validation")
+        if not (ROOT / PHASE53_REVISED_RECIPE_POLICY).is_file():
+            raise ContractError("Phase 53 revised block16 policy is not registered for manifest validation")
+        if not (ROOT / PHASE46_DATASET).is_file():
+            raise ContractError("Phase 46 KV-quality dataset is not registered for manifest validation")
         missing_matrices = sorted(path for path in ENGINE_PERFORMANCE_MATRIX_FILES if not (ROOT / path).is_file())
         if missing_matrices:
             raise ContractError(
@@ -1555,6 +1595,26 @@ def main() -> int:
                 errors.extend(
                     f"{path.relative_to(ROOT)}: {error.message}"
                     for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(phase6_a2_contract)
+                )
+            if path.relative_to(ROOT).as_posix() == PHASE46_POLICY_SCHEMA:
+                phase46_policy = read_json(ROOT / PHASE46_POLICY)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(phase46_policy)
+                )
+            if path.relative_to(ROOT).as_posix() == PHASE53_REVISED_RECIPE_POLICY_SCHEMA:
+                phase53_policy = read_json(ROOT / PHASE53_REVISED_RECIPE_POLICY)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(
+                        schema, format_checker=FormatChecker()
+                    ).iter_errors(phase53_policy)
+                )
+            if path.relative_to(ROOT).as_posix() == PHASE46_DATASET_SCHEMA:
+                phase46_dataset = read_json(ROOT / PHASE46_DATASET)
+                errors.extend(
+                    f"{path.relative_to(ROOT)}: {error.message}"
+                    for error in Draft202012Validator(schema, format_checker=FormatChecker()).iter_errors(phase46_dataset)
                 )
             if path.relative_to(ROOT).as_posix() == MODEL_LOCK_V2_SCHEMA:
                 model_lock_v2 = read_json(ROOT / MODEL_LOCK_V2_PATH)

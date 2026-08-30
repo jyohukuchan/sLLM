@@ -92,7 +92,8 @@ pub enum Encoding {
     /// Keeping scales out of the value payload makes the safetensors layout,
     /// provider bindings, and resident memory accounting explicit.  OCP and
     /// FNUZ are selected by the physical [`DType`], never by reinterpreting the
-    /// same byte stream.
+    /// same byte stream. Outer/tensor scales are FP32. KV block16 uses
+    /// `KBlock { block_size: 16 }` with raw-U8 E8M0 scales.
     Fp8Scaled {
         granularity: Fp8ScaleGranularity,
         scale_dtype: DType,
@@ -185,10 +186,18 @@ impl Encoding {
                         return Err(EncodingError::ZeroBlockSize);
                     }
                 }
-                if !matches!(dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ) {
+                if !matches!(dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ | DType::F8E5M2) {
                     return Err(EncodingError::Fp8StorageRequired { dtype });
                 }
-                if scale_dtype != DType::F32 {
+                let valid_scale = match granularity {
+                    Fp8ScaleGranularity::KBlock {
+                        block_size: 16 | 32,
+                    } => {
+                        matches!(scale_dtype, DType::F32 | DType::U8)
+                    }
+                    _ => scale_dtype == DType::F32,
+                };
+                if !valid_scale {
                     return Err(EncodingError::InvalidScaleDType { dtype: scale_dtype });
                 }
                 if matches!(resident, Fp8ResidentRepresentation::ConvertedBf16)
@@ -250,7 +259,7 @@ impl fmt::Display for EncodingError {
             Self::Fp8StorageRequired { dtype } => {
                 write!(
                     formatter,
-                    "scaled FP8 storage must use an E4M3 dtype, got {dtype}"
+                    "scaled FP8 storage must use an E4M3 or E5M2 dtype, got {dtype}"
                 )
             }
             Self::Nvfp4BlockScaleMustBeE4M3Fn { dtype } => {
@@ -277,3 +286,36 @@ impl fmt::Display for EncodingError {
 }
 
 impl std::error::Error for EncodingError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kv_fp8_block16_accepts_e8m0_without_broadening_outer_scale_contract() {
+        let block16 = Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::KBlock { block_size: 16 },
+            scale_dtype: DType::U8,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        };
+        for dtype in [DType::F8E4M3Fn, DType::F8E4M3FnuZ, DType::F8E5M2] {
+            assert_eq!(block16.validate(dtype), Ok(()));
+        }
+        let block32 = Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::KBlock { block_size: 32 },
+            scale_dtype: DType::U8,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        };
+        assert_eq!(block32.validate(DType::F8E4M3Fn), Ok(()));
+        assert_eq!(block32.validate(DType::F8E5M2), Ok(()));
+        let outer_e8m0 = Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::OuterDimension,
+            scale_dtype: DType::U8,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        };
+        assert!(matches!(
+            outer_e8m0.validate(DType::F8E4M3Fn),
+            Err(EncodingError::InvalidScaleDType { .. })
+        ));
+    }
+}

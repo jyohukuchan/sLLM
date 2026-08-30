@@ -394,7 +394,7 @@ fn print_help<W: Write>(output: &mut W) -> Result<(), String> {
     .map_err(|_| "chat output failed".to_owned())?;
     writeln!(
         output,
-        "  [--context-length N] [--kv-cache-encoding fp16] (defaults: model recommendation, fp16)"
+        "  [--context-length N] [--kv-cache-encoding fp16|kv-mxfp8-e4] (defaults: model recommendation, reviewed Qwen3.5-4B BF16 dense auto resolves to kv-mxfp8-e4)"
     )
     .map_err(|_| "chat output failed".to_owned())?;
     writeln!(

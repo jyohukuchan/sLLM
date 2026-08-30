@@ -17,8 +17,9 @@ use std::sync::{Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use sllm_core::{
-    DType, Encoding, ExecutionSessionId, KvCacheEncoding, KvMemoryKind, KvStateAppendRequest,
-    KvStateDescriptor, KvStateId, KvStateSnapshot, StateForkAuditV1, StateForkModeV1,
+    DType, Encoding, ExecutionSessionId, KvCacheEncoding, KvFp8PhysicalVariant, KvMemoryKind,
+    KvStateAppendRequest, KvStateDescriptor, KvStateId, KvStateSnapshot, StateForkAuditV1,
+    StateForkModeV1,
 };
 use sllm_hip_sys as sys;
 
@@ -37,8 +38,12 @@ const MAX_FINITE_TIMEOUT_MS: u32 = u32::MAX - 1;
 const KERNEL_SYMBOL: &str = "kv_state.bf16_to_f16_token_major.v2";
 const DEVICE_SYMBOL: &str = "sllm_kv_state_bf16_to_f16_token_major_v2";
 
-fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
-    match descriptor.cache_encoding() {
+pub(crate) fn native_kv_storage(
+    descriptor: KvStateDescriptor,
+    expected_target: Option<&str>,
+) -> Result<(u32, u32, u32, u32), RuntimeError> {
+    let target = expected_target.map(logical_gcn_arch_name);
+    let storage = match descriptor.cache_encoding() {
         KvCacheEncoding::Fp16 => (
             sys::SLLM_TENSOR_DTYPE_F16,
             sys::SLLM_HIP_KV_ENCODING_FP16_V1,
@@ -63,7 +68,53 @@ fn native_kv_storage(descriptor: KvStateDescriptor) -> (u32, u32, u32, u32) {
             16,
             sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
         ),
-    }
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidKvStateDescriptor,
+                "KV FP8 block16 has been retired; use standard OCP MXFP8 E4M3 or explicit FP16",
+            ));
+        }
+        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
+            let mxfp8 = descriptor.kv_mxfp8_descriptor().ok_or_else(|| {
+                RuntimeError::local(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    "KV MXFP8 encoding is missing its physical descriptor",
+                )
+            })?;
+            let compatible = matches!(
+                (target, mxfp8.physical_variant()),
+                (None, _)
+                    | (
+                        Some("gfx1030" | "gfx1201" | "gfx942"),
+                        KvFp8PhysicalVariant::OcpE4M3Fn
+                    )
+                    | (Some("gfx1030"), KvFp8PhysicalVariant::OcpE5M2)
+            );
+            if !compatible {
+                return Err(RuntimeError::new(
+                    RuntimeStatus::InvalidKvStateDescriptor,
+                    format!(
+                        "standard OCP MXFP8 physical variant {:?} is incompatible with target {}",
+                        mxfp8.physical_variant(),
+                        expected_target.unwrap_or("unspecified")
+                    ),
+                ));
+            }
+            let (dtype, encoding) = match mxfp8.physical_variant() {
+                KvFp8PhysicalVariant::OcpE4M3Fn => (
+                    sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                    sys::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                ),
+                KvFp8PhysicalVariant::OcpE5M2 => (
+                    sys::SLLM_TENSOR_DTYPE_F8_E5M2,
+                    sys::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
+                ),
+                KvFp8PhysicalVariant::E4M3FnuZ => unreachable!(),
+            };
+            (dtype, encoding, 32, sys::SLLM_TENSOR_DTYPE_U8)
+        }
+    };
+    Ok(storage)
 }
 
 const RDNA_CONTIGUOUS_LONG_KV_MIN_TOKENS: u64 = 65_536;
@@ -140,7 +191,8 @@ impl KvStateResource {
             ));
         }
         let context_raw = context.raw_handle()?;
-        let (dtype, encoding, block_size, scale_dtype) = native_kv_storage(descriptor);
+        let (dtype, encoding, block_size, scale_dtype) =
+            native_kv_storage(descriptor, context.expected_target())?;
         let static_scales = descriptor.static_fp8_scales();
         let mut reserved = [0_u32; 4];
         if let Some((key, value)) = static_scales {
@@ -233,6 +285,9 @@ impl KvStateResource {
             || descriptor.layout() != self.inner.descriptor.layout()
             || descriptor.cache_encoding() != self.inner.descriptor.cache_encoding()
             || descriptor.static_fp8_scales() != self.inner.descriptor.static_fp8_scales()
+            || descriptor.kv_fp8_block16_descriptor()
+                != self.inner.descriptor.kv_fp8_block16_descriptor()
+            || descriptor.kv_mxfp8_descriptor() != self.inner.descriptor.kv_mxfp8_descriptor()
         {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidKvStateDescriptor,
@@ -257,7 +312,8 @@ impl KvStateResource {
             reserved: [0; 4],
         };
         let mut raw_child = std::ptr::null_mut();
-        let (dtype, encoding, block_size, scale_dtype) = native_kv_storage(descriptor);
+        let (dtype, encoding, block_size, scale_dtype) =
+            native_kv_storage(descriptor, self.inner.context.expected_target())?;
         let static_scales = descriptor.static_fp8_scales();
         let mut reserved = [0_u32; 4];
         if let Some((key, value)) = static_scales {
@@ -1326,28 +1382,32 @@ fn validate_view_info(
     descriptor: KvStateDescriptor,
 ) -> Result<(), RuntimeError> {
     let layout = descriptor.layout();
+    let logical_head_dim = layout.head_dim() as u64;
+    let physical_head_dim = match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            logical_head_dim.div_ceil(16) * 16
+        }
+        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => logical_head_dim.div_ceil(32) * 32,
+        _ => logical_head_dim,
+    };
     let token_stride = (layout.heads() as u64)
-        .checked_mul(layout.head_dim() as u64)
+        .checked_mul(physical_head_dim)
         .ok_or_else(|| {
             RuntimeError::local(RuntimeStatus::MetadataOverflow, "KV stride overflow")
         })?;
-    let (expected_dtype, expected_encoding) = match descriptor.cache_encoding() {
-        KvCacheEncoding::Fp16 => (
-            sys::SLLM_TENSOR_DTYPE_F16,
-            sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
-        ),
-        KvCacheEncoding::Fp8E4M3Fn => (
-            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
-        ),
-        KvCacheEncoding::Fp8E4M3FnStatic => (
-            sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32,
-        ),
-        KvCacheEncoding::Nvfp4 => (
-            sys::SLLM_TENSOR_DTYPE_U8,
-            sys::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
-        ),
+    let expected_dtype = native_kv_storage(descriptor, context.expected_target())?.0;
+    let expected_encoding = match descriptor.cache_encoding() {
+        KvCacheEncoding::Fp16 => sys::SLLM_TENSOR_ENCODING_UNQUANTIZED,
+        KvCacheEncoding::Fp8E4M3Fn | KvCacheEncoding::Fp8E4M3FnStatic => {
+            sys::SLLM_TENSOR_ENCODING_FP8_OUTER_F32
+        }
+        KvCacheEncoding::Nvfp4 => sys::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32,
+        KvCacheEncoding::Fp8E4M3Block16 | KvCacheEncoding::Fp8E5M2Block16 => {
+            sys::SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0
+        }
+        KvCacheEncoding::Mxfp8E4 | KvCacheEncoding::Mxfp8E5 => {
+            sys::SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
+        }
     };
     if info.struct_size != size_of::<sys::sllm_kv_view_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
@@ -1367,8 +1427,8 @@ fn validate_view_info(
         || info.capacity_tokens != descriptor.capacity()
         || info.context_identity != context.raw_handle()?.as_ptr() as usize as u64
         || info.state_identity != raw_state as u64
-        || info.k_stride_elements != [token_stride, layout.head_dim() as u64, 1]
-        || info.v_stride_elements != [token_stride, layout.head_dim() as u64, 1]
+        || info.k_stride_elements != [token_stride, physical_head_dim, 1]
+        || info.v_stride_elements != [token_stride, physical_head_dim, 1]
         || info.physical_page_bytes == 0
         || info.tokens_per_page == 0
         || info.mapped_token_capacity > descriptor.capacity()
@@ -1467,6 +1527,26 @@ fn validate_append_info(
             sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1,
             "kv_state.bf16_to_nvfp4_token_major.v1",
             "sllm_kv_state_bf16_to_nvfp4_token_major_v1",
+        ),
+        KvCacheEncoding::Fp8E4M3Block16 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2,
+            "kv_state.bf16_to_fp8_e4_block16_token_major.v2",
+            "sllm_kv_state_bf16_to_fp8_e4_block16_token_major_v2",
+        ),
+        KvCacheEncoding::Fp8E5M2Block16 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2,
+            "kv_state.bf16_to_fp8_e5_block16_token_major.v2",
+            "sllm_kv_state_bf16_to_fp8_e5_block16_token_major_v2",
+        ),
+        KvCacheEncoding::Mxfp8E4 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1,
+            "kv_state.bf16_to_mxfp8_e4_token_major.v1",
+            "sllm_kv_state_bf16_to_mxfp8_e4_token_major_v1",
+        ),
+        KvCacheEncoding::Mxfp8E5 => (
+            sys::SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1,
+            "kv_state.bf16_to_mxfp8_e5_token_major.v1",
+            "sllm_kv_state_bf16_to_mxfp8_e5_token_major_v1",
         ),
     };
     let expected_rows = request
@@ -1681,12 +1761,15 @@ fn scaled_prefill_gemm_enabled(
 ) -> bool {
     !force_baseline
         && expected_target == Some("gfx1030")
-        && opt_in.is_none_or(|value| value == "1")
         && query_count >= 1024
         && query_heads == 16
         && kv_heads == 4
         && head_dim == 256
-        && encoding == KvCacheEncoding::Fp16
+        && match encoding {
+            KvCacheEncoding::Fp16 => opt_in.is_none_or(|value| value == "1"),
+            KvCacheEncoding::Mxfp8E4 => opt_in.is_some_and(|value| value == "1"),
+            _ => false,
+        }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2116,6 +2199,76 @@ pub fn expected_storage_offset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn block16_descriptor(
+        encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+    ) -> KvStateDescriptor {
+        KvStateDescriptor::new_with_kv_fp8_block16(0, 17, 4, 257, encoding, physical_variant)
+            .unwrap()
+    }
+
+    #[test]
+    fn block16_native_storage_is_retired_for_every_target() {
+        let ocp = block16_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        );
+        let fnuz = block16_descriptor(
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::E4M3FnuZ,
+        );
+        for (descriptor, target) in [
+            (ocp, "gfx1201"),
+            (ocp, "gfx1030"),
+            (fnuz, "gfx942:sramecc+:xnack-"),
+        ] {
+            let error = native_kv_storage(descriptor, Some(target)).unwrap_err();
+            assert_eq!(error.status(), RuntimeStatus::InvalidKvStateDescriptor);
+            assert!(error.message().contains("retired"));
+        }
+    }
+
+    #[test]
+    fn standard_mxfp8_e4_native_storage_supports_initial_amd_targets() {
+        let e4 = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            17,
+            4,
+            257,
+            KvCacheEncoding::Mxfp8E4,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let e5 = KvStateDescriptor::new_with_kv_mxfp8(
+            0,
+            17,
+            4,
+            257,
+            KvCacheEncoding::Mxfp8E5,
+            KvFp8PhysicalVariant::OcpE5M2,
+        )
+        .unwrap();
+        for target in ["gfx1030", "gfx1201", "gfx942:sramecc+:xnack-"] {
+            assert_eq!(
+                native_kv_storage(e4, Some(target)).unwrap().0,
+                sys::SLLM_TENSOR_DTYPE_F8_E4M3_FN
+            );
+        }
+        assert_eq!(
+            native_kv_storage(e5, Some("gfx1030")).unwrap().0,
+            sys::SLLM_TENSOR_DTYPE_F8_E5M2
+        );
+        for (descriptor, target) in [
+            (e4, "unknown"),
+            (e5, "gfx1201"),
+            (e5, "gfx942:sramecc+:xnack-"),
+        ] {
+            let error = native_kv_storage(descriptor, Some(target)).unwrap_err();
+            assert_eq!(error.status(), RuntimeStatus::InvalidKvStateDescriptor);
+            assert!(error.message().contains("standard OCP MXFP8"));
+        }
+    }
 
     #[test]
     fn long_rdna_and_gfx942_use_only_the_fixed_contiguous_provider() {
@@ -2914,7 +3067,7 @@ mod tests {
     }
 
     #[test]
-    fn scaled_prefill_gemm_guard_is_exact_target_shape_and_default_on() {
+    fn scaled_prefill_gemm_guard_keeps_fp16_default_on_and_mxfp8_explicit() {
         let enabled = Some(std::ffi::OsStr::new("1"));
         assert!(scaled_prefill_gemm_enabled(
             Some("gfx1030"),
@@ -2923,6 +3076,16 @@ mod tests {
             4,
             256,
             KvCacheEncoding::Fp16,
+            enabled,
+            false,
+        ));
+        assert!(scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
             enabled,
             false,
         ));
@@ -2955,6 +3118,16 @@ mod tests {
             4,
             256,
             KvCacheEncoding::Fp16,
+            None,
+            false,
+        ));
+        assert!(!scaled_prefill_gemm_enabled(
+            Some("gfx1030"),
+            1024,
+            16,
+            4,
+            256,
+            KvCacheEncoding::Mxfp8E4,
             None,
             false,
         ));

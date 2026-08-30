@@ -1,0 +1,269 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase54-qwen35-kv-attribution-research-v1.schema.json",
+  "title": "sLLM Phase 54 Qwen3.5 KV attribution research report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema", "schema_version", "state", "research_only", "identity", "target",
+    "device_index", "layer", "semantics", "audit_semantics_verified", "reference_mode",
+    "intervention_mode", "kv_state", "session_scope", "sequential_residents", "repeats",
+    "cleanup"
+  ],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase54-qwen35-kv-attribution-research-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase54-qwen35-kv-attribution-research-v1"},
+    "state": {"const": "PASS"},
+    "research_only": {"const": true},
+    "identity": {"$ref": "#/$defs/identity"},
+    "target": {"const": "gfx1030"},
+    "device_index": {"type": "integer", "minimum": 0},
+    "layer": {"enum": [3, 7, 11, 15, 19, 23, 27, 31]},
+    "semantics": {"const": "fp16-state/block16-roundtrip"},
+    "audit_semantics_verified": {"const": true},
+    "reference_mode": {"const": "off"},
+    "intervention_mode": {"enum": ["key-only", "value-only", "key-and-value"]},
+    "kv_state": {"const": "fp16-state"},
+    "session_scope": {"const": "single-process-single-hip-execution-session"},
+    "sequential_residents": {"const": true},
+    "repeats": {
+      "type": "array",
+      "oneOf": [
+        {
+          "minItems": 1,
+          "maxItems": 1,
+          "prefixItems": [
+            {"allOf": [
+              {"$ref": "#/$defs/repeat"},
+              {"properties": {"repeat": {"const": 1}}}
+            ]}
+          ],
+          "items": false
+        },
+        {
+          "minItems": 3,
+          "maxItems": 3,
+          "prefixItems": [
+            {"allOf": [
+              {"$ref": "#/$defs/repeat"},
+              {"properties": {"repeat": {"const": 1}}}
+            ]},
+            {"allOf": [
+              {"$ref": "#/$defs/repeat"},
+              {"properties": {"repeat": {"const": 2}}}
+            ]},
+            {"allOf": [
+              {"$ref": "#/$defs/repeat"},
+              {"properties": {"repeat": {"const": 3}}}
+            ]}
+          ],
+          "items": false
+        }
+      ]
+    },
+    "cleanup": {"$ref": "#/$defs/cleanup"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"intervention_mode": {"const": "key-only"}}},
+      "then": {"properties": {"repeats": {"items": {"properties": {"comparison": {"properties": {"observed_encoding": {"const": "fp16-state/key-only"}}}}}}}}
+    },
+    {
+      "if": {"properties": {"intervention_mode": {"const": "value-only"}}},
+      "then": {"properties": {"repeats": {"items": {"properties": {"comparison": {"properties": {"observed_encoding": {"const": "fp16-state/value-only"}}}}}}}}
+    },
+    {
+      "if": {"properties": {"intervention_mode": {"const": "key-and-value"}}},
+      "then": {"properties": {"repeats": {"items": {"properties": {"comparison": {"properties": {"observed_encoding": {"const": "fp16-state/key-and-value"}}}}}}}}
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "finite_number": {
+      "type": "number",
+      "minimum": -1.7976931348623157e308,
+      "maximum": 1.7976931348623157e308,
+      "oneOf": [{"minimum": 0}, {"exclusiveMaximum": 0}]
+    },
+    "finite_nonnegative": {
+      "allOf": [{"$ref": "#/$defs/finite_number"}, {"minimum": 0}]
+    },
+    "finite_unit": {
+      "allOf": [{"$ref": "#/$defs/finite_number"}, {"minimum": 0}, {"maximum": 1}]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dataset_sha256", "model_lock_fingerprint", "model_lock_sha256",
+        "derived_lock_fingerprint", "derived_lock_sha256", "binary_sha256"
+      ],
+      "properties": {
+        "dataset_sha256": {"const": "sha256:a2252d882ffd7e1fbb546d86b2b573bd2410467382c7da874f4fbd3dc8adc77d"},
+        "model_lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"},
+        "model_lock_sha256": {"$ref": "#/$defs/digest"},
+        "derived_lock_fingerprint": {"$ref": "#/$defs/digest"},
+        "derived_lock_sha256": {"$ref": "#/$defs/digest"},
+        "binary_sha256": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "repeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repeat", "order", "reference_released_before_intervention",
+        "intervention_released_after_repeat", "comparison"
+      ],
+      "properties": {
+        "repeat": {"type": "integer", "minimum": 1, "maximum": 3},
+        "order": {"const": ["fp16-state/off", "fp16-state/intervention"]},
+        "reference_released_before_intervention": {"const": true},
+        "intervention_released_after_repeat": {"const": true},
+        "comparison": {"$ref": "#/$defs/comparison"}
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_encoding", "observed_encoding", "aggregate", "cases"],
+      "properties": {
+        "reference_encoding": {"const": "fp16-state/off"},
+        "observed_encoding": {"enum": ["fp16-state/key-only", "fp16-state/value-only", "fp16-state/key-and-value"]},
+        "aggregate": {"$ref": "#/$defs/aggregate"},
+        "cases": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "prefixItems": [
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b001"}, "length": {"const": 1}, "long": {"const": false}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b015"}, "length": {"const": 15}, "long": {"const": false}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b016"}, "length": {"const": 16}, "long": {"const": false}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b017"}, "length": {"const": 17}, "long": {"const": false}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b255"}, "length": {"const": 255}, "long": {"const": true}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b256"}, "length": {"const": 256}, "long": {"const": true}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b257"}, "length": {"const": 257}, "long": {"const": true}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b511"}, "length": {"const": 511}, "long": {"const": true}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b512"}, "length": {"const": 512}, "long": {"const": true}}}]},
+            {"allOf": [{"$ref": "#/$defs/case"}, {"properties": {"case_id": {"const": "b513"}, "length": {"const": 513}, "long": {"const": true}}}]}
+          ],
+          "items": false
+        }
+      }
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_count", "metric_sample_counts", "kld_p99", "top1_agreement",
+        "reference_nll", "observed_nll", "nll_delta", "task_score_delta",
+        "long_context_score_delta", "first_top1_divergence", "maximum_logit_delta",
+        "finite", "hip_dispatches", "fallback_used", "all_dispatches_hip"
+      ],
+      "properties": {
+        "selected_count": {"const": 20},
+        "metric_sample_counts": {"$ref": "#/$defs/metric_sample_counts"},
+        "kld_p99": {"$ref": "#/$defs/finite_nonnegative"},
+        "top1_agreement": {"$ref": "#/$defs/finite_unit"},
+        "reference_nll": {"$ref": "#/$defs/finite_number"},
+        "observed_nll": {"$ref": "#/$defs/finite_number"},
+        "nll_delta": {"$ref": "#/$defs/finite_number"},
+        "task_score_delta": {"$ref": "#/$defs/finite_unit"},
+        "long_context_score_delta": {"$ref": "#/$defs/finite_unit"},
+        "first_top1_divergence": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/top1_divergence"}]},
+        "maximum_logit_delta": {"$ref": "#/$defs/logit_delta_locator"},
+        "finite": {"const": true},
+        "hip_dispatches": {"type": "integer", "minimum": 1},
+        "fallback_used": {"const": false},
+        "all_dispatches_hip": {"const": true}
+      }
+    },
+    "metric_sample_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kld", "top1", "nll", "task", "long-context"],
+      "properties": {
+        "kld": {"const": 20},
+        "top1": {"const": 20},
+        "nll": {"const": 10},
+        "task": {"const": 10},
+        "long-context": {"const": 12}
+      }
+    },
+    "top1_divergence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "row", "measured_row_index", "reference_top1", "observed_top1"],
+      "properties": {
+        "case_id": {"enum": ["b001", "b015", "b016", "b017", "b255", "b256", "b257", "b511", "b512", "b513"]},
+        "row": {"enum": ["prefill", "decode"]},
+        "measured_row_index": {"type": "integer", "minimum": 0, "maximum": 19},
+        "reference_top1": {"type": "integer", "minimum": 0, "maximum": 248319},
+        "observed_top1": {"type": "integer", "minimum": 0, "maximum": 248319}
+      }
+    },
+    "logit_delta_locator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "row", "measured_row_index", "logit_index", "max_abs_logit_delta"],
+      "properties": {
+        "case_id": {"enum": ["b001", "b015", "b016", "b017", "b255", "b256", "b257", "b511", "b512", "b513"]},
+        "row": {"enum": ["prefill", "decode"]},
+        "measured_row_index": {"type": "integer", "minimum": 0, "maximum": 19},
+        "logit_index": {"type": "integer", "minimum": 0, "maximum": 248319},
+        "max_abs_logit_delta": {"$ref": "#/$defs/finite_nonnegative"}
+      }
+    },
+    "nll": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "observed", "delta"],
+      "properties": {
+        "reference": {"$ref": "#/$defs/finite_number"},
+        "observed": {"$ref": "#/$defs/finite_number"},
+        "delta": {"$ref": "#/$defs/finite_number"}
+      }
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference_top1", "observed_top1", "top1_match", "kld", "max_abs_logit_delta",
+        "max_abs_logit_index", "reference_finite", "observed_finite"
+      ],
+      "properties": {
+        "reference_top1": {"type": "integer", "minimum": 0, "maximum": 248319},
+        "observed_top1": {"type": "integer", "minimum": 0, "maximum": 248319},
+        "top1_match": {"type": "boolean"},
+        "kld": {"$ref": "#/$defs/finite_nonnegative"},
+        "max_abs_logit_delta": {"$ref": "#/$defs/finite_nonnegative"},
+        "max_abs_logit_index": {"type": "integer", "minimum": 0, "maximum": 248319},
+        "reference_finite": {"const": true},
+        "observed_finite": {"const": true}
+      }
+    },
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["case_id", "length", "long", "prefill_nll", "prefill", "decode"],
+      "properties": {
+        "case_id": {"type": "string", "pattern": "^b[0-9]{3}$"},
+        "length": {"type": "integer", "minimum": 1, "maximum": 513},
+        "long": {"type": "boolean"},
+        "prefill_nll": {"$ref": "#/$defs/nll"},
+        "prefill": {"$ref": "#/$defs/row"},
+        "decode": {"$ref": "#/$defs/row"}
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["retryable", "durable", "poisoned", "terminal_zero"],
+      "properties": {
+        "retryable": {"const": 0},
+        "durable": {"const": 0},
+        "poisoned": {"const": false},
+        "terminal_zero": {"const": true}
+      }
+    }
+  }
+}

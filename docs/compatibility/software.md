@@ -481,6 +481,32 @@ HBM/GTT baseline復帰を確認した。このsoftware tupleとcaseだけを追�
 batch/parallel、他modelへ一般化しない。software lifecycleは`experimental`のままで、
 [Phase 52 summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正とする。
 
+### 2026-08-27 Phase53 local RDNA descriptor v1履歴とv2 follow-up
+
+Phase 53の追加reportはcanonical local RDNAのexact `gfx1030`／`gfx1201`、binary、model、dataset、policy identityを固定するが、
+OS／kernel／driver tuple全体はreport内で再固定していない。このため新しいsoftware tupleの検証とは扱わず、実機format／品質scopeを
+exact targetへだけ限定する。exact target専用release binaryのSHA-256はgfx1030 quality
+`513318543504c9d0e1a8fe4af43dcae5da7ffe7ca5ae2af4132a993fc5eb1754`、gfx1201 quality
+`97de3a1711843aef2fc3e07473dc13fd40875067ecd485ace852d7705988914a`、format correctnessはgfx1030
+`4e09989f6d2f3b38eeaa1b6aca70e4b81c5c57c08331e0c5fd4bb670faf04c66`、gfx1201
+`40518586be413d2b370a12e2dba05ff2ba3661392853d64a224b48e38a294e3d`である。
+
+このtupleでdescriptor v1 block16／standard OCP MXFP8のGPU correctnessはPASSしたが、freeze済みquality threshold未達により
+gfx1030／gfx1201とも旧recipeを`retain-fp16`とした。performance/resourceはearly-stopで未実行、旧runtime mapping候補は空、
+software lifecycleは`experimental`のままとする。このbinary／report evidenceはdescriptor v1履歴で、v2へ流用しない。
+gfx942はfresh Phase 53 tuple evidenceがなく`insufficient-evidence`であり、
+別OS、kernel、driver、ROCm、SKUへ推論しない。summaryと個別digestは
+[Phase 53履歴](../history/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正とする。
+2026-08-27のユーザー指示によりMI300X実機は追加検証項目がまとまるまで延期し、Hot Aisleの固定IP疎通をVMまたはsoftware tupleの
+存在証拠として扱わない。
+
+2026-08-30のユーザー決定でblock16 production経路を廃止し、上記結果を履歴へ固定した。同じsoftware tupleで
+reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256の省略時KVはstandard OCP
+`kv-mxfp8-e4-v1`となる。exact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`でOCP E4M3FN／block 32／E8M0を使い、
+明示`fp16`をrollbackとして残す。V620 `gfx1030`とR9700 `gfx1201`ではfresh direct GPU byte／attention oracleをPASSしたが、
+一回のfull-model測定でgfx1201 top-1一致が`0.85`となりfreeze済み`>=0.99`に未達だった。default変更はユーザー明示決定に
+基づくN2であり、software lifecycleまたはrelease品質の自動昇格ではない。gfx942はfresh実GPU evidence未取得である。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

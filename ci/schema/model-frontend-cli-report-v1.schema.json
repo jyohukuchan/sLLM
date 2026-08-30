@@ -257,7 +257,8 @@
         "placement_safety_reserve_bytes": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
         "workspace_separate_allocation_bytes": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "workspace_arena_bytes": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4"]},
+        "kv_cache_encoding": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "kv_cache_selection": {"$ref": "#/$defs/kv_cache_selection"},
         "image_count": {"type": "integer", "minimum": 0, "maximum": 2},
         "mtp_selection": {"enum": ["target-only", "forced", "auto"]},
         "mtp_draft_width_requested": {"type": ["integer", "null"], "minimum": 0, "maximum": 8},
@@ -372,6 +373,19 @@
           }
         }
       ]
+    },
+    "kv_cache_selection": {
+      "type": "object", "additionalProperties": false,
+      "required": ["requested", "resolved", "selection_source", "reason", "physical_variant", "descriptor_id", "policy_version"],
+      "properties": {
+        "requested": {"enum": ["auto", "fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "resolved": {"enum": ["fp16", "fp8", "fp8-static", "nvfp4", "kv-mxfp8-e4", "kv-mxfp8-e5"]},
+        "selection_source": {"enum": ["model-entry-explicit", "process-explicit", "mxfp8-e4-default", "model-fixed-fp16"]},
+        "reason": {"type": "string", "minLength": 1},
+        "physical_variant": {"type": ["string", "null"], "enum": [null, "E4M3-FNUZ", "E4M3-OCP", "E5M2-software", "E5M2-OCP"]},
+        "descriptor_id": {"type": ["string", "null"], "enum": [null, "kv-mxfp8-e4-v1", "kv-mxfp8-e5-v1"]},
+        "policy_version": {"type": "integer", "minimum": 1}
+      }
     },
     "dense_execution": {
       "allOf": [

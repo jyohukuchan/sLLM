@@ -259,6 +259,7 @@ bool causal_attention_gqa4_p32_selector_contract() {
 bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kGfx1201Wave = 1U << 0U;
   constexpr uint32_t kDecodeWaveSplit = 1U << 1U;
+  constexpr uint32_t kDecodeWaveQPreload = 1U << 5U;
   constexpr uint32_t kDecodeGqa4SplitP32 = 1U << 4U;
   constexpr uint32_t kPrefillGqa4 = 1U << 6U;
   constexpr uint32_t kPrefillGqa4QTile4 = 1U << 7U;
@@ -387,7 +388,13 @@ bool causal_attention_target_scoped_selector_contract() {
                      SLLM_HIP_KV_ENCODING_FP8_V1) &&
       expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 8U, 4U,
                      256U) &&
-      expect_gfx1201(4096U, 1U, kGfx1201Wave, 16U, 4U, 128U);
+      expect_gfx1201(4096U, 1U, kGfx1201Wave, 16U, 4U, 128U) &&
+      // Explicit OCP MXFP8 uses the packed-KV generic routes.  It must not
+      // select any FP16-only GQA4/specialized provider.
+      expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit, 16U, 4U, 256U,
+                     SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
+      select(4096U, 1U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1,
+             "gfx1030") == (kDecodeWaveSplit | kDecodeWaveQPreload);
 
   // Every environment spelling must remain inert for gfx942.  Test each
   // candidate independently and then all candidates together.
@@ -5187,14 +5194,30 @@ bool kv_lowbit_create_query_and_recipe_contract() {
         view.mapped_token_capacity == create.capacity_tokens &&
         view.tokens_per_page == 1U &&
         view.committed_bytes_per_plane == bytes_per_plane;
-    if (!valid) {
+    const uint64_t row_stride =
+        create.encoding == SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                create.encoding == SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+            ? ((static_cast<uint64_t>(create.head_dim) + 15U) / 16U) * 16U
+        : create.encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                create.encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+            ? ((static_cast<uint64_t>(create.head_dim) + 31U) / 32U) * 32U
+            : create.head_dim;
+    const bool stride_valid = view.k_stride_elements[0] == 4U * row_stride &&
+                              view.k_stride_elements[1] == row_stride &&
+                              view.k_stride_elements[2] == 1U &&
+                              view.v_stride_elements[0] == 4U * row_stride &&
+                              view.v_stride_elements[1] == row_stride &&
+                              view.v_stride_elements[2] == 1U;
+    const bool metadata_valid = valid && stride_valid;
+    if (!metadata_valid) {
       std::cerr << "low-bit KV query metadata mismatch: dtype=" << view.dtype
                 << " encoding=" << view.encoding
                 << " memory_kind=" << view.memory_kind
                 << " mapped=" << view.mapped_token_capacity
                 << " tokens_per_page=" << view.tokens_per_page
                 << " committed=" << view.committed_bytes_per_plane
-                << " expected_committed=" << bytes_per_plane << '\n';
+                << " expected_committed=" << bytes_per_plane
+                << " row_stride=" << row_stride << '\n';
     }
     sllm_kv_view_t *snapshot = nullptr;
     uint8_t output[2]{};
@@ -5223,7 +5246,7 @@ bool kv_lowbit_create_query_and_recipe_contract() {
     }
     return expect_status(sllm_kv_state_release(&state, &error.sink),
                          SLLM_STATUS_OK, "low-bit KV release", error) &&
-           state == nullptr && valid && readback_rejected;
+           state == nullptr && metadata_valid && readback_rejected;
   };
 
   bool valid = query_recipe(
@@ -5246,6 +5269,120 @@ bool kv_lowbit_create_query_and_recipe_contract() {
                         SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
                         "invalid NVFP4 KV recipe", error) &&
           invalid_state == nullptr;
+  // The historical block16 encodings remain reserved ABI values but are no
+  // longer accepted by state creation.
+  create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  create.encoding = SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V1;
+  create.block_size = 16U;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_U8;
+  sllm_kv_state_t *historical_v1_state = nullptr;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_create_v2(context, &create,
+                                            &historical_v1_state, &error.sink),
+                    SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+                    "historical block16 v1 encoding rejection", error) &&
+      historical_v1_state == nullptr;
+  create.encoding = SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2;
+  sllm_kv_state_t *retired_block16_state = nullptr;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_create_v2(
+                        context, &create, &retired_block16_state, &error.sink),
+                    SLLM_STATUS_INVALID_KV_STATE_DESCRIPTOR,
+                    "retired block16 v2 encoding rejection", error) &&
+      retired_block16_state == nullptr;
+  // The same canonical-tail guard applies to standard MXFP8's 32-lane rows.
+  create.head_dim = 33U;
+  create.encoding = SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
+  create.block_size = 32U;
+  create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_U8;
+  sllm_kv_state_t *mx_tail_state = nullptr;
+  const uint64_t mx_tail_value_bytes = create.capacity_tokens * 4U * 64U;
+  const bool mx_tail_created = expect_status(
+      sllm_kv_state_create_v2(context, &create, &mx_tail_state, &error.sink),
+      SLLM_STATUS_OK, "MXFP8 tail import state create", error);
+  const std::size_t mx_tail_allocations = fake_hip::live_allocations();
+  std::vector<uint8_t> mx_tail_image(
+      static_cast<std::size_t>(mx_tail_value_bytes), 0U);
+  mx_tail_image[33U] = 1U; // token 0, head 0, first padded lane
+  sllm_state_chunk_t mx_tail_chunk{};
+  mx_tail_chunk.struct_size = sizeof(mx_tail_chunk);
+  mx_tail_chunk.abi_version = SLLM_HIP_ABI_VERSION;
+  mx_tail_chunk.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  mx_tail_chunk.plane = SLLM_HIP_KV_STATE_PLANE_KEY;
+  mx_tail_chunk.byte_length = mx_tail_value_bytes;
+  mx_tail_chunk.host_pointer = mx_tail_image.data();
+  mx_tail_chunk.host_capacity = mx_tail_value_bytes;
+  const bool mx_tail_rejected =
+      mx_tail_created &&
+      expect_status(
+          sllm_kv_state_import(mx_tail_state, &mx_tail_chunk, &error.sink),
+          SLLM_STATUS_INVALID_ARGUMENT, "nonzero MXFP8 tail import rejection",
+          error);
+  sllm_kv_view_info_t mx_tail_view{};
+  mx_tail_view.struct_size = sizeof(mx_tail_view);
+  mx_tail_view.abi_version = SLLM_HIP_ABI_VERSION;
+  mx_tail_view.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+  const bool mx_tail_unchanged =
+      mx_tail_created &&
+      expect_status(
+          sllm_kv_state_query(mx_tail_state, &mx_tail_view, &error.sink),
+          SLLM_STATUS_OK, "MXFP8 tail state query", error) &&
+      mx_tail_view.observed_length == 0U && mx_tail_view.generation == 0U &&
+      mx_tail_view.committed_bytes_per_plane ==
+          mx_tail_value_bytes + create.capacity_tokens * 4U * 2U &&
+      fake_hip::live_allocations() == mx_tail_allocations;
+  const bool mx_tail_released =
+      mx_tail_state == nullptr ||
+      (expect_status(sllm_kv_state_release(&mx_tail_state, &error.sink),
+                     SLLM_STATUS_OK, "MXFP8 tail state release", error) &&
+       mx_tail_state == nullptr);
+  valid = valid && mx_tail_rejected && mx_tail_unchanged && mx_tail_released;
+  create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+  create.encoding = SLLM_HIP_KV_ENCODING_MXFP8_E4_V1;
+  create.block_size = 32U;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_U8;
+  for (const uint32_t head_dim :
+       {15U, 16U, 17U, 31U, 32U, 33U, 255U, 256U, 257U}) {
+    create.head_dim = head_dim;
+    const uint64_t padded =
+        ((static_cast<uint64_t>(head_dim) + 31U) / 32U) * 32U;
+    const uint64_t values = create.capacity_tokens * 4U * padded;
+    const uint64_t scales =
+        create.capacity_tokens * 4U * ((head_dim + 31U) / 32U);
+    valid = valid && query_recipe(SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                                  SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0,
+                                  values + scales);
+  }
+  const bool first_context_released = release_context(&context);
+  valid = valid && first_context_released;
+  create.head_dim = 256U;
+  fake_hip::set_gcn_arch_name("gfx1030");
+  create.dtype = SLLM_TENSOR_DTYPE_F8_E5M2;
+  create.encoding = SLLM_HIP_KV_ENCODING_MXFP8_E5_V1;
+  create.block_size = 32U;
+  create.scale_dtype = SLLM_TENSOR_DTYPE_U8;
+  const bool second_context_created =
+      create_context_for_arch("gfx1030", &context);
+  valid = valid && second_context_created;
+  if (second_context_created) {
+    create.encoding = SLLM_HIP_KV_ENCODING_MXFP8_E5_V1;
+    create.block_size = 32U;
+    for (const uint32_t head_dim :
+         {15U, 16U, 17U, 31U, 32U, 33U, 255U, 256U, 257U}) {
+      create.head_dim = head_dim;
+      const uint64_t padded =
+          ((static_cast<uint64_t>(head_dim) + 31U) / 32U) * 32U;
+      const uint64_t values = create.capacity_tokens * 4U * padded;
+      const uint64_t scales =
+          create.capacity_tokens * 4U * ((head_dim + 31U) / 32U);
+      valid = valid && query_recipe(SLLM_TENSOR_DTYPE_F8_E5M2,
+                                    SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0,
+                                    values + scales);
+    }
+  }
   const bool context_released = release_context(&context);
   const std::size_t live_allocations = fake_hip::live_allocations();
   if (!valid || !context_released || live_allocations != baseline_allocations) {
@@ -6648,6 +6785,7 @@ bool state_fork_vmm_and_linear_image_contract() {
   }
 
   struct LowBitRecipe final {
+    const char *arch;
     uint32_t dtype;
     uint32_t encoding;
     uint32_t block_size;
@@ -6659,19 +6797,30 @@ bool state_fork_vmm_and_linear_image_contract() {
     float static_key_scale;
     float static_value_scale;
   };
-  const std::array<LowBitRecipe, 3> lowbit_recipes = {{
-      {SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_V1, 0U,
+  const std::array<LowBitRecipe, 6> lowbit_recipes = {{
+      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_V1, 0U,
        SLLM_TENSOR_DTYPE_F32, 4U, 4U * 256U, 4U * sizeof(float), 0U, 0.0F,
        0.0F},
-      {SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_FP8_STATIC_V1, 0U,
-       SLLM_TENSOR_DTYPE_F32, 2U, 4U * 256U, 0U, 0U, 0.125F, 0.25F},
-      {SLLM_TENSOR_DTYPE_U8, SLLM_HIP_KV_ENCODING_NVFP4_V1, 16U,
+      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+       SLLM_HIP_KV_ENCODING_FP8_STATIC_V1, 0U, SLLM_TENSOR_DTYPE_F32, 2U,
+       4U * 256U, 0U, 0U, 0.125F, 0.25F},
+      {"gfx1201", SLLM_TENSOR_DTYPE_U8, SLLM_HIP_KV_ENCODING_NVFP4_V1, 16U,
        SLLM_TENSOR_DTYPE_F8_E4M3_FN, 6U, 4U * (256U / 2U), 4U * (256U / 16U),
        4U * sizeof(float), 0.0F, 0.0F},
+      {"gfx1201", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+       SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, SLLM_TENSOR_DTYPE_U8, 4U,
+       4U * 256U, 4U * (256U / 32U), 0U, 0.0F, 0.0F},
+      {"gfx942", SLLM_TENSOR_DTYPE_F8_E4M3_FN, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+       32U, SLLM_TENSOR_DTYPE_U8, 4U, 4U * 256U, 4U * (256U / 32U), 0U, 0.0F,
+       0.0F},
+      {"gfx1030", SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+       SLLM_HIP_KV_ENCODING_MXFP8_E4_V1, 32U, SLLM_TENSOR_DTYPE_U8, 4U,
+       4U * 256U, 4U * (256U / 32U), 0U, 0.0F, 0.0F},
   }};
   const auto run_lowbit_image_case = [&](const LowBitRecipe &recipe,
                                          const uint32_t case_index) {
     fake_hip::reset();
+    fake_hip::set_gcn_arch_name(recipe.arch);
     constexpr uint64_t lowbit_source_capacity = 17U;
     constexpr uint64_t lowbit_destination_capacity = 33U;
     sllm_context_t *lowbit_context = nullptr;
@@ -6703,7 +6852,7 @@ bool state_fork_vmm_and_linear_image_contract() {
                   sizeof(recipe.static_value_scale));
     }
     bool case_valid =
-        create_context(&lowbit_context) &&
+        create_context_for_arch(recipe.arch, &lowbit_context) &&
         expect_status(
             sllm_kv_state_create_v2(lowbit_context, &create, &lowbit_source,
                                     &lowbit_error.sink),

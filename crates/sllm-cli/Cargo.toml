@@ -15,6 +15,7 @@ sllm-core.workspace = true
 sllm-frontend.workspace = true
 sllm-hip.workspace = true
 sllm-server.workspace = true
+sllm-tools.workspace = true
 tokio.workspace = true
 
 [[bin]]

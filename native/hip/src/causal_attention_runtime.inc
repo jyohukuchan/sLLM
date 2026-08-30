@@ -392,13 +392,19 @@ CausalAttentionProviderSelection select_causal_attention_provider(
       metadata.query_count >= 1024U && metadata.query.q_heads == 16U &&
       kv_heads == 4U && metadata.query.head_dim == 256U &&
       encoding == SLLM_HIP_KV_ENCODING_FP16_V1;
+  const bool scaled_prefill_encoding_enabled =
+      (encoding == SLLM_HIP_KV_ENCODING_FP16_V1 &&
+       (scaled_prefill_opt_in == nullptr ||
+        std::strcmp(scaled_prefill_opt_in, "1") == 0)) ||
+      (encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+       scaled_prefill_opt_in != nullptr &&
+       std::strcmp(scaled_prefill_opt_in, "1") == 0);
   const bool use_scaled_prefill_gemm =
       allow_prefill_provider && std::strcmp(arch_name, "gfx1030") == 0 &&
-      (scaled_prefill_opt_in == nullptr ||
-       std::strcmp(scaled_prefill_opt_in, "1") == 0) &&
+      scaled_prefill_encoding_enabled &&
       metadata.query_count >= 1024U && metadata.query.q_heads == 16U &&
       kv_heads == 4U && metadata.query.head_dim == 256U &&
-      encoding == SLLM_HIP_KV_ENCODING_FP16_V1 && !use_long_prefill_v2;
+      !use_long_prefill_v2;
   return {
       std::strcmp(arch_name, "gfx1201") == 0 &&
           (metadata.query_count == 1U || metadata.query_count >= 32U),
@@ -958,10 +964,16 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
 #else
       launch_status = ::sllm_causal_attention_kernel::launch_scaled_prefill_gemm(
           query_pointer, state->key_buffer->device_pointer,
-          state->value_buffer->device_pointer, output_pointer,
+          state->value_buffer->device_pointer, state->key_scale_plane.address,
+          state->value_scale_plane.address,
+          static_cast<const float *>(state->key_outer_scale_plane.address),
+          static_cast<const float *>(state->value_outer_scale_plane.address),
+          output_pointer,
           static_cast<uint32_t>(metadata.query_count), metadata.start_position,
           metadata.expected_kv_length, metadata.query.q_heads,
-          state->head_count, state->head_dim, scaled_prefill_workspace,
+          state->head_count, state->head_dim, state->encoding,
+          state->static_key_scale, state->static_value_scale,
+          scaled_prefill_workspace,
           scaled_prefill_workspace_bytes, context->matmul_blas_handle,
           &context->matmul_blas_mutex, queue->stream);
 #endif

@@ -1,5 +1,23 @@
 cmake_minimum_required(VERSION 3.21)
 
+set(SLLM_ENABLE_PHASE54_KV_RESEARCH "OFF" CACHE STRING
+    "Compile the private Phase 54 block16 KV recipe research path (0/1 or OFF/ON)"
+)
+set_property(CACHE SLLM_ENABLE_PHASE54_KV_RESEARCH PROPERTY STRINGS OFF ON)
+if(NOT SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "0" AND
+   NOT SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "1" AND
+   NOT SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "OFF" AND
+   NOT SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "ON")
+    message(FATAL_ERROR
+        "SLLM_ENABLE_PHASE54_KV_RESEARCH must be exactly 0, 1, OFF, or ON")
+endif()
+if(SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "1" OR
+   SLLM_ENABLE_PHASE54_KV_RESEARCH STREQUAL "ON")
+    set(SLLM_PHASE54_KV_RESEARCH_ENABLED 1)
+else()
+    set(SLLM_PHASE54_KV_RESEARCH_ENABLED 0)
+endif()
+
 option(SLLM_ENABLE_HIP_COMPILE_PROBE
     "Build the explicit HIP compile/link-only probe"
     OFF
@@ -14,6 +32,12 @@ option(SLLM_ENABLE_PUBLIC_HIP_RUNTIME
     "Build the public HIP context/resource runtime"
     OFF
 )
+
+if(SLLM_PHASE54_KV_RESEARCH_ENABLED AND
+   NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+    message(FATAL_ERROR
+        "Phase 54 KV research requires SLLM_ENABLE_PUBLIC_HIP_RUNTIME=ON")
+endif()
 
 option(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST
     "Build the production public runtime against the test-only fake HIP API"
@@ -361,6 +385,64 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/header_cpp_compile.cpp
 )
 
+# Keep the private recipe controls linkable in stub and production builds.
+# Only the separately compiled HIP research kernels are gated; the disabled
+# setter accepts Floor/Floor and rejects every non-production recipe.
+set(SLLM_PHASE54_KV_RESEARCH_SELECTOR_SOURCE
+    "${CMAKE_CURRENT_BINARY_DIR}/phase54_kv_research_selector.cpp")
+file(GENERATE OUTPUT "${SLLM_PHASE54_KV_RESEARCH_SELECTOR_SOURCE}" CONTENT [=[
+#include <atomic>
+#include <cstdint>
+
+#ifndef SLLM_ENABLE_PHASE54_KV_RESEARCH
+#define SLLM_ENABLE_PHASE54_KV_RESEARCH 0
+#endif
+
+namespace {
+constexpr uint32_t kFloor = 0U;
+constexpr uint32_t kRecipeCount = 4U;
+constexpr int32_t kOk = 0;
+constexpr int32_t kInvalidRecipe = 1;
+constexpr int32_t kUnsupported = 2;
+constexpr uint32_t kValueShift = 8U;
+constexpr uint32_t kRecipeMask = UINT32_C(0xff);
+std::atomic<uint32_t> g_recipe_pair{kFloor};
+} // namespace
+
+extern "C" int32_t
+sllm_phase54_kv_research_set_recipe_pair_v1(const uint32_t key_recipe,
+                                             const uint32_t value_recipe) noexcept {
+  if (key_recipe >= kRecipeCount || value_recipe >= kRecipeCount) {
+    g_recipe_pair.store(kFloor, std::memory_order_release);
+    return kInvalidRecipe;
+  }
+#if SLLM_ENABLE_PHASE54_KV_RESEARCH
+  g_recipe_pair.store(key_recipe | (value_recipe << kValueShift),
+                      std::memory_order_release);
+  return kOk;
+#else
+  g_recipe_pair.store(kFloor, std::memory_order_release);
+  return key_recipe == kFloor && value_recipe == kFloor ? kOk : kUnsupported;
+#endif
+}
+
+extern "C" int32_t
+sllm_phase54_kv_research_get_recipe_pair_v1(uint32_t *const key_recipe,
+                                             uint32_t *const value_recipe) noexcept {
+  if (key_recipe == nullptr || value_recipe == nullptr) {
+    return kInvalidRecipe;
+  }
+  const uint32_t pair = g_recipe_pair.load(std::memory_order_acquire);
+  *key_recipe = pair & kRecipeMask;
+  *value_recipe = (pair >> kValueShift) & kRecipeMask;
+  return kOk;
+}
+]=])
+set_source_files_properties("${SLLM_PHASE54_KV_RESEARCH_SELECTOR_SOURCE}"
+    PROPERTIES GENERATED TRUE)
+list(APPEND SLLM_HIP_NATIVE_SOURCES
+    "${SLLM_PHASE54_KV_RESEARCH_SELECTOR_SOURCE}")
+
 if(SLLM_ENABLE_HIP_RUNTIME)
     set_source_files_properties(src/hip_evidence_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
     list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES src/hip_evidence_stub.cpp)
@@ -373,6 +455,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set(SLLM_SEMANTIC_G1_HIP_FLAGS
             -D__HIP_ROCclr__=1
             -DSLLM_ENABLE_PUBLIC_HIP_RUNTIME=1
+            -DSLLM_ENABLE_PHASE54_KV_RESEARCH=${SLLM_PHASE54_KV_RESEARCH_ENABLED}
             -O3
             -DNDEBUG
             -ffp-contract=off
@@ -691,6 +774,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
 endif()
 
 add_library(sllm_hip_stub STATIC ${SLLM_HIP_NATIVE_SOURCES})
+
+target_compile_definitions(sllm_hip_stub PRIVATE
+    SLLM_ENABLE_PHASE54_KV_RESEARCH=${SLLM_PHASE54_KV_RESEARCH_ENABLED}
+)
 
 target_compile_features(sllm_hip_stub PRIVATE c_std_11 cxx_std_17)
 set_target_properties(sllm_hip_stub PROPERTIES

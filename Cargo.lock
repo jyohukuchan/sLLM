@@ -1247,6 +1247,7 @@ dependencies = [
  "sllm-frontend",
  "sllm-hip",
  "sllm-server",
+ "sllm-tools",
  "tokio",
 ]
 
@@ -1314,6 +1315,17 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower-http",
+]
+
+[[package]]
+name = "sllm-tools"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sllm-core",
 ]
 
 [[package]]

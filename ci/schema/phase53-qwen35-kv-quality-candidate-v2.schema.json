@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase53-qwen35-kv-quality-candidate-v2.schema.json",
+  "title": "sLLM Phase 53 Qwen3.5 KV quality candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "state", "identity", "target", "device_index", "encoding", "mxfp8_comparison", "reference_encoding", "sequential_residents", "completely_sequential_order", "selected_count", "repeats", "cleanup"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase53-qwen35-kv-quality-candidate-v2.schema.json"},
+    "schema_version": {"const": "sllm-phase53-qwen35-kv-quality-candidate-v2"},
+    "state": {"enum": ["PASS", "FAIL"]},
+    "identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["policy_sha256", "dataset_sha256", "model_lock_fingerprint", "model_lock_sha256", "derived_lock_fingerprint", "derived_lock_sha256", "binary_sha256", "descriptor_id", "scale_recipe"],
+      "properties": {
+        "policy_sha256": {"$ref": "#/$defs/digest"}, "dataset_sha256": {"$ref": "#/$defs/digest"},
+        "model_lock_fingerprint": {"const": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae"},
+        "model_lock_sha256": {"$ref": "#/$defs/digest"}, "derived_lock_fingerprint": {"$ref": "#/$defs/digest"},
+        "derived_lock_sha256": {"$ref": "#/$defs/digest"}, "binary_sha256": {"$ref": "#/$defs/digest"},
+        "descriptor_id": {"enum": ["kv-fp8-e4-block16-v2", "kv-fp8-e5-block16-v2"]},
+        "scale_recipe": {"const": "standard-mx-floor-power-v1"}
+      }
+    },
+    "target": {"enum": ["gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]},
+    "device_index": {"type": "integer", "minimum": 0},
+    "encoding": {"enum": ["kv-fp8-e4-block16", "kv-fp8-e5-block16"]},
+    "mxfp8_comparison": {"oneOf": [{"$ref": "#/$defs/mxfp8_complete"}, {"$ref": "#/$defs/mxfp8_unsupported"}]},
+    "reference_encoding": {"const": "fp16"},
+    "sequential_residents": {"const": true},
+    "completely_sequential_order": {"type": "array", "minItems": 2, "maxItems": 3, "items": {"enum": ["fp16", "block16", "mxfp8"]}},
+    "selected_count": {"type": "integer", "minimum": 1},
+    "repeats": {"type": "array", "minItems": 3, "maxItems": 3},
+    "cleanup": {"type": "object", "additionalProperties": false, "required": ["retryable", "durable", "terminal_zero"], "properties": {"retryable": {"const": 0}, "durable": {"const": 0}, "terminal_zero": {"const": true}}}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"target": {"const": "gfx942:sramecc+:xnack-"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e4-block16"},
+        "identity": {"properties": {"descriptor_id": {"const": "kv-fp8-e4-block16-v2"}}},
+        "mxfp8_comparison": {"$ref": "#/$defs/mxfp8_unsupported"},
+        "completely_sequential_order": {"const": ["fp16", "block16"]},
+        "repeats": {"items": {"$ref": "#/$defs/repeat_block16_only"}}
+      }}
+    },
+    {
+      "if": {"properties": {"target": {"const": "gfx1201"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e4-block16"},
+        "identity": {"properties": {"descriptor_id": {"const": "kv-fp8-e4-block16-v2"}}},
+        "mxfp8_comparison": {"allOf": [{"$ref": "#/$defs/mxfp8_complete"}, {"properties": {"encoding": {"const": "kv-mxfp8-e4"}}}]},
+        "completely_sequential_order": {"const": ["fp16", "block16", "mxfp8"]},
+        "repeats": {"items": {"$ref": "#/$defs/repeat_with_mxfp8"}}
+      }}
+    },
+    {
+      "if": {"properties": {"target": {"const": "gfx1030"}}},
+      "then": {"properties": {
+        "encoding": {"const": "kv-fp8-e5-block16"},
+        "identity": {"properties": {"descriptor_id": {"const": "kv-fp8-e5-block16-v2"}}},
+        "mxfp8_comparison": {"allOf": [{"$ref": "#/$defs/mxfp8_complete"}, {"properties": {"encoding": {"const": "kv-mxfp8-e5"}}}]},
+        "completely_sequential_order": {"const": ["fp16", "block16", "mxfp8"]},
+        "repeats": {"items": {"$ref": "#/$defs/repeat_with_mxfp8"}}
+      }}
+    }
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "mxfp8_complete": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "encoding", "reference_only"],
+      "properties": {"status": {"const": "complete"}, "encoding": {"enum": ["kv-mxfp8-e4", "kv-mxfp8-e5"]}, "reference_only": {"const": true}}
+    },
+    "mxfp8_unsupported": {
+      "type": "object", "additionalProperties": false,
+      "required": ["status", "encoding", "reference_only", "reason"],
+      "properties": {
+        "status": {"const": "unsupported"}, "encoding": {"type": "null"}, "reference_only": {"const": true},
+        "reason": {"const": "gfx942 OCP MXFP8 is intentionally unsupported because CDNA3 FNUZ element bytes differ"}
+      }
+    },
+    "repeat_block16_only": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repeat", "fp16_released_before_block16", "block16_released_after_repeat", "block16"],
+      "properties": {"repeat": {"type": "integer", "minimum": 1, "maximum": 3}, "fp16_released_before_block16": {"const": true}, "block16_released_after_repeat": {"const": true}, "block16": {"$ref": "#/$defs/metrics"}}
+    },
+    "repeat_with_mxfp8": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repeat", "fp16_released_before_block16", "block16_released_before_mxfp8", "mxfp8_released_after_repeat", "block16", "mxfp8"],
+      "properties": {"repeat": {"type": "integer", "minimum": 1, "maximum": 3}, "fp16_released_before_block16": {"const": true}, "block16_released_before_mxfp8": {"const": true}, "mxfp8_released_after_repeat": {"const": true}, "block16": {"$ref": "#/$defs/metrics"}, "mxfp8": {"$ref": "#/$defs/metrics"}}
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["selected_count", "metric_sample_counts", "perplexity_relative_delta", "kld_p99", "top1_agreement", "task_score_delta", "long_context_score_delta", "hip_dispatches", "fallback_used", "all_dispatches_hip"],
+      "properties": {
+        "selected_count": {"type": "integer", "minimum": 1},
+        "metric_sample_counts": {"type": "object", "additionalProperties": false, "required": ["perplexity", "kld", "top1", "task", "long-context"], "properties": {"perplexity": {"type": "integer", "minimum": 1}, "kld": {"type": "integer", "minimum": 1}, "top1": {"type": "integer", "minimum": 1}, "task": {"type": "integer", "minimum": 1}, "long-context": {"type": "integer", "minimum": 1}}},
+        "perplexity_relative_delta": {"type": "number"}, "kld_p99": {"type": "number", "minimum": 0}, "top1_agreement": {"type": "number", "minimum": 0, "maximum": 1},
+        "task_score_delta": {"type": "number", "minimum": 0}, "long_context_score_delta": {"type": "number", "minimum": 0},
+        "hip_dispatches": {"type": "integer", "minimum": 1}, "fallback_used": {"const": false}, "all_dispatches_hip": {"const": true}
+      }
+    }
+  }
+}

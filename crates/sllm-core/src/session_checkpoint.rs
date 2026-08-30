@@ -449,7 +449,11 @@ fn required_state_planes(
             KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {
                 [KvKey, KvValue].into_iter().collect()
             }
-            KvCacheEncoding::Fp8E4M3Fn => [KvKey, KvValue, KvKeyScale, KvValueScale]
+            KvCacheEncoding::Fp8E4M3Fn
+            | KvCacheEncoding::Fp8E4M3Block16
+            | KvCacheEncoding::Fp8E5M2Block16
+            | KvCacheEncoding::Mxfp8E4
+            | KvCacheEncoding::Mxfp8E5 => [KvKey, KvValue, KvKeyScale, KvValueScale]
                 .into_iter()
                 .collect(),
             KvCacheEncoding::Nvfp4 => [
@@ -989,6 +993,10 @@ const fn kv_encoding_name(encoding: KvCacheEncoding) -> &'static str {
         KvCacheEncoding::Fp8E4M3Fn => "fp8-e4m3fn-dynamic",
         KvCacheEncoding::Fp8E4M3FnStatic => "fp8-e4m3fn-static",
         KvCacheEncoding::Nvfp4 => "nvfp4",
+        KvCacheEncoding::Fp8E4M3Block16 => "kv-fp8-e4-block16",
+        KvCacheEncoding::Fp8E5M2Block16 => "kv-fp8-e5-block16",
+        KvCacheEncoding::Mxfp8E4 => "kv-mxfp8-e4",
+        KvCacheEncoding::Mxfp8E5 => "kv-mxfp8-e5",
     }
 }
 
@@ -998,6 +1006,10 @@ const fn kv_encoding_tag(encoding: KvCacheEncoding) -> u8 {
         KvCacheEncoding::Fp8E4M3Fn => 1,
         KvCacheEncoding::Fp8E4M3FnStatic => 2,
         KvCacheEncoding::Nvfp4 => 3,
+        KvCacheEncoding::Fp8E4M3Block16 => 4,
+        KvCacheEncoding::Fp8E5M2Block16 => 5,
+        KvCacheEncoding::Mxfp8E4 => 6,
+        KvCacheEncoding::Mxfp8E5 => 7,
     }
 }
 
@@ -1007,6 +1019,10 @@ fn decode_kv_encoding(tag: u8) -> Result<KvCacheEncoding, CheckpointError> {
         1 => Ok(KvCacheEncoding::Fp8E4M3Fn),
         2 => Ok(KvCacheEncoding::Fp8E4M3FnStatic),
         3 => Ok(KvCacheEncoding::Nvfp4),
+        4 => Ok(KvCacheEncoding::Fp8E4M3Block16),
+        5 => Ok(KvCacheEncoding::Fp8E5M2Block16),
+        6 => Ok(KvCacheEncoding::Mxfp8E4),
+        7 => Ok(KvCacheEncoding::Mxfp8E5),
         _ => Err(CheckpointError::Corrupt("unknown KV encoding".into())),
     }
 }

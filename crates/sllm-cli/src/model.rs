@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value, json};
 use sllm_core::{
     Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
+    KvCacheSelection, KvCacheSelectionRequest, KvCacheSelectionSource, KvFp8PhysicalVariant,
     ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenComponentSelection,
     QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
     QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock, SamplingParametersV1,
@@ -14,13 +15,14 @@ use sllm_core::{
     assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
     build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_mtp_graph,
-    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
     build_verified_gguf_qwen35_vision_manifest, build_verified_qwen_component_weight_load_plan,
     build_verified_qwen35_vision_manifest, builtin_reviewed_model_lock, qwen_graph_memory_estimate,
     qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
+    resolve_kv_cache_selection, verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe,
+    verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
     BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
@@ -219,6 +221,81 @@ fn select_cli_fp8_provider(
     Ok(Some(selected))
 }
 
+fn resolve_cli_kv_cache_selection(
+    requested: Option<KvCacheEncoding>,
+    target: &str,
+    model_fingerprint: &str,
+    dense_text: bool,
+    full_attention: bool,
+    head_dim: usize,
+) -> Result<KvCacheSelection, String> {
+    resolve_kv_cache_selection(KvCacheSelectionRequest::new(
+        requested,
+        target,
+        model_fingerprint,
+        dense_text,
+        full_attention,
+        true,
+        head_dim,
+    ))
+    .map_err(|error| error.to_string())
+}
+
+const fn kv_selection_source_name(source: KvCacheSelectionSource) -> &'static str {
+    match source {
+        KvCacheSelectionSource::Explicit => "process-explicit",
+        KvCacheSelectionSource::Mxfp8E4Default => "mxfp8-e4-default",
+        KvCacheSelectionSource::ModelFixedFp16 => "model-fixed-fp16",
+    }
+}
+
+const fn kv_physical_variant_name(
+    variant: KvFp8PhysicalVariant,
+    standard_mxfp8: bool,
+) -> &'static str {
+    match (variant, standard_mxfp8) {
+        (KvFp8PhysicalVariant::OcpE5M2, true) => "E5M2-OCP",
+        (KvFp8PhysicalVariant::OcpE4M3Fn, _) => "E4M3-OCP",
+        (KvFp8PhysicalVariant::E4M3FnuZ, _) => "E4M3-FNUZ",
+        (KvFp8PhysicalVariant::OcpE5M2, false) => "E5M2-software",
+    }
+}
+
+fn kv_descriptor_id(selection: KvCacheSelection) -> Option<String> {
+    selection
+        .block16_descriptor()
+        .map(|descriptor| {
+            format!(
+                "{}-v{}",
+                descriptor.encoding().canonical_name(),
+                descriptor.format_version(),
+            )
+        })
+        .or_else(|| {
+            selection.mxfp8_descriptor().map(|descriptor| {
+                format!(
+                    "{}-v{}",
+                    descriptor.encoding().canonical_name(),
+                    descriptor.format_version(),
+                )
+            })
+        })
+}
+
+fn kv_selection_report(selection: KvCacheSelection) -> Value {
+    json!({
+        "requested": selection.requested().map(KvCacheEncoding::canonical_name).unwrap_or("auto"),
+        "resolved": selection.resolved().canonical_name(),
+        "selection_source": kv_selection_source_name(selection.source()),
+        "reason": selection.reason(),
+        "physical_variant": selection
+            .physical_variant()
+            .map(|variant| kv_physical_variant_name(variant, selection.mxfp8_descriptor().is_some())),
+        "descriptor_id": kv_descriptor_id(selection),
+        "policy_version": selection.policy_version(),
+    })
+}
+
 #[derive(Debug, PartialEq)]
 struct GenerateRequest {
     input: GenerationInput,
@@ -231,7 +308,9 @@ struct GenerateRequest {
     stop_strings: Vec<String>,
     device_index: u32,
     target: String,
-    kv_cache_encoding: KvCacheEncoding,
+    /// `None` is the public `auto` request. It remains distinct from explicit
+    /// `fp16` until the model lock and exact target are both known.
+    kv_cache_encoding: Option<KvCacheEncoding>,
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<CliFp8Provider>,
@@ -345,7 +424,7 @@ struct BenchmarkRequest {
     greedy: bool,
     warmups: u32,
     measured: u32,
-    kv_cache_encoding: KvCacheEncoding,
+    kv_cache_encoding: Option<KvCacheEncoding>,
     fp8_manifest: Option<PathBuf>,
     fp8_artifact: Option<PathBuf>,
     fp8_provider: Option<CliFp8Provider>,
@@ -1988,6 +2067,7 @@ impl ProductionBackend {
         state_capacity: u64,
         target: &str,
         kv_cache_encoding: KvCacheEncoding,
+        kv_cache_selection: Option<KvCacheSelection>,
     ) -> Result<sllm_core::QwenGraph, sllm_core::QwenGraphError> {
         match &self.source {
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe() => {
@@ -2003,13 +2083,22 @@ impl ProductionBackend {
                     kv_cache_encoding,
                 )
             }
-            _ => build_qwen35_graph_with_kv_cache_encoding(
-                &self.lock,
-                plan,
-                token_count,
-                state_capacity,
-                kv_cache_encoding,
-            ),
+            _ => match kv_cache_selection {
+                Some(selection) => build_qwen35_graph_with_kv_cache_selection(
+                    &self.lock,
+                    plan,
+                    token_count,
+                    state_capacity,
+                    selection,
+                ),
+                None => build_qwen35_graph_with_kv_cache_encoding(
+                    &self.lock,
+                    plan,
+                    token_count,
+                    state_capacity,
+                    kv_cache_encoding,
+                ),
+            },
         }
     }
 }
@@ -2155,6 +2244,7 @@ impl ModelFrontendBackend for ProductionBackend {
                 token_count,
                 target,
                 KvCacheEncoding::Fp16,
+                None,
             )
             .map_err(|error| format!("embedding graph is unavailable: {error}"))?;
         let source = match &self.source {
@@ -2273,6 +2363,17 @@ impl ModelFrontendBackend for ProductionBackend {
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
         let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
+        let head_dim = usize::try_from(self.lock.model().architecture.text_config.head_dim)
+            .map_err(|_| "Qwen KV head dimension overflowed usize".to_owned())?;
+        let kv_selection = resolve_cli_kv_cache_selection(
+            request.kv_cache_encoding,
+            &request.target,
+            self.lock.fingerprint(),
+            true,
+            true,
+            head_dim,
+        )?;
+        let kv_cache_encoding = kv_selection.resolved();
         let embedded_fp8 = matches!(
             &self.source,
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
@@ -2312,8 +2413,16 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 generation requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
+        if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
+            && (has_sidecar || embedded_fp8)
+        {
+            return Err(
+                "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
+                    .to_owned(),
+            );
+        }
         if !processed_images.is_empty()
-            && (has_sidecar || request.kv_cache_encoding != KvCacheEncoding::Fp16)
+            && (has_sidecar || kv_cache_encoding != KvCacheEncoding::Fp16)
         {
             return Err(
                 "vision requests currently require BF16 text weights and FP16 KV cache".to_owned(),
@@ -2327,7 +2436,7 @@ impl ModelFrontendBackend for ProductionBackend {
             has_sidecar,
             embedded_fp8,
             &request.target,
-            request.kv_cache_encoding,
+            kv_cache_encoding,
             request.sampling,
             self.lock.fingerprint(),
         )?;
@@ -2432,7 +2541,8 @@ impl ModelFrontendBackend for ProductionBackend {
                         text_rows,
                         state_capacity,
                         &request.target,
-                        request.kv_cache_encoding,
+                        kv_cache_encoding,
+                        Some(kv_selection),
                     ),
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
@@ -2767,7 +2877,8 @@ impl ModelFrontendBackend for ProductionBackend {
                 "boundary_count": audit.boundary_count(),
                 "all_dispatches_hip": audit.all_dispatches_hip(),
                 "weight_encoding": cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider)),
-                "kv_cache_encoding": match request.kv_cache_encoding { KvCacheEncoding::Fp16 => "fp16", KvCacheEncoding::Fp8E4M3Fn => "fp8", KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static", KvCacheEncoding::Nvfp4 => "nvfp4" },
+                "kv_cache_encoding": kv_cache_encoding.canonical_name(),
+                "kv_cache_selection": kv_selection_report(kv_selection),
                 "fp8_provider": embedded_fp8_provider
                     .map(cli_gguf_fp8_provider_label)
                     .or_else(|| fp8_provider.map(CliFp8Provider::label)),
@@ -2913,6 +3024,17 @@ impl ModelFrontendBackend for ProductionBackend {
             benchmark_stop_policy(self.lock.generation_stop_policy(), request.ignore_eos);
         let model_load_start_ns = timing.model_load_start_ns();
         let plan = self.load_plan(QwenComponentSelection::TEXT_ONLY)?;
+        let head_dim = usize::try_from(self.lock.model().architecture.text_config.head_dim)
+            .map_err(|_| "Qwen KV head dimension overflowed usize".to_owned())?;
+        let kv_selection = resolve_cli_kv_cache_selection(
+            request.kv_cache_encoding,
+            &request.target,
+            self.lock.fingerprint(),
+            true,
+            true,
+            head_dim,
+        )?;
+        let kv_cache_encoding = kv_selection.resolved();
         let embedded_fp8 = matches!(
             &self.source,
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
@@ -2952,6 +3074,14 @@ impl ModelFrontendBackend for ProductionBackend {
             _ => return Err("FP8 benchmark requires both manifest and artifact".to_owned()),
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
+        if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
+            && (has_sidecar || embedded_fp8)
+        {
+            return Err(
+                "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
+                    .to_owned(),
+            );
+        }
         let fp8_provider =
             select_cli_fp8_provider(has_sidecar, request.fp8_provider, &request.target)?;
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
@@ -3010,7 +3140,8 @@ impl ModelFrontendBackend for ProductionBackend {
                         graph_token_count,
                         state_capacity,
                         &request.target,
-                        request.kv_cache_encoding,
+                        kv_cache_encoding,
+                        Some(kv_selection),
                     ),
                     _ => unreachable!("quantized provider selection validated sidecar state"),
                 }
@@ -3180,7 +3311,8 @@ impl ModelFrontendBackend for ProductionBackend {
                             graph_token_count,
                             state_capacity,
                             &request.target,
-                            request.kv_cache_encoding,
+                            kv_cache_encoding,
+                            Some(kv_selection),
                         ),
                         _ => unreachable!("quantized provider selection validated sidecar state"),
                     }
@@ -3400,12 +3532,6 @@ impl ModelFrontendBackend for ProductionBackend {
                     true,
                 ),
             };
-            let kv_cache_encoding = match request.kv_cache_encoding {
-                KvCacheEncoding::Fp16 => "fp16",
-                KvCacheEncoding::Fp8E4M3Fn => "fp8",
-                KvCacheEncoding::Fp8E4M3FnStatic => "fp8-static",
-                KvCacheEncoding::Nvfp4 => "nvfp4",
-            };
             let config = if request.lane == BenchmarkLane::Direct {
                 json!({
                     "input_token_ids": seed_input.as_slice(),
@@ -3432,7 +3558,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "lane": lane,
                     "tokenizer": tokenizer_enabled,
                     "render": render_enabled,
-                    "kv_cache_encoding": kv_cache_encoding,
+                    "kv_cache_encoding": kv_cache_encoding.canonical_name(),
+                    "kv_cache_selection": kv_selection_report(kv_selection),
                     "stop_policy": {
                         "stop_token_ids": if request.ignore_eos {
                             Vec::<u32>::new()
@@ -3468,6 +3595,8 @@ impl ModelFrontendBackend for ProductionBackend {
                     "measured": request.measured,
                     "tokenizer": tokenizer_enabled,
                     "render": render_enabled,
+                    "kv_cache_encoding": kv_cache_encoding.canonical_name(),
+                    "kv_cache_selection": kv_selection_report(kv_selection),
                     "stop_policy": {
                         "stop_token_ids": if request.ignore_eos {
                             Vec::<u32>::new()
@@ -4073,8 +4202,14 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     || command == "rerank" =>
             {
                 let value = take_value(&mut arguments, "--target")?;
-                if value != "gfx1030" && value != "gfx1201" && value != "gfx942" {
-                    return Err("--target must be gfx1030, gfx1201, or gfx942".to_owned());
+                if !matches!(
+                    value.as_str(),
+                    "gfx1030" | "gfx1201" | "gfx942" | "gfx942:sramecc+:xnack-"
+                ) {
+                    return Err(
+                        "--target must be gfx1030, gfx1201, gfx942, or gfx942:sramecc+:xnack-"
+                            .to_owned(),
+                    );
                 }
                 set_once(&mut target, value, "--target")?;
             }
@@ -4085,9 +4220,11 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     "fp8" => KvCacheEncoding::Fp8E4M3Fn,
                     "fp8-static" => KvCacheEncoding::Fp8E4M3FnStatic,
                     "nvfp4" => KvCacheEncoding::Nvfp4,
+                    "kv-mxfp8-e4" => KvCacheEncoding::Mxfp8E4,
+                    "kv-mxfp8-e5" => KvCacheEncoding::Mxfp8E5,
                     _ => {
                         return Err(
-                            "--kv-cache-encoding must be fp16, fp8, fp8-static, or nvfp4"
+                            "--kv-cache-encoding must be fp16, fp8, fp8-static, nvfp4, kv-mxfp8-e4, or kv-mxfp8-e5"
                                 .to_owned(),
                         );
                     }
@@ -4460,7 +4597,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 device_index: device_index
                     .ok_or_else(|| "generate requires --device-index".to_owned())?,
                 target: target.ok_or_else(|| "generate requires --target".to_owned())?,
-                kv_cache_encoding: kv_cache_encoding.unwrap_or(KvCacheEncoding::Fp16),
+                kv_cache_encoding,
                 fp8_manifest,
                 fp8_artifact,
                 fp8_provider,
@@ -4558,7 +4695,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 greedy,
                 warmups,
                 measured,
-                kv_cache_encoding: kv_cache_encoding.unwrap_or(KvCacheEncoding::Fp16),
+                kv_cache_encoding,
                 fp8_manifest,
                 fp8_artifact,
                 fp8_provider,
@@ -5187,7 +5324,7 @@ mod tests {
                 max_new_tokens: 3,
                 seed: Some(u64::MAX),
                 device_index: 0,
-                kv_cache_encoding: KvCacheEncoding::Fp16,
+                kv_cache_encoding: None,
                 ..
             })
         ));
@@ -5215,7 +5352,7 @@ mod tests {
         assert!(matches!(
             low_bit_kv.operation,
             Operation::Generate(GenerateRequest {
-                kv_cache_encoding: KvCacheEncoding::Fp8E4M3FnStatic,
+                kv_cache_encoding: Some(KvCacheEncoding::Fp8E4M3FnStatic),
                 ..
             })
         ));
@@ -5463,6 +5600,181 @@ mod tests {
             cli_prefill_chunk_candidates(None, 32 * 1024 * 1024 * 1024, 10_001).unwrap(),
             qwen_prefill_chunk_candidates(32 * 1024 * 1024 * 1024, 10_001).unwrap()
         );
+    }
+
+    #[test]
+    fn kv_parser_and_resolver_preserve_auto_and_canonical_public_names() {
+        let common = [
+            "--gguf",
+            "model.gguf",
+            "--derived-lock",
+            "model.lock.json",
+            "--prompt",
+            "abc",
+            "--max-new-tokens",
+            "1",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1201",
+            "--greedy",
+        ];
+        let omitted = parse_args("generate", &common).unwrap();
+        assert!(matches!(
+            omitted.operation,
+            Operation::Generate(GenerateRequest {
+                kv_cache_encoding: None,
+                ..
+            })
+        ));
+        for (name, expected) in [
+            ("fp16", KvCacheEncoding::Fp16),
+            ("kv-mxfp8-e4", KvCacheEncoding::Mxfp8E4),
+            ("kv-mxfp8-e5", KvCacheEncoding::Mxfp8E5),
+        ] {
+            let mut args = common.to_vec();
+            args.extend(["--kv-cache-encoding", name]);
+            let request = parse_args("generate", &args).unwrap();
+            assert!(matches!(
+                request.operation,
+                Operation::Generate(GenerateRequest {
+                    kv_cache_encoding: Some(actual),
+                    ..
+                }) if actual == expected
+            ));
+        }
+        for alias in [
+            "fp8-e4-block16",
+            "kv-fp8-e4m3-block16",
+            "kv-fp8-e5m2-block16",
+            "KV-FP8-E4-BLOCK16",
+            "mxfp8-e4",
+            "kv-mxfp8-e4-block32",
+            "KV-MXFP8-E4",
+        ] {
+            let mut args = common.to_vec();
+            args.extend(["--kv-cache-encoding", alias]);
+            assert!(parse_args("generate", &args).is_err(), "alias {alias}");
+        }
+
+        let auto = resolve_cli_kv_cache_selection(
+            None,
+            "gfx1201",
+            sllm_core::QWEN35_4B_FINGERPRINT,
+            true,
+            true,
+            256,
+        )
+        .unwrap();
+        let auto_report = kv_selection_report(auto);
+        assert_eq!(auto_report["requested"], "auto");
+        assert_eq!(auto_report["resolved"], "kv-mxfp8-e4");
+        assert_eq!(auto_report["selection_source"], "mxfp8-e4-default");
+
+        assert!(
+            resolve_cli_kv_cache_selection(
+                Some(KvCacheEncoding::Fp8E4M3Block16),
+                "gfx942:sramecc+:xnack-",
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                true,
+                256,
+            )
+            .is_err()
+        );
+
+        for (encoding, target, physical_variant) in [
+            (KvCacheEncoding::Mxfp8E4, "gfx1201", "E4M3-OCP"),
+            (KvCacheEncoding::Mxfp8E5, "gfx1030", "E5M2-OCP"),
+        ] {
+            let resolved = resolve_cli_kv_cache_selection(
+                Some(encoding),
+                target,
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                true,
+                256,
+            )
+            .unwrap();
+            let report = kv_selection_report(resolved);
+            assert_eq!(report["resolved"], encoding.canonical_name());
+            assert_eq!(report["selection_source"], "process-explicit");
+            assert_eq!(report["physical_variant"], physical_variant);
+            assert_eq!(
+                report["descriptor_id"],
+                format!("{}-v1", encoding.canonical_name())
+            );
+        }
+        for target in ["gfx1030", "gfx1201", "gfx942:sramecc+:xnack-"] {
+            let resolved = resolve_cli_kv_cache_selection(
+                Some(KvCacheEncoding::Mxfp8E4),
+                target,
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                true,
+                256,
+            )
+            .unwrap();
+            assert_eq!(
+                resolved.physical_variant(),
+                Some(KvFp8PhysicalVariant::OcpE4M3Fn)
+            );
+        }
+        for (encoding, target, fingerprint, dense, full_attention, head_dim) in [
+            (
+                KvCacheEncoding::Mxfp8E5,
+                "gfx1201",
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                true,
+                256,
+            ),
+            (
+                KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                "wrong-model",
+                true,
+                true,
+                256,
+            ),
+            (
+                KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                false,
+                true,
+                256,
+            ),
+            (
+                KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                false,
+                256,
+            ),
+            (
+                KvCacheEncoding::Mxfp8E4,
+                "gfx1201",
+                sllm_core::QWEN35_4B_FINGERPRINT,
+                true,
+                true,
+                128,
+            ),
+        ] {
+            assert!(
+                resolve_cli_kv_cache_selection(
+                    Some(encoding),
+                    target,
+                    fingerprint,
+                    dense,
+                    full_attention,
+                    head_dim,
+                )
+                .is_err(),
+                "MXFP8 must fail closed outside its reviewed target/model/shape scope"
+            );
+        }
     }
 
     #[test]
@@ -5940,7 +6252,7 @@ mod tests {
             Operation::Benchmark(BenchmarkRequest {
                 lane: BenchmarkLane::Direct,
                 input: BenchmarkInput::TokenIds(ref ids),
-                kv_cache_encoding: KvCacheEncoding::Fp8E4M3Fn,
+                kv_cache_encoding: Some(KvCacheEncoding::Fp8E4M3Fn),
                 ..
             }) if ids.len() == 10_001 && ids.as_slice().iter().all(|id| *id == 23_066)
         ));

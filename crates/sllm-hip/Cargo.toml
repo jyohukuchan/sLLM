@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Safe Rust wrapper and Phase 1 host probe for the sLLM HIP ABI"
 
+[features]
+default = []
+phase54-research = ["sllm-core/phase54-research"]
+
 [[bin]]
 name = "sllm-rmsnorm-g2-evidence"
 path = "src/bin/sllm-rmsnorm-g2-evidence.rs"
@@ -69,6 +73,36 @@ path = "src/bin/sllm-qwen35-moe-admission.rs"
 [[bin]]
 name = "sllm-qwen35-adapter-evidence"
 path = "src/bin/sllm-qwen35-adapter-evidence.rs"
+
+[[bin]]
+name = "sllm-qwen35-quality-baseline"
+path = "src/bin/sllm-qwen35-quality-baseline.rs"
+
+[[bin]]
+name = "sllm-qwen35-kv-quality-probe"
+path = "src/bin/sllm-qwen35-kv-quality-probe.rs"
+
+[[bin]]
+name = "sllm-kv-mxfp8-e4-evidence"
+path = "src/bin/sllm-kv-mxfp8-e4-evidence.rs"
+
+[[bin]]
+name = "sllm-qwen35-kv-quality-candidate"
+path = "src/bin/sllm-qwen35-kv-quality-candidate.rs"
+
+[[bin]]
+name = "sllm-qwen35-kv-quality-research"
+path = "src/bin/sllm-qwen35-kv-quality-research.rs"
+
+[[bin]]
+name = "sllm-qwen35-kv-attribution-research"
+path = "src/bin/sllm-qwen35-kv-attribution-research.rs"
+required-features = ["phase54-research"]
+
+[[bin]]
+name = "sllm-kv-fp8-block16-research-evidence"
+path = "src/bin/sllm-kv-fp8-block16-research-evidence.rs"
+required-features = ["phase54-research"]
 
 [[bin]]
 name = "sllm-mxfp4-w4a4-evidence"

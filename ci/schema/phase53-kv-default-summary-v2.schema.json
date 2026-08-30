@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase53-kv-default-summary-v2.schema.json",
+  "title": "sLLM Phase 53 target-independent KV default decisions for the revised block16 recipe",
+  "type": "object", "additionalProperties": false,
+  "required": ["$schema", "schema_version", "state", "policy_sha256", "dataset_sha256", "targets"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase53-kv-default-summary-v2.schema.json"},
+    "schema_version": {"const": "sllm-phase53-kv-default-summary-v2"}, "state": {"enum": ["PASS", "FAIL"]},
+    "policy_sha256": {"$ref": "#/$defs/digest"}, "dataset_sha256": {"$ref": "#/$defs/digest"},
+    "targets": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"$ref": "#/$defs/target"}}
+  },
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "target": {"type": "object", "additionalProperties": false, "required": ["target", "candidate_encoding", "descriptor_id", "scale_recipe", "correctness", "quality", "performance", "resource", "memory", "fallback", "cleanup", "decision", "reasons", "quality_report_sha256", "correctness_report_sha256", "performance_resource_report_sha256"], "properties": {
+      "target": {"enum": ["gfx942:sramecc+:xnack-", "gfx1201", "gfx1030"]}, "candidate_encoding": {"enum": ["kv-fp8-e4-block16", "kv-fp8-e5-block16"]},
+      "descriptor_id": {"enum": ["kv-fp8-e4-block16-v2", "kv-fp8-e5-block16-v2"]}, "scale_recipe": {"const": "standard-mx-floor-power-v1"},
+      "correctness": {"enum": ["pass", "fail", "insufficient-evidence"]}, "quality": {"enum": ["pass", "fail", "insufficient-evidence"]},
+      "performance": {"enum": ["pass", "fail", "insufficient-evidence"]}, "resource": {"enum": ["pass", "fail", "insufficient-evidence"]}, "memory": {"enum": ["pass", "fail", "insufficient-evidence"]},
+      "fallback": {"enum": ["pass", "fail", "insufficient-evidence"]}, "cleanup": {"enum": ["pass", "fail", "insufficient-evidence"]},
+      "decision": {"enum": ["adopt", "retain-fp16", "insufficient-evidence"]}, "reasons": {"type": "array", "items": {"type": "string", "minLength": 1}},
+      "quality_report_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}, "correctness_report_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}, "performance_resource_report_sha256": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]}
+    }}
+  },
+  "allOf": [
+    {"properties": {"targets": {"items": {"allOf": [
+      {"if": {"properties": {"target": {"enum": ["gfx942:sramecc+:xnack-", "gfx1201"]}}}, "then": {"properties": {"candidate_encoding": {"const": "kv-fp8-e4-block16"}, "descriptor_id": {"const": "kv-fp8-e4-block16-v2"}}}},
+      {"if": {"properties": {"target": {"const": "gfx1030"}}}, "then": {"properties": {"candidate_encoding": {"const": "kv-fp8-e5-block16"}, "descriptor_id": {"const": "kv-fp8-e5-block16-v2"}}}}
+    ]}}}}
+  ]
+}

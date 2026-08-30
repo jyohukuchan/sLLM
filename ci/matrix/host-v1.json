@@ -1,13 +1,13 @@
 {
   "schema_version": "host-v1",
   "matrix_id": "host-required",
-  "revision": 21,
+  "revision": 22,
   "rows": [
     {
       "row_id": "h0",
       "tier": "tier_h0",
       "required": true,
-      "suite_ids": ["h0-rust-format", "h0-rust-clippy", "h0-cpp-format-static", "h0-python", "h0-markdown-links", "h0-json-schema-manifest-workflow", "h0-h3-static-contracts", "h0-g0-static-contracts", "h0-rmsnorm-semantic-g1-contract", "h0-execution-transfer-g1-contract", "h0-weight-upload-g1-contract", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract", "h0-phase3-stage-a-evidence-plan", "h0-engine-performance-direct-contract", "h0-engine-performance-render-tokenize-contract", "h0-llama-phase5-contract", "h0-vattention-a0-contract", "h0-vattention-a1-contract", "h0-phase6-a2-contract", "h0-openai-profile-v1-contract", "h0-phase7-lifecycle-contract", "h0-license-provenance", "h0-tracked-tree", "h0-suite-registration", "h0-self-test", "h0-rust-dependency-closure"],
+      "suite_ids": ["h0-rust-format", "h0-rust-clippy", "h0-cpp-format-static", "h0-python", "h0-markdown-links", "h0-json-schema-manifest-workflow", "h0-h3-static-contracts", "h0-g0-static-contracts", "h0-rmsnorm-semantic-g1-contract", "h0-execution-transfer-g1-contract", "h0-weight-upload-g1-contract", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract", "h0-phase3-stage-a-evidence-plan", "h0-engine-performance-direct-contract", "h0-engine-performance-render-tokenize-contract", "h0-llama-phase5-contract", "h0-vattention-a0-contract", "h0-vattention-a1-contract", "h0-phase6-a2-contract", "h0-openai-profile-v1-contract", "h0-phase7-lifecycle-contract", "h0-phase46-tools-contract", "h0-license-provenance", "h0-tracked-tree", "h0-suite-registration", "h0-self-test", "h0-rust-dependency-closure"],
       "seed": 1729,
       "timeout_seconds": 720,
       "max_command_seconds": 300,

@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase46-quality-result-v1.schema.json",
+  "title": "sLLM Phase 46 quality result v1",
+  "description": "Common-manifest-bound perplexity, logit KLD/top-1, task, and long-context result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "struct_size", "state", "metric", "manifest", "result", "extensions"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase46-quality-result-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase46-quality-result-v1"},
+    "struct_size": {"const": 7},
+    "state": {"const": "PASS"},
+    "metric": {"enum": ["perplexity", "logit_comparison", "task", "long_context"]},
+    "manifest": {"$ref": "#/$defs/manifest"},
+    "result": {"$ref": "#/$defs/result"},
+    "extensions": {"type": "object", "additionalProperties": true}
+  },
+  "allOf": [
+    {"if": {"properties": {"metric": {"const": "perplexity"}}}, "then": {"properties": {"result": {"$ref": "#/$defs/perplexity"}}}},
+    {"if": {"properties": {"metric": {"const": "logit_comparison"}}}, "then": {"properties": {"result": {"$ref": "#/$defs/logit_comparison"}}}},
+    {"if": {"properties": {"metric": {"const": "task"}}}, "then": {"properties": {"result": {"$ref": "#/$defs/task"}}}},
+    {"if": {"properties": {"metric": {"const": "long_context"}}}, "then": {"properties": {"result": {"$ref": "#/$defs/long_context"}}}}
+  ],
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "file": {
+      "type": "object", "additionalProperties": false, "required": ["role", "logical_name", "size_bytes", "sha256"],
+      "properties": {"role": {"type": "string", "minLength": 1, "maxLength": 256}, "logical_name": {"type": "string", "minLength": 1, "maxLength": 256}, "size_bytes": {"type": "integer", "minimum": 1}, "sha256": {"$ref": "#/$defs/digest"}}
+    },
+    "tool": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "commit", "package", "version", "executable_sha256", "arguments", "environment"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1, "maxLength": 256}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "package": {"type": "string", "minLength": 1, "maxLength": 256}, "version": {"type": "string", "minLength": 1, "maxLength": 256}, "executable_sha256": {"$ref": "#/$defs/digest"},
+        "arguments": {"type": "array", "maxItems": 512, "items": {"type": "string", "maxLength": 16384}}, "environment": {"$ref": "#/$defs/string_map"}
+      }
+    },
+    "recipe": {
+      "type": "object", "additionalProperties": false, "required": ["id", "version", "config_sha256"],
+      "properties": {"id": {"type": "string", "minLength": 1, "maxLength": 256}, "version": {"type": "string", "minLength": 1, "maxLength": 256}, "config_sha256": {"$ref": "#/$defs/digest"}}
+    },
+    "string_map": {"type": "object", "propertyNames": {"minLength": 1, "maxLength": 256}, "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 16384}},
+    "manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "struct_size", "canonicalization", "operation", "state", "selected_count", "tool", "recipe", "sources", "outputs", "raw_evidence", "identities", "metrics", "extensions"],
+      "properties": {
+        "schema_version": {"const": "sllm-phase46-tool-run-v1"}, "struct_size": {"const": 13}, "canonicalization": {"const": "sllm-sorted-json-v1"},
+        "operation": {"type": "string", "minLength": 1, "maxLength": 256}, "state": {"enum": ["PASS", "FAIL", "INSUFFICIENT-EVIDENCE"]}, "selected_count": {"type": "integer", "minimum": 1},
+        "tool": {"$ref": "#/$defs/tool"}, "recipe": {"$ref": "#/$defs/recipe"}, "sources": {"type": "array", "minItems": 1, "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "outputs": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "raw_evidence": {"type": "array", "maxItems": 16384, "items": {"$ref": "#/$defs/file"}}, "identities": {"$ref": "#/$defs/string_map"}, "metrics": {"type": "object", "additionalProperties": true}, "extensions": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "result": {"type": "object"},
+    "perplexity": {
+      "type": "object", "additionalProperties": false, "required": ["loss_sum", "token_count", "mean_nll", "perplexity"],
+      "properties": {"loss_sum": {"type": "number", "minimum": 0}, "token_count": {"type": "integer", "minimum": 1}, "mean_nll": {"type": "number", "minimum": 0}, "perplexity": {"type": "number", "exclusiveMinimum": 0}}
+    },
+    "logit_sample": {
+      "type": "object", "additionalProperties": false, "required": ["position", "baseline_top1", "candidate_top1", "top1_match", "kld"],
+      "properties": {"position": {"type": "integer", "minimum": 0}, "baseline_top1": {"type": "integer", "minimum": 0}, "candidate_top1": {"type": "integer", "minimum": 0}, "top1_match": {"type": "boolean"}, "kld": {"type": "number", "minimum": 0}}
+    },
+    "quantiles": {"type": "object", "additionalProperties": false, "required": ["p50", "p90", "p99"], "properties": {"p50": {"type": "number", "minimum": 0}, "p90": {"type": "number", "minimum": 0}, "p99": {"type": "number", "minimum": 0}}},
+    "logit_comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_count", "top1_matches", "top1_agreement", "kld_max", "kld_p50", "kld_p90", "kld_p99", "logit_abs_diff_max", "logit_abs_diff", "first_divergence_position", "positions"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1}, "top1_matches": {"type": "integer", "minimum": 0}, "top1_agreement": {"type": "number", "minimum": 0, "maximum": 1}, "kld_max": {"type": "number", "minimum": 0}, "kld_p50": {"type": "number", "minimum": 0}, "kld_p90": {"type": "number", "minimum": 0}, "kld_p99": {"type": "number", "minimum": 0}, "logit_abs_diff_max": {"type": "number", "minimum": 0}, "logit_abs_diff": {"$ref": "#/$defs/quantiles"}, "first_divergence_position": {"type": ["integer", "null"], "minimum": 0}, "positions": {"type": "array", "minItems": 1, "maxItems": 100000, "items": {"$ref": "#/$defs/logit_sample"}}
+      }
+    },
+    "task": {
+      "type": "object", "additionalProperties": false, "required": ["task_version", "renderer", "few_shot", "sample_count", "exact_match", "exact_match_count", "multiple_choice_count", "multiple_choice_accuracy", "multiple_choice_correct"],
+      "properties": {"task_version": {"type": ["string", "null"], "minLength": 1}, "renderer": {"type": ["string", "null"], "minLength": 1}, "few_shot": {"type": ["integer", "null"], "minimum": 0}, "sample_count": {"type": "integer", "minimum": 1}, "exact_match": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "exact_match_count": {"type": "integer", "minimum": 0}, "multiple_choice_count": {"type": "integer", "minimum": 0}, "multiple_choice_accuracy": {"type": ["number", "null"], "minimum": 0, "maximum": 1}, "multiple_choice_correct": {"type": "integer", "minimum": 0}}
+    },
+    "long_context": {
+      "type": "object", "additionalProperties": false, "required": ["sample_count", "capacity", "position_min", "position_max", "early", "middle", "tail", "coverage_ratio", "key_samples", "value_samples", "layers", "kv_heads", "block_tail_samples", "kinds"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1}, "capacity": {"type": "integer", "minimum": 1}, "position_min": {"type": "integer", "minimum": 0}, "position_max": {"type": "integer", "minimum": 0}, "early": {"type": "integer", "minimum": 1}, "middle": {"type": "integer", "minimum": 1}, "tail": {"type": "integer", "minimum": 1}, "coverage_ratio": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}, "key_samples": {"type": "integer", "minimum": 1}, "value_samples": {"type": "integer", "minimum": 1}, "layers": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}, "kv_heads": {"type": "array", "minItems": 1, "items": {"type": "integer", "minimum": 0}}, "block_tail_samples": {"type": "integer", "minimum": 1}, "kinds": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

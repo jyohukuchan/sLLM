@@ -174,6 +174,54 @@ KvPlaneRef kv_plane(KvState *const state, const uint32_t id) noexcept {
   }
 }
 
+// Value rows in block16/MXFP8 planes are physically padded to the block size;
+// their public head_dim remains the logical lane count.  Reject imported
+// nonzero tail bytes before any mapping/COW mutation so canonical state images
+// cannot publish stale padding.
+bool kv_import_padding_is_zero(const KvState *const state,
+                               const uint32_t plane_id,
+                               const sllm_state_chunk_t *const chunk) noexcept {
+  if (state == nullptr || chunk == nullptr ||
+      (plane_id != SLLM_HIP_KV_STATE_PLANE_KEY &&
+       plane_id != SLLM_HIP_KV_STATE_PLANE_VALUE) ||
+      (state->encoding != SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 &&
+       state->encoding != SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2 &&
+       state->encoding != SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 &&
+       state->encoding != SLLM_HIP_KV_ENCODING_MXFP8_E5_V1)) {
+    return true;
+  }
+  const uint64_t row_stride =
+      kv_value_row_stride(state->head_dim, state->encoding);
+  const uint64_t token_stride =
+      static_cast<uint64_t>(state->head_count) * row_stride;
+  if (row_stride <= state->head_dim || token_stride == 0U) {
+    return true;
+  }
+  const uint64_t chunk_end = chunk->byte_offset + chunk->byte_length;
+  const uint64_t first_token = chunk->byte_offset / token_stride;
+  const uint64_t last_token = (chunk_end - 1U) / token_stride;
+  const auto *const host = static_cast<const uint8_t *>(chunk->host_pointer);
+  for (uint64_t token = first_token; token <= last_token; ++token) {
+    const uint64_t token_base = token * token_stride;
+    for (uint32_t head = 0U; head != state->head_count; ++head) {
+      const uint64_t tail_begin =
+          token_base + static_cast<uint64_t>(head) * row_stride +
+          state->head_dim;
+      const uint64_t tail_end = token_base +
+                                static_cast<uint64_t>(head + 1U) * row_stride;
+      const uint64_t begin = std::max(chunk->byte_offset, tail_begin);
+      const uint64_t end = std::min(chunk_end, tail_end);
+      for (uint64_t absolute = begin; absolute < end; ++absolute) {
+        if (host[static_cast<std::size_t>(absolute - chunk->byte_offset)] !=
+            0U) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 struct LinearPlaneRef final {
   void *pointer;
   uint64_t bytes;
@@ -386,13 +434,29 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
           destination_info->encoding != source->encoding ||
           destination_info->dtype != source->dtype ||
           destination_info->block_size !=
-              (source->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ? 16U : 0U) ||
+              (source->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
+                       source->encoding ==
+                           SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                       source->encoding ==
+                           SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                   ? 16U
+               : source->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1 ||
+                         source->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                   ? 32U
+                   : 0U) ||
           destination_info->scale_dtype !=
               (source->encoding == SLLM_HIP_KV_ENCODING_FP8_V1 ||
                        source->encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1
                    ? SLLM_TENSOR_DTYPE_F32
                : source->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
                    ? SLLM_TENSOR_DTYPE_F8_E4M3_FN
+               : source->encoding ==
+                             SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2 ||
+                         source->encoding ==
+                             SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2
+                         || source->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E4_V1
+                         || source->encoding == SLLM_HIP_KV_ENCODING_MXFP8_E5_V1
+                   ? SLLM_TENSOR_DTYPE_U8
                    : 0U)) {
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_INVALID_ARGUMENT,
@@ -746,6 +810,11 @@ sllm_kv_state_import(const sllm_kv_state_t *const raw_state,
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
           "KV import range is outside the exact native plane");
+    }
+    if (!kv_import_padding_is_zero(state, chunk->plane, chunk)) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "KV import value-plane padding must be canonical zero");
     }
     const sllm_status_t device_status =
         select_context_device(state->context, error_sink);

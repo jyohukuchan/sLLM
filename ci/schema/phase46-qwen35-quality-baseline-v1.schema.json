@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sllm.dev/schema/phase46-qwen35-quality-baseline-v1.schema.json",
+  "title": "sLLM Phase 46 exact-HIP Qwen3.5 FP16 quality baseline v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "state", "model_repo_id", "model_revision", "model_fingerprint", "weight_dtype", "kv_encoding", "target", "device_index", "executable_sha256", "dataset_id", "dataset_sha256", "dataset_seed", "dataset_case_count", "repeats", "baseline_pass", "baseline_vs_first", "long_context", "cases", "cleanup"],
+  "properties": {
+    "$schema": {"const": "https://sllm.dev/schema/phase46-qwen35-quality-baseline-v1.schema.json"},
+    "schema_version": {"const": "sllm-phase46-qwen35-quality-baseline-v1"},
+    "state": {"const": "PASS"},
+    "model_repo_id": {"const": "Qwen/Qwen3.5-4B"},
+    "model_revision": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "model_fingerprint": {"$ref": "#/$defs/prefixed_digest"},
+    "weight_dtype": {"const": "BF16"},
+    "kv_encoding": {"const": "fp16"},
+    "target": {"enum": ["gfx1030", "gfx1201", "gfx942:sramecc+:xnack-"]},
+    "device_index": {"type": "integer", "minimum": 0},
+    "executable_sha256": {"$ref": "#/$defs/prefixed_digest"},
+    "dataset_id": {"const": "phase46-kv-quality-baseline-v1"},
+    "dataset_sha256": {"$ref": "#/$defs/prefixed_digest"},
+    "dataset_seed": {"const": 1729},
+    "dataset_case_count": {"const": 10},
+    "repeats": {"type": "integer", "minimum": 3, "maximum": 16},
+    "baseline_pass": {"const": true},
+    "baseline_vs_first": {"$ref": "#/$defs/comparison"},
+    "long_context": {"$ref": "#/$defs/coverage"},
+    "cases": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"$ref": "#/$defs/case"}},
+    "cleanup": {"$ref": "#/$defs/cleanup"}
+  },
+  "$defs": {
+    "prefixed_digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "finite_nonnegative": {"type": "number", "minimum": 0},
+    "repeat": {
+      "type": "object", "additionalProperties": false,
+      "required": ["repeat", "token_count", "loss_sum", "mean_nll", "perplexity", "top1_correct", "top1_score", "task_score", "hip_dispatches"],
+      "properties": {
+        "repeat": {"type": "integer", "minimum": 0}, "token_count": {"const": 1},
+        "loss_sum": {"$ref": "#/$defs/finite_nonnegative"}, "mean_nll": {"$ref": "#/$defs/finite_nonnegative"},
+        "perplexity": {"type": "number", "minimum": 1}, "top1_correct": {"type": "integer", "minimum": 0, "maximum": 1},
+        "top1_score": {"type": "number", "minimum": 0, "maximum": 1}, "task_score": {"type": "number", "minimum": 0, "maximum": 1},
+        "hip_dispatches": {"type": "integer", "minimum": 1}
+      }
+    },
+    "comparison": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_count", "top1_matches", "top1_agreement", "kld_baseline_to_first", "kld_mean", "kld_max", "max_logit_delta", "first_divergence_position"],
+      "properties": {
+        "sample_count": {"type": "integer", "minimum": 1}, "top1_matches": {"type": "integer", "minimum": 0},
+        "top1_agreement": {"type": "number", "minimum": 0, "maximum": 1},
+        "kld_baseline_to_first": {"$ref": "#/$defs/finite_nonnegative"}, "kld_mean": {"$ref": "#/$defs/finite_nonnegative"},
+        "kld_max": {"$ref": "#/$defs/finite_nonnegative"}, "max_logit_delta": {"$ref": "#/$defs/finite_nonnegative"},
+        "first_divergence_position": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "length", "band", "block_tail", "token_digest", "expected_next", "baseline", "repeats", "baseline_vs_first"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^b[0-9]{3}$"}, "length": {"type": "integer", "minimum": 1, "maximum": 513},
+        "band": {"enum": ["early", "middle", "tail"]}, "block_tail": {"type": "boolean"},
+        "token_digest": {"$ref": "#/$defs/prefixed_digest"}, "expected_next": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "baseline": {"$ref": "#/$defs/repeat"}, "repeats": {"type": "array", "minItems": 3, "maxItems": 16, "items": {"$ref": "#/$defs/repeat"}},
+        "baseline_vs_first": {"$ref": "#/$defs/comparison"}
+      }
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sample_count", "position_min", "position_max", "early", "middle", "tail", "coverage_ratio", "key_samples", "value_samples", "kv_planes", "layers", "kv_heads", "boundaries", "block_tail_samples"],
+      "properties": {
+        "sample_count": {"const": 10}, "position_min": {"const": 1}, "position_max": {"const": 513},
+        "early": {"type": "integer", "minimum": 1}, "middle": {"type": "integer", "minimum": 1}, "tail": {"type": "integer", "minimum": 1},
+        "coverage_ratio": {"const": 1.0}, "key_samples": {"const": 10}, "value_samples": {"const": 10},
+        "kv_planes": {"const": ["K", "V"]}, "layers": {"const": [0, 13, 27]}, "kv_heads": {"const": [0, 1, 3]},
+        "boundaries": {"const": [1, 15, 16, 17, 255, 256, 257, 511, 512, 513]},
+        "block_tail_samples": {"type": "integer", "minimum": 1}
+      }
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model_ready_current_bytes", "pre_shutdown_current_bytes", "final_current_bytes", "final_request_state_bytes", "final_workspace_bytes", "retryable_cleanup", "durable_quarantine", "empty"],
+      "properties": {
+        "model_ready_current_bytes": {"type": "integer", "minimum": 1}, "pre_shutdown_current_bytes": {"const": 0}, "final_current_bytes": {"const": 0},
+        "final_request_state_bytes": {"const": 0}, "final_workspace_bytes": {"const": 0}, "retryable_cleanup": {"const": 0}, "durable_quarantine": {"const": 0}, "empty": {"const": true}
+      }
+    }
+  }
+}

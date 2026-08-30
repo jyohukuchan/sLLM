@@ -1,0 +1,26 @@
+[package]
+name = "sllm-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Reproducible artifact, benchmark, quality, and debug tools for sLLM"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+libc.workspace = true
+sllm-core.workspace = true
+
+[[bin]]
+name = "sllm-artifact"
+path = "src/bin/sllm-artifact.rs"
+
+[[bin]]
+name = "sllm-bench"
+path = "src/bin/sllm-bench.rs"
+
+[[bin]]
+name = "sllm-eval"
+path = "src/bin/sllm-eval.rs"

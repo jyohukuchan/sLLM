@@ -110,12 +110,25 @@ FA3/4相当kernelが現れた場合も、contiguous pointerを受ける限りvAt
 - private evidence readbackもpublishedかつmappedな範囲だけを許可し、未map領域を成功扱いにしない。
 - actual public runtimeのfocused probeは両targetで1023/1024/1025 token、FP16全要素oracle、
   2/2/4 MiB per-plane commitment、未map readback拒否、fallbackなし、cleanupをPASSした。
-- Phase 31のQwen CLI/serverはKV encodingをweight encodingから独立して明示選択できる。既定はFP16のままで、dynamic/static
+- Phase 31のQwen CLI/serverはKV encodingをweight encodingから独立して明示選択できる。dynamic/static
   FP8とNVFP4は明示選択時だけ使う。10,001-token dynamic FP8はexact gfx1030/gfx1201の双方、16,385-token 2-chunk
   dynamic FP8はgfx1201でHIP-only、fallbackなし、cleanup 0をPASSした。static FP8の固定scale 1.0は実験設定であり、
   model由来calibrationやdefault policyではない。
 - Phase 52の自動providerはexact `gfx942`を全capacityで、exact `gfx1030`/`gfx1201`をcapacity 65,536以上で
   `contiguous-resident`へ固定する。それ以外は従来のcapability-selected providerを維持する。
+
+## Phase 53 block-scale KV形式のmemory判定
+
+Phase 53はtoken-major logical shapeと既存memory providerを維持したまま、K/Vそれぞれにpadded value planeと
+head-dimension方向のblock-scale planeを追加する。head dim 256の1 token／KV head／KまたはV当たり、FP16は512 byte、
+block16はvalue 256 byte＋E8M0 scale 16 byteの272 byte、標準OCP MXFP8 block32はvalue 256 byte＋scale 8 byteの
+264 byteである。これはalignment、VMM page、resident capacityを含まないlogical accountingであり、実HBM削減値ではない。
+
+block16 descriptor v1/v2のcorrectness・品質・early-stopはPhase 53/54履歴として保持するが、2026-08-30以降は
+block16 stateの新規生成を全production境界で拒否する。standard OCP `kv-mxfp8-e4`はblock 32、1 KV head／1 plane／
+head dim 256当たり264 byteで、reviewed Qwen3.5-4B BF16 dense text scopeの既定である。exact `gfx1030`、`gfx1201`、
+`gfx942:sramecc+:xnack-`で同一OCP E4M3FN byte contractを使い、gfx942でもFNUZへ再解釈しない。
+K/V valueとscaleの全plane完了後だけlogical lengthを公開し、grow/COW failure時は全planeをappend前へ戻す。
 
 ## 再検討条件
 

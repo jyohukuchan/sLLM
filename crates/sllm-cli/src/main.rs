@@ -70,9 +70,11 @@ fn print_help() {
     println!("model source: --gguf PATH --derived-lock PATH");
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
     println!(
-        "  --device-index N --target gfx1030|gfx1201|gfx942 [--greedy | --temperature F32] [--seed U64]"
+        "  --device-index N --target gfx1030|gfx1201|gfx942|gfx942:sramecc+:xnack- [--greedy | --temperature F32] [--seed U64]"
     );
-    println!("  [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4] (default: fp16)");
+    println!(
+        "  [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (reviewed Qwen3.5-4B BF16 dense default: kv-mxfp8-e4; rollback: fp16)"
+    );
     println!("  [--prefill-chunk-tokens 1..16384] (dense Qwen text only; default: auto)");
     println!("  [--mtp-draft-width 0..8] (default: auto; 0 target-only; 1..8 forced MTP)");
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");

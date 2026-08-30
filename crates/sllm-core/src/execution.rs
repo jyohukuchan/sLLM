@@ -2478,8 +2478,7 @@ fn checked_shape_bytes(dtype: DType, shape: &[u64]) -> Result<u64, ExecutionErro
 }
 
 fn kv_state_allocation_bytes(descriptor: KvStateDescriptor) -> Option<u64> {
-    let one = checked_shape_bytes(descriptor.dtype(), &descriptor.storage_shape()).ok()?;
-    one.checked_mul(2)
+    descriptor.resident_bytes_per_plane()?.checked_mul(2)
 }
 
 fn linear_state_allocation_bytes(descriptor: LinearAttentionStateDescriptor) -> Option<u64> {
@@ -3566,7 +3565,11 @@ fn kv_state_plane_kinds(encoding: KvCacheEncoding) -> Vec<StatePlaneKindV1> {
     let mut planes = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
     match encoding {
         KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
-        KvCacheEncoding::Fp8E4M3Fn => {
+        KvCacheEncoding::Fp8E4M3Fn
+        | KvCacheEncoding::Fp8E4M3Block16
+        | KvCacheEncoding::Fp8E5M2Block16
+        | KvCacheEncoding::Mxfp8E4
+        | KvCacheEncoding::Mxfp8E5 => {
             planes.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
         }
         KvCacheEncoding::Nvfp4 => {

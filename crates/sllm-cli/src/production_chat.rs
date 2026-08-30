@@ -10,13 +10,17 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use sllm_core::{KvCacheEncoding, QWEN35_RECOMMENDED_CONTEXT_TOKENS};
+use sllm_core::{
+    KvCacheEncoding, KvCacheSelectionRequest, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
+    builtin_reviewed_model_lock, read_derived_gguf_lock, resolve_kv_cache_selection,
+};
 use sllm_frontend::{GenerationCancellationV1, ThinkingModeV1};
 use sllm_server::{
     CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
-    Phase41ProductionConfigV1, PrefixCacheStartupConfigV1, QwenBackendConfigV1,
-    QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
-    QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1,
+    KvCacheExplicitSourceV1, KvCacheSelectionReportV1, Phase41ProductionConfigV1,
+    PrefixCacheStartupConfigV1, QwenBackendConfigV1, QwenPersistentChatFinishReasonV1,
+    QwenPersistentChatSessionConfigV1, QwenPersistentChatSessionV1,
+    QwenPersistentChatTurnRequestV1,
 };
 
 use crate::chat::{
@@ -148,6 +152,7 @@ struct ProductionChatConfigV1 {
     device_index: u32,
     target: String,
     context_length: u32,
+    kv_cache_encoding: Option<KvCacheEncoding>,
     completion_timeout_seconds: u64,
     shutdown_timeout_seconds: u64,
     checkpoint_directory: std::path::PathBuf,
@@ -300,9 +305,14 @@ fn split_args(
     if target.is_empty() || !target.is_ascii() {
         return Err("chat target is invalid".to_owned());
     }
-    if kv_cache_encoding.as_deref().unwrap_or("fp16") != "fp16" {
-        return Err("chat supports only fp16 KV cache encoding".to_owned());
-    }
+    let kv_cache_encoding = match kv_cache_encoding.as_deref() {
+        None => None,
+        Some("fp16") => Some(KvCacheEncoding::Fp16),
+        Some("kv-mxfp8-e4") => Some(KvCacheEncoding::Mxfp8E4),
+        Some(_) => {
+            return Err("chat KV cache encoding must be fp16 or kv-mxfp8-e4".to_owned());
+        }
+    };
     let checkpoint_directory =
         checkpoint_directory.ok_or_else(|| "chat requires --checkpoint-directory".to_owned())?;
     validate_path_argument(&gguf, "--gguf")?;
@@ -320,6 +330,7 @@ fn split_args(
                 u32::try_from(QWEN35_RECOMMENDED_CONTEXT_TOKENS)
                     .expect("Qwen recommended context fits u32")
             }),
+            kv_cache_encoding,
             completion_timeout_seconds: completion_timeout_seconds
                 .unwrap_or(DEFAULT_COMPLETION_TIMEOUT_SECONDS_V1),
             shutdown_timeout_seconds: shutdown_timeout_seconds
@@ -344,6 +355,30 @@ fn open_backend(
     config: ProductionChatConfigV1,
     cancellation_registry: CancellationRegistryV1,
 ) -> Result<ProductionChatBackendV1, String> {
+    let derived = read_derived_gguf_lock(&config.derived_lock)
+        .map_err(|_| "chat derived GGUF lock is invalid".to_owned())?;
+    let lock = match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+        .map_err(|_| "chat model lock is unsupported".to_owned())?
+    {
+        ReviewedModelLock::Qwen35(lock) => lock,
+        ReviewedModelLock::Gemma4(_) => {
+            return Err("chat requires a reviewed Qwen model".to_owned());
+        }
+    };
+    let head_dim = usize::try_from(lock.model().architecture.text_config.head_dim)
+        .map_err(|_| "chat KV head dimension is invalid".to_owned())?;
+    let kv_selection = resolve_kv_cache_selection(KvCacheSelectionRequest::new(
+        config.kv_cache_encoding,
+        &config.target,
+        lock.fingerprint(),
+        true,
+        true,
+        true,
+        head_dim,
+    ))
+    .map_err(|error| error.to_string())?;
+    let kv_selection_report =
+        KvCacheSelectionReportV1::from_core(kv_selection, KvCacheExplicitSourceV1::Process);
     let backend = QwenBackendConfigV1 {
         gguf_path: config.gguf,
         derived_lock_path: config.derived_lock,
@@ -352,7 +387,9 @@ fn open_backend(
         completion_timeout: Duration::from_secs(config.completion_timeout_seconds),
         shutdown_timeout: Duration::from_secs(config.shutdown_timeout_seconds),
         context_length: config.context_length,
-        kv_cache_encoding: KvCacheEncoding::Fp16,
+        kv_cache_encoding: kv_selection.resolved(),
+        kv_cache_resolved_selection: Some(kv_selection),
+        kv_cache_selection: Some(kv_selection_report),
         phase41: phase41_disabled(),
         adapter_catalog: None,
     };
@@ -504,7 +541,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_requires_exact_qwen_fp16_runtime_surface() {
+    fn parser_defaults_qwen_kv_and_accepts_explicit_mxfp8_or_fp16() {
         let error = split_args(["--gguf", "m"].into_iter().map(str::to_owned)).unwrap_err();
         assert!(error.contains("--derived-lock"));
         let mut args = vec![
@@ -525,6 +562,31 @@ mod tests {
         ];
         let error = split_args(args.drain(..).map(str::to_owned)).unwrap_err();
         assert!(error.contains("fp16"));
+
+        let base = [
+            "--gguf",
+            "m",
+            "--derived-lock",
+            "l",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx942",
+            "--checkpoint-directory",
+            "c",
+            "--checkpoint-quota-bytes",
+            "1024",
+        ];
+        let (auto, _) = split_args(base.into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(auto.kv_cache_encoding, None);
+        let mut explicit_args = base.to_vec();
+        explicit_args.extend(["--kv-cache-encoding", "fp16"]);
+        let (explicit, _) = split_args(explicit_args.into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(explicit.kv_cache_encoding, Some(KvCacheEncoding::Fp16));
+        let mut explicit_args = base.to_vec();
+        explicit_args.extend(["--kv-cache-encoding", "kv-mxfp8-e4"]);
+        let (explicit, _) = split_args(explicit_args.into_iter().map(str::to_owned)).unwrap();
+        assert_eq!(explicit.kv_cache_encoding, Some(KvCacheEncoding::Mxfp8E4));
 
         let args = [
             "--gguf",

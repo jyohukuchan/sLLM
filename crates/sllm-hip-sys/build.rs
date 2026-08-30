@@ -581,6 +581,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_COMPILE_PROBE");
     println!("cargo:rerun-if-env-changed=SLLM_ENABLE_HIP_RUNTIME");
     println!("cargo:rerun-if-env-changed=SLLM_ENABLE_PUBLIC_HIP_RUNTIME");
+    println!("cargo:rerun-if-env-changed=SLLM_ENABLE_PHASE54_KV_RESEARCH");
     println!("cargo:rerun-if-env-changed=SLLM_SEMANTIC_G1_AUTHORITY");
     println!("cargo:rerun-if-env-changed=SLLM_HIP_COMPILER");
     println!("cargo:rerun-if-env-changed=SLLM_HIP_COMPILER_BROKER_SOCKET");
@@ -611,6 +612,19 @@ fn main() {
         Err(env::VarError::NotPresent) => false,
         Err(error) => panic!("cannot read SLLM_ENABLE_PUBLIC_HIP_RUNTIME: {error}"),
     };
+    let phase54_kv_research_enabled = match env::var("SLLM_ENABLE_PHASE54_KV_RESEARCH") {
+        Ok(value) if value == "1" || value == "ON" => true,
+        Ok(value) if value == "0" || value == "OFF" => false,
+        Ok(value) => panic!(
+            "SLLM_ENABLE_PHASE54_KV_RESEARCH must be unset or exactly 0, 1, OFF, or ON; got {value}"
+        ),
+        Err(env::VarError::NotPresent) => false,
+        Err(error) => panic!("cannot read SLLM_ENABLE_PHASE54_KV_RESEARCH: {error}"),
+    };
+    assert!(
+        !phase54_kv_research_enabled || public_runtime_enabled,
+        "SLLM_ENABLE_PHASE54_KV_RESEARCH=ON requires SLLM_ENABLE_PUBLIC_HIP_RUNTIME=1"
+    );
     let semantic_g1_authority = semantic_g1_authority_enabled();
     let hip_configuration = if hip_probe {
         Some(validate_hip_environment(
@@ -675,7 +689,12 @@ fn main() {
         .arg(format!(
             "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY={}",
             build_dir.display()
-        ));
+        ))
+        .arg(if phase54_kv_research_enabled {
+            "-DSLLM_ENABLE_PHASE54_KV_RESEARCH=ON"
+        } else {
+            "-DSLLM_ENABLE_PHASE54_KV_RESEARCH=OFF"
+        });
 
     if let Some(configuration) = &hip_configuration {
         configure
@@ -1187,6 +1206,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_DTYPE_F32={{}}\", bindings::SLLM_TENSOR_DTYPE_F32);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FN={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FN);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E5M2={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E5M2);\n\
              println!(\"const SLLM_HIP_KV_HEAD_COUNT={{}}\", bindings::SLLM_HIP_KV_HEAD_COUNT);\n\
              println!(\"const SLLM_HIP_KV_HEAD_DIM={{}}\", bindings::SLLM_HIP_KV_HEAD_DIM);\n\
              println!(\"const SLLM_HIP_KV_MAX_HEAD_DIM={{}}\", bindings::SLLM_HIP_KV_MAX_HEAD_DIM);\n\
@@ -1197,10 +1217,22 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V1);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V1);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E4_BLOCK16_TOKEN_MAJOR_V2);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_E5_BLOCK16_TOKEN_MAJOR_V2);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E4_TOKEN_MAJOR_V1);\n\
+             println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_MXFP8_E5_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_FP16_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP16_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_FP8_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_FP8_STATIC_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_STATIC_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_NVFP4_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_NVFP4_V1);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V1);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V1);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2={{}}\", bindings::SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_MXFP8_E4_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);\n\
+             println!(\"const SLLM_HIP_KV_ENCODING_MXFP8_E5_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);\n\
              println!(\"const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);\n\
              println!(\"const SLLM_BACKEND_HIP={{}}\", bindings::SLLM_BACKEND_HIP);\n\
              println!(\"const SLLM_ACCESS_READ={{}}\", bindings::SLLM_ACCESS_READ);\n\
@@ -1326,6 +1358,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_DTYPE_F32={{}}\", bindings::SLLM_TENSOR_DTYPE_F32);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FN={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FN);\n\
              println!(\"const SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E4M3_FNUZ);\n\
+             println!(\"const SLLM_TENSOR_DTYPE_F8_E5M2={{}}\", bindings::SLLM_TENSOR_DTYPE_F8_E5M2);\n\
              println!(\"const SLLM_TENSOR_DTYPE_U8={{}}\", bindings::SLLM_TENSOR_DTYPE_U8);\n\
              println!(\"const SLLM_TENSOR_DTYPE_I32={{}}\", bindings::SLLM_TENSOR_DTYPE_I32);\n\
              println!(\"const SLLM_TENSOR_ENCODING_UNQUANTIZED={{}}\", bindings::SLLM_TENSOR_ENCODING_UNQUANTIZED);\n\
@@ -1333,6 +1366,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32);\n\
              println!(\"const SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32={{}}\", bindings::SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32);\n\
              println!(\"const SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0);\n\
+             println!(\"const SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0);\n\
+             println!(\"const SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0);\n\
              println!(\"const SLLM_RMSNORM_ACCUMULATION_F32={{}}\", bindings::SLLM_RMSNORM_ACCUMULATION_F32);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_DIRECT={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_DIRECT);\n\

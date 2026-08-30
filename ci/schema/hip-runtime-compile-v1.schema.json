@@ -126,7 +126,7 @@
     "$schema": {"const": "https://sllm-project.local/ci/schema/hip-runtime-compile-v1.schema.json"},
     "schema_version": {"const": "hip-runtime-compile-v1"},
     "matrix_id": {"const": "hip-runtime-compile-v1"},
-    "revision": {"const": 8},
+    "revision": {"const": 10},
     "toolchain_id": {"const": "rocm-7.14.0"},
     "container": {
       "type": "object",

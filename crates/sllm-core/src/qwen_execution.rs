@@ -25,6 +25,8 @@ use crate::execution::{
     OwnedTensorBinding, PrepareSupport, Submission,
 };
 use crate::final_output::QWEN35_VOCAB_SIZE;
+#[cfg(feature = "phase54-research")]
+use crate::kv_state::KvFp8PhysicalVariant;
 use crate::kv_state::{
     CausalAttentionDescriptor, KvCacheEncoding, KvPhysicalMemorySnapshot, KvStateDescriptor,
 };
@@ -33,6 +35,22 @@ use crate::model::{QWEN35_4B_FINGERPRINT, TensorDType, VerifiedCache};
 use crate::op::{
     AttentionPreprocessContract, AttentionPreprocessPositionMode, OpError, SemanticOpDescriptor,
     SemanticOpKind, TokenSelectorContractV1,
+};
+#[cfg(feature = "phase54-research")]
+use crate::phase54_kq_transform::{
+    PHASE54_KQ_TRANSFORM_HEAD_DIM, PHASE54_KQ_TRANSFORM_SEMANTICS, Phase54KqTransformConfig,
+    Phase54KqTransformMode, Phase54KqTransformTarget, transpose_bf16_bytes,
+};
+#[cfg(feature = "phase54-research")]
+use crate::phase54_kv_attribution::{
+    PHASE54_KV_ATTRIBUTION_SEMANTICS, Phase54KvAttributionConfig, Phase54KvAttributionMode,
+    roundtrip_bf16_plane,
+};
+#[cfg(feature = "phase54-research")]
+use crate::phase54_vo_transform::{
+    PHASE54_VO_TRANSFORM_HEAD_DIM, PHASE54_VO_TRANSFORM_KV_HEADS, PHASE54_VO_TRANSFORM_Q_HEADS,
+    PHASE54_VO_TRANSFORM_SEMANTICS, Phase54VoTransformConfig, Phase54VoTransformMode,
+    Phase54VoTransformTarget,
 };
 use crate::prepared_execution::{
     ExecutionAuditAccumulator, ExecutionBoundaryKind, ExecutionSegment, ExecutionTransaction,
@@ -842,6 +860,198 @@ fn qwen_deferred_completion_enabled(
         && graph.layer_types().len() == 32
 }
 
+#[cfg(feature = "phase54-research")]
+fn phase54_request_config(
+    session: &ExecutionSession,
+) -> Result<Phase54KvAttributionConfig, QwenExecutionError> {
+    Phase54KvAttributionConfig::from_env(session.expected_target().as_deref()).map_err(|error| {
+        QwenExecutionError::InvalidRequest(format!("{PHASE54_KV_ATTRIBUTION_SEMANTICS}: {error}"))
+    })
+}
+
+#[cfg(feature = "phase54-research")]
+fn phase54_kq_transform_request_config(
+    session: &ExecutionSession,
+) -> Result<Phase54KqTransformConfig, QwenExecutionError> {
+    Phase54KqTransformConfig::from_env(session.expected_target().as_deref()).map_err(|error| {
+        QwenExecutionError::InvalidRequest(format!("{PHASE54_KQ_TRANSFORM_SEMANTICS}: {error}"))
+    })
+}
+
+#[cfg(feature = "phase54-research")]
+fn phase54_vo_transform_request_config(
+    session: &ExecutionSession,
+) -> Result<Phase54VoTransformConfig, QwenExecutionError> {
+    Phase54VoTransformConfig::from_env(session.expected_target().as_deref()).map_err(|error| {
+        QwenExecutionError::InvalidRequest(format!("{PHASE54_VO_TRANSFORM_SEMANTICS}: {error}"))
+    })
+}
+
+#[cfg(feature = "phase54-research")]
+fn validate_phase54_research_mode_exclusivity(
+    attribution: Phase54KvAttributionConfig,
+    kq: Phase54KqTransformConfig,
+    vo: Phase54VoTransformConfig,
+) -> Result<(), QwenExecutionError> {
+    let enabled = usize::from(attribution.mode().is_enabled())
+        + usize::from(kq.mode().is_enabled())
+        + usize::from(vo.mode().is_enabled());
+    if enabled > 1 {
+        return Err(QwenExecutionError::InvalidRequest(
+            "Phase 54 attribution, K/Q transform, and V/output transform modes are mutually exclusive"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "phase54-research")]
+fn validate_phase54_kq_transform_scope(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+    kv_states: &BTreeMap<u32, KvState>,
+    config: Phase54KqTransformConfig,
+) -> Result<(), QwenExecutionError> {
+    if !config.is_enabled() {
+        return Ok(());
+    }
+    let (expected_encoding, expected_variant) = match config.target() {
+        Some(Phase54KqTransformTarget::Gfx1030) => (
+            KvCacheEncoding::Fp8E5M2Block16,
+            KvFp8PhysicalVariant::OcpE5M2,
+        ),
+        Some(Phase54KqTransformTarget::Gfx1201) => (
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        ),
+        None => {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KQ_TRANSFORM_SEMANTICS} has no target-bound physical contract"
+            )));
+        }
+    };
+    if session.backend_name() != "hip"
+        || graph.model_fingerprint() != QWEN35_4B_FINGERPRINT
+        || graph.is_multimodal()
+        || graph.is_mtp()
+        || graph.layer_types() != QWEN35_LAYER_TYPES
+        || !adapters.lora.is_empty()
+        || !adapters.controls.is_empty()
+        || kv_states.is_empty()
+        || kv_states.values().any(|state| {
+            let descriptor = state.descriptor();
+            descriptor.cache_encoding() != expected_encoding
+                || descriptor.layout().head_dim() != PHASE54_KQ_TRANSFORM_HEAD_DIM
+                || descriptor
+                    .kv_fp8_block16_descriptor()
+                    .is_none_or(|block| block.physical_variant() != expected_variant)
+        })
+    {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "{PHASE54_KQ_TRANSFORM_SEMANTICS} requires HIP Qwen3.5-4B text, no adapters, and actual KV FP8 block16 states with head_dim {PHASE54_KQ_TRANSFORM_HEAD_DIM}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "phase54-research")]
+fn validate_phase54_vo_transform_scope(
+    session: &ExecutionSession,
+    graph: &QwenGraph,
+    adapters: &QwenAdapterRuntime,
+    kv_states: &BTreeMap<u32, KvState>,
+    config: Phase54VoTransformConfig,
+) -> Result<(), QwenExecutionError> {
+    if !config.is_enabled() {
+        return Ok(());
+    }
+    let semantics = config.semantics();
+    let selected_layers = config.mode().layers();
+    let (expected_encoding, expected_variant) = match config.target() {
+        Some(Phase54VoTransformTarget::Gfx1030) => (
+            KvCacheEncoding::Fp8E5M2Block16,
+            KvFp8PhysicalVariant::OcpE5M2,
+        ),
+        Some(Phase54VoTransformTarget::Gfx1201) => (
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvFp8PhysicalVariant::OcpE4M3Fn,
+        ),
+        None => {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{semantics} has no target-bound physical contract"
+            )));
+        }
+    };
+    let expected_preprocess = selected_layers.iter().all(|selected_layer| {
+        graph.nodes().iter().any(|node| {
+            matches!(
+                node.kind(),
+                QwenGraphNodeKind::AttentionPreprocess {
+                    layer,
+                    q_heads: 16,
+                    kv_heads: 4,
+                    head_dim: 256,
+                    ..
+                } if layer == *selected_layer
+            )
+        })
+    });
+    let expected_attention_output = selected_layers.iter().all(|selected_layer| {
+        graph.nodes().iter().any(|node| match node.kind() {
+            QwenGraphNodeKind::FullCausalAttention {
+                layer,
+                query_shape,
+                output_shape,
+                ..
+            } if layer == *selected_layer => {
+                query_shape[1] == PHASE54_VO_TRANSFORM_Q_HEADS as u64
+                    && query_shape[2] == PHASE54_VO_TRANSFORM_HEAD_DIM as u64
+                    && output_shape[1] == PHASE54_VO_TRANSFORM_Q_HEADS as u64
+                    && output_shape[2] == PHASE54_VO_TRANSFORM_HEAD_DIM as u64
+            }
+            _ => false,
+        })
+    });
+    let expected_selected_states = selected_layers.iter().all(|layer| {
+        kv_states.get(layer).is_some_and(|state| {
+            let descriptor = state.descriptor();
+            descriptor.cache_encoding() == expected_encoding
+                && descriptor.layout().heads() == PHASE54_VO_TRANSFORM_KV_HEADS
+                && descriptor.layout().head_dim() == PHASE54_VO_TRANSFORM_HEAD_DIM
+                && descriptor
+                    .kv_fp8_block16_descriptor()
+                    .is_some_and(|block| block.physical_variant() == expected_variant)
+        })
+    });
+    if session.backend_name() != "hip"
+        || graph.model_fingerprint() != QWEN35_4B_FINGERPRINT
+        || graph.is_multimodal()
+        || graph.is_mtp()
+        || graph.layer_types() != QWEN35_LAYER_TYPES
+        || !adapters.lora.is_empty()
+        || !adapters.controls.is_empty()
+        || !expected_preprocess
+        || !expected_attention_output
+        || !expected_selected_states
+        || kv_states.is_empty()
+        || kv_states.values().any(|state| {
+            let descriptor = state.descriptor();
+            descriptor.cache_encoding() != expected_encoding
+                || descriptor.layout().heads() != PHASE54_VO_TRANSFORM_KV_HEADS
+                || descriptor.layout().head_dim() != PHASE54_VO_TRANSFORM_HEAD_DIM
+                || descriptor
+                    .kv_fp8_block16_descriptor()
+                    .is_none_or(|block| block.physical_variant() != expected_variant)
+        })
+    {
+        return Err(QwenExecutionError::InvalidRequest(format!(
+            "{semantics} requires HIP Qwen3.5-4B text, no adapters, actual KV FP8 block16 states, and exact [kv_heads=4,q_heads=16,head_dim=256] shapes for selected layers {selected_layers:?}"
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct StatefulExecution {
     token_count: u64,
@@ -864,6 +1074,20 @@ pub struct QwenExecutionAudit {
     boundary_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    #[cfg(feature = "phase54-research")]
+    phase54_kv_attribution_semantics: Option<&'static str>,
+    #[cfg(feature = "phase54-research")]
+    phase54_kv_attribution_layer: Option<u32>,
+    #[cfg(feature = "phase54-research")]
+    phase54_kq_transform_semantics: Option<&'static str>,
+    #[cfg(feature = "phase54-research")]
+    phase54_kq_transform_digest: Option<&'static str>,
+    #[cfg(feature = "phase54-research")]
+    phase54_vo_transform_semantics: Option<&'static str>,
+    #[cfg(feature = "phase54-research")]
+    phase54_vo_transform_digest: Option<&'static str>,
+    #[cfg(feature = "phase54-research")]
+    phase54_vo_transform_backend: Option<&'static str>,
 }
 
 impl QwenExecutionAudit {
@@ -905,6 +1129,48 @@ impl QwenExecutionAudit {
 
     pub const fn sparse_moe_active_pair_count(&self) -> u64 {
         self.sparse_moe_active_pair_count
+    }
+
+    /// Returns the research-only surrogate label when it was enabled for the
+    /// request. Normal builds expose no intervention label.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kv_attribution_semantics(&self) -> Option<&'static str> {
+        self.phase54_kv_attribution_semantics
+    }
+
+    /// Returns the reviewed full-attention layer selected for this research
+    /// request, or `None` for the unmodified off mode.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kv_attribution_layer(&self) -> Option<u32> {
+        self.phase54_kv_attribution_layer
+    }
+
+    /// Returns the research-only K/Q transform label when active. Normal
+    /// builds expose no transform state.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kq_transform_semantics(&self) -> Option<&'static str> {
+        self.phase54_kq_transform_semantics
+    }
+
+    /// Returns the canonical digest of the active research K/Q transform.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kq_transform_digest(&self) -> Option<&'static str> {
+        self.phase54_kq_transform_digest
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_semantics(&self) -> Option<&'static str> {
+        self.phase54_vo_transform_semantics
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_digest(&self) -> Option<&'static str> {
+        self.phase54_vo_transform_digest
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_backend(&self) -> Option<&'static str> {
+        self.phase54_vo_transform_backend
     }
 }
 
@@ -2057,6 +2323,67 @@ impl QwenExecutionRequest {
         &self.core.adapters.identity
     }
 
+    /// Returns the request-local Phase 54 research selector.  This accessor
+    /// exists only in research builds; normal builds contain no selector or
+    /// intervention state.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kv_attribution_mode(&self) -> Phase54KvAttributionMode {
+        self.core.phase54_kv_attribution.mode()
+    }
+
+    /// Stable semantic label for the research-only surrogate.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kv_attribution_semantics(&self) -> &'static str {
+        self.core.phase54_kv_attribution.semantics()
+    }
+
+    /// Returns the reviewed full-attention layer selected for this research
+    /// request, or `None` for the unmodified off mode.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kv_attribution_layer(&self) -> Option<u32> {
+        self.core.phase54_kv_attribution.layer()
+    }
+
+    /// Returns the request-local Phase 54 K/Q transform selector. This
+    /// accessor exists only in research builds; normal builds contain no
+    /// intervention state.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kq_transform_mode(&self) -> Phase54KqTransformMode {
+        self.core.phase54_kq_transform.mode()
+    }
+
+    /// Stable semantic label for the research-only K/Q transform.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kq_transform_semantics(&self) -> &'static str {
+        self.core.phase54_kq_transform.semantics()
+    }
+
+    /// Canonical transform digest when the research K/Q transform is active.
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_kq_transform_digest(&self) -> Option<&'static str> {
+        self.core.phase54_kq_transform.digest()
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_mode(&self) -> Phase54VoTransformMode {
+        self.core.phase54_vo_transform.mode()
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_semantics(&self) -> &'static str {
+        self.core.phase54_vo_transform.semantics()
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_digest(&self) -> Option<&'static str> {
+        self.core.phase54_vo_transform.digest()
+    }
+
+    #[cfg(feature = "phase54-research")]
+    pub const fn phase54_vo_transform_backend(&self) -> Option<&'static str> {
+        self.core.phase54_vo_transform.backend()
+    }
+
     /// Returns the immutable audit accumulated by successful compute
     /// submissions. An empty audit is never a successful request audit.
     pub fn audit_snapshot(&self) -> Result<QwenExecutionAudit, QwenExecutionError> {
@@ -2171,6 +2498,12 @@ struct QwenExecutionCore {
     pending_speculative: Option<PendingSpeculativeBlock>,
     adapters: QwenAdapterRuntime,
     short_terminal_last_row: bool,
+    #[cfg(feature = "phase54-research")]
+    phase54_kv_attribution: Phase54KvAttributionConfig,
+    #[cfg(feature = "phase54-research")]
+    phase54_kq_transform: Phase54KqTransformConfig,
+    #[cfg(feature = "phase54-research")]
+    phase54_vo_transform: Phase54VoTransformConfig,
 }
 
 struct QwenAdapterRuntime {
@@ -3695,6 +4028,274 @@ impl QwenResidentInner {
 }
 
 impl QwenExecutionCore {
+    #[cfg(feature = "phase54-research")]
+    fn ensure_phase54_reuse_safe(&self, operation: &str) -> Result<(), QwenExecutionError> {
+        if self.phase54_kv_attribution.mode().is_enabled() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KV_ATTRIBUTION_SEMANTICS} cannot be used with {operation}"
+            )));
+        }
+        if self.phase54_kq_transform.mode().is_enabled() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KQ_TRANSFORM_SEMANTICS} cannot be used with {operation}"
+            )));
+        }
+        if self.phase54_vo_transform.mode().is_enabled() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{} cannot be used with {operation}",
+                self.phase54_vo_transform.semantics()
+            )));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "phase54-research")]
+    fn phase54_roundtrip_kv_inputs(
+        &self,
+        layer: u32,
+        descriptor: KvStateDescriptor,
+        key: &OwnedTensorBinding,
+        value: &OwnedTensorBinding,
+    ) -> Result<(), QwenExecutionError> {
+        let mode = self.phase54_kv_attribution.mode();
+        if !mode.is_enabled() || self.phase54_kv_attribution.layer() != Some(layer) {
+            return Ok(());
+        }
+        if descriptor.cache_encoding() != KvCacheEncoding::Fp16 {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KV_ATTRIBUTION_SEMANTICS} requires an FP16 KV state"
+            )));
+        }
+        let physical_variant = self
+            .phase54_kv_attribution
+            .physical_variant()
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE54_KV_ATTRIBUTION_SEMANTICS} has no resolved physical variant"
+                ))
+            })?;
+
+        let roundtrip = |plane: &str, binding: &OwnedTensorBinding| {
+            let view = binding.view();
+            if view.dtype() != DType::Bf16
+                || view.encoding() != Encoding::Unquantized
+                || !view.is_contiguous()
+                || view.shape().len() != 3
+                || view.shape().contains(&0)
+            {
+                return Err(QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE54_KV_ATTRIBUTION_SEMANTICS} {plane} input must be contiguous BF16 [tokens,heads,head_dim]"
+                )));
+            }
+            let rows = view.shape()[0]
+                .checked_mul(view.shape()[1])
+                .ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(format!(
+                        "{PHASE54_KV_ATTRIBUTION_SEMANTICS} {plane} row shape overflowed"
+                    ))
+                })?;
+            let columns = view.shape()[2];
+            let source = read_exact_bytes(
+                self.session.as_ref(),
+                &self.queue,
+                binding.buffer(),
+                view,
+                self.completion_timeout,
+                &format!("{PHASE54_KV_ATTRIBUTION_SEMANTICS} {plane} readback"),
+            )?;
+            let (reconstructed, _stats) = roundtrip_bf16_plane(
+                &source,
+                rows,
+                columns,
+                physical_variant,
+                self.phase54_kv_attribution.recipe(),
+            )
+            .map_err(|error| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE54_KV_ATTRIBUTION_SEMANTICS} {plane} roundtrip failed: {error}"
+                ))
+            })?;
+            let destination = binding
+                .buffer()
+                .range(view.byte_offset(), view.payload_bytes())?;
+            upload_buffer_bytes(
+                self.session.as_ref(),
+                &self.queue,
+                &destination,
+                &reconstructed,
+                self.completion_timeout,
+                &format!("{PHASE54_KV_ATTRIBUTION_SEMANTICS} {plane} reconstructed BF16 upload"),
+            )
+        };
+
+        if mode.transforms_key() {
+            roundtrip("key", key)?;
+        }
+        if mode.transforms_value() {
+            roundtrip("value", value)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "phase54-research")]
+    fn phase54_transform_kq_input(
+        &self,
+        layer: u32,
+        descriptor: KvStateDescriptor,
+        plane: &str,
+        binding: &OwnedTensorBinding,
+    ) -> Result<(), QwenExecutionError> {
+        let config = self.phase54_kq_transform;
+        if !config.applies_layer(layer) {
+            return Ok(());
+        }
+        if !descriptor.cache_encoding().is_kv_fp8_block16() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KQ_TRANSFORM_SEMANTICS} requires a KV FP8 block16 state"
+            )));
+        }
+        let view = binding.view();
+        if view.dtype() != DType::Bf16
+            || view.encoding() != Encoding::Unquantized
+            || !view.is_contiguous()
+            || view.shape().len() != 3
+            || view.shape().contains(&0)
+            || view.shape()[2] != PHASE54_KQ_TRANSFORM_HEAD_DIM
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KQ_TRANSFORM_SEMANTICS} {plane} input must be contiguous BF16 [tokens,heads,256]"
+            )));
+        }
+        let rows = view.shape()[0]
+            .checked_mul(view.shape()[1])
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE54_KQ_TRANSFORM_SEMANTICS} {plane} row shape overflowed"
+                ))
+            })?;
+        let source = read_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            binding.buffer(),
+            view,
+            self.completion_timeout,
+            &format!("{PHASE54_KQ_TRANSFORM_SEMANTICS} {plane} readback"),
+        )?;
+        let transformed =
+            transpose_bf16_bytes(&source, rows, view.shape()[2]).map_err(|error| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{PHASE54_KQ_TRANSFORM_SEMANTICS} {plane} transform failed: {error}"
+                ))
+            })?;
+        let destination = binding
+            .buffer()
+            .range(view.byte_offset(), view.payload_bytes())?;
+        upload_buffer_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &destination,
+            &transformed,
+            self.completion_timeout,
+            &format!("{PHASE54_KQ_TRANSFORM_SEMANTICS} {plane} transformed BF16 upload"),
+        )
+    }
+
+    #[cfg(feature = "phase54-research")]
+    fn phase54_transform_vo_value(
+        &self,
+        layer: u32,
+        descriptor: KvStateDescriptor,
+        binding: &OwnedTensorBinding,
+    ) -> Result<(), QwenExecutionError> {
+        self.phase54_transform_vo_binding(layer, descriptor, "value", false, binding)
+    }
+
+    #[cfg(feature = "phase54-research")]
+    fn phase54_transform_vo_output(
+        &self,
+        layer: u32,
+        descriptor: KvStateDescriptor,
+        binding: &OwnedTensorBinding,
+    ) -> Result<(), QwenExecutionError> {
+        self.phase54_transform_vo_binding(layer, descriptor, "attention_output", true, binding)
+    }
+
+    #[cfg(feature = "phase54-research")]
+    fn phase54_transform_vo_binding(
+        &self,
+        layer: u32,
+        descriptor: KvStateDescriptor,
+        plane: &str,
+        output_companion: bool,
+        binding: &OwnedTensorBinding,
+    ) -> Result<(), QwenExecutionError> {
+        let config = self.phase54_vo_transform;
+        let semantics = config.semantics();
+        let applies = if output_companion {
+            config.applies_output_layer(layer)
+        } else {
+            config.applies_value_layer(layer)
+        };
+        if !applies {
+            return Ok(());
+        }
+        if !descriptor.cache_encoding().is_kv_fp8_block16() {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{semantics} requires a KV FP8 block16 state"
+            )));
+        }
+        let expected_heads = if output_companion {
+            PHASE54_VO_TRANSFORM_Q_HEADS
+        } else {
+            PHASE54_VO_TRANSFORM_KV_HEADS
+        };
+        let view = binding.view();
+        if view.dtype() != DType::Bf16
+            || view.encoding() != Encoding::Unquantized
+            || !view.is_contiguous()
+            || view.shape().len() != 3
+            || view.shape().contains(&0)
+            || view.shape()[1] != expected_heads
+            || view.shape()[2] != PHASE54_VO_TRANSFORM_HEAD_DIM
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{semantics} {plane} must be contiguous BF16 [tokens,{expected_heads},256]"
+            )));
+        }
+        let rows = view.shape()[0]
+            .checked_mul(view.shape()[1])
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{semantics} {plane} row shape overflowed"
+                ))
+            })?;
+        let source = read_exact_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            binding.buffer(),
+            view,
+            self.completion_timeout,
+            &format!("{semantics} {plane} readback"),
+        )?;
+        let transformed =
+            transpose_bf16_bytes(&source, rows, view.shape()[2]).map_err(|error| {
+                QwenExecutionError::InvalidRequest(format!(
+                    "{semantics} {plane} transform failed: {error}"
+                ))
+            })?;
+        let destination = binding
+            .buffer()
+            .range(view.byte_offset(), view.payload_bytes())?;
+        upload_buffer_bytes(
+            self.session.as_ref(),
+            &self.queue,
+            &destination,
+            &transformed,
+            self.completion_timeout,
+            &format!("{semantics} {plane} transformed BF16 upload"),
+        )
+    }
+
     fn from_resident(
         resident: Arc<QwenResidentInner>,
         graph: QwenGraph,
@@ -3784,6 +4385,44 @@ impl QwenExecutionCore {
             adapters,
             resident.completion_timeout,
         )?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_kv_attribution = phase54_request_config(resident.session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_kq_transform = phase54_kq_transform_request_config(resident.session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_vo_transform = phase54_vo_transform_request_config(resident.session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_research_mode_exclusivity(
+            phase54_kv_attribution,
+            phase54_kq_transform,
+            phase54_vo_transform,
+        )?;
+        #[cfg(feature = "phase54-research")]
+        if phase54_kv_attribution.mode().is_enabled()
+            && kv_states
+                .values()
+                .any(|state| state.descriptor().cache_encoding() != KvCacheEncoding::Fp16)
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KV_ATTRIBUTION_SEMANTICS} requires every KV state to use FP16"
+            )));
+        }
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_kq_transform_scope(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+            &kv_states,
+            phase54_kq_transform,
+        )?;
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_vo_transform_scope(
+            resident.session.as_ref(),
+            &graph,
+            &adapters,
+            &kv_states,
+            phase54_vo_transform,
+        )?;
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
         let core = Self {
             session: Arc::clone(&resident.session),
@@ -3808,6 +4447,12 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters,
             short_terminal_last_row,
+            #[cfg(feature = "phase54-research")]
+            phase54_kv_attribution,
+            #[cfg(feature = "phase54-research")]
+            phase54_kq_transform,
+            #[cfg(feature = "phase54-research")]
+            phase54_vo_transform,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -3817,6 +4462,8 @@ impl QwenExecutionCore {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("state image export")?;
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
@@ -3877,6 +4524,8 @@ impl QwenExecutionCore {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("state image import")?;
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
@@ -3941,6 +4590,8 @@ impl QwenExecutionCore {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("checkpoint import")?;
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
@@ -4196,6 +4847,8 @@ impl QwenExecutionCore {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("prefix fork/export")?;
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
@@ -4281,6 +4934,8 @@ impl QwenExecutionCore {
         if self.lifecycle.is_poisoned() {
             return Err(QwenExecutionError::Poisoned);
         }
+        #[cfg(feature = "phase54-research")]
+        self.ensure_phase54_reuse_safe("prefix import/fork")?;
         if self.pending_speculative.is_some() {
             return Err(QwenExecutionError::Busy);
         }
@@ -4534,6 +5189,44 @@ impl QwenExecutionCore {
             completion_timeout,
         )?;
         let (kv_states, linear_states) = create_states(&session, &graph)?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_kv_attribution = phase54_request_config(session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_kq_transform = phase54_kq_transform_request_config(session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_vo_transform = phase54_vo_transform_request_config(session.as_ref())?;
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_research_mode_exclusivity(
+            phase54_kv_attribution,
+            phase54_kq_transform,
+            phase54_vo_transform,
+        )?;
+        #[cfg(feature = "phase54-research")]
+        if phase54_kv_attribution.mode().is_enabled()
+            && kv_states
+                .values()
+                .any(|state| state.descriptor().cache_encoding() != KvCacheEncoding::Fp16)
+        {
+            return Err(QwenExecutionError::InvalidRequest(format!(
+                "{PHASE54_KV_ATTRIBUTION_SEMANTICS} requires every KV state to use FP16"
+            )));
+        }
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_kq_transform_scope(
+            session.as_ref(),
+            &graph,
+            &QwenAdapterRuntime::disabled(),
+            &kv_states,
+            phase54_kq_transform,
+        )?;
+        #[cfg(feature = "phase54-research")]
+        validate_phase54_vo_transform_scope(
+            session.as_ref(),
+            &graph,
+            &QwenAdapterRuntime::disabled(),
+            &kv_states,
+            phase54_vo_transform,
+        )?;
         let execution_plan = qwen_prepared_execution_plan(&graph)?;
 
         let core = Self {
@@ -4559,6 +5252,12 @@ impl QwenExecutionCore {
             pending_speculative: None,
             adapters: QwenAdapterRuntime::disabled(),
             short_terminal_last_row: false,
+            #[cfg(feature = "phase54-research")]
+            phase54_kv_attribution,
+            #[cfg(feature = "phase54-research")]
+            phase54_kq_transform,
+            #[cfg(feature = "phase54-research")]
+            phase54_vo_transform,
         };
         core.ensure_state_lengths(0)?;
         Ok(core)
@@ -7067,6 +7766,12 @@ impl QwenExecutionCore {
         let state = self.kv_state(layer, descriptor)?;
         let key = self.bind(node.inputs()[0], execution.token_count, AccessMode::Read)?;
         let value = self.bind(node.inputs()[1], execution.token_count, AccessMode::Read)?;
+        #[cfg(feature = "phase54-research")]
+        self.phase54_transform_kq_input(layer, descriptor, "key", &key)?;
+        #[cfg(feature = "phase54-research")]
+        self.phase54_transform_vo_value(layer, descriptor, &value)?;
+        #[cfg(feature = "phase54-research")]
+        self.phase54_roundtrip_kv_inputs(layer, descriptor, &key, &value)?;
         let mut submission = self.session.append_kv_state(
             state,
             &self.queue,
@@ -7114,11 +7819,20 @@ impl QwenExecutionCore {
         )
         .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
         let query = self.bind(node.inputs()[0], execution.token_count, AccessMode::Read)?;
+        #[cfg(feature = "phase54-research")]
+        self.phase54_transform_kq_input(layer, state_descriptor, "query", &query)?;
         let output = self.bind(node.outputs()[0], execution.token_count, AccessMode::Write)?;
+        #[cfg(feature = "phase54-research")]
+        let phase54_output = output.clone();
         let submission =
             self.session
                 .causal_attention(state, &self.queue, query, output, descriptor)?;
         pending.retain_causal_attention(node.label(), submission);
+        // Retain the accepted attention submission before the research-only
+        // queue readback waits for it. The synchronous companion upload is
+        // complete before the following SigmoidMul node is submitted.
+        #[cfg(feature = "phase54-research")]
+        self.phase54_transform_vo_output(layer, state_descriptor, &phase54_output)?;
         Ok(())
     }
 
@@ -7239,6 +7953,32 @@ impl QwenExecutionCore {
             boundary_count: audit.boundary_count(),
             sparse_moe_submission_count: audit.sparse_moe_submission_count(),
             sparse_moe_active_pair_count: audit.sparse_moe_active_pair_count(),
+            #[cfg(feature = "phase54-research")]
+            phase54_kv_attribution_semantics: self
+                .phase54_kv_attribution
+                .mode()
+                .is_enabled()
+                .then_some(PHASE54_KV_ATTRIBUTION_SEMANTICS),
+            #[cfg(feature = "phase54-research")]
+            phase54_kv_attribution_layer: self.phase54_kv_attribution.layer(),
+            #[cfg(feature = "phase54-research")]
+            phase54_kq_transform_semantics: self
+                .phase54_kq_transform
+                .mode()
+                .is_enabled()
+                .then_some(PHASE54_KQ_TRANSFORM_SEMANTICS),
+            #[cfg(feature = "phase54-research")]
+            phase54_kq_transform_digest: self.phase54_kq_transform.digest(),
+            #[cfg(feature = "phase54-research")]
+            phase54_vo_transform_semantics: self
+                .phase54_vo_transform
+                .mode()
+                .is_enabled()
+                .then_some(self.phase54_vo_transform.semantics()),
+            #[cfg(feature = "phase54-research")]
+            phase54_vo_transform_digest: self.phase54_vo_transform.digest(),
+            #[cfg(feature = "phase54-research")]
+            phase54_vo_transform_backend: self.phase54_vo_transform.backend(),
         })
     }
 
@@ -9400,6 +10140,10 @@ fn qwen_prefix_identity(
                     crate::KvCacheEncoding::Fp8E4M3Fn => 2,
                     crate::KvCacheEncoding::Fp8E4M3FnStatic => 3,
                     crate::KvCacheEncoding::Nvfp4 => 4,
+                    crate::KvCacheEncoding::Fp8E4M3Block16 => 5,
+                    crate::KvCacheEncoding::Fp8E5M2Block16 => 6,
+                    crate::KvCacheEncoding::Mxfp8E4 => 7,
+                    crate::KvCacheEncoding::Mxfp8E5 => 8,
                 };
                 digest.update([encoding]);
                 if let Some((key, value)) = descriptor.static_fp8_scales() {
@@ -9408,6 +10152,18 @@ fn qwen_prefix_identity(
                     digest.update(value.to_bits().to_le_bytes());
                 } else {
                     digest.update([0]);
+                }
+                if let Some(block16) = descriptor.kv_fp8_block16_descriptor() {
+                    digest.update([
+                        block16.format_version(),
+                        block16.physical_variant().identity_tag(),
+                    ]);
+                }
+                if let Some(mxfp8) = descriptor.kv_mxfp8_descriptor() {
+                    digest.update([
+                        mxfp8.format_version(),
+                        mxfp8.physical_variant().identity_tag(),
+                    ]);
                 }
             }
             QwenGraphStateDescriptor::Linear(descriptor) => {
@@ -9474,6 +10230,10 @@ fn qwen_kv_descriptor_digest(
             KvCacheEncoding::Fp8E4M3Fn => 1,
             KvCacheEncoding::Fp8E4M3FnStatic => 2,
             KvCacheEncoding::Nvfp4 => 3,
+            KvCacheEncoding::Fp8E4M3Block16 => 4,
+            KvCacheEncoding::Fp8E5M2Block16 => 5,
+            KvCacheEncoding::Mxfp8E4 => 6,
+            KvCacheEncoding::Mxfp8E5 => 7,
         };
         digest.update([encoding]);
         if let Some((key, value)) = descriptor.static_fp8_scales() {
@@ -9482,6 +10242,18 @@ fn qwen_kv_descriptor_digest(
             digest.update(value.to_bits().to_le_bytes());
         } else {
             digest.update([0]);
+        }
+        if let Some(block16) = descriptor.kv_fp8_block16_descriptor() {
+            digest.update([
+                block16.format_version(),
+                block16.physical_variant().identity_tag(),
+            ]);
+        }
+        if let Some(mxfp8) = descriptor.kv_mxfp8_descriptor() {
+            digest.update([
+                mxfp8.format_version(),
+                mxfp8.physical_variant().identity_tag(),
+            ]);
         }
     }
     digest.finalize().into()
@@ -9501,7 +10273,11 @@ impl QwenStateImageDescriptor for KvStateDescriptor {
         let mut planes = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
         match self.cache_encoding() {
             KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
-            KvCacheEncoding::Fp8E4M3Fn => {
+            KvCacheEncoding::Fp8E4M3Fn
+            | KvCacheEncoding::Fp8E4M3Block16
+            | KvCacheEncoding::Fp8E5M2Block16
+            | KvCacheEncoding::Mxfp8E4
+            | KvCacheEncoding::Mxfp8E5 => {
                 planes.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
             }
             KvCacheEncoding::Nvfp4 => {
@@ -9655,6 +10431,49 @@ mod tests {
     };
     use crate::kv_state::{KvStateAppendRequest, KvStateSnapshot};
     use crate::linear_attention::{LinearAttentionRequest, LinearAttentionStateSnapshot};
+
+    #[cfg(feature = "phase54-research")]
+    #[test]
+    fn phase54_vo_mode_is_exclusive_from_attribution_and_kq() {
+        let vo = Phase54VoTransformConfig::for_mode(
+            Phase54VoTransformMode::Transpose16x16VLayer19OutputInverse,
+            Some("gfx1030"),
+        )
+        .unwrap();
+        assert!(
+            validate_phase54_research_mode_exclusivity(
+                Phase54KvAttributionConfig::off(),
+                Phase54KqTransformConfig::off(),
+                vo,
+            )
+            .is_ok()
+        );
+
+        let kq = Phase54KqTransformConfig::for_mode(
+            Phase54KqTransformMode::Transpose16x16AllFull,
+            Some("gfx1030"),
+        )
+        .unwrap();
+        assert!(
+            validate_phase54_research_mode_exclusivity(Phase54KvAttributionConfig::off(), kq, vo,)
+                .is_err()
+        );
+
+        let attribution = Phase54KvAttributionConfig::for_mode_at_layer(
+            Phase54KvAttributionMode::ValueOnly,
+            Some("gfx1030"),
+            Some(19),
+        )
+        .unwrap();
+        assert!(
+            validate_phase54_research_mode_exclusivity(
+                attribution,
+                Phase54KqTransformConfig::off(),
+                vo,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn text_contiguous_positions_use_derived_mode_but_multimodal_does_not() {
@@ -10263,7 +11082,11 @@ mod tests {
             let mut kinds = vec![StatePlaneKindV1::KvKey, StatePlaneKindV1::KvValue];
             match state.descriptor().cache_encoding() {
                 KvCacheEncoding::Fp16 | KvCacheEncoding::Fp8E4M3FnStatic => {}
-                KvCacheEncoding::Fp8E4M3Fn => {
+                KvCacheEncoding::Fp8E4M3Fn
+                | KvCacheEncoding::Fp8E4M3Block16
+                | KvCacheEncoding::Fp8E5M2Block16
+                | KvCacheEncoding::Mxfp8E4
+                | KvCacheEncoding::Mxfp8E5 => {
                     kinds.extend([StatePlaneKindV1::KvKeyScale, StatePlaneKindV1::KvValueScale]);
                 }
                 KvCacheEncoding::Nvfp4 => {
@@ -12634,12 +13457,16 @@ mod tests {
     }
 
     #[test]
-    fn qwen_state_image_encoding_plane_contract_covers_fp16_fp8_static_and_nvfp4() {
+    fn qwen_state_image_encoding_plane_contract_covers_all_encodings() {
         let expected = [
             (KvCacheEncoding::Fp16, 2),
             (KvCacheEncoding::Fp8E4M3Fn, 4),
             (KvCacheEncoding::Fp8E4M3FnStatic, 2),
             (KvCacheEncoding::Nvfp4, 6),
+            (KvCacheEncoding::Fp8E4M3Block16, 4),
+            (KvCacheEncoding::Fp8E5M2Block16, 4),
+            (KvCacheEncoding::Mxfp8E4, 4),
+            (KvCacheEncoding::Mxfp8E5, 4),
         ];
         for (encoding, count) in expected {
             let descriptor = KvStateDescriptor::new_with_storage(0, 3, 4, 256, encoding).unwrap();
@@ -12652,6 +13479,41 @@ mod tests {
                 .len(),
             5
         );
+    }
+
+    #[test]
+    fn qwen_descriptor_digest_separates_lowbit_format_and_physical_variant() {
+        let ocp = KvStateDescriptor::new_with_kv_fp8_block16(
+            0,
+            257,
+            4,
+            256,
+            KvCacheEncoding::Fp8E4M3Block16,
+            crate::KvFp8PhysicalVariant::OcpE4M3Fn,
+        )
+        .unwrap();
+        let fnuz = KvStateDescriptor::new_with_kv_fp8_block16(
+            0,
+            257,
+            4,
+            256,
+            KvCacheEncoding::Fp8E4M3Block16,
+            crate::KvFp8PhysicalVariant::E4M3FnuZ,
+        )
+        .unwrap();
+        let e5 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Fp8E5M2Block16)
+                .unwrap();
+        let ocp_digest = qwen_kv_descriptor_digest([(0, ocp)]);
+        assert_ne!(ocp_digest, qwen_kv_descriptor_digest([(0, fnuz)]));
+        assert_ne!(ocp_digest, qwen_kv_descriptor_digest([(0, e5)]));
+        let mx_e4 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Mxfp8E4).unwrap();
+        let mx_e5 =
+            KvStateDescriptor::new_with_storage(0, 257, 4, 256, KvCacheEncoding::Mxfp8E5).unwrap();
+        let mx_e4_digest = qwen_kv_descriptor_digest([(0, mx_e4)]);
+        assert_ne!(ocp_digest, mx_e4_digest);
+        assert_ne!(mx_e4_digest, qwen_kv_descriptor_digest([(0, mx_e5)]));
     }
 
     #[test]

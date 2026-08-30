@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest, Sha256};
 
-use crate::kv_state::KvCacheEncoding;
+use crate::kv_state::{
+    KvCacheEncoding, KvFp8Block16Descriptor, KvFp8PhysicalVariant, KvMxfp8Descriptor,
+};
 
 /// Maximum number of published entries in the default bounded index.
 pub const DEFAULT_PREFIX_CACHE_MAX_ENTRIES: usize = 256;
@@ -65,6 +67,8 @@ pub struct PrefixStateIdentityV1 {
     renderer_template_digest: Arc<[u8]>,
     tokenizer_identity: Arc<[u8]>,
     kv_cache_encoding: KvCacheEncoding,
+    kv_fp8_block16: Option<KvFp8Block16Descriptor>,
+    kv_mxfp8: Option<KvMxfp8Descriptor>,
     kv_layout: PrefixKvLayoutV1,
     target_semantics: Arc<[u8]>,
     context_policy_version: u32,
@@ -76,6 +80,8 @@ impl fmt::Debug for PrefixStateIdentityV1 {
             .debug_struct("PrefixStateIdentityV1")
             .field("identity", &"<redacted>")
             .field("kv_cache_encoding", &self.kv_cache_encoding)
+            .field("kv_fp8_block16", &self.kv_fp8_block16)
+            .field("kv_mxfp8", &self.kv_mxfp8)
             .field("kv_layout", &self.kv_layout)
             .field("context_policy_version", &self.context_policy_version)
             .finish()
@@ -108,10 +114,46 @@ impl PrefixStateIdentityV1 {
             renderer_template_digest,
             tokenizer_identity,
             kv_cache_encoding,
+            kv_fp8_block16: KvFp8Block16Descriptor::canonical_for_encoding(kv_cache_encoding),
+            kv_mxfp8: KvMxfp8Descriptor::canonical_for_encoding(kv_cache_encoding),
             kv_layout,
             target_semantics,
             context_policy_version,
         })
+    }
+
+    /// Construct an identity with an exact OCP/FNUZ/E5M2 resident byte
+    /// variant. This is required when logical E4 block16 uses target-native
+    /// FNUZ storage instead of canonical OCP bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_kv_fp8_block16(
+        model_lock_fingerprint: impl AsRef<[u8]>,
+        derived_artifact_identity: impl AsRef<[u8]>,
+        adapter_identity: impl AsRef<[u8]>,
+        renderer_template_digest: impl AsRef<[u8]>,
+        tokenizer_identity: impl AsRef<[u8]>,
+        kv_cache_encoding: KvCacheEncoding,
+        physical_variant: KvFp8PhysicalVariant,
+        kv_layout: PrefixKvLayoutV1,
+        target_semantics: impl AsRef<[u8]>,
+        context_policy_version: u32,
+    ) -> Result<Self, PrefixCacheError> {
+        let mut identity = Self::new(
+            model_lock_fingerprint,
+            derived_artifact_identity,
+            adapter_identity,
+            renderer_template_digest,
+            tokenizer_identity,
+            kv_cache_encoding,
+            kv_layout,
+            target_semantics,
+            context_policy_version,
+        )?;
+        identity.kv_fp8_block16 = Some(
+            KvFp8Block16Descriptor::new(kv_cache_encoding, physical_variant)
+                .map_err(|_| PrefixCacheError::InvalidKvFp8Block16Variant)?,
+        );
+        Ok(identity)
     }
 
     pub fn model_lock_fingerprint(&self) -> &[u8] {
@@ -136,6 +178,14 @@ impl PrefixStateIdentityV1 {
 
     pub const fn kv_cache_encoding(&self) -> KvCacheEncoding {
         self.kv_cache_encoding
+    }
+
+    pub const fn kv_fp8_block16_descriptor(&self) -> Option<KvFp8Block16Descriptor> {
+        self.kv_fp8_block16
+    }
+
+    pub const fn kv_mxfp8_descriptor(&self) -> Option<KvMxfp8Descriptor> {
+        self.kv_mxfp8
     }
 
     pub const fn kv_layout(&self) -> PrefixKvLayoutV1 {
@@ -892,6 +942,7 @@ pub enum PrefixCacheError {
     IdentityTooLarge,
     EmptyTokenSequence,
     InvalidKvLayout,
+    InvalidKvFp8Block16Variant,
     InvalidQuota,
     ZeroLogicalTokens,
     LogicalLengthMismatch { key_tokens: u64, value_tokens: u64 },
@@ -920,6 +971,9 @@ impl fmt::Display for PrefixCacheError {
             Self::InvalidKvLayout => {
                 formatter.write_str("prefix KV layout dimensions must be non-zero")
             }
+            Self::InvalidKvFp8Block16Variant => formatter.write_str(
+                "prefix KV FP8 physical variant is incompatible with the logical encoding",
+            ),
             Self::InvalidQuota => formatter.write_str("prefix cache quotas must be non-zero"),
             Self::ZeroLogicalTokens => {
                 formatter.write_str("prefix value logical token count must be non-zero")
@@ -959,6 +1013,18 @@ fn digest_key(identity: &PrefixStateIdentityV1, tokens: &[u32]) -> [u8; 32] {
     digest_bytes(&mut hasher, identity.renderer_template_digest());
     digest_bytes(&mut hasher, identity.tokenizer_identity());
     hasher.update([encoding_tag(identity.kv_cache_encoding())]);
+    if let Some(block16) = identity.kv_fp8_block16_descriptor() {
+        hasher.update([
+            block16.format_version(),
+            block16.physical_variant().identity_tag(),
+        ]);
+    }
+    if let Some(mxfp8) = identity.kv_mxfp8_descriptor() {
+        hasher.update([
+            mxfp8.format_version(),
+            mxfp8.physical_variant().identity_tag(),
+        ]);
+    }
     hasher.update(identity.kv_layout().heads().to_le_bytes());
     hasher.update(identity.kv_layout().head_dim().to_le_bytes());
     digest_bytes(&mut hasher, identity.target_semantics());
@@ -981,6 +1047,10 @@ const fn encoding_tag(encoding: KvCacheEncoding) -> u8 {
         KvCacheEncoding::Fp8E4M3Fn => 1,
         KvCacheEncoding::Fp8E4M3FnStatic => 2,
         KvCacheEncoding::Nvfp4 => 3,
+        KvCacheEncoding::Fp8E4M3Block16 => 4,
+        KvCacheEncoding::Fp8E5M2Block16 => 5,
+        KvCacheEncoding::Mxfp8E4 => 6,
+        KvCacheEncoding::Mxfp8E5 => 7,
     }
 }
 
@@ -1009,6 +1079,78 @@ mod atomicity_tests {
 
     fn value(tokens: u64) -> PrefixCacheValueV1 {
         PrefixCacheValueV1::new(tokens, 16, [tokens as u8; 32]).unwrap()
+    }
+
+    #[test]
+    fn lowbit_logical_and_physical_variants_have_distinct_reuse_identity() {
+        let make = |encoding, physical_variant| {
+            PrefixStateIdentityV1::new_with_kv_fp8_block16(
+                b"model",
+                b"artifact",
+                b"adapter",
+                b"renderer",
+                b"tokenizer",
+                encoding,
+                physical_variant,
+                PrefixKvLayoutV1::new(2, 256).unwrap(),
+                b"target",
+                1,
+            )
+            .unwrap()
+        };
+        let ocp_e4 = PrefixCacheKeyV1::new(
+            make(
+                KvCacheEncoding::Fp8E4M3Block16,
+                KvFp8PhysicalVariant::OcpE4M3Fn,
+            ),
+            [1, 2, 3],
+        )
+        .unwrap();
+        let fnuz_e4 = PrefixCacheKeyV1::new(
+            make(
+                KvCacheEncoding::Fp8E4M3Block16,
+                KvFp8PhysicalVariant::E4M3FnuZ,
+            ),
+            [1, 2, 3],
+        )
+        .unwrap();
+        let ocp_e5 = PrefixCacheKeyV1::new(
+            make(
+                KvCacheEncoding::Fp8E5M2Block16,
+                KvFp8PhysicalVariant::OcpE5M2,
+            ),
+            [1, 2, 3],
+        )
+        .unwrap();
+        assert_ne!(ocp_e4, fnuz_e4);
+        assert_ne!(ocp_e4, ocp_e5);
+        assert_ne!(ocp_e4.redacted_digest(), fnuz_e4.redacted_digest());
+        assert_ne!(ocp_e4.redacted_digest(), ocp_e5.redacted_digest());
+
+        let make_mx = |encoding| {
+            PrefixCacheKeyV1::new(
+                PrefixStateIdentityV1::new(
+                    b"model",
+                    b"artifact",
+                    b"adapter",
+                    b"renderer",
+                    b"tokenizer",
+                    encoding,
+                    PrefixKvLayoutV1::new(2, 256).unwrap(),
+                    b"target",
+                    1,
+                )
+                .unwrap(),
+                [1, 2, 3],
+            )
+            .unwrap()
+        };
+        let mx_e4 = make_mx(KvCacheEncoding::Mxfp8E4);
+        let mx_e5 = make_mx(KvCacheEncoding::Mxfp8E5);
+        assert_ne!(mx_e4, mx_e5);
+        assert_ne!(mx_e4, ocp_e4);
+        assert_ne!(mx_e4.redacted_digest(), mx_e5.redacted_digest());
+        assert_ne!(mx_e4.redacted_digest(), ocp_e4.redacted_digest());
     }
 
     #[test]
