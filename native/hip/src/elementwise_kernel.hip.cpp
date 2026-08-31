@@ -146,6 +146,19 @@ __launch_bounds__(256, 1) void sllm_elementwise_broadcast_add_bf16_fp32_v1(
   }
 }
 
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_elementwise_broadcast_mul_bf16_fp32_v1(
+    const uint16_t *const input, const uint16_t *const vector,
+    uint16_t *const output, const uint64_t element_count,
+    const uint64_t width) {
+  const uint64_t index = static_cast<uint64_t>(blockIdx.x) * blockDim.x +
+                         static_cast<uint64_t>(threadIdx.x);
+  if (index < element_count) {
+    output[index] = float_to_bf16_rne_bits(
+        bf16_to_float(input[index]) * bf16_to_float(vector[index % width]));
+  }
+}
+
 namespace sllm_elementwise_kernel {
 namespace {
 
@@ -274,6 +287,20 @@ launch_broadcast_add(const uint16_t *const input, const uint16_t *const vector,
     return hipErrorInvalidValue;
   }
   hipLaunchKernelGGL(sllm_elementwise_broadcast_add_bf16_fp32_v1, grid,
+                     dim3(kWorkgroupSize), 0U, stream, input, vector, output,
+                     element_count, width);
+  return hipGetLastError();
+}
+
+hipError_t
+launch_broadcast_mul(const uint16_t *const input, const uint16_t *const vector,
+                     uint16_t *const output, const uint64_t element_count,
+                     const uint64_t width, const hipStream_t stream) noexcept {
+  dim3 grid;
+  if (!grid_for(element_count, &grid) || width == 0U) {
+    return hipErrorInvalidValue;
+  }
+  hipLaunchKernelGGL(sllm_elementwise_broadcast_mul_bf16_fp32_v1, grid,
                      dim3(kWorkgroupSize), 0U, stream, input, vector, output,
                      element_count, width);
   return hipGetLastError();

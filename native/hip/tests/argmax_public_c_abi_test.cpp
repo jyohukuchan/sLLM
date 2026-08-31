@@ -66,11 +66,11 @@ int32_t scalar_oracle(const std::vector<uint16_t> &logits, const uint64_t row,
   float maximum = 0.0F;
   uint64_t index = 0U;
   bool valid = false;
-  bool has_nan = false;
+  bool has_nonfinite = false;
   for (uint64_t column = 0U; column != v; ++column) {
     const float value = bf16_to_f32(logits[row * v + column]);
-    if (std::isnan(value)) {
-      has_nan = true;
+    if (!std::isfinite(value)) {
+      has_nonfinite = true;
     } else if (!valid || value > maximum ||
                (value == maximum && column < index)) {
       maximum = value;
@@ -78,7 +78,7 @@ int32_t scalar_oracle(const std::vector<uint16_t> &logits, const uint64_t row,
       valid = true;
     }
   }
-  return has_nan ? -1 : static_cast<int32_t>(index);
+  return has_nonfinite ? -1 : static_cast<int32_t>(index);
 }
 
 sllm_tensor_binding_t binding(const sllm_buffer_t *const buffer,

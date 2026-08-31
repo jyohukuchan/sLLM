@@ -17,9 +17,9 @@ use sllm_frontend::GenerationCancellationV1;
 use sllm_server::{
     BackendCompletionV1, BackendErrorV1, ChatCompletionRequestV1, ChatGenerationBackendV1,
     CredentialRoleV1, CredentialStoreV1, FinishReasonV1, GenerationDeltaSinkV1,
-    ModelRegistryEntryV1, ModelRegistryV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1,
-    ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1, TokenUsageV1,
-    build_router_v1,
+    ModelLibraryDeviceV1, ModelRegistryEntryV1, ModelRegistryV1, ResumableStoreV1,
+    SchedulerConfigV1, SchedulerV1, ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1,
+    ServerMetricsV1, TokenUsageV1, build_router_v1,
 };
 
 const FINGERPRINT: &str = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
@@ -265,6 +265,12 @@ async fn health_readiness_metrics_and_props_are_bounded_and_authenticated() {
         .unwrap()
         .with_credentials(credentials)
         .with_lifecycle(lifecycle.clone())
+        .with_hardware(ModelLibraryDeviceV1 {
+            device_index: 0,
+            target: "gfx1201".to_owned(),
+            name: "Radeon PRO R9700".to_owned(),
+            total_memory_bytes: 32_000_000_000,
+        })
         .with_metrics(ServerMetricsV1::new(["qwen-test"]).unwrap());
     let scheduler = make_scheduler(2);
     let (address, server) = serve(build_router_v1(
@@ -288,6 +294,9 @@ async fn health_readiness_metrics_and_props_are_bounded_and_authenticated() {
     .await;
     assert_eq!(props.status, 200);
     assert_eq!(props.json()["schema_version"], "sllm-server-props-v1");
+    assert_eq!(props.json()["hardware"]["vendor"], "AMD");
+    assert_eq!(props.json()["hardware"]["target"], "gfx1201");
+    assert_eq!(props.json()["hardware"]["memory_bytes"], 32_000_000_000_u64);
     lifecycle.transition(ServerLifecycleStateV1::Ready);
     let ready = raw_http(address, request_bytes("GET", "/readyz", b"", &[])).await;
     assert_eq!(ready.status, 200);

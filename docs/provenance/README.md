@@ -192,6 +192,88 @@ vLLM containerによる同一artifactのblack-box起動はhealth到達前に停�
 入力にもしていない。このPhaseによる新規第三者code importと`THIRD_PARTY_NOTICES.md`追加はない。model shard、生成token trace、
 profile artifactはrepositoryへ含めず、model artifactのlicense/noticeはsLLM runtimeのMIT licenseと別に扱う。
 
+## Phase 55 Gemma 4 MoE implementation record
+
+Phase 55は`google/gemma-4-26B-A4B-it`と`nvidia/Gemma-4-26B-A4B-NVFP4`の固定公開artifactを、architecture、
+tensor catalog、chat/template identity、NVFP4 expert recipe、implicit-unit static FP8 KV contractのdata/semantic sourceとして
+使用した。公開Transformers実装はrouterの演算順を確認するsemantic referenceに限定し、source expressionやcontrol flowをcopy、
+adapt、portしていない。Gemma固有graph/router、HIP expert/attention/KV、GGUF mapping、state/prefix/checkpoint、CLI/server統合は
+sLLM既存のmodel-neutral execution contractと独立oracleから実装した。vLLMはartifact提供元が示すreference runtimeだが、local
+AMD環境では同一artifactを実行しておらず、vLLM/CUDA/FlashInfer sourceのcopyまたは移植はない。このPhaseによる新規第三者code
+importと`THIRD_PARTY_NOTICES.md`追加はない。model shard、生成GGUF、raw trace、profile artifactはrepositoryへ含めず、model
+artifactのlicense/noticeはsLLM runtimeのMIT licenseと別に扱う。
+
+## Phase 56 Gemma 4 MTP implementation record
+
+Phase 56はGoogle公式`google/gemma-4-12B-it-assistant`の固定revision、config、tokenizer、safetensors metadata／tensor bytesを
+semantic/data sourceとして使用した。target KV mappingとQ-only assistant semanticsは固定reader記録へ分離し、実装はsLLM既存Gemma graph、
+model-neutral speculative transaction、owned HIP execution contractから行った。llama.cpp、vLLM、SGLang、Transformers engineのMTP
+control flowやkernel sourceをcopy、adapt、portしていない。
+
+公開runtime artifactは公式assistant BF16 tensorをlosslessに格納するcanonical `gemma4mtp` GGUFであり、source safetensorsは変換入力である。
+既存targetはreviewed mixed NVFP4 W4A4／FP8 W8A8 GGUFを再利用し、BF16 targetへ変換したとは主張しない。pair lock、reader記録、全48 tensorの
+source/GGUF byte照合、exact GPU target-only比較をrelease provenance evidenceとする。このPhaseによる新規第三者code importと
+`THIRD_PARTY_NOTICES.md`追加はない。
+
+## Phase 57 DeepSeek V4 foundation implementation record
+
+Phase 57はDeepSeek公式`deepseek-ai/DeepSeek-V4-Flash-0731` revision
+`7872f01b1d1fe23eabc4c98b48bffcef5a386062`のMIT-licensed config、artifact index／header、tokenizer、generation metadata、
+encoding documentation／fixtureをsemantic/data sourceとして使用する。公式Python inference／encoding sourceはidentityと
+concept確認のreader-onlyであり、source expression、control flow、kernelをcopy、adapt、portしない。固定llama.cpp
+`3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`もGGUF naming、shape、layer schedule、state境界の概念cross-checkに限り、
+本Phaseではcodeを直接reuseしない。
+
+typed config／catalog／capacity、mHC、CSA／HCA、Lightning Indexer、hash／score MoE、mixed FP8／MXFP4、GGUF contractは
+sLLM既存のmodel-neutral execution contractと独立oracleから実装する。公式48 shardのLFS identityは固定するが、全166.9 GBを
+local取得していない段階でfull-byte SHA-256 verified、full-model resident、generation correctnessとは主張しない。
+DSparkをDFlashへ読み替えず、model-free／tiny-random／verified slice証拠はそのscopeを明記する。このPhaseによる新規第三者code
+importと`THIRD_PARTY_NOTICES.md`追加はない。model shard、GGUF、raw trace、profile artifactはrepositoryへ含めない。
+
+## Phase 58 MiniMax M3 foundation implementation record
+
+Phase 58はMiniMax公式`MiniMaxAI/MiniMax-M3` revision
+`f0e1c1e04d40177e4673a22097036854f536e9c0`のCommunity-Licensed config、artifact index／header、tokenizer、
+generation／processor metadataと、公式MSA paper／repositoryをsemantic/data sourceとして使用する。公式MSA実装は
+NVIDIA SM100／CUDA向けoperator境界のconcept確認に限り、source expression、control flow、kernelをcopy、adapt、portしない。
+固定llama.cpp `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`もcanonical GGUF naming、shape、layer schedule、
+released MTP tensor absenceのcross-checkに限定し、本Phaseではcodeを直接reuseしない。
+
+typed config／catalog／capacity、manifest mismatch、MSA block selection／causal attention、sigmoid MoE、GGUF contractは
+sLLM既存のmodel-neutral execution contractと独立oracleから実装する。公式59 shardのLFS identityとbounded headerを固定するが、
+全854 GB payloadをlocal取得していない段階でfull-byte SHA-256 verified、full-model resident、generation correctnessとは主張しない。
+configが示す7 MTP moduleに対応するtensorがreleased indexにないため、未公開weightを推測で補わない。model-free／tiny-random／
+verified slice証拠はそのscopeを明記する。このPhaseによる新規第三者code importと`THIRD_PARTY_NOTICES.md`追加はない。
+model artifactのMiniMax Community LicenseはsLLM runtimeのMIT licenseと別に扱い、model shard、GGUF、raw trace、profile artifactを
+repositoryへ含めない。
+
+## Phase 59 DiffusionGemma foundation implementation record
+
+Phase 59はGoogle公式`google/diffusiongemma-26B-A4B-it` revision
+`f7f5b7f5fa82ffc52addd066915886d497f5517b`のApache-2.0 config、index／bounded header、tokenizer、processor、generation、
+scheduler metadataをartifact sourceとして使用した。意味論はGoogle DeepMind Gemma repository commit
+`7b785991bd78626c73b317eb43fdbb6c292f7b9c`、Transformers commit
+`42ca97014c85d71a88ad60d55f08cb9fb4d26e2c`、Diffusers commit
+`c1bf18c92c6285334adcaac7e75ef8946a227f49`をreader-onlyで照合した。source expression、control flow、test、kernelは
+copy、adapt、portしていない。
+
+fixed llama.cpp `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`にはDiffusionGemmaのmerged GGUF architectureがない。
+
+Phase 60 Ministral 3はMistral公式BF16 source revision
+`b6d637bef2393152b3da2b2fde72eecdee30557e`と公式GGUF revision
+`eb599d408350ea2bb60452cb86be7c7b2fc28227`をartifact identityとして直接固定する。Transformers commit
+`3e9d3e50e71442a3173bdf01cd45ba5833533efe`はYaRN／Q-only position scale／stage orderのsemantic照合、fixed
+llama.cpp `3cb7ffb1a1f612d5e4a46244ae5a3c77ad934a70`はcanonical `mistral3` GGUF metadata／tensor naming／QK layoutの
+相互運用cross-checkだけに使い、source expressionをcopy／portしない。詳細は
+[Phase 60 reader](../references/ministral3-phase60-reader.md)を正とする。
+`diffusion-gemma`はwrite-disabled sLLM foundation keyとして分離し、open proposalのspellingをapproved upstream standardへ
+読み替えない。typed config／catalog／capacity、causal encoder、read-only encoder KVを参照するbidirectional decoder、
+self-conditioning、entropy-bound sampler、adaptive stop、GGUF dry-runは独立oracleとして実装した。
+
+11 shardのHub LFS identityとbounded headerだけを固定し、51.6 GB payload全体をlocal取得していないためfull-byte SHA-256 verified、
+derived GGUF、single-GPU resident、generation correctnessとは主張しない。このPhaseによる第三者code importと
+`THIRD_PARTY_NOTICES.md`追加はなく、model shard、生成GGUF、raw trace、profile artifactをrepositoryへ含めない。
+
 ## Phase X llama.cpp Qwen3.8 performance investigation record
 
 Phase Xはllama.cpp build 901 commit `4df29be4f4c3673f428170fda944a5b19f743bb8`を外部local-subagent runtimeと

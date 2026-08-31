@@ -323,6 +323,8 @@ extern "C" __global__ __launch_bounds__(
                                                      float *const value_scales,
                                                      const uint32_t token_count,
                                                      const uint64_t
+                                                         capacity_tokens,
+                                                     const uint64_t
                                                          start_position,
                                                      const uint32_t head_count,
                                                      const uint32_t head_dim,
@@ -339,7 +341,8 @@ extern "C" __global__ __launch_bounds__(
   const uint64_t input_base = row * head_dim;
   const uint64_t token = row / head_count;
   const uint64_t head = row % head_count;
-  const uint64_t output_row = (start_position + token) * head_count + head;
+  const uint64_t output_row =
+      ((start_position + token) % capacity_tokens) * head_count + head;
   const uint64_t output_base = output_row * head_dim;
   __shared__ float key_maxima[SLLM_HIP_KV_WORKGROUP_SIZE];
   __shared__ float value_maxima[SLLM_HIP_KV_WORKGROUP_SIZE];
@@ -967,7 +970,8 @@ hipError_t launch(const uint16_t *const key_input,
         sllm_kv_state_bf16_to_fp8_token_major_v1, grid, block, 0U, stream,
         key_input, value_input, static_cast<uint8_t *>(key_output),
         static_cast<uint8_t *>(value_output), static_cast<float *>(key_scales),
-        static_cast<float *>(value_scales), token_count, start_position,
+        static_cast<float *>(value_scales), token_count, capacity_tokens,
+        start_position,
         head_count, head_dim, static_key_scale, static_value_scale,
         encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ? UINT32_C(1)
                                                        : UINT32_C(0));

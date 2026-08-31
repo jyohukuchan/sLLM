@@ -1,9 +1,12 @@
 use sllm_core::{
-    DerivedGgufConverter, DerivedGgufLock, GgufWritePlan, GgufWriteReport,
-    QWEN35_MOE_MODEL_FINGERPRINT, UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256, build_gemma4_nvfp4_gguf_plan,
-    build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan, build_qwen35_moe_mxfp4_gguf_plan,
-    read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar, verify_qwen35_moe_artifact,
-    verify_unsloth_gemma4_nvfp4, write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf,
+    DerivedGgufConverter, DerivedGgufLock, GEMMA4_MOE_MODEL_FINGERPRINT, GgufWritePlan,
+    GgufWriteReport, QWEN35_MOE_MODEL_FINGERPRINT, UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256,
+    build_gemma4_moe_nvfp4_gguf_plan, build_gemma4_mtp_bf16_gguf_plan,
+    build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan,
+    build_qwen35_moe_mxfp4_gguf_plan, gemma4_mtp_pair_semantic_id, parse_gemma4_mtp_model_lock,
+    read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar, verify_gemma4_moe_artifact,
+    verify_qwen35_moe_artifact, verify_unsloth_gemma4_nvfp4, write_gemma4_moe_nvfp4_gguf,
+    write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf,
     write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf,
 };
 use sllm_tools::{
@@ -59,6 +62,8 @@ fn run(raw: Vec<String>) -> Result<String, String> {
         "qwen35-bf16" => run_qwen35_bf16(&arguments),
         "qwen35-fp8" => run_qwen35_fp8(&arguments),
         "gemma4-nvfp4" => run_gemma4_nvfp4(&arguments),
+        "gemma4moe-nvfp4" => run_gemma4_moe_nvfp4(&arguments),
+        "gemma4-mtp-bf16" => run_gemma4_mtp_bf16(&arguments),
         "qwen35moe-mxfp4" => run_qwen35_moe(&arguments),
         kind => Err(format!("unsupported --kind `{kind}`")),
     }
@@ -141,6 +146,55 @@ fn run_qwen35_moe(arguments: &Arguments) -> Result<String, String> {
         "mixed BF16/MXFP4 lossless standard-block repack",
         &plan,
         |output| write_qwen35_moe_mxfp4_gguf(&artifact, output).map_err(|e| e.to_string()),
+    )
+}
+
+fn run_gemma4_moe_nvfp4(arguments: &Arguments) -> Result<String, String> {
+    let artifact =
+        verify_gemma4_moe_artifact(&arguments.cache).map_err(|error| error.to_string())?;
+    let plan = build_gemma4_moe_nvfp4_gguf_plan(&artifact).map_err(|error| error.to_string())?;
+    finish_conversion(
+        arguments,
+        "gemma4moe",
+        format!("gemma4moe:{GEMMA4_MOE_MODEL_FINGERPRINT}"),
+        vec![GEMMA4_MOE_MODEL_FINGERPRINT.to_owned()],
+        "mixed BF16/NVFP4 lossless standard-block repack with implicit-unit static FP8 KV",
+        &plan,
+        |output| write_gemma4_moe_nvfp4_gguf(&artifact, output).map_err(|e| e.to_string()),
+    )
+}
+
+fn run_gemma4_mtp_bf16(arguments: &Arguments) -> Result<String, String> {
+    let lock_path = required_path(&arguments.lock, "--lock")?;
+    let target = match read_reviewed_model_lock(lock_path).map_err(|error| error.to_string())? {
+        sllm_core::ReviewedModelLock::Gemma4(lock) => lock,
+        _ => return Err("--lock is not a reviewed Gemma 4 target lock".to_owned()),
+    };
+    let assistant_lock = parse_gemma4_mtp_model_lock(include_bytes!(
+        "../../../../docs/models/locks/gemma4-12b-it-assistant-bf16.json"
+    ))
+    .map_err(|error| error.to_string())?;
+    let assistant = assistant_lock
+        .verify_cache(&arguments.cache, &target)
+        .map_err(|error| error.to_string())?;
+    let plan = build_gemma4_mtp_bf16_gguf_plan(&assistant_lock, &target, &assistant)
+        .map_err(|error| error.to_string())?;
+    let semantic_model_id =
+        gemma4_mtp_pair_semantic_id(target.fingerprint(), assistant_lock.fingerprint());
+    finish_conversion(
+        arguments,
+        "gemma4mtp",
+        semantic_model_id,
+        vec![
+            target.fingerprint().to_owned(),
+            assistant_lock.fingerprint().to_owned(),
+        ],
+        "BF16 lossless Gemma 4 MTP assistant (target-paired)",
+        &plan,
+        |output| {
+            write_gemma4_mtp_bf16_gguf(&assistant_lock, &target, &assistant, output)
+                .map_err(|error| error.to_string())
+        },
     )
 }
 
@@ -379,10 +433,13 @@ fn collect_regular_files(
         let metadata = fs::symlink_metadata(&path)
             .map_err(|error| format!("stat verified cache entry {}: {error}", path.display()))?;
         if metadata.file_type().is_symlink() {
-            return Err(format!(
-                "verified cache entry must not be a symlink: {}",
-                path.display()
-            ));
+            let resolved = resolve_hugging_face_blob_symlink(root, &path)?;
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| format!("verified cache entry escaped root: {}", path.display()))?;
+            let logical_name = format!("cache/{}", relative.to_string_lossy().replace('\\', "/"));
+            paths.push((logical_name, resolved));
+            continue;
         }
         if metadata.is_dir() {
             collect_regular_files(root, &path, paths)?;
@@ -400,6 +457,55 @@ fn collect_regular_files(
         }
     }
     Ok(())
+}
+
+fn resolve_hugging_face_blob_symlink(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    let snapshots = root.parent().ok_or_else(|| {
+        format!(
+            "verified cache symlink is not in a Hugging Face snapshot: {}",
+            path.display()
+        )
+    })?;
+    if snapshots.file_name().and_then(|name| name.to_str()) != Some("snapshots") {
+        return Err(format!(
+            "verified cache symlink is not in a Hugging Face snapshot: {}",
+            path.display()
+        ));
+    }
+    let repository = snapshots.parent().ok_or_else(|| {
+        format!(
+            "verified cache symlink has no Hugging Face repository root: {}",
+            path.display()
+        )
+    })?;
+    let blob_root = fs::canonicalize(repository.join("blobs")).map_err(|error| {
+        format!(
+            "resolve Hugging Face blob root for {}: {error}",
+            path.display()
+        )
+    })?;
+    let resolved = fs::canonicalize(path).map_err(|error| {
+        format!(
+            "resolve verified Hugging Face cache entry {}: {error}",
+            path.display()
+        )
+    })?;
+    let resolved_metadata = fs::symlink_metadata(&resolved).map_err(|error| {
+        format!(
+            "stat resolved Hugging Face cache entry {}: {error}",
+            resolved.display()
+        )
+    })?;
+    if !resolved_metadata.is_file()
+        || resolved_metadata.file_type().is_symlink()
+        || resolved.parent() != Some(blob_root.as_path())
+    {
+        return Err(format!(
+            "verified cache symlink does not resolve to one repository blob: {}",
+            path.display()
+        ));
+    }
+    Ok(resolved)
 }
 
 fn build_derived_lock(
@@ -508,7 +614,7 @@ fn required_path<'a>(path: &'a Option<PathBuf>, flag: &str) -> Result<&'a PathBu
 }
 
 fn help() -> String {
-    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
+    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4moe-nvfp4 --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH --cache ASSISTANT_CACHE_PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
 }
 
 #[cfg(test)]
@@ -543,6 +649,75 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_moe_kind_is_explicit_and_needs_no_dense_lock() {
+        let parsed = parse_arguments(vec![
+            "--kind".to_owned(),
+            "gemma4moe-nvfp4".to_owned(),
+            "--cache".to_owned(),
+            "immutable-snapshot".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("Gemma 4 MoE arguments");
+        assert_eq!(parsed.kind, "gemma4moe-nvfp4");
+        assert!(parsed.lock.is_none());
+        assert!(parsed.dry_run);
+        assert!(help().contains("--kind gemma4moe-nvfp4 --cache PATH --dry-run"));
+    }
+
+    #[test]
+    fn gemma4_mtp_kind_requires_the_target_lock_and_is_documented() {
+        let parsed = parse_arguments(vec![
+            "--kind".to_owned(),
+            "gemma4-mtp-bf16".to_owned(),
+            "--lock".to_owned(),
+            "target-lock.json".to_owned(),
+            "--cache".to_owned(),
+            "assistant-cache".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("Gemma 4 MTP arguments");
+        assert_eq!(parsed.kind, "gemma4-mtp-bf16");
+        assert!(parsed.lock.is_some());
+        assert!(help().contains("--kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH"));
+    }
+
+    #[test]
+    fn gemma4_mtp_dry_run_reports_the_plan_without_writing_payload() {
+        let arguments = parse_arguments(vec![
+            "--kind".to_owned(),
+            "gemma4-mtp-bf16".to_owned(),
+            "--cache".to_owned(),
+            "assistant-cache".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .expect("dry-run arguments");
+        let plan = GgufWritePlan {
+            metadata: BTreeMap::from([(
+                "general.architecture".to_owned(),
+                sllm_core::GgufValue::String("gemma4mtp".to_owned()),
+            )]),
+            tensors: vec![sllm_core::GgufWriteTensor {
+                name: "model.norm.weight".to_owned(),
+                source_name: "model.norm.weight".to_owned(),
+                dimensions: vec![2],
+                tensor_type: sllm_core::GgufTensorType::Bf16,
+            }],
+        };
+        let report = finish_conversion(
+            &arguments,
+            "gemma4mtp",
+            "gemma4mtp-pair:test".to_owned(),
+            vec!["sha256:test".to_owned()],
+            "BF16 fixture",
+            &plan,
+            |_output| panic!("dry-run must not write"),
+        )
+        .expect("dry-run report");
+        assert!(report.contains("\"mode\":\"dry-run\""));
+        assert!(report.contains("\"tensor_count\":1"));
+    }
+
+    #[test]
     fn verified_cache_sources_are_real_files_in_deterministic_order() {
         let root = temp_dir("sources");
         fs::create_dir_all(root.join("nested")).unwrap();
@@ -558,5 +733,27 @@ mod tests {
         assert_eq!(identities[1].sha256, sha256_bytes(b"z"));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_cache_sources_accept_only_hugging_face_repository_blob_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let repository = temp_dir("hf-symlinks");
+        let root = repository.join("snapshots/revision");
+        fs::create_dir_all(repository.join("blobs")).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(repository.join("blobs/abcd"), b"reviewed blob").unwrap();
+        symlink("../../blobs/abcd", root.join("model.bin")).unwrap();
+        let identities = verified_cache_identities(&root).unwrap();
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].logical_name, "cache/model.bin");
+        assert_eq!(identities[0].sha256, sha256_bytes(b"reviewed blob"));
+
+        fs::write(repository.join("outside"), b"escape").unwrap();
+        symlink("../../outside", root.join("escape.bin")).unwrap();
+        assert!(verified_cache_identities(&root).is_err());
+        fs::remove_dir_all(repository).unwrap();
     }
 }

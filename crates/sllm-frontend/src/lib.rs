@@ -4,8 +4,10 @@ use core::fmt;
 use std::borrow::Borrow;
 
 mod chat;
+mod gemma4_mtp_generation;
 mod generation;
 mod inference;
+mod ministral3;
 mod reasoning;
 mod template;
 mod tokenizer;
@@ -13,11 +15,16 @@ mod tool_protocol;
 mod vision;
 
 pub use chat::{
-    ChatFieldV1, ChatRenderError, QWEN35_CHAT_MAX_OUTPUT_BYTES, QWEN35_CHAT_RENDERER_VERSION,
-    QWEN35_CHAT_TEMPLATE_FILENAME, QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES,
-    Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, ThinkingModeV1,
-    UntrustedChatMessageV1, UntrustedChatRequestV1, UntrustedChatValueV1,
+    ChatFieldV1, ChatMessageV1, ChatRenderError, ChatRenderOptionsV1, ChatTemplateRenderResultV1,
+    ChatTemplateRendererErrorV1, ChatTemplateRendererV1, GEMMA4_MOE_CHAT_TEMPLATE_FILENAME,
+    GEMMA4_MOE_CHAT_TEMPLATE_SHA256, GEMMA4_MOE_CHAT_TEMPLATE_SIZE_BYTES,
+    Gemma4MoeChatTemplateErrorV1, Gemma4MoeChatTemplateV1, GenericChatTemplateConfigV1,
+    QWEN35_CHAT_MAX_OUTPUT_BYTES, QWEN35_CHAT_RENDERER_VERSION, QWEN35_CHAT_TEMPLATE_FILENAME,
+    QWEN35_CHAT_TEMPLATE_SHA256, QWEN35_CHAT_TEMPLATE_SIZE_BYTES, Qwen35ChatMessageV1,
+    Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, ThinkingModeV1, UntrustedChatMessageV1,
+    UntrustedChatRequestV1, UntrustedChatValueV1,
 };
+pub use gemma4_mtp_generation::{GEMMA4_MTP_TARGET_HIDDEN_WIDTH, Gemma4MtpGenerationExecutorV1};
 pub use generation::{
     FinishReasonV1, GenerationCancellationV1, GenerationChoiceResultV1, GenerationChoicesResultV1,
     GenerationConfigV1, GenerationExecutorV1, GenerationInputV1, GenerationOutputSinkV1,
@@ -26,6 +33,7 @@ pub use generation::{
     MAX_STOP_STRING_BYTES_V1, MAX_STOP_STRINGS_V1, PreparedGenerationInputV1,
     QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1, SpeculativeGenerationExecutorV1,
     TokenUsageV1, derive_choice_seed_v1, gemma4_generation_stop_policy,
+    gemma4_moe_generation_stop_policy,
 };
 pub use inference::{
     ApplyTemplateResultV1, FIM_TEMPLATE_VERSION_V1, FimTemplateErrorV1, FimTemplateV1,
@@ -34,6 +42,20 @@ pub use inference::{
     MAX_TOKENIZER_UTILITY_INPUT_BYTES_V1, TOKENIZER_UTILITY_VERSION_V1, TemplateIdentityV1,
     TokenPieceV1, TokenizeOptionsV1, TokenizeResultV1, TokenizerUtilityErrorV1,
     TokenizerUtilityServiceV1,
+};
+pub use ministral3::{
+    MINISTRAL3_CHAT_MAX_OUTPUT_BYTES_V1, MINISTRAL3_CHAT_TEMPLATE_FILENAME,
+    MINISTRAL3_CHAT_TEMPLATE_SHA256, MINISTRAL3_CHAT_TEMPLATE_SIZE_BYTES,
+    MINISTRAL3_DEFAULT_SYSTEM_PROMPT, MINISTRAL3_EMBEDDED_CHAT_TEMPLATE_SHA256,
+    MINISTRAL3_EMBEDDED_CHAT_TEMPLATE_SIZE_BYTES, MINISTRAL3_FRONTEND_VERSION_V1,
+    MINISTRAL3_HISTORY_FIXTURE_RENDERED_SHA256, MINISTRAL3_HISTORY_FIXTURE_TOKEN_IDS_SHA256,
+    MINISTRAL3_HISTORY_FIXTURE_TOKEN_IDS_V1, MINISTRAL3_MAX_MESSAGES_V1,
+    MINISTRAL3_SYSTEM_USER_FIXTURE_RENDERED_SHA256,
+    MINISTRAL3_SYSTEM_USER_FIXTURE_TOKEN_IDS_SHA256, MINISTRAL3_SYSTEM_USER_FIXTURE_TOKEN_IDS_V1,
+    MINISTRAL3_TOKENIZER_FILENAME, MINISTRAL3_TOKENIZER_SHA256, MINISTRAL3_TOKENIZER_SIZE_BYTES,
+    Ministral3ChatRendererV1, Ministral3ChatTemplateV1, Ministral3FrontendErrorV1,
+    Ministral3RenderOptionsV1, Ministral3TextFrontendV1, Ministral3TokenizerV1,
+    ministral3_generation_stop_policy,
 };
 pub use reasoning::{
     MAX_REASONING_CLOSE_TOKENS_V1, MAX_REASONING_TOKENS_V1, ReasoningControllerV1,
@@ -44,9 +66,10 @@ pub use template::{
     GENERIC_TEMPLATE_MAX_KWARGS_DEPTH_V1, GENERIC_TEMPLATE_MAX_KWARGS_V1,
     GENERIC_TEMPLATE_MAX_MESSAGES_V1, GENERIC_TEMPLATE_MAX_OUTPUT_BYTES_V1,
     GENERIC_TEMPLATE_MAX_RECURSION_V1, GENERIC_TEMPLATE_MAX_SOURCE_BYTES_V1,
-    GENERIC_TEMPLATE_PROFILE_VERSION_V1, GenericTemplateContextV1, GenericTemplateErrorV1,
-    GenericTemplateIdentityV1, GenericTemplateProviderV1, GenericTemplateRenderResultV1,
-    GenericTemplateRendererV1, GenericTemplateSourceV1,
+    GENERIC_TEMPLATE_PROFILE_VERSION_V1, GENERIC_TEMPLATE_REVIEWED_GEMMA4_PROFILE_VERSION_V1,
+    GenericTemplateContextV1, GenericTemplateErrorV1, GenericTemplateIdentityV1,
+    GenericTemplateProviderV1, GenericTemplateRenderResultV1, GenericTemplateRendererV1,
+    GenericTemplateSourceV1,
 };
 pub use tokenizer::{
     DecodeModeV1, EosIdentitySnapshotV1, EosIdentityV1, MAX_TOKEN_PIECE_BYTES_V1,

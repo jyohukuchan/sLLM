@@ -33,13 +33,23 @@ sllm_status_t validate_chunk(const sllm_state_chunk_t *const chunk,
         "state chunk has an unsupported struct size");
   }
   if (chunk->abi_version != SLLM_HIP_ABI_VERSION ||
-      chunk->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION) {
+      (chunk->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION &&
+       chunk->info_version != SLLM_HIP_STATE_IMAGE_SLIDING_VERSION)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ABI_VERSION,
         "state chunk ABI or version is unsupported");
   }
-  if (chunk->reserved0 != 0U || chunk->reserved1 != 0U ||
-      !state_reserved_zero(chunk->reserved, 4U)) {
+  const bool full = chunk->info_version == SLLM_HIP_STATE_FORK_INFO_VERSION &&
+                    chunk->reserved0 == 0U && chunk->reserved1 == 0U &&
+                    state_reserved_zero(chunk->reserved, 4U);
+  const uint64_t sliding_window =
+      static_cast<uint64_t>(chunk->reserved0) |
+      (static_cast<uint64_t>(chunk->reserved1) << UINT32_C(32));
+  const bool sliding =
+      chunk->info_version == SLLM_HIP_STATE_IMAGE_SLIDING_VERSION &&
+      sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 &&
+      chunk->reserved[2] == 0U && chunk->reserved[3] == 0U;
+  if (!full && !sliding) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "state chunk reserved fields must be zero");
@@ -64,12 +74,22 @@ sllm_status_t validate_image_header(const sllm_state_image_info_t *const info,
         "state image info has an unsupported struct size");
   }
   if (info->abi_version != SLLM_HIP_ABI_VERSION ||
-      info->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION) {
+      (info->info_version != SLLM_HIP_STATE_FORK_INFO_VERSION &&
+       info->info_version != SLLM_HIP_STATE_IMAGE_SLIDING_VERSION)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ABI_VERSION,
         "state image info ABI or version is unsupported");
   }
-  if (info->reserved0 != 0U || !state_reserved_zero(info->reserved, 7U)) {
+  const bool full = info->info_version == SLLM_HIP_STATE_FORK_INFO_VERSION &&
+                    state_reserved_zero(info->reserved, 7U);
+  const uint64_t sliding_window =
+      static_cast<uint64_t>(info->reserved[0]) |
+      (static_cast<uint64_t>(info->reserved[1]) << UINT32_C(32));
+  const bool sliding =
+      info->info_version == SLLM_HIP_STATE_IMAGE_SLIDING_VERSION &&
+      sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 &&
+      state_reserved_zero(info->reserved + 4U, 3U);
+  if (info->reserved0 != 0U || (!full && !sliding)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_RESERVED_NONZERO,
         "state image info reserved fields must be zero");
@@ -95,6 +115,15 @@ void fill_kv_image_info(const KvState *const state,
   info->generation = state->generation;
   info->plane_count = (state->scale_bytes_per_token != 0U ? 4U : 2U) +
                       (state->outer_scale_bytes_per_token != 0U ? 2U : 0U);
+  if (state->sliding_window != 0U) {
+    info->info_version = SLLM_HIP_STATE_IMAGE_SLIDING_VERSION;
+    info->reserved[0] = static_cast<uint32_t>(state->sliding_window);
+    info->reserved[1] =
+        static_cast<uint32_t>(state->sliding_window >> UINT32_C(32));
+    info->reserved[2] = static_cast<uint32_t>(state->retained_start);
+    info->reserved[3] =
+        static_cast<uint32_t>(state->retained_start >> UINT32_C(32));
+  }
 }
 
 void fill_linear_image_info(const LinearAttentionState *const state,
@@ -153,25 +182,76 @@ KvPlaneRef kv_plane(KvState *const state, const uint32_t id) noexcept {
   switch (id) {
   case SLLM_HIP_KV_STATE_PLANE_KEY:
     return {&state->key_plane,
-            state->capacity_tokens * state->value_bytes_per_token};
+            state->storage_capacity_tokens * state->value_bytes_per_token};
   case SLLM_HIP_KV_STATE_PLANE_VALUE:
     return {&state->value_plane,
-            state->capacity_tokens * state->value_bytes_per_token};
+            state->storage_capacity_tokens * state->value_bytes_per_token};
   case SLLM_HIP_KV_STATE_PLANE_KEY_SCALE:
     return {&state->key_scale_plane,
-            state->capacity_tokens * state->scale_bytes_per_token};
+            state->storage_capacity_tokens * state->scale_bytes_per_token};
   case SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE:
     return {&state->value_scale_plane,
-            state->capacity_tokens * state->scale_bytes_per_token};
+            state->storage_capacity_tokens * state->scale_bytes_per_token};
   case SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE:
     return {&state->key_outer_scale_plane,
-            state->capacity_tokens * state->outer_scale_bytes_per_token};
+            state->storage_capacity_tokens * state->outer_scale_bytes_per_token};
   case SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE:
     return {&state->value_outer_scale_plane,
-            state->capacity_tokens * state->outer_scale_bytes_per_token};
+            state->storage_capacity_tokens * state->outer_scale_bytes_per_token};
   default:
     return {nullptr, 0U};
   }
+}
+
+uint64_t kv_plane_bytes_per_token(const KvState *const state,
+                                  const uint32_t id) noexcept {
+  switch (id) {
+  case SLLM_HIP_KV_STATE_PLANE_KEY:
+  case SLLM_HIP_KV_STATE_PLANE_VALUE:
+    return state->value_bytes_per_token;
+  case SLLM_HIP_KV_STATE_PLANE_KEY_SCALE:
+  case SLLM_HIP_KV_STATE_PLANE_VALUE_SCALE:
+    return state->scale_bytes_per_token;
+  case SLLM_HIP_KV_STATE_PLANE_KEY_OUTER_SCALE:
+  case SLLM_HIP_KV_STATE_PLANE_VALUE_OUTER_SCALE:
+    return state->outer_scale_bytes_per_token;
+  default:
+    return 0U;
+  }
+}
+
+hipError_t copy_ring_interval(void *const destination,
+                              const void *const source,
+                              const uint64_t physical_bytes,
+                              const uint64_t physical_offset,
+                              const uint64_t byte_length,
+                              const hipMemcpyKind direction) noexcept {
+  if (destination == nullptr || source == nullptr || physical_bytes == 0U ||
+      physical_offset >= physical_bytes || byte_length > physical_bytes) {
+    return hipErrorInvalidValue;
+  }
+  const uint64_t first = std::min(byte_length, physical_bytes - physical_offset);
+  hipError_t status = hipSuccess;
+  if (direction == hipMemcpyDeviceToHost) {
+    status = state_copy(destination,
+                        static_cast<const char *>(source) + physical_offset,
+                        static_cast<std::size_t>(first), direction);
+    if (status == hipSuccess && first != byte_length) {
+      status = state_copy(static_cast<char *>(destination) + first, source,
+                          static_cast<std::size_t>(byte_length - first),
+                          direction);
+    }
+  } else {
+    status = state_copy(static_cast<char *>(destination) + physical_offset,
+                        source, static_cast<std::size_t>(first), direction);
+    if (status == hipSuccess && first != byte_length) {
+      status = state_copy(destination,
+                          static_cast<const char *>(source) + first,
+                          static_cast<std::size_t>(byte_length - first),
+                          direction);
+    }
+  }
+  return status;
 }
 
 // Value rows in block16/MXFP8 planes are physically padded to the block size;
@@ -274,14 +354,19 @@ uint64_t kv_mapped_bytes(const KvState *const state) noexcept {
 }
 
 uint64_t kv_visible_bytes(const KvState *const state) noexcept {
-  const uint64_t value = state->published_length * state->value_bytes_per_token;
-  const uint64_t scale = state->published_length * state->scale_bytes_per_token;
+  const uint64_t visible_tokens =
+      state->published_length - state->retained_start;
+  const uint64_t value = visible_tokens * state->value_bytes_per_token;
+  const uint64_t scale = visible_tokens * state->scale_bytes_per_token;
   const uint64_t outer =
-      state->published_length * state->outer_scale_bytes_per_token;
+      visible_tokens * state->outer_scale_bytes_per_token;
   return value * 2U + scale * 2U + outer * 2U;
 }
 
 uint64_t kv_visible_shared_bytes(const KvState *const state) noexcept {
+  if (state->sliding_window != 0U) {
+    return kv_mapped_bytes(state);
+  }
   const auto visible_plane = [state](const KvVmmPlane &plane,
                                      const uint64_t bytes_per_token) {
     if (bytes_per_token == 0U || plane.page_bytes == 0U) {
@@ -433,6 +518,7 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
           destination_info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR ||
           destination_info->encoding != source->encoding ||
           destination_info->dtype != source->dtype ||
+          destination_info->capacity_tokens < source->published_length ||
           destination_info->block_size !=
               (source->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1 ||
                        source->encoding ==
@@ -476,6 +562,18 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
               "KV fork destination changes static FP8 scales");
         }
       }
+      const uint64_t destination_window =
+          destination_info->create_info_version ==
+                  SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
+              ? (static_cast<uint64_t>(destination_info->reserved[2]) |
+                 (static_cast<uint64_t>(destination_info->reserved[3])
+                  << UINT32_C(32)))
+              : 0U;
+      if (destination_window != source->sliding_window) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+            "KV fork destination changes the sliding window");
+      }
       source->release_active = true;
     }
     const auto unguard_source = [&]() noexcept {
@@ -498,6 +596,11 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
     KvVmmPlane key_outer_scale_plane;
     KvVmmPlane value_outer_scale_plane;
     const int device_index = static_cast<int>(context->device_index);
+    const uint64_t destination_storage_tokens =
+        source->sliding_window == 0U
+            ? destination_info->capacity_tokens
+            : std::min(destination_info->capacity_tokens,
+                       source->sliding_window + UINT64_C(1));
     const std::array<std::pair<const KvVmmPlane *, KvVmmPlane *>, 6> planes = {
         std::pair{&source->key_plane, &key_plane},
         std::pair{&source->value_plane, &value_plane},
@@ -508,14 +611,16 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
     if (shared) {
       for (const auto &pair : planes) {
         const uint64_t visible_bytes =
-            source->published_length *
-            (pair.first == &source->key_scale_plane ||
+            (source->sliding_window == 0U
+                 ? source->published_length *
+                       (pair.first == &source->key_scale_plane ||
                      pair.first == &source->value_scale_plane
-                 ? source->scale_bytes_per_token
-             : pair.first == &source->key_outer_scale_plane ||
+                            ? source->scale_bytes_per_token
+                        : pair.first == &source->key_outer_scale_plane ||
                      pair.first == &source->value_outer_scale_plane
-                 ? source->outer_scale_bytes_per_token
-                 : source->value_bytes_per_token);
+                            ? source->outer_scale_bytes_per_token
+                            : source->value_bytes_per_token)
+                 : pair.first->mapped_bytes);
         const hipError_t ro_status =
             const_cast<KvVmmPlane *>(pair.first)
                 ->mark_read_only(visible_bytes, device_index);
@@ -540,8 +645,10 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
               ? source->outer_scale_bytes_per_token
               : source->value_bytes_per_token;
       const uint64_t destination_logical =
-          destination_info->capacity_tokens * bytes_per_token;
-      const uint64_t visible_bytes = source->published_length * bytes_per_token;
+          destination_storage_tokens * bytes_per_token;
+      const uint64_t visible_bytes =
+          source->sliding_window == 0U ? source->published_length * bytes_per_token
+                                      : pair.first->mapped_bytes;
       clone_status =
           clone_kv_plane(*pair.first, pair.second, destination_logical,
                          visible_bytes, device_index, shared);
@@ -570,7 +677,7 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
     std::unique_ptr<KvState> candidate;
     try {
       const uint64_t destination_value_bytes =
-          destination_info->capacity_tokens * source->value_bytes_per_token;
+          destination_storage_tokens * source->value_bytes_per_token;
       key_buffer = std::make_unique<Buffer>(context, key_plane.address,
                                             destination_value_bytes);
       value_buffer = std::make_unique<Buffer>(context, value_plane.address,
@@ -585,8 +692,10 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
           source->dtype, source->encoding, source->static_key_scale,
           source->static_value_scale, source->value_bytes_per_token,
           source->scale_bytes_per_token, source->outer_scale_bytes_per_token,
-          source->physical_page_bytes, source->context_identity);
+          source->physical_page_bytes, source->context_identity,
+          destination_storage_tokens, source->sliding_window);
       candidate->published_length = source->published_length;
+      candidate->retained_start = source->retained_start;
       candidate->generation = source->generation;
       candidate->last_published_start = source->last_published_start;
       candidate->last_published_end = source->last_published_end;
@@ -654,7 +763,7 @@ sllm_kv_state_fork(const sllm_kv_state_t *const raw_source,
     const uint64_t visible = kv_visible_bytes(source);
     const uint64_t shared_visible = kv_visible_shared_bytes(source);
     const uint64_t destination_owned =
-        destination_info->capacity_tokens *
+        destination_storage_tokens *
         (source->value_bytes_per_token * 2U +
          source->scale_bytes_per_token * 2U +
          source->outer_scale_bytes_per_token * 2U);
@@ -748,10 +857,36 @@ sllm_kv_state_export(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_PUBLIC_BUSY,
           "KV export requires a quiescent state");
     }
+    const bool sliding_chunk =
+        chunk->info_version == SLLM_HIP_STATE_IMAGE_SLIDING_VERSION;
+    const uint64_t chunk_window =
+        static_cast<uint64_t>(chunk->reserved0) |
+        (static_cast<uint64_t>(chunk->reserved1) << UINT32_C(32));
+    const uint64_t chunk_published =
+        static_cast<uint64_t>(chunk->reserved[0]) |
+        (static_cast<uint64_t>(chunk->reserved[1]) << UINT32_C(32));
+    if (sliding_chunk != (state->sliding_window != 0U) ||
+        (sliding_chunk &&
+         (chunk_window != state->sliding_window ||
+          chunk_published != state->published_length))) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "KV export chunk version or retained interval is invalid");
+    }
     const KvPlaneRef ref = kv_plane(state, chunk->plane);
-    if (ref.plane == nullptr || chunk->byte_offset > ref.logical_bytes ||
-        chunk->byte_length > ref.logical_bytes - chunk->byte_offset ||
-        chunk->byte_offset + chunk->byte_length > ref.plane->mapped_bytes) {
+    const uint64_t bytes_per_token =
+        kv_plane_bytes_per_token(state, chunk->plane);
+    const uint64_t retained_tokens =
+        state->published_length - state->retained_start;
+    const uint64_t image_bytes =
+        state->sliding_window == 0U
+            ? ref.logical_bytes
+            : retained_tokens * bytes_per_token;
+    if (ref.plane == nullptr || bytes_per_token == 0U ||
+        chunk->byte_offset > image_bytes ||
+        chunk->byte_length > image_bytes - chunk->byte_offset ||
+        (state->sliding_window == 0U &&
+         chunk->byte_offset + chunk->byte_length > ref.plane->mapped_bytes)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
           "KV export range is outside the exact native plane");
@@ -761,11 +896,20 @@ sllm_kv_state_export(const sllm_kv_state_t *const raw_state,
     if (device_status != SLLM_STATUS_OK) {
       return device_status;
     }
-    const hipError_t status = state_copy(
-        chunk->host_pointer,
-        static_cast<const char *>(ref.plane->address) +
-            static_cast<std::size_t>(chunk->byte_offset),
-        static_cast<std::size_t>(chunk->byte_length), hipMemcpyDeviceToHost);
+    const hipError_t status =
+        state->sliding_window == 0U
+            ? state_copy(
+                  chunk->host_pointer,
+                  static_cast<const char *>(ref.plane->address) +
+                      static_cast<std::size_t>(chunk->byte_offset),
+                  static_cast<std::size_t>(chunk->byte_length),
+                  hipMemcpyDeviceToHost)
+            : copy_ring_interval(
+                  chunk->host_pointer, ref.plane->address, ref.logical_bytes,
+                  (state->retained_start * bytes_per_token +
+                   chunk->byte_offset) %
+                      ref.logical_bytes,
+                  chunk->byte_length, hipMemcpyDeviceToHost);
     return status == hipSuccess
                ? SLLM_STATUS_OK
                : hip_failure(error_sink, status, "export KV raw plane chunk");
@@ -804,9 +948,32 @@ sllm_kv_state_import(const sllm_kv_state_t *const raw_state,
           "KV import requires a quiescent state");
     }
     const KvPlaneRef ref = kv_plane(state, chunk->plane);
-    if (ref.plane == nullptr || chunk->byte_offset > ref.logical_bytes ||
-        chunk->byte_length > ref.logical_bytes - chunk->byte_offset ||
-        chunk->byte_offset + chunk->byte_length > ref.plane->mapped_bytes) {
+    const uint64_t bytes_per_token =
+        kv_plane_bytes_per_token(state, chunk->plane);
+    const bool sliding_chunk =
+        chunk->info_version == SLLM_HIP_STATE_IMAGE_SLIDING_VERSION;
+    const uint64_t chunk_window =
+        static_cast<uint64_t>(chunk->reserved0) |
+        (static_cast<uint64_t>(chunk->reserved1) << UINT32_C(32));
+    const uint64_t chunk_published =
+        static_cast<uint64_t>(chunk->reserved[0]) |
+        (static_cast<uint64_t>(chunk->reserved[1]) << UINT32_C(32));
+    const uint64_t chunk_retained_start =
+        sliding_chunk ? chunk_published - std::min(chunk_published, chunk_window)
+                      : 0U;
+    const uint64_t image_bytes =
+        sliding_chunk
+            ? (chunk_published - chunk_retained_start) * bytes_per_token
+            : ref.logical_bytes;
+    if (ref.plane == nullptr || bytes_per_token == 0U ||
+        sliding_chunk != (state->sliding_window != 0U) ||
+        (sliding_chunk &&
+         (chunk_window != state->sliding_window ||
+          chunk_published > state->capacity_tokens)) ||
+        chunk->byte_offset > image_bytes ||
+        chunk->byte_length > image_bytes - chunk->byte_offset ||
+        (!sliding_chunk &&
+         chunk->byte_offset + chunk->byte_length > ref.plane->mapped_bytes)) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_BUFFER_OUT_OF_BOUNDS,
           "KV import range is outside the exact native plane");
@@ -830,6 +997,19 @@ sllm_kv_state_import(const sllm_kv_state_t *const raw_state,
     hipMemAccessDesc access{};
     access.location = properties.location;
     access.flags = hipMemAccessFlagsProtReadWrite;
+    if (sliding_chunk &&
+        ref.plane->grow(ref.logical_bytes, properties, access) != hipSuccess) {
+      return sllm_public_runtime::write_error(
+          error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
+          "KV sliding import failed to map retained ring storage");
+    }
+    const uint64_t physical_offset =
+        sliding_chunk
+            ? (chunk_retained_start * bytes_per_token + chunk->byte_offset) %
+                  ref.logical_bytes
+            : chunk->byte_offset;
+    const uint64_t first_bytes =
+        std::min(chunk->byte_length, ref.logical_bytes - physical_offset);
     const uint64_t shared_before =
         state->key_plane.shared_page_count() +
         state->value_plane.shared_page_count() +
@@ -837,9 +1017,13 @@ sllm_kv_state_import(const sllm_kv_state_t *const raw_state,
         state->value_scale_plane.shared_page_count() +
         state->key_outer_scale_plane.shared_page_count() +
         state->value_outer_scale_plane.shared_page_count();
-    if (ref.plane->make_private(chunk->byte_offset,
-                                chunk->byte_offset + chunk->byte_length,
-                                properties, access) != hipSuccess) {
+    hipError_t private_status = ref.plane->make_private(
+        physical_offset, physical_offset + first_bytes, properties, access);
+    if (private_status == hipSuccess && first_bytes != chunk->byte_length) {
+      private_status = ref.plane->make_private(
+          0U, chunk->byte_length - first_bytes, properties, access);
+    }
+    if (private_status != hipSuccess) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_PUBLIC_HIP_RUNTIME_ERROR,
           "KV import failed to privatize shared pages");
@@ -854,11 +1038,16 @@ sllm_kv_state_import(const sllm_kv_state_t *const raw_state,
     state->shared_page_count = shared_after;
     state->cow_copied_bytes +=
         (shared_before - shared_after) * state->physical_page_bytes;
-    const hipError_t status = state_copy(
-        static_cast<char *>(ref.plane->address) +
-            static_cast<std::size_t>(chunk->byte_offset),
-        chunk->host_pointer, static_cast<std::size_t>(chunk->byte_length),
-        hipMemcpyHostToDevice);
+    const hipError_t status =
+        sliding_chunk
+            ? copy_ring_interval(ref.plane->address, chunk->host_pointer,
+                                 ref.logical_bytes, physical_offset,
+                                 chunk->byte_length, hipMemcpyHostToDevice)
+            : state_copy(static_cast<char *>(ref.plane->address) +
+                             static_cast<std::size_t>(chunk->byte_offset),
+                         chunk->host_pointer,
+                         static_cast<std::size_t>(chunk->byte_length),
+                         hipMemcpyHostToDevice);
     if (status == hipSuccess) {
       state->import_plane_mask |= UINT32_C(1) << (chunk->plane - 1U);
       return SLLM_STATUS_OK;
@@ -937,6 +1126,35 @@ sllm_kv_state_import_finalize(const sllm_kv_state_t *const raw_state,
     const uint32_t expected_count =
         (state->scale_bytes_per_token != 0U ? 4U : 2U) +
         (state->outer_scale_bytes_per_token != 0U ? 2U : 0U);
+    const uint64_t image_window =
+        static_cast<uint64_t>(image_info->reserved[0]) |
+        (static_cast<uint64_t>(image_info->reserved[1]) << UINT32_C(32));
+    const uint64_t image_retained_start =
+        static_cast<uint64_t>(image_info->reserved[2]) |
+        (static_cast<uint64_t>(image_info->reserved[3]) << UINT32_C(32));
+    const uint64_t expected_retained_start =
+        state->sliding_window == 0U
+            ? 0U
+            : image_info->published_length -
+                  std::min(image_info->published_length,
+                           state->sliding_window);
+    const uint64_t retained_length =
+        image_info->published_length - expected_retained_start;
+    const bool sliding_metadata_matches =
+        state->sliding_window == 0U
+            ? image_info->info_version == SLLM_HIP_STATE_FORK_INFO_VERSION
+            : image_info->info_version ==
+                      SLLM_HIP_STATE_IMAGE_SLIDING_VERSION &&
+                  image_window == state->sliding_window &&
+                  image_retained_start == expected_retained_start;
+    const uint64_t mapped_capacity =
+        state->sliding_window == 0U
+            ? state->mapped_token_capacity
+            : std::min(state->storage_capacity_tokens,
+                       std::min(state->key_plane.mapped_bytes,
+                                state->value_plane.mapped_bytes) /
+                           state->value_bytes_per_token);
+    const uint32_t required_mask = retained_length == 0U ? 0U : expected_mask;
     if (!kv_quiescent(state) || state->context->poisoned.load() ||
         image_info->session_id != state->session_id ||
         image_info->layer_id != state->layer_id ||
@@ -944,18 +1162,30 @@ sllm_kv_state_import_finalize(const sllm_kv_state_t *const raw_state,
         image_info->encoding != state->encoding ||
         image_info->capacity_tokens > state->capacity_tokens ||
         image_info->published_length > state->capacity_tokens ||
-        (state->mapped_token_capacity < image_info->published_length) ||
+        !sliding_metadata_matches ||
+        (state->sliding_window == 0U
+             ? mapped_capacity < image_info->published_length
+             : mapped_capacity < retained_length) ||
         image_info->plane_count != expected_count ||
-        (state->import_plane_mask & expected_mask) != expected_mask) {
+        (state->import_plane_mask & required_mask) != required_mask) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "KV image metadata or imported plane set is incomplete");
     }
     state->published_length = image_info->published_length;
+    state->retained_start = expected_retained_start;
+    state->mapped_token_capacity = mapped_capacity;
     state->generation = image_info->generation;
-    state->last_published_start = 0U;
-    state->last_published_end = image_info->published_length;
-    state->last_published_generation = image_info->generation;
+    if (state->sliding_window == 0U) {
+      state->last_published_start = 0U;
+      state->last_published_end = image_info->published_length;
+      state->last_published_generation = image_info->generation;
+    } else {
+      state->last_published_start = 0U;
+      state->last_published_end = 0U;
+      state->last_published_generation = 0U;
+    }
+    state->import_plane_mask = 0U;
     return SLLM_STATUS_OK;
   } catch (...) {
     return sllm_public_runtime::write_error(
@@ -998,7 +1228,10 @@ sllm_kv_state_image_plane_size(const sllm_kv_state_t *const raw_state,
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "KV image plane is unknown or empty");
     }
-    *size_bytes = ref.logical_bytes;
+    *size_bytes = state->sliding_window == 0U
+                      ? ref.logical_bytes
+                      : (state->published_length - state->retained_start) *
+                            kv_plane_bytes_per_token(state, plane);
     return SLLM_STATUS_OK;
   } catch (...) {
     return sllm_public_runtime::write_error(

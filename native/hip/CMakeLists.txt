@@ -64,6 +64,21 @@ option(SLLM_ENABLE_MOE_ROUTE_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_GEMMA4_MOE_ROUTE_PUBLIC_GPU_TEST
+    "Build the Phase55 Gemma4 public-ABI MoE routing oracle"
+    OFF
+)
+
+option(SLLM_ENABLE_DEEPSEEK_V4_MOE_ROUTE_GPU_TEST
+    "Build the Phase57 DeepSeek V4 score/hash MoE routing oracle"
+    OFF
+)
+
+option(SLLM_ENABLE_MINIMAX_M3_MOE_ROUTE_GPU_TEST
+    "Build the Phase58 MiniMax M3 sigmoid top-4 MoE routing oracle"
+    OFF
+)
+
 option(SLLM_ENABLE_MOE_EXPERT_GPU_TEST
     "Build the focused real-weight Qwen3.5 MoE expert runner"
     OFF
@@ -84,8 +99,18 @@ option(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_MINISTRAL3_YARN_PUBLIC_GPU_TEST
+    "Build the focused real-GPU public-ABI Ministral 3 YaRN runner"
+    OFF
+)
+
 option(SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST
     "Build the focused real-GPU public-ABI BroadcastAdd numerical runner"
+    OFF
+)
+
+option(SLLM_ENABLE_BROADCAST_MUL_PUBLIC_GPU_TEST
+    "Build the focused real-GPU public-ABI BroadcastMul numerical runner"
     OFF
 )
 
@@ -151,8 +176,11 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
        SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST OR
        SLLM_ENABLE_LINEAR_ATTENTION_GPU_TEST OR SLLM_ENABLE_ARGMAX_GPU_TEST OR
        SLLM_ENABLE_TOKEN_SELECTOR_GPU_TEST OR
+       SLLM_ENABLE_DEEPSEEK_V4_MOE_ROUTE_GPU_TEST OR
+       SLLM_ENABLE_MINIMAX_M3_MOE_ROUTE_GPU_TEST OR
        SLLM_ENABLE_PHASE41_STATE_GPU_TEST OR
-       SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST)
+       SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST OR
+       SLLM_ENABLE_MINISTRAL3_YARN_PUBLIC_GPU_TEST)
         message(FATAL_ERROR
             "semantic G1 discovery test requires only public HIP runtime authority")
     endif()
@@ -371,11 +399,16 @@ set(SLLM_HIP_NATIVE_SOURCES
     src/argmax_api.cpp
     src/token_selector_api.cpp
     src/moe_route_api.cpp
+    src/deepseek_v4_moe_route_api.cpp
+    src/deepseek_v4_moe_route_stub.cpp
+    src/minimax_m3_moe_route_api.cpp
+    src/minimax_m3_moe_route_stub.cpp
     src/moe_expert_api.cpp
     src/rmsnorm_api.cpp
     src/residual_rmsnorm_api.cpp
     src/attention_preprocess_api.cpp
     src/rotary_api.cpp
+    src/ministral3_yarn_api.cpp
     src/windowed_attention_api.cpp
     src/causal_attention_api.cpp
     src/kv_state_api.cpp
@@ -451,6 +484,10 @@ endif()
 
 if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
     list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES src/public_runtime_stub.cpp)
+    list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES
+        src/deepseek_v4_moe_route_stub.cpp)
+    list(REMOVE_ITEM SLLM_HIP_NATIVE_SOURCES
+        src/minimax_m3_moe_route_stub.cpp)
     if(SLLM_SEMANTIC_G1_AUTHORITY)
         set(SLLM_SEMANTIC_G1_HIP_FLAGS
             -D__HIP_ROCclr__=1
@@ -482,6 +519,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${CMAKE_BINARY_DIR}/token_selector_kernel.hip.o")
         set(SLLM_MOE_ROUTE_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/moe_route_kernel.hip.o")
+        set(SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/deepseek_v4_moe_route_kernel.hip.o")
+        set(SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/minimax_m3_moe_route_kernel.hip.o")
         set(SLLM_MOE_EXPERT_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/moe_expert_kernel.hip.o")
         set(SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT
@@ -494,22 +535,28 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${CMAKE_BINARY_DIR}/linear_attention_kernel.hip.o")
         set(SLLM_ROTARY_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/rotary_kernel.hip.o")
+        set(SLLM_MINISTRAL3_YARN_G1_KERNEL_OBJECT
+            "${CMAKE_BINARY_DIR}/ministral3_yarn_kernel.hip.o")
         set(SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT
             "${CMAKE_BINARY_DIR}/gemma_attention_kernel.hip.o")
         add_custom_command(
             OUTPUT "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
-                "${PROJECT_SOURCE_DIR}/src/public_runtime.hip.cpp"
+                "${PROJECT_SOURCE_DIR}/src/minimax_m3_moe_route_public_runtime.hip.cpp"
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
-            DEPENDS src/public_runtime.hip.cpp src/matmul_runtime.inc
+            DEPENDS src/minimax_m3_moe_route_public_runtime.hip.cpp
+                src/public_runtime.hip.cpp src/matmul_runtime.inc
                 src/mlp_gate_up_silu_bundle_runtime.inc
                 src/mlp_gate_up_silu_bundle_kernel_internal.hpp
                 src/argmax_runtime.inc
                 src/token_selector_runtime.inc
                 src/moe_route_runtime.inc
+                src/deepseek_v4_moe_route_runtime.inc
+                src/minimax_m3_moe_route_runtime.inc
                 src/moe_expert_runtime.inc
                 src/attention_preprocess_runtime.inc
                 src/rotary_runtime.inc
+                src/ministral3_yarn_runtime.inc
                 src/windowed_attention_runtime.inc
                 src/causal_attention_runtime.inc
                 src/linear_attention_runtime.inc
@@ -520,10 +567,16 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 src/argmax_kernel_internal.hpp src/rmsnorm_api.hpp
                 src/token_selector_api.hpp src/token_selector_kernel_internal.hpp
                 src/moe_route_api.hpp src/moe_route_kernel_internal.hpp
+                src/deepseek_v4_moe_route_api.hpp
+                src/deepseek_v4_moe_route_kernel_internal.hpp
+                src/minimax_m3_moe_route_api.hpp
+                src/minimax_m3_moe_route_kernel_internal.hpp
                 src/moe_expert_api.hpp src/moe_expert_kernel_internal.hpp
                 src/attention_preprocess_api.hpp
                 src/attention_preprocess_kernel_internal.hpp
                 src/rotary_api.hpp src/rotary_kernel_internal.hpp
+                src/ministral3_yarn_api.hpp
+                src/ministral3_yarn_kernel_internal.hpp
                 src/windowed_attention_api.hpp
                 src/gemma_attention_kernel_internal.hpp
                 src/causal_attention_api.hpp
@@ -620,6 +673,28 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             VERBATIM
         )
         add_custom_command(
+            OUTPUT "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/deepseek_v4_moe_route_kernel.hip.cpp"
+                -o "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            DEPENDS src/deepseek_v4_moe_route_kernel.hip.cpp
+                src/deepseek_v4_moe_route_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
+            OUTPUT "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/minimax_m3_moe_route_kernel.hip.cpp"
+                -o "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            DEPENDS src/minimax_m3_moe_route_kernel.hip.cpp
+                src/minimax_m3_moe_route_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
             OUTPUT "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
                 "${PROJECT_SOURCE_DIR}/src/moe_expert_kernel.hip.cpp"
@@ -685,6 +760,17 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             VERBATIM
         )
         add_custom_command(
+            OUTPUT "${SLLM_MINISTRAL3_YARN_G1_KERNEL_OBJECT}"
+            COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
+                "${PROJECT_SOURCE_DIR}/src/ministral3_yarn_kernel.hip.cpp"
+                -o "${SLLM_MINISTRAL3_YARN_G1_KERNEL_OBJECT}"
+            DEPENDS src/ministral3_yarn_kernel.hip.cpp
+                src/ministral3_yarn_kernel_internal.hpp
+                "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            VERBATIM
+        )
+        add_custom_command(
             OUTPUT "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
             COMMAND "${CMAKE_HIP_COMPILER}" ${SLLM_SEMANTIC_G1_HIP_FLAGS}
                 "${PROJECT_SOURCE_DIR}/src/gemma_attention_kernel.hip.cpp"
@@ -703,12 +789,15 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            "${SLLM_MINISTRAL3_YARN_G1_KERNEL_OBJECT}"
             "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
             PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE
         )
@@ -721,16 +810,21 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
             "${SLLM_ARGMAX_G1_KERNEL_OBJECT}"
             "${SLLM_TOKEN_SELECTOR_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_DEEPSEEK_V4_MOE_ROUTE_G1_KERNEL_OBJECT}"
+            "${SLLM_MINIMAX_M3_MOE_ROUTE_G1_KERNEL_OBJECT}"
             "${SLLM_MOE_EXPERT_G1_KERNEL_OBJECT}"
             "${SLLM_ATTENTION_PREPROCESS_G1_KERNEL_OBJECT}"
             "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_LINEAR_ATTENTION_G1_KERNEL_OBJECT}"
             "${SLLM_ROTARY_G1_KERNEL_OBJECT}"
+            "${SLLM_MINISTRAL3_YARN_G1_KERNEL_OBJECT}"
             "${SLLM_GEMMA_ATTENTION_G1_KERNEL_OBJECT}"
         )
     else()
-        set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(
+            src/minimax_m3_moe_route_public_runtime.hip.cpp
+            PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/rmsnorm_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/elementwise_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/embedding_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
@@ -740,6 +834,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/argmax_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/token_selector_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_route_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/deepseek_v4_moe_route_kernel.hip.cpp
+                                    PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/minimax_m3_moe_route_kernel.hip.cpp
+                                    PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/moe_expert_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/attention_preprocess_kernel.hip.cpp
                                     PROPERTIES LANGUAGE HIP)
@@ -750,9 +848,12 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         set_source_files_properties(src/linear_attention_kernel.hip.cpp PROPERTIES
                                     LANGUAGE HIP)
         set_source_files_properties(src/rotary_kernel.hip.cpp PROPERTIES LANGUAGE HIP)
+        set_source_files_properties(src/ministral3_yarn_kernel.hip.cpp
+                                    PROPERTIES LANGUAGE HIP)
         set_source_files_properties(src/gemma_attention_kernel.hip.cpp PROPERTIES
                                     LANGUAGE HIP)
-        list(APPEND SLLM_HIP_NATIVE_SOURCES src/public_runtime.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES
+            src/minimax_m3_moe_route_public_runtime.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/rmsnorm_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/elementwise_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/embedding_kernel.hip.cpp)
@@ -762,6 +863,10 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/argmax_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/token_selector_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_route_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES
+            src/deepseek_v4_moe_route_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES
+            src/minimax_m3_moe_route_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/moe_expert_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES
             src/attention_preprocess_kernel.hip.cpp)
@@ -769,6 +874,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/causal_attention_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/linear_attention_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/rotary_kernel.hip.cpp)
+        list(APPEND SLLM_HIP_NATIVE_SOURCES src/ministral3_yarn_kernel.hip.cpp)
         list(APPEND SLLM_HIP_NATIVE_SOURCES src/gemma_attention_kernel.hip.cpp)
     endif()
 endif()
@@ -889,7 +995,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     enable_testing()
     find_package(Threads REQUIRED)
     add_executable(sllm_public_runtime_host_test
-        src/public_runtime.hip.cpp
+        src/minimax_m3_moe_route_public_runtime.hip.cpp
         src/embedding_api.cpp
         src/elementwise_api.cpp
         src/matmul_api.cpp
@@ -897,11 +1003,14 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
         src/moe_route_api.cpp
+        src/deepseek_v4_moe_route_api.cpp
+        src/minimax_m3_moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
         src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
+        src/ministral3_yarn_api.cpp
         src/windowed_attention_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
@@ -909,7 +1018,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         tests/fake_hip_runtime.cpp
         tests/public_runtime_host_test.cpp
     )
-    set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES
+    set_source_files_properties(
+        src/minimax_m3_moe_route_public_runtime.hip.cpp PROPERTIES
         LANGUAGE CXX
     )
     target_compile_features(sllm_public_runtime_host_test PRIVATE cxx_std_17)
@@ -935,8 +1045,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         COMMAND sllm_public_runtime_host_test
     )
 
-    add_executable(sllm_argmax_public_c_abi_host_test
-        src/public_runtime.hip.cpp
+    add_executable(sllm_ministral3_yarn_public_c_abi_host_test
+        src/minimax_m3_moe_route_public_runtime.hip.cpp
         src/embedding_api.cpp
         src/elementwise_api.cpp
         src/matmul_api.cpp
@@ -944,11 +1054,63 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
         src/moe_route_api.cpp
+        src/deepseek_v4_moe_route_api.cpp
+        src/minimax_m3_moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
         src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
+        src/ministral3_yarn_api.cpp
+        src/windowed_attention_api.cpp
+        src/causal_attention_api.cpp
+        src/kv_state_api.cpp
+        src/linear_attention_api.cpp
+        tests/fake_hip_runtime.cpp
+        tests/ministral3_yarn_public_c_abi_test.cpp
+    )
+    set_source_files_properties(
+        src/minimax_m3_moe_route_public_runtime.hip.cpp PROPERTIES
+        LANGUAGE CXX
+    )
+    target_compile_features(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
+        cxx_std_17
+    )
+    target_compile_definitions(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
+        SLLM_PUBLIC_RUNTIME_HOST_TEST=1
+    )
+    target_include_directories(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/../../include"
+        "${PROJECT_SOURCE_DIR}/src"
+        "${PROJECT_SOURCE_DIR}/tests/fake_hip/include"
+    )
+    target_compile_options(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_ministral3_yarn_public_c_abi_host_test PRIVATE
+        Threads::Threads
+    )
+    add_test(NAME sllm_ministral3_yarn_public_c_abi_host_test
+        COMMAND sllm_ministral3_yarn_public_c_abi_host_test
+    )
+
+    add_executable(sllm_argmax_public_c_abi_host_test
+        src/minimax_m3_moe_route_public_runtime.hip.cpp
+        src/embedding_api.cpp
+        src/elementwise_api.cpp
+        src/matmul_api.cpp
+        src/argmax_api.cpp
+        src/token_selector_api.cpp
+        src/token_selector_kernel.hip.cpp
+        src/moe_route_api.cpp
+        src/deepseek_v4_moe_route_api.cpp
+        src/minimax_m3_moe_route_api.cpp
+        src/moe_expert_api.cpp
+        src/rmsnorm_api.cpp
+        src/residual_rmsnorm_api.cpp
+        src/attention_preprocess_api.cpp
+        src/rotary_api.cpp
+        src/ministral3_yarn_api.cpp
         src/windowed_attention_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
@@ -956,7 +1118,8 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         tests/fake_hip_runtime.cpp
         tests/argmax_public_c_abi_test.cpp
     )
-    set_source_files_properties(src/public_runtime.hip.cpp PROPERTIES
+    set_source_files_properties(
+        src/minimax_m3_moe_route_public_runtime.hip.cpp PROPERTIES
         LANGUAGE CXX
     )
     target_compile_features(sllm_argmax_public_c_abi_host_test PRIVATE cxx_std_17)
@@ -977,7 +1140,7 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
     )
 
     add_executable(sllm_token_selector_public_c_abi_host_test
-        src/public_runtime.hip.cpp
+        src/minimax_m3_moe_route_public_runtime.hip.cpp
         src/embedding_api.cpp
         src/elementwise_api.cpp
         src/matmul_api.cpp
@@ -985,11 +1148,14 @@ if(SLLM_ENABLE_PUBLIC_RUNTIME_HOST_TEST)
         src/token_selector_api.cpp
         src/token_selector_kernel.hip.cpp
         src/moe_route_api.cpp
+        src/deepseek_v4_moe_route_api.cpp
+        src/minimax_m3_moe_route_api.cpp
         src/moe_expert_api.cpp
         src/rmsnorm_api.cpp
         src/residual_rmsnorm_api.cpp
         src/attention_preprocess_api.cpp
         src/rotary_api.cpp
+        src/ministral3_yarn_api.cpp
         src/windowed_attention_api.cpp
         src/causal_attention_api.cpp
         src/kv_state_api.cpp
@@ -1116,6 +1282,82 @@ if(SLLM_ENABLE_MOE_ROUTE_GPU_TEST)
     target_link_libraries(sllm_moe_route_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
+if(SLLM_ENABLE_GEMMA4_MOE_ROUTE_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase55 Gemma4 MoE route GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_phase55_gemma4_moe_route_gpu_test
+        tests/phase55_gemma4_moe_route_gpu_test.cpp
+    )
+    target_compile_features(sllm_phase55_gemma4_moe_route_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_phase55_gemma4_moe_route_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_phase55_gemma4_moe_route_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_include_directories(sllm_phase55_gemma4_moe_route_gpu_test SYSTEM PRIVATE
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_phase55_gemma4_moe_route_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_DEEPSEEK_V4_MOE_ROUTE_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase57 DeepSeek V4 MoE route GPU test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_deepseek_v4_moe_route_gpu_test
+        tests/deepseek_v4_moe_route_gpu_test.cpp
+    )
+    target_compile_features(sllm_deepseek_v4_moe_route_gpu_test PRIVATE
+        cxx_std_17)
+    target_compile_definitions(sllm_deepseek_v4_moe_route_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_deepseek_v4_moe_route_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+        -Werror
+    )
+    target_link_libraries(sllm_deepseek_v4_moe_route_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_deepseek_v4_moe_route_gpu_test
+        COMMAND sllm_deepseek_v4_moe_route_gpu_test)
+    set_tests_properties(sllm_deepseek_v4_moe_route_gpu_test PROPERTIES
+        LABELS "gpu;phase57;deepseek-v4;moe-route"
+        RESOURCE_LOCK sllm_gpu)
+endif()
+
+if(SLLM_ENABLE_MINIMAX_M3_MOE_ROUTE_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "Phase58 MiniMax M3 MoE route GPU test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_minimax_m3_moe_route_gpu_test
+        tests/minimax_m3_moe_route_gpu_test.cpp
+    )
+    target_compile_features(sllm_minimax_m3_moe_route_gpu_test PRIVATE
+        cxx_std_17)
+    target_compile_definitions(sllm_minimax_m3_moe_route_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_minimax_m3_moe_route_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow
+        -Werror
+    )
+    target_link_libraries(sllm_minimax_m3_moe_route_gpu_test PRIVATE
+        sllm_hip_stub)
+    add_test(NAME sllm_minimax_m3_moe_route_gpu_test
+        COMMAND sllm_minimax_m3_moe_route_gpu_test)
+    set_tests_properties(sllm_minimax_m3_moe_route_gpu_test PROPERTIES
+        LABELS "gpu;phase58;minimax-m3;moe-route"
+        RESOURCE_LOCK sllm_gpu)
+endif()
+
 if(SLLM_ENABLE_MOE_EXPERT_GPU_TEST)
     if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
         message(FATAL_ERROR
@@ -1197,6 +1439,33 @@ if(SLLM_ENABLE_ROTARY_PUBLIC_GPU_TEST)
     target_link_libraries(sllm_rotary_public_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
+if(SLLM_ENABLE_MINISTRAL3_YARN_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "public Ministral 3 YaRN GPU test requires the normal public HIP runtime build")
+    endif()
+    enable_testing()
+    add_executable(sllm_ministral3_yarn_public_gpu_test
+        tests/ministral3_yarn_public_c_abi_test.cpp
+    )
+    target_compile_features(sllm_ministral3_yarn_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_ministral3_yarn_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+    )
+    target_compile_options(sllm_ministral3_yarn_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_link_libraries(sllm_ministral3_yarn_public_gpu_test PRIVATE sllm_hip_stub)
+    add_test(NAME sllm_ministral3_yarn_public_gpu_test
+        COMMAND sllm_ministral3_yarn_public_gpu_test
+    )
+    set_tests_properties(sllm_ministral3_yarn_public_gpu_test PROPERTIES
+        LABELS "gpu;phase60;ministral3;yarn"
+        RESOURCE_LOCK sllm_gpu
+        ENVIRONMENT "LD_LIBRARY_PATH=${ROCM_PATH}/lib:$ENV{LD_LIBRARY_PATH}"
+    )
+endif()
+
 if(SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST)
     if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
         message(FATAL_ERROR
@@ -1217,6 +1486,28 @@ if(SLLM_ENABLE_BROADCAST_ADD_PUBLIC_GPU_TEST)
         "${ROCM_PATH}/include"
     )
     target_link_libraries(sllm_broadcast_add_public_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_BROADCAST_MUL_PUBLIC_GPU_TEST)
+    if(NOT SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR SLLM_SEMANTIC_G1_AUTHORITY)
+        message(FATAL_ERROR
+            "public BroadcastMul GPU test requires the normal public HIP runtime build")
+    endif()
+    add_executable(sllm_broadcast_mul_public_gpu_test
+        tests/phase55_broadcast_mul_gpu_test.cpp
+    )
+    target_compile_features(sllm_broadcast_mul_public_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_broadcast_mul_public_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_broadcast_mul_public_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+    )
+    target_include_directories(sllm_broadcast_mul_public_gpu_test SYSTEM PRIVATE
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_broadcast_mul_public_gpu_test PRIVATE sllm_hip_stub)
 endif()
 
 if(SLLM_ENABLE_GEMMA_ATTENTION_GPU_TEST)

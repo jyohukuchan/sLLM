@@ -15,10 +15,10 @@ use sllm_core::{
 
 use crate::reasoning::{ReasoningControllerV1, ReasoningErrorV1, ReasoningPolicyV1};
 use crate::{
-    DecodeModeV1, GenerationStopPolicyV1, GenericTemplateIdentityV1, GenericTemplateInputV1,
-    GenericTemplateProviderV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1,
-    TokenByteTableV1, TokenIdsV1, TokenizerFrontendV1, TokenizerUtilityErrorV1,
-    validate_generation_stop_policy,
+    ChatMessageV1, ChatRenderOptionsV1, ChatTemplateRendererV1, DecodeModeV1,
+    GenerationStopPolicyV1, GenericTemplateIdentityV1, GenericTemplateInputV1,
+    GenericTemplateProviderV1, Qwen35ChatTemplateV1, TokenByteTableV1, TokenIdsV1,
+    TokenizerFrontendV1, TokenizerUtilityErrorV1, validate_generation_stop_policy,
 };
 
 pub const MAX_STOP_STRINGS_V1: usize = 4;
@@ -53,12 +53,20 @@ pub fn gemma4_generation_stop_policy(
     Ok(policy)
 }
 
+pub fn gemma4_moe_generation_stop_policy() -> Result<GenerationStopPolicyV1, GenerationServiceError>
+{
+    let policy = sllm_core::gemma4_moe_generation_stop_policy();
+    validate_generation_stop_policy(&policy)
+        .map_err(|_| GenerationServiceError::InvalidStopPolicy)?;
+    Ok(policy)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GenerationInputV1 {
     Prompt(String),
     Messages {
-        messages: Vec<Qwen35ChatMessageV1>,
-        options: Qwen35RenderOptionsV1,
+        messages: Vec<ChatMessageV1>,
+        options: ChatRenderOptionsV1,
     },
     /// Explicit continuation input.  The assistant prefix is part of the
     /// model context, but is not emitted as generated output.
@@ -69,8 +77,8 @@ pub enum GenerationInputV1 {
     /// Explicit chat continuation input.  This is intentionally separate
     /// from `Messages` so the legacy rendering/token sequence remains exact.
     MessagesWithAssistantPrefill {
-        messages: Vec<Qwen35ChatMessageV1>,
-        options: Qwen35RenderOptionsV1,
+        messages: Vec<ChatMessageV1>,
+        options: ChatRenderOptionsV1,
         assistant_prefill: String,
     },
     /// A capability-gated generic template input.  The provider renders this
@@ -1896,7 +1904,7 @@ impl From<ReasoningErrorV1> for GenerationServiceError {
 
 pub struct GenerationServiceV1<'a> {
     tokenizer: &'a dyn GenerationTextFrontendV1,
-    renderer: Option<&'a Qwen35ChatTemplateV1>,
+    renderer: Option<ChatTemplateRendererV1<'a>>,
     stop_policy: &'a GenerationStopPolicyV1,
 }
 
@@ -1904,6 +1912,22 @@ impl<'a> GenerationServiceV1<'a> {
     pub fn new(
         tokenizer: &'a dyn GenerationTextFrontendV1,
         renderer: Option<&'a Qwen35ChatTemplateV1>,
+        stop_policy: &'a GenerationStopPolicyV1,
+    ) -> Result<Self, GenerationServiceError> {
+        Self::new_with_chat_renderer(
+            tokenizer,
+            renderer.map(ChatTemplateRendererV1::qwen35),
+            stop_policy,
+        )
+    }
+
+    /// Constructs the shared generation service with a model-selected chat
+    /// renderer. Existing Qwen callers keep using [`Self::new`]; reviewed
+    /// non-Qwen models can select the same message preparation path with a
+    /// bounded [`ChatTemplateRendererV1::Generic`] provider.
+    pub fn new_with_chat_renderer(
+        tokenizer: &'a dyn GenerationTextFrontendV1,
+        renderer: Option<ChatTemplateRendererV1<'a>>,
         stop_policy: &'a GenerationStopPolicyV1,
     ) -> Result<Self, GenerationServiceError> {
         validate_generation_stop_policy(stop_policy)
@@ -1959,14 +1983,19 @@ impl<'a> GenerationServiceV1<'a> {
     ) -> Result<PreparedGenerationInputV1, GenerationServiceError> {
         let (rendered, assistant_prefill, generic_identity) = match input {
             GenerationInputV1::Prompt(prompt) => (prompt.clone(), None, None),
-            GenerationInputV1::Messages { messages, options } => (
-                self.renderer
+            GenerationInputV1::Messages { messages, options } => {
+                let rendered = self
+                    .renderer
+                    .as_ref()
                     .ok_or(GenerationServiceError::MissingRenderer)?
                     .render(messages, *options)
-                    .map_err(|_| GenerationServiceError::Render)?,
-                None,
-                None,
-            ),
+                    .map_err(|_| GenerationServiceError::Render)?;
+                (
+                    rendered.rendered().to_owned(),
+                    None,
+                    rendered.generic_identity().cloned(),
+                )
+            }
             GenerationInputV1::PromptWithAssistantPrefill {
                 prompt,
                 assistant_prefill,
@@ -1975,14 +2004,19 @@ impl<'a> GenerationServiceV1<'a> {
                 messages,
                 options,
                 assistant_prefill,
-            } => (
-                self.renderer
+            } => {
+                let rendered = self
+                    .renderer
+                    .as_ref()
                     .ok_or(GenerationServiceError::MissingRenderer)?
-                    .render_with_assistant_prefill(messages, *options, "")
-                    .map_err(|_| GenerationServiceError::Render)?,
-                Some(assistant_prefill.as_str()),
-                None,
-            ),
+                    .render_with_assistant_prefill(messages, *options)
+                    .map_err(|_| GenerationServiceError::Render)?;
+                (
+                    rendered.rendered().to_owned(),
+                    Some(assistant_prefill.as_str()),
+                    rendered.generic_identity().cloned(),
+                )
+            }
             GenerationInputV1::GenericTemplate(generic) => (
                 generic.rendered().to_owned(),
                 None,
@@ -2696,6 +2730,22 @@ mod tests {
         assert_eq!(
             policy.evaluation,
             sllm_core::StopEvaluation::NewlyGeneratedAfterArgmax
+        );
+        assert!(!policy.stop_token.visible_output);
+        assert!(!policy.stop_token.subsequent_decode_input);
+    }
+
+    #[test]
+    fn gemma4_moe_stop_policy_is_the_reviewed_eos_turn_and_tool_boundary() {
+        let policy = gemma4_moe_generation_stop_policy().unwrap();
+        assert_eq!(policy.stop_token_ids, [1, 106, 50]);
+        assert_eq!(
+            policy.evaluation,
+            sllm_core::StopEvaluation::NewlyGeneratedAfterArgmax
+        );
+        assert_eq!(
+            policy.prompt_evaluation,
+            sllm_core::PromptEvaluation::NeverStop
         );
         assert!(!policy.stop_token.visible_output);
         assert!(!policy.stop_token.subsequent_decode_input);

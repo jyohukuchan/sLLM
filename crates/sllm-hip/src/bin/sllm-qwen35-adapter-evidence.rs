@@ -408,7 +408,7 @@ fn run() -> Result<Report, String> {
         .map_err(|error| format!("resolve reviewed model lock: {error}"))?;
     let lock = match reviewed {
         ReviewedModelLock::Qwen35(lock) => lock,
-        ReviewedModelLock::Gemma4(_) => {
+        ReviewedModelLock::Gemma4(_) | ReviewedModelLock::Ministral3(_) => {
             return Err("derived artifact is not reviewed Qwen3.5".to_owned());
         }
     };

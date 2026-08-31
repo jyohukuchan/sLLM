@@ -179,8 +179,17 @@ fn accepts_zero_and_one_tensor_files() {
 }
 
 #[test]
-fn accepts_supported_architectures_and_tokenizer_arrays() {
-    for architecture in ["qwen35", "qwen35moe", "gemma4"] {
+fn accepts_supported_architectures_without_extra_required_metadata_and_tokenizer_arrays() {
+    for architecture in [
+        "qwen35",
+        "qwen35moe",
+        "gemma4",
+        "gemma4moe",
+        "deepseek4",
+        "minimax-m3",
+        "diffusion-gemma",
+        "mistral3",
+    ] {
         let mut metadata = base_metadata();
         metadata[0].1 = TestValue::String(architecture.to_owned());
         let verified = open_bytes(&build(metadata, vec![])).expect("supported architecture");
@@ -190,6 +199,28 @@ fn accepts_supported_architectures_and_tokenizer_arrays() {
             Some(GgufValue::Array(_))
         ));
     }
+}
+
+#[test]
+fn diffusion_gemma_is_parser_only_and_writer_rejects_it() {
+    let output = temp_output("diffusion-gemma-write-disabled");
+    let error = write_gguf(
+        &output,
+        &GgufWritePlan {
+            metadata: BTreeMap::from([
+                (
+                    "general.architecture".to_owned(),
+                    GgufValue::String("diffusion-gemma".to_owned()),
+                ),
+                ("general.alignment".to_owned(), GgufValue::U32(32)),
+            ]),
+            tensors: vec![],
+        },
+        |_, _, _| unreachable!("write-disabled plan must fail before payload reads"),
+    )
+    .expect_err("DiffusionGemma writer must remain disabled");
+    assert!(error.to_string().contains("architecture is unsupported"));
+    assert!(!output.exists());
 }
 
 #[test]
@@ -476,6 +507,8 @@ fn deterministic_writer_round_trips_frontend_assets_and_derived_lock() {
     let config = br#"{"model_type":"qwen3_5"}"#;
     let tokenizer = br#"{"version":"1.0"}"#;
     let tokenizer_config = br#"{"eos_token":"<eos>"}"#;
+    let generation_config = br#"{"do_sample":false}"#;
+    let hf_quant_config = br#"{"quant_method":"modelopt"}"#;
     let mut metadata = BTreeMap::from([
         (
             "general.architecture".to_owned(),
@@ -495,6 +528,30 @@ fn deterministic_writer_round_trips_frontend_assets_and_derived_lock() {
             SLLM_TENSOR_RECIPE_SHA256_KEY.to_owned(),
             GgufValue::String(recipe.digest().expect("recipe digest")),
         ),
+        (
+            "sllm.source.artifact.fingerprint".to_owned(),
+            GgufValue::String(format!("sha256:{}", "3".repeat(64))),
+        ),
+        (
+            "sllm.source.semantic.repository".to_owned(),
+            GgufValue::String("example/semantic-model".to_owned()),
+        ),
+        (
+            "sllm.source.semantic.revision".to_owned(),
+            GgufValue::String("4".repeat(40)),
+        ),
+        (
+            "sllm.source.recipe.producer".to_owned(),
+            GgufValue::String("modelopt@test".to_owned()),
+        ),
+        (
+            "sllm.kv.fp8.scheme".to_owned(),
+            GgufValue::String("implicit-unit-test".to_owned()),
+        ),
+        (
+            "sllm.kv.fp8.implicit_decode_scale_bf16".to_owned(),
+            GgufValue::U16(0x3f80),
+        ),
     ]);
     for (key, value) in [
         (SLLM_FRONTEND_CONFIG_KEY, config.as_slice()),
@@ -502,6 +559,14 @@ fn deterministic_writer_round_trips_frontend_assets_and_derived_lock() {
         (
             SLLM_FRONTEND_TOKENIZER_CONFIG_KEY,
             tokenizer_config.as_slice(),
+        ),
+        (
+            "sllm.frontend.generation_config_json",
+            generation_config.as_slice(),
+        ),
+        (
+            "sllm.source.hf_quant_config_json",
+            hf_quant_config.as_slice(),
         ),
     ] {
         metadata.insert(
@@ -563,6 +628,18 @@ fn deterministic_writer_round_trips_frontend_assets_and_derived_lock() {
     assert_eq!(
         verified.frontend_asset("tokenizer.json"),
         Some(tokenizer.as_slice())
+    );
+    assert_eq!(
+        verified.frontend_asset("generation_config.json"),
+        Some(generation_config.as_slice())
+    );
+    assert_eq!(
+        verified.frontend_asset("hf_quant_config.json"),
+        Some(hf_quant_config.as_slice())
+    );
+    assert_eq!(
+        verified.metadata_value("sllm.kv.fp8.implicit_decode_scale_bf16"),
+        Some(&GgufValue::U16(0x3f80))
     );
 
     let lock = DerivedGgufLock::new(

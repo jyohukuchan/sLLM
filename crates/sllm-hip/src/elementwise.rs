@@ -18,6 +18,7 @@ pub enum ElementwiseOperation {
     Copy,
     Add,
     BroadcastAdd,
+    BroadcastMul,
     ScalarMul,
     SiluMul,
     GeluTanhMul,
@@ -31,6 +32,7 @@ impl ElementwiseOperation {
             Self::Copy => sys::SLLM_ELEMENTWISE_OPERATION_COPY,
             Self::Add => sys::SLLM_ELEMENTWISE_OPERATION_ADD,
             Self::BroadcastAdd => sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD,
+            Self::BroadcastMul => sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL,
             Self::ScalarMul => sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL,
             Self::SiluMul => sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL,
             Self::GeluTanhMul => sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL,
@@ -44,6 +46,7 @@ impl ElementwiseOperation {
             SemanticOpKind::Copy => Ok(Self::Copy),
             SemanticOpKind::Add => Ok(Self::Add),
             SemanticOpKind::BroadcastAdd => Ok(Self::BroadcastAdd),
+            SemanticOpKind::BroadcastMul => Ok(Self::BroadcastMul),
             SemanticOpKind::ScalarMul => Ok(Self::ScalarMul),
             SemanticOpKind::SiluMul => Ok(Self::SiluMul),
             SemanticOpKind::GeluTanhMul => Ok(Self::GeluTanhMul),
@@ -113,6 +116,25 @@ impl ElementwiseDescriptor {
         )?);
         Ok(Self {
             operation: ElementwiseOperation::BroadcastAdd,
+            input0: input,
+            input1: Some(vector),
+            output,
+            semantic,
+        })
+    }
+
+    pub fn broadcast_mul(
+        input: TensorBinding,
+        vector: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, sllm_core::OpError> {
+        let semantic = Arc::new(SemanticOpDescriptor::new(
+            SemanticOpKind::BroadcastMul,
+            vec![input.view().clone(), vector.view().clone()],
+            vec![output.view().clone()],
+        )?);
+        Ok(Self {
+            operation: ElementwiseOperation::BroadcastMul,
             input0: input,
             input1: Some(vector),
             output,
@@ -244,6 +266,7 @@ impl ElementwiseDescriptor {
             ElementwiseOperation::Copy => 1,
             ElementwiseOperation::Add => 2,
             ElementwiseOperation::BroadcastAdd => 2,
+            ElementwiseOperation::BroadcastMul => 2,
             ElementwiseOperation::ScalarMul => 2,
             ElementwiseOperation::SiluMul => 2,
             ElementwiseOperation::GeluTanhMul => 2,
@@ -400,6 +423,7 @@ fn dispatch_info_from_raw(
         sys::SLLM_ELEMENTWISE_OPERATION_COPY => ElementwiseOperation::Copy,
         sys::SLLM_ELEMENTWISE_OPERATION_ADD => ElementwiseOperation::Add,
         sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD => ElementwiseOperation::BroadcastAdd,
+        sys::SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL => ElementwiseOperation::BroadcastMul,
         sys::SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL => ElementwiseOperation::ScalarMul,
         sys::SLLM_ELEMENTWISE_OPERATION_SILU_MUL => ElementwiseOperation::SiluMul,
         sys::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL => ElementwiseOperation::GeluTanhMul,
@@ -613,6 +637,18 @@ mod tests {
         assert_eq!(
             broadcast_add.semantic().kind(),
             SemanticOpKind::BroadcastAdd
+        );
+
+        let broadcast_mul = ElementwiseDescriptor::broadcast_mul(
+            input0.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+            input1.binding(TensorView::contiguous(DType::Bf16, &[5]).unwrap()),
+            output.binding(TensorView::contiguous(DType::Bf16, &[3, 5]).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(broadcast_mul.operation, ElementwiseOperation::BroadcastMul);
+        assert_eq!(
+            broadcast_mul.semantic().kind(),
+            SemanticOpKind::BroadcastMul
         );
 
         let silu_mul = ElementwiseDescriptor::silu_mul(

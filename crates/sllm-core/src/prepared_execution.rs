@@ -793,13 +793,16 @@ impl ExecutionAuditAccumulator {
         }
     }
 
-    fn record_labeled(
+    pub(crate) fn record_labeled(
         &mut self,
         label: &str,
         evidence: &DispatchEvidence,
     ) -> Result<(), PreparedExecutionError> {
         self.record(evidence)?;
-        if label.ends_with(".sparse_moe") {
+        if label.ends_with(".sparse_moe")
+            || label.ends_with(".routed_expert")
+            || label.ends_with(".routed_experts_nvfp4")
+        {
             self.sparse_moe_submission_count = self
                 .sparse_moe_submission_count
                 .checked_add(1)
@@ -1443,5 +1446,19 @@ mod tests {
         other.target = "other".to_owned();
         assert!(audit.record(&other).is_err());
         assert!(audit.snapshot().is_err());
+    }
+
+    #[test]
+    fn audit_counts_all_reviewed_sparse_moe_labels() {
+        for label in [
+            "layer.0.sparse_moe",
+            "layer.0.routed_expert",
+            "layer.0.routed_experts_nvfp4",
+        ] {
+            let mut audit = ExecutionAuditAccumulator::new(1);
+            audit.record_labeled(label, &evidence(3)).unwrap();
+            assert_eq!(audit.sparse_moe_submission_count, 1, "{label}");
+            assert_eq!(audit.sparse_moe_active_pair_count, 1, "{label}");
+        }
     }
 }

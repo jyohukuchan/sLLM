@@ -1,8 +1,9 @@
 use core::fmt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sllm_core::{
-    Gemma4ModelLock, ModelLock, StopIdentity, TokenizerContract, VerifiedCache, VerifiedGguf,
+    GEMMA4_MOE_MODEL_FINGERPRINT, Gemma4ModelLock, Gemma4TokenizerContract, ModelLock,
+    StopIdentity, TokenizerContract, VerifiedCache, VerifiedGguf,
 };
 use tokenizers::{AddedToken, Tokenizer};
 
@@ -24,6 +25,77 @@ const QWEN35_MOE_TOKENIZER_CONTRACT: &str = r#"{
     "budget_boundary":"stop_token_wins","max_new_tokens_zero":"max_new_tokens_before_decode","reason_version":1
   }
 }"#;
+
+const GEMMA4_MOE_SEMANTIC_PREFIX: &str = "gemma4moe:";
+
+pub(crate) fn has_reviewed_gemma4_moe_gguf_identity(gguf: &VerifiedGguf) -> bool {
+    let Some(extension) = gguf.extension() else {
+        return false;
+    };
+    has_reviewed_gemma4_moe_identity_parts(
+        gguf.architecture(),
+        &extension.recipe.semantic_model_id,
+        &extension.recipe.source_lock_fingerprints,
+    )
+}
+
+fn has_reviewed_gemma4_moe_identity_parts(
+    architecture: &str,
+    semantic_model_id: &str,
+    source_lock_fingerprints: &[String],
+) -> bool {
+    architecture == "gemma4moe"
+        && semantic_model_id.strip_prefix(GEMMA4_MOE_SEMANTIC_PREFIX)
+            == Some(GEMMA4_MOE_MODEL_FINGERPRINT)
+        && source_lock_fingerprints == [GEMMA4_MOE_MODEL_FINGERPRINT]
+}
+
+fn gemma4_moe_semantic_model_id() -> String {
+    format!("{GEMMA4_MOE_SEMANTIC_PREFIX}{GEMMA4_MOE_MODEL_FINGERPRINT}")
+}
+
+fn gemma4_moe_tokenizer_contract() -> Gemma4TokenizerContract {
+    let special_token_ids = BTreeMap::from([
+        ("audio".to_owned(), 258_881),
+        ("audio_begin".to_owned(), 256_000),
+        ("audio_end".to_owned(), 258_883),
+        ("bos".to_owned(), 2),
+        ("channel_begin".to_owned(), 100),
+        ("channel_end".to_owned(), 101),
+        ("eos".to_owned(), 1),
+        ("image".to_owned(), 258_880),
+        ("image_begin".to_owned(), 255_999),
+        ("image_end".to_owned(), 258_882),
+        ("mask".to_owned(), 4),
+        ("pad".to_owned(), 0),
+        ("think".to_owned(), 98),
+        ("tool_call_begin".to_owned(), 48),
+        ("tool_call_end".to_owned(), 49),
+        ("tool_response_begin".to_owned(), 50),
+        ("tool_response_end".to_owned(), 51),
+        ("turn_begin".to_owned(), 105),
+        ("turn_end".to_owned(), 106),
+        ("unk".to_owned(), 3),
+        ("video".to_owned(), 258_884),
+    ]);
+    Gemma4TokenizerContract {
+        files: vec![
+            "chat_template.jinja".to_owned(),
+            "tokenizer.json".to_owned(),
+            "tokenizer_config.json".to_owned(),
+        ],
+        tokenizer_class: "GemmaTokenizer".to_owned(),
+        vocab_size: 262_144,
+        chat_template_path: Some("chat_template.jinja".to_owned()),
+        prompt_mode: "chat-template".to_owned(),
+        special_token_ids,
+        stop_token_ids: sllm_core::gemma4_moe_generation_stop_policy()
+            .stop_token_ids
+            .into_iter()
+            .map(u64::from)
+            .collect(),
+    }
+}
 
 /// Immutable token IDs returned by the versioned tokenizer frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -647,7 +719,7 @@ impl TokenizerFrontendV1 {
         let bytes = cache
             .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
-        Self::from_gemma4_bytes(lock, bytes)
+        Self::from_gemma4_contract_bytes(&lock.model.tokenizer_contract, bytes, lock.fingerprint())
     }
 
     /// Construct the identical Gemma tokenizer contract from a first-class
@@ -659,7 +731,7 @@ impl TokenizerFrontendV1 {
         let bytes = artifact
             .read_frontend_asset(sllm_core::FrontendAssetKind::TokenizerJson)
             .map_err(|_| TokenizerError::FrontendAssetRead)?;
-        Self::from_gemma4_bytes(lock, bytes)
+        Self::from_gemma4_contract_bytes(&lock.model.tokenizer_contract, bytes, lock.fingerprint())
     }
 
     pub fn from_gemma4_gguf(
@@ -683,13 +755,55 @@ impl TokenizerFrontendV1 {
             .frontend_asset("tokenizer.json")
             .ok_or(TokenizerError::FrontendAssetRead)?
             .to_vec();
-        Self::from_gemma4_bytes(lock, bytes)
+        Self::from_gemma4_contract_bytes(&lock.model.tokenizer_contract, bytes, lock.fingerprint())
     }
 
-    fn from_gemma4_bytes(lock: &Gemma4ModelLock, bytes: Vec<u8>) -> Result<Self, TokenizerError> {
+    /// Constructs the reviewed Gemma 4 MoE tokenizer directly from the exact
+    /// source artifact, without borrowing the unrelated Dense 12B lock.
+    pub fn from_gemma4_moe_artifact(
+        artifact: &sllm_core::VerifiedGemma4Moe,
+    ) -> Result<Self, TokenizerError> {
+        let bytes = artifact
+            .read_support_file("tokenizer.json")
+            .map_err(|_| TokenizerError::FrontendAssetRead)?;
+        Self::from_gemma4_contract_bytes(
+            &gemma4_moe_tokenizer_contract(),
+            bytes,
+            GEMMA4_MOE_MODEL_FINGERPRINT,
+        )
+    }
+
+    /// Constructs the reviewed Gemma 4 MoE tokenizer from its canonical
+    /// derived GGUF while retaining the container-neutral semantic identity.
+    pub fn from_gemma4_moe_gguf(gguf: &VerifiedGguf) -> Result<Self, TokenizerError> {
+        if !has_reviewed_gemma4_moe_gguf_identity(gguf) {
+            return Err(TokenizerError::LockFingerprintMismatch {
+                lock: gemma4_moe_semantic_model_id(),
+                cache: gguf
+                    .extension()
+                    .map(|extension| extension.recipe.semantic_model_id.clone())
+                    .unwrap_or_else(|| gguf.architecture().to_owned()),
+            });
+        }
+        let bytes = gguf
+            .frontend_asset("tokenizer.json")
+            .ok_or(TokenizerError::FrontendAssetRead)?
+            .to_vec();
+        let semantic_model_id = gemma4_moe_semantic_model_id();
+        Self::from_gemma4_contract_bytes(
+            &gemma4_moe_tokenizer_contract(),
+            bytes,
+            &semantic_model_id,
+        )
+    }
+
+    fn from_gemma4_contract_bytes(
+        contract: &Gemma4TokenizerContract,
+        bytes: Vec<u8>,
+        fingerprint: &str,
+    ) -> Result<Self, TokenizerError> {
         let tokenizer =
             Tokenizer::from_bytes(bytes.clone()).map_err(|_| TokenizerError::InvalidTokenizer)?;
-        let contract = &lock.model.tokenizer_contract;
         let tokenizer_vocab = tokenizer.get_vocab(true);
         let tokenizer_vocab_size = tokenizer.get_vocab_size(true);
         let expected_vocab_size =
@@ -743,9 +857,7 @@ impl TokenizerFrontendV1 {
             .iter()
             .map(|id| checked_token_id(*id, TokenIdContextV1::ContractEos))
             .collect::<Result<Vec<_>, _>>()?;
-        let expected_stop_ids = lock
-            .model
-            .tokenizer_contract
+        let expected_stop_ids = contract
             .stop_token_ids
             .iter()
             .map(|id| checked_token_id(*id, TokenIdContextV1::ContractEos))
@@ -768,7 +880,7 @@ impl TokenizerFrontendV1 {
             )?,
         };
         let snapshot = TokenizerSnapshotV1 {
-            fingerprint: lock.fingerprint().to_owned(),
+            fingerprint: fingerprint.to_owned(),
             vocab_size: contract.vocab_size,
             special_roles,
             config_eos: eos.clone(),
@@ -1410,5 +1522,52 @@ mod tests {
             TokenByteTableV1::from_tokenizer_json(bytes, 1),
             Err(TokenizerError::TokenByteUnsupported { id: 0 })
         );
+    }
+
+    #[test]
+    fn gemma4_moe_contract_keeps_exact_special_and_stop_identity() {
+        let contract = gemma4_moe_tokenizer_contract();
+        assert_eq!(contract.vocab_size, 262_144);
+        assert_eq!(contract.special_token_ids.get("bos"), Some(&2));
+        assert_eq!(contract.special_token_ids.get("eos"), Some(&1));
+        assert_eq!(contract.special_token_ids.get("turn_begin"), Some(&105));
+        assert_eq!(contract.special_token_ids.get("turn_end"), Some(&106));
+        assert_eq!(
+            contract.special_token_ids.get("tool_response_begin"),
+            Some(&50)
+        );
+        assert_eq!(contract.stop_token_ids, [1, 106, 50]);
+        assert_eq!(
+            sllm_core::gemma4_moe_generation_stop_policy().stop_token_ids,
+            [1, 106, 50]
+        );
+    }
+
+    #[test]
+    fn gemma4_moe_gguf_identity_is_exact_and_rejects_adjacent_values() {
+        let semantic = gemma4_moe_semantic_model_id();
+        let sources = vec![GEMMA4_MOE_MODEL_FINGERPRINT.to_owned()];
+        assert!(has_reviewed_gemma4_moe_identity_parts(
+            "gemma4moe",
+            &semantic,
+            &sources,
+        ));
+        assert!(!has_reviewed_gemma4_moe_identity_parts(
+            "gemma4", &semantic, &sources,
+        ));
+        assert!(!has_reviewed_gemma4_moe_identity_parts(
+            "gemma4moe",
+            GEMMA4_MOE_MODEL_FINGERPRINT,
+            &sources,
+        ));
+        let extra = vec![
+            GEMMA4_MOE_MODEL_FINGERPRINT.to_owned(),
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+        ];
+        assert!(!has_reviewed_gemma4_moe_identity_parts(
+            "gemma4moe",
+            &semantic,
+            &extra,
+        ));
     }
 }

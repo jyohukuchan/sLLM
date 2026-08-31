@@ -303,6 +303,10 @@ CausalAttentionProviderSelection select_causal_attention_provider(
     const sllm_causal_attention::DescriptorMetadata &metadata,
     const uint32_t kv_heads, const uint32_t encoding,
     const char *const arch_name) noexcept {
+  if (metadata.sliding_window != 0U || metadata.explicit_score_scale) {
+    return {false, false, false, false, false,
+            false, false, false, false, false};
+  }
   const bool use_phase33_common_provider =
       std::strcmp(arch_name, "gfx1030") == 0 ||
       std::strcmp(arch_name, "gfx1201") == 0;
@@ -443,6 +447,8 @@ void fill_causal_attention_dispatch_info(
   const bool use_prefill_gqa4_qtile4 = selection.use_prefill_gqa4_qtile4;
   const bool use_scaled_prefill_gemm = selection.use_scaled_prefill_gemm;
   const bool use_long_prefill_v2 = selection.use_long_prefill_v2;
+  const bool sliding = metadata.sliding_window != 0U;
+  const bool explicitly_scaled = metadata.explicit_score_scale;
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
   std::memset(info, 0, sizeof(*info));
@@ -456,7 +462,11 @@ void fill_causal_attention_dispatch_info(
        use_long_prefill_v2)
           ? 2U
           : 1U;
-  info->kernel_id = encoding == SLLM_HIP_KV_ENCODING_FP16_V1
+  info->kernel_id = sliding
+                        ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1
+                    : explicitly_scaled
+                        ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1
+                    : encoding == SLLM_HIP_KV_ENCODING_FP16_V1
                         ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2
                         : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3;
   info->workgroup_size_x = (use_decode_gqa4_split ||
@@ -485,12 +495,39 @@ void fill_causal_attention_dispatch_info(
   info->q_heads = metadata.query.q_heads;
   info->kv_heads = kv_heads;
   info->head_dim = metadata.query.head_dim;
-  info->scale_denominator = SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR;
+  const uint32_t implicit_denominator = static_cast<uint32_t>(
+      std::sqrt(static_cast<float>(metadata.query.head_dim)));
+  const bool integer_implicit_scale =
+      static_cast<uint64_t>(implicit_denominator) * implicit_denominator ==
+      metadata.query.head_dim;
+  info->scale_denominator = explicitly_scaled || !integer_implicit_scale
+                                ? 0U
+                                : implicit_denominator;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
+  const uint64_t retained_start =
+      metadata.expected_kv_length > metadata.sliding_window && sliding
+          ? metadata.expected_kv_length - metadata.sliding_window
+          : 0U;
+  info->reserved[0] = static_cast<uint32_t>(metadata.sliding_window);
+  info->reserved[1] = static_cast<uint32_t>(metadata.sliding_window >> 32U);
+  info->reserved[2] = static_cast<uint32_t>(retained_start);
+  info->reserved[3] = static_cast<uint32_t>(retained_start >> 32U);
+  if (explicitly_scaled || !integer_implicit_scale) {
+    const float published_scale =
+        explicitly_scaled
+            ? metadata.score_scale
+            : 1.0F / std::sqrt(static_cast<float>(metadata.query.head_dim));
+    std::memcpy(&info->reserved[4], &published_scale, sizeof(float));
+    info->reserved[5] = 1U;
+  }
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX,
-      use_decode_gqa4_split_p32
+      sliding
+          ? ::sllm_causal_attention_kernel::kSlidingStaticFp8LogicalKernelId
+      : explicitly_scaled
+          ? ::sllm_causal_attention_kernel::kScaledStaticFp8LogicalKernelId
+      : use_decode_gqa4_split_p32
           ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitP32LogicalKernelId
       : use_decode_gqa4_split
           ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitLogicalKernelId
@@ -520,7 +557,11 @@ void fill_causal_attention_dispatch_info(
                  : ::sllm_causal_attention_kernel::kPackedKvLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX,
-      use_decode_gqa4_split_p32
+      sliding
+          ? ::sllm_causal_attention_kernel::kSlidingStaticFp8DeviceSymbol
+      : explicitly_scaled
+          ? ::sllm_causal_attention_kernel::kScaledStaticFp8DeviceSymbol
+      : use_decode_gqa4_split_p32
           ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitP32DeviceSymbol
       : use_decode_gqa4_split
           ? ::sllm_causal_attention_kernel::kDecodeGqa4SplitDeviceSymbol
@@ -691,6 +732,23 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
         return sllm_public_runtime::write_error(
             error_sink, SLLM_STATUS_CAUSAL_ATTENTION_LENGTH_MISMATCH,
             "causal attention length does not equal the committed KV snapshot");
+      }
+      if (metadata.sliding_window != state->sliding_window ||
+          (state->sliding_window != 0U &&
+           state->retained_start !=
+               state->published_length -
+                   std::min(state->published_length, state->sliding_window))) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR,
+            "causal attention sliding window differs from the KV state");
+      }
+      if (metadata.explicit_score_scale &&
+          (state->encoding != SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ||
+           state->static_key_scale != 1.0F ||
+           state->static_value_scale != 1.0F)) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR,
+            "explicit score scaling requires unit-scale static FP8 KV");
       }
       const uint32_t gqa_ratio = metadata.query.q_heads / state->head_count;
       if (metadata.query.q_heads % state->head_count != 0U ||
@@ -997,13 +1055,17 @@ extern "C" sllm_status_t sllm_causal_attention_execute(
           static_cast<const float *>(state->key_outer_scale_plane.address),
           static_cast<const float *>(state->value_outer_scale_plane.address),
           output_pointer, static_cast<uint32_t>(metadata.query_count),
-          state->capacity_tokens, metadata.start_position,
+          state->storage_capacity_tokens, metadata.start_position,
           metadata.expected_kv_length, metadata.query.q_heads,
           state->head_count, state->head_dim, state->encoding,
           state->static_key_scale, state->static_value_scale,
           selection.use_gfx1201_wave_provider, selection.use_decode_wave_split,
           selection.use_decode_wave_split_q_preload,
           selection.use_prefill_gqa4, selection.use_prefill_gqa4_qtile4,
+          metadata.sliding_window,
+          metadata.explicit_score_scale
+              ? metadata.score_scale
+              : 1.0F / std::sqrt(static_cast<float>(state->head_dim)),
           queue->stream);
     }
     if (launch_status != hipSuccess) {

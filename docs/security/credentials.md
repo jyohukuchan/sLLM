@@ -29,6 +29,8 @@
   拒否する。`POST /admin/keys/reload`は新fileを全検証してからsnapshotを交換し、失敗時は旧key setを保持する。
 - 従来の`--api-key-env NAME`は単一user keyとして維持し、`--api-key-file`とは同時指定できない。どちらも省略したlocal profileは
   user surfaceだけopenで、admin surfaceはcredential不在のため閉じる。
+- 統合WebUI子processは親環境をclearし、command解決用`PATH`と非secretのintegration marker／API base URLだけを受け取る。
+  API key環境変数、Hugging Face token、その他の親credentialをnpm／Vinext／workerへ継承しない。
 - TLS private keyもregular non-symlink fileかつUnixのgroup/other permissionなしを要求する。certificate/keyはpairで指定し、
   Unixでは`O_NOFOLLOW`で開いた同じdescriptorから各1 MiBを上限に読み、PEM parseをmodel/GPU load前に完了する。
   ready/shutdown logへpathや内容を出力しない。

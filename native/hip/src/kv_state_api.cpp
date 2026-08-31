@@ -34,6 +34,11 @@ bool multiply_overflows(const uint64_t left, const uint64_t right,
   return false;
 }
 
+uint64_t u64_from_words(const uint32_t low, const uint32_t high) noexcept {
+  return static_cast<uint64_t>(low) |
+         (static_cast<uint64_t>(high) << UINT32_C(32));
+}
+
 sllm_status_t exact_struct(const uint32_t struct_size,
                            const uint32_t abi_version,
                            const std::size_t expected_size,
@@ -226,16 +231,30 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
        !fp8_static && all_zero(info->reserved, 4U)) ||
       (info->create_info_version ==
            SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION &&
-       fp8_static && all_zero(info->reserved + 2U, 2U));
+       fp8_static && all_zero(info->reserved + 2U, 2U)) ||
+      (info->create_info_version ==
+           SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION &&
+       fp8_static && static_key_scale == 1.0F &&
+       static_value_scale == 1.0F &&
+       u64_from_words(info->reserved[2], info->reserved[3]) ==
+           SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4);
+  const bool sliding =
+      info->create_info_version ==
+      SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
   if (!version_matches || info->reserved0 != 0U || info->flags != 0U ||
       info->session_id == 0U || info->capacity_tokens == 0U ||
       info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||
+      (sliding &&
+       (info->capacity_tokens > SLLM_HIP_KV_SLIDING_MAX_CAPACITY ||
+        info->capacity_tokens < SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4)) ||
       (head_count != 1U && head_count != 2U && head_count != 4U &&
        head_count != 8U) ||
       head_dim == 0U || head_dim > SLLM_HIP_KV_MAX_HEAD_DIM ||
       (info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED &&
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS &&
        info->memory_kind != SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
+      (sliding &&
+       info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) ||
       info->layout != SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR ||
       (!fp16 && !fp8 && !fp8_static && !nvfp4 && !mxfp8_e4 && !mxfp8_e5)) {
     return sllm_public_runtime::write_error(

@@ -381,9 +381,14 @@ sllm_moe_expert_execute(const sllm_moe_expert_plan_t *const raw_plan,
         byte_pointer(plan->buffers[3], plan->metadata.tensors[3].byte_offset));
     uint16_t *const output = static_cast<uint16_t *>(
         byte_pointer(plan->buffers[4], plan->metadata.tensors[4].byte_offset));
-    status = ::sllm_moe_expert_kernel::launch(
-        hidden, routing_metadata, layer_blob, workspace, output,
-        plan->metadata.token_count, queue->stream);
+    status = plan->metadata.op_version ==
+                     SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION
+                 ? ::sllm_moe_expert_kernel::launch_gemma4(
+                       hidden, routing_metadata, layer_blob, workspace, output,
+                       plan->metadata.token_count, queue->stream)
+                 : ::sllm_moe_expert_kernel::launch(
+                       hidden, routing_metadata, layer_blob, workspace, output,
+                       plan->metadata.token_count, queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, status,

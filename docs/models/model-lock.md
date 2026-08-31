@@ -173,6 +173,15 @@ missing/extra/duplicate/range/hash不一致をload前に拒否する。lowered e
 config、index、support fileも同じdescriptorから上限付きで読み、読み込み前後のdevice/inode/size/mtime/ctimeとpath bindingが
 変化した場合は拒否する。
 
+Phase 55のGemma 4 MoE semantic sourceは`google/gemma-4-26B-A4B-it` revision
+`4d7ae4984b7db7de8f8457170b3f1a419ee76d52`、primary quantized artifactは
+`nvidia/Gemma-4-26B-A4B-NVFP4` revision `a19cfe00be84568a6867111c9a68c9c44fdcffe6`である。
+loaderは2 shard、11 support identity、全47,033 source tensor、128 expert × 30 layer、NVFP4 value/block-scale/
+outer-scale/input-scale plane、implicit-unit static E4M3 KV recipeをallocation前に検証する。canonical GGUF semantic identityは
+`gemma4moe:<reviewed fingerprint>`であり、35,513 tensorと17,636,771,900-byte resident planを保持する。
+source snapshot、GGUF container、resident plan、state image/checkpointは別digestで結び、近似architecture名、未知source revision、
+欠落scale、保存されていないper-layer KV scaleを受け入れない。
+
 このlockはsource container固有の検査結果と、container-neutralなMoE config、expert-axis inventory、mixed recipe、verified load plan、
 tokenizer/chat metadataを分離する。Phase 20のGGUFは後者と同じsemantic identityを保持し、GGUF化を理由に別modelとして扱ったり、
 source safetensorsと量子化sidecarを最終ユーザー形式として残したりしない。model shardや生成GGUF自体はrepositoryへ含めない。
@@ -452,3 +461,95 @@ model lock alias、path、request length、空きHBMはselection identityを代�
 descriptor v1/v2のgfx1201／gfx1030 correctness／品質と空mappingはPhase 53/54の履歴である。2026-08-30の明示決定により、
 reviewed Qwen3.5-4B BF16 dense text scopeではexact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`をstandard OCP
 MXFP8 E4M3 defaultへmappingする。このpolicy変更はmodel weight lockの新revisionではない。明示`fp16`はrollbackである。
+
+## Phase 56 Gemma 4 MTP pair identity
+
+Gemma 4 MTP targetは既存`google/gemma-4-12B-it` revision
+`707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7`、fingerprint
+`sha256:381c94bcb48a26d8ef83d1c3d7c5a3513ef8fac4a638752731b85c119385f09d`を変更しない。assistantは
+[`gemma4-12b-it-assistant-bf16.json`](locks/gemma4-12b-it-assistant-bf16.json)へrepo、完全revision、license、7 file、config、
+generation、tokenizer、safetensors header／catalog／全48 tensorを固定する。pair semantic identityはtarget fingerprintとassistant fingerprintの
+両方を含み、片方の差替えを拒否する。
+
+wire tokenizerはtargetを正本とする。vocab幅と共通generation IDを一致させ、targetだけが名前付きで持つ`<|video|>` ID 258,884はこの固定pairの
+documented差としてのみ許可する。assistant GGUF、derived lock、target lock、pair identity、Q-only topology、target KV layer mappingのいずれかが
+一致しない場合はresident allocation前に拒否する。
+
+## Phase 57 DeepSeek V4 foundation identity
+
+Phase 57は`deepseek-ai/DeepSeek-V4-Flash-0731` revision
+`7872f01b1d1fe23eabc4c98b48bffcef5a386062`、MIT license、公式support file、48 shardのHub LFS identity、
+5,602,871-byte index SHA-256 `98efab455cf08dfbbbaaba6f570e1bf10bf927d2b4c3c453a59c2f6f0e3be92b`、
+72,317 tensor、advertised payload 166,878,536,440 bytesを
+[`deepseek-v4-flash-0731-foundation.json`](locks/deepseek-v4-flash-0731-foundation.json)へ固定する。
+Hub LFS OIDはlocal shard payloadを実読した証拠ではなく、foundation lockは`local_full_payload_sha256_verified=false`を保持する。
+一方、48 shardの先頭8-byte length fieldと宣言headerだけはbounded rangeで取得し、合計7,998,896 bytes、各prefix SHA-256、
+全72,317 tensorのdtype／shape／relative offset／absolute byte rangeを検証した。header catalog SHA-256は
+`6d90aa665f26217f4488809b1fdf87a1459702aa4ec46c8b02b44ce66bd4afcc`であり、これはweight payload hashではない。
+
+typed configは43 main layerの先頭3 layerだけをhash routingとし、これを46 main layerへ数えない。root configの
+`num_nextn_predict_layers=1`とindexに存在する`mtp.0..2`のcheckpoint DSpark 3 stageも別fieldで照合する。DSparkと要件上の
+DFlashは別identityであり、名前、sampling contract、evidenceを相互流用しない。
+
+このlockはidentity／config／header catalog／index／mapping foundationであり、tensor payload bytes、全shard local hash、derived GGUF、
+single-またはmulti-GPU resident、generationを証明しない。model libraryが`deepseek4`を認識してもproduction aliasへ登録せず、
+full-model対応はmulti-GPUまたは別のreviewed fitting artifactをscopeに含む後段計画と、そのartifactへ結合した新しいruntime evidenceを要求する。
+
+## Phase 58 MiniMax M3 foundation identity
+
+Phase 58は`MiniMaxAI/MiniMax-M3` revision
+`f0e1c1e04d40177e4673a22097036854f536e9c0`、MiniMax Community License、18 support file、59 shardのHub LFS identity、
+2,706,437-byte index SHA-256 `54dbde502126d07f6999077437a06b5df1f71e317518956d0aad1c8197df524e`、
+23,416 tensorを[`minimax-m3-foundation.json`](locks/minimax-m3-foundation.json)へ固定する。
+Hub LFS OIDはlocal shard payloadを実読した証拠ではなく、foundation lockは`local_full_payload_sha256_verified=false`を保持する。
+
+公式index `metadata.total_size=869,157,697,024`に対し、59 shard file合計は854,176,398,808 bytes、header由来payloadは
+854,172,958,720 bytesで整合しない。lockは三値と14,981,298,216-byteのindex／file差を別fieldで保持し、capacity admissionを
+最大の869,157,697,024 bytesへfail-closeする。59 header prefix 3,440,088 bytes、全tensorのBF16／F32 dtype、shape、rangeを
+検証したheader catalog SHA-256は`341285506267abca7bf50507d4bd39adf3eb430d1454d3f4dbfe74eb84b35982`であり、
+weight payload hashではない。
+
+typed configはdense layer 0..2、MSA／MoE layer 3..59、block 128／top-16／index 4×128／local block 1、
+128 routed expert／top-4／shared expert 1／routed scale 2.0、vision topologyを固定する。configの7 MTP module／
+`num_nextn_predict_layers=1`に対しreleased indexのMTP tensorは0件であるため、未公開weightやspeculative control flowを補わない。
+
+canonical `minimax-m3` mappingはsource text 22,893、vision／projector 523、routed-expert source 21,888、
+stacked expert候補171、combined physical候補1,699とdigest
+`93ad9f5467bb9a7ba3b77c96db5aa0641e5d9e9801f99dc49bf46a8a4a18dd3f`を保持する。ただしpayload transform、GGUF書込み、
+full-model resident／generation、multimodal／MTP productionを証明しない。model libraryはCommunity License、manifest不整合、
+capacity、production loader未対応を灰色行に表示し、production aliasへ登録しない。
+
+## Phase 59 DiffusionGemma foundation identity
+
+Phase 59は`google/diffusiongemma-26B-A4B-it` revision
+`f7f5b7f5fa82ffc52addd066915886d497f5517b`、Apache-2.0、10 runtime／evidence support file、11 shardのHub LFS identity、
+104,650-byte index SHA-256 `6e33e8465d55fe6c7bc0a5453c7a4b341e6467d032c6ded82aaf439f61dac69a`、
+1,047 tensorを[`diffusion-gemma-26b-a4b-it-foundation.json`](locks/diffusion-gemma-26b-a4b-it-foundation.json)へ固定する。
+Hub LFS OIDはlocal shard payloadを実読した証拠ではなく、foundation lockは`local_full_payload_sha256_verified=false`を保持する。
+
+11 shard file合計51,647,701,024 bytesからbounded header prefix 138,568 bytesを除いたpayloadは、index宣言
+51,647,562,456 bytesと一致する。header catalog SHA-256は
+`fd2cdedb367cd6c9aa52af6463e73baff3df52477b9cc3d61b9c6c4213cdc86f`であり、weight payload hashではない。
+capacity admissionはKV／workspaceを追加する前からfile合計51,647,701,024 bytesを使う。
+
+typed configはcanvas 256、text 30 layer、hidden 2,816、5 sliding＋1 full schedule、128 expert／top-8、vision 27 layer、
+context 262,144を固定する。decoder text weightはencoder language-model weightへtieされ、indexに独立して存在するencoder tensorを
+勝手に補わない。causal encoder KV、read-only KVを参照するbidirectional decoder、processed-logit self-conditioning、
+entropy-bound sampler、adaptive stopはcontainer-neutral contractとして分離する。
+
+`diffusion-gemma` GGUF foundation mappingはwrite-disabledである。fixed llama.cpp revisionにmerged architectureがなく、
+full shard payload、derived GGUF、single-GPU resident、multimodal／generationを証明しない。model libraryはApache-2.0、capacity、
+production loader未対応を灰色行に表示し、production aliasへ登録しない。
+
+## Phase 60 Ministral 3 official GGUF identity
+
+Phase 60は`mistralai/Ministral-3-3B-Instruct-2512-GGUF` revision
+`eb599d408350ea2bb60452cb86be7c7b2fc28227`の`Ministral-3-3B-Instruct-2512-BF16.gguf`を
+[`ministral3-3b-instruct-2512-official-bf16-gguf.json`](locks/ministral3-3b-instruct-2512-official-bf16-gguf.json)へ固定する。
+file sizeは6,866,745,504 bytes、SHA-256は
+`17ef932bea952e007f9dad63151da5699132ec513d1033d618df7382e24aa3ee`である。これはsource safetensorsからsLLMが
+導出したartifactではなく、公式公開GGUFを直接固定したlockである。
+
+lockは236 text tensor、losslessなF32 normalization、Tekken tokenizer、chat template、YaRN metadata、text／vision分離を
+検証する。model identityとcontainer integrityの一致はruntime wiringを許可する条件だが、参照生成とのtoken一致やproduction品質を
+証明しない。Phase 60の品質差が解消するまで、このlockの検証成功をmodel対応完了へ読み替えない。

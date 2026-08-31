@@ -637,3 +637,35 @@ fn rebind_rejects_loading_and_preserves_completion() {
     assert_eq!(owner.alias(), lease.alias());
     assert_eq!(owner.lock_fingerprint(), lease.identity().model_identity());
 }
+
+#[test]
+fn unloaded_aliases_can_be_registered_and_removed_at_runtime() {
+    let registry = ModelLifecycleRegistryV1::new_with_fns(
+        [],
+        |d: &ModelLifecycleDescriptorV1| Ok::<_, ()>(loaded(d)),
+        |_loaded: ModelLifecycleLoadedV1| Ok::<_, ()>(()),
+        config(8),
+    )
+    .unwrap();
+    let model = descriptor(
+        "library-model",
+        "sha256:abababababababababababababababababababababababababababababababab",
+        1,
+    );
+    registry.register(model.clone()).unwrap();
+    assert_eq!(registry.configured_aliases(), vec!["library-model"]);
+    assert_eq!(
+        registry.register(model),
+        Err(ModelLifecycleErrorV1::DuplicateAlias)
+    );
+
+    let lease = registry.resolve("library-model").unwrap();
+    drop(lease);
+    assert_eq!(
+        registry.unregister("library-model"),
+        Err(ModelLifecycleErrorV1::AliasBusy)
+    );
+    registry.unload("library-model").unwrap();
+    registry.unregister("library-model").unwrap();
+    assert!(registry.configured_aliases().is_empty());
+}

@@ -294,6 +294,10 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_SLIDING_MAX_CAPACITY);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);
@@ -318,6 +322,12 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_STATE_IMAGE_SLIDING_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1);
   SLLM_PRINT_CONSTANT(SLLM_BACKEND_HIP);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_READ);
   SLLM_PRINT_CONSTANT(SLLM_ACCESS_WRITE);
@@ -336,6 +346,7 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);
@@ -392,10 +403,45 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_TOKENS);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_EXPERTS);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_ROUTE_MAX_SELECTED);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_SCORE_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT);
+  SLLM_PRINT_CONSTANT(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_MAX_TOKENS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK);
+  SLLM_PRINT_CONSTANT(SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE);
+  SLLM_PRINT_CONSTANT(SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE);
@@ -405,6 +451,12 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_TOPK);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES);
   SLLM_PRINT_CONSTANT(SLLM_HIP_MOE_EXPERT_MAX_TOKENS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);
@@ -429,6 +481,20 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_HIP_ROTARY_WORKGROUP_SIZE);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ROTARY_MAX_M);
   SLLM_PRINT_CONSTANT(SLLM_HIP_ROTARY_MAX_POSITION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_VERSION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION);
+  SLLM_PRINT_CONSTANT(
+      SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_Q_HEADS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_KV_HEADS);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION);
+  SLLM_PRINT_CONSTANT(SLLM_HIP_MINISTRAL3_YARN_MAX_M);
   SLLM_PRINT_CONSTANT(SLLM_HIP_WINDOWED_ATTENTION_VERSION);
   SLLM_PRINT_CONSTANT(SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION);
   SLLM_PRINT_CONSTANT(
@@ -466,6 +532,7 @@ int main() {
   SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL);
   SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP);
   SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD);
+  SLLM_PRINT_CONSTANT(SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_PENDING);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_SUCCESS);
   SLLM_PRINT_CONSTANT(SLLM_COMPLETION_STATE_FAILURE);
@@ -872,6 +939,197 @@ int main() {
       << offsetof(sllm_moe_route_dispatch_info_t, gcn_arch_name)
       << " reserved=" << offsetof(sllm_moe_route_dispatch_info_t, reserved)
       << '\n';
+  std::cout
+      << "layout sllm_deepseek_v4_moe_route_desc_t size="
+      << sizeof(sllm_deepseek_v4_moe_route_desc_t)
+      << " align=" << alignof(sllm_deepseek_v4_moe_route_desc_t)
+      << " struct_size="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, abi_version)
+      << " op_version="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, op_version)
+      << " mode=" << offsetof(sllm_deepseek_v4_moe_route_desc_t, mode)
+      << " selected_expert_count="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, selected_expert_count)
+      << " renormalize="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, renormalize)
+      << " routed_scale="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, routed_scale)
+      << " reserved0=" << offsetof(sllm_deepseek_v4_moe_route_desc_t, reserved0)
+      << " reserved=" << offsetof(sllm_deepseek_v4_moe_route_desc_t, reserved)
+      << " logits=" << offsetof(sllm_deepseek_v4_moe_route_desc_t, logits)
+      << " selection_bias="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, selection_bias)
+      << " hash_expert_ids="
+      << offsetof(sllm_deepseek_v4_moe_route_desc_t, hash_expert_ids)
+      << " metadata=" << offsetof(sllm_deepseek_v4_moe_route_desc_t, metadata)
+      << '\n';
+  std::cout << "layout sllm_deepseek_v4_moe_route_query_info_t size="
+            << sizeof(sllm_deepseek_v4_moe_route_query_info_t)
+            << " align=" << alignof(sllm_deepseek_v4_moe_route_query_info_t)
+            << " struct_size="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, struct_size)
+            << " abi_version="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, abi_version)
+            << " info_version="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, info_version)
+            << " mode="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, mode)
+            << " token_count="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, token_count)
+            << " expert_count="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, expert_count)
+            << " pair_count="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, pair_count)
+            << " metadata_bytes="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, metadata_bytes)
+            << " selected_expert_count="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t,
+                        selected_expert_count)
+            << " renormalize="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, renormalize)
+            << " routed_scale="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, routed_scale)
+            << " reserved0="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, reserved0)
+            << " reserved="
+            << offsetof(sllm_deepseek_v4_moe_route_query_info_t, reserved)
+            << '\n';
+  std::cout
+      << "layout sllm_deepseek_v4_moe_route_dispatch_info_t size="
+      << sizeof(sllm_deepseek_v4_moe_route_dispatch_info_t)
+      << " align=" << alignof(sllm_deepseek_v4_moe_route_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, info_version)
+      << " backend="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, dispatch_count)
+      << " kernel_id="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, grid_size_x)
+      << " token_count="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, token_count)
+      << " expert_count="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, expert_count)
+      << " pair_count="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, pair_count)
+      << " selected_expert_count="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t,
+                  selected_expert_count)
+      << " mode=" << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, mode)
+      << " renormalize="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, renormalize)
+      << " fallback_allowed="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, fallback_used)
+      << " reserved0="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, reserved0)
+      << " kernel_symbol="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, gcn_arch_name)
+      << " reserved="
+      << offsetof(sllm_deepseek_v4_moe_route_dispatch_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_minimax_m3_moe_route_desc_t size="
+      << sizeof(sllm_minimax_m3_moe_route_desc_t)
+      << " align=" << alignof(sllm_minimax_m3_moe_route_desc_t)
+      << " struct_size="
+      << offsetof(sllm_minimax_m3_moe_route_desc_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_minimax_m3_moe_route_desc_t, abi_version)
+      << " op_version="
+      << offsetof(sllm_minimax_m3_moe_route_desc_t, op_version)
+      << " selected_expert_count="
+      << offsetof(sllm_minimax_m3_moe_route_desc_t, selected_expert_count)
+      << " reserved=" << offsetof(sllm_minimax_m3_moe_route_desc_t, reserved)
+      << " logits=" << offsetof(sllm_minimax_m3_moe_route_desc_t, logits)
+      << " selection_bias="
+      << offsetof(sllm_minimax_m3_moe_route_desc_t, selection_bias)
+      << " metadata=" << offsetof(sllm_minimax_m3_moe_route_desc_t, metadata)
+      << '\n';
+  std::cout
+      << "layout sllm_minimax_m3_moe_route_query_info_t size="
+      << sizeof(sllm_minimax_m3_moe_route_query_info_t)
+      << " align=" << alignof(sllm_minimax_m3_moe_route_query_info_t)
+      << " struct_size="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, info_version)
+      << " selected_expert_count="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t,
+                  selected_expert_count)
+      << " token_count="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, token_count)
+      << " expert_count="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, expert_count)
+      << " pair_count="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, pair_count)
+      << " metadata_bytes="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, metadata_bytes)
+      << " reserved="
+      << offsetof(sllm_minimax_m3_moe_route_query_info_t, reserved) << '\n';
+  std::cout
+      << "layout sllm_minimax_m3_moe_route_dispatch_info_t size="
+      << sizeof(sllm_minimax_m3_moe_route_dispatch_info_t)
+      << " align=" << alignof(sllm_minimax_m3_moe_route_dispatch_info_t)
+      << " struct_size="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, struct_size)
+      << " abi_version="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, abi_version)
+      << " info_version="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, info_version)
+      << " backend="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, backend)
+      << " dispatch_id="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, dispatch_id)
+      << " dispatch_count="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, dispatch_count)
+      << " kernel_id="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, kernel_id)
+      << " workgroup_size_x="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, workgroup_size_x)
+      << " grid_size_x="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, grid_size_x)
+      << " token_count="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, token_count)
+      << " expert_count="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, expert_count)
+      << " pair_count="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, pair_count)
+      << " selected_expert_count="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t,
+                  selected_expert_count)
+      << " fallback_allowed="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, fallback_allowed)
+      << " fallback_used="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, fallback_used)
+      << " reserved0="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, reserved0)
+      << " kernel_symbol="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, kernel_symbol)
+      << " device_symbol="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, device_symbol)
+      << " gcn_arch_name="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, gcn_arch_name)
+      << " reserved="
+      << offsetof(sllm_minimax_m3_moe_route_dispatch_info_t, reserved) << '\n';
   std::cout << "layout sllm_moe_expert_desc_t size="
             << sizeof(sllm_moe_expert_desc_t)
             << " align=" << alignof(sllm_moe_expert_desc_t)

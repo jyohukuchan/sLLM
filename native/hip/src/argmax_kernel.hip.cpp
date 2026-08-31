@@ -8,7 +8,7 @@ struct Candidate final {
   float value;
   uint32_t index;
   uint32_t valid;
-  uint32_t has_nan;
+  uint32_t has_nonfinite;
 };
 
 __device__ float bf16_to_float(const uint16_t bits) noexcept {
@@ -21,15 +21,15 @@ __device__ float bf16_to_float(const uint16_t bits) noexcept {
 
 __device__ void merge_candidate(Candidate *const left,
                                 const Candidate &right) noexcept {
-  const uint32_t has_nan = left->has_nan | right.has_nan;
+  const uint32_t has_nonfinite = left->has_nonfinite | right.has_nonfinite;
   if (!right.valid || (left->valid && (left->value > right.value ||
                                        (left->value == right.value &&
                                         left->index <= right.index)))) {
-    left->has_nan = has_nan;
+    left->has_nonfinite = has_nonfinite;
     return;
   }
   *left = right;
-  left->has_nan = has_nan;
+  left->has_nonfinite = has_nonfinite;
 }
 
 extern "C" __global__
@@ -45,14 +45,14 @@ __launch_bounds__(SLLM_HIP_ARGMAX_WORKGROUP_SIZE,
   for (uint64_t column = lane; column < vocab_size;
        column += SLLM_HIP_ARGMAX_WORKGROUP_SIZE) {
     const float value = bf16_to_float(logits[row_offset + column]);
-    if (isnan(value)) {
-      local.has_nan = 1U;
+    if (!isfinite(value)) {
+      local.has_nonfinite = 1U;
       continue;
     }
     const uint32_t index = static_cast<uint32_t>(column);
     if (!local.valid || value > local.value ||
         (value == local.value && index < local.index)) {
-      local = {value, index, 1U, local.has_nan};
+      local = {value, index, 1U, local.has_nonfinite};
     }
   }
   candidates[lane] = local;
@@ -65,8 +65,9 @@ __launch_bounds__(SLLM_HIP_ARGMAX_WORKGROUP_SIZE,
     __syncthreads();
   }
   if (lane == 0U) {
-    output[row] =
-        candidates[0].has_nan ? -1 : static_cast<int32_t>(candidates[0].index);
+    output[row] = candidates[0].has_nonfinite
+                      ? -1
+                      : static_cast<int32_t>(candidates[0].index);
   }
 }
 

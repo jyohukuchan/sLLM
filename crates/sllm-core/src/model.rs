@@ -605,12 +605,14 @@ impl ModelLock {
 pub enum ReviewedModelKind {
     Qwen35Dense,
     Gemma4Dense,
+    Ministral3Dense,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ReviewedModelLock {
     Qwen35(ModelLock),
     Gemma4(crate::gemma4::Gemma4ModelLock),
+    Ministral3(crate::ministral3_lock::Ministral3ModelLock),
 }
 
 impl ReviewedModelLock {
@@ -618,6 +620,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(_) => ReviewedModelKind::Qwen35Dense,
             Self::Gemma4(_) => ReviewedModelKind::Gemma4Dense,
+            Self::Ministral3(_) => ReviewedModelKind::Ministral3Dense,
         }
     }
 
@@ -625,6 +628,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(lock) => lock.fingerprint(),
             Self::Gemma4(lock) => lock.fingerprint(),
+            Self::Ministral3(lock) => lock.fingerprint(),
         }
     }
 
@@ -632,6 +636,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(lock) => lock.aliases(),
             Self::Gemma4(lock) => &lock.aliases,
+            Self::Ministral3(lock) => lock.aliases(),
         }
     }
 
@@ -639,6 +644,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(lock) => &lock.model.repo_id,
             Self::Gemma4(lock) => &lock.model.repo_id,
+            Self::Ministral3(lock) => lock.repository(),
         }
     }
 
@@ -646,6 +652,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(lock) => &lock.model.resolved_revision,
             Self::Gemma4(lock) => &lock.model.resolved_revision,
+            Self::Ministral3(lock) => lock.revision(),
         }
     }
 
@@ -653,6 +660,7 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(_) => true,
             Self::Gemma4(lock) => lock.supports_chat_messages(),
+            Self::Ministral3(lock) => lock.supports_chat_messages(),
         }
     }
 
@@ -660,6 +668,9 @@ impl ReviewedModelLock {
         match self {
             Self::Qwen35(lock) => lock.verify_cache(cache_root),
             Self::Gemma4(lock) => lock.verify_cache(cache_root),
+            Self::Ministral3(_) => Err(invalid(
+                "verified cache is unsupported for the direct official GGUF reviewed model lock (source kind: official GGUF)",
+            )),
         }
     }
 }
@@ -723,6 +734,10 @@ pub fn parse_reviewed_model_lock(bytes: &[u8]) -> Result<ReviewedModelLock, Mode
         Some("model-lock-v2") => {
             crate::gemma4::parse_gemma4_model_lock(bytes).map(ReviewedModelLock::Gemma4)
         }
+        Some(crate::ministral3_lock::MINISTRAL3_MODEL_LOCK_SCHEMA) => {
+            crate::ministral3_lock::parse_ministral3_model_lock(bytes)
+                .map(ReviewedModelLock::Ministral3)
+        }
         _ => Err(invalid("unsupported reviewed model-lock schema")),
     }
 }
@@ -740,6 +755,10 @@ pub fn read_reviewed_model_lock(path: impl AsRef<Path>) -> Result<ReviewedModelL
 pub fn builtin_reviewed_model_lock(
     source_fingerprints: &[String],
 ) -> Result<ReviewedModelLock, ModelError> {
+    // This resolver consumes source fingerprints from `derived-gguf-lock-v1`.
+    // The official Ministral 3 GGUF lock authenticates a direct production
+    // artifact, not an sLLM conversion source ModelLock, so it intentionally
+    // remains outside this derived-artifact resolution set.
     const LOCKS: &[&[u8]] = &[
         include_bytes!("../../../docs/models/locks/qwen3.5-2b-bf16.json"),
         include_bytes!("../../../docs/models/locks/qwen3.5-4b-bf16.json"),
@@ -4609,6 +4628,66 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn reviewed_registry_selects_ministral3_by_alias_and_fingerprint() {
+        let lock = parse_reviewed_model_lock(include_bytes!(
+            "../../../docs/models/locks/ministral3-3b-instruct-2512-official-bf16-gguf.json"
+        ))
+        .expect("reviewed Ministral 3 lock parses");
+        assert_eq!(lock.kind(), ReviewedModelKind::Ministral3Dense);
+        assert_eq!(
+            lock.fingerprint(),
+            crate::ministral3_lock::MINISTRAL3_MODEL_LOCK_FINGERPRINT
+        );
+        assert_eq!(
+            lock.aliases(),
+            [crate::ministral3_lock::MINISTRAL3_MODEL_ALIAS]
+        );
+        assert_eq!(
+            lock.repo_id(),
+            crate::ministral3_gguf::MINISTRAL3_OFFICIAL_GGUF_REPOSITORY
+        );
+        assert_eq!(
+            lock.resolved_revision(),
+            crate::ministral3_gguf::MINISTRAL3_OFFICIAL_GGUF_REVISION
+        );
+        assert!(lock.supports_chat_messages());
+
+        let registry = ReviewedModelRegistry::new(vec![lock]).expect("lock registers");
+        let selected = registry
+            .resolve(
+                crate::ministral3_lock::MINISTRAL3_MODEL_ALIAS,
+                crate::ministral3_lock::MINISTRAL3_MODEL_LOCK_FINGERPRINT,
+            )
+            .expect("Ministral 3 alias and fingerprint select");
+        assert_eq!(selected.kind(), ReviewedModelKind::Ministral3Dense);
+    }
+
+    #[test]
+    fn ministral3_direct_official_gguf_is_not_a_derived_source_lock() {
+        assert!(
+            builtin_reviewed_model_lock(&[
+                crate::ministral3_lock::MINISTRAL3_MODEL_LOCK_FINGERPRINT.to_owned(),
+            ])
+            .is_err()
+        );
+
+        let lock = parse_reviewed_model_lock(include_bytes!(
+            "../../../docs/models/locks/ministral3-3b-instruct-2512-official-bf16-gguf.json"
+        ))
+        .expect("reviewed Ministral 3 lock parses");
+        let error = lock
+            .verify_cache(Path::new("unused-cache-root"))
+            .expect_err("direct official GGUF must not use safetensors cache verification");
+        assert!(matches!(
+            error,
+            ModelError::Invalid(message)
+                if message.contains("unsupported")
+                    && message.contains("official GGUF")
+                    && message.contains("source kind")
+        ));
     }
 
     #[test]

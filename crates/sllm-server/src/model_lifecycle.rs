@@ -4,7 +4,7 @@
 //! details.  A caller supplies an offline loader and receives an RAII lease for
 //! the existing [`ModelRegistryEntryV1`].
 
-use crate::runtime::ModelRegistryEntryV1;
+use crate::runtime::{BackendObservabilitySnapshotV1, ModelRegistryEntryV1};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -510,6 +510,62 @@ impl ModelLifecycleRegistryV1 {
             .cloned()
             .collect()
     }
+
+    /// Adds a new unloaded alias to the bounded registry. The loader remains
+    /// model-neutral and resolves the descriptor when the alias is loaded.
+    pub fn register(
+        &self,
+        descriptor: ModelLifecycleDescriptorV1,
+    ) -> Result<(), ModelLifecycleErrorV1> {
+        descriptor.validate()?;
+        let mut state = self.inner.state.lock().expect("lifecycle mutex poisoned");
+        if state.records.len() >= MAX_CONFIGURED_ALIASES_V1 {
+            return Err(ModelLifecycleErrorV1::TooManyConfiguredAliases);
+        }
+        if state.records.contains_key(descriptor.alias()) {
+            return Err(ModelLifecycleErrorV1::DuplicateAlias);
+        }
+        let alias = descriptor.alias().to_owned();
+        state.records.insert(
+            alias,
+            Record {
+                descriptor,
+                state: ModelLifecycleStateV1::Unloaded,
+                generation: 0,
+                active_leases: 0,
+                resident_bytes: 0,
+                last_used: 0,
+                owner: None,
+                shutdown_started: false,
+            },
+        );
+        self.inner.changed.notify_all();
+        Ok(())
+    }
+
+    /// Removes an idle non-resident alias. Loaded, loading, draining, leased,
+    /// or cleanup-quarantined aliases must be made idle before removal.
+    pub fn unregister(&self, alias: &str) -> Result<(), ModelLifecycleErrorV1> {
+        let mut state = self.inner.state.lock().expect("lifecycle mutex poisoned");
+        let record = state
+            .records
+            .get(alias)
+            .ok_or(ModelLifecycleErrorV1::AliasNotFound)?;
+        if record.active_leases > 0
+            || record.resident_bytes > 0
+            || matches!(
+                record.state,
+                ModelLifecycleStateV1::Loading
+                    | ModelLifecycleStateV1::Ready
+                    | ModelLifecycleStateV1::Draining
+            )
+        {
+            return Err(ModelLifecycleErrorV1::AliasBusy);
+        }
+        state.records.remove(alias);
+        self.inner.changed.notify_all();
+        Ok(())
+    }
     pub fn loaded_count(&self) -> usize {
         self.inner
             .state
@@ -539,6 +595,23 @@ impl ModelLifecycleRegistryV1 {
             .records
             .iter()
             .map(|(alias, record)| snapshot_of(alias, record))
+            .collect()
+    }
+
+    /// Returns runtime memory observations for models that currently own a
+    /// loaded backend. Unloaded and failed records intentionally contribute no
+    /// snapshot so metrics render their fixed zero-valued series.
+    pub fn observability_snapshots(&self) -> Vec<(String, BackendObservabilitySnapshotV1)> {
+        let state = self.inner.state.lock().expect("lifecycle mutex poisoned");
+        state
+            .records
+            .iter()
+            .filter_map(|(alias, record)| {
+                record
+                    .owner
+                    .as_ref()
+                    .map(|loaded| (alias.clone(), loaded.owner.observability_snapshot()))
+            })
             .collect()
     }
 

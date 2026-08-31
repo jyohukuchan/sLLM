@@ -18,10 +18,10 @@ use sllm_core::{
     AdapterResource, BoundSemanticOp, BufferRange, CausalAttentionDescriptor, DispatchEvidence,
     ExecutionAdapterAccess, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
     ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
-    ExecutionQueueFenceAdapter, ExecutionReadbackAdapter, ExecutionSession,
-    ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState, ExecutionStateImageV1,
-    ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvCacheEncoding, OpaqueStatePlane,
-    OwnedTensorBinding, PrepareSupport, PreparedOperation,
+    ExecutionMinistral3YarnSubmissionAdapter, ExecutionQueueFenceAdapter, ExecutionReadbackAdapter,
+    ExecutionSession, ExecutionSessionAdapter, ExecutionSessionRequest, ExecutionState,
+    ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvCacheEncoding,
+    OpaqueStatePlane, OwnedTensorBinding, PrepareSupport, PreparedOperation,
     QueueCompletionMode as CoreQueueCompletionMode, ShutdownReport, StateLayerMetadataV1,
     StateOwnerKindV1, StatePlaneKindV1,
 };
@@ -38,26 +38,70 @@ use crate::runtime::logical_gcn_arch_name;
 use crate::{
     ArgmaxDescriptor, AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo,
     AttentionPreprocessSubmission, Buffer, Completion, CompletionState, Context,
+    DeepSeekV4MoeRouteDescriptor, DeepSeekV4MoeRouteDispatchInfo, DeepSeekV4MoeRouteSubmission,
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseSubmission, EmbeddingDescriptor,
     EmbeddingDispatchInfo, EmbeddingSubmission, GdnProjectionBundleDescriptor,
     GdnProjectionBundleDispatchInfo, GdnProjectionBundleSubmission, HipBackend, MatmulDescriptor,
-    MatmulDispatchInfo, MatmulSubmission, MlpGateUpSiluBundleDescriptor,
+    MatmulDispatchInfo, MatmulSubmission, MiniMaxM3MoeRouteDescriptor,
+    MiniMaxM3MoeRouteDispatchInfo, MiniMaxM3MoeRouteSubmission, Ministral3YarnDescriptor,
+    Ministral3YarnDispatchInfo, Ministral3YarnPositionMode,
+    Ministral3YarnSubmission as HipMinistral3YarnSubmission, MlpGateUpSiluBundleDescriptor,
     MlpGateUpSiluBundleDispatchInfo, MlpGateUpSiluBundleSubmission, MoeExpertDescriptor,
-    MoeExpertDispatchInfo, MoeExpertSubmission, MoeRouteDescriptor, MoeRouteLayout,
-    MoeRouteSubmission, PreparedAttentionPreprocess, PreparedElementwise, PreparedEmbedding,
-    PreparedGdnProjectionBundle, PreparedMatmul, PreparedMlpGateUpSiluBundle, PreparedMoeExpert,
-    PreparedMoeRoute, PreparedResidualRmsNorm, PreparedRmsNorm, PreparedRotary,
-    PreparedTokenSelector, PreparedWindowedAttention, Queue,
-    QueueCompletionMode as HipQueueCompletionMode, ResidualRmsNormDescriptor,
-    ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission, RmsNormDescriptor, RmsNormDispatchInfo,
-    RmsNormSubmission, RotaryDescriptor, RotaryDispatchInfo, RotarySubmission, RuntimeError,
-    RuntimeStatus, TokenSelectorDescriptor, TokenSelectorDispatchInfo, TokenSelectorSubmission,
-    WindowedAttentionDescriptor, WindowedAttentionDispatchInfo, WindowedAttentionSubmission,
+    MoeExpertDispatchInfo, MoeExpertSubmission, MoeRouteDescriptor, MoeRouteDispatchInfo,
+    MoeRouteLayout, MoeRouteSubmission, PreparedAttentionPreprocess, PreparedDeepSeekV4MoeRoute,
+    PreparedElementwise, PreparedEmbedding, PreparedGdnProjectionBundle, PreparedMatmul,
+    PreparedMiniMaxM3MoeRoute, PreparedMlpGateUpSiluBundle, PreparedMoeExpert, PreparedMoeRoute,
+    PreparedResidualRmsNorm, PreparedRmsNorm, PreparedRotary, PreparedTokenSelector,
+    PreparedWindowedAttention, Queue, QueueCompletionMode as HipQueueCompletionMode,
+    ResidualRmsNormDescriptor, ResidualRmsNormDispatchInfo, ResidualRmsNormSubmission,
+    RmsNormDescriptor, RmsNormDispatchInfo, RmsNormSubmission, RotaryDescriptor,
+    RotaryDispatchInfo, RotarySubmission, RuntimeError, RuntimeStatus, TokenSelectorDescriptor,
+    TokenSelectorDispatchInfo, TokenSelectorSubmission, WindowedAttentionDescriptor,
+    WindowedAttentionDispatchInfo, WindowedAttentionSubmission, gemma4_moe_expert_workspace_bytes,
     moe_expert_workspace_bytes,
 };
 
 const HIP_BACKEND_NAME: &str = "hip";
 const CLEANUP_ATTEMPT_CAP: usize = 16;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DeepSeekV4MoeRouteLowering {
+    mode: sllm_core::DeepSeekV4MoeRouteMode,
+    active_input_index: usize,
+    renormalize: bool,
+    routed_scale_bits: u32,
+}
+
+impl DeepSeekV4MoeRouteLowering {
+    fn from_semantic(descriptor: &sllm_core::SemanticOpDescriptor) -> Result<Self, ExecutionError> {
+        if descriptor.kind() != sllm_core::SemanticOpKind::DeepSeekV4MoeRoute {
+            return Err(ExecutionError::InvalidRequest {
+                reason: "DeepSeek V4 MoE route lowering received the wrong semantic operation"
+                    .to_owned(),
+            });
+        }
+        let contract = descriptor.deepseek_v4_moe_route_contract().ok_or_else(|| {
+            ExecutionError::InvalidRequest {
+                reason: "deepseek_v4_moe_route semantic descriptor is missing its contract"
+                    .to_owned(),
+            }
+        })?;
+        let active_input_index = match contract.mode() {
+            sllm_core::DeepSeekV4MoeRouteMode::Score => 1,
+            sllm_core::DeepSeekV4MoeRouteMode::Hash => 2,
+        };
+        Ok(Self {
+            mode: contract.mode(),
+            active_input_index,
+            renormalize: contract.renormalize_selected_weights(),
+            routed_scale_bits: contract.routed_scale_bits(),
+        })
+    }
+
+    const fn routed_scale(self) -> f32 {
+        f32::from_bits(self.routed_scale_bits)
+    }
+}
 
 fn image_failure(reason: impl Into<String>) -> ExecutionError {
     ExecutionError::InvalidRequest {
@@ -404,6 +448,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             sllm_core::SemanticOpKind::Copy
                 | sllm_core::SemanticOpKind::Add
                 | sllm_core::SemanticOpKind::BroadcastAdd
+                | sllm_core::SemanticOpKind::BroadcastMul
                 | sllm_core::SemanticOpKind::ScalarMul
                 | sllm_core::SemanticOpKind::SiluMul
                 | sllm_core::SemanticOpKind::GeluTanhMul
@@ -420,6 +465,10 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 | sllm_core::SemanticOpKind::Rotary
                 | sllm_core::SemanticOpKind::CausalAttention
                 | sllm_core::SemanticOpKind::TokenSelect
+                | sllm_core::SemanticOpKind::MoeRoute
+                | sllm_core::SemanticOpKind::DeepSeekV4MoeRoute
+                | sllm_core::SemanticOpKind::MiniMaxM3MoeRoute
+                | sllm_core::SemanticOpKind::MoeExpert
                 | sllm_core::SemanticOpKind::SparseMoe
         ) {
             return PrepareSupport::Unsupported {
@@ -573,6 +622,27 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 "native KV image metadata does not match descriptor",
             ));
         }
+        let retained_start = info.published_length.saturating_sub(
+            state
+                .descriptor()
+                .sliding_window()
+                .unwrap_or(info.published_length),
+        );
+        let image_version_matches = if let Some(window) = state.descriptor().sliding_window() {
+            info.info_version == sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
+                && (u64::from(info.reserved[0]) | (u64::from(info.reserved[1]) << 32)) == window
+                && (u64::from(info.reserved[2]) | (u64::from(info.reserved[3]) << 32))
+                    == retained_start
+                && info.reserved[4..].iter().all(|value| *value == 0)
+        } else {
+            info.info_version == sys::SLLM_HIP_STATE_FORK_INFO_VERSION
+                && info.reserved.iter().all(|value| *value == 0)
+        };
+        if !image_version_matches {
+            return Err(image_failure(
+                "native KV image version or retention metadata is invalid",
+            ));
+        }
         let planes = kv_image_planes(encoding, info.plane_count);
         if planes.len() != info.plane_count as usize {
             return Err(image_failure("native KV image plane count is invalid"));
@@ -583,7 +653,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 .image_plane_size(native_plane)
                 .map_err(map_backend_error)?;
             let bytes = read_native_plane(size, |offset, destination| {
-                resource.export_chunk(native_plane, offset, destination)
+                resource.export_chunk(native_plane, offset, destination, info.published_length)
             })?;
             output.push(OpaqueStatePlane {
                 owner: StateOwnerKindV1::Kv,
@@ -640,20 +710,57 @@ impl ExecutionSessionAdapter for HipExecutionSession {
         let mut native_info = info;
         native_info.published_length = image.metadata().published_length;
         native_info.generation = image.metadata().generation;
+        let retained_length = state
+            .descriptor()
+            .sliding_window()
+            .map_or(image.metadata().published_length, |window| {
+                image.metadata().published_length.min(window)
+            });
+        if let Some(window) = state.descriptor().sliding_window() {
+            let retained_start = image.metadata().published_length - retained_length;
+            native_info.reserved[0] = window as u32;
+            native_info.reserved[1] = (window >> 32) as u32;
+            native_info.reserved[2] = retained_start as u32;
+            native_info.reserved[3] = (retained_start >> 32) as u32;
+        }
+        let sliding_bytes_per_token = state
+            .descriptor()
+            .sliding_window()
+            .map(|_| {
+                state
+                    .descriptor()
+                    .resident_bytes_per_plane()
+                    .and_then(|bytes| {
+                        bytes.checked_div(state.descriptor().physical_capacity_tokens())
+                    })
+                    .ok_or_else(|| image_failure("sliding KV plane stride overflow"))
+            })
+            .transpose()?;
         for (native_plane, semantic_plane) in planes {
             let plane = image
                 .planes()
                 .iter()
                 .find(|plane| plane.plane == semantic_plane)
                 .ok_or_else(|| image_failure("KV image is missing a required plane"))?;
-            let expected = resource
-                .image_plane_size(native_plane)
-                .map_err(map_backend_error)?;
+            let expected = if let Some(bytes_per_token) = sliding_bytes_per_token {
+                retained_length
+                    .checked_mul(bytes_per_token)
+                    .ok_or_else(|| image_failure("sliding KV image plane size overflow"))?
+            } else {
+                resource
+                    .image_plane_size(native_plane)
+                    .map_err(map_backend_error)?
+            };
             if plane.bytes.len() as u64 != expected {
                 return Err(image_failure("KV image plane byte length mismatch"));
             }
             write_native_plane(&plane.bytes, |offset, bytes| {
-                resource.import_chunk(native_plane, offset, bytes)
+                resource.import_chunk(
+                    native_plane,
+                    offset,
+                    bytes,
+                    image.metadata().published_length,
+                )
             })?;
         }
         resource
@@ -750,6 +857,8 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             &output,
             descriptor.start_position(),
             descriptor.expected_kv_length(),
+            descriptor.sliding_window(),
+            descriptor.score_scale(),
         ) {
             Ok(value) => value,
             Err(error) => {
@@ -764,6 +873,68 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                 _ticket: ticket,
             }),
             dispatch_from_causal_attention(evidence),
+        ))
+    }
+
+    fn execute_ministral3_yarn(
+        &self,
+        access: &ExecutionAdapterAccess<'_>,
+        queue: &sllm_core::ExecutionQueue,
+        query: &OwnedTensorBinding,
+        key: &OwnedTensorBinding,
+        positions: &OwnedTensorBinding,
+        query_output: &OwnedTensorBinding,
+        key_output: &OwnedTensorBinding,
+        stage: sllm_core::Ministral3YarnQueryScaleStage,
+    ) -> Result<
+        (
+            Box<dyn ExecutionMinistral3YarnSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        self.state.ensure_open()?;
+        let queue = access.downcast_queue_payload::<Queue>(queue)?.clone();
+        let binding = |owned: &OwnedTensorBinding| -> Result<crate::TensorBinding, ExecutionError> {
+            let buffer = access
+                .downcast_buffer_payload::<Buffer>(owned.buffer())?
+                .clone();
+            Ok(buffer.binding(owned.view().clone()))
+        };
+        let descriptor = Ministral3YarnDescriptor::new(
+            binding(query)?,
+            binding(key)?,
+            binding(positions)?,
+            binding(query_output)?,
+            binding(key_output)?,
+            stage.start_position(),
+            Ministral3YarnPositionMode::Contiguous,
+        )
+        .map_err(map_backend_error)?;
+        let ticket = self.state.acquire_active()?;
+        let prepared = match self
+            .backend
+            .prepare_ministral3_yarn(&self.context, descriptor)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        let (submission, evidence) = match prepared.execute(&queue) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(ticket);
+                return Err(map_backend_error(error));
+            }
+        };
+        Ok((
+            Box::new(HipMinistral3YarnSubmissionAdapter {
+                completion: submission,
+                _ticket: ticket,
+            }),
+            dispatch_from_ministral3_yarn(evidence),
         ))
     }
 
@@ -1131,6 +1302,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
             sllm_core::SemanticOpKind::Copy
             | sllm_core::SemanticOpKind::Add
             | sllm_core::SemanticOpKind::BroadcastAdd
+            | sllm_core::SemanticOpKind::BroadcastMul
             | sllm_core::SemanticOpKind::ScalarMul
             | sllm_core::SemanticOpKind::SiluMul
             | sllm_core::SemanticOpKind::GeluTanhMul
@@ -1378,6 +1550,156 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         .map_err(map_backend_error)?,
                 )
             }
+            sllm_core::SemanticOpKind::MoeRoute => {
+                let logits_owned = &operation.inputs()[0];
+                let metadata_owned = &operation.outputs()[0];
+                let logits = access
+                    .downcast_buffer_payload::<Buffer>(logits_owned.buffer())?
+                    .clone();
+                let metadata = access
+                    .downcast_buffer_payload::<Buffer>(metadata_owned.buffer())?
+                    .clone();
+                let descriptor = MoeRouteDescriptor::new(
+                    logits.binding(logits_owned.view().clone()),
+                    metadata.binding(metadata_owned.view().clone()),
+                    8,
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::MoeRoute(
+                    self.backend
+                        .prepare_moe_route(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::DeepSeekV4MoeRoute => {
+                let lowering = DeepSeekV4MoeRouteLowering::from_semantic(operation.descriptor())?;
+                let logits_owned = &operation.inputs()[0];
+                let active_owned = &operation.inputs()[lowering.active_input_index];
+                let metadata_owned = &operation.outputs()[0];
+                let logits = access
+                    .downcast_buffer_payload::<Buffer>(logits_owned.buffer())?
+                    .clone();
+                let active = access
+                    .downcast_buffer_payload::<Buffer>(active_owned.buffer())?
+                    .clone();
+                let metadata = access
+                    .downcast_buffer_payload::<Buffer>(metadata_owned.buffer())?
+                    .clone();
+                let logits = logits.binding(logits_owned.view().clone());
+                let active = active.binding(active_owned.view().clone());
+                let metadata = metadata.binding(metadata_owned.view().clone());
+                let descriptor = match lowering.mode {
+                    sllm_core::DeepSeekV4MoeRouteMode::Score => {
+                        DeepSeekV4MoeRouteDescriptor::new_score(
+                            logits,
+                            active,
+                            metadata,
+                            lowering.renormalize,
+                            lowering.routed_scale(),
+                        )
+                    }
+                    sllm_core::DeepSeekV4MoeRouteMode::Hash => {
+                        DeepSeekV4MoeRouteDescriptor::new_hash(
+                            logits,
+                            active,
+                            metadata,
+                            lowering.renormalize,
+                            lowering.routed_scale(),
+                        )
+                    }
+                }
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::DeepSeekV4MoeRoute(
+                    self.backend
+                        .prepare_deepseek_v4_moe_route(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::MiniMaxM3MoeRoute => {
+                operation
+                    .descriptor()
+                    .minimax_m3_moe_route_contract()
+                    .ok_or_else(|| ExecutionError::InvalidRequest {
+                        reason: "minimax_m3_moe_route semantic descriptor is missing its contract"
+                            .to_owned(),
+                    })?;
+                let logits_owned = &operation.inputs()[0];
+                let bias_owned = &operation.inputs()[1];
+                let metadata_owned = &operation.outputs()[0];
+                let logits = access
+                    .downcast_buffer_payload::<Buffer>(logits_owned.buffer())?
+                    .clone();
+                let bias = access
+                    .downcast_buffer_payload::<Buffer>(bias_owned.buffer())?
+                    .clone();
+                let metadata = access
+                    .downcast_buffer_payload::<Buffer>(metadata_owned.buffer())?
+                    .clone();
+                let descriptor = MiniMaxM3MoeRouteDescriptor::new(
+                    logits.binding(logits_owned.view().clone()),
+                    bias.binding(bias_owned.view().clone()),
+                    metadata.binding(metadata_owned.view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::MiniMaxM3MoeRoute(
+                    self.backend
+                        .prepare_minimax_m3_moe_route(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
+            sllm_core::SemanticOpKind::MoeExpert => {
+                let hidden_owned = &operation.inputs()[0];
+                let route_owned = &operation.inputs()[1];
+                let blob_owned = &operation.inputs()[2];
+                let output_owned = &operation.outputs()[0];
+                let hidden = access
+                    .downcast_buffer_payload::<Buffer>(hidden_owned.buffer())?
+                    .clone();
+                let route_metadata = access
+                    .downcast_buffer_payload::<Buffer>(route_owned.buffer())?
+                    .clone();
+                let layer_blob = access
+                    .downcast_buffer_payload::<Buffer>(blob_owned.buffer())?
+                    .clone();
+                let output = access
+                    .downcast_buffer_payload::<Buffer>(output_owned.buffer())?
+                    .clone();
+                let token_count = hidden_owned.view().shape()[0] as u64;
+                let workspace_bytes =
+                    gemma4_moe_expert_workspace_bytes(token_count).ok_or_else(|| {
+                        ExecutionError::ExecutionUnavailable {
+                            backend: HIP_BACKEND_NAME,
+                            reason: "Gemma 4 MoeExpert workspace size overflow".to_owned(),
+                        }
+                    })?;
+                let workspace_view = sllm_core::TensorView::contiguous(
+                    sllm_core::DType::U8,
+                    &[workspace_bytes as usize],
+                )
+                .map_err(|error| ExecutionError::ExecutionUnavailable {
+                    backend: HIP_BACKEND_NAME,
+                    reason: format!("Gemma 4 MoeExpert workspace layout: {error}"),
+                })?;
+                let workspace = Buffer::allocate(&self.context, workspace_view.payload_bytes())
+                    .map_err(map_backend_error)?;
+                let descriptor = MoeExpertDescriptor::new_gemma4(
+                    hidden.binding(hidden_owned.view().clone()),
+                    route_metadata.binding(route_owned.view().clone()),
+                    layer_blob.binding(blob_owned.view().clone()),
+                    workspace.binding(workspace_view),
+                    output.binding(output_owned.view().clone()),
+                )
+                .map_err(map_backend_error)?;
+                self.state.ensure_open()?;
+                HipPreparedPlan::MoeExpert(
+                    self.backend
+                        .prepare_moe_expert(&self.context, descriptor)
+                        .map_err(map_backend_error)?,
+                )
+            }
             sllm_core::SemanticOpKind::SparseMoe => {
                 let hidden_owned = &operation.inputs()[0];
                 let router_owned = &operation.inputs()[1];
@@ -1573,6 +1895,34 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                     dispatch_from_windowed_attention(dispatch),
                 )
             }
+            HipPreparedPlan::MoeRoute(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::MoeRoute(submission),
+                    dispatch_from_moe_route(dispatch),
+                )
+            }
+            HipPreparedPlan::DeepSeekV4MoeRoute(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::DeepSeekV4MoeRoute(submission),
+                    dispatch_from_deepseek_v4_moe_route(dispatch),
+                )
+            }
+            HipPreparedPlan::MiniMaxM3MoeRoute(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::MiniMaxM3MoeRoute(submission),
+                    dispatch_from_minimax_m3_moe_route(dispatch),
+                )
+            }
+            HipPreparedPlan::MoeExpert(plan) => {
+                let (submission, dispatch) = plan.execute(&queue).map_err(map_backend_error)?;
+                (
+                    HipSemanticSubmission::MoeExpert(submission),
+                    dispatch_from_moe_expert(dispatch, 0),
+                )
+            }
             HipPreparedPlan::SparseMoe(plan) => {
                 let (router, _) = plan.router.execute(&queue).map_err(map_backend_error)?;
                 let (route, _) = plan.route.execute(&queue).map_err(map_backend_error)?;
@@ -1583,7 +1933,7 @@ impl ExecutionSessionAdapter for HipExecutionSession {
                         route,
                         expert,
                     }),
-                    dispatch_from_moe_expert(dispatch),
+                    dispatch_from_moe_expert(dispatch, 3),
                 )
             }
         };
@@ -1715,6 +2065,10 @@ enum HipPreparedPlan {
     AttentionPreprocess(PreparedAttentionPreprocess),
     Rotary(PreparedRotary),
     WindowedAttention(PreparedWindowedAttention),
+    MoeRoute(PreparedMoeRoute),
+    DeepSeekV4MoeRoute(PreparedDeepSeekV4MoeRoute),
+    MiniMaxM3MoeRoute(PreparedMiniMaxM3MoeRoute),
+    MoeExpert(PreparedMoeExpert),
     SparseMoe(PreparedSparseMoe),
 }
 
@@ -1738,6 +2092,10 @@ enum HipSemanticSubmission {
     AttentionPreprocess(AttentionPreprocessSubmission),
     Rotary(RotarySubmission),
     WindowedAttention(WindowedAttentionSubmission),
+    MoeRoute(MoeRouteSubmission),
+    DeepSeekV4MoeRoute(DeepSeekV4MoeRouteSubmission),
+    MiniMaxM3MoeRoute(MiniMaxM3MoeRouteSubmission),
+    MoeExpert(MoeExpertSubmission),
     SparseMoe(SparseMoeSubmission),
 }
 
@@ -1762,6 +2120,10 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.query(),
             Self::Rotary(submission) => submission.query(),
             Self::WindowedAttention(submission) => submission.query(),
+            Self::MoeRoute(submission) => submission.query(),
+            Self::DeepSeekV4MoeRoute(submission) => submission.query(),
+            Self::MiniMaxM3MoeRoute(submission) => submission.query(),
+            Self::MoeExpert(submission) => submission.query(),
             Self::SparseMoe(submission) => submission.expert.query(),
         }
     }
@@ -1780,6 +2142,10 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.wait(timeout),
             Self::Rotary(submission) => submission.wait(timeout),
             Self::WindowedAttention(submission) => submission.wait(timeout),
+            Self::MoeRoute(submission) => submission.wait(timeout),
+            Self::DeepSeekV4MoeRoute(submission) => submission.wait(timeout),
+            Self::MiniMaxM3MoeRoute(submission) => submission.wait(timeout),
+            Self::MoeExpert(submission) => submission.wait(timeout),
             Self::SparseMoe(submission) => submission.expert.wait(timeout),
         }
     }
@@ -1798,6 +2164,10 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.finalize_after_token(fence_token),
             Self::Rotary(submission) => submission.finalize_after_token(fence_token),
             Self::WindowedAttention(submission) => submission.finalize_after_token(fence_token),
+            Self::MoeRoute(submission) => submission.finalize_after_token(fence_token),
+            Self::DeepSeekV4MoeRoute(submission) => submission.finalize_after_token(fence_token),
+            Self::MiniMaxM3MoeRoute(submission) => submission.finalize_after_token(fence_token),
+            Self::MoeExpert(submission) => submission.finalize_after_token(fence_token),
             Self::SparseMoe(submission) => {
                 submission.router.finalize_after_token(fence_token)?;
                 submission.route.finalize_after_token(fence_token)?;
@@ -1820,6 +2190,10 @@ impl HipSemanticSubmission {
             Self::AttentionPreprocess(submission) => submission.kernel_elapsed_ns(),
             Self::Rotary(submission) => submission.kernel_elapsed_ns(),
             Self::WindowedAttention(submission) => submission.kernel_elapsed_ns(),
+            Self::MoeRoute(submission) => submission.kernel_elapsed_ns(),
+            Self::DeepSeekV4MoeRoute(submission) => submission.kernel_elapsed_ns(),
+            Self::MiniMaxM3MoeRoute(submission) => submission.kernel_elapsed_ns(),
+            Self::MoeExpert(submission) => submission.kernel_elapsed_ns(),
             Self::SparseMoe(submission) => {
                 let expert = submission.expert.kernel_elapsed_ns()?;
                 let route = submission.route.kernel_elapsed_ns()?;
@@ -1924,6 +2298,11 @@ struct HipCausalAttentionSubmission {
     _ticket: ActiveOperation,
 }
 
+struct HipMinistral3YarnSubmissionAdapter {
+    completion: HipMinistral3YarnSubmission,
+    _ticket: ActiveOperation,
+}
+
 struct HipLinearAttentionSubmission {
     completion: LinearAttentionCompletion,
     _evidence: LinearAttentionEvidence,
@@ -1971,6 +2350,29 @@ impl ExecutionCausalAttentionSubmissionAdapter for HipCausalAttentionSubmission 
     fn finalize_after_fence(&mut self, fence_token: u64) -> Result<ExecutionState, ExecutionError> {
         self.completion
             .finalize_after_token(fence_token)
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        self.completion
+            .kernel_elapsed_ns()
+            .map(Some)
+            .map_err(map_async_error)
+    }
+}
+
+impl ExecutionMinistral3YarnSubmissionAdapter for HipMinistral3YarnSubmissionAdapter {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .query()
+            .map(map_completion_state)
+            .map_err(map_async_error)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        self.completion
+            .wait(timeout)
             .map(map_completion_state)
             .map_err(map_async_error)
     }
@@ -2335,12 +2737,97 @@ fn dispatch_from_windowed_attention(dispatch: WindowedAttentionDispatchInfo) -> 
     }
 }
 
-fn dispatch_from_moe_expert(dispatch: MoeExpertDispatchInfo) -> DispatchEvidence {
+fn dispatch_from_moe_route(dispatch: MoeRouteDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: sys::SLLM_HIP_ABI_VERSION,
+        info_version: sys::SLLM_HIP_MOE_ROUTE_DISPATCH_INFO_VERSION,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: sys::SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE,
+        grid_size_x: dispatch.token_count as u32,
+        row_count: dispatch.token_count,
+        normalized_size: dispatch.pair_count,
+        backend: sys::SLLM_BACKEND_HIP,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: "moe_route.bf16.stable_topk_group.v1".to_owned(),
+        device_symbol: "sllm_moe_route_stable_topk_group_v1".to_owned(),
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_deepseek_v4_moe_route(
+    dispatch: DeepSeekV4MoeRouteDispatchInfo,
+) -> DispatchEvidence {
     DispatchEvidence {
         abi_version: dispatch.abi_version,
         info_version: dispatch.info_version,
         dispatch_id: dispatch.dispatch_id,
-        dispatch_count: dispatch.dispatch_count + 3,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: dispatch.pair_count,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_minimax_m3_moe_route(dispatch: MiniMaxM3MoeRouteDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: dispatch.pair_count,
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_ministral3_yarn(dispatch: Ministral3YarnDispatchInfo) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count,
+        kernel_id: dispatch.kernel_id,
+        workgroup_size_x: dispatch.workgroup_size_x,
+        grid_size_x: dispatch.grid_size_x,
+        row_count: dispatch.token_count,
+        normalized_size: u64::from(dispatch.head_dim),
+        backend: dispatch.backend,
+        fallback_allowed: dispatch.fallback_allowed,
+        fallback_used: dispatch.fallback_used,
+        kernel_symbol: dispatch.kernel_symbol,
+        device_symbol: dispatch.device_symbol,
+        target: logical_dispatch_target(dispatch.gcn_arch_name),
+    }
+}
+
+fn dispatch_from_moe_expert(
+    dispatch: MoeExpertDispatchInfo,
+    prior_dispatch_count: u32,
+) -> DispatchEvidence {
+    DispatchEvidence {
+        abi_version: dispatch.abi_version,
+        info_version: dispatch.info_version,
+        dispatch_id: dispatch.dispatch_id,
+        dispatch_count: dispatch.dispatch_count + prior_dispatch_count,
         kernel_id: dispatch.kernel_id,
         workgroup_size_x: dispatch.workgroup_size_x,
         grid_size_x: dispatch.grid_size_x,
@@ -2420,8 +2907,10 @@ mod tests {
     use super::*;
     use sllm_core::{
         AttentionPreprocessContract, AttentionPreprocessPositionMode, Backend, DType,
-        ExecutionSessionRequest, SemanticOpDescriptor, SplitHalfRotaryContract, TensorView,
-        TokenSelectorContractV1, WindowedCausalAttentionContract,
+        DeepSeekV4MoeRouteContractV1, DeepSeekV4MoeRouteMode as CoreDeepSeekV4MoeRouteMode,
+        ExecutionSessionRequest, MiniMaxM3MoeRouteContractV1, SemanticOpDescriptor,
+        SplitHalfRotaryContract, TensorView, TokenSelectorContractV1,
+        WindowedCausalAttentionContract,
     };
 
     #[test]
@@ -2662,6 +3151,287 @@ mod tests {
     }
 
     #[test]
+    fn supports_separate_gemma_route_expert_and_broadcast_mul_semantics() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
+            available_memory_bytes: u64::MAX,
+        };
+        let route = SemanticOpDescriptor::new(
+            sllm_core::SemanticOpKind::MoeRoute,
+            vec![TensorView::contiguous(DType::Bf16, &[3, 128]).unwrap()],
+            vec![TensorView::contiguous(DType::U8, &[1_416]).unwrap()],
+        )
+        .unwrap();
+        let expert = SemanticOpDescriptor::new(
+            sllm_core::SemanticOpKind::MoeExpert,
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 2_816]).unwrap(),
+                TensorView::contiguous(DType::U8, &[1_416]).unwrap(),
+                TensorView::contiguous(DType::U8, &[428_215_552]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[3, 2_816]).unwrap()],
+        )
+        .unwrap();
+        let broadcast_mul = SemanticOpDescriptor::new(
+            sllm_core::SemanticOpKind::BroadcastMul,
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 2_816]).unwrap(),
+                TensorView::contiguous(DType::Bf16, &[2_816]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[3, 2_816]).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(adapter.supports(&route), PrepareSupport::Supported);
+        assert_eq!(adapter.supports(&expert), PrepareSupport::Supported);
+        assert_eq!(adapter.supports(&broadcast_mul), PrepareSupport::Supported);
+    }
+
+    fn deepseek_v4_route_descriptor(
+        mode: CoreDeepSeekV4MoeRouteMode,
+        renormalize: bool,
+        routed_scale: f32,
+    ) -> SemanticOpDescriptor {
+        let (bias, hash_ids) = match mode {
+            CoreDeepSeekV4MoeRouteMode::Score => (
+                TensorView::contiguous(DType::F32, &[256]).unwrap(),
+                TensorView::contiguous(DType::I32, &[0, 6]).unwrap(),
+            ),
+            CoreDeepSeekV4MoeRouteMode::Hash => (
+                TensorView::contiguous(DType::F32, &[0]).unwrap(),
+                TensorView::contiguous(DType::I32, &[3, 6]).unwrap(),
+            ),
+        };
+        SemanticOpDescriptor::new_deepseek_v4_moe_route(
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, 256]).unwrap(),
+                bias,
+                hash_ids,
+            ],
+            vec![TensorView::contiguous(DType::U8, &[2_344]).unwrap()],
+            DeepSeekV4MoeRouteContractV1::new(mode, renormalize, routed_scale).unwrap(),
+        )
+        .expect("valid DeepSeek V4 route descriptor")
+    }
+
+    #[test]
+    fn deepseek_v4_score_and_hash_m3_lowering_select_only_the_live_input() {
+        let adapter = HipExecutionSession {
+            state: Arc::new(HipSessionState::new()),
+            backend: HipBackend { _private: () },
+            context: Context::test_without_native(),
+            total_memory_bytes: u64::MAX,
+            available_memory_bytes: u64::MAX,
+        };
+        let score = deepseek_v4_route_descriptor(CoreDeepSeekV4MoeRouteMode::Score, true, 1.5);
+        let hash = deepseek_v4_route_descriptor(CoreDeepSeekV4MoeRouteMode::Hash, false, 1.25);
+
+        let score_lowering = DeepSeekV4MoeRouteLowering::from_semantic(&score).unwrap();
+        assert_eq!(score_lowering.mode, CoreDeepSeekV4MoeRouteMode::Score);
+        assert_eq!(score_lowering.active_input_index, 1);
+        assert!(score_lowering.renormalize);
+        assert_eq!(score_lowering.routed_scale().to_bits(), 1.5_f32.to_bits());
+
+        let hash_lowering = DeepSeekV4MoeRouteLowering::from_semantic(&hash).unwrap();
+        assert_eq!(hash_lowering.mode, CoreDeepSeekV4MoeRouteMode::Hash);
+        assert_eq!(hash_lowering.active_input_index, 2);
+        assert!(!hash_lowering.renormalize);
+        assert_eq!(hash_lowering.routed_scale().to_bits(), 1.25_f32.to_bits());
+
+        assert_eq!(adapter.supports(&score), PrepareSupport::Supported);
+        assert_eq!(adapter.supports(&hash), PrepareSupport::Supported);
+    }
+
+    #[test]
+    fn deepseek_v4_route_missing_or_mode_inconsistent_contract_is_rejected_by_core() {
+        let score_inputs = vec![
+            TensorView::contiguous(DType::Bf16, &[3, 256]).unwrap(),
+            TensorView::contiguous(DType::F32, &[256]).unwrap(),
+            TensorView::contiguous(DType::I32, &[0, 6]).unwrap(),
+        ];
+        let output = vec![TensorView::contiguous(DType::U8, &[2_344]).unwrap()];
+        assert!(
+            SemanticOpDescriptor::new(
+                sllm_core::SemanticOpKind::DeepSeekV4MoeRoute,
+                score_inputs.clone(),
+                output.clone(),
+            )
+            .is_err()
+        );
+
+        let hash_contract =
+            DeepSeekV4MoeRouteContractV1::new(CoreDeepSeekV4MoeRouteMode::Hash, true, 1.5).unwrap();
+        assert!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(score_inputs, output, hash_contract,)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_dispatch_evidence_preserves_dedicated_kernel_and_no_fallback() {
+        let dispatch = dispatch_from_deepseek_v4_moe_route(DeepSeekV4MoeRouteDispatchInfo {
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION,
+            backend: sys::SLLM_BACKEND_HIP,
+            dispatch_id: 57,
+            dispatch_count: 2,
+            kernel_id: sys::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1,
+            workgroup_size_x: sys::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE,
+            grid_size_x: 3,
+            token_count: 3,
+            expert_count: 256,
+            pair_count: 18,
+            selected_expert_count: 6,
+            mode: crate::DeepSeekV4MoeRouteMode::Hash,
+            renormalize: true,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "deepseek_v4_moe_route.bf16_f32.hash.v1".to_owned(),
+            device_symbol: "sllm_deepseek_v4_moe_route_score_hash_v1".to_owned(),
+            gcn_arch_name: "gfx1201".to_owned(),
+        });
+        assert_eq!(
+            dispatch.kernel_id,
+            sys::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1
+        );
+        assert_eq!(dispatch.dispatch_count, 2);
+        assert_eq!(dispatch.row_count, 3);
+        assert_eq!(dispatch.normalized_size, 18);
+        assert!(!dispatch.fallback_allowed);
+        assert!(!dispatch.fallback_used);
+        assert_eq!(dispatch.target, "gfx1201");
+        assert_eq!(
+            dispatch.kernel_symbol,
+            "deepseek_v4_moe_route.bf16_f32.hash.v1"
+        );
+    }
+
+    #[test]
+    fn minimax_m3_fixed_descriptor_and_missing_contract_are_distinct() {
+        let inputs = vec![
+            TensorView::contiguous(DType::F32, &[3, 128]).unwrap(),
+            TensorView::contiguous(DType::F32, &[128]).unwrap(),
+        ];
+        let outputs = vec![TensorView::contiguous(DType::U8, &[1_224]).unwrap()];
+        assert!(
+            SemanticOpDescriptor::new(
+                sllm_core::SemanticOpKind::MiniMaxM3MoeRoute,
+                inputs.clone(),
+                outputs.clone(),
+            )
+            .is_err()
+        );
+        let descriptor = SemanticOpDescriptor::new_minimax_m3_moe_route(
+            inputs,
+            outputs,
+            MiniMaxM3MoeRouteContractV1::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            descriptor.kind(),
+            sllm_core::SemanticOpKind::MiniMaxM3MoeRoute
+        );
+        assert_eq!(
+            descriptor.minimax_m3_moe_route_contract(),
+            Some(MiniMaxM3MoeRouteContractV1::new())
+        );
+    }
+
+    #[test]
+    fn minimax_m3_dispatch_evidence_preserves_exact_kernel_and_no_fallback() {
+        let evidence = dispatch_from_minimax_m3_moe_route(MiniMaxM3MoeRouteDispatchInfo {
+            abi_version: sys::SLLM_HIP_ABI_VERSION,
+            info_version: sys::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION,
+            backend: sys::SLLM_BACKEND_HIP,
+            dispatch_id: 58,
+            dispatch_count: 2,
+            kernel_id: sys::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1,
+            workgroup_size_x: sys::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE,
+            grid_size_x: 3,
+            token_count: 3,
+            expert_count: 128,
+            pair_count: 12,
+            selected_expert_count: 4,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "sllm.minimax_m3_moe_route.sigmoid_top4.v1".to_owned(),
+            device_symbol: "sllm_minimax_m3_moe_route_sigmoid_top4_v1".to_owned(),
+            gcn_arch_name: "gfx1030".to_owned(),
+        });
+        assert_eq!(evidence.dispatch_id, 58);
+        assert_eq!(evidence.kernel_id, 1);
+        assert_eq!(evidence.row_count, 3);
+        assert_eq!(evidence.normalized_size, 12);
+        assert_eq!(evidence.target, "gfx1030");
+        assert!(!evidence.fallback_allowed);
+        assert!(!evidence.fallback_used);
+    }
+
+    #[test]
+    fn deepseek_v4_semantic_failure_preserves_status_and_diagnostic_at_bridge_boundary() {
+        let error = map_async_error(RuntimeError::local(
+            RuntimeStatus::InvalidArgument,
+            "DeepSeek V4 route rejected duplicate hash expert ids",
+        ));
+        assert_eq!(
+            error,
+            ExecutionError::AsyncFailure {
+                status: sys::SLLM_STATUS_INVALID_ARGUMENT,
+                diagnostic: "DeepSeek V4 route rejected duplicate hash expert ids".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn separate_gemma_route_and_expert_dispatches_keep_individual_counts() {
+        let route = dispatch_from_moe_route(MoeRouteDispatchInfo {
+            dispatch_id: 41,
+            dispatch_count: 3,
+            kernel_id: sys::SLLM_HIP_MOE_ROUTE_KERNEL_ID_STABLE_TOPK_V1,
+            token_count: 3,
+            expert_count: 128,
+            pair_count: 24,
+            selected_expert_count: 8,
+            fallback_allowed: false,
+            fallback_used: false,
+            gcn_arch_name: "gfx1201".to_owned(),
+        });
+        assert_eq!(route.dispatch_count, 3);
+        assert_eq!(route.row_count, 3);
+        assert_eq!(route.normalized_size, 24);
+        assert_eq!(route.target, "gfx1201");
+
+        let expert_dispatch = MoeExpertDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            backend: sys::SLLM_BACKEND_HIP,
+            dispatch_id: 42,
+            dispatch_count: 4,
+            kernel_id: sys::SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2,
+            workgroup_size_x: 256,
+            grid_size_x: 24,
+            token_count: 3,
+            active_pair_count: 24,
+            workspace_bytes: 81_312,
+            selected_expert_count: 8,
+            shared_expert_count: 0,
+            fallback_allowed: false,
+            fallback_used: false,
+            gcn_arch_name: "gfx1201".to_owned(),
+            kernel_symbol: "moe_expert.gemma4.nvfp4.prefill.active_pairs.v2".to_owned(),
+            device_symbol: "sllm_moe_expert_gemma4_nvfp4_active_pairs_v2".to_owned(),
+        };
+        let standalone = dispatch_from_moe_expert(expert_dispatch.clone(), 0);
+        let qwen_combined = dispatch_from_moe_expert(expert_dispatch, 3);
+        assert_eq!(standalone.dispatch_count, 4);
+        assert_eq!(qwen_combined.dispatch_count, 7);
+        assert_eq!(standalone.row_count, 3);
+        assert_eq!(standalone.normalized_size, 24);
+    }
+
+    #[test]
     fn rotary_dispatch_mapping_preserves_non_aligned_shape_and_target() {
         let dispatch = dispatch_from_rotary(RotaryDispatchInfo {
             abi_version: 1,
@@ -2687,6 +3457,37 @@ mod tests {
         });
         assert_eq!(dispatch.row_count, 3);
         assert_eq!(dispatch.normalized_size, 6);
+        assert_eq!(dispatch.target, "gfx1030");
+        assert!(!dispatch.fallback_allowed);
+        assert!(!dispatch.fallback_used);
+    }
+
+    #[test]
+    fn ministral3_yarn_dispatch_mapping_preserves_fixed_head_geometry() {
+        let dispatch = dispatch_from_ministral3_yarn(Ministral3YarnDispatchInfo {
+            abi_version: 1,
+            info_version: 1,
+            dispatch_id: 60,
+            dispatch_count: 1,
+            kernel_id: 1,
+            workgroup_size_x: 256,
+            grid_size_x: 4,
+            token_count: 3,
+            q_heads: 32,
+            kv_heads: 8,
+            head_dim: 128,
+            rotary_dim: 128,
+            start_position: 16_383,
+            max_position: 262_144,
+            backend: sys::SLLM_BACKEND_HIP,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: "ministral3_yarn.bf16.split_half.qscale.v1".to_owned(),
+            device_symbol: "sllm_ministral3_yarn_bf16_split_half_qscale_v1".to_owned(),
+            gcn_arch_name: "gfx1030".to_owned(),
+        });
+        assert_eq!(dispatch.row_count, 3);
+        assert_eq!(dispatch.normalized_size, 128);
         assert_eq!(dispatch.target, "gfx1030");
         assert!(!dispatch.fallback_allowed);
         assert!(!dispatch.fallback_used);

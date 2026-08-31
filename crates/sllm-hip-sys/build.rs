@@ -305,6 +305,12 @@ fn main() {
     let rotary_kernel_internal = source_dir.join("src/rotary_kernel_internal.hpp");
     let rotary_kernel = source_dir.join("src/rotary_kernel.hip.cpp");
     let rotary_runtime = source_dir.join("src/rotary_runtime.inc");
+    let ministral3_yarn_api_header = source_dir.join("src/ministral3_yarn_api.hpp");
+    let ministral3_yarn_api = source_dir.join("src/ministral3_yarn_api.cpp");
+    let ministral3_yarn_kernel_internal =
+        source_dir.join("src/ministral3_yarn_kernel_internal.hpp");
+    let ministral3_yarn_kernel = source_dir.join("src/ministral3_yarn_kernel.hip.cpp");
+    let ministral3_yarn_runtime = source_dir.join("src/ministral3_yarn_runtime.inc");
     let windowed_attention_api_header = source_dir.join("src/windowed_attention_api.hpp");
     let windowed_attention_api = source_dir.join("src/windowed_attention_api.cpp");
     let windowed_attention_runtime = source_dir.join("src/windowed_attention_runtime.inc");
@@ -335,6 +341,25 @@ fn main() {
     let moe_route_kernel_internal = source_dir.join("src/moe_route_kernel_internal.hpp");
     let moe_route_kernel = source_dir.join("src/moe_route_kernel.hip.cpp");
     let moe_route_runtime = source_dir.join("src/moe_route_runtime.inc");
+    let deepseek_v4_moe_route_api_header = source_dir.join("src/deepseek_v4_moe_route_api.hpp");
+    let deepseek_v4_moe_route_api = source_dir.join("src/deepseek_v4_moe_route_api.cpp");
+    let deepseek_v4_moe_route_stub = source_dir.join("src/deepseek_v4_moe_route_stub.cpp");
+    let deepseek_v4_moe_route_public_runtime =
+        source_dir.join("src/deepseek_v4_moe_route_public_runtime.hip.cpp");
+    let deepseek_v4_moe_route_runtime = source_dir.join("src/deepseek_v4_moe_route_runtime.inc");
+    let deepseek_v4_moe_route_kernel_internal =
+        source_dir.join("src/deepseek_v4_moe_route_kernel_internal.hpp");
+    let deepseek_v4_moe_route_kernel = source_dir.join("src/deepseek_v4_moe_route_kernel.hip.cpp");
+    let minimax_m3_moe_route_api_header = source_dir.join("src/minimax_m3_moe_route_api.hpp");
+    let minimax_m3_moe_route_api = source_dir.join("src/minimax_m3_moe_route_api.cpp");
+    let minimax_m3_moe_route_stub = source_dir.join("src/minimax_m3_moe_route_stub.cpp");
+    let minimax_m3_moe_route_public_runtime =
+        source_dir.join("src/minimax_m3_moe_route_public_runtime.hip.cpp");
+    let minimax_m3_moe_route_runtime = source_dir.join("src/minimax_m3_moe_route_runtime.inc");
+    let minimax_m3_moe_route_kernel_internal =
+        source_dir.join("src/minimax_m3_moe_route_kernel_internal.hpp");
+    let minimax_m3_moe_route_kernel = source_dir.join("src/minimax_m3_moe_route_kernel.hip.cpp");
+    let minimax_m3_moe_route_gpu_test = source_dir.join("tests/minimax_m3_moe_route_gpu_test.cpp");
     let moe_expert_api_header = source_dir.join("src/moe_expert_api.hpp");
     let moe_expert_api = source_dir.join("src/moe_expert_api.cpp");
     let moe_expert_kernel_internal = source_dir.join("src/moe_expert_kernel_internal.hpp");
@@ -481,6 +506,23 @@ fn main() {
     println!("cargo:rerun-if-changed={}", rotary_runtime.display());
     println!(
         "cargo:rerun-if-changed={}",
+        ministral3_yarn_api_header.display()
+    );
+    println!("cargo:rerun-if-changed={}", ministral3_yarn_api.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        ministral3_yarn_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        ministral3_yarn_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        ministral3_yarn_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         windowed_attention_api_header.display()
     );
     println!(
@@ -560,6 +602,66 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", moe_route_kernel.display());
     println!("cargo:rerun-if-changed={}", moe_route_runtime.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_api_header.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_api.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_stub.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_public_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        deepseek_v4_moe_route_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_api_header.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_api.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_stub.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_public_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_runtime.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_kernel_internal.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_kernel.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        minimax_m3_moe_route_gpu_test.display()
+    );
     println!("cargo:rerun-if-changed={}", moe_expert_api_header.display());
     println!("cargo:rerun-if-changed={}", moe_expert_api.display());
     println!(
@@ -1214,6 +1316,10 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_KV_STATE_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_VERSION);\n\
              println!(\"const SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION);\n\
              println!(\"const SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION);\n\
+             println!(\"const SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION={{}}\", bindings::SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION);\n\
+             println!(\"const SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION={{}}\", bindings::SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION);\n\
+             println!(\"const SLLM_HIP_KV_SLIDING_MAX_CAPACITY={{}}\", bindings::SLLM_HIP_KV_SLIDING_MAX_CAPACITY);\n\
+             println!(\"const SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4={{}}\", bindings::SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_STATIC_TOKEN_MAJOR_V1);\n\
              println!(\"const SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1={{}}\", bindings::SLLM_HIP_KV_KERNEL_ID_BF16_TO_NVFP4_TOKEN_MAJOR_V1);\n\
@@ -1234,6 +1340,11 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_KV_ENCODING_MXFP8_E4_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_MXFP8_E4_V1);\n\
              println!(\"const SLLM_HIP_KV_ENCODING_MXFP8_E5_V1={{}}\", bindings::SLLM_HIP_KV_ENCODING_MXFP8_E5_V1);\n\
              println!(\"const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3);\n\
+             println!(\"const SLLM_HIP_STATE_IMAGE_SLIDING_VERSION={{}}\", bindings::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION);\n\
+             println!(\"const SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION);\n\
+             println!(\"const SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION);\n\
+             println!(\"const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1);\n\
+             println!(\"const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1={{}}\", bindings::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1);\n\
              println!(\"const SLLM_BACKEND_HIP={{}}\", bindings::SLLM_BACKEND_HIP);\n\
              println!(\"const SLLM_ACCESS_READ={{}}\", bindings::SLLM_ACCESS_READ);\n\
              println!(\"const SLLM_ACCESS_WRITE={{}}\", bindings::SLLM_ACCESS_WRITE);\n\
@@ -1252,6 +1363,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1);\n\
+             println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE);\n\
@@ -1307,10 +1419,44 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MOE_ROUTE_MAX_TOKENS={{}}\", bindings::SLLM_HIP_MOE_ROUTE_MAX_TOKENS);\n\
              println!(\"const SLLM_HIP_MOE_ROUTE_MAX_EXPERTS={{}}\", bindings::SLLM_HIP_MOE_ROUTE_MAX_EXPERTS);\n\
              println!(\"const SLLM_HIP_MOE_ROUTE_MAX_SELECTED={{}}\", bindings::SLLM_HIP_MOE_ROUTE_MAX_SELECTED);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_SCORE_V1={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_SCORE_V1);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT);\n\
+             println!(\"const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT={{}}\", bindings::SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT);\n\
+             println!(\"const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER={{}}\", bindings::SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_MAX_TOKENS={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_MAX_TOKENS);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT);\n\
+             println!(\"const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT={{}}\", bindings::SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT);\n\
+             println!(\"const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK={{}}\", bindings::SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK);\n\
+             println!(\"const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE={{}}\", bindings::SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE);\n\
+             println!(\"const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER={{}}\", bindings::SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_VERSION={{}}\", bindings::SLLM_HIP_MOE_EXPERT_VERSION);\n\
+             println!(\"const SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION={{}}\", bindings::SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1={{}}\", bindings::SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1={{}}\", bindings::SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1);\n\
+             println!(\"const SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2={{}}\", bindings::SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2);\n\
+             println!(\"const SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2={{}}\", bindings::SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE);\n\
@@ -1320,6 +1466,12 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MOE_EXPERT_TOPK={{}}\", bindings::SLLM_HIP_MOE_EXPERT_TOPK);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES={{}}\", bindings::SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES);\n\
              println!(\"const SLLM_HIP_MOE_EXPERT_MAX_TOKENS={{}}\", bindings::SLLM_HIP_MOE_EXPERT_MAX_TOKENS);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES);\n\
+             println!(\"const SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN={{}}\", bindings::SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_VERSION={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_VERSION);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1={{}}\", bindings::SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1);\n\
@@ -1344,6 +1496,19 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ROTARY_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_ROTARY_WORKGROUP_SIZE);\n\
              println!(\"const SLLM_HIP_ROTARY_MAX_M={{}}\", bindings::SLLM_HIP_ROTARY_MAX_M);\n\
              println!(\"const SLLM_HIP_ROTARY_MAX_POSITION={{}}\", bindings::SLLM_HIP_ROTARY_MAX_POSITION);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_VERSION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_VERSION);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_Q_HEADS={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_Q_HEADS);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_KV_HEADS={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KV_HEADS);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_MAX_M={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_MAX_M);\n\
              println!(\"const SLLM_HIP_WINDOWED_ATTENTION_VERSION={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_VERSION);\n\
              println!(\"const SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1={{}}\", bindings::SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1);\n\
@@ -1380,6 +1545,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP);\n\
              println!(\"const SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD);\n\
+             println!(\"const SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL={{}}\", bindings::SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL);\n\
              println!(\"const SLLM_COMPLETION_STATE_PENDING={{}}\", bindings::SLLM_COMPLETION_STATE_PENDING);\n\
              println!(\"const SLLM_COMPLETION_STATE_SUCCESS={{}}\", bindings::SLLM_COMPLETION_STATE_SUCCESS);\n\
              println!(\"const SLLM_COMPLETION_STATE_FAILURE={{}}\", bindings::SLLM_COMPLETION_STATE_FAILURE);\n\
@@ -1406,6 +1572,9 @@ fn verify_checked_in_bindings(
              println!(\"layout sllm_argmax_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} row_count={{}} vocab_size={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_argmax_dispatch_info_t>(), align_of::<bindings::sllm_argmax_dispatch_info_t>(), offset_of!(bindings::sllm_argmax_dispatch_info_t, struct_size), offset_of!(bindings::sllm_argmax_dispatch_info_t, abi_version), offset_of!(bindings::sllm_argmax_dispatch_info_t, info_version), offset_of!(bindings::sllm_argmax_dispatch_info_t, backend), offset_of!(bindings::sllm_argmax_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_argmax_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_argmax_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_argmax_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_argmax_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_argmax_dispatch_info_t, row_count), offset_of!(bindings::sllm_argmax_dispatch_info_t, vocab_size), offset_of!(bindings::sllm_argmax_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_argmax_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_argmax_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_argmax_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_argmax_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_argmax_dispatch_info_t, reserved));\n\
              println!(\"layout sllm_moe_route_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} selected_expert_count={{}} reserved={{}} logits={{}} metadata={{}}\", size_of::<bindings::sllm_moe_route_desc_t>(), align_of::<bindings::sllm_moe_route_desc_t>(), offset_of!(bindings::sllm_moe_route_desc_t, struct_size), offset_of!(bindings::sllm_moe_route_desc_t, abi_version), offset_of!(bindings::sllm_moe_route_desc_t, op_version), offset_of!(bindings::sllm_moe_route_desc_t, selected_expert_count), offset_of!(bindings::sllm_moe_route_desc_t, reserved), offset_of!(bindings::sllm_moe_route_desc_t, logits), offset_of!(bindings::sllm_moe_route_desc_t, metadata));\n\
              println!(\"layout sllm_moe_route_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} token_count={{}} expert_count={{}} pair_count={{}} selected_expert_count={{}} fallback_allowed={{}} fallback_used={{}} reserved0={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_moe_route_dispatch_info_t>(), align_of::<bindings::sllm_moe_route_dispatch_info_t>(), offset_of!(bindings::sllm_moe_route_dispatch_info_t, struct_size), offset_of!(bindings::sllm_moe_route_dispatch_info_t, abi_version), offset_of!(bindings::sllm_moe_route_dispatch_info_t, info_version), offset_of!(bindings::sllm_moe_route_dispatch_info_t, backend), offset_of!(bindings::sllm_moe_route_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_moe_route_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_moe_route_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_moe_route_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_moe_route_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_moe_route_dispatch_info_t, token_count), offset_of!(bindings::sllm_moe_route_dispatch_info_t, expert_count), offset_of!(bindings::sllm_moe_route_dispatch_info_t, pair_count), offset_of!(bindings::sllm_moe_route_dispatch_info_t, selected_expert_count), offset_of!(bindings::sllm_moe_route_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_moe_route_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_moe_route_dispatch_info_t, reserved0), offset_of!(bindings::sllm_moe_route_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_moe_route_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_moe_route_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_moe_route_dispatch_info_t, reserved));\n\
+             println!(\"layout sllm_deepseek_v4_moe_route_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} mode={{}} selected_expert_count={{}} renormalize={{}} routed_scale={{}} reserved0={{}} reserved={{}} logits={{}} selection_bias={{}} hash_expert_ids={{}} metadata={{}}\", size_of::<bindings::sllm_deepseek_v4_moe_route_desc_t>(), align_of::<bindings::sllm_deepseek_v4_moe_route_desc_t>(), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, struct_size), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, abi_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, op_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, mode), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, selected_expert_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, renormalize), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, routed_scale), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, reserved0), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, reserved), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, logits), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, selection_bias), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, hash_expert_ids), offset_of!(bindings::sllm_deepseek_v4_moe_route_desc_t, metadata));\n\
+             println!(\"layout sllm_deepseek_v4_moe_route_query_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} mode={{}} token_count={{}} expert_count={{}} pair_count={{}} metadata_bytes={{}} selected_expert_count={{}} renormalize={{}} routed_scale={{}} reserved0={{}} reserved={{}}\", size_of::<bindings::sllm_deepseek_v4_moe_route_query_info_t>(), align_of::<bindings::sllm_deepseek_v4_moe_route_query_info_t>(), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, struct_size), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, abi_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, info_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, mode), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, token_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, expert_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, pair_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, metadata_bytes), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, selected_expert_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, renormalize), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, routed_scale), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, reserved0), offset_of!(bindings::sllm_deepseek_v4_moe_route_query_info_t, reserved));\n\
+             println!(\"layout sllm_deepseek_v4_moe_route_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} token_count={{}} expert_count={{}} pair_count={{}} selected_expert_count={{}} mode={{}} renormalize={{}} fallback_allowed={{}} fallback_used={{}} reserved0={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_deepseek_v4_moe_route_dispatch_info_t>(), align_of::<bindings::sllm_deepseek_v4_moe_route_dispatch_info_t>(), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, struct_size), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, abi_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, info_version), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, backend), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, token_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, expert_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, pair_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, selected_expert_count), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, mode), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, renormalize), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, reserved0), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_deepseek_v4_moe_route_dispatch_info_t, reserved));\n\
              println!(\"layout sllm_moe_expert_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} reserved0={{}} reserved={{}} hidden={{}} routing_metadata={{}} layer_blob={{}} workspace={{}} output={{}}\", size_of::<bindings::sllm_moe_expert_desc_t>(), align_of::<bindings::sllm_moe_expert_desc_t>(), offset_of!(bindings::sllm_moe_expert_desc_t, struct_size), offset_of!(bindings::sllm_moe_expert_desc_t, abi_version), offset_of!(bindings::sllm_moe_expert_desc_t, op_version), offset_of!(bindings::sllm_moe_expert_desc_t, reserved0), offset_of!(bindings::sllm_moe_expert_desc_t, reserved), offset_of!(bindings::sllm_moe_expert_desc_t, hidden), offset_of!(bindings::sllm_moe_expert_desc_t, routing_metadata), offset_of!(bindings::sllm_moe_expert_desc_t, layer_blob), offset_of!(bindings::sllm_moe_expert_desc_t, workspace), offset_of!(bindings::sllm_moe_expert_desc_t, output));\n\
              println!(\"layout sllm_moe_expert_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} token_count={{}} active_pair_count={{}} workspace_bytes={{}} selected_expert_count={{}} shared_expert_count={{}} fallback_allowed={{}} fallback_used={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_moe_expert_dispatch_info_t>(), align_of::<bindings::sllm_moe_expert_dispatch_info_t>(), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, struct_size), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, abi_version), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, info_version), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, backend), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, token_count), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, active_pair_count), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, workspace_bytes), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, selected_expert_count), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, shared_expert_count), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_moe_expert_dispatch_info_t, reserved));\n\
              println!(\"layout sllm_attention_preprocess_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} start_position={{}} reserved={{}} packed_q_gate={{}} k={{}} q_raw_scale={{}} k_raw_scale={{}} positions={{}} q_output={{}} gate_output={{}} k_output={{}}\", size_of::<bindings::sllm_attention_preprocess_desc_t>(), align_of::<bindings::sllm_attention_preprocess_desc_t>(), offset_of!(bindings::sllm_attention_preprocess_desc_t, struct_size), offset_of!(bindings::sllm_attention_preprocess_desc_t, abi_version), offset_of!(bindings::sllm_attention_preprocess_desc_t, op_version), offset_of!(bindings::sllm_attention_preprocess_desc_t, start_position), offset_of!(bindings::sllm_attention_preprocess_desc_t, reserved), offset_of!(bindings::sllm_attention_preprocess_desc_t, packed_q_gate), offset_of!(bindings::sllm_attention_preprocess_desc_t, k), offset_of!(bindings::sllm_attention_preprocess_desc_t, q_raw_scale), offset_of!(bindings::sllm_attention_preprocess_desc_t, k_raw_scale), offset_of!(bindings::sllm_attention_preprocess_desc_t, positions), offset_of!(bindings::sllm_attention_preprocess_desc_t, q_output), offset_of!(bindings::sllm_attention_preprocess_desc_t, gate_output), offset_of!(bindings::sllm_attention_preprocess_desc_t, k_output));\n\
@@ -1429,6 +1598,9 @@ fn verify_checked_in_bindings(
              println!(\"layout sllm_state_fork_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} mode={{}} source_state_identity={{}} child_state_identity={{}} source_owned_bytes={{}} child_owned_bytes={{}} copied_bytes={{}} shared_bytes={{}} published_length={{}} page_bytes={{}} reserved={{}}\", size_of::<bindings::sllm_state_fork_info_t>(), align_of::<bindings::sllm_state_fork_info_t>(), offset_of!(bindings::sllm_state_fork_info_t, struct_size), offset_of!(bindings::sllm_state_fork_info_t, abi_version), offset_of!(bindings::sllm_state_fork_info_t, info_version), offset_of!(bindings::sllm_state_fork_info_t, mode), offset_of!(bindings::sllm_state_fork_info_t, source_state_identity), offset_of!(bindings::sllm_state_fork_info_t, child_state_identity), offset_of!(bindings::sllm_state_fork_info_t, source_owned_bytes), offset_of!(bindings::sllm_state_fork_info_t, child_owned_bytes), offset_of!(bindings::sllm_state_fork_info_t, copied_bytes), offset_of!(bindings::sllm_state_fork_info_t, shared_bytes), offset_of!(bindings::sllm_state_fork_info_t, published_length), offset_of!(bindings::sllm_state_fork_info_t, page_bytes), offset_of!(bindings::sllm_state_fork_info_t, reserved));\n\
              println!(\"layout sllm_state_chunk_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} plane={{}} byte_offset={{}} byte_length={{}} host_pointer={{}} host_capacity={{}} reserved={{}}\", size_of::<bindings::sllm_state_chunk_t>(), align_of::<bindings::sllm_state_chunk_t>(), offset_of!(bindings::sllm_state_chunk_t, struct_size), offset_of!(bindings::sllm_state_chunk_t, abi_version), offset_of!(bindings::sllm_state_chunk_t, info_version), offset_of!(bindings::sllm_state_chunk_t, plane), offset_of!(bindings::sllm_state_chunk_t, byte_offset), offset_of!(bindings::sllm_state_chunk_t, byte_length), offset_of!(bindings::sllm_state_chunk_t, host_pointer), offset_of!(bindings::sllm_state_chunk_t, host_capacity), offset_of!(bindings::sllm_state_chunk_t, reserved));\n\
              println!(\"layout sllm_state_image_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} session_id={{}} layer_id={{}} dtype={{}} encoding={{}} active_slot={{}} capacity_tokens={{}} published_length={{}} generation={{}} plane_count={{}} reserved={{}}\", size_of::<bindings::sllm_state_image_info_t>(), align_of::<bindings::sllm_state_image_info_t>(), offset_of!(bindings::sllm_state_image_info_t, struct_size), offset_of!(bindings::sllm_state_image_info_t, abi_version), offset_of!(bindings::sllm_state_image_info_t, info_version), offset_of!(bindings::sllm_state_image_info_t, session_id), offset_of!(bindings::sllm_state_image_info_t, layer_id), offset_of!(bindings::sllm_state_image_info_t, dtype), offset_of!(bindings::sllm_state_image_info_t, encoding), offset_of!(bindings::sllm_state_image_info_t, active_slot), offset_of!(bindings::sllm_state_image_info_t, capacity_tokens), offset_of!(bindings::sllm_state_image_info_t, published_length), offset_of!(bindings::sllm_state_image_info_t, generation), offset_of!(bindings::sllm_state_image_info_t, plane_count), offset_of!(bindings::sllm_state_image_info_t, reserved));\n\
+             println!(\"layout sllm_minimax_m3_moe_route_desc_t size={{}} align={{}} struct_size={{}} abi_version={{}} op_version={{}} selected_expert_count={{}} reserved={{}} logits={{}} selection_bias={{}} metadata={{}}\", size_of::<bindings::sllm_minimax_m3_moe_route_desc_t>(), align_of::<bindings::sllm_minimax_m3_moe_route_desc_t>(), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, struct_size), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, abi_version), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, op_version), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, selected_expert_count), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, reserved), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, logits), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, selection_bias), offset_of!(bindings::sllm_minimax_m3_moe_route_desc_t, metadata));\n\
+             println!(\"layout sllm_minimax_m3_moe_route_query_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} selected_expert_count={{}} token_count={{}} expert_count={{}} pair_count={{}} metadata_bytes={{}} reserved={{}}\", size_of::<bindings::sllm_minimax_m3_moe_route_query_info_t>(), align_of::<bindings::sllm_minimax_m3_moe_route_query_info_t>(), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, struct_size), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, abi_version), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, info_version), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, selected_expert_count), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, token_count), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, expert_count), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, pair_count), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, metadata_bytes), offset_of!(bindings::sllm_minimax_m3_moe_route_query_info_t, reserved));\n\
+             println!(\"layout sllm_minimax_m3_moe_route_dispatch_info_t size={{}} align={{}} struct_size={{}} abi_version={{}} info_version={{}} backend={{}} dispatch_id={{}} dispatch_count={{}} kernel_id={{}} workgroup_size_x={{}} grid_size_x={{}} token_count={{}} expert_count={{}} pair_count={{}} selected_expert_count={{}} fallback_allowed={{}} fallback_used={{}} reserved0={{}} kernel_symbol={{}} device_symbol={{}} gcn_arch_name={{}} reserved={{}}\", size_of::<bindings::sllm_minimax_m3_moe_route_dispatch_info_t>(), align_of::<bindings::sllm_minimax_m3_moe_route_dispatch_info_t>(), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, struct_size), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, abi_version), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, info_version), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, backend), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, dispatch_id), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, dispatch_count), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, kernel_id), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, workgroup_size_x), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, grid_size_x), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, token_count), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, expert_count), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, pair_count), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, selected_expert_count), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, fallback_allowed), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, fallback_used), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, reserved0), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, kernel_symbol), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, device_symbol), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, gcn_arch_name), offset_of!(bindings::sllm_minimax_m3_moe_route_dispatch_info_t, reserved));\n\
          }}\n",
         bindings_path.display()
     );
@@ -1452,9 +1624,14 @@ fn verify_checked_in_bindings(
         "Rust ABI layout probe",
     );
 
+    let sorted_probe = |probe: &str| {
+        let mut lines = probe.lines().collect::<Vec<_>>();
+        lines.sort_unstable();
+        lines.join("\n")
+    };
     assert_eq!(
-        c_layout.trim(),
-        rust_layout.trim(),
+        sorted_probe(c_layout.trim()),
+        sorted_probe(rust_layout.trim()),
         "checked-in Rust bindings do not match include/sllm/hip.h ABI layout/constants\nC++:\n{}\nRust:\n{}",
         c_layout,
         rust_layout

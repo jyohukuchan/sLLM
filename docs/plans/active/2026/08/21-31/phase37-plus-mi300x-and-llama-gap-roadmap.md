@@ -16,6 +16,9 @@ Phase 51へ吸収する。Phase 39〜45は完了済みである。2026-08-26の�
 Phase 49〜53の性能・KV経路とPhase 46のtool／品質評価基盤は完了済みである。2026-08-27のユーザー指示により、
 block16の精度改善研究を独立したPhase 54へ割り当てる。
 default判定だけがPhase 46のfreeze済みKV品質policyに依存する。
+2026-08-30のユーザー決定でPhase 53/54のblock16製品経路を廃止し、reviewed Qwen3.5-4B BF16 dense textでは
+standard OCP `kv-mxfp8-e4`（E4M3FN、block 32、E8M0 scale）を省略時KVへ採用した。明示`fp16`はrollbackとして残す。
+block16のschema、policy、research source、証拠は互換入力やproduction候補ではなく、監査可能な履歴としてだけ保持する。
 
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
@@ -64,21 +67,21 @@ default判定だけがPhase 46のfreeze済みKV品質policyに依存する。
 | 45 | complete (host + RDNA GPU; MI300X deferred) | LoRA/control vector、dynamic model lifecycle/router cache | model lock・Phase 39 ops |
 | 46 | complete | conversion、quantization、benchmark、quality/debug tools | stable GGUF/model identities、gfx1030 FP16 baseline、freeze済みKV policy |
 | 47 | approval-required | 組込みtool/MCP実行 | Phase 39 security・Phase 43 tool protocol |
-| 48 | planned | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
+| 48 | prototype-complete・継続中 | minimal WebUI/server UI | Phase 39・42〜45 public APIs |
 | 49 | complete-scoped-adoption | V620のGQA P32を限定採用、long-prefill v2とHIP Graphを棄却 | 3候補の関連実機行、通常5行退行確認、採否履歴 |
 | 50 | complete-limited-adoption | R9700 `gfx1201`採用とMI300X `gfx942` wave64引継ぎ準備 | Phase 49完了（充足済み） |
 | 51 | completed-target-separated | Phase 49/50採用内容のMI300X wave64適用・実機検証 | MI300X 7/7 PASS、GDN候補を既定無効でtarget分離 |
 | 52 | complete | R9700 `100,000/2`のKV物理コミットOOM解消 | 自動経路4/4 PASS、10,001 regression 13/13 PASS |
-| 53 | complete-target-separated | block16 descriptor v2／`StandardMxFloorPowerV1`。gfx1201／gfx1030 correctness PASS、品質未達で`retain-fp16`、gfx942実機は延期 | Phase 46のfreeze済みKV品質policyを継承したv2 policyを使用 |
-| 54 | complete-no-improvement | block16のK/V・layer別attribution、scale／rounding、attention-aware固定変換。勝者なしでFP16維持 | Phase 53 control／MXFP8比較、Phase 46のfreeze済み品質policy |
+| 53 | complete-superseded | block16 descriptor v2のtarget別評価を完了。2026-08-30の経路廃止により採用候補ではなく履歴化 | Phase 46のfreeze済みpolicyによる当時の評価を保持 |
+| 54 | complete-route-retired | block16精度研究は勝者なしで完了し、製品経路を廃止。standard OCP MXFP8 E4をreviewed scopeの既定KVへ採用 | explicit FP16 rollbackを維持、gfx942実機は一括検証へ延期 |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
 採用routeをexact `gfx1201`へ限定した。Phase 50の全7行llama.cpp同等達成は後続Phase開始のgateではない。Phase 46も完了し、
-Phase 53のdescriptor v1／旧scale recipeは二つのlocal target判定まで完了したが、ユーザー決定でdescriptor v2／
-`StandardMxFloorPowerV1`へ変更したため旧evidenceはsupersededとなった。v2のfresh correctnessは両local targetでPASSしたが品質未達で
-両方`retain-fp16`とし、Phase 53を完了した。gfx942は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期した。
-Phase 54は`no-improvement`で完了し、Phase 47〜48は内容と番号を保持する。
+Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠として完了済みである。2026-08-30のユーザー決定により
+block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
+`kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
+Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice
 state、Phase 41はassistant-prefill/state semantics、Phase 42はFIM/infill execution modeを所有する。Phase 42〜44の後続記述は、
@@ -568,86 +571,52 @@ network/filesystem、confirmation、audit保持を明示承認するまで`appro
 
 ## Phase 48: minimal WebUI/server UI
 
+2026-08-30に、公開HTTP APIだけを使うprototypeを`webui/`へ実装した。2026-08-31にGPU identityとprefill／decode throughputの
+dashboardをdefault viewへ追加し、chatをsecondary viewへ移した。live throughputは単一streaming request前後の`/metrics`差分から
+server-level推定値を計算する。`/props.hardware`はserver側HIP device queryだけを公開し、照会不能時は未提供と表示する。demo fixtureを
+GPU／live API証拠へ読み替えない。model選択／load／unload、chat SSE、`content`／`reasoning_content`分離、取消し、generation設定、
+状態／失敗表示も維持する。
+credentialはbrowser memoryだけに保持する。詳細は
+[prototype計画](phase48-minimal-webui-prototype.md)と
+[実装履歴](../../../../../history/2026/08/21-31/phase48-minimal-webui-prototype.md)を正本とする。
+追加承認によりdynamic loopback serverへmodel folder管理を追加し、直下GGUFの互換判定とalias登録を行う。さらに固定`hf` CLI経路で
+Hugging FaceのGGUF検索、完全commit SHA付きcommand copy、選択済みfolderへの単一download jobを追加した。これは構造化入力から作る
+限定admin操作であり、任意command／destination／token入力やPhase 47の汎用tool実行には拡張しない。
+source treeでは`sllm-server`のdefault WebUI起動、無効化／port option、runtime API URL注入、exact CORS、graceful shutdownを統合した。
+以下のfull Phase 48 scopeのうちsession、adapter、slot、key status、log、static asset組込み／versioned配布は未着手の継続項目であり、
+prototype完了をPhase全体完了へ読み替えない。
+
 ### Scope
 
-- sLLM HTTP APIだけを利用する薄いUIとして、model選択、chat/stream、reasoning/tool表示、sampling/structured controls、
-  session save/resume、adapter選択、health/metrics要約を提供する。
+- sLLM HTTP APIだけを利用する薄いUIとして、GPU identity、prefill／decode throughput、model選択を主surfaceにし、chat/stream、
+  reasoning/tool表示、sampling/structured controls、session save/resume、adapter選択、health/metrics要約を提供する。
 - admin面はmodel load/unload、slot cancel、key/credentialの値を表示しないstatus、log downloadを権限分離する。
 - UI資産はserver binaryへ埋め込むかversioned static artifactとして配布し、CDN依存と外部telemetryをdefaultで持たない。
 
 ### Acceptance
 
 - keyboard操作、stream cancel/reconnect、large conversation、tool/reasoning block、upload制限、XSS/CSRF/CORS、auth分離を検証する。
-- UIだけのhidden APIやmodel filesystem accessを作らず、APIで拒否される操作をUIが迂回しない。
+- browserからmodel filesystemへ直接accessせず、承認済みのloopback model-library／固定`hf` admin APIを使う。APIで拒否される操作をUIが迂回しない。
 - WebUIのrichnessは完了条件にせず、CLI/APIで利用できる機能の管理surfaceに限定する。
 
-## Phase 53: KV FP8 block16実装とtarget別default採用
+## Phase 53〜54: block16履歴とMXFP8 E4既定化
 
-詳細なformat contract、target matrix、state identity、GPU evidence、rollbackは
-[Phase 53保存済み計画](../../../../archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正本とする。
-
-### Scope
-
-- canonical public nameを正確に`kv-fp8-e4-block16`と`kv-fp8-e5-block16`とし、追加suffixやaliasを付けない。
-- 同一token、K/V plane、KV headのhead-dimension方向16値ごとにE8M0 scaleを持つ。tokenを跨ぐper-channel scale／calibrationは実装しない。
-- current descriptorは`kv-fp8-e4-block16-v2`／`kv-fp8-e5-block16-v2`で、scale recipeは
-  `StandardMxFloorPowerV1`とする。block sizeは16を維持し、standard MXFP8との差はblock sizeだけにする。
-- exact `gfx942:sramecc+:xnack-`と`gfx1201`はE4M3系、exact `gfx1030`はE5M2を候補とする。OCP／FNUZ／software codecは
-  descriptorとartifact identityで分離する。
-- format／append／direct attention／state lifecycleをadditiveに実装し、既存`fp16`、`fp8`、`fp8-static`、`nvfp4`の意味を変えない。
-- defaultはmodel entryのexplicit指定、process-wide explicit指定、verified target policy、FP16の順で解決する。未検証target、model、
-  shape、MoE／MTP／vision／Gemmaは個別証拠が揃うまでFP16を維持する。
-
-### Acceptance
-
-- 15／16／17、255／256／257のblock/tail、special value、K/V scale plane、append atomicity、grow/COW rollbackを独立oracleで確認する。
-- prefix/session/checkpoint/fork/state imageへencoding／descriptor／physical variantを結合し、異なるE4/E5/OCP/FNUZ stateを拒否する。
-- exact targetごとにfresh GPU oracle、full-model品質、性能、logical／physical memory、fallback 0、cleanupをtarget別summaryへ固定する。
-  実機未確保targetは`insufficient-evidence`を隠さず、ユーザーが一括検証へ延期した場合は未採用のままPhaseから分離できる。
-- default変更はN2としてPhase 46のfreeze済みpolicyで評価し、`adopt`のtargetだけ昇格する。一targetの未達で別targetをblockしない。
-- explicit FP16 rollbackと新形式のexplicit selectionを残し、unknown／unsupported選択をsilent fallbackしない。
-
-### 2026-08-27 descriptor v1 target-separated履歴とv2 follow-up
-
-- `kv-mxfp8-e4`／`kv-mxfp8-e5`をstandard OCP MXFP8 block32／E8M0のexplicit-only形式として追加した。
-- exact gfx1201/gfx1030のdescriptor v1 block16とMXFP8 correctnessはGPU append／direct attention、fallback 0、cleanup 0でPASSした。
-- FP16→block16→MXFP8の完全直列3 repeat品質測定は再現したが、block16のtop-1／long-context thresholdが両targetで未達となり、
-  descriptor v1のgfx1201／gfx1030を`retain-fp16`とした。frozen early-stopにより旧recipeの7行performance/resourceは実行しない。
-- gfx942はfresh Phase 53 reportがなく`insufficient-evidence`。standard OCP MXFP8はCDNA3 FNUZとbyte互換でないためunsupportedである。
-  MI300X実機はユーザー指示により、追加検証項目がまとまった時点の一括実行へ延期する。
-- runtime mapping候補は空で、省略時FP16を維持する。詳細digestとmetricsは
-  [Phase 53履歴](../../../../../history/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正とする。
-- descriptor v1のcorrectness／品質／非採用判定はsupersededで、descriptor v2のdefault採否へ流用しない。
-  descriptor v2は両local targetでcorrectness PASS、品質未達のため`retain-fp16`とし、MI300XはdeferredのままPhase 53から分離する。
-
-## Phase 54: KV FP8 block16精度改善研究
-
-研究candidate identity、Phase 53基準値、attribution、scale／rounding、K/V別recipe、固定transform、段階選別、target別採否は
-[Phase 54保存済み計画](../../../../archive/2026/08/21-31/phase54-kv-fp8-block16-accuracy-research.md)を正本とする。
-
-### Scope and acceptance
-
-- primary targetはexact gfx1030／E5M2、transfer targetはexact gfx1201／E4M3とし、MI300Xはfinalistがまとまるまで延期する。
-- block size 16、E8M0、per-token／K-V独立scaleを維持し、per-channel scale、sidecar、別低bit形式を自動追加しない。
-- K/V・layer・QK／softmax／attention output／logitまで劣化を分解し、主要因を確認してから候補を選ぶ。
-- 探索candidateは完全直列で一回だけ測定し、production v2とMXFP8 block32の両方をKLDで上回り、他品質metricを悪化させない
-  候補だけをfinalistとする。
-- 最大2 finalistだけfresh 3-repeat、resource、性能、state identityへ進め、現行frozen policyをPASSしたexact targetだけdefault採用できる。
-- 勝者がなくても棄却理由と証拠を残してPhaseを完了でき、production descriptor v2、空mapping、FP16 defaultを維持する。
-
-### Closeout
-
-- exact gfx1030は`no-improvement`。best KLDのV/O layers 19+31は`0.03337377972334127`だがMXFP8未達かつtop-1悪化、
-  他metricを維持したlayer 19単独も`0.033918254226008415`でMXFP8未達だった。
-- finalistがないため3-repeat、resource／性能、gfx1201 transfer、MI300Xは実行しない。FP16 default／空mapping／descriptor v2を維持する。
-- Phase 54研究経路はcompile feature限定で通常buildへ入らず、公開format／defaultとしては採用しない。
+- Phase 53のdescriptor v1／v2評価とPhase 54のattribution・scale・固定transform研究は完了済みで、詳細は
+  [Phase 53保存済み計画](../../../../archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)と
+  [Phase 54保存済み計画](../../../../archive/2026/08/21-31/phase54-kv-fp8-block16-accuracy-research.md)を正本とする。
+- block16はMXFP8を上回る品質候補を得られず、2026-08-30のユーザー決定でpublic parser、selector、Qwen graph、Rust→HIP state、
+  native state-create ABIから製品経路を廃止した。予約済みABI番号と履歴evidenceだけを監査用に保持する。
+- reviewed Qwen3.5-4B BF16 dense textの省略時KVは、exact `gfx1030`、`gfx1201`、`gfx942:sramecc+:xnack-`でstandard OCP
+  `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）とする。対象外model/laneはfixed FP16 recipeを維持し、明示`fp16`をrollbackに残す。
+- gfx1030／gfx1201のdirect GPU byte・packed attention oracleはHIP-only、fallback 0、cleanup 0でPASS済みである。
+  gfx942のfresh実機証拠は追加のMI300X項目と一括取得し、local RDNA作業をblockしない。
 
 ## Intentional exclusions and deferred items
 
 - Vulkan、一般的なllama.cpp INT4/INT8+scale形式は明示的な製品方針どおり対象外。
 - model family/architecture追加、RDNA3等の新hardware、CPU/NVIDIA、parallel/continuous batching、multi-GPU、Infinity Fabric、
   RCCL/RDMAは今回のllama.cpp機能差計画へ含めない。
-- LMCache、RadixAttention、Paged Attention、TurboQuant、Phase 53で明示した二つ以外の残るKV／MX形式は今回のPhaseへ自動追加しない。
+- LMCache、RadixAttention、Paged Attention、TurboQuant、standard OCP MXFP8 E4以外の残るKV／MX形式は今回のPhaseへ自動追加しない。
   Phase 41のcache/state ABIは後からproviderを追加できる形を維持する。
 - README整備、人間による発表、release packagingは別作業であり、Phase 37以降の受入をblockしない。
 - fixed llama.cppに存在する機能でも、外部仕様がないrerank、Anthropic、MCP、server extensionは「llama互換」を名乗らず、

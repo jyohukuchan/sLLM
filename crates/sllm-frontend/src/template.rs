@@ -10,13 +10,16 @@ use core::fmt;
 use std::cell::{Cell, RefCell};
 use std::io::{self, Write};
 use std::rc::Rc;
+use std::sync::Arc;
 
-use minijinja::{Environment, ErrorKind, UndefinedBehavior};
+use minijinja::value::{Value as MiniJinjaValue, ValueKind, from_args};
+use minijinja::{Environment, Error, ErrorKind, UndefinedBehavior};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 pub const GENERIC_TEMPLATE_PROFILE_VERSION_V1: u8 = 1;
+pub const GENERIC_TEMPLATE_REVIEWED_GEMMA4_PROFILE_VERSION_V1: u8 = 2;
 pub const GENERIC_TEMPLATE_MAX_SOURCE_BYTES_V1: usize = 64 * 1024;
 pub const GENERIC_TEMPLATE_MAX_OUTPUT_BYTES_V1: usize = 16 * 1024 * 1024;
 pub const GENERIC_TEMPLATE_MAX_MESSAGES_V1: usize = 1_024;
@@ -378,6 +381,13 @@ impl GenericTemplateSourceV1 {
 pub struct GenericTemplateProviderV1 {
     source: GenericTemplateSourceV1,
     environment: Environment<'static>,
+    profile_version: u8,
+}
+
+#[derive(Clone, Copy)]
+enum GenericTemplateBuiltinProfile {
+    Restricted,
+    ReviewedGemma4,
 }
 
 /// Compatibility alias for callers that use “renderer” terminology.
@@ -389,6 +399,7 @@ impl fmt::Debug for GenericTemplateProviderV1 {
             .debug_struct("GenericTemplateProviderV1")
             .field("digest", &self.source.digest())
             .field("size_bytes", &self.source.size_bytes())
+            .field("profile_version", &self.profile_version)
             .finish()
     }
 }
@@ -406,18 +417,63 @@ impl GenericTemplateProviderV1 {
     }
 
     fn from_source(source: GenericTemplateSourceV1) -> Result<Self, GenericTemplateErrorV1> {
+        Self::from_source_with_profile(source, GenericTemplateBuiltinProfile::Restricted)
+    }
+
+    pub(crate) fn from_reviewed_gemma4_bytes(
+        source: &[u8],
+        expected_digest: &str,
+    ) -> Result<Self, GenericTemplateErrorV1> {
+        let source = GenericTemplateSourceV1::from_bytes(source, expected_digest)?;
+        Self::from_source_with_profile(source, GenericTemplateBuiltinProfile::ReviewedGemma4)
+    }
+
+    fn from_source_with_profile(
+        source: GenericTemplateSourceV1,
+        profile: GenericTemplateBuiltinProfile,
+    ) -> Result<Self, GenericTemplateErrorV1> {
         let mut environment = Environment::<'static>::new();
         environment.set_undefined_behavior(UndefinedBehavior::Strict);
         environment.set_recursion_limit(GENERIC_TEMPLATE_MAX_RECURSION_V1);
         environment.set_fuel(Some(GENERIC_TEMPLATE_MAX_FUEL_V1));
         for filter in DISALLOWED_FILTERS {
-            environment.remove_filter(filter);
+            if !matches!(profile, GenericTemplateBuiltinProfile::ReviewedGemma4)
+                || !matches!(*filter, "dictsort" | "map" | "upper")
+            {
+                environment.remove_filter(filter);
+            }
         }
         for test in DISALLOWED_TESTS {
             environment.remove_test(test);
         }
         for global in DISALLOWED_GLOBALS {
-            environment.remove_global(global);
+            if !matches!(profile, GenericTemplateBuiltinProfile::ReviewedGemma4)
+                || !matches!(*global, "range" | "namespace")
+            {
+                environment.remove_global(global);
+            }
+        }
+        if matches!(profile, GenericTemplateBuiltinProfile::ReviewedGemma4) {
+            environment.set_unknown_method_callback(|_, value, method, args| {
+                match (value.kind(), method) {
+                    (ValueKind::String, "split") => {
+                        let (separator, max_splits): (Option<Arc<str>>, Option<i64>) =
+                            from_args(args)?;
+                        minijinja::filters::split(value, separator, max_splits)
+                    }
+                    (ValueKind::Map, "get") => {
+                        let (key, default): (&MiniJinjaValue, Option<&MiniJinjaValue>) =
+                            from_args(args)?;
+                        let found = value.get_item(key)?;
+                        if found.is_undefined() {
+                            Ok(default.cloned().unwrap_or_else(|| MiniJinjaValue::from(())))
+                        } else {
+                            Ok(found)
+                        }
+                    }
+                    _ => Err(Error::from(ErrorKind::UnknownMethod)),
+                }
+            });
         }
         environment
             .add_template_owned(TEMPLATE_NAME.to_owned(), source.source.clone())
@@ -425,6 +481,12 @@ impl GenericTemplateProviderV1 {
         Ok(Self {
             source,
             environment,
+            profile_version: match profile {
+                GenericTemplateBuiltinProfile::Restricted => GENERIC_TEMPLATE_PROFILE_VERSION_V1,
+                GenericTemplateBuiltinProfile::ReviewedGemma4 => {
+                    GENERIC_TEMPLATE_REVIEWED_GEMMA4_PROFILE_VERSION_V1
+                }
+            },
         })
     }
 
@@ -438,6 +500,10 @@ impl GenericTemplateProviderV1 {
 
     pub fn source_size_bytes(&self) -> usize {
         self.source.size_bytes()
+    }
+
+    pub const fn profile_version(&self) -> u8 {
+        self.profile_version
     }
 
     pub fn render<S: Serialize>(
@@ -503,7 +569,7 @@ impl GenericTemplateProviderV1 {
             kind: ErrorKind::WriteFailure,
         })?;
         let identity = GenericTemplateIdentityV1 {
-            profile_version: GENERIC_TEMPLATE_PROFILE_VERSION_V1,
+            profile_version: self.profile_version,
             template_digest: self.source.digest.clone(),
             source_size_bytes: self.source.size_bytes(),
             kwargs_digest,

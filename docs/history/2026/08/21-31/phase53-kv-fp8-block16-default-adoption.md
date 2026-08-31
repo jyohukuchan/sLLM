@@ -141,3 +141,12 @@ archiveした。その後のdescriptor v2／`StandardMxFloorPowerV1`決定によ
 再判定した。gfx1201／gfx1030はともに`retain-fp16`、MI300Xはdeferを維持し、Phase 53を完了した。
 
 [対応する保存済み計画](../../../../plans/archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)
+
+## 2026-08-30: block16経路廃止によるsupersede
+
+ユーザー決定によりblock16をpublic parser、selector、Qwen graph、Rust→HIP state、native state-create ABIの製品経路から廃止した。
+本履歴に残るdescriptor v1/v2、quality、空mapping、`retain-fp16`は当時の評価事実であり、現行defaultを表さない。
+reviewed Qwen3.5-4B BF16 dense textの省略時KVはstandard OCP `kv-mxfp8-e4`（E4M3FN、block 32、E8M0 scale）、
+明示rollbackは`fp16`である。ABI予約値、schema、policy、raw evidenceは監査履歴としてだけ保持する。
+
+[対応する保存済み計画](../../../../plans/archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)

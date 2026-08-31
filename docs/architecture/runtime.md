@@ -16,6 +16,7 @@ Cargo workspace
 ├── crates/sllm-hip
 ├── crates/sllm-cli
 ├── crates/sllm-server
+├── webui
 └── native/hip
     └── CMake project
 ```
@@ -27,7 +28,8 @@ Cargo workspace
 | `sllm-hip-sys` | versioned HIP C ABI の宣言、check-in した generated bindings、`build.rs` による native build と link 情報の伝達 |
 | `sllm-hip` | C ABI の安全な Rust wrapper、HIP backend 実装、resource ownership、非同期実行の lifetime と error 変換 |
 | `sllm-cli` | CLI、設定の読み込み、runtime の組み立てと起動。GPU resource の詳細を直接扱わない |
-| `sllm-server` | strict OpenAI profile DTO、model registry、bounded FIFO、HTTP/non-stream/SSE adapter、transport cancellation |
+| `sllm-server` | strict OpenAI profile DTO、model registry、bounded FIFO、HTTP/non-stream/SSE adapter、transport cancellation、local WebUI processの起動／終了 |
+| `webui` | GPU／throughput dashboard、chat、model library、Hugging Face取得をHTTP APIへ接続するlocal Vinext UI |
 | `native/hip` | HIP context、allocator、queues、events、operator dispatch、backend 内 kernel registry、HIP kernels |
 
 server contextはmodel artifactが宣言するnative/推奨値と、operator/stateが実際に使用する実行容量を分離する。
@@ -36,6 +38,22 @@ server contextはmodel artifactが宣言するnative/推奨値と、operator/sta
 1 dispatchのshape上限、memory確保失敗は独立した実装制約であり、model品質上の推奨値へ偽装しない。
 
 Rust 側は model graph を backend 非依存の op descriptor 列へ落とし、scheduler が request の実行順序と batch を決め、execution plan が tensor dependency と access mode を明示する。HIP 固有の queue 選択や kernel symbol は `sllm-core` に漏らさない。
+
+### Local WebUI process
+
+`sllm-server`はsource treeでの標準起動時にWebUIをdefault enabledとし、API listenerとは別の`localhost:65457`へVinext development processを
+起動する。`--webui false`はheadless、`--webui-port`は独立portである。WebUI有効時は省略時metricsと2つのloopback exact CORS originを有効にし、
+API base URLだけをWebUI server routeへruntime注入する。browser credentialは注入せずReact memoryに限定する。
+GPU identityは同じserver processのHIP device queryを`/props.hardware`へ公開し、browser側device APIから推測しない。
+
+WebUIはsLLMの子process groupとして所有し、startup readinessを確認してからserver readyを公開する。port 0、APIとの同一port、使用中port、
+依存欠落、WebUI早期終了はstartup errorであり、別portやdemo serverへ黙ってfallbackしない。sLLMのgraceful shutdownではprocess groupを
+TERM後bounded waitし、残存時だけKILLして回収する。release binaryへのasset埋込みとNode非依存配布はこのlocal process契約に含めない。
+Phase 55のactual `gemma4moe` smokeでは、modelなし標準起動からfolder選択、dynamic load、非stream／SSE／raw generation、metrics、
+prefix再利用、client cancellation、unloadまでを同じprocessで実行し、終了時にserver audit clean、両listener閉鎖、WebUI子process 0を確認した。
+WebUIの出力上限はstrict APIのcanonical `max_completion_tokens`を送る。
+Phase 56のGemma 4 MTP smokeでは、targetとassistantを一つのdynamic aliasへ結合し、loaded lifecycleからbackend observabilityを取得する。
+これによりmodel libraryのresident宣言、`/props`、`/metrics`は同じpaired resident量を報告し、unload後は0へ戻る。
 
 ## Backend 境界
 
@@ -211,6 +229,14 @@ attentionとKV appendはtransientを維持する。decode tailはpublished atten
 state-publicationとterminal-readbackの両boundary完了後だけ長さを公開する。greedyではArgmaxだけを返し、sampling時だけ最終
 BF16 logits rowをbounded chunkでreadbackしてからtransactionをcommitする。
 
+Gemma 4 26B-A4B MoEは別の`Gemma4MoeResidentModel`として、30 layerのdirect weight 567 rangeとlayer単位にpackした
+30 expert blobを一度だけresident化する。requestは25 sliding layerと5 full layerのopaque static E4M3 KV stateを保持し、
+sliding stateの物理ringは`min(logical capacity, window + 1)`、windowは1,024とする。最初の最大1,024-token prefill後は
+同じ30 stateへM=1でprompt suffixとdecodeを継続し、requestごとのweight展開、全expert dense実行、CPU numerical fallbackを
+行わない。prefix forkは同一session、portable checkpointはcross-sessionで30 stateを復元し、復元済みprefixを再appendせず
+新しいsuffixだけを実行する。公開CLI／single・dynamic server／model libraryはcanonical `gemma4moe` GGUF identityを自動判定し、
+KVはartifact固定の`fp8-static`だけを許可する。
+
 ## DType と量子化 encoding
 
 `DType` は BF16、FP16、FP8 など、要素の物理 scalar format を表す。量子化の scale、grouping、packing、codebook、tensor ごとの付加 metadata は `DType` に詰め込まず、独立した quantization encoding descriptor として表す。これにより、同じ低精度 storage dtype に複数の量子化方式を対応づけたり、weight、activation、KV cache で異なる encoding 制約を表現できる。
@@ -239,12 +265,56 @@ encoding、mixed-precision recipe、providerをloaderが自動解決し、低bit
 量子化済みartifactの選択をユーザーの明示選択とみなす。provider名やscale layoutは`doctor`、明示的なdiagnostic、benchmark reportで
 確認可能にするが、通常のgenerate/server応答へ品質警告を注入しない。
 
-Phase 20完了後の公開CLI/serverは`--gguf PATH --derived-lock PATH`だけをmodel入力として受け付ける。
+Phase 20完了後の公開CLIとsingle-model serverは`--gguf PATH --derived-lock PATH`だけをmodel入力として受け付ける。
 旧`--lock`/`--cache`、量子化sidecar、provider overrideは公開parserから削除した。safetensorsとsidecarのreaderはconverter・
 開発adapterに限定し、GGUFのhash/schema不一致、未対応encoding、memory/shape contract不成立はfallbackせずerrorにする。
 Qwen dense GGUFはtextだけでなく、同じverified descriptorからvision tensorとMTP componentをscope付きでlowerする。
 multimodal requestはrank-4物理tableから復元したlogical shapeでvision graphを構築し、text-only greedy `gfx1201`は同じGGUF内の
 MTP planをidentity/digest検証して内部providerへ渡す。
+
+Phase 48のloopback dynamic serverはmodel source optionを省略して起動できる。この場合、WebUIはserver側の
+`/admin/model-library*`でlocal folderを参照・選択し、選択pathをuser configへatomic保存する。browser自体へfilesystem権限は渡さない。
+走査はfolder直下のregular non-symlink GGUFへ限定し、architecture、同名derived lock、reviewed model identity、weight-plan digest、
+resident weight bytes、device 0 capacityを検証した後にだけPhase 45 lifecycleへ新しいaliasを登録する。未対応artifactはcatalogに理由を
+表示するがload対象にはしない。folder pathはmodel-library admin surfaceだけに現れ、推論requestと
+`/admin/models/{alias}/load|unload`は引き続きalias-onlyである。credential-free adminはloopback listenerだけで許可し、非loopbackの
+library-only起動はfail closedにする。既存manifest／single-model起動は互換経路として維持する。
+
+Phase 57の`deepseek4`は例外的なfoundation admissionである。bounded GGUF parserはarchitecture文字列を認識するが、model libraryは
+production registrationより前に必ず灰色行へ分岐し、reviewed source payload 166,878,536,440 bytesがKV／workspace前から単一
+R9700容量を超えることとbackend未実装を返す。derived lock、GPU有無、folder aliasにかかわらずdynamic registration callbackは
+呼ばれず、CLI／API／WebUI生成経路へ到達しない。
+
+DeepSeek V4 MoE routingは既存Gemma 4 softmax top-8 `MoeRoute` ABIを変更せず、専用top-6 semantic op／public HIP ABIを使う。
+score modeはBF16 logitsからFP32 `sqrt(softplus(logit))`を計算し、F32 biasはselectionにだけ使い、weightはunbiased scoreを
+renormalize後にpositive routed scaleへ掛ける。hash modeはmain layer 0..=2のI32 expert IDsだけをselectionに使い、weightは同じ
+logitsから計算する。両modeはduplicate／out-of-range hash ID、nonfinite、zero normalizerをdevice statusでfail-closeし、CPU fallbackを
+持たない。mHC、CSA／HCA cache、expert execution、full graphはこのrouting operator単独のevidenceからproduction対応へ推論しない。
+
+MiniMax M3の`minimax-m3`もfoundation admissionとして扱う。59 shardのfile合計854,176,398,808 bytes、header由来payload
+854,172,958,720 bytes、index宣言869,157,697,024 bytesの不整合を保持し、model libraryは最大値をresident admissionに使う。
+Community Licenseとproduction loader未対応を灰色行へ表示し、dynamic registration callback、CLI／API／WebUI generationへは渡さない。
+
+MiniMax M3 MoE routingは専用E=128／top-4 semantic opとpublic HIP ABIを使う。F32 logitsへstable sigmoidを適用し、F32 biasは
+selectionだけに使う。選択4 expertのunbiased sigmoid scoreを正規化して2.0倍し、stable low-ID tie順とexpert-major grouped metadataを
+生成する。nonfinite／zero normalizerはdevice statusから公開completionへfail-closeし、CPU fallbackを持たない。MSA、shared／routed
+expert execution、full graph、multimodal、MTPはこのoperator単独のevidenceからproduction対応へ推論しない。
+
+DiffusionGemmaの`diffusion-gemma`もfoundation admissionとして扱う。model libraryはApache-2.0、11 shard file合計
+51,647,701,024 bytes、production loader未対応を灰色行へ表示し、dynamic registration callbackや通常AR生成へ渡さない。
+外側は確定済み256-token canvasを次のcausal encoder prefillで一度だけKVへappendし、内側decoderはencoder KVをread-onlyに参照して
+current canvas全体をbidirectional attentionで更新する。decoder stepはKVを更新せず、previous processed logitsを
+self-conditioning signalに使う。
+
+uniform canvas、48回のreverse denoising、temperature schedule、entropy-bound acceptance、非accept位置のuniform renoise、
+argmax canvasのstabilityとmean entropyによるadaptive stopは独立host oracleへ固定する。これはCPU production fallbackではなく、
+後段のnative graph／providerが照合するsemantic contractである。full BF16 resident、multimodal、service、性能、single-GPU generationは
+Phase 59 foundationの範囲外とする。
+
+Phase 57のartifact readerは48 shardの8-byte length field＋JSON headerだけをbounded-readし、payloadをmaterializeせず、
+全72,317 tensorのdtype／shape／relative offset／absolute rangeをindexへ照合する。host-only semanticはmHC、CSA 4:1、
+HCA 128:1、CSA-only Lightning Indexer top-k 512とraw sliding window 128をcontainer／backendから分離する。
+これらはCPU production fallbackではなく、後段のnative graph／kernelが照合すべきoracleである。
 
 内部状態は一つの序列へ潰さず、少なくとも次を独立に記録する。
 
@@ -565,6 +635,19 @@ semantic Matmulへ下ろす。画像埋め込みはtyped multimodal promptでima
 decodeでは通常token embeddingを使い、vision encodeを再実行しない。初期実装はBF16 text artifactだけをvisionと組み合わせ、
 vision weightのlow-bit化とcross-request image cacheは後続範囲とする。
 
+### Gemma 4 MTP assistant
+
+Gemma 4 MTPは既存dense target ownerへ4層のQ-only assistantを接続する。assistantは独自K/Vを確保せず、target sliding layer 46と
+full layer 47のrequest-local KVをread-onlyで参照する。target embedding rowとnormalized hidden rowをpre projectionへ連結し、assistantの
+post projectionとvocab headから幅1のdraftを得る。target側は連続verification rowを未公開transactionとして保持し、model-neutral
+speculative adapterがaccept／reject／length／stop／cancel時に消費分だけを公開する。target-only greedyのtoken、finish reason、stop除外、usageを
+正本とし、assistantの一致率や速度を正しさへ読み替えない。
+
+公開runtime artifactは既存mixed NVFP4 W4A4／FP8 W8A8 `gemma4` target GGUFと、48 tensor BF16 `gemma4mtp` companion GGUFのpairである。
+static serverは両assistant pathと`--draft mtp-auto`を明示する。loopback model libraryはassistantを単独登録せず、exact `gfx1201`、pair identity、
+target＋assistant residentが選択deviceのVRAM内という条件を満たすtargetだけへ付加する。dynamic preflightはtargetのpacked payload、scale、alignment、
+graph constantを数え、BF16論理展開量をresident宣言に使わない。
+
 ## Build integration
 
 Cargo を top-level build entry point とする。`sllm-hip-sys/build.rs` が CMake を使って `native/hip` を configure/build し、Cargo に native link search path、library、必要な rerun 条件を伝える。CMake の configure/build/install output は Cargo が割り当てた `OUT_DIR` 以下だけに生成し、source tree や共有 build directory へ生成物を書かない。
@@ -679,3 +762,14 @@ client, and a later client request may return its result as untrusted history.
 The server does not resolve tool names or touch process, network, filesystem,
 environment, credentials, MCP, hosted tools, workers or sandboxes. Any such
 execution remains the separately approval-required Phase 47 boundary.
+
+## Phase 60 Ministral 3 text runtime boundary
+
+Ministral 3のtext ownerは公式GGUFから236 BF16 weightを常駐させ、26層のrequest-local FP16 KV、
+YaRN split-half RoPE、32:8 GQA、terminal-row logitsとdevice Argmaxを所有する。graphは499 node／105 zero-copy aliasで、
+prefillとM=1 decodeは同じowner上でKVを単調commitする。direct起動の既定contextは16,384であり、262,144は
+明示指定時だけadmitする。CLI、OpenAI buffered／SSE、dynamic model library、WebUIは同じexecutor/frontendを使う。
+
+exact `gfx1030`／`gfx1201`でHIP-only実行とcleanup 0までは確認したが、固定llama.cppのgreedy token列とは3 token目から
+一致しない。このためruntime wiringの存在をproduction品質合格へ読み替えない。Phase 60はactive planのまま一時停止し、
+再開時はhead dim 128のFP16 KV Attention逐次oracleと、layer／terminal logitsのF32対BF16境界を先に比較する。

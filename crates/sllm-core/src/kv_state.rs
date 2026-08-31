@@ -11,6 +11,9 @@ use std::num::NonZeroU64;
 use crate::execution::{ExecutionSessionId, KvStateId};
 use crate::{DType, Encoding, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 
+pub const KV_STATIC_FP8_SLIDING_WINDOW: u64 = 1024;
+pub const KV_STATIC_FP8_SLIDING_MAX_CAPACITY: u64 = 262_144;
+
 /// Versioned physical encoding selected for a request-local KV state.
 ///
 /// This is backend metadata, not a user-facing generation option. The model
@@ -442,6 +445,8 @@ pub struct CausalAttentionDescriptor {
     start_position: u64,
     query_count: u64,
     expected_kv_length: u64,
+    sliding_window: Option<NonZeroU64>,
+    score_scale_bits: Option<u32>,
 }
 
 impl CausalAttentionDescriptor {
@@ -466,7 +471,63 @@ impl CausalAttentionDescriptor {
             start_position,
             query_count,
             expected_kv_length,
+            sliding_window: None,
+            score_scale_bits: None,
         })
+    }
+
+    /// Constructs an explicitly windowed causal-attention request. Each query
+    /// at logical position `p` may read exactly
+    /// `p.saturating_add(1).saturating_sub(sliding_window)..=p`.
+    pub fn new_sliding(
+        start_position: u64,
+        query_count: u64,
+        expected_kv_length: u64,
+        sliding_window: u64,
+    ) -> Result<Self, KvStateError> {
+        if sliding_window != KV_STATIC_FP8_SLIDING_WINDOW {
+            return Err(KvStateError::InvalidLayout);
+        }
+        let mut descriptor = Self::new(start_position, query_count, expected_kv_length)?;
+        descriptor.sliding_window =
+            Some(NonZeroU64::new(sliding_window).ok_or(KvStateError::ZeroSlidingWindow)?);
+        Ok(descriptor)
+    }
+
+    pub fn new_scaled(
+        start_position: u64,
+        query_count: u64,
+        expected_kv_length: u64,
+        score_scale: f32,
+    ) -> Result<Self, KvStateError> {
+        let mut descriptor = Self::new(start_position, query_count, expected_kv_length)?;
+        descriptor.set_score_scale(score_scale)?;
+        Ok(descriptor)
+    }
+
+    pub fn new_sliding_scaled(
+        start_position: u64,
+        query_count: u64,
+        expected_kv_length: u64,
+        sliding_window: u64,
+        score_scale: f32,
+    ) -> Result<Self, KvStateError> {
+        let mut descriptor = Self::new_sliding(
+            start_position,
+            query_count,
+            expected_kv_length,
+            sliding_window,
+        )?;
+        descriptor.set_score_scale(score_scale)?;
+        Ok(descriptor)
+    }
+
+    fn set_score_scale(&mut self, score_scale: f32) -> Result<(), KvStateError> {
+        if !score_scale.is_finite() || score_scale <= 0.0 {
+            return Err(KvStateError::InvalidScoreScale);
+        }
+        self.score_scale_bits = Some(score_scale.to_bits());
+        Ok(())
     }
 
     pub const fn start_position(self) -> u64 {
@@ -480,6 +541,17 @@ impl CausalAttentionDescriptor {
     pub const fn expected_kv_length(self) -> u64 {
         self.expected_kv_length
     }
+
+    pub const fn sliding_window(self) -> Option<u64> {
+        match self.sliding_window {
+            Some(window) => Some(window.get()),
+            None => None,
+        }
+    }
+
+    pub fn score_scale(self) -> Option<f32> {
+        self.score_scale_bits.map(f32::from_bits)
+    }
 }
 
 /// Errors found while constructing typed KV metadata.
@@ -488,6 +560,8 @@ pub enum KvStateError {
     ZeroCapacity,
     InvalidLayout,
     ZeroQueryCount,
+    ZeroSlidingWindow,
+    InvalidScoreScale,
     LengthOverflow,
     LengthMismatch { expected: u64, actual: u64 },
     LengthOutOfBounds { length: u64, capacity: u64 },
@@ -505,6 +579,12 @@ impl fmt::Display for KvStateError {
                 formatter.write_str("KV state layout dimensions must be non-zero")
             }
             Self::ZeroQueryCount => formatter.write_str("attention query count must be non-zero"),
+            Self::ZeroSlidingWindow => {
+                formatter.write_str("sliding-attention window must be non-zero")
+            }
+            Self::InvalidScoreScale => {
+                formatter.write_str("attention score scale must be finite and positive")
+            }
             Self::LengthOverflow => formatter.write_str("attention length overflowed u64"),
             Self::LengthMismatch { expected, actual } => {
                 write!(
@@ -544,6 +624,7 @@ pub struct KvStateDescriptor {
     static_value_scale_bits: u32,
     kv_fp8_block16: Option<KvFp8Block16Descriptor>,
     kv_mxfp8: Option<KvMxfp8Descriptor>,
+    sliding_window: Option<NonZeroU64>,
 }
 
 impl KvStateDescriptor {
@@ -558,6 +639,7 @@ impl KvStateDescriptor {
             static_value_scale_bits: 0,
             kv_fp8_block16: None,
             kv_mxfp8: None,
+            sliding_window: None,
         })
     }
 
@@ -577,6 +659,7 @@ impl KvStateDescriptor {
             static_value_scale_bits: 0,
             kv_fp8_block16: None,
             kv_mxfp8: None,
+            sliding_window: None,
         })
     }
 
@@ -597,6 +680,7 @@ impl KvStateDescriptor {
             static_value_scale_bits: 0,
             kv_fp8_block16: KvFp8Block16Descriptor::canonical_for_encoding(cache_encoding),
             kv_mxfp8: KvMxfp8Descriptor::canonical_for_encoding(cache_encoding),
+            sliding_window: None,
         })
     }
 
@@ -616,6 +700,35 @@ impl KvStateDescriptor {
             physical_variant,
         )?);
         Ok(descriptor)
+    }
+
+    /// Adds a physical retained-window contract without changing the logical
+    /// capacity or length domain. The current native sliding provider is
+    /// intentionally limited to unit-scale static E4M3 and fails closed for
+    /// every other encoding.
+    pub fn with_sliding_window(mut self, sliding_window: u64) -> Result<Self, KvStateError> {
+        let window = NonZeroU64::new(sliding_window).ok_or(KvStateError::ZeroSlidingWindow)?;
+        if sliding_window != KV_STATIC_FP8_SLIDING_WINDOW
+            || self.capacity() > KV_STATIC_FP8_SLIDING_MAX_CAPACITY
+            || sliding_window > self.capacity()
+            || self.cache_encoding != KvCacheEncoding::Fp8E4M3FnStatic
+            || self.static_fp8_scales() != Some((1.0, 1.0))
+        {
+            return Err(KvStateError::InvalidLayout);
+        }
+        self.sliding_window = Some(window);
+        Ok(self)
+    }
+
+    pub fn new_with_static_fp8_sliding(
+        layer_id: u32,
+        capacity: u64,
+        heads: usize,
+        head_dim: usize,
+        sliding_window: u64,
+    ) -> Result<Self, KvStateError> {
+        Self::new_with_static_fp8(layer_id, capacity, heads, head_dim, 1.0, 1.0)?
+            .with_sliding_window(sliding_window)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -673,7 +786,7 @@ impl KvStateDescriptor {
     }
 
     pub const fn storage_shape(self) -> [u64; 3] {
-        self.layout().storage_shape(self.capacity())
+        self.layout().storage_shape(self.physical_capacity_tokens())
     }
 
     pub const fn dtype(self) -> DType {
@@ -702,6 +815,30 @@ impl KvStateDescriptor {
         self.kv_mxfp8
     }
 
+    pub const fn sliding_window(self) -> Option<u64> {
+        match self.sliding_window {
+            Some(window) => Some(window.get()),
+            None => None,
+        }
+    }
+
+    /// Maximum number of token rows physically owned by each K/V plane.
+    /// Sliding state keeps one spare row so a canceled saturated append cannot
+    /// overwrite the oldest still-published row.
+    pub const fn physical_capacity_tokens(self) -> u64 {
+        match self.sliding_window {
+            Some(window) => {
+                let ring_capacity = window.get().saturating_add(1);
+                if self.capacity.get() < ring_capacity {
+                    self.capacity.get()
+                } else {
+                    ring_capacity
+                }
+            }
+            None => self.capacity.get(),
+        }
+    }
+
     pub fn static_fp8_scales(self) -> Option<(f32, f32)> {
         (self.cache_encoding == KvCacheEncoding::Fp8E4M3FnStatic).then(|| {
             (
@@ -715,7 +852,7 @@ impl KvStateDescriptor {
     /// planes. Static FP8 scales are descriptor scalars and own no device
     /// scale plane. The complete state owns two such composites.
     pub fn resident_bytes_per_plane(self) -> Option<u64> {
-        let capacity = self.capacity();
+        let capacity = self.physical_capacity_tokens();
         let heads = u64::try_from(self.layout.heads()).ok()?;
         let head_dim = u64::try_from(self.layout.head_dim()).ok()?;
         let bytes_per_token = match self.cache_encoding {
@@ -757,6 +894,8 @@ pub struct KvPhysicalMemorySnapshot {
     tokens_per_page: u64,
     mapped_token_capacity: u64,
     committed_bytes_per_plane: u64,
+    retained_start: u64,
+    retained_length: u64,
 }
 
 impl KvPhysicalMemorySnapshot {
@@ -802,6 +941,41 @@ impl KvPhysicalMemorySnapshot {
             tokens_per_page,
             mapped_token_capacity,
             committed_bytes_per_plane,
+            retained_start: 0,
+            retained_length: observed_length,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_retention(
+        memory_kind: KvMemoryKind,
+        logical_capacity: u64,
+        observed_length: u64,
+        physical_page_bytes: u64,
+        tokens_per_page: u64,
+        mapped_token_capacity: u64,
+        committed_bytes_per_plane: u64,
+        retained_start: u64,
+        retained_length: u64,
+    ) -> Result<Self, KvStateError> {
+        if physical_page_bytes == 0
+            || tokens_per_page == 0
+            || mapped_token_capacity > logical_capacity
+            || retained_length > mapped_token_capacity
+            || retained_start > observed_length
+            || retained_start.checked_add(retained_length) != Some(observed_length)
+            || committed_bytes_per_plane % physical_page_bytes != 0
+        {
+            return Err(KvStateError::InvalidPhysicalMemory);
+        }
+        Ok(Self {
+            memory_kind,
+            physical_page_bytes,
+            tokens_per_page,
+            mapped_token_capacity,
+            committed_bytes_per_plane,
+            retained_start,
+            retained_length,
         })
     }
 
@@ -823,6 +997,14 @@ impl KvPhysicalMemorySnapshot {
 
     pub const fn committed_bytes_per_plane(self) -> u64 {
         self.committed_bytes_per_plane
+    }
+
+    pub const fn retained_start(self) -> u64 {
+        self.retained_start
+    }
+
+    pub const fn retained_length(self) -> u64 {
+        self.retained_length
     }
 }
 
@@ -870,7 +1052,14 @@ impl KvStateSnapshot {
         length: u64,
         physical_memory: KvPhysicalMemorySnapshot,
     ) -> Result<Self, KvStateError> {
-        if length > descriptor.capacity() || length > physical_memory.mapped_token_capacity() {
+        let physical_covers_length = match descriptor.sliding_window() {
+            Some(window) => {
+                physical_memory.retained_length() == length.min(window)
+                    && physical_memory.retained_start() == length.saturating_sub(window)
+            }
+            None => length <= physical_memory.mapped_token_capacity(),
+        };
+        if length > descriptor.capacity() || !physical_covers_length {
             return Err(KvStateError::LengthOutOfBounds {
                 length,
                 capacity: descriptor.capacity(),
@@ -1161,6 +1350,96 @@ mod tests {
             let descriptor = CausalAttentionDescriptor::new(start_position, query_count, expected)
                 .expect("valid decode prefix");
             assert_eq!(descriptor.expected_kv_length(), expected);
+        }
+    }
+
+    #[test]
+    fn static_fp8_sliding_descriptor_and_score_scale_are_fail_closed() {
+        let descriptor = KvStateDescriptor::new_with_static_fp8_sliding(
+            17,
+            KV_STATIC_FP8_SLIDING_MAX_CAPACITY,
+            4,
+            512,
+            KV_STATIC_FP8_SLIDING_WINDOW,
+        )
+        .unwrap();
+        assert_eq!(
+            descriptor.cache_encoding(),
+            KvCacheEncoding::Fp8E4M3FnStatic
+        );
+        assert_eq!(descriptor.static_fp8_scales(), Some((1.0, 1.0)));
+        assert_eq!(descriptor.sliding_window(), Some(1024));
+        assert_eq!(descriptor.capacity(), 262_144);
+        assert_eq!(descriptor.resident_bytes_per_plane(), Some(1025 * 4 * 512));
+        assert_eq!(descriptor.physical_capacity_tokens(), 1025);
+        assert_eq!(descriptor.storage_shape(), [1025, 4, 512]);
+
+        assert_eq!(
+            KvStateDescriptor::new_with_static_fp8(0, 2048, 4, 256, 0.5, 1.0)
+                .unwrap()
+                .with_sliding_window(1024),
+            Err(KvStateError::InvalidLayout)
+        );
+        assert_eq!(
+            KvStateDescriptor::new_with_static_fp8_sliding(0, 2048, 4, 256, 1023),
+            Err(KvStateError::InvalidLayout)
+        );
+        assert_eq!(
+            KvStateDescriptor::new_with_static_fp8_sliding(0, 262_145, 4, 256, 1024),
+            Err(KvStateError::InvalidLayout)
+        );
+
+        for (start, count, end) in [(0, 1023, 1023), (0, 1024, 1024), (1024, 1, 1025)] {
+            let attention =
+                CausalAttentionDescriptor::new_sliding_scaled(start, count, end, 1024, 1.0)
+                    .unwrap();
+            assert_eq!(attention.sliding_window(), Some(1024));
+            assert_eq!(attention.score_scale(), Some(1.0));
+        }
+        for scale in [0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(
+                CausalAttentionDescriptor::new_scaled(0, 1, 1, scale),
+                Err(KvStateError::InvalidScoreScale)
+            );
+        }
+    }
+
+    #[test]
+    fn sliding_snapshot_tracks_logical_length_and_only_retained_physical_rows() {
+        let descriptor =
+            KvStateDescriptor::new_with_static_fp8_sliding(2, 262_144, 4, 256, 1024).unwrap();
+        for (length, retained_start, retained_length) in
+            [(1023, 0, 1023), (1024, 0, 1024), (1025, 1, 1024)]
+        {
+            let physical = KvPhysicalMemorySnapshot::new_with_retention(
+                KvMemoryKind::VirtualContiguous,
+                descriptor.capacity(),
+                length,
+                4096,
+                4,
+                1025,
+                1_052_672,
+                retained_start,
+                retained_length,
+            )
+            .unwrap();
+            let snapshot = KvStateSnapshot::new_with_physical_memory(
+                ExecutionSessionId::new(7),
+                KvStateId::new(11),
+                descriptor,
+                length,
+                physical,
+            )
+            .unwrap();
+            assert_eq!(snapshot.length(), length);
+            assert_eq!(
+                snapshot.physical_memory().unwrap().retained_start(),
+                retained_start
+            );
+            assert_eq!(
+                snapshot.physical_memory().unwrap().retained_length(),
+                retained_length
+            );
         }
     }
 }

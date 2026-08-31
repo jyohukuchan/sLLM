@@ -157,6 +157,10 @@ hipError_t
 elementwise_broadcast_add_launch(const uint16_t *input, const uint16_t *vector,
                                  uint16_t *output, uint64_t element_count,
                                  uint64_t width, hipStream_t stream) noexcept;
+hipError_t
+elementwise_broadcast_mul_launch(const uint16_t *input, const uint16_t *vector,
+                                 uint16_t *output, uint64_t element_count,
+                                 uint64_t width, hipStream_t stream) noexcept;
 hipError_t elementwise_silu_mul_launch(const uint16_t *gate, const uint16_t *up,
                                        uint16_t *output, uint64_t element_count,
                                        hipStream_t stream) noexcept;
@@ -200,6 +204,10 @@ hipError_t rotary_launch(const uint16_t *query, const uint16_t *key,
                          uint32_t q_heads, uint32_t kv_heads, uint32_t head_dim,
                          uint32_t rotary_dim, float theta,
                          hipStream_t stream) noexcept;
+hipError_t ministral3_yarn_launch(
+    const uint16_t *query, const uint16_t *key, const int32_t *positions,
+    uint16_t *query_output, uint16_t *key_output, uint32_t token_count,
+    uint32_t q_heads, uint32_t kv_heads, hipStream_t stream) noexcept;
 hipError_t windowed_attention_launch(
     const uint16_t *query, const uint16_t *key, const uint16_t *value,
     uint16_t *output, uint32_t query_count, uint64_t start_position,
@@ -222,8 +230,10 @@ void set_gcn_arch_name(const char *name) noexcept;
 std::size_t matmul_launch_calls() noexcept;
 std::size_t attention_preprocess_launch_calls() noexcept;
 std::size_t rotary_launch_calls() noexcept;
+std::size_t ministral3_yarn_launch_calls() noexcept;
 std::size_t windowed_attention_launch_calls() noexcept;
 uint32_t rotary_last_token_count() noexcept;
+uint32_t ministral3_yarn_last_token_count() noexcept;
 uint32_t attention_preprocess_last_m() noexcept;
 std::size_t kv_state_append_launch_calls() noexcept;
 std::size_t causal_attention_launch_calls() noexcept;
@@ -243,6 +253,7 @@ void set_elementwise_launch_status(hipError_t status) noexcept;
 std::size_t elementwise_copy_launch_calls() noexcept;
 std::size_t elementwise_add_launch_calls() noexcept;
 std::size_t elementwise_broadcast_add_launch_calls() noexcept;
+std::size_t elementwise_broadcast_mul_launch_calls() noexcept;
 std::size_t elementwise_silu_mul_launch_calls() noexcept;
 std::size_t elementwise_sigmoid_mul_launch_calls() noexcept;
 std::size_t elementwise_scalar_mul_launch_calls() noexcept;

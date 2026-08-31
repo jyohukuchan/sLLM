@@ -39,6 +39,7 @@ struct State final {
   std::size_t elementwise_copy_launch_calls = 0U;
   std::size_t elementwise_add_launch_calls = 0U;
   std::size_t elementwise_broadcast_add_launch_calls = 0U;
+  std::size_t elementwise_broadcast_mul_launch_calls = 0U;
   std::size_t elementwise_silu_mul_launch_calls = 0U;
   std::size_t elementwise_sigmoid_mul_launch_calls = 0U;
   std::size_t elementwise_scalar_mul_launch_calls = 0U;
@@ -49,6 +50,7 @@ struct State final {
   std::size_t argmax_launch_calls = 0U;
   std::size_t attention_preprocess_launch_calls = 0U;
   std::size_t rotary_launch_calls = 0U;
+  std::size_t ministral3_yarn_launch_calls = 0U;
   std::size_t device_property_calls = 0U;
   std::size_t windowed_attention_launch_calls = 0U;
   uint64_t elementwise_last_element_count = 0U;
@@ -60,6 +62,7 @@ struct State final {
   uint64_t argmax_last_v = 0U;
   uint32_t attention_preprocess_last_m = 0U;
   uint32_t rotary_last_token_count = 0U;
+  uint32_t ministral3_yarn_last_token_count = 0U;
   char gcn_arch_name[64] = "gfx1201";
   std::size_t kv_state_append_launch_calls = 0U;
   std::size_t causal_attention_launch_calls = 0U;
@@ -229,6 +232,7 @@ void reset() noexcept {
   state.elementwise_copy_launch_calls = 0U;
   state.elementwise_add_launch_calls = 0U;
   state.elementwise_broadcast_add_launch_calls = 0U;
+  state.elementwise_broadcast_mul_launch_calls = 0U;
   state.elementwise_silu_mul_launch_calls = 0U;
   state.elementwise_sigmoid_mul_launch_calls = 0U;
   state.elementwise_scalar_mul_launch_calls = 0U;
@@ -239,6 +243,7 @@ void reset() noexcept {
   state.argmax_launch_calls = 0U;
   state.attention_preprocess_launch_calls = 0U;
   state.rotary_launch_calls = 0U;
+  state.ministral3_yarn_launch_calls = 0U;
   state.device_property_calls = 0U;
   state.windowed_attention_launch_calls = 0U;
   state.kv_state_append_launch_calls = 0U;
@@ -252,6 +257,7 @@ void reset() noexcept {
   state.argmax_last_v = 0U;
   state.attention_preprocess_last_m = 0U;
   state.rotary_last_token_count = 0U;
+  state.ministral3_yarn_last_token_count = 0U;
   state.kv_state_last_token_count = 0U;
   state.kv_state_last_capacity_tokens = 0U;
   state.kv_state_last_start_position = 0U;
@@ -419,6 +425,22 @@ hipError_t elementwise_broadcast_add_launch(
   return state.elementwise_launch_status;
 }
 
+hipError_t elementwise_broadcast_mul_launch(
+    const uint16_t *const input, const uint16_t *const vector,
+    uint16_t *const output, const uint64_t element_count, const uint64_t width,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.elementwise_broadcast_mul_launch_calls;
+  state.elementwise_last_element_count = element_count;
+  if (state.elementwise_launch_status == hipSuccess && width != 0U) {
+    for (uint64_t index = 0U; index != element_count; ++index) {
+      output[index] = f32_to_bf16_rne(bf16_to_f32(input[index]) *
+                                      bf16_to_f32(vector[index % width]));
+    }
+  }
+  return state.elementwise_launch_status;
+}
+
 hipError_t elementwise_silu_mul_launch(const uint16_t *const /*gate*/,
                                        const uint16_t *const /*up*/,
                                        uint16_t *const /*output*/,
@@ -548,11 +570,11 @@ hipError_t argmax_launch(const uint16_t *const logits, int32_t *const output,
     float maximum = 0.0F;
     uint64_t index = 0U;
     bool valid = false;
-    bool has_nan = false;
+    bool has_nonfinite = false;
     for (uint64_t column = 0U; column != v; ++column) {
       const float value = bf16_to_f32(logits[row * v + column]);
-      if (std::isnan(value)) {
-        has_nan = true;
+      if (!std::isfinite(value)) {
+        has_nonfinite = true;
       } else if (!valid || value > maximum ||
                  (value == maximum && column < index)) {
         maximum = value;
@@ -560,7 +582,7 @@ hipError_t argmax_launch(const uint16_t *const logits, int32_t *const output,
         valid = true;
       }
     }
-    output[row] = has_nan ? -1 : static_cast<int32_t>(index);
+    output[row] = has_nonfinite ? -1 : static_cast<int32_t>(index);
   }
   return hipSuccess;
 }
@@ -618,6 +640,66 @@ hipError_t rotary_launch(const uint16_t *const query, const uint16_t *const key,
   };
   rotate(query, query_output, q_heads);
   rotate(key, key_output, kv_heads);
+  return hipSuccess;
+}
+
+hipError_t ministral3_yarn_launch(
+    const uint16_t *const query, const uint16_t *const key,
+    const int32_t *const positions, uint16_t *const query_output,
+    uint16_t *const key_output, const uint32_t token_count,
+    const uint32_t q_heads, const uint32_t kv_heads,
+    const hipStream_t /*stream*/) noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.ministral3_yarn_launch_calls;
+  state.ministral3_yarn_last_token_count = token_count;
+  if (query == nullptr || key == nullptr || positions == nullptr ||
+      query_output == nullptr || key_output == nullptr || q_heads != 32U ||
+      kv_heads != 8U || token_count == 0U) {
+    return hipErrorInvalidValue;
+  }
+  constexpr uint32_t head_dim = 128U;
+  constexpr uint32_t half = 64U;
+  constexpr uint32_t low = 20U;
+  constexpr uint32_t high = 37U;
+  for (uint32_t token = 0U; token != token_count; ++token) {
+    const int32_t position = positions[token];
+    if (position < 0 || position >= 262144) {
+      return hipErrorInvalidValue;
+    }
+    const uint32_t block = static_cast<uint32_t>(position) / 16384U;
+    const float q_scale =
+        1.0F + 0.1F * std::log1p(static_cast<float>(block));
+    const auto rotate = [&](const uint16_t *const input,
+                            uint16_t *const output, const uint32_t heads,
+                            const float scale) {
+      for (uint32_t head = 0U; head != heads; ++head) {
+        const uint64_t base =
+            (static_cast<uint64_t>(token) * heads + head) * head_dim;
+        for (uint32_t pair = 0U; pair != half; ++pair) {
+          const float base_frequency = std::pow(
+              1000000.0F, static_cast<float>(pair * 2U) / 128.0F);
+          const float extrapolated = 1.0F / base_frequency;
+          const float interpolated = 1.0F / (16.0F * base_frequency);
+          const float ramp = std::fmin(
+              1.0F, std::fmax(0.0F, (static_cast<float>(pair) - low) /
+                                         static_cast<float>(high - low)));
+          const float inverse = interpolated * ramp +
+                                extrapolated * (1.0F - ramp);
+          const float angle = static_cast<float>(position) * inverse;
+          const float cosine = std::cos(angle);
+          const float sine = std::sin(angle);
+          const float left = bf16_to_f32(input[base + pair]);
+          const float right = bf16_to_f32(input[base + half + pair]);
+          output[base + pair] = f32_to_bf16_rne(
+              (left * cosine - right * sine) * scale);
+          output[base + half + pair] = f32_to_bf16_rne(
+              (right * cosine + left * sine) * scale);
+        }
+      }
+    };
+    rotate(query, query_output, q_heads, q_scale);
+    rotate(key, key_output, kv_heads, 1.0F);
+  }
   return hipSuccess;
 }
 
@@ -812,6 +894,11 @@ std::size_t rotary_launch_calls() noexcept {
   return state.rotary_launch_calls;
 }
 
+std::size_t ministral3_yarn_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.ministral3_yarn_launch_calls;
+}
+
 std::size_t windowed_attention_launch_calls() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.windowed_attention_launch_calls;
@@ -820,6 +907,11 @@ std::size_t windowed_attention_launch_calls() noexcept {
 uint32_t rotary_last_token_count() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.rotary_last_token_count;
+}
+
+uint32_t ministral3_yarn_last_token_count() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.ministral3_yarn_last_token_count;
 }
 
 uint32_t attention_preprocess_last_m() noexcept {
@@ -922,6 +1014,11 @@ std::size_t elementwise_add_launch_calls() noexcept {
 std::size_t elementwise_broadcast_add_launch_calls() noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   return state.elementwise_broadcast_add_launch_calls;
+}
+
+std::size_t elementwise_broadcast_mul_launch_calls() noexcept {
+  std::lock_guard<std::mutex> lock(state.mutex);
+  return state.elementwise_broadcast_mul_launch_calls;
 }
 
 std::size_t elementwise_silu_mul_launch_calls() noexcept {

@@ -130,8 +130,12 @@ fn selected_memory_kind_for_target(expected_target: Option<&str>, capacity_token
     }
 }
 
-fn selected_memory_kind(context: &Context, capacity_tokens: u64) -> u32 {
-    selected_memory_kind_for_target(context.expected_target(), capacity_tokens)
+fn selected_memory_kind(context: &Context, descriptor: KvStateDescriptor) -> u32 {
+    if descriptor.sliding_window().is_some() {
+        sys::SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+    } else {
+        selected_memory_kind_for_target(context.expected_target(), descriptor.capacity())
+    }
 }
 
 struct KvStateInner {
@@ -199,10 +203,16 @@ impl KvStateResource {
             reserved[0] = key.to_bits();
             reserved[1] = value.to_bits();
         }
+        if let Some(window) = descriptor.sliding_window() {
+            reserved[2] = window as u32;
+            reserved[3] = (window >> 32) as u32;
+        }
         let info = sys::sllm_kv_state_create_info_v2_t {
             struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            create_info_version: if static_scales.is_some() {
+            create_info_version: if descriptor.sliding_window().is_some() {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
+            } else if static_scales.is_some() {
                 sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
             } else {
                 sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
@@ -214,7 +224,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(context, descriptor.capacity()),
+            memory_kind: selected_memory_kind(context, descriptor),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
@@ -288,6 +298,7 @@ impl KvStateResource {
             || descriptor.kv_fp8_block16_descriptor()
                 != self.inner.descriptor.kv_fp8_block16_descriptor()
             || descriptor.kv_mxfp8_descriptor() != self.inner.descriptor.kv_mxfp8_descriptor()
+            || descriptor.sliding_window() != self.inner.descriptor.sliding_window()
         {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidKvStateDescriptor,
@@ -320,10 +331,16 @@ impl KvStateResource {
             reserved[0] = key.to_bits();
             reserved[1] = value.to_bits();
         }
+        if let Some(window) = descriptor.sliding_window() {
+            reserved[2] = window as u32;
+            reserved[3] = (window >> 32) as u32;
+        }
         let destination_info = sys::sllm_kv_state_create_info_v2_t {
             struct_size: size_of::<sys::sllm_kv_state_create_info_v2_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            create_info_version: if static_scales.is_some() {
+            create_info_version: if descriptor.sliding_window().is_some() {
+                sys::SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
+            } else if static_scales.is_some() {
                 sys::SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION
             } else {
                 sys::SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION
@@ -335,7 +352,7 @@ impl KvStateResource {
             capacity_tokens: descriptor.capacity(),
             head_count: descriptor.layout().heads() as u32,
             head_dim: descriptor.layout().head_dim() as u32,
-            memory_kind: selected_memory_kind(&self.inner.context, descriptor.capacity()),
+            memory_kind: selected_memory_kind(&self.inner.context, descriptor),
             layout: sys::SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR,
             dtype,
             encoding,
@@ -508,15 +525,31 @@ impl KvStateResource {
                 ));
             }
         };
-        let physical_memory = sllm_core::KvPhysicalMemorySnapshot::new_with_kind(
-            memory_kind,
-            self.inner.descriptor.capacity(),
-            info.observed_length,
-            info.physical_page_bytes,
-            info.tokens_per_page,
-            info.mapped_token_capacity,
-            info.committed_bytes_per_plane,
-        )
+        let retained_start = u64::from(info.reserved[2]) | (u64::from(info.reserved[3]) << 32);
+        let retained_length = info.observed_length.saturating_sub(retained_start);
+        let physical_memory = if self.inner.descriptor.sliding_window().is_some() {
+            sllm_core::KvPhysicalMemorySnapshot::new_with_retention(
+                memory_kind,
+                self.inner.descriptor.capacity(),
+                info.observed_length,
+                info.physical_page_bytes,
+                info.tokens_per_page,
+                info.mapped_token_capacity,
+                info.committed_bytes_per_plane,
+                retained_start,
+                retained_length,
+            )
+        } else {
+            sllm_core::KvPhysicalMemorySnapshot::new_with_kind(
+                memory_kind,
+                self.inner.descriptor.capacity(),
+                info.observed_length,
+                info.physical_page_bytes,
+                info.tokens_per_page,
+                info.mapped_token_capacity,
+                info.committed_bytes_per_plane,
+            )
+        }
         .map_err(|error| {
             RuntimeError::new(
                 RuntimeStatus::InvalidKvStateDescriptor,
@@ -561,6 +594,7 @@ impl KvStateResource {
         plane: u32,
         byte_offset: u64,
         destination: &mut [u8],
+        published_length: u64,
     ) -> Result<(), RuntimeError> {
         if destination.is_empty() {
             return Err(RuntimeError::local(
@@ -570,18 +604,28 @@ impl KvStateResource {
         }
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
+        let sliding_window = self.inner.descriptor.sliding_window();
+        let mut reserved = [0_u32; 4];
+        if sliding_window.is_some() {
+            reserved[0] = published_length as u32;
+            reserved[1] = (published_length >> 32) as u32;
+        }
         let chunk = sys::sllm_state_chunk_t {
             struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            info_version: if sliding_window.is_some() {
+                sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
+            } else {
+                sys::SLLM_HIP_STATE_FORK_INFO_VERSION
+            },
             plane,
-            reserved0: 0,
-            reserved1: 0,
+            reserved0: sliding_window.unwrap_or(0) as u32,
+            reserved1: (sliding_window.unwrap_or(0) >> 32) as u32,
             byte_offset,
             byte_length: destination.len() as u64,
             host_pointer: destination.as_mut_ptr().cast(),
             host_capacity: destination.len() as u64,
-            reserved: [0; 4],
+            reserved,
         };
         let status = unsafe {
             sys::sllm_kv_state_export(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
@@ -594,6 +638,7 @@ impl KvStateResource {
         plane: u32,
         byte_offset: u64,
         source: &[u8],
+        published_length: u64,
     ) -> Result<(), RuntimeError> {
         if source.is_empty() {
             return Err(RuntimeError::local(
@@ -603,18 +648,28 @@ impl KvStateResource {
         }
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
         let mut error_sink = sink(&mut error_buffer);
+        let sliding_window = self.inner.descriptor.sliding_window();
+        let mut reserved = [0_u32; 4];
+        if sliding_window.is_some() {
+            reserved[0] = published_length as u32;
+            reserved[1] = (published_length >> 32) as u32;
+        }
         let chunk = sys::sllm_state_chunk_t {
             struct_size: size_of::<sys::sllm_state_chunk_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            info_version: sys::SLLM_HIP_STATE_FORK_INFO_VERSION,
+            info_version: if sliding_window.is_some() {
+                sys::SLLM_HIP_STATE_IMAGE_SLIDING_VERSION
+            } else {
+                sys::SLLM_HIP_STATE_FORK_INFO_VERSION
+            },
             plane,
-            reserved0: 0,
-            reserved1: 0,
+            reserved0: sliding_window.unwrap_or(0) as u32,
+            reserved1: (sliding_window.unwrap_or(0) >> 32) as u32,
             byte_offset,
             byte_length: source.len() as u64,
             host_pointer: source.as_ptr().cast_mut().cast(),
             host_capacity: source.len() as u64,
-            reserved: [0; 4],
+            reserved,
         };
         let status = unsafe {
             sys::sllm_kv_state_import(self.raw_handle()?.as_ptr(), &chunk, &mut error_sink)
@@ -661,12 +716,6 @@ impl KvStateResource {
             )
         };
         ensure_ok(status, &error_buffer, error_sink.message_length)?;
-        if size_bytes == 0 {
-            return Err(RuntimeError::local(
-                RuntimeStatus::InvalidKvStateDescriptor,
-                "native KV image plane size is zero",
-            ));
-        }
         Ok(size_bytes)
     }
 
@@ -780,6 +829,7 @@ impl KvStateResource {
         Ok((completion, evidence))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn causal_attention(
         &self,
         queue: &Queue,
@@ -787,20 +837,48 @@ impl KvStateResource {
         output: &TensorBinding,
         start_position: u64,
         expected_kv_length: u64,
+        sliding_window: Option<u64>,
+        score_scale: Option<f32>,
     ) -> Result<(CausalAttentionCompletion, CausalAttentionEvidence), RuntimeError> {
+        if sliding_window != self.inner.descriptor.sliding_window() {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "causal attention sliding window differs from the KV state descriptor",
+            ));
+        }
         validate_causal_attention_binding(query, self.inner.descriptor)?;
         validate_causal_attention_binding(output, self.inner.descriptor)?;
+        let mut reserved = [0_u32; 4];
+        if let Some(window) = sliding_window {
+            reserved[0] = window as u32;
+            reserved[1] = (window >> 32) as u32;
+        }
+        if let Some(scale) = score_scale {
+            if !scale.is_finite() || scale <= 0.0 {
+                return Err(RuntimeError::local(
+                    RuntimeStatus::InvalidCausalAttentionDescriptor,
+                    "causal attention score scale must be finite and positive",
+                ));
+            }
+            reserved[2] = scale.to_bits();
+        }
         let descriptor = sys::sllm_causal_attention_desc_t {
             struct_size: size_of::<sys::sllm_causal_attention_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version: sys::SLLM_HIP_CAUSAL_ATTENTION_VERSION,
+            op_version: if score_scale.is_some() {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION
+            } else if sliding_window.is_some() {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION
+            } else {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_VERSION
+            },
             reserved0: 0,
             start_position,
             expected_kv_length,
             kv_state: self.raw_handle()?.as_ptr(),
             query: query.raw()?,
             output: output.raw()?,
-            reserved: [0; 4],
+            reserved,
         };
         let mut dispatch_info = empty_causal_attention_info();
         let mut error_buffer = [0_u8; ERROR_CAPACITY];
@@ -844,6 +922,8 @@ impl KvStateResource {
                     "causal attention query head count does not fit u32",
                 )
             })?,
+            sliding_window,
+            score_scale,
         ) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -1010,6 +1090,10 @@ pub struct CausalAttentionEvidence {
     pub query_count: u64,
     pub start_position: u64,
     pub committed_kv_length: u64,
+    pub sliding_window: u64,
+    pub retained_start: u64,
+    pub score_scale_bits: u32,
+    pub explicit_score_scale: bool,
     pub q_heads: u32,
     pub kv_heads: u32,
     pub head_dim: u32,
@@ -1409,9 +1493,34 @@ fn validate_view_info(
             sys::SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
         }
     };
+    let sliding_window = descriptor.sliding_window();
+    let expected_info_version = if sliding_window.is_some() {
+        sys::SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION
+    } else {
+        sys::SLLM_HIP_KV_VIEW_INFO_VERSION
+    };
+    let retained_start = info
+        .observed_length
+        .saturating_sub(sliding_window.unwrap_or(info.observed_length));
+    let expected_reserved = if let Some(window) = sliding_window {
+        [
+            window as u32,
+            (window >> 32) as u32,
+            retained_start as u32,
+            (retained_start >> 32) as u32,
+        ]
+    } else {
+        [0; 4]
+    };
+    let physical_length_valid = if let Some(window) = sliding_window {
+        info.mapped_token_capacity <= window.saturating_add(1)
+            && info.observed_length.saturating_sub(retained_start) <= info.mapped_token_capacity
+    } else {
+        info.observed_length <= info.mapped_token_capacity
+    };
     if info.struct_size != size_of::<sys::sllm_kv_view_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
-        || info.info_version != sys::SLLM_HIP_KV_VIEW_INFO_VERSION
+        || info.info_version != expected_info_version
         || info.session_id != session_id.raw()
         || info.layer_id != descriptor.layer_id()
         || info.dtype != expected_dtype
@@ -1432,11 +1541,11 @@ fn validate_view_info(
         || info.physical_page_bytes == 0
         || info.tokens_per_page == 0
         || info.mapped_token_capacity > descriptor.capacity()
-        || info.observed_length > info.mapped_token_capacity
+        || !physical_length_valid
         || info.committed_bytes_per_plane % info.physical_page_bytes != 0
         || info.reserved0 != 0
         || info.reserved1 != 0
-        || info.reserved != [0; 4]
+        || info.reserved != expected_reserved
     {
         return Err(RuntimeError::local(
             RuntimeStatus::InvalidKvStateDescriptor,
@@ -1793,6 +1902,17 @@ fn long_prefill_v2_enabled(
         && encoding == KvCacheEncoding::Fp16
 }
 
+fn implicit_attention_scale_evidence(head_dim: u32) -> (u32, u32, [u32; 8]) {
+    let denominator = (head_dim as f32).sqrt() as u32;
+    if u64::from(denominator) * u64::from(denominator) == u64::from(head_dim) {
+        (denominator, 0, [0; 8])
+    } else {
+        let scale_bits = (1.0_f32 / (head_dim as f32).sqrt()).to_bits();
+        (0, scale_bits, [0, 0, 0, 0, scale_bits, 1, 0, 0])
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn validate_causal_attention_info(
     info: &sys::sllm_causal_attention_dispatch_info_t,
     context: &Context,
@@ -1800,6 +1920,8 @@ fn validate_causal_attention_info(
     committed_kv_length: u64,
     descriptor: KvStateDescriptor,
     query_heads: u32,
+    sliding_window: Option<u64>,
+    score_scale: Option<f32>,
 ) -> Result<CausalAttentionEvidence, RuntimeError> {
     let observed_target = c_string(&info.gcn_arch_name);
     let target = logical_gcn_arch_name(&observed_target).to_owned();
@@ -1815,6 +1937,157 @@ fn validate_causal_attention_info(
         .checked_mul(u64::from(query_heads))
         .and_then(|value| u32::try_from(value).ok());
     let expected_target = context.expected_target();
+    if let Some(scale) = score_scale {
+        let window = sliding_window.unwrap_or(0);
+        let retained_start = if window == 0 {
+            0
+        } else {
+            committed_kv_length.saturating_sub(window)
+        };
+        let expected_reserved = [
+            window as u32,
+            (window >> 32) as u32,
+            retained_start as u32,
+            (retained_start >> 32) as u32,
+            scale.to_bits(),
+            1,
+            0,
+            0,
+        ];
+        let (kernel_id, kernel_symbol, device_symbol) = if window == 0 {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1,
+                "causal_attention.scaled_static_fp8_gqa.v1",
+                "sllm_causal_attention_scaled_static_fp8_gqa_v1",
+            )
+        } else {
+            (
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1,
+                "causal_attention.sliding_static_fp8_gqa.v1",
+                "sllm_causal_attention_sliding_static_fp8_gqa_v1",
+            )
+        };
+        if descriptor.sliding_window() != sliding_window
+            || descriptor.static_fp8_scales() != Some((1.0, 1.0))
+            || info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
+            || info.abi_version != sys::SLLM_HIP_ABI_VERSION
+            || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
+            || info.backend != sys::SLLM_BACKEND_HIP
+            || info.dispatch_id == 0
+            || info.dispatch_count != 1
+            || info.kernel_id != kernel_id
+            || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
+            || Some(info.grid_size_x) != expected_grid
+            || info.query_count != query_count
+            || info.start_position != start_position
+            || info.committed_kv_length != committed_kv_length
+            || info.q_heads != query_heads
+            || info.kv_heads != descriptor.layout().heads() as u32
+            || info.head_dim != descriptor.layout().head_dim() as u32
+            || info.scale_denominator != 0
+            || info.fallback_allowed != 0
+            || info.fallback_used != 0
+            || c_string(&info.kernel_symbol) != kernel_symbol
+            || c_string(&info.device_symbol) != device_symbol
+            || info.reserved != expected_reserved
+            || committed_kv_length > descriptor.capacity()
+            || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "native explicit-scale causal attention metadata failed exact-target/no-fallback validation",
+            ));
+        }
+        return Ok(CausalAttentionEvidence {
+            dispatch_id: info.dispatch_id,
+            dispatch_count: info.dispatch_count,
+            kernel_id: info.kernel_id,
+            workgroup_size_x: info.workgroup_size_x,
+            grid_size_x: info.grid_size_x,
+            query_count: info.query_count,
+            start_position: info.start_position,
+            committed_kv_length: info.committed_kv_length,
+            sliding_window: window,
+            retained_start,
+            score_scale_bits: scale.to_bits(),
+            explicit_score_scale: true,
+            q_heads: info.q_heads,
+            kv_heads: info.kv_heads,
+            head_dim: info.head_dim,
+            scale_denominator: info.scale_denominator,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: c_string(&info.kernel_symbol),
+            device_symbol: c_string(&info.device_symbol),
+            target,
+        });
+    }
+    if let Some(window) = sliding_window {
+        let retained_start = committed_kv_length.saturating_sub(window);
+        let expected_reserved = [
+            window as u32,
+            (window >> 32) as u32,
+            retained_start as u32,
+            (retained_start >> 32) as u32,
+            0,
+            0,
+            0,
+            0,
+        ];
+        if descriptor.sliding_window() != Some(window)
+            || info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
+            || info.abi_version != sys::SLLM_HIP_ABI_VERSION
+            || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
+            || info.backend != sys::SLLM_BACKEND_HIP
+            || info.dispatch_id == 0
+            || info.dispatch_count != 1
+            || info.kernel_id != sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1
+            || info.workgroup_size_x != sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE
+            || Some(info.grid_size_x) != expected_grid
+            || info.query_count != query_count
+            || info.start_position != start_position
+            || info.committed_kv_length != committed_kv_length
+            || info.q_heads != query_heads
+            || info.kv_heads != descriptor.layout().heads() as u32
+            || info.head_dim != descriptor.layout().head_dim() as u32
+            || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
+            || info.fallback_allowed != 0
+            || info.fallback_used != 0
+            || c_string(&info.kernel_symbol) != "causal_attention.sliding_static_fp8_gqa.v1"
+            || c_string(&info.device_symbol) != "sllm_causal_attention_sliding_static_fp8_gqa_v1"
+            || info.reserved != expected_reserved
+            || committed_kv_length > descriptor.capacity()
+            || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
+        {
+            return Err(RuntimeError::local(
+                RuntimeStatus::InvalidCausalAttentionDescriptor,
+                "native sliding causal attention metadata failed exact-target/no-fallback validation",
+            ));
+        }
+        return Ok(CausalAttentionEvidence {
+            dispatch_id: info.dispatch_id,
+            dispatch_count: info.dispatch_count,
+            kernel_id: info.kernel_id,
+            workgroup_size_x: info.workgroup_size_x,
+            grid_size_x: info.grid_size_x,
+            query_count: info.query_count,
+            start_position: info.start_position,
+            committed_kv_length: info.committed_kv_length,
+            sliding_window: window,
+            retained_start,
+            score_scale_bits: 0,
+            explicit_score_scale: false,
+            q_heads: info.q_heads,
+            kv_heads: info.kv_heads,
+            head_dim: info.head_dim,
+            scale_denominator: info.scale_denominator,
+            fallback_allowed: false,
+            fallback_used: false,
+            kernel_symbol: c_string(&info.kernel_symbol),
+            device_symbol: c_string(&info.device_symbol),
+            target,
+        });
+    }
     let use_gfx1201_wave_provider =
         expected_target == Some("gfx1201") && (query_count == 1 || query_count >= 32);
     let use_phase33_common_provider = matches!(expected_target, Some("gfx1030" | "gfx1201"));
@@ -1996,6 +2269,8 @@ fn validate_causal_attention_info(
     } else {
         (baseline_kernel, baseline_device)
     };
+    let (expected_scale_denominator, implicit_scale_bits, expected_reserved) =
+        implicit_attention_scale_evidence(descriptor.layout().head_dim() as u32);
     if info.struct_size != size_of::<sys::sllm_causal_attention_dispatch_info_t>() as u32
         || info.abi_version != sys::SLLM_HIP_ABI_VERSION
         || info.info_version != sys::SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION
@@ -2050,12 +2325,12 @@ fn validate_causal_attention_info(
         || info.q_heads != query_heads
         || info.kv_heads != descriptor.layout().heads() as u32
         || info.head_dim != descriptor.layout().head_dim() as u32
-        || info.scale_denominator != sys::SLLM_HIP_CAUSAL_ATTENTION_SCALE_DENOMINATOR
+        || info.scale_denominator != expected_scale_denominator
         || info.fallback_allowed != 0
         || info.fallback_used != 0
         || c_string(&info.kernel_symbol) != expected_kernel
         || c_string(&info.device_symbol) != expected_device
-        || info.reserved != [0; 8]
+        || info.reserved != expected_reserved
         || committed_kv_length > descriptor.capacity()
         || expected_target.is_some_and(|expected| !gcn_arch_matches(expected, &observed_target))
     {
@@ -2073,6 +2348,10 @@ fn validate_causal_attention_info(
         query_count: info.query_count,
         start_position: info.start_position,
         committed_kv_length: info.committed_kv_length,
+        sliding_window: 0,
+        retained_start: 0,
+        score_scale_bits: implicit_scale_bits,
+        explicit_score_scale: false,
         q_heads: info.q_heads,
         kv_heads: info.kv_heads,
         head_dim: info.head_dim,
@@ -2200,6 +2479,12 @@ pub fn expected_storage_offset(
 mod tests {
     use super::*;
 
+    fn set_test_c_string<const N: usize>(destination: &mut [std::ffi::c_char; N], value: &str) {
+        for (slot, byte) in destination.iter_mut().zip(value.bytes()) {
+            *slot = byte as std::ffi::c_char;
+        }
+    }
+
     fn block16_descriptor(
         encoding: KvCacheEncoding,
         physical_variant: KvFp8PhysicalVariant,
@@ -2226,6 +2511,132 @@ mod tests {
             let error = native_kv_storage(descriptor, Some(target)).unwrap_err();
             assert_eq!(error.status(), RuntimeStatus::InvalidKvStateDescriptor);
             assert!(error.message().contains("retired"));
+        }
+    }
+
+    #[test]
+    fn implicit_attention_scale_evidence_is_exact_for_square_and_non_square_head_dims() {
+        assert_eq!(implicit_attention_scale_evidence(256), (16, 0, [0; 8]));
+        for head_dim in [128_u32, 512] {
+            let (denominator, scale_bits, reserved) = implicit_attention_scale_evidence(head_dim);
+            assert_eq!(denominator, 0);
+            assert_eq!(scale_bits, (1.0_f32 / (head_dim as f32).sqrt()).to_bits());
+            assert_eq!(reserved, [0, 0, 0, 0, scale_bits, 1, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn explicit_score_scale_evidence_is_exact_for_full_and_sliding_static_fp8() {
+        let context = Context::test_without_native();
+        for (sliding_window, start, committed) in [
+            (None, 0_u64, 1023_u64),
+            (Some(1024), 0, 1024),
+            (Some(1024), 1024, 1025),
+        ] {
+            let descriptor = if let Some(window) = sliding_window {
+                KvStateDescriptor::new_with_static_fp8_sliding(0, 262_144, 4, 256, window).unwrap()
+            } else {
+                KvStateDescriptor::new_with_static_fp8(0, 262_144, 4, 256, 1.0, 1.0).unwrap()
+            };
+            let mut info = empty_causal_attention_info();
+            info.backend = sys::SLLM_BACKEND_HIP;
+            info.dispatch_id = 7;
+            info.dispatch_count = 1;
+            info.kernel_id = if sliding_window.is_some() {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1
+            } else {
+                sys::SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1
+            };
+            info.workgroup_size_x = sys::SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE;
+            info.query_count = committed - start;
+            info.grid_size_x = u32::try_from(info.query_count * 16).unwrap();
+            info.start_position = start;
+            info.committed_kv_length = committed;
+            info.q_heads = 16;
+            info.kv_heads = 4;
+            info.head_dim = 256;
+            info.scale_denominator = 0;
+            let window = sliding_window.unwrap_or(0);
+            let retained_start = if window == 0 {
+                0
+            } else {
+                committed.saturating_sub(window)
+            };
+            info.reserved = [
+                window as u32,
+                (window >> 32) as u32,
+                retained_start as u32,
+                (retained_start >> 32) as u32,
+                1.0_f32.to_bits(),
+                1,
+                0,
+                0,
+            ];
+            if sliding_window.is_some() {
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.sliding_static_fp8_gqa.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_sliding_static_fp8_gqa_v1",
+                );
+            } else {
+                set_test_c_string(
+                    &mut info.kernel_symbol,
+                    "causal_attention.scaled_static_fp8_gqa.v1",
+                );
+                set_test_c_string(
+                    &mut info.device_symbol,
+                    "sllm_causal_attention_scaled_static_fp8_gqa_v1",
+                );
+            }
+            let evidence = validate_causal_attention_info(
+                &info,
+                &context,
+                start,
+                committed,
+                descriptor,
+                16,
+                sliding_window,
+                Some(1.0),
+            )
+            .unwrap();
+            assert_eq!(evidence.score_scale_bits, 1.0_f32.to_bits());
+            assert!(evidence.explicit_score_scale);
+            assert!(!evidence.fallback_allowed);
+            assert!(!evidence.fallback_used);
+
+            let mut fallback = info;
+            fallback.fallback_used = 1;
+            assert!(
+                validate_causal_attention_info(
+                    &fallback,
+                    &context,
+                    start,
+                    committed,
+                    descriptor,
+                    16,
+                    sliding_window,
+                    Some(1.0),
+                )
+                .is_err()
+            );
+            let mut wrong_scale = info;
+            wrong_scale.reserved[4] = (1.0_f32 / 16.0).to_bits();
+            assert!(
+                validate_causal_attention_info(
+                    &wrong_scale,
+                    &context,
+                    start,
+                    committed,
+                    descriptor,
+                    16,
+                    sliding_window,
+                    Some(1.0),
+                )
+                .is_err()
+            );
         }
     }
 

@@ -1639,6 +1639,39 @@ fn classify_release<T>(
     (remaining, CleanupDisposition::Poisoned, false)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionCleanupDecision {
+    Release,
+    Retry,
+    Poison,
+}
+
+fn completion_cleanup_decision(
+    status: RuntimeStatus,
+    state: Option<CompletionState>,
+) -> CompletionCleanupDecision {
+    match state {
+        Some(CompletionState::Success) if status == RuntimeStatus::Ok => {
+            CompletionCleanupDecision::Release
+        }
+        /* A terminal semantic failure may still have positive device
+         * completion evidence and a safely releasable native owner graph.
+         * Let the native release contract distinguish that case from an
+         * unsafe HIP failure; unsafe or stale handles remain fail-closed via
+         * `classify_release` below. */
+        Some(CompletionState::Failure) => CompletionCleanupDecision::Release,
+        Some(CompletionState::Pending)
+            if matches!(
+                status,
+                RuntimeStatus::Pending | RuntimeStatus::Timeout | RuntimeStatus::Busy
+            ) =>
+        {
+            CompletionCleanupDecision::Retry
+        }
+        _ => CompletionCleanupDecision::Poison,
+    }
+}
+
 fn release_context_once(
     raw: NonNull<sys::sllm_context_t>,
 ) -> (RuntimeStatus, Option<NonNull<sys::sllm_context_t>>) {
@@ -2348,33 +2381,26 @@ impl PendingCleanup {
                 };
                 let status = RuntimeStatus::from_raw(wait_status);
                 let state = CompletionState::from_raw(result.state);
-                if !matches!(state, Ok(CompletionState::Success)) {
-                    let pending = matches!(state, Ok(CompletionState::Pending))
-                        && matches!(
-                            status,
-                            RuntimeStatus::Pending | RuntimeStatus::Timeout | RuntimeStatus::Busy
-                        );
-                    let disposition = if pending {
-                        CleanupDisposition::Recoverable
-                    } else {
-                        CleanupDisposition::Poisoned
-                    };
-                    return Some(Self::Completion {
-                        raw: Some(raw_handle),
-                        context,
-                        queue,
-                        buffer,
-                        disposition,
-                    });
-                }
-                if status != RuntimeStatus::Ok {
-                    return Some(Self::Completion {
-                        raw: Some(raw_handle),
-                        context,
-                        queue,
-                        buffer,
-                        disposition: CleanupDisposition::Poisoned,
-                    });
+                match completion_cleanup_decision(status, state.ok()) {
+                    CompletionCleanupDecision::Retry => {
+                        return Some(Self::Completion {
+                            raw: Some(raw_handle),
+                            context,
+                            queue,
+                            buffer,
+                            disposition: CleanupDisposition::Recoverable,
+                        });
+                    }
+                    CompletionCleanupDecision::Poison => {
+                        return Some(Self::Completion {
+                            raw: Some(raw_handle),
+                            context,
+                            queue,
+                            buffer,
+                            disposition: CleanupDisposition::Poisoned,
+                        });
+                    }
+                    CompletionCleanupDecision::Release => {}
                 }
                 let (release_status, remaining) = release_completion_once(raw_handle);
                 let (remaining, disposition, done) = classify_release(release_status, remaining);
@@ -4319,6 +4345,36 @@ mod tests {
         assert!(done);
         assert_eq!(disposition, CleanupDisposition::Recoverable);
         assert!(remaining.is_none());
+    }
+
+    #[test]
+    fn terminal_semantic_failure_attempts_native_safe_release() {
+        assert_eq!(
+            completion_cleanup_decision(
+                RuntimeStatus::InvalidArgument,
+                Some(CompletionState::Failure),
+            ),
+            CompletionCleanupDecision::Release
+        );
+        assert_eq!(
+            completion_cleanup_decision(
+                RuntimeStatus::HipRuntimeError,
+                Some(CompletionState::Failure),
+            ),
+            CompletionCleanupDecision::Release,
+            "native release remains the fail-closed authority for unsafe failures"
+        );
+        assert_eq!(
+            completion_cleanup_decision(RuntimeStatus::Timeout, Some(CompletionState::Pending),),
+            CompletionCleanupDecision::Retry
+        );
+        assert_eq!(
+            completion_cleanup_decision(
+                RuntimeStatus::InternalError,
+                Some(CompletionState::Success),
+            ),
+            CompletionCleanupDecision::Poison
+        );
     }
 
     #[test]

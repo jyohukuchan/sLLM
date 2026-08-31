@@ -64,6 +64,7 @@ _EXPECTED_SOURCE_SETS = {
         "native/hip/src/rmsnorm_kernel_internal.hpp",
     ),
     "host_abi": (
+        "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
         "native/hip/src/public_runtime.hip.cpp",
         "native/hip/src/public_runtime_internal.hpp",
         "native/hip/src/rmsnorm_api.cpp",
@@ -244,7 +245,7 @@ def expected_build_commands() -> list[list[str]]:
     ]
     return [
         [*common_hip, "-o", "{build_dir}/rmsnorm-kernel-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/rmsnorm_kernel.hip.cpp"],
-        [*common_hip, "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/public_runtime.hip.cpp"],
+        [*common_hip, "-o", "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c", "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp"],
         [
             COMPILER, "-O3", "-DNDEBUG", "-std=gnu++17", "-I", "{repo}/include", "-I",
             "{repo}/native/hip/src", "--offload-arch={target}", "-mcode-object-version=6",
@@ -276,7 +277,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
     expected_top = {"$schema", "schema_version", "matrix_id", "revision", "suite_id", "tier", "toolchain_id", "container", "workflow", "source_sets", "source_symbol_map", "public_abi_symbols", "logical_kernel", "device_symbol", "case_manifest", "rows"}
     if set(matrix) != expected_top:
         raise ContractError("RMSNorm matrix has missing or unknown top-level fields")
-    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 6:
+    if matrix["$schema"] != "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json" or matrix["schema_version"] != "rmsnorm-h3-compile-v1" or matrix["matrix_id"] != "rmsnorm-h3-compile-v1" or matrix["revision"] != 7:
         raise ContractError("RMSNorm matrix identity is invalid")
     if matrix["suite_id"] != "h3-rmsnorm-compile-only" or matrix["tier"] != "tier_h3_rmsnorm" or matrix["toolchain_id"] != "rocm-7.14.0":
         raise ContractError("RMSNorm matrix suite/tier/toolchain is not fixed")
@@ -313,7 +314,7 @@ def validate_matrix(repo: Path = ROOT) -> tuple[dict[str, Any], dict[str, Any], 
         if row["resource"] != {"max_rss_bytes": 4294967296, "max_output_bytes": 16777216, "timeout_seconds": 900, "max_output_file_bytes": 268435456}:
             raise ContractError(f"{expected_id} resource bounds drifted")
         build = row["build"]
-        if build.get("generator") != "direct-amdclang++" or build.get("mode") != "compile-link-extract-inspect" or build.get("build_type") != "Release" or build.get("language_standard") != "gnu++17" or build.get("sources") != ["native/hip/src/rmsnorm_kernel.hip.cpp", "native/hip/src/public_runtime.hip.cpp", "native/hip/src/rmsnorm_api.cpp"] or build.get("commands") != expected_build_commands():
+        if build.get("generator") != "direct-amdclang++" or build.get("mode") != "compile-link-extract-inspect" or build.get("build_type") != "Release" or build.get("language_standard") != "gnu++17" or build.get("sources") != ["native/hip/src/rmsnorm_kernel.hip.cpp", "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp", "native/hip/src/rmsnorm_api.cpp"] or build.get("commands") != expected_build_commands():
             raise ContractError(f"{expected_id} build contract is not the dedicated RMSNorm tuple")
         for command in build["commands"]:
             if not command or command[0] != COMPILER or any(any(token in value for token in (";", "&&", "||", "`", "$(")) for value in command):

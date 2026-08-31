@@ -21,12 +21,15 @@ use sllm_hip_sys as sys;
 mod argmax;
 mod attention_preprocess;
 mod bridge;
+mod deepseek_v4_moe_route;
 mod elementwise;
 mod embedding;
 mod gdn_projection_bundle;
 mod kv_state;
 mod linear_attention;
 mod matmul;
+mod minimax_m3_moe_route;
+mod ministral3_yarn;
 mod mlp_gate_up_silu_bundle;
 mod moe_expert;
 mod moe_route;
@@ -41,6 +44,11 @@ pub use argmax::{ArgmaxDescriptor, ArgmaxDispatchInfo, ArgmaxSubmission, Prepare
 pub use attention_preprocess::{
     AttentionPreprocessDescriptor, AttentionPreprocessDispatchInfo, AttentionPreprocessSubmission,
     PreparedAttentionPreprocess,
+};
+pub use deepseek_v4_moe_route::{
+    DeepSeekV4MoeRouteDescriptor, DeepSeekV4MoeRouteDispatchInfo, DeepSeekV4MoeRouteLayout,
+    DeepSeekV4MoeRouteMode, DeepSeekV4MoeRouteQueryInfo, DeepSeekV4MoeRouteStatus,
+    DeepSeekV4MoeRouteSubmission, PreparedDeepSeekV4MoeRoute,
 };
 pub use elementwise::{
     ElementwiseDescriptor, ElementwiseDispatchInfo, ElementwiseOperation, ElementwiseSubmission,
@@ -57,13 +65,22 @@ pub use kv_state::{
     CausalAttentionEvidence, KvAppendEvidence, bf16_to_f16_bits, expected_storage_offset,
 };
 pub use matmul::{MatmulDescriptor, MatmulDispatchInfo, MatmulSubmission, PreparedMatmul};
+pub use minimax_m3_moe_route::{
+    MiniMaxM3MoeRouteDescriptor, MiniMaxM3MoeRouteDispatchInfo, MiniMaxM3MoeRouteLayout,
+    MiniMaxM3MoeRouteQueryInfo, MiniMaxM3MoeRouteStatus, MiniMaxM3MoeRouteSubmission,
+    PreparedMiniMaxM3MoeRoute,
+};
+pub use ministral3_yarn::{
+    Ministral3YarnDescriptor, Ministral3YarnDispatchInfo, Ministral3YarnPositionMode,
+    Ministral3YarnSubmission, PreparedMinistral3Yarn,
+};
 pub use mlp_gate_up_silu_bundle::{
     MlpGateUpSiluBundleDescriptor, MlpGateUpSiluBundleDispatchInfo, MlpGateUpSiluBundleSubmission,
     PreparedMlpGateUpSiluBundle,
 };
 pub use moe_expert::{
     MoeExpertDescriptor, MoeExpertDispatchInfo, MoeExpertSubmission, PreparedMoeExpert,
-    moe_expert_workspace_bytes,
+    gemma4_moe_expert_workspace_bytes, moe_expert_workspace_bytes,
 };
 pub use moe_route::{
     MoeRouteDescriptor, MoeRouteDispatchInfo, MoeRouteLayout, MoeRouteSubmission, PreparedMoeRoute,

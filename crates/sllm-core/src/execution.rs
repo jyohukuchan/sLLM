@@ -19,6 +19,7 @@ use crate::linear_attention::{
     LinearAttentionDescriptor, LinearAttentionLayout, LinearAttentionRequest,
     LinearAttentionStateDescriptor, LinearAttentionStateSnapshot,
 };
+use crate::ministral3_graph::Ministral3YarnQueryScaleStage;
 use crate::session_checkpoint::{
     OpaqueStatePlane, StateLayerMetadataV1, StateOwnerKindV1, StatePlaneKindV1,
 };
@@ -823,6 +824,33 @@ pub trait ExecutionSessionAdapter: Send + Sync {
         })
     }
 
+    /// Enqueues the fixed Ministral 3 YaRN RoPE plus query-only long-position
+    /// scale stage. This is deliberately a dedicated path rather than a
+    /// `SemanticOpDescriptor`: plain Rotary cannot express the reviewed YaRN
+    /// law or its Q-only scale.
+    #[allow(clippy::too_many_arguments)]
+    fn execute_ministral3_yarn(
+        &self,
+        _access: &ExecutionAdapterAccess<'_>,
+        _queue: &ExecutionQueue,
+        _query: &OwnedTensorBinding,
+        _key: &OwnedTensorBinding,
+        _positions: &OwnedTensorBinding,
+        _query_output: &OwnedTensorBinding,
+        _key_output: &OwnedTensorBinding,
+        _stage: Ministral3YarnQueryScaleStage,
+    ) -> Result<
+        (
+            Box<dyn ExecutionMinistral3YarnSubmissionAdapter>,
+            DispatchEvidence,
+        ),
+        ExecutionError,
+    > {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support Ministral 3 YaRN execution".to_owned(),
+        })
+    }
+
     /// Creates one request-local C4 convolution/recurrent state. Adapters
     /// without native linear attention reject it rather than substituting CPU
     /// storage or execution.
@@ -988,6 +1016,27 @@ pub trait ExecutionCausalAttentionSubmissionAdapter: Send {
     ) -> Result<ExecutionState, ExecutionError> {
         Err(ExecutionError::Unsupported {
             reason: "backend does not support deferred attention completion finalization"
+                .to_owned(),
+        })
+    }
+    fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        Ok(None)
+    }
+}
+
+/// Adapter-owned mutable completion for one dedicated Ministral 3 YaRN
+/// dispatch. It is separate from a stateless semantic submission because the
+/// stage has model-specific fixed numerical semantics and five retained
+/// tensor bindings.
+pub trait ExecutionMinistral3YarnSubmissionAdapter: Send {
+    fn query(&mut self) -> Result<ExecutionState, ExecutionError>;
+    fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError>;
+    fn finalize_after_fence(
+        &mut self,
+        _fence_token: u64,
+    ) -> Result<ExecutionState, ExecutionError> {
+        Err(ExecutionError::Unsupported {
+            reason: "backend does not support deferred Ministral 3 YaRN completion finalization"
                 .to_owned(),
         })
     }
@@ -2035,6 +2084,55 @@ impl ExecutionSession {
             descriptor,
             dispatch,
             attention_in_flight: Arc::clone(&state.attention_in_flight),
+            completion_state: ExecutionState::Pending,
+            inner: Some(inner),
+        })
+    }
+
+    /// Validates and submits the fixed Ministral 3 YaRN RoPE plus
+    /// query-only long-position scale stage. This operation is intentionally
+    /// not representable by `SemanticOpDescriptor`/plain Rotary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ministral3_yarn(
+        &self,
+        queue: &ExecutionQueue,
+        query: OwnedTensorBinding,
+        key: OwnedTensorBinding,
+        positions: OwnedTensorBinding,
+        query_output: OwnedTensorBinding,
+        key_output: OwnedTensorBinding,
+        stage: Ministral3YarnQueryScaleStage,
+    ) -> Result<Ministral3YarnSubmission, ExecutionError> {
+        self.ensure_open()?;
+        self.ensure_queue(queue)?;
+        validate_ministral3_yarn_bindings(
+            self,
+            &query,
+            &key,
+            &positions,
+            &query_output,
+            &key_output,
+            stage,
+        )?;
+        let (inner, dispatch) = self.state.adapter.execute_ministral3_yarn(
+            &ExecutionAdapterAccess { session: self },
+            queue,
+            &query,
+            &key,
+            &positions,
+            &query_output,
+            &key_output,
+            stage,
+        )?;
+        Ok(Ministral3YarnSubmission {
+            queue: queue.clone(),
+            query,
+            key,
+            positions,
+            query_output,
+            key_output,
+            stage,
+            dispatch,
             completion_state: ExecutionState::Pending,
             inner: Some(inner),
         })
@@ -3100,6 +3198,122 @@ impl CausalAttentionSubmission {
     }
 }
 
+/// Distinct asynchronous completion for one dedicated Ministral 3 YaRN
+/// dispatch. The queue and all five bindings remain owned until the adapter
+/// completion is terminal or this submission is dropped.
+pub struct Ministral3YarnSubmission {
+    queue: ExecutionQueue,
+    query: OwnedTensorBinding,
+    key: OwnedTensorBinding,
+    positions: OwnedTensorBinding,
+    query_output: OwnedTensorBinding,
+    key_output: OwnedTensorBinding,
+    stage: Ministral3YarnQueryScaleStage,
+    dispatch: DispatchEvidence,
+    completion_state: ExecutionState,
+    inner: Option<Box<dyn ExecutionMinistral3YarnSubmissionAdapter>>,
+}
+
+impl Drop for Ministral3YarnSubmission {
+    fn drop(&mut self) {
+        drop(self.inner.take());
+    }
+}
+
+impl fmt::Debug for Ministral3YarnSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Ministral3YarnSubmission")
+            .field("queue", &self.queue.id())
+            .field("token_count", &self.stage.token_count())
+            .field("completion_state", &self.completion_state)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Ministral3YarnSubmission {
+    pub fn queue(&self) -> &ExecutionQueue {
+        &self.queue
+    }
+
+    pub fn query_binding(&self) -> &OwnedTensorBinding {
+        &self.query
+    }
+
+    pub fn key_binding(&self) -> &OwnedTensorBinding {
+        &self.key
+    }
+
+    pub fn positions_binding(&self) -> &OwnedTensorBinding {
+        &self.positions
+    }
+
+    pub fn query_output_binding(&self) -> &OwnedTensorBinding {
+        &self.query_output
+    }
+
+    pub fn key_output_binding(&self) -> &OwnedTensorBinding {
+        &self.key_output
+    }
+
+    pub const fn stage(&self) -> Ministral3YarnQueryScaleStage {
+        self.stage
+    }
+
+    pub fn dispatch(&self) -> &DispatchEvidence {
+        &self.dispatch
+    }
+
+    pub const fn completion_state(&self) -> ExecutionState {
+        self.completion_state
+    }
+
+    pub fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("Ministral 3 YaRN submission adapter remains owned until drop")
+            .query()?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn wait(&mut self, timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("Ministral 3 YaRN submission adapter remains owned until drop")
+            .wait(timeout)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    pub fn finalize_after_fence(
+        &mut self,
+        fence: &ExecutionQueueFence,
+    ) -> Result<ExecutionState, ExecutionError> {
+        let state = self
+            .inner
+            .as_mut()
+            .expect("Ministral 3 YaRN submission adapter remains owned until drop")
+            .finalize_after_fence(fence.token()?)?;
+        self.completion_state = state;
+        Ok(state)
+    }
+
+    /// Backend event timing for the YaRN kernel. The submission must have
+    /// reached success; host-only adapters may return `None`.
+    pub fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+        if self.completion_state != ExecutionState::Success {
+            return Err(ExecutionError::NotReady);
+        }
+        self.inner
+            .as_mut()
+            .expect("Ministral 3 YaRN submission adapter remains owned until drop")
+            .kernel_elapsed_ns()
+    }
+}
+
 /// A checked half-open byte interval in one owned execution buffer.
 #[derive(Clone, Debug)]
 pub struct BufferRange {
@@ -3845,6 +4059,118 @@ fn validate_causal_attention_bindings(
     Ok(())
 }
 
+fn validate_ministral3_yarn_bindings(
+    session: &ExecutionSession,
+    query: &OwnedTensorBinding,
+    key: &OwnedTensorBinding,
+    positions: &OwnedTensorBinding,
+    query_output: &OwnedTensorBinding,
+    key_output: &OwnedTensorBinding,
+    stage: Ministral3YarnQueryScaleStage,
+) -> Result<(), ExecutionError> {
+    let token_count = u64::from(stage.token_count());
+    let end_position = stage
+        .start_position()
+        .checked_add(token_count)
+        .ok_or_else(|| ExecutionError::InvalidRange {
+            reason: "Ministral 3 YaRN position range overflowed u64".to_owned(),
+        })?;
+    if end_position > u64::from(crate::MINISTRAL3_CONTEXT_LENGTH) {
+        return Err(ExecutionError::InvalidRange {
+            reason: "Ministral 3 YaRN position range exceeds the fixed context".to_owned(),
+        });
+    }
+    let token_count = usize::try_from(token_count).map_err(|_| ExecutionError::InvalidRequest {
+        reason: "Ministral 3 YaRN token count does not fit the host index type".to_owned(),
+    })?;
+
+    validate_ministral3_yarn_binding(
+        session,
+        query,
+        "Ministral 3 YaRN query",
+        AccessMode::Read,
+        DType::Bf16,
+        &[token_count, 32, 128],
+    )?;
+    validate_ministral3_yarn_binding(
+        session,
+        key,
+        "Ministral 3 YaRN key",
+        AccessMode::Read,
+        DType::Bf16,
+        &[token_count, 8, 128],
+    )?;
+    validate_ministral3_yarn_binding(
+        session,
+        positions,
+        "Ministral 3 YaRN positions",
+        AccessMode::Read,
+        DType::I32,
+        &[token_count],
+    )?;
+    validate_ministral3_yarn_binding(
+        session,
+        query_output,
+        "Ministral 3 YaRN query output",
+        AccessMode::Write,
+        DType::Bf16,
+        &[token_count, 32, 128],
+    )?;
+    validate_ministral3_yarn_binding(
+        session,
+        key_output,
+        "Ministral 3 YaRN key output",
+        AccessMode::Write,
+        DType::Bf16,
+        &[token_count, 8, 128],
+    )?;
+
+    validate_nonoverlap(&[
+        ("Ministral 3 YaRN query", query),
+        ("Ministral 3 YaRN key", key),
+        ("Ministral 3 YaRN positions", positions),
+        ("Ministral 3 YaRN query output", query_output),
+        ("Ministral 3 YaRN key output", key_output),
+    ])
+}
+
+fn validate_ministral3_yarn_binding(
+    session: &ExecutionSession,
+    binding: &OwnedTensorBinding,
+    role: &'static str,
+    required_access: AccessMode,
+    dtype: DType,
+    shape: &[usize],
+) -> Result<(), ExecutionError> {
+    validate_binding_identity(session.backend_name(), session.id(), binding)?;
+    ensure_view_in_bounds(binding.buffer(), binding.view())?;
+    let permitted = match required_access {
+        AccessMode::Read => binding.access().permits_read(),
+        AccessMode::Write => binding.access().permits_write(),
+        AccessMode::ReadWrite => {
+            binding.access().permits_read() && binding.access().permits_write()
+        }
+    };
+    if !permitted {
+        return Err(ExecutionError::AccessViolation {
+            role,
+            required: required_access,
+            actual: binding.access(),
+        });
+    }
+    let view = binding.view();
+    if view.dtype() != dtype
+        || view.encoding() != Encoding::Unquantized
+        || view.shape() != shape
+        || !view.is_contiguous()
+    {
+        return Err(ExecutionError::InvalidRequest {
+            reason: format!("{role} must be contiguous unquantized {dtype:?} with shape {shape:?}"),
+        });
+    }
+    Ok(())
+}
+
 fn validate_linear_attention_state_snapshot(
     session: &ExecutionSession,
     state: &LinearAttentionState,
@@ -4448,6 +4774,7 @@ mod tests {
     struct TestReadback {
         bytes: Vec<u8>,
     }
+    struct TestMinistral3YarnSubmission;
 
     impl ExecutionSessionAdapter for TestAdapter {
         fn max_transfer_bytes(&self) -> u64 {
@@ -4522,6 +4849,46 @@ mod tests {
                     fallback_used: false,
                     kernel_symbol: "test".to_owned(),
                     device_symbol: "test".to_owned(),
+                    target: "test".to_owned(),
+                },
+            ))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn execute_ministral3_yarn(
+            &self,
+            _access: &ExecutionAdapterAccess<'_>,
+            _queue: &ExecutionQueue,
+            _query: &OwnedTensorBinding,
+            _key: &OwnedTensorBinding,
+            _positions: &OwnedTensorBinding,
+            _query_output: &OwnedTensorBinding,
+            _key_output: &OwnedTensorBinding,
+            stage: Ministral3YarnQueryScaleStage,
+        ) -> Result<
+            (
+                Box<dyn ExecutionMinistral3YarnSubmissionAdapter>,
+                DispatchEvidence,
+            ),
+            ExecutionError,
+        > {
+            Ok((
+                Box::new(TestMinistral3YarnSubmission),
+                DispatchEvidence {
+                    abi_version: 1,
+                    info_version: 1,
+                    dispatch_id: 7,
+                    dispatch_count: 1,
+                    kernel_id: 7,
+                    workgroup_size_x: 256,
+                    grid_size_x: stage.token_count(),
+                    row_count: u64::from(stage.token_count()),
+                    normalized_size: 128,
+                    backend: 1,
+                    fallback_allowed: false,
+                    fallback_used: false,
+                    kernel_symbol: "test_ministral3_yarn".to_owned(),
+                    device_symbol: "test_ministral3_yarn".to_owned(),
                     target: "test".to_owned(),
                 },
             ))
@@ -4652,6 +5019,20 @@ mod tests {
             Ok(Box::new(TestReadback {
                 bytes: vec![0x5a; size],
             }))
+        }
+    }
+
+    impl ExecutionMinistral3YarnSubmissionAdapter for TestMinistral3YarnSubmission {
+        fn query(&mut self) -> Result<ExecutionState, ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn wait(&mut self, _timeout: Duration) -> Result<ExecutionState, ExecutionError> {
+            Ok(ExecutionState::Success)
+        }
+
+        fn kernel_elapsed_ns(&mut self) -> Result<Option<u64>, ExecutionError> {
+            Ok(Some(17))
         }
     }
 
@@ -5962,6 +6343,198 @@ mod tests {
                 AccessMode::Read,
             ),
         )
+    }
+
+    fn valid_ministral3_yarn_bindings(
+        session: &ExecutionSession,
+        token_count: usize,
+    ) -> (
+        OwnedTensorBinding,
+        OwnedTensorBinding,
+        OwnedTensorBinding,
+        OwnedTensorBinding,
+        OwnedTensorBinding,
+    ) {
+        let query = kv_binding(
+            session,
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[token_count, 32, 128],
+            &[32 * 128, 128, 1],
+            AccessMode::Read,
+        );
+        let key = kv_binding(
+            session,
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[token_count, 8, 128],
+            &[8 * 128, 128, 1],
+            AccessMode::Read,
+        );
+        let positions = kv_binding(
+            session,
+            DType::I32,
+            Encoding::Unquantized,
+            &[token_count],
+            &[1],
+            AccessMode::Read,
+        );
+        let query_output = kv_binding(
+            session,
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[token_count, 32, 128],
+            &[32 * 128, 128, 1],
+            AccessMode::Write,
+        );
+        let key_output = kv_binding(
+            session,
+            DType::Bf16,
+            Encoding::Unquantized,
+            &[token_count, 8, 128],
+            &[8 * 128, 128, 1],
+            AccessMode::Write,
+        );
+        (query, key, positions, query_output, key_output)
+    }
+
+    #[test]
+    fn ministral3_yarn_dispatch_accepts_non_aligned_tokens_and_mirrors_completion() {
+        let session = session("ministral3-yarn-test");
+        let queue = session.create_queue().unwrap();
+        let (query, key, positions, query_output, key_output) =
+            valid_ministral3_yarn_bindings(&session, 3);
+        let stage = Ministral3YarnQueryScaleStage::new(16_384, 3).unwrap();
+        let mut submission = session
+            .ministral3_yarn(
+                &queue,
+                query,
+                key,
+                positions,
+                query_output,
+                key_output,
+                stage,
+            )
+            .unwrap();
+        assert_eq!(submission.queue().id(), queue.id());
+        assert_eq!(submission.stage(), stage);
+        assert_eq!(submission.dispatch().row_count, 3);
+        assert_eq!(submission.query_binding().view().shape(), &[3, 32, 128]);
+        assert_eq!(submission.key_binding().view().shape(), &[3, 8, 128]);
+        assert_eq!(submission.positions_binding().view().shape(), &[3]);
+        assert_eq!(
+            submission.query_output_binding().view().shape(),
+            &[3, 32, 128]
+        );
+        assert_eq!(submission.key_output_binding().view().shape(), &[3, 8, 128]);
+        assert_eq!(submission.query().unwrap(), ExecutionState::Success);
+        assert_eq!(submission.completion_state(), ExecutionState::Success);
+        assert_eq!(submission.kernel_elapsed_ns().unwrap(), Some(17));
+    }
+
+    #[test]
+    fn ministral3_yarn_rejects_default_adapter_and_invalid_contracts() {
+        let (default_session, _) = kv_session();
+        let default_queue = default_session.create_queue().unwrap();
+        let (query, key, positions, query_output, key_output) =
+            valid_ministral3_yarn_bindings(&default_session, 3);
+        assert!(matches!(
+            default_session.ministral3_yarn(
+                &default_queue,
+                query,
+                key,
+                positions,
+                query_output,
+                key_output,
+                Ministral3YarnQueryScaleStage::new(0, 3).unwrap(),
+            ),
+            Err(ExecutionError::Unsupported { reason })
+                if reason.contains("Ministral 3 YaRN")
+        ));
+
+        let invalid_session = session("ministral3-yarn-invalid");
+        let queue = invalid_session.create_queue().unwrap();
+        let invalid_stage = Ministral3YarnQueryScaleStage::new(0, 2).unwrap();
+        let (query, key, positions, query_output, key_output) =
+            valid_ministral3_yarn_bindings(&invalid_session, 3);
+        assert!(matches!(
+            invalid_session.ministral3_yarn(
+                &queue,
+                query,
+                key,
+                positions,
+                query_output,
+                key_output,
+                invalid_stage,
+            ),
+            Err(ExecutionError::InvalidRequest { .. })
+        ));
+
+        let (query, key, positions, query_output, key_output) =
+            valid_ministral3_yarn_bindings(&invalid_session, 3);
+        let wrong_access = invalid_session
+            .bind(
+                query_output.buffer(),
+                query_output.view().clone(),
+                AccessMode::Read,
+            )
+            .unwrap();
+        assert!(matches!(
+            invalid_session.ministral3_yarn(
+                &queue,
+                query,
+                key,
+                positions,
+                wrong_access,
+                key_output,
+                Ministral3YarnQueryScaleStage::new(0, 3).unwrap(),
+            ),
+            Err(ExecutionError::AccessViolation { .. })
+        ));
+
+        let (query, key, positions, _query_output, key_output) =
+            valid_ministral3_yarn_bindings(&invalid_session, 3);
+        let aliased_output = invalid_session
+            .bind(query.buffer(), query.view().clone(), AccessMode::Write)
+            .unwrap();
+        assert!(matches!(
+            invalid_session.ministral3_yarn(
+                &queue,
+                query,
+                key,
+                positions,
+                aliased_output,
+                key_output,
+                Ministral3YarnQueryScaleStage::new(0, 3).unwrap(),
+            ),
+            Err(ExecutionError::AliasOverlap { .. })
+        ));
+
+        let foreign = session("ministral3-yarn-invalid");
+        let foreign_query = valid_ministral3_yarn_bindings(&foreign, 3).0;
+        let (_query, key, positions, query_output, key_output) =
+            valid_ministral3_yarn_bindings(&invalid_session, 3);
+        assert!(matches!(
+            invalid_session.ministral3_yarn(
+                &queue,
+                foreign_query,
+                key,
+                positions,
+                query_output,
+                key_output,
+                Ministral3YarnQueryScaleStage::new(0, 3).unwrap(),
+            ),
+            Err(ExecutionError::WrongSession { .. })
+        ));
+
+        assert!(matches!(
+            Ministral3YarnQueryScaleStage::new(crate::MINISTRAL3_CONTEXT_LENGTH as u64, 1),
+            Err(crate::Ministral3GraphError::ContextExceeded { .. })
+        ));
+        assert!(matches!(
+            Ministral3YarnQueryScaleStage::new(crate::MINISTRAL3_CONTEXT_LENGTH as u64 - 1, 2),
+            Err(crate::Ministral3GraphError::ContextExceeded { .. })
+        ));
     }
 
     fn linear_binding(

@@ -210,6 +210,21 @@ impl TokenizeResultV1 {
         }
     }
 
+    /// Constructs a utility result from a tokenizer whose model identity and
+    /// decoder table were already verified by a trusted backend.
+    pub fn from_verified_parts(
+        token_ids: TokenIdsV1,
+        pieces: Option<Vec<TokenPieceV1>>,
+    ) -> Result<Self, TokenizerUtilityErrorV1> {
+        if pieces
+            .as_ref()
+            .is_some_and(|pieces| pieces.len() != token_ids.len())
+        {
+            return Err(TokenizerUtilityErrorV1::InvalidTokenPieceCount);
+        }
+        Ok(Self::new(token_ids, pieces))
+    }
+
     pub const fn version(&self) -> u8 {
         self.version
     }
@@ -555,6 +570,7 @@ pub enum TokenizerUtilityErrorV1 {
     TemplateUnavailable,
     ApplyTemplate(ChatRenderError),
     TokenPieceUnavailable { id: u32 },
+    InvalidTokenPieceCount,
     InvalidTemplateIdentity,
     InvalidTemplateResult,
     GenericTemplate(GenericTemplateErrorV1),
@@ -584,6 +600,9 @@ impl fmt::Display for TokenizerUtilityErrorV1 {
             Self::ApplyTemplate(error) => write!(formatter, "template application failed: {error}"),
             Self::TokenPieceUnavailable { id } => {
                 write!(formatter, "token {id} has no decoder-aware piece")
+            }
+            Self::InvalidTokenPieceCount => {
+                formatter.write_str("token piece count differs from token ID count")
             }
             Self::InvalidTemplateIdentity => {
                 formatter.write_str("verified template identity is malformed")

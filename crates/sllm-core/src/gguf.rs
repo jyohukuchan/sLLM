@@ -5,6 +5,7 @@
 //! source container after an error.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -25,11 +26,25 @@ pub const SLLM_FRONTEND_CONFIG_KEY: &str = "sllm.frontend.config_json";
 pub const SLLM_FRONTEND_TOKENIZER_KEY: &str = "sllm.frontend.tokenizer_json";
 pub const SLLM_FRONTEND_TOKENIZER_CONFIG_KEY: &str = "sllm.frontend.tokenizer_config_json";
 pub const SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY: &str = "sllm.frontend.preprocessor_config_json";
+/// Metadata namespace used by the Gemma 4 assistant GGUF.  These keys are
+/// intentionally kept outside the tensor recipe: they describe the required
+/// target/assistant pair and are not an alternate weight encoding.
+pub const GEMMA4_MTP_ROLE_KEY: &str = "gemma4mtp.role";
+pub const GEMMA4_MTP_SEMANTIC_PAIR_KEY: &str = "gemma4mtp.semantic_pair_id";
+pub const GEMMA4_MTP_TARGET_FINGERPRINT_KEY: &str = "gemma4mtp.target_fingerprint";
+pub const GEMMA4_MTP_ASSISTANT_FINGERPRINT_KEY: &str = "gemma4mtp.assistant_fingerprint";
+pub const GEMMA4_MTP_LAYER_MAPPING_KEY: &str = "gemma4mtp.layer_mapping";
+pub const GEMMA4_MTP_KV_MAPPING_KEY: &str = "gemma4mtp.kv_mapping";
+pub const GEMMA4_MTP_TOKENIZER_IDENTITY_KEY: &str = "gemma4mtp.tokenizer_identity";
+pub const GEMMA4_MTP_SOURCE_RANGES_KEY: &str = "gemma4mtp.source_ranges";
 
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const MAX_HEADER_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_METADATA_ENTRIES: u64 = 16_384;
-const MAX_TENSORS: u64 = 65_536;
+// DeepSeek V4 Flash contains 72,317 indexed tensors. Keep this bounded while
+// allowing its reviewed catalog to be represented without weakening any byte
+// range or allocation checks.
+const MAX_TENSORS: u64 = 100_000;
 const MAX_DIMS: u32 = 4;
 const MAX_KEY_BYTES: u64 = 1_024;
 const MAX_NAME_BYTES: u64 = 16 * 1024;
@@ -348,7 +363,18 @@ impl VerifiedGguf {
             Some(_) => return Err(invalid("general.architecture has wrong type")),
             None => return Err(invalid("general.architecture is missing")),
         };
-        if !matches!(architecture, "qwen35" | "qwen35moe" | "gemma4") {
+        if !matches!(
+            architecture,
+            "qwen35"
+                | "qwen35moe"
+                | "gemma4"
+                | "gemma4moe"
+                | "gemma4mtp"
+                | "deepseek4"
+                | "minimax-m3"
+                | "diffusion-gemma"
+                | "mistral3"
+        ) {
             return Err(invalid(format!("unsupported architecture {architecture}")));
         }
 
@@ -420,6 +446,9 @@ impl VerifiedGguf {
         validate_non_overlapping(&tensors)?;
 
         let extension = parse_extension(&metadata, &tensors)?;
+        if architecture == "gemma4mtp" {
+            validate_gemma4_mtp_extension(&metadata, &tensors, extension.as_ref())?;
+        }
         validate_i8_carriers(&tensors, extension.as_ref())?;
 
         let tensor_index = tensors
@@ -480,6 +509,31 @@ impl VerifiedGguf {
             Some(GgufValue::String(value)) => value,
             _ => unreachable!("verified GGUF always has architecture"),
         }
+    }
+
+    /// Returns whether this file is an assistant-only artifact.  An
+    /// assistant GGUF is intentionally parseable for the explicit MTP
+    /// verifier, but must never be treated as a standalone target model by a
+    /// generic model loader.
+    pub fn is_assistant_only(&self) -> bool {
+        self.architecture() == "gemma4mtp"
+            && matches!(
+                self.metadata_value(GEMMA4_MTP_ROLE_KEY),
+                Some(GgufValue::String(role)) if role == "assistant"
+            )
+    }
+
+    /// Open a GGUF for a standalone target-model runtime.  MTP assistant
+    /// artifacts are intentionally excluded; callers that explicitly enable
+    /// MTP must validate the target/assistant pair through the MTP verifier.
+    pub fn open_target(path: impl AsRef<Path>) -> Result<Self, GgufError> {
+        let verified = Self::open(path)?;
+        if verified.architecture() == "gemma4mtp" {
+            return Err(invalid(
+                "Gemma 4 MTP assistant GGUF requires its reviewed target pair",
+            ));
+        }
+        Ok(verified)
     }
 
     pub fn tensors(&self) -> &[GgufTensorInfo] {
@@ -564,6 +618,12 @@ fn parse_extension(
                     | "sllm.source.fp8_manifest_fingerprint"
                     | "sllm.source.fp8_artifact.sha256"
                     | "sllm.source.recipe.sha256"
+                    | "sllm.source.artifact.fingerprint"
+                    | "sllm.source.semantic.repository"
+                    | "sllm.source.semantic.revision"
+                    | "sllm.source.recipe.producer"
+                    | "sllm.kv.fp8.scheme"
+                    | "sllm.kv.fp8.implicit_decode_scale_bf16"
             )
         {
             return Err(invalid(format!("unknown sLLM extension key {key}")));
@@ -621,12 +681,174 @@ fn parse_extension(
     }))
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Gemma4MtpSourceRange {
+    name: String,
+    source_file: String,
+    dtype: String,
+    shape: Vec<u64>,
+    data_offsets: [u64; 2],
+    absolute_byte_range: [u64; 2],
+}
+
+/// Validate the structural safety boundary shared by the generic GGUF reader
+/// and the explicit Gemma MTP verifier.  This does not admit an assistant as
+/// a target and does not replace target-lock validation; it guarantees that a
+/// malformed or identity-less assistant artifact cannot pass as a pair member.
+fn validate_gemma4_mtp_extension(
+    metadata: &BTreeMap<String, GgufValue>,
+    tensors: &[GgufTensorInfo],
+    extension: Option<&GgufExtensionV1>,
+) -> Result<(), GgufError> {
+    let extension = extension.ok_or_else(|| invalid("Gemma 4 MTP GGUF extension is missing"))?;
+    let role = metadata_string(metadata, GEMMA4_MTP_ROLE_KEY)?;
+    if role != "assistant" {
+        return Err(invalid("Gemma 4 MTP GGUF role is not assistant"));
+    }
+    let target_fingerprint = metadata_string(metadata, GEMMA4_MTP_TARGET_FINGERPRINT_KEY)?;
+    let assistant_fingerprint = metadata_string(metadata, GEMMA4_MTP_ASSISTANT_FINGERPRINT_KEY)?;
+    if !valid_sha256(target_fingerprint) || !valid_sha256(assistant_fingerprint) {
+        return Err(invalid("Gemma 4 MTP pair fingerprint is invalid"));
+    }
+    if extension.recipe.source_lock_fingerprints.as_slice()
+        != [
+            target_fingerprint.to_owned(),
+            assistant_fingerprint.to_owned(),
+        ]
+    {
+        return Err(invalid(
+            "Gemma 4 MTP recipe source fingerprints differ from metadata",
+        ));
+    }
+    let semantic_pair = metadata_string(metadata, GEMMA4_MTP_SEMANTIC_PAIR_KEY)?;
+    if semantic_pair != extension.recipe.semantic_model_id || semantic_pair.is_empty() {
+        return Err(invalid("Gemma 4 MTP semantic pair identity differs"));
+    }
+    let catalog = metadata_string(metadata, "gemma4mtp.tensor_catalog_sha256")?;
+    if !valid_sha256(catalog) {
+        return Err(invalid("Gemma 4 MTP catalog fingerprint is invalid"));
+    }
+    for key in [
+        "gemma4mtp.source_model_sha256",
+        "gemma4mtp.source_header_sha256",
+    ] {
+        if !valid_sha256(metadata_string(metadata, key)?) {
+            return Err(invalid(format!(
+                "Gemma 4 MTP source fingerprint is invalid: {key}"
+            )));
+        }
+    }
+    validate_u32_array(metadata, GEMMA4_MTP_LAYER_MAPPING_KEY, &[0, 1, 2, 3])?;
+    validate_u32_array(metadata, GEMMA4_MTP_KV_MAPPING_KEY, &[46, 46, 46, 47])?;
+    let layer_types = match metadata.get("gemma4mtp.layer_types") {
+        Some(GgufValue::Array(GgufArray::String(values))) => values,
+        _ => return Err(invalid("Gemma 4 MTP layer types metadata is invalid")),
+    };
+    if layer_types.as_slice()
+        != [
+            "sliding_attention".to_owned(),
+            "sliding_attention".to_owned(),
+            "sliding_attention".to_owned(),
+            "full_attention".to_owned(),
+        ]
+    {
+        return Err(invalid("Gemma 4 MTP layer types metadata differs"));
+    }
+    let tokenizer_identity = metadata_string(metadata, GEMMA4_MTP_TOKENIZER_IDENTITY_KEY)?;
+    let tokenizer_value: Value = serde_json::from_str(tokenizer_identity)
+        .map_err(|error| invalid(format!("Gemma 4 MTP tokenizer identity JSON: {error}")))?;
+    if serde_json::to_string(&tokenizer_value)
+        .map_err(|error| invalid(format!("serialize tokenizer identity: {error}")))?
+        != tokenizer_identity
+    {
+        return Err(invalid("Gemma 4 MTP tokenizer identity is not canonical"));
+    }
+    let source_ranges = metadata_string(metadata, GEMMA4_MTP_SOURCE_RANGES_KEY)?;
+    let source_ranges: Vec<Gemma4MtpSourceRange> = serde_json::from_str(source_ranges)
+        .map_err(|error| invalid(format!("Gemma 4 MTP source ranges JSON: {error}")))?;
+    if serde_json::to_string(&source_ranges)
+        .map_err(|error| invalid(format!("serialize source ranges: {error}")))?
+        != source_ranges_json(metadata, GEMMA4_MTP_SOURCE_RANGES_KEY)?
+    {
+        return Err(invalid("Gemma 4 MTP source ranges are not canonical"));
+    }
+    if source_ranges.len() != tensors.len() {
+        return Err(invalid("Gemma 4 MTP source range count differs"));
+    }
+    let mut names = BTreeSet::new();
+    for (source, tensor) in source_ranges.iter().zip(tensors) {
+        if source.name != tensor.name
+            || source.source_file.is_empty()
+            || source.dtype != "BF16"
+            || source.shape.is_empty()
+            || source.shape.contains(&0)
+            || !names.insert(source.name.as_str())
+            || tensor.tensor_type != GgufTensorType::Bf16
+        {
+            return Err(invalid("Gemma 4 MTP source range tensor identity differs"));
+        }
+        let mut physical_shape = source.shape.clone();
+        physical_shape.reverse();
+        let logical_elements = source
+            .shape
+            .iter()
+            .try_fold(1_u64, |product, dimension| product.checked_mul(*dimension))
+            .ok_or_else(|| invalid("Gemma 4 MTP source range shape overflows"))?;
+        let expected_bytes = logical_elements
+            .checked_mul(2)
+            .ok_or_else(|| invalid("Gemma 4 MTP source range byte size overflows"))?;
+        if tensor.dimensions != physical_shape
+            || source.data_offsets[0] >= source.data_offsets[1]
+            || source.absolute_byte_range[0] >= source.absolute_byte_range[1]
+            || source.data_offsets[1] - source.data_offsets[0]
+                != source.absolute_byte_range[1] - source.absolute_byte_range[0]
+            || tensor.byte_length() != expected_bytes
+        {
+            return Err(invalid("Gemma 4 MTP source range shape or size differs"));
+        }
+    }
+    Ok(())
+}
+
+fn metadata_string<'a>(
+    metadata: &'a BTreeMap<String, GgufValue>,
+    key: &str,
+) -> Result<&'a str, GgufError> {
+    match metadata.get(key) {
+        Some(GgufValue::String(value)) if !value.is_empty() => Ok(value),
+        _ => Err(invalid(format!(
+            "Gemma 4 MTP metadata {key} is missing or invalid"
+        ))),
+    }
+}
+
+fn source_ranges_json<'a>(
+    metadata: &'a BTreeMap<String, GgufValue>,
+    key: &str,
+) -> Result<&'a str, GgufError> {
+    metadata_string(metadata, key)
+}
+
+fn validate_u32_array(
+    metadata: &BTreeMap<String, GgufValue>,
+    key: &str,
+    expected: &[u32],
+) -> Result<(), GgufError> {
+    match metadata.get(key) {
+        Some(GgufValue::Array(GgufArray::U32(values))) if values == expected => Ok(()),
+        _ => Err(invalid(format!("Gemma 4 MTP metadata {key} differs"))),
+    }
+}
+
 fn frontend_asset_name(key: &str) -> Option<&'static str> {
     match key {
         SLLM_FRONTEND_CONFIG_KEY => Some("config.json"),
         SLLM_FRONTEND_TOKENIZER_KEY => Some("tokenizer.json"),
         SLLM_FRONTEND_TOKENIZER_CONFIG_KEY => Some("tokenizer_config.json"),
         SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY => Some("preprocessor_config.json"),
+        "sllm.frontend.generation_config_json" => Some("generation_config.json"),
+        "sllm.source.hf_quant_config_json" => Some("hf_quant_config.json"),
         _ => None,
     }
 }
@@ -640,6 +862,8 @@ fn parse_frontend_assets(
         SLLM_FRONTEND_TOKENIZER_KEY,
         SLLM_FRONTEND_TOKENIZER_CONFIG_KEY,
         SLLM_FRONTEND_PREPROCESSOR_CONFIG_KEY,
+        "sllm.frontend.generation_config_json",
+        "sllm.source.hf_quant_config_json",
     ] {
         let digest_key = format!("{key}.sha256");
         match (metadata.get(key), metadata.get(&digest_key)) {
@@ -1212,5 +1436,126 @@ impl<'a> BoundedReader<'a> {
             12 => GgufArray::F64(read_values!(read_f64)),
             _ => unreachable!("array type was validated"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemma4_mtp_extension_is_fail_closed_without_pair_metadata() {
+        let metadata = BTreeMap::from([
+            (
+                "general.architecture".to_owned(),
+                GgufValue::String("gemma4mtp".to_owned()),
+            ),
+            (
+                GEMMA4_MTP_ROLE_KEY.to_owned(),
+                GgufValue::String("assistant".to_owned()),
+            ),
+        ]);
+        let error = validate_gemma4_mtp_extension(&metadata, &[], None)
+            .expect_err("assistant metadata without a recipe must fail closed");
+        assert!(error.to_string().contains("extension is missing"));
+    }
+
+    #[test]
+    fn gemma4_mtp_source_range_digest_uses_the_explicit_pair_namespace() {
+        assert_eq!(GEMMA4_MTP_SOURCE_RANGES_KEY, "gemma4mtp.source_ranges");
+        assert_eq!(GEMMA4_MTP_KV_MAPPING_KEY, "gemma4mtp.kv_mapping");
+    }
+
+    #[test]
+    fn gemma4_mtp_extension_accepts_a_structurally_bound_bf16_source_range() {
+        let target = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        let assistant = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        let semantic_pair = "gemma4mtp-pair:sha256:1111111111111111111111111111111111111111111111111111111111111111:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        let tensor = GgufTensorInfo {
+            name: "model.norm.weight".to_owned(),
+            dimensions: vec![2, 2],
+            tensor_type: GgufTensorType::Bf16,
+            relative_offset: 0,
+            absolute_range: [0, 8],
+        };
+        let ranges = serde_json::to_string(&vec![Gemma4MtpSourceRange {
+            name: tensor.name.clone(),
+            source_file: "model.safetensors".to_owned(),
+            dtype: "BF16".to_owned(),
+            shape: vec![2, 2],
+            data_offsets: [0, 8],
+            absolute_byte_range: [5368, 5376],
+        }])
+        .expect("source ranges JSON");
+        let metadata = BTreeMap::from([
+            (
+                GEMMA4_MTP_ROLE_KEY.to_owned(),
+                GgufValue::String("assistant".to_owned()),
+            ),
+            (
+                GEMMA4_MTP_TARGET_FINGERPRINT_KEY.to_owned(),
+                GgufValue::String(target.to_owned()),
+            ),
+            (
+                GEMMA4_MTP_ASSISTANT_FINGERPRINT_KEY.to_owned(),
+                GgufValue::String(assistant.to_owned()),
+            ),
+            (
+                GEMMA4_MTP_SEMANTIC_PAIR_KEY.to_owned(),
+                GgufValue::String(semantic_pair.to_owned()),
+            ),
+            (
+                "gemma4mtp.tensor_catalog_sha256".to_owned(),
+                GgufValue::String(format!("sha256:{}", "3".repeat(64))),
+            ),
+            (
+                "gemma4mtp.source_model_sha256".to_owned(),
+                GgufValue::String(format!("sha256:{}", "4".repeat(64))),
+            ),
+            (
+                "gemma4mtp.source_header_sha256".to_owned(),
+                GgufValue::String(format!("sha256:{}", "5".repeat(64))),
+            ),
+            (
+                GEMMA4_MTP_LAYER_MAPPING_KEY.to_owned(),
+                GgufValue::Array(GgufArray::U32(vec![0, 1, 2, 3])),
+            ),
+            (
+                GEMMA4_MTP_KV_MAPPING_KEY.to_owned(),
+                GgufValue::Array(GgufArray::U32(vec![46, 46, 46, 47])),
+            ),
+            (
+                "gemma4mtp.layer_types".to_owned(),
+                GgufValue::Array(GgufArray::String(vec![
+                    "sliding_attention".to_owned(),
+                    "sliding_attention".to_owned(),
+                    "sliding_attention".to_owned(),
+                    "full_attention".to_owned(),
+                ])),
+            ),
+            (
+                GEMMA4_MTP_TOKENIZER_IDENTITY_KEY.to_owned(),
+                GgufValue::String("{}".to_owned()),
+            ),
+            (
+                GEMMA4_MTP_SOURCE_RANGES_KEY.to_owned(),
+                GgufValue::String(ranges),
+            ),
+        ]);
+        let extension = GgufExtensionV1 {
+            recipe: GgufTensorRecipeV1 {
+                schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
+                semantic_model_id: semantic_pair.to_owned(),
+                source_lock_fingerprints: vec![target.to_owned(), assistant.to_owned()],
+                bindings: Vec::new(),
+                logical_shapes: Vec::new(),
+                static_fp8_kv: Vec::new(),
+                known_unconsumed_tensors: Vec::new(),
+            },
+            recipe_sha256: String::new(),
+            frontend_assets: BTreeMap::new(),
+        };
+        validate_gemma4_mtp_extension(&metadata, &[tensor], Some(&extension))
+            .expect("structurally bound MTP extension");
     }
 }

@@ -22,6 +22,8 @@
 #include "moe_expert_kernel_internal.hpp"
 #include "moe_route_api.hpp"
 #include "moe_route_kernel_internal.hpp"
+#include "ministral3_yarn_api.hpp"
+#include "ministral3_yarn_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "residual_rmsnorm_api.hpp"
 #include "rmsnorm_api.hpp"
@@ -171,6 +173,13 @@ launch_broadcast_add(const uint16_t *const input, const uint16_t *const vector,
   return fake_hip::elementwise_broadcast_add_launch(
       input, vector, output, element_count, width, stream);
 }
+hipError_t
+launch_broadcast_mul(const uint16_t *const input, const uint16_t *const vector,
+                     uint16_t *const output, const uint64_t element_count,
+                     const uint64_t width, const hipStream_t stream) noexcept {
+  return fake_hip::elementwise_broadcast_mul_launch(
+      input, vector, output, element_count, width, stream);
+}
 } // namespace sllm_elementwise_kernel
 
 namespace sllm_embedding_kernel {
@@ -249,6 +258,14 @@ hipError_t launch(const uint16_t *, const uint8_t *, const uint8_t *, uint8_t *,
                   uint16_t *, uint64_t, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
+uint64_t gemma4_workspace_bytes(const uint64_t token_count) noexcept {
+  return token_count * UINT64_C(27104);
+}
+hipError_t launch_gemma4(const uint16_t *, const uint8_t *, const uint8_t *,
+                         uint8_t *, uint16_t *, uint64_t,
+                         hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
 } // namespace sllm_moe_expert_kernel
 
 namespace sllm_argmax_kernel {
@@ -292,6 +309,18 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
 }
 } // namespace sllm_rotary_kernel
 
+namespace sllm_ministral3_yarn_kernel {
+hipError_t launch(const uint16_t *const query, const uint16_t *const key,
+                  const int32_t *const positions, uint16_t *const query_output,
+                  uint16_t *const key_output, const uint32_t token_count,
+                  const uint32_t q_heads, const uint32_t kv_heads,
+                  const hipStream_t stream) noexcept {
+  return fake_hip::ministral3_yarn_launch(
+      query, key, positions, query_output, key_output, token_count, q_heads,
+      kv_heads, stream);
+}
+} // namespace sllm_ministral3_yarn_kernel
+
 namespace sllm_gemma_attention_kernel {
 hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const uint16_t *const value, uint16_t *const output,
@@ -325,6 +354,63 @@ hipError_t launch(const uint16_t *const key_input,
   (void)head_dim;
   (void)static_key_scale;
   (void)static_value_scale;
+  if (encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+      static_key_scale == 1.0F && static_value_scale == 1.0F) {
+    const uint64_t row_bytes = static_cast<uint64_t>(head_count) * head_dim;
+    const auto encode = [](const uint16_t input) noexcept -> uint8_t {
+      uint32_t bits = static_cast<uint32_t>(input) << UINT32_C(16);
+      float value = 0.0F;
+      std::memcpy(&value, &bits, sizeof(value));
+      const uint8_t sign = std::signbit(value) ? UINT8_C(0x80) : 0U;
+      if (std::isnan(value)) {
+        return static_cast<uint8_t>(UINT8_C(0x7f));
+      }
+      value = std::fabs(value);
+      if (value == 0.0F) {
+        return sign;
+      }
+      if (!std::isfinite(value) || value >= 448.0F) {
+        return static_cast<uint8_t>(sign | UINT8_C(0x7e));
+      }
+      const auto decode = [](const uint8_t encoded) noexcept {
+        const uint8_t exponent = (encoded >> UINT32_C(3)) & UINT8_C(0x0f);
+        const uint8_t mantissa = encoded & UINT8_C(0x07);
+        if (exponent == 0U) {
+          return static_cast<float>(mantissa) * std::ldexp(1.0F, -9);
+        }
+        return (1.0F + static_cast<float>(mantissa) / 8.0F) *
+               std::ldexp(1.0F, static_cast<int>(exponent) - 7);
+      };
+      uint32_t low = 0U;
+      uint32_t high = UINT32_C(0x7e);
+      while (low < high) {
+        const uint32_t middle = (low + high) >> UINT32_C(1);
+        if (decode(static_cast<uint8_t>(middle)) < value) {
+          low = middle + 1U;
+        } else {
+          high = middle;
+        }
+      }
+      const uint8_t upper = static_cast<uint8_t>(low);
+      const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
+      const float lower_error = value - decode(lower);
+      const float upper_error = decode(upper) - value;
+      const bool upper_selected = upper_error < lower_error ||
+                                  (upper_error == lower_error &&
+                                   (upper & 1U) == 0U && (lower & 1U) != 0U);
+      return static_cast<uint8_t>(sign | (upper_selected ? upper : lower));
+    };
+    for (uint64_t token = 0U; token != token_count; ++token) {
+      const uint64_t slot = (start_position + token) % capacity_tokens;
+      for (uint64_t element = 0U; element != row_bytes; ++element) {
+        static_cast<uint8_t *>(key_output)[slot * row_bytes + element] =
+            encode(key_input[token * row_bytes + element]);
+        static_cast<uint8_t *>(value_output)[slot * row_bytes + element] =
+            encode(value_input[token * row_bytes + element]);
+      }
+    }
+    return hipSuccess;
+  }
   if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
     return hipErrorInvalidValue;
   }
@@ -422,7 +508,9 @@ launch(const uint16_t *const query, const void *const key,
        const float static_value_scale, const bool use_gfx1201_wave_provider,
        const bool use_decode_wave_split,
        const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
-       const bool use_prefill_gqa4_qtile4, const hipStream_t stream) noexcept {
+       const bool use_prefill_gqa4_qtile4, const uint64_t sliding_window,
+       const float score_scale,
+       const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
   (void)key_outer_scales;
@@ -437,6 +525,16 @@ launch(const uint16_t *const query, const void *const key,
   (void)use_decode_wave_split_q_preload;
   (void)use_prefill_gqa4;
   (void)use_prefill_gqa4_qtile4;
+  (void)score_scale;
+  if ((sliding_window == 0U ||
+       sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4) &&
+      encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 &&
+      static_key_scale == 1.0F && static_value_scale == 1.0F) {
+    std::memset(output, 0,
+                static_cast<std::size_t>(query_count) * q_heads * head_dim *
+                    sizeof(uint16_t));
+    return hipSuccess;
+  }
   if (encoding != SLLM_HIP_KV_ENCODING_FP16_V1) {
     return hipErrorInvalidValue;
   }
@@ -567,6 +665,7 @@ enum class HandleKind : uint32_t {
   MoeExpertPlan,
   AttentionPreprocessPlan,
   RotaryPlan,
+  Ministral3YarnPlan,
   WindowedAttentionPlan,
   KvState,
   KvView,
@@ -1242,6 +1341,9 @@ struct KvState final : QuarantineNode {
   uint64_t session_id;
   uint32_t layer_id;
   uint64_t capacity_tokens;
+  uint64_t storage_capacity_tokens;
+  uint64_t sliding_window;
+  uint64_t retained_start;
   uint32_t head_count;
   uint32_t head_dim;
   Buffer *key_buffer;
@@ -1297,11 +1399,18 @@ struct KvState final : QuarantineNode {
           const uint64_t value_bytes_per_token_value,
           const uint64_t scale_bytes_per_token_value,
           const uint64_t outer_scale_bytes_per_token_value,
-          const uint64_t page_bytes_value, const uint64_t context_token)
+          const uint64_t page_bytes_value, const uint64_t context_token,
+          const uint64_t storage_capacity_value = 0U,
+          const uint64_t sliding_window_value = 0U)
       : QuarantineNode(HandleKind::KvState), context(context_value),
         context_identity(context_token), state_identity(0U),
         session_id(session_value), layer_id(layer_value),
-        capacity_tokens(capacity_value), head_count(head_count_value),
+        capacity_tokens(capacity_value),
+        storage_capacity_tokens(storage_capacity_value == 0U
+                                    ? capacity_value
+                                    : storage_capacity_value),
+        sliding_window(sliding_window_value), retained_start(0U),
+        head_count(head_count_value),
         head_dim(head_dim_value), key_buffer(key_value),
         value_buffer(value_value), key_plane(std::move(key_plane_value)),
         value_plane(std::move(value_plane_value)),
@@ -1320,7 +1429,7 @@ struct KvState final : QuarantineNode {
                             ? page_bytes_value / value_bytes_per_token_value
                             : 1U),
         mapped_token_capacity(
-            std::min(capacity_value,
+            std::min(storage_capacity_tokens,
                      key_plane.mapped_bytes / value_bytes_per_token_value)),
         committed_bytes_per_plane(
             std::min(key_plane.mapped_bytes, value_plane.mapped_bytes)),
@@ -1552,6 +1661,12 @@ using CausalAttentionBuffers = std::array<struct Buffer *, 2>;
 using LinearAttentionBuffers = std::array<struct Buffer *, 9>;
 struct ArgmaxCompletionTag final {};
 
+enum class CompletionValidatorKind : uint8_t {
+  None = 0U,
+  DeepSeekV4MoeRouteStatus = 1U,
+  MinimaxM3MoeRouteStatus = 2U,
+};
+
 struct TokenSelectorPlan final : QuarantineNode {
   Context *context;
   Buffer *logits;
@@ -1595,6 +1710,8 @@ struct Completion final : QuarantineNode {
   bool reference_accounting_failed;
   bool active_release_attempted;
   hipError_t failure_status;
+  CompletionValidatorKind validator_kind;
+  int32_t semantic_failure_detail;
   std::atomic<uint64_t> api_pins;
   bool wait_active;
   std::mutex state_mutex;
@@ -1711,8 +1828,11 @@ struct Completion final : QuarantineNode {
         context_child_released(false), event_destroyed(false),
         release_active(false), lifetime_guard_reserved(true), orphaned(false),
         reference_accounting_failed(false), active_release_attempted(false),
-        failure_status(hipErrorInvalidValue), api_pins(0U), wait_active(false),
-        state_mutex(), safety(), host_storage(std::move(storage)),
+        failure_status(hipErrorInvalidValue),
+        validator_kind(CompletionValidatorKind::None),
+        semantic_failure_detail(SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK),
+        api_pins(0U), wait_active(false), state_mutex(), safety(),
+        host_storage(std::move(storage)),
         rmsnorm(rmsnorm_plan_value != nullptr),
         rmsnorm_fused(rmsnorm_fused_value), rmsnorm_plan(rmsnorm_plan_value),
         rmsnorm_activation(rmsnorm_activation_value),
@@ -1974,6 +2094,17 @@ struct RotaryPlan final : ArrayOperationPlan {
   RotaryPlan(Context *const context_value, const RotaryBuffers buffers_value,
              const sllm_rotary::DescriptorMetadata &metadata_value)
       : ArrayOperationPlan(HandleKind::RotaryPlan, context_value,
+                           buffers_value),
+        metadata(metadata_value) {}
+};
+
+struct Ministral3YarnPlan final : ArrayOperationPlan {
+  sllm_ministral3_yarn::DescriptorMetadata metadata;
+
+  Ministral3YarnPlan(
+      Context *const context_value, const AttentionBuffers buffers_value,
+      const sllm_ministral3_yarn::DescriptorMetadata &metadata_value)
+      : ArrayOperationPlan(HandleKind::Ministral3YarnPlan, context_value,
                            buffers_value),
         metadata(metadata_value) {}
 };
@@ -3032,6 +3163,41 @@ validate_rotary_dispatch_info(const sllm_rotary_dispatch_info_t *const info,
   return SLLM_STATUS_OK;
 }
 
+sllm_status_t validate_ministral3_yarn_dispatch_info(
+    const sllm_ministral3_yarn_dispatch_info_t *const info,
+    sllm_error_sink_t *const sink) noexcept {
+  if (info == nullptr) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "Ministral3 YaRN dispatch info output is null");
+  }
+  uint32_t prefix[2] = {};
+  std::memcpy(prefix, info, sizeof(prefix));
+  if (prefix[0] != sizeof(sllm_ministral3_yarn_dispatch_info_t)) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "Ministral3 YaRN dispatch info has an unsupported struct size");
+  }
+  if (prefix[1] != SLLM_HIP_ABI_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ABI_VERSION,
+        "Ministral3 YaRN dispatch info ABI version is unsupported");
+  }
+  if (info->info_version != SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "Ministral3 YaRN dispatch info version is unsupported");
+  }
+  for (const uint32_t value : info->reserved) {
+    if (value != 0U) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_RESERVED_NONZERO,
+          "Ministral3 YaRN dispatch info reserved fields must be zero");
+    }
+  }
+  return SLLM_STATUS_OK;
+}
+
 sllm_status_t validate_windowed_attention_dispatch_info(
     const sllm_windowed_attention_dispatch_info_t *const info,
     sllm_error_sink_t *const sink) noexcept {
@@ -3223,6 +3389,11 @@ void initialize_elementwise_dispatch_info(
     info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1;
     logical_symbol = ::sllm_elementwise_kernel::kBroadcastAddLogicalKernelId;
     device_symbol = ::sllm_elementwise_kernel::kBroadcastAddDeviceSymbol;
+    break;
+  case SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL:
+    info->kernel_id = SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1;
+    logical_symbol = ::sllm_elementwise_kernel::kBroadcastMulLogicalKernelId;
+    device_symbol = ::sllm_elementwise_kernel::kBroadcastMulDeviceSymbol;
     break;
   default:
     info->kernel_id = 0U;
@@ -3567,29 +3738,38 @@ void initialize_moe_expert_dispatch_info(
   info->info_version = SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  /* Two MXFP4 quantizers plus routed gate/up, shared gate/up, and down/combine.
-   */
-  info->dispatch_count = 5U;
-  info->kernel_id = metadata.token_count == 1U
-                        ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1
-                        : SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1;
+  const bool gemma4 = metadata.op_version == SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION;
+  /* Qwen v1 uses two quantizers, routed gate/up, shared gate/up, and combine.
+   * Gemma v2 uses two pair-specific quantizers, gate/up, and down/combine. */
+  info->dispatch_count = gemma4 ? 4U : 5U;
+  info->kernel_id =
+      gemma4 ? (metadata.token_count == 1U
+                    ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2
+                    : SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2)
+             : (metadata.token_count == 1U
+                    ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1
+                    : SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1);
   info->workgroup_size_x = SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(metadata.active_pair_count);
   info->token_count = metadata.token_count;
   info->active_pair_count = metadata.active_pair_count;
   info->workspace_bytes = metadata.workspace_bytes;
-  info->selected_expert_count = SLLM_HIP_MOE_EXPERT_TOPK;
-  info->shared_expert_count = 1U;
+  info->selected_expert_count = metadata.selected_expert_count;
+  info->shared_expert_count = metadata.shared_expert_count;
   info->fallback_allowed = 0U;
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX,
-      metadata.token_count == 1U
-          ? ::sllm_moe_expert_kernel::kDecodeLogicalKernelId
-          : ::sllm_moe_expert_kernel::kPrefillLogicalKernelId);
+      gemma4 ? (metadata.token_count == 1U
+                    ? ::sllm_moe_expert_kernel::gemma4::kDecodeLogicalKernelId
+                    : ::sllm_moe_expert_kernel::gemma4::kPrefillLogicalKernelId)
+             : (metadata.token_count == 1U
+                    ? ::sllm_moe_expert_kernel::kDecodeLogicalKernelId
+                    : ::sllm_moe_expert_kernel::kPrefillLogicalKernelId));
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX,
-      "sllm_moe_expert_active_pairs_shared_v1");
+      gemma4 ? ::sllm_moe_expert_kernel::gemma4::kDeviceSymbol
+             : "sllm_moe_expert_active_pairs_shared_v1");
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -3669,6 +3849,44 @@ void initialize_rotary_dispatch_info(
   sllm_public_runtime::copy_fixed_string(info->device_symbol,
                                          SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX,
                                          ::sllm_rotary_kernel::kDeviceSymbol);
+  sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
+                                         SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
+}
+
+void initialize_ministral3_yarn_dispatch_info(
+    sllm_ministral3_yarn_dispatch_info_t *const info,
+    const uint64_t dispatch_id,
+    const sllm_ministral3_yarn::DescriptorMetadata &metadata,
+    const char *const arch_name) noexcept {
+  const uint32_t struct_size = info->struct_size;
+  const uint32_t abi_version = info->abi_version;
+  std::memset(info, 0, sizeof(*info));
+  info->struct_size = struct_size;
+  info->abi_version = abi_version;
+  info->info_version = SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION;
+  info->backend = SLLM_BACKEND_HIP;
+  info->dispatch_id = dispatch_id;
+  info->dispatch_count = 1U;
+  info->kernel_id = SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1;
+  info->workgroup_size_x = SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE;
+  info->grid_size_x = static_cast<uint32_t>(
+      metadata.token_count * (SLLM_HIP_MINISTRAL3_YARN_Q_HEADS +
+                              SLLM_HIP_MINISTRAL3_YARN_KV_HEADS));
+  info->token_count = metadata.token_count;
+  info->q_heads = SLLM_HIP_MINISTRAL3_YARN_Q_HEADS;
+  info->kv_heads = SLLM_HIP_MINISTRAL3_YARN_KV_HEADS;
+  info->head_dim = SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM;
+  info->rotary_dim = SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM;
+  info->start_position = static_cast<uint32_t>(metadata.start_position);
+  info->max_position = SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION;
+  info->fallback_allowed = 0U;
+  info->fallback_used = 0U;
+  sllm_public_runtime::copy_fixed_string(
+      info->kernel_symbol, SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX,
+      ::sllm_ministral3_yarn_kernel::kLogicalKernelId);
+  sllm_public_runtime::copy_fixed_string(
+      info->device_symbol, SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX,
+      ::sllm_ministral3_yarn_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }
@@ -4025,6 +4243,12 @@ bool clear_kv_transition_locked(KvState *const state, const uint64_t token,
     state->last_published_start = state->transition_start;
     state->last_published_end = state->transition_end;
     state->published_length = state->transition_end;
+    state->retained_start =
+        state->sliding_window == 0U
+            ? 0U
+            : state->published_length > state->sliding_window
+                  ? state->published_length - state->sliding_window
+                  : 0U;
     ++state->generation;
     state->last_published_generation = state->generation;
   }
@@ -4671,9 +4895,101 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   return released;
 }
 
+sllm_status_t write_completion_semantic_failure(
+    const CompletionValidatorKind kind, const int32_t detail,
+    sllm_error_sink_t *const sink) noexcept {
+  if (kind == CompletionValidatorKind::MinimaxM3MoeRouteStatus) {
+    switch (detail) {
+    case SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE:
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "MiniMax M3 route rejected non-finite logits, bias, or weights");
+    case SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER:
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INVALID_ARGUMENT,
+          "MiniMax M3 route rejected a zero or invalid sigmoid normalizer");
+    default:
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_INTERNAL_ERROR,
+          "MiniMax M3 route device status is missing or unsupported");
+    }
+  }
+  if (kind != CompletionValidatorKind::DeepSeekV4MoeRouteStatus) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "completion semantic validator kind is unsupported");
+  }
+  switch (detail) {
+  case SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE:
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "DeepSeek V4 route rejected non-finite logits, bias, or weights");
+  case SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE:
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "DeepSeek V4 route rejected an out-of-range hash expert id");
+  case SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT:
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "DeepSeek V4 route rejected duplicate hash expert ids");
+  case SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER:
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INVALID_ARGUMENT,
+        "DeepSeek V4 route rejected a zero or invalid score normalizer");
+  default:
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "DeepSeek V4 route device status is missing or unsupported");
+  }
+}
+
+int32_t completion_validator_detail(
+    const Completion *const completion) noexcept {
+  if (completion->validator_kind == CompletionValidatorKind::None) {
+    return SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK;
+  }
+  if ((completion->validator_kind !=
+           CompletionValidatorKind::DeepSeekV4MoeRouteStatus &&
+       completion->validator_kind !=
+           CompletionValidatorKind::MinimaxM3MoeRouteStatus) ||
+      completion->host_storage.size() != sizeof(int32_t)) {
+    return std::numeric_limits<int32_t>::min();
+  }
+  int32_t detail = SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK;
+  std::memcpy(&detail, completion->host_storage.data(), sizeof(detail));
+  return detail;
+}
+
+sllm_status_t finalize_completion_semantic_failure(
+    Completion *const completion, const int32_t detail,
+    sllm_error_sink_t *const sink) noexcept {
+  if (!release_submission_references(completion)) {
+    completion->terminal = true;
+    completion->success = false;
+    completion->safe_to_release = false;
+    completion->safety.quarantine();
+    completion->reference_accounting_failed = true;
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_INTERNAL_ERROR,
+        "completion reference accounting failed; release is disabled");
+  }
+  completion->semantic_failure_detail = detail;
+  completion->terminal = true;
+  completion->success = false;
+  completion->safety.observe_positive_completion();
+  completion->safe_to_release = true;
+  return write_completion_semantic_failure(completion->validator_kind, detail,
+                                           sink);
+}
+
 sllm_status_t
 finalize_completion_success(Completion *const completion,
                             sllm_error_sink_t *const sink) noexcept {
+  const int32_t semantic_detail = completion_validator_detail(completion);
+  if (semantic_detail != SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK) {
+    return finalize_completion_semantic_failure(completion, semantic_detail,
+                                                sink);
+  }
   if (!release_submission_references(completion)) {
     completion->terminal = true;
     completion->success = false;
@@ -4721,6 +5037,13 @@ sllm_status_t poll_completion(Completion *const completion,
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_INTERNAL_ERROR,
           "completion reference accounting failed; release is disabled");
+    }
+    if (completion->validator_kind != CompletionValidatorKind::None &&
+        completion->semantic_failure_detail !=
+            SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK) {
+      return write_completion_semantic_failure(
+          completion->validator_kind, completion->semantic_failure_detail,
+          sink);
     }
     return hip_failure(sink, completion->failure_status,
                        "completion event query");
@@ -7270,7 +7593,10 @@ sllm_completion_finalize_after(sllm_completion_t *const raw_completion,
     }
     const sllm_status_t status =
         finalize_completion_success(completion, error_sink);
-    if (status == SLLM_STATUS_OK) {
+    if (completion->terminal && completion->safe_to_release) {
+      /* The successful fence is the positive device-completion evidence for
+       * this eventless operation.  Semantic failure is still safely
+       * releasable and must not try to destroy a null per-operation event. */
       completion->event_destroyed = true;
     }
     fill_completion_result(completion, result);
@@ -9235,6 +9561,13 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
       launch_status = ::sllm_elementwise_kernel::launch_broadcast_add(
           input0, input1, output, plan->metadata.element_count,
           plan->metadata.input0.shape[1], queue->stream);
+    } else if (plan->metadata.operation ==
+               SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL) {
+      const uint16_t *const input1 = static_cast<const uint16_t *>(
+          byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
+      launch_status = ::sllm_elementwise_kernel::launch_broadcast_mul(
+          input0, input1, output, plan->metadata.element_count,
+          plan->metadata.input0.shape[1], queue->stream);
     } else {
       const uint16_t *const input1 = static_cast<const uint16_t *>(
           byte_pointer(plan->input1, plan->metadata.input1.byte_offset));
@@ -9279,6 +9612,7 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "mlp_gate_up_silu_bundle_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
+#include "ministral3_yarn_runtime.inc"
 #include "rotary_runtime.inc"
 #include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
@@ -9373,6 +9707,17 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
                        const uint64_t state_id,
                        sllm_kv_view_info_t *const info) noexcept {
   sllm_kv_state::initialize_view_info(info);
+  if (state->sliding_window != 0U) {
+    info->info_version = SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION;
+    const uint64_t retained_start =
+        length > state->sliding_window ? length - state->sliding_window : 0U;
+    info->reserved[0] = static_cast<uint32_t>(state->sliding_window);
+    info->reserved[1] =
+        static_cast<uint32_t>(state->sliding_window >> UINT32_C(32));
+    info->reserved[2] = static_cast<uint32_t>(retained_start);
+    info->reserved[3] =
+        static_cast<uint32_t>(retained_start >> UINT32_C(32));
+  }
   info->session_id = state->session_id;
   info->layer_id = state->layer_id;
   info->dtype = state->dtype;
@@ -9796,8 +10141,21 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
         info->encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1
             ? static_cast<uint64_t>(head_count) * UINT64_C(4)
             : 0U;
+    const uint64_t sliding_window =
+        info->create_info_version ==
+                SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
+            ? static_cast<uint64_t>(info->reserved[2]) |
+                  (static_cast<uint64_t>(info->reserved[3]) << UINT32_C(32))
+            : 0U;
+    /* One spare logical slot prevents a canceled or failed decode append from
+     * overwriting the oldest still-published token. VMM page rounding remains
+     * the authoritative physical accounting. */
+    const uint64_t storage_capacity_tokens =
+        sliding_window == 0U
+            ? info->capacity_tokens
+            : std::min(info->capacity_tokens, sliding_window + UINT64_C(1));
     const uint64_t allocation_bytes =
-        info->capacity_tokens * value_bytes_per_token;
+        storage_capacity_tokens * value_bytes_per_token;
     hipMemAllocationProp allocation_properties{};
     allocation_properties.type = hipMemAllocationTypePinned;
     allocation_properties.location.type = hipMemLocationTypeDevice;
@@ -9816,8 +10174,12 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
       return hip_failure(error_sink, capability_status,
                          "query HIP VMM capability for KV provider");
     }
+    const bool sliding_state =
+        info->create_info_version ==
+        SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
     const uint32_t selected_memory_kind =
-        info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
+        sliding_state ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+        : info->memory_kind == SLLM_HIP_KV_MEMORY_KIND_CAPABILITY_SELECTED
             ? (vmm_supported != 0 ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
                                   : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT)
             : info->memory_kind;
@@ -9854,7 +10216,7 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
               sllm_public_runtime::FaultPoint::NativeCreationFailure)) {
         return hipErrorUnknown;
       }
-      const uint64_t logical = info->capacity_tokens * bytes_per_token;
+      const uint64_t logical = storage_capacity_tokens * bytes_per_token;
       if (selected_memory_kind == SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT) {
         return plane.reserve_contiguous(logical, bytes_per_token);
       }
@@ -9910,7 +10272,8 @@ sllm_kv_state_create_v2(const sllm_context_t *const raw_context,
           std::move(key_outer_scale_plane), std::move(value_outer_scale_plane),
           info->dtype, info->encoding, static_key_scale, static_value_scale,
           value_bytes_per_token, scale_bytes_per_token,
-          outer_scale_bytes_per_token, page_bytes, context_token);
+          outer_scale_bytes_per_token, page_bytes, context_token,
+          storage_capacity_tokens, sliding_window);
     } catch (...) {
       (void)rollback_child(context, error_sink,
                            "KV state provisional accounting rollback failed");
@@ -10172,12 +10535,18 @@ sllm_kv_state_rewind_last(const sllm_kv_state_t *const raw_state,
     }
     if (rewind_length >= expected_length ||
         state->published_length != expected_length ||
+        (state->sliding_window != 0U &&
+         rewind_length != state->last_published_start) ||
         state->generation == std::numeric_limits<uint64_t>::max()) {
       return sllm_public_runtime::write_error(
           error_sink, SLLM_STATUS_INVALID_ARGUMENT,
           "KV rewind length is stale or outside the committed tail");
     }
     state->published_length = rewind_length;
+    state->retained_start =
+        state->sliding_window != 0U && rewind_length > state->sliding_window
+            ? rewind_length - state->sliding_window
+            : 0U;
     ++state->generation;
     state->last_published_start = 0U;
     state->last_published_end = 0U;
@@ -10612,6 +10981,15 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
             error_sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
             "KV append exceeds state capacity");
       }
+      if (state->sliding_window != 0U &&
+          ((state->published_length < state->sliding_window &&
+            metadata.end_position > state->sliding_window) ||
+           (state->published_length >= state->sliding_window &&
+            metadata.token_count != 1U))) {
+        return sllm_public_runtime::write_error(
+            error_sink, SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR,
+            "saturated sliding KV append must contain exactly one token");
+      }
       if (metadata.key_input.end_offset > key_input->size_bytes ||
           metadata.value_input.end_offset > value_input->size_bytes) {
         return sllm_public_runtime::write_error(
@@ -10745,7 +11123,12 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       if (bytes_per_token == 0U) {
         return hipSuccess;
       }
-      const uint64_t required_bytes = metadata.end_position * bytes_per_token;
+      const uint64_t required_tokens =
+          state->sliding_window == 0U
+              ? metadata.end_position
+              : std::min(metadata.end_position,
+                         state->storage_capacity_tokens);
+      const uint64_t required_bytes = required_tokens * bytes_per_token;
       const uint64_t required_mapped_bytes =
           plane.contiguous
               ? required_bytes
@@ -10758,8 +11141,13 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       if (bytes_per_token == 0U || plane.contiguous) {
         return hipSuccess;
       }
-      const uint64_t start_bytes = metadata.start_position * bytes_per_token;
-      const uint64_t end_bytes = metadata.end_position * bytes_per_token;
+      const uint64_t physical_start =
+          state->sliding_window == 0U
+              ? metadata.start_position
+              : metadata.start_position % state->storage_capacity_tokens;
+      const uint64_t start_bytes = physical_start * bytes_per_token;
+      const uint64_t end_bytes =
+          (physical_start + metadata.token_count) * bytes_per_token;
       return plane.make_private(start_bytes, end_bytes, allocation_properties,
                                 access, shared_access);
     };
@@ -10958,9 +11346,10 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         std::min(state->key_outer_scale_plane.mapped_bytes,
                  state->value_outer_scale_plane.mapped_bytes);
     state->mapped_token_capacity = std::min(
-        state->capacity_tokens, std::min(state->key_plane.mapped_bytes,
-                                         state->value_plane.mapped_bytes) /
-                                    state->value_bytes_per_token);
+        state->storage_capacity_tokens,
+        std::min(state->key_plane.mapped_bytes,
+                 state->value_plane.mapped_bytes) /
+            state->value_bytes_per_token);
     if (state->scale_bytes_per_token != 0U) {
       state->mapped_token_capacity =
           std::min(state->mapped_token_capacity,
@@ -10990,7 +11379,8 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         state->key_scale_plane.address, state->value_scale_plane.address,
         static_cast<float *>(state->key_outer_scale_plane.address),
         static_cast<float *>(state->value_outer_scale_plane.address),
-        static_cast<uint32_t>(metadata.token_count), state->capacity_tokens,
+        static_cast<uint32_t>(metadata.token_count),
+        state->storage_capacity_tokens,
         metadata.start_position, state->head_count, state->head_dim,
         state->encoding, state->static_key_scale, state->static_value_scale,
         queue->stream);

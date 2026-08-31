@@ -38,6 +38,10 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers(
 extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
     uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
     uint32_t head_dim, const char *arch_name) noexcept;
+extern "C" void
+sllm_test_deepseek_v4_moe_route_device_status(int32_t status) noexcept;
+extern "C" void
+sllm_test_minimax_m3_moe_route_device_status(int32_t status) noexcept;
 
 namespace {
 
@@ -1180,7 +1184,8 @@ elementwise_descriptor(const sllm_elementwise_operation_t operation,
       result.stride_elements[0] = 4096U;
       result.stride_elements[1] = 256U;
       result.stride_elements[2] = 1U;
-    } else if (operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD) {
+    } else if (operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD ||
+               operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL) {
       result.rank = 2U;
       result.shape[0] = 1U;
       result.shape[1] = logical_size;
@@ -1195,7 +1200,8 @@ elementwise_descriptor(const sllm_elementwise_operation_t operation,
         operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||
                 operation == SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP
             ? rmsnorm_binding(input1, 0U, 1U, 1U)
-        : operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD
+        : operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD ||
+                operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL
             ? rmsnorm_binding(input1, 0U, 1U, size)
             : binding(input1, size);
   }
@@ -1207,12 +1213,14 @@ sllm_elementwise_desc_t
 broadcast_elementwise_descriptor(const sllm_buffer_t *const input,
                                  const sllm_buffer_t *const vector,
                                  const sllm_buffer_t *const output,
-                                 const uint64_t rows, const uint64_t columns) {
+                                 const uint64_t rows, const uint64_t columns,
+                                 const sllm_elementwise_operation_t operation =
+                                     SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD) {
   sllm_elementwise_desc_t descriptor{};
   descriptor.struct_size = sizeof(descriptor);
   descriptor.abi_version = SLLM_HIP_ABI_VERSION;
   descriptor.op_version = SLLM_HIP_ELEMENTWISE_VERSION;
-  descriptor.operation = SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD;
+  descriptor.operation = operation;
   descriptor.input0 = rmsnorm_binding(input, 0U, rows, columns);
   descriptor.input1 = rmsnorm_binding(vector, 0U, 1U, columns);
   descriptor.output = rmsnorm_binding(output, 0U, rows, columns);
@@ -1306,6 +1314,9 @@ bool elementwise_prepare_execute_and_negative_contract() {
       !run(SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD, 17U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1,
            "elementwise.broadcast_add.bf16_fp32.v1") ||
+      !run(SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL, 17U,
+           SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1,
+           "elementwise.broadcast_mul.bf16_fp32.v1") ||
       !run(SLLM_ELEMENTWISE_OPERATION_SILU_MUL, 255U,
            SLLM_HIP_ELEMENTWISE_KERNEL_ID_SILU_MUL_V1,
            "elementwise.silu_mul.bf16_fp32.v1") ||
@@ -1324,6 +1335,7 @@ bool elementwise_prepare_execute_and_negative_contract() {
       fake_hip::elementwise_copy_launch_calls() != 1U ||
       fake_hip::elementwise_add_launch_calls() != 1U ||
       fake_hip::elementwise_broadcast_add_launch_calls() != 1U ||
+      fake_hip::elementwise_broadcast_mul_launch_calls() != 1U ||
       fake_hip::elementwise_silu_mul_launch_calls() != 1U ||
       fake_hip::elementwise_sigmoid_mul_launch_calls() != 1U ||
       fake_hip::elementwise_scalar_mul_launch_calls() != 1U ||
@@ -1411,7 +1423,75 @@ bool elementwise_prepare_execute_and_negative_contract() {
     return false;
   }
 
+  auto broadcast_mul_descriptor = broadcast_elementwise_descriptor(
+      input0, input1, output, 3U, 17U,
+      SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL);
+  sllm_elementwise_plan_t *broadcast_mul_plan = nullptr;
+  if (!expect_status(sllm_elementwise_prepare(context,
+                                              &broadcast_mul_descriptor,
+                                              &broadcast_mul_plan, &error.sink),
+                     SLLM_STATUS_OK, "broadcast mul M=3 prepare", error) ||
+      broadcast_mul_plan == nullptr) {
+    return false;
+  }
+  sllm_completion_t *broadcast_mul_completion = nullptr;
+  auto broadcast_mul_info = elementwise_dispatch_info();
+  if (!expect_status(sllm_elementwise_execute(broadcast_mul_plan, queue,
+                                              &broadcast_mul_completion,
+                                              &broadcast_mul_info, &error.sink),
+                     SLLM_STATUS_OK, "broadcast mul M=3 execute", error) ||
+      broadcast_mul_completion == nullptr ||
+      broadcast_mul_info.operation !=
+          SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL ||
+      broadcast_mul_info.kernel_id !=
+          SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1 ||
+      broadcast_mul_info.element_count != 3U * 17U ||
+      broadcast_mul_info.fallback_allowed != 0U ||
+      broadcast_mul_info.fallback_used != 0U ||
+      std::strcmp(broadcast_mul_info.kernel_symbol,
+                  "elementwise.broadcast_mul.bf16_fp32.v1") != 0 ||
+      std::strcmp(broadcast_mul_info.device_symbol,
+                  "sllm_elementwise_broadcast_mul_bf16_fp32_v1") != 0 ||
+      !query_completion(broadcast_mul_completion, SLLM_STATUS_OK) ||
+      !release_completion(&broadcast_mul_completion) ||
+      !expect_status(
+          sllm_elementwise_plan_release(&broadcast_mul_plan, &error.sink),
+          SLLM_STATUS_OK, "broadcast mul M=3 release", error) ||
+      fake_hip::elementwise_broadcast_mul_launch_calls() != 2U) {
+    return false;
+  }
+  sllm_completion_t *broadcast_mul_readback = nullptr;
+  if (!submit_d2h(queue, output, broadcast_bytes, &broadcast_mul_readback) ||
+      !query_completion(broadcast_mul_readback, SLLM_STATUS_OK)) {
+    return false;
+  }
+  std::vector<uint16_t> broadcast_mul_output(3U * 17U);
+  uint64_t broadcast_mul_written = 0U;
+  const uint16_t expected_broadcast_mul = UINT16_C(0x4000);
+  if (!expect_status(sllm_completion_read(
+                         broadcast_mul_readback, broadcast_mul_output.data(),
+                         broadcast_bytes, &broadcast_mul_written, &error.sink),
+                     SLLM_STATUS_OK, "broadcast mul M=3 read", error) ||
+      broadcast_mul_written != broadcast_bytes ||
+      std::any_of(broadcast_mul_output.begin(), broadcast_mul_output.end(),
+                  [expected_broadcast_mul](const uint16_t value) {
+                    return value != expected_broadcast_mul;
+                  }) ||
+      !release_completion(&broadcast_mul_readback)) {
+    return false;
+  }
+
+  broadcast_mul_descriptor.input1 = rmsnorm_binding(input1, 0U, 1U, 16U);
   sllm_elementwise_plan_t *plan = nullptr;
+  if (!expect_status(sllm_elementwise_prepare(context,
+                                              &broadcast_mul_descriptor, &plan,
+                                              &error.sink),
+                     SLLM_STATUS_SHAPE_MISMATCH,
+                     "broadcast mul vector shape rejection", error) ||
+      plan != nullptr) {
+    return false;
+  }
+
   auto descriptor = elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_COPY,
                                            input0, input1, output, 3U);
   descriptor.input0.dtype = SLLM_TENSOR_DTYPE_F32;
@@ -7146,9 +7226,1236 @@ bool state_fork_vmm_and_linear_image_contract() {
   return cleanup_linear() && valid;
 }
 
+bool sliding_static_fp8_ring_image_fork_and_scale_contract() {
+  fake_hip::reset();
+  const std::size_t baseline_allocations = fake_hip::live_allocations();
+  const std::size_t baseline_streams = fake_hip::live_streams();
+  const std::size_t baseline_events = fake_hip::live_events();
+  constexpr uint64_t capacity = SLLM_HIP_KV_SLIDING_MAX_CAPACITY;
+  constexpr uint64_t window = SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4;
+  constexpr uint64_t value_bytes_per_token = 4U * 256U;
+  constexpr uint64_t input_words_per_token = 4U * 256U;
+  constexpr uint64_t input_bytes =
+      window * input_words_per_token * sizeof(uint16_t);
+  constexpr uint64_t image_plane_bytes = window * value_bytes_per_token;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_kv_state_t *state = nullptr;
+  sllm_kv_state_t *full_state = nullptr;
+  sllm_kv_state_t *child = nullptr;
+  sllm_kv_state_t *restored = nullptr;
+  sllm_buffer_t *key = nullptr;
+  sllm_buffer_t *value = nullptr;
+  sllm_buffer_t *query = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_completion_t *completion = nullptr;
+  Error error;
+  const auto release_all = [&]() {
+    bool valid = true;
+    if (completion != nullptr) {
+      valid = release_completion(&completion) && valid;
+    }
+    for (sllm_kv_state_t **candidate :
+         {&restored, &child, &full_state, &state}) {
+      if (*candidate != nullptr) {
+        valid = expect_status(sllm_kv_state_release(candidate, &error.sink),
+                              SLLM_STATUS_OK, "sliding state release", error) &&
+                valid;
+      }
+    }
+    for (sllm_buffer_t **buffer : {&key, &value, &query, &output}) {
+      valid = release_buffer(buffer) && valid;
+    }
+    valid = release_queue(&queue) && valid;
+    valid = release_context(&context) && valid;
+    return valid;
+  };
+  const auto create_info = []() {
+    sllm_kv_state_create_info_v2_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.create_info_version =
+        SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
+    info.session_id = 0x5510U;
+    info.layer_id = 23U;
+    info.capacity_tokens = capacity;
+    info.head_count = 4U;
+    info.head_dim = 256U;
+    info.memory_kind = SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS;
+    info.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+    info.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    info.encoding = SLLM_HIP_KV_ENCODING_FP8_STATIC_V1;
+    info.scale_dtype = SLLM_TENSOR_DTYPE_F32;
+    const float unit = 1.0F;
+    std::memcpy(&info.reserved[0], &unit, sizeof(unit));
+    std::memcpy(&info.reserved[1], &unit, sizeof(unit));
+    info.reserved[2] = static_cast<uint32_t>(window);
+    info.reserved[3] = static_cast<uint32_t>(window >> 32U);
+    return info;
+  };
+  auto create = create_info();
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !expect_status(
+          sllm_kv_state_create_v2(context, &create, &state, &error.sink),
+          SLLM_STATUS_OK, "sliding state create", error) ||
+      !create_buffer_sized(context, input_bytes, &key) ||
+      !create_buffer_sized(context, input_bytes, &value) ||
+      !create_buffer_sized(context, 16U * 256U * sizeof(uint16_t), &query) ||
+      !create_buffer_sized(context, 16U * 256U * sizeof(uint16_t), &output)) {
+    (void)release_all();
+    return false;
+  }
+  constexpr std::array<uint16_t, 5> input_patterns{
+      UINT16_C(0x0000), UINT16_C(0x3f00), UINT16_C(0x3f80), UINT16_C(0x4000),
+      UINT16_C(0xbf80)};
+  constexpr std::array<uint8_t, 5> encoded_patterns{
+      UINT8_C(0x00), UINT8_C(0x30), UINT8_C(0x38), UINT8_C(0x40),
+      UINT8_C(0xb8)};
+  std::vector<uint16_t> words(
+      static_cast<std::size_t>(window * input_words_per_token));
+  for (uint64_t token = 0U; token != window; ++token) {
+    std::fill_n(words.begin() +
+                    static_cast<std::ptrdiff_t>(token * input_words_per_token),
+                static_cast<std::ptrdiff_t>(input_words_per_token),
+                input_patterns[static_cast<std::size_t>(
+                    token % input_patterns.size())]);
+  }
+  bool valid = upload_kv_words(queue, key, words) &&
+               upload_kv_words(queue, value, words);
+  auto full_create = create;
+  full_create.create_info_version =
+      SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION;
+  full_create.capacity_tokens = 3U;
+  full_create.memory_kind = SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT;
+  full_create.reserved[2] = 0U;
+  full_create.reserved[3] = 0U;
+  valid = valid &&
+          expect_status(sllm_kv_state_create_v2(context, &full_create,
+                                                &full_state, &error.sink),
+                        SLLM_STATUS_OK, "full static state create", error) &&
+          full_state != nullptr;
+  if (full_state != nullptr) {
+    auto full_append = kv_append_descriptor(key, value, 1U, 0U);
+    auto full_append_info = kv_append_info();
+    valid = valid &&
+            expect_status(sllm_kv_state_append(full_state, queue, &full_append,
+                                               &completion, &full_append_info,
+                                               &error.sink),
+                          SLLM_STATUS_OK, "full static append", error) &&
+            completion != nullptr &&
+            query_completion(completion, SLLM_STATUS_OK) &&
+            release_completion(&completion);
+    auto full_attention =
+        causal_attention_descriptor(full_state, query, output, 1U, 0U, 1U);
+    full_attention.op_version =
+        SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION;
+    const float unit_score_scale = 1.0F;
+    std::memcpy(&full_attention.reserved[2], &unit_score_scale,
+                sizeof(unit_score_scale));
+    auto full_dispatch = causal_attention_dispatch_info();
+    valid =
+        valid &&
+        expect_status(sllm_causal_attention_execute(
+                          context, queue, &full_attention, &completion,
+                          &full_dispatch, &error.sink),
+                      SLLM_STATUS_OK, "full scaled static attention", error) &&
+        completion != nullptr &&
+        full_dispatch.kernel_id ==
+            SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1 &&
+        full_dispatch.scale_denominator == 0U &&
+        full_dispatch.fallback_allowed == 0U &&
+        full_dispatch.fallback_used == 0U &&
+        full_dispatch.reserved[4] == UINT32_C(0x3f800000) &&
+        full_dispatch.reserved[5] == 1U &&
+        query_completion(completion, SLLM_STATUS_OK) &&
+        release_completion(&completion);
+  }
+  if (!valid) {
+    std::cerr << "full explicit score-scale phase failed\n";
+  }
+  const auto append_and_publish = [&](const uint64_t count,
+                                      const uint64_t position) {
+    auto descriptor = kv_append_descriptor(key, value, count, position);
+    const uint64_t input_offset =
+        (position % window) * input_words_per_token * sizeof(uint16_t);
+    descriptor.key_input.byte_offset = input_offset;
+    descriptor.value_input.byte_offset = input_offset;
+    auto info = kv_append_info();
+    completion = nullptr;
+    return expect_status(sllm_kv_state_append(state, queue, &descriptor,
+                                              &completion, &info, &error.sink),
+                         SLLM_STATUS_OK, "sliding append", error) &&
+           completion != nullptr &&
+           query_completion(completion, SLLM_STATUS_OK) &&
+           release_completion(&completion) && info.fallback_allowed == 0U &&
+           info.fallback_used == 0U;
+  };
+  const auto query_ring = [&](const sllm_kv_state_t *const candidate,
+                              const uint64_t length,
+                              const uint64_t retained_start) {
+    sllm_kv_view_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+    const bool matches =
+        expect_status(sllm_kv_state_query(candidate, &info, &error.sink),
+                      SLLM_STATUS_OK, "sliding state query", error) &&
+        info.info_version == SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION &&
+        info.observed_length == length && info.capacity_tokens == capacity &&
+        info.mapped_token_capacity <= window + 1U &&
+        info.reserved[0] == static_cast<uint32_t>(window) &&
+        info.reserved[1] == 0U &&
+        info.reserved[2] == static_cast<uint32_t>(retained_start) &&
+        info.reserved[3] == static_cast<uint32_t>(retained_start >> 32U);
+    if (!matches) {
+      std::cerr << "sliding query mismatch version=" << info.info_version
+                << " length=" << info.observed_length
+                << " capacity=" << info.capacity_tokens
+                << " mapped=" << info.mapped_token_capacity
+                << " reserved=" << info.reserved[0] << ',' << info.reserved[1]
+                << ',' << info.reserved[2] << ',' << info.reserved[3]
+                << " expected_length=" << length
+                << " expected_start=" << retained_start << '\n';
+    }
+    return matches;
+  };
+  valid = valid && append_and_publish(1023U, 0U) &&
+          query_ring(state, 1023U, 0U) && append_and_publish(1U, 1023U) &&
+          query_ring(state, 1024U, 0U) && append_and_publish(1U, 1024U) &&
+          query_ring(state, 1025U, 1U);
+  if (!valid) {
+    std::cerr << "sliding boundary append/query phase failed\n";
+  }
+
+  auto rejected = kv_append_descriptor(key, value, 2U, 1025U);
+  auto rejected_info = kv_append_info();
+  completion = nullptr;
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_append(state, queue, &rejected, &completion,
+                                         &rejected_info, &error.sink),
+                    SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR,
+                    "saturated sliding M=2 rejection", error) &&
+      completion == nullptr && query_ring(state, 1025U, 1U);
+  if (!valid) {
+    std::cerr << "sliding saturated rejection phase failed\n";
+  }
+
+  valid =
+      valid && append_and_publish(1U, 1025U) && query_ring(state, 1026U, 2U);
+  if (!valid) {
+    std::cerr << "sliding wrap publication phase failed\n";
+  }
+
+  auto cancel_descriptor = kv_append_descriptor(key, value, 1U, 1026U);
+  auto cancel_info = kv_append_info();
+  fake_hip::set_completion_pending(true);
+  valid =
+      valid &&
+      expect_status(sllm_kv_state_append(state, queue, &cancel_descriptor,
+                                         &completion, &cancel_info,
+                                         &error.sink),
+                    SLLM_STATUS_OK, "sliding append before cancel", error) &&
+      completion != nullptr &&
+      expect_status(sllm_kv_state_append_cancel(state, completion, &error.sink),
+                    SLLM_STATUS_OK, "sliding append cancel", error) &&
+      expect_status(sllm_kv_state_append_cancel(state, completion, &error.sink),
+                    SLLM_STATUS_OK, "sliding append cancel idempotent", error);
+  fake_hip::set_completion_pending(false);
+  valid = valid && query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion) && query_ring(state, 1026U, 2U);
+  if (!valid) {
+    std::cerr << "sliding cancel phase failed\n";
+  }
+
+  auto attention =
+      causal_attention_descriptor(state, query, output, 1U, 1025U, 1026U);
+  attention.op_version = SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION;
+  attention.reserved[0] = static_cast<uint32_t>(window);
+  attention.reserved[1] = 0U;
+  const float score_scale = 1.0F;
+  std::memcpy(&attention.reserved[2], &score_scale, sizeof(score_scale));
+  auto dispatch = causal_attention_dispatch_info();
+  valid = valid &&
+          expect_status(sllm_causal_attention_execute(context, queue,
+                                                      &attention, &completion,
+                                                      &dispatch, &error.sink),
+                        SLLM_STATUS_OK, "sliding scaled attention", error) &&
+          completion != nullptr &&
+          dispatch.kernel_id ==
+              SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1 &&
+          dispatch.dispatch_count == 1U && dispatch.scale_denominator == 0U &&
+          dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U &&
+          dispatch.reserved[0] == static_cast<uint32_t>(window) &&
+          dispatch.reserved[2] == 2U &&
+          dispatch.reserved[4] == UINT32_C(0x3f800000) &&
+          dispatch.reserved[5] == 1U &&
+          query_completion(completion, SLLM_STATUS_OK) &&
+          release_completion(&completion);
+  if (!valid) {
+    std::cerr << "sliding scaled attention phase failed\n";
+  }
+
+  sllm_state_image_info_t image{};
+  image.struct_size = sizeof(image);
+  image.abi_version = SLLM_HIP_ABI_VERSION;
+  image.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  uint64_t key_image_size = 0U;
+  uint64_t value_image_size = 0U;
+  valid = valid &&
+          expect_status(sllm_kv_state_image_query(state, &image, &error.sink),
+                        SLLM_STATUS_OK, "sliding image query", error) &&
+          image.info_version == SLLM_HIP_STATE_IMAGE_SLIDING_VERSION &&
+          image.published_length == 1026U && image.reserved[0] == window &&
+          image.reserved[2] == 2U &&
+          expect_status(
+              sllm_kv_state_image_plane_size(state, SLLM_HIP_KV_STATE_PLANE_KEY,
+                                             &key_image_size, &error.sink),
+              SLLM_STATUS_OK, "sliding key image size", error) &&
+          expect_status(sllm_kv_state_image_plane_size(
+                            state, SLLM_HIP_KV_STATE_PLANE_VALUE,
+                            &value_image_size, &error.sink),
+                        SLLM_STATUS_OK, "sliding value image size", error) &&
+          key_image_size == image_plane_bytes &&
+          value_image_size == image_plane_bytes;
+  if (!valid) {
+    std::cerr << "sliding image metadata phase failed key=" << key_image_size
+              << " value=" << value_image_size << '\n';
+  }
+  std::vector<uint8_t> key_image(static_cast<std::size_t>(key_image_size));
+  std::vector<uint8_t> value_image(static_cast<std::size_t>(value_image_size));
+  const auto chunk_for = [&](const uint32_t plane, void *const host) {
+    sllm_state_chunk_t chunk{};
+    chunk.struct_size = sizeof(chunk);
+    chunk.abi_version = SLLM_HIP_ABI_VERSION;
+    chunk.info_version = SLLM_HIP_STATE_IMAGE_SLIDING_VERSION;
+    chunk.plane = plane;
+    chunk.reserved0 = static_cast<uint32_t>(window);
+    chunk.byte_length = image_plane_bytes;
+    chunk.host_pointer = host;
+    chunk.host_capacity = image_plane_bytes;
+    chunk.reserved[0] = 1026U;
+    return chunk;
+  };
+  auto key_chunk = chunk_for(SLLM_HIP_KV_STATE_PLANE_KEY, key_image.data());
+  auto value_chunk =
+      chunk_for(SLLM_HIP_KV_STATE_PLANE_VALUE, value_image.data());
+  valid = valid &&
+          expect_status(sllm_kv_state_export(state, &key_chunk, &error.sink),
+                        SLLM_STATUS_OK, "sliding key export", error) &&
+          expect_status(sllm_kv_state_export(state, &value_chunk, &error.sink),
+                        SLLM_STATUS_OK, "sliding value export", error);
+  std::vector<uint8_t> expected_image(
+      static_cast<std::size_t>(image_plane_bytes));
+  for (uint64_t retained = 0U; retained != window; ++retained) {
+    const uint64_t logical_token = retained + 2U;
+    std::fill_n(expected_image.begin() + static_cast<std::ptrdiff_t>(
+                                             retained * value_bytes_per_token),
+                static_cast<std::ptrdiff_t>(value_bytes_per_token),
+                encoded_patterns[static_cast<std::size_t>(
+                    (logical_token % window) % encoded_patterns.size())]);
+  }
+  valid = valid && key_image == expected_image && value_image == expected_image;
+  if (!valid) {
+    const auto mismatch = std::mismatch(key_image.begin(), key_image.end(),
+                                        expected_image.begin());
+    if (mismatch.first != key_image.end()) {
+      const auto index = static_cast<std::size_t>(
+          std::distance(key_image.begin(), mismatch.first));
+      std::cerr << "sliding key image mismatch index=" << index
+                << " actual=" << static_cast<uint32_t>(key_image[index])
+                << " expected=" << static_cast<uint32_t>(expected_image[index])
+                << '\n';
+    }
+    std::cerr << "sliding image export phase failed\n";
+  }
+
+  sllm_state_fork_info_t fork{};
+  fork.struct_size = sizeof(fork);
+  fork.abi_version = SLLM_HIP_ABI_VERSION;
+  fork.info_version = SLLM_HIP_STATE_FORK_INFO_VERSION;
+  valid = valid &&
+          expect_status(
+              sllm_kv_state_fork(state, &create, &child, &fork, &error.sink),
+              SLLM_STATUS_OK, "sliding state fork", error) &&
+          child != nullptr && fork.published_length == 1026U &&
+          fork.mode == SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES &&
+          fork.child_owned_bytes == 0U && fork.copied_bytes == 0U &&
+          fork.shared_bytes <= 2U * fork.page_bytes &&
+          query_ring(child, 1026U, 2U);
+  if (!valid) {
+    std::cerr << "sliding fork phase failed shared=" << fork.shared_bytes
+              << " page=" << fork.page_bytes << '\n';
+  }
+
+  valid = valid &&
+          expect_status(
+              sllm_kv_state_create_v2(context, &create, &restored, &error.sink),
+              SLLM_STATUS_OK, "sliding restore state create", error) &&
+          restored != nullptr;
+  if (restored != nullptr) {
+    valid =
+        valid &&
+        expect_status(sllm_kv_state_import(restored, &key_chunk, &error.sink),
+                      SLLM_STATUS_OK, "sliding key import", error) &&
+        expect_status(sllm_kv_state_import(restored, &value_chunk, &error.sink),
+                      SLLM_STATUS_OK, "sliding value import", error) &&
+        expect_status(
+            sllm_kv_state_import_finalize(restored, &image, &error.sink),
+            SLLM_STATUS_OK, "sliding import finalize", error) &&
+        query_ring(restored, 1026U, 2U);
+  }
+  const auto exported_image_matches = [&](const sllm_kv_state_t *candidate) {
+    std::vector<uint8_t> observed_key(expected_image.size());
+    std::vector<uint8_t> observed_value(expected_image.size());
+    auto observed_key_chunk =
+        chunk_for(SLLM_HIP_KV_STATE_PLANE_KEY, observed_key.data());
+    auto observed_value_chunk =
+        chunk_for(SLLM_HIP_KV_STATE_PLANE_VALUE, observed_value.data());
+    return candidate != nullptr &&
+           expect_status(sllm_kv_state_export(candidate, &observed_key_chunk,
+                                              &error.sink),
+                         SLLM_STATUS_OK, "sliding retained key re-export",
+                         error) &&
+           expect_status(sllm_kv_state_export(candidate, &observed_value_chunk,
+                                              &error.sink),
+                         SLLM_STATUS_OK, "sliding retained value re-export",
+                         error) &&
+           observed_key == expected_image && observed_value == expected_image;
+  };
+  valid = valid && exported_image_matches(child) &&
+          exported_image_matches(restored);
+  if (!valid) {
+    std::cerr << "sliding restore phase failed\n";
+  }
+  const bool released = release_all();
+  const bool clean = fake_hip::live_allocations() == baseline_allocations &&
+                     fake_hip::live_streams() == baseline_streams &&
+                     fake_hip::live_events() == baseline_events;
+  if (!released || !clean) {
+    std::cerr << "sliding cleanup failed released=" << released
+              << " allocations=" << fake_hip::live_allocations()
+              << " streams=" << fake_hip::live_streams()
+              << " events=" << fake_hip::live_events() << '\n';
+  }
+  return released && valid && clean;
+}
+
+sllm_tensor_binding_t deepseek_v4_route_binding(
+    const sllm_buffer_t *const buffer, const uint32_t dtype,
+    const uint32_t rank, const uint64_t first,
+    const uint64_t second = 0U) {
+  sllm_tensor_binding_t result{};
+  result.struct_size = sizeof(result);
+  result.abi_version = SLLM_HIP_ABI_VERSION;
+  result.buffer = buffer;
+  result.dtype = dtype;
+  result.encoding = SLLM_TENSOR_ENCODING_UNQUANTIZED;
+  result.rank = rank;
+  result.shape[0] = first;
+  result.stride_elements[0] = rank == 2U ? second : 1U;
+  if (rank == 2U) {
+    result.shape[1] = second;
+    result.stride_elements[1] = 1U;
+  }
+  return result;
+}
+
+bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
+  constexpr uint64_t tokens = 3U;
+  constexpr uint64_t experts =
+      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
+  constexpr uint32_t selected =
+      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT;
+  constexpr uint64_t pairs = tokens * selected;
+  constexpr uint64_t metadata_bytes =
+      pairs * UINT64_C(16) + experts * UINT64_C(4) +
+      (experts + 1U) * UINT64_C(4) + UINT64_C(4);
+  const auto *const sentinel = reinterpret_cast<const sllm_buffer_t *>(1U);
+  sllm_deepseek_v4_moe_route_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION;
+  descriptor.mode = SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE;
+  descriptor.selected_expert_count = selected;
+  descriptor.renormalize = 1U;
+  descriptor.routed_scale = 1.5F;
+  descriptor.logits = deepseek_v4_route_binding(
+      sentinel, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
+  descriptor.selection_bias = deepseek_v4_route_binding(
+      sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+  descriptor.metadata = deepseek_v4_route_binding(
+      sentinel, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
+  const auto query = [&](const sllm_deepseek_v4_moe_route_desc_t &candidate,
+                         const sllm_status_t expected,
+                         const char *const label) {
+    sllm_deepseek_v4_moe_route_query_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION;
+    Error error;
+    const bool valid = expect_status(
+        sllm_deepseek_v4_moe_route_query(&candidate, &info, &error.sink),
+        expected, label, error);
+    return valid &&
+           (expected != SLLM_STATUS_OK ||
+            (info.mode == candidate.mode && info.token_count == tokens &&
+             info.expert_count == experts && info.pair_count == pairs &&
+             info.metadata_bytes == metadata_bytes &&
+             info.selected_expert_count == selected &&
+             info.renormalize == candidate.renormalize &&
+             info.routed_scale == candidate.routed_scale));
+  };
+  bool valid = query(descriptor, SLLM_STATUS_OK, "DeepSeek route query");
+  for (const float invalid_scale :
+       {0.0F, -1.0F, std::numeric_limits<float>::infinity(),
+        -std::numeric_limits<float>::infinity(),
+        std::numeric_limits<float>::quiet_NaN()}) {
+    auto candidate = descriptor;
+    candidate.routed_scale = invalid_scale;
+    valid = valid &&
+            query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                  "DeepSeek route invalid routed scale");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.struct_size -= 1U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                           "DeepSeek route descriptor size");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.abi_version += 1U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ABI_VERSION,
+                           "DeepSeek route descriptor ABI");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.reserved[3] = 1U;
+    valid = valid && query(candidate, SLLM_STATUS_RESERVED_NONZERO,
+                           "DeepSeek route descriptor reserved");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.mode = 0U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                           "DeepSeek route mode boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.renormalize = 2U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                           "DeepSeek route renormalize boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.logits.shape[0] = 0U;
+    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
+                           "DeepSeek route zero-token boundary");
+    candidate.logits.shape[0] =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS + 1U;
+    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
+                           "DeepSeek route maximum-token boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.logits.shape[1] = experts - 1U;
+    candidate.logits.stride_elements[0] = experts - 1U;
+    valid = valid && query(candidate, SLLM_STATUS_SHAPE_MISMATCH,
+                           "DeepSeek route E boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.selected_expert_count = selected - 1U;
+    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
+                           "DeepSeek route K boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.hash_expert_ids = deepseek_v4_route_binding(
+        sentinel, SLLM_TENSOR_DTYPE_I32, 2U, tokens, selected);
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_TENSOR_BINDING,
+                           "DeepSeek route score inactive hash binding");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.metadata.shape[0] -= 1U;
+    valid = valid && query(candidate, SLLM_STATUS_SHAPE_MISMATCH,
+                           "DeepSeek route metadata byte boundary");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.selection_bias.byte_offset = 2U;
+    valid = valid && query(candidate, SLLM_STATUS_MISALIGNED_OFFSET,
+                           "DeepSeek route bias alignment");
+    candidate = descriptor;
+    candidate.metadata.byte_offset = 1U;
+    valid = valid && query(candidate, SLLM_STATUS_MISALIGNED_OFFSET,
+                           "DeepSeek route metadata alignment");
+  }
+  {
+    auto candidate = descriptor;
+    candidate.mode = SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH;
+    candidate.selection_bias = {};
+    candidate.hash_expert_ids = deepseek_v4_route_binding(
+        sentinel, SLLM_TENSOR_DTYPE_I32, 2U, tokens, selected);
+    valid = valid &&
+            query(candidate, SLLM_STATUS_OK, "DeepSeek route hash query");
+    candidate.selection_bias = descriptor.selection_bias;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_TENSOR_BINDING,
+                           "DeepSeek route hash inactive bias binding");
+  }
+  {
+    sllm_deepseek_v4_moe_route_query_info_t info{};
+    info.struct_size = sizeof(info) - 1U;
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION;
+    Error error;
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_query(
+                             &descriptor, &info, &error.sink),
+                         SLLM_STATUS_INVALID_ARGUMENT,
+                         "DeepSeek route query info size", error);
+    info = {};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION + 1U;
+    info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION;
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_query(
+                             &descriptor, &info, &error.sink),
+                         SLLM_STATUS_INVALID_ABI_VERSION,
+                         "DeepSeek route query info ABI", error);
+    info = {};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION + 1U;
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_query(
+                             &descriptor, &info, &error.sink),
+                         SLLM_STATUS_INVALID_ARGUMENT,
+                         "DeepSeek route query info version", error);
+  }
+
+  sllm_context_t *context = nullptr;
+  sllm_buffer_t *logits = nullptr;
+  sllm_buffer_t *bias = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_deepseek_v4_moe_route_plan_t *plan = nullptr;
+  valid = valid && create_context(&context) &&
+          create_buffer_sized(context, tokens * experts * UINT64_C(2),
+                              &logits) &&
+          create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
+          create_buffer_sized(context, metadata_bytes, &output);
+  if (valid) {
+    descriptor.logits = deepseek_v4_route_binding(
+        logits, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
+    descriptor.selection_bias = deepseek_v4_route_binding(
+        bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.metadata = deepseek_v4_route_binding(
+        output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
+    Error error;
+    valid = expect_status(sllm_deepseek_v4_moe_route_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK, "DeepSeek route prepare", error) &&
+            plan != nullptr;
+    sllm_deepseek_v4_moe_route_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch) - 1U;
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    sllm_completion_t *completion = nullptr;
+    const auto *const queue_sentinel =
+        reinterpret_cast<const sllm_queue_t *>(1U);
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_execute(
+                             plan, queue_sentinel, &completion, &dispatch,
+                             &error.sink),
+                         SLLM_STATUS_INVALID_ARGUMENT,
+                         "DeepSeek route dispatch info size", error) &&
+            completion == nullptr;
+    dispatch = {};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_execute(
+                             plan, queue_sentinel, &completion, &dispatch,
+                             &error.sink),
+                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                         "DeepSeek route queue handle rejection", error) &&
+            completion == nullptr;
+    auto *wrong_kind = reinterpret_cast<sllm_moe_route_plan_t *>(plan);
+    valid = valid && expect_status(
+                         sllm_moe_route_plan_release(&wrong_kind, &error.sink),
+                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                         "DeepSeek route cross-ABI handle rejection", error) &&
+            wrong_kind != nullptr;
+    valid = valid &&
+            expect_status(sllm_buffer_release(&output, &error.sink),
+                          SLLM_STATUS_PUBLIC_BUSY,
+                          "DeepSeek route retained output", error) &&
+            output != nullptr;
+    valid = valid && expect_status(
+                         sllm_deepseek_v4_moe_route_plan_release(
+                             &plan, &error.sink),
+                         SLLM_STATUS_OK, "DeepSeek route plan release", error) &&
+            plan == nullptr;
+  }
+  Error release_error;
+  const bool released =
+      (output == nullptr ||
+       expect_status(sllm_buffer_release(&output, &release_error.sink),
+                     SLLM_STATUS_OK, "DeepSeek route output release",
+                     release_error)) &&
+      (bias == nullptr ||
+       expect_status(sllm_buffer_release(&bias, &release_error.sink),
+                     SLLM_STATUS_OK, "DeepSeek route bias release",
+                     release_error)) &&
+      (logits == nullptr ||
+       expect_status(sllm_buffer_release(&logits, &release_error.sink),
+                     SLLM_STATUS_OK, "DeepSeek route logits release",
+                     release_error)) &&
+      (context == nullptr ||
+       expect_status(sllm_context_release(&context, &release_error.sink),
+                     SLLM_STATUS_OK, "DeepSeek route context release",
+                     release_error));
+  return valid && released;
+}
+
+bool deepseek_v4_moe_route_device_status_completion_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  constexpr uint64_t tokens = 3U;
+  constexpr uint64_t experts =
+      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
+  constexpr uint32_t selected =
+      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT;
+  constexpr uint64_t pairs = tokens * selected;
+  constexpr uint64_t metadata_bytes =
+      pairs * UINT64_C(16) + experts * UINT64_C(4) +
+      (experts + 1U) * UINT64_C(4) + UINT64_C(4);
+
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *logits = nullptr;
+  sllm_buffer_t *bias = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_deepseek_v4_moe_route_plan_t *plan = nullptr;
+  if (!create_context(&context) || !create_queue(context, &queue) ||
+      !create_buffer_sized(context, tokens * experts * UINT64_C(2), &logits) ||
+      !create_buffer_sized(context, experts * UINT64_C(4), &bias) ||
+      !create_buffer_sized(context, metadata_bytes, &output)) {
+    return false;
+  }
+  sllm_deepseek_v4_moe_route_desc_t descriptor{};
+  descriptor.struct_size = sizeof(descriptor);
+  descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+  descriptor.op_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION;
+  descriptor.mode = SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE;
+  descriptor.selected_expert_count = selected;
+  descriptor.renormalize = 1U;
+  descriptor.routed_scale = 1.5F;
+  descriptor.logits = deepseek_v4_route_binding(
+      logits, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
+  descriptor.selection_bias = deepseek_v4_route_binding(
+      bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+  descriptor.metadata = deepseek_v4_route_binding(
+      output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
+  Error prepare_error;
+  bool valid = expect_status(sllm_deepseek_v4_moe_route_prepare(
+                                 context, &descriptor, &plan,
+                                 &prepare_error.sink),
+                             SLLM_STATUS_OK, "DeepSeek status prepare",
+                             prepare_error) &&
+               plan != nullptr;
+
+  struct StatusCase final {
+    int32_t device_status;
+    sllm_status_t expected_status;
+    const char *message_fragment;
+  };
+  constexpr std::array<StatusCase, 6> cases{{
+      {SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK, SLLM_STATUS_OK, nullptr},
+      {SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE,
+       SLLM_STATUS_INVALID_ARGUMENT, "non-finite"},
+      {SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE,
+       SLLM_STATUS_INVALID_ARGUMENT, "out-of-range"},
+      {SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT,
+       SLLM_STATUS_INVALID_ARGUMENT, "duplicate"},
+      {SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER,
+       SLLM_STATUS_INVALID_ARGUMENT, "normalizer"},
+      {INT32_C(99), SLLM_STATUS_INTERNAL_ERROR, "missing or unsupported"},
+  }};
+  const std::size_t baseline_events = fake_hip::live_events();
+  for (const auto &test_case : cases) {
+    if (!valid) {
+      break;
+    }
+    sllm_test_deepseek_v4_moe_route_device_status(test_case.device_status);
+    sllm_deepseek_v4_moe_route_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    sllm_completion_t *completion = nullptr;
+    Error execute_error;
+    valid = expect_status(sllm_deepseek_v4_moe_route_execute(
+                              plan, queue, &completion, &dispatch,
+                              &execute_error.sink),
+                          SLLM_STATUS_OK, "DeepSeek status execute",
+                          execute_error) &&
+            completion != nullptr && dispatch.fallback_allowed == 0U &&
+            dispatch.fallback_used == 0U;
+    if (!valid) {
+      break;
+    }
+    sllm_completion_result_t result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error wait_error;
+    const bool query_first =
+        test_case.device_status ==
+        SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT;
+    const sllm_status_t wait_status =
+        query_first
+            ? sllm_completion_query(completion, &result, &wait_error.sink)
+            : sllm_completion_wait(completion, 1000U, &result,
+                                   &wait_error.sink);
+    const uint32_t expected_state =
+        test_case.expected_status == SLLM_STATUS_OK
+            ? SLLM_COMPLETION_STATE_SUCCESS
+            : SLLM_COMPLETION_STATE_FAILURE;
+    valid = expect_status(wait_status, test_case.expected_status,
+                          query_first ? "DeepSeek first status query"
+                                      : "DeepSeek status wait",
+                          wait_error) &&
+            result.state == expected_state &&
+            (test_case.message_fragment == nullptr ||
+             std::strstr(wait_error.message, test_case.message_fragment) !=
+                 nullptr);
+    result = {};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error repeated_error;
+    valid = valid &&
+            expect_status(sllm_completion_query(completion, &result,
+                                                &repeated_error.sink),
+                          test_case.expected_status,
+                          "DeepSeek repeated status query", repeated_error) &&
+            result.state == expected_state &&
+            release_completion(&completion) && completion == nullptr &&
+            fake_hip::live_events() == baseline_events;
+  }
+
+  if (valid) {
+    Error mode_error;
+    valid = expect_status(sllm_queue_set_completion_mode(
+                              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
+                              &mode_error.sink),
+                          SLLM_STATUS_OK, "DeepSeek deferred mode",
+                          mode_error);
+  }
+  sllm_completion_t *deferred = nullptr;
+  sllm_completion_t *fence = nullptr;
+  if (valid) {
+    sllm_test_deepseek_v4_moe_route_device_status(
+        SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT);
+    sllm_deepseek_v4_moe_route_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version =
+        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    Error execute_error;
+    valid = expect_status(sllm_deepseek_v4_moe_route_execute(
+                              plan, queue, &deferred, &dispatch,
+                              &execute_error.sink),
+                          SLLM_STATUS_OK, "DeepSeek deferred execute",
+                          execute_error) &&
+            deferred != nullptr &&
+            fake_hip::live_events() == baseline_events;
+  }
+  if (valid) {
+    Error fence_error;
+    valid = expect_status(sllm_queue_fence(queue, &fence, &fence_error.sink),
+                          SLLM_STATUS_OK, "DeepSeek deferred fence",
+                          fence_error) &&
+            fence != nullptr &&
+            fake_hip::live_events() == baseline_events + 1U;
+  }
+  if (valid) {
+    sllm_completion_result_t result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error wait_error;
+    valid = expect_status(sllm_completion_wait(fence, 1000U, &result,
+                                               &wait_error.sink),
+                          SLLM_STATUS_OK, "DeepSeek deferred fence wait",
+                          wait_error) &&
+            result.state == SLLM_COMPLETION_STATE_SUCCESS;
+    result = {};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error finalize_error;
+    valid = valid &&
+            expect_status(sllm_completion_finalize_after(
+                              deferred, fence, &result, &finalize_error.sink),
+                          SLLM_STATUS_INVALID_ARGUMENT,
+                          "DeepSeek deferred semantic failure",
+                          finalize_error) &&
+            result.state == SLLM_COMPLETION_STATE_FAILURE &&
+            std::strstr(finalize_error.message, "duplicate") != nullptr &&
+            release_completion(&deferred) && deferred == nullptr &&
+            fake_hip::live_events() == baseline_events + 1U &&
+            release_completion(&fence) && fence == nullptr &&
+            fake_hip::live_events() == baseline_events;
+  }
+
+  sllm_test_deepseek_v4_moe_route_device_status(
+      SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK);
+  Error release_error;
+  const bool released =
+      (deferred == nullptr || release_completion(&deferred)) &&
+      (fence == nullptr || release_completion(&fence)) &&
+      (plan == nullptr ||
+       expect_status(sllm_deepseek_v4_moe_route_plan_release(
+                         &plan, &release_error.sink),
+                     SLLM_STATUS_OK, "DeepSeek status plan release",
+                     release_error)) &&
+      release_buffer(&output) && release_buffer(&bias) &&
+      release_buffer(&logits) && release_queue(&queue) &&
+      release_context(&context);
+  return valid && released && fake_hip::live_events() == baseline_events;
+}
+
+bool minimax_m3_moe_route_public_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  constexpr uint64_t experts = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT;
+  constexpr uint32_t selected =
+      SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT;
+  const auto metadata_bytes = [](const uint64_t tokens) {
+    return tokens * selected * UINT64_C(16) + experts * UINT64_C(4) +
+           (experts + 1U) * UINT64_C(4) + UINT64_C(4);
+  };
+  const auto *const sentinel = reinterpret_cast<const sllm_buffer_t *>(1U);
+  const auto descriptor_for = [&](const uint64_t tokens) {
+    sllm_minimax_m3_moe_route_desc_t descriptor{};
+    descriptor.struct_size = sizeof(descriptor);
+    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+    descriptor.op_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION;
+    descriptor.selected_expert_count = selected;
+    descriptor.logits = deepseek_v4_route_binding(
+        sentinel, SLLM_TENSOR_DTYPE_F32, 2U, tokens, experts);
+    descriptor.selection_bias = deepseek_v4_route_binding(
+        sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.metadata = deepseek_v4_route_binding(
+        sentinel, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes(tokens));
+    return descriptor;
+  };
+  const auto query = [&](const sllm_minimax_m3_moe_route_desc_t &descriptor,
+                         const sllm_status_t expected,
+                         const char *const label) {
+    sllm_minimax_m3_moe_route_query_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION;
+    Error error;
+    const bool ok = expect_status(
+        sllm_minimax_m3_moe_route_query(&descriptor, &info, &error.sink),
+        expected, label, error);
+    return ok &&
+           (expected != SLLM_STATUS_OK ||
+            (info.token_count == descriptor.logits.shape[0] &&
+             info.expert_count == experts &&
+             info.pair_count == descriptor.logits.shape[0] * selected &&
+             info.metadata_bytes == metadata_bytes(descriptor.logits.shape[0]) &&
+             info.selected_expert_count == selected));
+  };
+
+  bool valid = true;
+  for (const uint64_t tokens : {UINT64_C(1), UINT64_C(3), UINT64_C(5),
+                                UINT64_C(17)}) {
+    valid = valid && query(descriptor_for(tokens), SLLM_STATUS_OK,
+                           "MiniMax route M query");
+  }
+  auto descriptor = descriptor_for(3U);
+  {
+    auto candidate = descriptor;
+    candidate.struct_size -= 1U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                           "MiniMax route descriptor size");
+    candidate = descriptor;
+    candidate.abi_version += 1U;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ABI_VERSION,
+                           "MiniMax route descriptor ABI");
+    candidate = descriptor;
+    candidate.reserved[0] = 1U;
+    valid = valid && query(candidate, SLLM_STATUS_RESERVED_NONZERO,
+                           "MiniMax route descriptor reserved");
+    candidate = descriptor;
+    candidate.selected_expert_count = selected - 1U;
+    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
+                           "MiniMax route K boundary");
+    candidate = descriptor;
+    candidate.logits.dtype = SLLM_TENSOR_DTYPE_BF16;
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_TENSOR_BINDING,
+                           "MiniMax route logits dtype");
+    candidate = descriptor;
+    candidate.logits.shape[0] = 0U;
+    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
+                           "MiniMax route zero M");
+    candidate = descriptor;
+    candidate.logits.shape[1] = experts - 1U;
+    candidate.logits.stride_elements[0] = experts - 1U;
+    valid = valid && query(candidate, SLLM_STATUS_SHAPE_MISMATCH,
+                           "MiniMax route E boundary");
+    candidate = descriptor;
+    candidate.selection_bias.shape[0] = experts - 1U;
+    valid = valid && query(candidate, SLLM_STATUS_SHAPE_MISMATCH,
+                           "MiniMax route bias shape");
+    candidate = descriptor;
+    candidate.metadata.shape[0] -= 1U;
+    valid = valid && query(candidate, SLLM_STATUS_SHAPE_MISMATCH,
+                           "MiniMax route metadata bytes");
+    candidate = descriptor;
+    candidate.metadata.byte_offset = 1U;
+    valid = valid && query(candidate, SLLM_STATUS_MISALIGNED_OFFSET,
+                           "MiniMax route metadata alignment");
+  }
+  {
+    sllm_minimax_m3_moe_route_query_info_t info{};
+    info.struct_size = sizeof(info);
+    info.abi_version = SLLM_HIP_ABI_VERSION;
+    info.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION;
+    info.reserved[7] = 1U;
+    Error error;
+    valid = valid && expect_status(
+                         sllm_minimax_m3_moe_route_query(
+                             &descriptor, &info, &error.sink),
+                         SLLM_STATUS_RESERVED_NONZERO,
+                         "MiniMax route query reserved", error);
+  }
+
+  constexpr uint64_t tokens = 3U;
+  sllm_context_t *context = nullptr;
+  sllm_queue_t *queue = nullptr;
+  sllm_buffer_t *logits = nullptr;
+  sllm_buffer_t *bias = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_minimax_m3_moe_route_plan_t *plan = nullptr;
+  valid = valid && create_context(&context) && create_queue(context, &queue) &&
+          create_buffer_sized(context, tokens * experts * UINT64_C(4),
+                              &logits) &&
+          create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
+          create_buffer_sized(context, metadata_bytes(tokens), &output);
+  if (valid) {
+    descriptor.logits = deepseek_v4_route_binding(
+        logits, SLLM_TENSOR_DTYPE_F32, 2U, tokens, experts);
+    descriptor.selection_bias = deepseek_v4_route_binding(
+        bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.metadata = deepseek_v4_route_binding(
+        output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes(tokens));
+    Error error;
+    valid = expect_status(sllm_minimax_m3_moe_route_prepare(
+                              context, &descriptor, &plan, &error.sink),
+                          SLLM_STATUS_OK, "MiniMax route prepare", error) &&
+            plan != nullptr;
+    sllm_minimax_m3_moe_route_dispatch_info_t invalid_dispatch{};
+    invalid_dispatch.struct_size = sizeof(invalid_dispatch) - 1U;
+    invalid_dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    invalid_dispatch.info_version =
+        SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    sllm_completion_t *invalid_completion = nullptr;
+    valid = valid && expect_status(
+                         sllm_minimax_m3_moe_route_execute(
+                             plan, queue, &invalid_completion,
+                             &invalid_dispatch, &error.sink),
+                         SLLM_STATUS_INVALID_ARGUMENT,
+                         "MiniMax invalid dispatch size", error) &&
+            invalid_completion == nullptr;
+    invalid_dispatch = {};
+    invalid_dispatch.struct_size = sizeof(invalid_dispatch);
+    invalid_dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    invalid_dispatch.info_version =
+        SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    invalid_dispatch.reserved[0] = 1U;
+    valid = valid && expect_status(
+                         sllm_minimax_m3_moe_route_execute(
+                             plan, queue, &invalid_completion,
+                             &invalid_dispatch, &error.sink),
+                         SLLM_STATUS_RESERVED_NONZERO,
+                         "MiniMax invalid dispatch reserved", error) &&
+            invalid_completion == nullptr;
+    auto *wrong_kind = reinterpret_cast<sllm_moe_route_plan_t *>(plan);
+    valid = valid && expect_status(
+                         sllm_moe_route_plan_release(&wrong_kind, &error.sink),
+                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                         "MiniMax cross-ABI plan rejection", error) &&
+            wrong_kind != nullptr;
+    valid = valid && expect_status(sllm_buffer_release(&output, &error.sink),
+                                   SLLM_STATUS_PUBLIC_BUSY,
+                                   "MiniMax retained output", error) &&
+            output != nullptr;
+  }
+
+  struct StatusCase final {
+    int32_t device_status;
+    sllm_status_t expected_status;
+    const char *fragment;
+    bool query_first;
+  };
+  constexpr std::array<StatusCase, 4> cases{{
+      {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK, SLLM_STATUS_OK, nullptr, false},
+      {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE,
+       SLLM_STATUS_INVALID_ARGUMENT, "non-finite", true},
+      {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER,
+       SLLM_STATUS_INVALID_ARGUMENT, "normalizer", false},
+      {INT32_C(99), SLLM_STATUS_INTERNAL_ERROR, "missing or unsupported",
+       true},
+  }};
+  const std::size_t baseline_events = fake_hip::live_events();
+  for (const auto &test_case : cases) {
+    if (!valid) {
+      break;
+    }
+    sllm_test_minimax_m3_moe_route_device_status(test_case.device_status);
+    sllm_minimax_m3_moe_route_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    sllm_completion_t *completion = nullptr;
+    Error execute_error;
+    valid = expect_status(sllm_minimax_m3_moe_route_execute(
+                              plan, queue, &completion, &dispatch,
+                              &execute_error.sink),
+                          SLLM_STATUS_OK, "MiniMax route execute",
+                          execute_error) &&
+            completion != nullptr && dispatch.dispatch_count == 2U &&
+            dispatch.kernel_id ==
+                SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1 &&
+            dispatch.token_count == tokens && dispatch.expert_count == experts &&
+            dispatch.pair_count == tokens * selected &&
+            dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U;
+    sllm_completion_result_t result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error completion_error;
+    const sllm_status_t status =
+        test_case.query_first
+            ? sllm_completion_query(completion, &result,
+                                    &completion_error.sink)
+            : sllm_completion_wait(completion, 1000U, &result,
+                                   &completion_error.sink);
+    valid = valid && expect_status(status, test_case.expected_status,
+                                   "MiniMax route completion",
+                                   completion_error) &&
+            (test_case.fragment == nullptr ||
+             std::strstr(completion_error.message, test_case.fragment) !=
+                 nullptr);
+    result = {};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error cached_error;
+    valid = valid && expect_status(
+                         sllm_completion_query(completion, &result,
+                                               &cached_error.sink),
+                         test_case.expected_status,
+                         "MiniMax cached completion", cached_error) &&
+            release_completion(&completion) &&
+            fake_hip::live_events() == baseline_events;
+  }
+
+  sllm_completion_t *deferred = nullptr;
+  sllm_completion_t *fence = nullptr;
+  if (valid) {
+    Error mode_error;
+    valid = expect_status(sllm_queue_set_completion_mode(
+                              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
+                              &mode_error.sink),
+                          SLLM_STATUS_OK, "MiniMax deferred mode", mode_error);
+  }
+  if (valid) {
+    sllm_test_minimax_m3_moe_route_device_status(
+        SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER);
+    sllm_minimax_m3_moe_route_dispatch_info_t dispatch{};
+    dispatch.struct_size = sizeof(dispatch);
+    dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+    dispatch.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
+    Error execute_error;
+    valid = expect_status(sllm_minimax_m3_moe_route_execute(
+                              plan, queue, &deferred, &dispatch,
+                              &execute_error.sink),
+                          SLLM_STATUS_OK, "MiniMax deferred execute",
+                          execute_error) &&
+            fake_hip::live_events() == baseline_events;
+    Error busy_error;
+    valid = valid && expect_status(sllm_minimax_m3_moe_route_plan_release(
+                                       &plan, &busy_error.sink),
+                                   SLLM_STATUS_PUBLIC_BUSY,
+                                   "MiniMax in-flight plan", busy_error) &&
+            plan != nullptr;
+    Error fence_error;
+    valid = valid && expect_status(sllm_queue_fence(queue, &fence,
+                                                    &fence_error.sink),
+                                   SLLM_STATUS_OK, "MiniMax deferred fence",
+                                   fence_error);
+  }
+  if (valid) {
+    sllm_completion_result_t result{};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error wait_error;
+    valid = expect_status(sllm_completion_wait(fence, 1000U, &result,
+                                               &wait_error.sink),
+                          SLLM_STATUS_OK, "MiniMax fence wait", wait_error);
+    result = {};
+    result.struct_size = sizeof(result);
+    result.abi_version = SLLM_HIP_ABI_VERSION;
+    Error finalize_error;
+    valid = valid && expect_status(sllm_completion_finalize_after(
+                                       deferred, fence, &result,
+                                       &finalize_error.sink),
+                                   SLLM_STATUS_INVALID_ARGUMENT,
+                                   "MiniMax deferred semantic failure",
+                                   finalize_error) &&
+            std::strstr(finalize_error.message, "normalizer") != nullptr;
+  }
+
+  sllm_test_minimax_m3_moe_route_device_status(
+      SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK);
+  Error release_error;
+  const bool released =
+      (deferred == nullptr || release_completion(&deferred)) &&
+      (fence == nullptr || release_completion(&fence)) &&
+      (plan == nullptr ||
+       expect_status(sllm_minimax_m3_moe_route_plan_release(
+                         &plan, &release_error.sink),
+                     SLLM_STATUS_OK, "MiniMax route plan release",
+                     release_error)) &&
+      release_buffer(&output) && release_buffer(&bias) &&
+      release_buffer(&logits) && release_queue(&queue) &&
+      release_context(&context);
+  return valid && released && fake_hip::live_events() == baseline_events &&
+         fake_hip::live_allocations() == 0U && fake_hip::live_streams() == 0U;
+}
+
 } // namespace
 
 int main() {
+  if (!minimax_m3_moe_route_public_contract()) {
+    std::cerr << "MiniMax M3 MoE route public contract test failed\n";
+    return 1;
+  }
+  if (!deepseek_v4_moe_route_device_status_completion_contract()) {
+    std::cerr << "DeepSeek V4 MoE route status completion test failed\n";
+    return 1;
+  }
+  if (!deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract()) {
+    std::cerr << "DeepSeek V4 MoE route descriptor/ABI contract test failed\n";
+    return 1;
+  }
   if (!mlp_gate_up_silu_bundle_abi_negative_contract()) {
     std::cerr << "MLP gate/up/SiLU bundle ABI contract test failed\n";
     return 1;
@@ -7281,6 +8588,7 @@ int main() {
   SLLM_RUN_KV_CONTRACT(kv_vmm_cow_transaction_failure_injection_contract)
   SLLM_RUN_KV_CONTRACT(kv_append_lifetime_alias_and_quarantine_contract)
   SLLM_RUN_KV_CONTRACT(state_fork_vmm_and_linear_image_contract)
+  SLLM_RUN_KV_CONTRACT(sliding_static_fp8_ring_image_fork_and_scale_contract)
 #undef SLLM_RUN_KV_CONTRACT
   std::cout << "production public runtime host fault test: PASS\n";
   return 0;

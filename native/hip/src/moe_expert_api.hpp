@@ -17,6 +17,12 @@ struct TensorMetadata final {
 
 struct DescriptorMetadata final {
   std::array<TensorMetadata, 5> tensors;
+  uint32_t op_version;
+  uint32_t expert_count;
+  uint32_t selected_expert_count;
+  uint32_t shared_expert_count;
+  uint32_t hidden_size;
+  uint32_t intermediate_size;
   uint64_t token_count;
   uint64_t active_pair_count;
   uint64_t routing_metadata_bytes;

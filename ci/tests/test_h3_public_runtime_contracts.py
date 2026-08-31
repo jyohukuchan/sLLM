@@ -656,6 +656,8 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
     def test_kernel_symbols_cover_the_full_gfx1030_direct_closure(self) -> None:
         expected_additions = {
             "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+            "sllm_deepseek_v4_moe_route_score_hash_v1",
+            "sllm_deepseek_v4_moe_route_stable_group_v1",
             "sllm_elementwise_broadcast_add_bf16_fp32_v1",
             "sllm_gdn_projection_bundle_bf16_fp32_decode_v1",
             "sllm_kv_state_bf16_to_fp8_token_major_v1",
@@ -673,6 +675,9 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_matmul_mxfp4_w4a4_block32_decode_v1",
             "sllm_matmul_mxfp4_w4a4_block32_prefill_v1",
             "sllm_matmul_nvfp4_w4a4_block16_packed_v1",
+            "sllm_minimax_m3_moe_route_sigmoid_top4_v1",
+            "sllm_minimax_m3_moe_route_stable_group_v1",
+            "sllm_ministral3_yarn_bf16_v1",
             "sllm_mlp_gate_up_silu_bundle_bf16_fp32_decode_v1",
             "sllm_moe_down_combine_v1",
             "sllm_moe_route_bf16_stable_topk_v1",
@@ -683,10 +688,10 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
             "sllm_rmsnorm_residual_fused_wave64_v1",
             "sllm_token_selector_bf16_f32_mask_v1",
         }
-        self.assertEqual(len(KERNEL_SYMBOLS), 53)
+        self.assertEqual(len(KERNEL_SYMBOLS), 58)
         self.assertEqual(tuple(sorted(KERNEL_SYMBOLS)), KERNEL_SYMBOLS)
         self.assertTrue(expected_additions <= set(KERNEL_SYMBOLS))
-        self.assertEqual(len(expected_additions), 27)
+        self.assertEqual(len(expected_additions), 32)
 
     def test_causal_attention_stub_allowlist_is_exact_and_duplicate_free(self) -> None:
         expected = (
@@ -722,7 +727,7 @@ class H3PublicRuntimeContractTests(unittest.TestCase):
         self.assertEqual(additions, additions & set(EXPECTED_HOST_HIP_UNDEFINED_SYMBOLS))
 
     def test_public_symbols_are_exactly_the_umbrella_header_extern_c_set(self) -> None:
-        self.assertEqual(len(PUBLIC_SYMBOLS), 98)
+        self.assertEqual(len(PUBLIC_SYMBOLS), 109)
         self.assertEqual(declared_public_symbols(ROOT), PUBLIC_SYMBOLS)
         with tempfile.TemporaryDirectory(prefix="sllm-h3-public-symbol-header-") as directory:
             repo = Path(directory)

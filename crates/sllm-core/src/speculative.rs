@@ -16,6 +16,7 @@ pub const MAX_SPECULATIVE_HISTORY_TOKENS_V1: usize = 1_048_576;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DraftProviderKindV1 {
     QwenMtp,
+    Gemma4Mtp,
     ExternalModel,
     Ngram,
 }

@@ -55,7 +55,7 @@ fn print_help() {
     println!("  verify-model  Verify a derived GGUF artifact");
     println!("  tokenize      Encode text with the verified tokenizer");
     println!("  detokenize    Decode token IDs with the verified tokenizer");
-    println!("  render        Render Qwen3.5 chat messages");
+    println!("  render        Render the reviewed model chat template");
     println!("  apply-template Apply and tokenize the reviewed chat template");
     println!("  input-tokens  Count raw or rendered input tokens (CPU only)");
     println!("  decode        Decode token IDs with the verified tokenizer");
@@ -65,9 +65,12 @@ fn print_help() {
     println!("  infill        FIM/infill (fails closed without a verified capability)");
     println!("  chat          Interactive typed conversation (JSONL events)");
     println!("  models        Load, unload, and administer model aliases (loopback only)");
-    println!("  generate      Run Qwen3.5 text generation on one exact HIP target");
+    println!("  generate      Run reviewed text generation on one exact HIP target");
     println!();
-    println!("model source: --gguf PATH --derived-lock PATH");
+    println!("model source: --gguf PATH [--derived-lock PATH]");
+    println!(
+        "  omitting --derived-lock selects the reviewed official Ministral 3 BF16 GGUF (FP16 KV, greedy device argmax)"
+    );
     println!("generate: --prompt TEXT | --message ROLE:CONTENT --max-new-tokens N");
     println!(
         "  --device-index N --target gfx1030|gfx1201|gfx942|gfx942:sramecc+:xnack- [--greedy | --temperature F32] [--seed U64]"
@@ -77,9 +80,15 @@ fn print_help() {
     );
     println!("  [--prefill-chunk-tokens 1..16384] (dense Qwen text only; default: auto)");
     println!("  [--mtp-draft-width 0..8] (default: auto; 0 target-only; 1..8 forced MTP)");
+    println!(
+        "  Gemma 4 MTP width 1: --mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH (exact gfx1201, greedy, FP16 KV, context <=2048)"
+    );
     println!("  [--top-p F32] [--presence-penalty F32] [--frequency-penalty F32]");
     println!("  [--stop TEXT] (repeat --stop at most four times)");
     println!("  [--image PATH] (Qwen3.5 BF16 chat only; at most two, before final user text)");
+    println!(
+        "  Gemma 4 26B-A4B MoE GGUF is detected automatically; it supports exact HIP greedy text generation and --model-size 26B-A4B benchmarks."
+    );
     println!(
         "  apply-template/input-tokens custom: --chat-template-file PATH --chat-template-digest sha256:<64 lowercase hex>"
     );

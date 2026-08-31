@@ -1,5 +1,6 @@
 #include "causal_attention_api.hpp"
 
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -142,9 +143,27 @@ sllm_status_t validate_and_copy_descriptor(
                      sink, SLLM_STATUS_INVALID_CAUSAL_ATTENTION_DESCRIPTOR,
                      "causal attention metadata output is null");
   }
-  if (descriptor->op_version != SLLM_HIP_CAUSAL_ATTENTION_VERSION ||
-      descriptor->kv_state == nullptr || descriptor->reserved0 != 0U ||
-      !all_zero(descriptor->reserved, sizeof(descriptor->reserved))) {
+  const uint64_t sliding_window =
+      static_cast<uint64_t>(descriptor->reserved[0]) |
+      (static_cast<uint64_t>(descriptor->reserved[1]) << UINT32_C(32));
+  const bool full =
+      descriptor->op_version == SLLM_HIP_CAUSAL_ATTENTION_VERSION &&
+      all_zero(descriptor->reserved, sizeof(descriptor->reserved));
+  const bool sliding =
+      descriptor->op_version == SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION &&
+      sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 &&
+      descriptor->reserved[2] == 0U && descriptor->reserved[3] == 0U;
+  float explicit_score_scale = 0.0F;
+  std::memcpy(&explicit_score_scale, &descriptor->reserved[2], sizeof(float));
+  const bool explicitly_scaled =
+      descriptor->op_version ==
+          SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION &&
+      (sliding_window == 0U ||
+       sliding_window == SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4) &&
+      std::isfinite(explicit_score_scale) && explicit_score_scale > 0.0F &&
+      descriptor->reserved[3] == 0U;
+  if ((!full && !sliding && !explicitly_scaled) ||
+      descriptor->kv_state == nullptr || descriptor->reserved0 != 0U) {
     return sllm_public_runtime::write_error(
         sink,
         descriptor->reserved0 != 0U ||
@@ -180,14 +199,17 @@ sllm_status_t validate_and_copy_descriptor(
         sink, SLLM_STATUS_KV_CAPACITY_EXCEEDED,
         "causal attention range is outside the bounded KV capacity");
   }
-  if ((metadata->query.q_heads != 8U && metadata->query.q_heads != 16U) ||
-      (metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
+  if ((metadata->query.q_heads != 8U && metadata->query.q_heads != 16U &&
+       metadata->query.q_heads != 32U) ||
+      (metadata->query.head_dim != 128U &&
+       metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
        metadata->query.head_dim != SLLM_HIP_KV_MAX_HEAD_DIM) ||
       metadata->output.q_heads != metadata->query.q_heads ||
       metadata->output.head_dim != metadata->query.head_dim) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
-        "causal attention Q/output must share a reviewed [M,Hq,256|512] shape");
+        "causal attention Q/output must share a reviewed "
+        "[M,Hq,128|256|512] shape");
   }
   if (descriptor->query.buffer == descriptor->output.buffer &&
       intervals_overlap(metadata->query, metadata->output)) {
@@ -198,6 +220,9 @@ sllm_status_t validate_and_copy_descriptor(
   metadata->start_position = descriptor->start_position;
   metadata->expected_kv_length = descriptor->expected_kv_length;
   metadata->query_count = metadata->query.query_count;
+  metadata->sliding_window = sliding_window;
+  metadata->score_scale = explicit_score_scale;
+  metadata->explicit_score_scale = explicitly_scaled;
   return SLLM_STATUS_OK;
 }
 

@@ -2799,3 +2799,36 @@ extern "C" sllm_status_t sllm_mlp_gate_up_silu_bundle_execute(
       error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
       "public HIP runtime is unavailable; CPU fallback is disabled");
 }
+
+extern "C" sllm_status_t sllm_ministral3_yarn_prepare(
+    const sllm_context_t *, const sllm_ministral3_yarn_desc_t *,
+    sllm_ministral3_yarn_plan_t **const plan,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (plan != nullptr) {
+    *plan = nullptr;
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_ministral3_yarn_plan_release(
+    sllm_ministral3_yarn_plan_t **,
+    sllm_error_sink_t *const error_sink) noexcept {
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}
+
+extern "C" sllm_status_t sllm_ministral3_yarn_execute(
+    const sllm_ministral3_yarn_plan_t *, const sllm_queue_t *,
+    sllm_completion_t **const completion,
+    sllm_ministral3_yarn_dispatch_info_t *,
+    sllm_error_sink_t *const error_sink) noexcept {
+  if (completion != nullptr) {
+    *completion = nullptr;
+  }
+  return sllm_public_runtime::write_error(
+      error_sink, SLLM_STATUS_HIP_UNAVAILABLE,
+      "public HIP runtime is unavailable; CPU fallback is disabled");
+}

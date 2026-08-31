@@ -31,8 +31,26 @@ pub enum SemanticOpKind {
     AttentionPreprocess,
     Argmax,
     TokenSelect,
+    /// Gemma 4 26B-A4B router output selection. The input is already the
+    /// separately normalized/root-scaled router projection logits `[M,128]`.
+    /// This operation applies stable full softmax, stable top-8 selection, and
+    /// top-k renormalization into the canonical route-metadata byte layout.
+    MoeRoute,
+    /// DeepSeek V4's model-specific top-6 router. Score routing and the first
+    /// three main layers' hash routing share one stable descriptor arity while
+    /// keeping their distinct numerical contracts explicit.
+    DeepSeekV4MoeRoute,
+    /// MiniMax M3's fixed sigmoid top-4 router. The F32 selection bias changes
+    /// only expert ranking; emitted weights are the selected unbiased sigmoid
+    /// values, renormalized and multiplied by the model-fixed scale 2.0.
+    MiniMaxM3MoeRoute,
+    /// Gemma 4 26B-A4B NVFP4 routed experts. The separately normalized expert
+    /// activation and canonical `MoeRoute` metadata are explicit inputs; the
+    /// dense shared MLP remains an external graph branch.
+    MoeExpert,
     SparseMoe,
     BroadcastAdd,
+    BroadcastMul,
 }
 
 /// The only accepted C3a1 Q/gate storage layout. The packed tensor is
@@ -244,6 +262,7 @@ impl SemanticOpKind {
             Self::Copy => "copy",
             Self::Add => "add",
             Self::BroadcastAdd => "broadcast_add",
+            Self::BroadcastMul => "broadcast_mul",
             Self::ScalarMul => "scalar_mul",
             Self::Embedding => "embedding",
             Self::Matmul => "matmul",
@@ -260,6 +279,10 @@ impl SemanticOpKind {
             Self::AttentionPreprocess => "attention_preprocess",
             Self::Argmax => "argmax",
             Self::TokenSelect => "token_select",
+            Self::MoeRoute => "moe_route",
+            Self::DeepSeekV4MoeRoute => "deepseek_v4_moe_route",
+            Self::MiniMaxM3MoeRoute => "minimax_m3_moe_route",
+            Self::MoeExpert => "moe_expert",
             Self::SparseMoe => "sparse_moe",
         }
     }
@@ -269,6 +292,7 @@ impl SemanticOpKind {
             Self::Copy => (1, 1),
             Self::Add => (2, 1),
             Self::BroadcastAdd => (2, 1),
+            Self::BroadcastMul => (2, 1),
             Self::ScalarMul => (2, 1),
             Self::Embedding => (2, 1),
             Self::Matmul => (2, 1),
@@ -285,8 +309,103 @@ impl SemanticOpKind {
             Self::AttentionPreprocess => (5, 3),
             Self::Argmax => (1, 1),
             Self::TokenSelect => (3, 1),
+            Self::MoeRoute => (1, 1),
+            Self::DeepSeekV4MoeRoute => (3, 1),
+            Self::MiniMaxM3MoeRoute => (2, 1),
+            Self::MoeExpert => (3, 1),
             Self::SparseMoe => (3, 1),
         }
+    }
+}
+
+/// Routing source for the fixed DeepSeek V4 top-6 MoE boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum DeepSeekV4MoeRouteMode {
+    /// Compute `sqrt(softplus(logit))`, use the F32 bias for selection only,
+    /// then emit unbiased selected scores as route weights.
+    Score,
+    /// Consume the fixed six expert IDs supplied by the reviewed hash table.
+    Hash,
+}
+
+/// Fixed DeepSeek V4 routing contract.
+///
+/// The routed scale is stored as bits so the descriptor remains an `Eq` and
+/// `Hash` cache key. Its constructor rejects non-finite and non-positive values.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct DeepSeekV4MoeRouteContractV1 {
+    mode: DeepSeekV4MoeRouteMode,
+    renormalize_selected_weights: bool,
+    routed_scale_bits: u32,
+}
+
+impl DeepSeekV4MoeRouteContractV1 {
+    pub const EXPERT_COUNT: usize = 256;
+    pub const SELECTED_EXPERT_COUNT: usize = 6;
+    pub const MAX_TOKEN_COUNT: usize = 65_536;
+
+    pub fn new(
+        mode: DeepSeekV4MoeRouteMode,
+        renormalize_selected_weights: bool,
+        routed_scale: f32,
+    ) -> Result<Self, OpError> {
+        if !routed_scale.is_finite() || routed_scale <= 0.0 {
+            return Err(OpError::DeepSeekV4MoeRouteInvalidRoutedScale {
+                bits: routed_scale.to_bits(),
+            });
+        }
+        Ok(Self {
+            mode,
+            renormalize_selected_weights,
+            routed_scale_bits: routed_scale.to_bits(),
+        })
+    }
+
+    pub const fn mode(self) -> DeepSeekV4MoeRouteMode {
+        self.mode
+    }
+
+    pub const fn renormalize_selected_weights(self) -> bool {
+        self.renormalize_selected_weights
+    }
+
+    pub const fn routed_scale(self) -> f32 {
+        f32::from_bits(self.routed_scale_bits)
+    }
+
+    pub const fn routed_scale_bits(self) -> u32 {
+        self.routed_scale_bits
+    }
+
+    /// Returns the canonical byte length for:
+    /// `i32 ids[M,6] + f32 weights[M,6] + i32 counts[256] +
+    /// i32 offsets[257] + i32 grouped_token[M,6] +
+    /// i32 grouped_slot[M,6] + i32 status`.
+    pub fn metadata_bytes(token_count: usize) -> Option<usize> {
+        deepseek_v4_moe_route_metadata_bytes(token_count)
+    }
+}
+
+/// Fixed MiniMax M3 score-routing contract.
+///
+/// There are deliberately no configurable fields: the reviewed model fixes
+/// sigmoid routing, 128 experts, stable top-4 selection, selected-weight
+/// renormalization, and routed scale 2.0.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MiniMaxM3MoeRouteContractV1;
+
+impl MiniMaxM3MoeRouteContractV1 {
+    pub const EXPERT_COUNT: usize = 128;
+    pub const SELECTED_EXPERT_COUNT: usize = 4;
+    pub const MAX_TOKEN_COUNT: usize = 65_536;
+    pub const ROUTED_SCALE: f32 = 2.0;
+
+    pub const fn new() -> Self {
+        Self
+    }
+
+    pub fn metadata_bytes(token_count: usize) -> Option<usize> {
+        minimax_m3_moe_route_metadata_bytes(token_count)
     }
 }
 
@@ -1275,6 +1394,8 @@ pub struct SemanticOpDescriptor {
     attention_preprocess_contract: Option<AttentionPreprocessContract>,
     token_selector_contract: Option<TokenSelectorContractV1>,
     sparse_moe_contract: Option<SparseMoeContract>,
+    deepseek_v4_moe_route_contract: Option<DeepSeekV4MoeRouteContractV1>,
+    minimax_m3_moe_route_contract: Option<MiniMaxM3MoeRouteContractV1>,
     gdn_projection_bundle_contract: Option<GdnProjectionBundleContractV1>,
     mlp_gate_up_silu_bundle_contract: Option<MlpGateUpSiluBundleContractV1>,
 }
@@ -1299,6 +1420,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1334,6 +1457,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1371,6 +1496,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1394,6 +1521,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: Some(contract),
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1417,6 +1546,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1440,6 +1571,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1465,6 +1598,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: Some(contract),
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1497,6 +1632,66 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: Some(contract),
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Creates the DeepSeek V4 model-specific top-6 routing descriptor.
+    ///
+    /// `TensorView` supports zero extents, so this operation preserves one
+    /// stable three-input arity with typed, storage-free placeholders instead
+    /// of making backend binding depend on the route mode. Score mode binds
+    /// `[logits, bias, I32[0,6]]`; hash mode binds
+    /// `[logits, F32[0], hash_ids]`.
+    pub fn new_deepseek_v4_moe_route(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: DeepSeekV4MoeRouteContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::DeepSeekV4MoeRoute,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: Some(contract),
+            minimax_m3_moe_route_contract: None,
+            gdn_projection_bundle_contract: None,
+            mlp_gate_up_silu_bundle_contract: None,
+        };
+        descriptor.validate()?;
+        Ok(descriptor)
+    }
+
+    /// Creates the fixed MiniMax M3 top-4 sigmoid routing descriptor.
+    pub fn new_minimax_m3_moe_route(
+        inputs: Vec<TensorView>,
+        outputs: Vec<TensorView>,
+        contract: MiniMaxM3MoeRouteContractV1,
+    ) -> Result<Self, OpError> {
+        let descriptor = Self {
+            kind: SemanticOpKind::MiniMaxM3MoeRoute,
+            inputs,
+            outputs,
+            rms_norm_contract: None,
+            residual_rms_norm_contract: None,
+            rotary_contract: None,
+            causal_attention_contract: None,
+            attention_preprocess_contract: None,
+            token_selector_contract: None,
+            sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: Some(contract),
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1520,6 +1715,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: Some(contract),
             mlp_gate_up_silu_bundle_contract: None,
         };
@@ -1543,6 +1740,8 @@ impl SemanticOpDescriptor {
             attention_preprocess_contract: None,
             token_selector_contract: None,
             sparse_moe_contract: None,
+            deepseek_v4_moe_route_contract: None,
+            minimax_m3_moe_route_contract: None,
             gdn_projection_bundle_contract: None,
             mlp_gate_up_silu_bundle_contract: Some(contract),
         };
@@ -1592,6 +1791,14 @@ impl SemanticOpDescriptor {
 
     pub const fn sparse_moe_contract(&self) -> Option<SparseMoeContract> {
         self.sparse_moe_contract
+    }
+
+    pub const fn deepseek_v4_moe_route_contract(&self) -> Option<DeepSeekV4MoeRouteContractV1> {
+        self.deepseek_v4_moe_route_contract
+    }
+
+    pub const fn minimax_m3_moe_route_contract(&self) -> Option<MiniMaxM3MoeRouteContractV1> {
+        self.minimax_m3_moe_route_contract
     }
 
     pub const fn gdn_projection_bundle_contract(&self) -> Option<GdnProjectionBundleContractV1> {
@@ -1645,6 +1852,9 @@ impl SemanticOpDescriptor {
             }
             SemanticOpKind::BroadcastAdd => {
                 validate_broadcast_add(&self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::BroadcastMul => {
+                validate_broadcast_mul(&self.inputs, &self.outputs)?;
             }
             SemanticOpKind::ScalarMul => {
                 validate_baseline_elementwise(self.kind, &self.inputs, &self.outputs)?;
@@ -1717,6 +1927,23 @@ impl SemanticOpDescriptor {
                     .token_selector_contract
                     .ok_or(OpError::TokenSelectorContractRequired)?;
                 validate_token_selector(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::MoeRoute => {
+                validate_gemma4_moe_route(&self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::DeepSeekV4MoeRoute => {
+                let contract = self
+                    .deepseek_v4_moe_route_contract
+                    .ok_or(OpError::DeepSeekV4MoeRouteContractRequired)?;
+                validate_deepseek_v4_moe_route(&self.inputs, &self.outputs, contract)?;
+            }
+            SemanticOpKind::MiniMaxM3MoeRoute => {
+                self.minimax_m3_moe_route_contract
+                    .ok_or(OpError::MiniMaxM3MoeRouteContractRequired)?;
+                validate_minimax_m3_moe_route(&self.inputs, &self.outputs)?;
+            }
+            SemanticOpKind::MoeExpert => {
+                validate_gemma4_moe_expert(&self.inputs, &self.outputs)?;
             }
             SemanticOpKind::SparseMoe => {
                 let contract = self
@@ -1861,6 +2088,245 @@ fn validate_sparse_moe(
         || !layer_blob.is_contiguous()
     {
         return Err(OpError::SparseMoeTensorContractMismatch);
+    }
+    Ok(())
+}
+
+fn deepseek_v4_moe_route_metadata_bytes(token_count: usize) -> Option<usize> {
+    let routed_elements =
+        token_count.checked_mul(DeepSeekV4MoeRouteContractV1::SELECTED_EXPERT_COUNT)?;
+    let ids_bytes = routed_elements.checked_mul(std::mem::size_of::<i32>())?;
+    let weights_bytes = routed_elements.checked_mul(std::mem::size_of::<f32>())?;
+    let counts_bytes =
+        DeepSeekV4MoeRouteContractV1::EXPERT_COUNT.checked_mul(std::mem::size_of::<i32>())?;
+    let offsets_bytes = DeepSeekV4MoeRouteContractV1::EXPERT_COUNT
+        .checked_add(1)?
+        .checked_mul(std::mem::size_of::<i32>())?;
+    let grouped_token_bytes = routed_elements.checked_mul(std::mem::size_of::<i32>())?;
+    let grouped_slot_bytes = routed_elements.checked_mul(std::mem::size_of::<i32>())?;
+    ids_bytes
+        .checked_add(weights_bytes)?
+        .checked_add(counts_bytes)?
+        .checked_add(offsets_bytes)?
+        .checked_add(grouped_token_bytes)?
+        .checked_add(grouped_slot_bytes)?
+        .checked_add(std::mem::size_of::<i32>())
+}
+
+fn minimax_m3_moe_route_metadata_bytes(token_count: usize) -> Option<usize> {
+    let routed_elements =
+        token_count.checked_mul(MiniMaxM3MoeRouteContractV1::SELECTED_EXPERT_COUNT)?;
+    let routed_plane_bytes = routed_elements.checked_mul(std::mem::size_of::<i32>())?;
+    let counts_bytes =
+        MiniMaxM3MoeRouteContractV1::EXPERT_COUNT.checked_mul(std::mem::size_of::<i32>())?;
+    let offsets_bytes = MiniMaxM3MoeRouteContractV1::EXPERT_COUNT
+        .checked_add(1)?
+        .checked_mul(std::mem::size_of::<i32>())?;
+    routed_plane_bytes
+        .checked_mul(4)?
+        .checked_add(counts_bytes)?
+        .checked_add(offsets_bytes)?
+        .checked_add(std::mem::size_of::<i32>())
+}
+
+fn validate_minimax_m3_moe_route(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+) -> Result<(), OpError> {
+    let logits = &inputs[0];
+    let bias = &inputs[1];
+    let metadata = &outputs[0];
+    if logits.shape().len() != 2
+        || logits.shape()[1] != MiniMaxM3MoeRouteContractV1::EXPERT_COUNT
+        || logits.dtype() != DType::F32
+        || logits.encoding() != Encoding::Unquantized
+        || !logits.is_contiguous()
+    {
+        return Err(OpError::MiniMaxM3MoeRouteLogitsContractMismatch);
+    }
+    let token_count = logits.shape()[0];
+    if token_count == 0 || token_count > MiniMaxM3MoeRouteContractV1::MAX_TOKEN_COUNT {
+        return Err(OpError::MiniMaxM3MoeRouteTokenCountOutOfRange { token_count });
+    }
+    if bias.shape() != [MiniMaxM3MoeRouteContractV1::EXPERT_COUNT]
+        || bias.dtype() != DType::F32
+        || bias.encoding() != Encoding::Unquantized
+        || !bias.is_contiguous()
+    {
+        return Err(OpError::MiniMaxM3MoeRouteBiasContractMismatch);
+    }
+    let metadata_bytes = minimax_m3_moe_route_metadata_bytes(token_count)
+        .ok_or(OpError::MiniMaxM3MoeRouteMetadataSizeOverflow { token_count })?;
+    if metadata.shape() != [metadata_bytes]
+        || metadata.dtype() != DType::U8
+        || metadata.encoding() != Encoding::Unquantized
+        || !metadata.is_contiguous()
+    {
+        return Err(OpError::MiniMaxM3MoeRouteOutputContractMismatch);
+    }
+    Ok(())
+}
+
+fn validate_deepseek_v4_moe_route(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+    contract: DeepSeekV4MoeRouteContractV1,
+) -> Result<(), OpError> {
+    let logits = &inputs[0];
+    let bias = &inputs[1];
+    let hash_ids = &inputs[2];
+    let metadata = &outputs[0];
+
+    if !contract.routed_scale().is_finite() || contract.routed_scale() <= 0.0 {
+        return Err(OpError::DeepSeekV4MoeRouteInvalidRoutedScale {
+            bits: contract.routed_scale_bits(),
+        });
+    }
+    if logits.shape().len() != 2
+        || logits.shape()[1] != DeepSeekV4MoeRouteContractV1::EXPERT_COUNT
+        || logits.dtype() != DType::Bf16
+        || logits.encoding() != Encoding::Unquantized
+        || !logits.is_contiguous()
+    {
+        return Err(OpError::DeepSeekV4MoeRouteLogitsContractMismatch);
+    }
+
+    let token_count = logits.shape()[0];
+    if token_count == 0 || token_count > DeepSeekV4MoeRouteContractV1::MAX_TOKEN_COUNT {
+        return Err(OpError::DeepSeekV4MoeRouteTokenCountOutOfRange { token_count });
+    }
+
+    match contract.mode() {
+        DeepSeekV4MoeRouteMode::Score => {
+            if bias.shape() != [DeepSeekV4MoeRouteContractV1::EXPERT_COUNT]
+                || bias.dtype() != DType::F32
+                || bias.encoding() != Encoding::Unquantized
+                || !bias.is_contiguous()
+            {
+                return Err(OpError::DeepSeekV4MoeRouteBiasContractMismatch {
+                    mode: contract.mode(),
+                });
+            }
+            // This typed zero-extent view consumes no backing storage and
+            // makes an accidentally live hash table fail validation.
+            if hash_ids.shape() != [0, DeepSeekV4MoeRouteContractV1::SELECTED_EXPERT_COUNT]
+                || hash_ids.dtype() != DType::I32
+                || hash_ids.encoding() != Encoding::Unquantized
+                || !hash_ids.is_contiguous()
+            {
+                return Err(OpError::DeepSeekV4MoeRouteHashContractMismatch {
+                    mode: contract.mode(),
+                });
+            }
+        }
+        DeepSeekV4MoeRouteMode::Hash => {
+            // The inactive F32 bias role is a canonical storage-free [0]
+            // placeholder, preserving a mode-independent descriptor arity.
+            if bias.shape() != [0]
+                || bias.dtype() != DType::F32
+                || bias.encoding() != Encoding::Unquantized
+                || !bias.is_contiguous()
+            {
+                return Err(OpError::DeepSeekV4MoeRouteBiasContractMismatch {
+                    mode: contract.mode(),
+                });
+            }
+            if hash_ids.shape()
+                != [
+                    token_count,
+                    DeepSeekV4MoeRouteContractV1::SELECTED_EXPERT_COUNT,
+                ]
+                || hash_ids.dtype() != DType::I32
+                || hash_ids.encoding() != Encoding::Unquantized
+                || !hash_ids.is_contiguous()
+            {
+                return Err(OpError::DeepSeekV4MoeRouteHashContractMismatch {
+                    mode: contract.mode(),
+                });
+            }
+        }
+    }
+
+    let metadata_bytes = deepseek_v4_moe_route_metadata_bytes(token_count)
+        .ok_or(OpError::DeepSeekV4MoeRouteMetadataSizeOverflow { token_count })?;
+    if metadata.shape() != [metadata_bytes]
+        || metadata.dtype() != DType::U8
+        || metadata.encoding() != Encoding::Unquantized
+        || !metadata.is_contiguous()
+    {
+        return Err(OpError::DeepSeekV4MoeRouteOutputContractMismatch);
+    }
+    Ok(())
+}
+
+const GEMMA4_MOE_EXPERT_COUNT: usize = 128;
+const GEMMA4_MOE_SELECTED_EXPERT_COUNT: usize = 8;
+const GEMMA4_MOE_HIDDEN_SIZE: usize = 2_816;
+const GEMMA4_MOE_LAYER_BLOB_BYTES: usize = 428_215_552;
+const GEMMA4_MOE_MAX_TOKENS: usize = 65_536;
+
+fn gemma4_moe_route_metadata_bytes(token_count: usize) -> Option<usize> {
+    token_count
+        .checked_mul(GEMMA4_MOE_SELECTED_EXPERT_COUNT)?
+        .checked_mul(16)?
+        .checked_add(GEMMA4_MOE_EXPERT_COUNT.checked_mul(4)?)?
+        .checked_add((GEMMA4_MOE_EXPERT_COUNT + 1).checked_mul(4)?)?
+        .checked_add(4)
+}
+
+fn validate_gemma4_moe_route(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
+    let logits = &inputs[0];
+    let metadata = &outputs[0];
+    let token_count = logits.shape().first().copied().unwrap_or(0);
+    let metadata_bytes = gemma4_moe_route_metadata_bytes(token_count)
+        .ok_or(OpError::MoeRouteTensorContractMismatch)?;
+    if logits.shape() != [token_count, GEMMA4_MOE_EXPERT_COUNT]
+        || token_count == 0
+        || token_count > GEMMA4_MOE_MAX_TOKENS
+        || logits.dtype() != DType::Bf16
+        || logits.encoding() != Encoding::Unquantized
+        || !logits.is_contiguous()
+        || metadata.shape() != [metadata_bytes]
+        || metadata.dtype() != DType::U8
+        || metadata.encoding() != Encoding::Unquantized
+        || !metadata.is_contiguous()
+    {
+        return Err(OpError::MoeRouteTensorContractMismatch);
+    }
+    Ok(())
+}
+
+fn validate_gemma4_moe_expert(
+    inputs: &[TensorView],
+    outputs: &[TensorView],
+) -> Result<(), OpError> {
+    let hidden = &inputs[0];
+    let metadata = &inputs[1];
+    let layer_blob = &inputs[2];
+    let output = &outputs[0];
+    let token_count = hidden.shape().first().copied().unwrap_or(0);
+    let metadata_bytes = gemma4_moe_route_metadata_bytes(token_count)
+        .ok_or(OpError::MoeExpertTensorContractMismatch)?;
+    if hidden.shape() != [token_count, GEMMA4_MOE_HIDDEN_SIZE]
+        || token_count == 0
+        || token_count > GEMMA4_MOE_MAX_TOKENS
+        || hidden.dtype() != DType::Bf16
+        || hidden.encoding() != Encoding::Unquantized
+        || !hidden.is_contiguous()
+        || output.shape() != hidden.shape()
+        || output.dtype() != DType::Bf16
+        || output.encoding() != Encoding::Unquantized
+        || !output.is_contiguous()
+        || metadata.shape() != [metadata_bytes]
+        || metadata.dtype() != DType::U8
+        || metadata.encoding() != Encoding::Unquantized
+        || !metadata.is_contiguous()
+        || layer_blob.shape() != [GEMMA4_MOE_LAYER_BLOB_BYTES]
+        || layer_blob.dtype() != DType::U8
+        || layer_blob.encoding() != Encoding::Unquantized
+        || !layer_blob.is_contiguous()
+    {
+        return Err(OpError::MoeExpertTensorContractMismatch);
     }
     Ok(())
 }
@@ -2284,6 +2750,51 @@ fn validate_broadcast_add(inputs: &[TensorView], outputs: &[TensorView]) -> Resu
     Ok(())
 }
 
+fn validate_broadcast_mul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {
+    let input = &inputs[0];
+    let vector = &inputs[1];
+    let output = &outputs[0];
+    let tensors = [
+        (input, ElementwiseTensor::Input0),
+        (vector, ElementwiseTensor::Input1),
+        (output, ElementwiseTensor::Output),
+    ];
+    for (tensor, role) in tensors {
+        if tensor.shape().is_empty() {
+            return Err(OpError::ElementwiseRankZero {
+                kind: SemanticOpKind::BroadcastMul,
+                tensor: role,
+            });
+        }
+        if tensor.shape().contains(&0) {
+            return Err(OpError::BroadcastMulZeroExtent { tensor: role });
+        }
+        if !tensor.is_contiguous() {
+            return Err(OpError::BroadcastMulNonContiguous { tensor: role });
+        }
+        if tensor.encoding() != Encoding::Unquantized {
+            return Err(OpError::BroadcastMulUnsupportedEncoding {
+                tensor: role,
+                actual: tensor.encoding(),
+            });
+        }
+        if tensor.dtype() != DType::Bf16 {
+            return Err(OpError::BroadcastMulUnsupportedDType {
+                tensor: role,
+                actual: tensor.dtype(),
+            });
+        }
+    }
+    if input.shape().len() != 2
+        || vector.shape().len() != 1
+        || output.shape() != input.shape()
+        || vector.shape()[0] != input.shape()[1]
+    {
+        return Err(OpError::BroadcastMulShapeMismatch);
+    }
+    Ok(())
+}
+
 fn validate_rms_norm(
     inputs: &[TensorView],
     outputs: &[TensorView],
@@ -2542,6 +3053,21 @@ pub enum OpError {
         tensor: ElementwiseTensor,
         actual: Encoding,
     },
+    BroadcastMulShapeMismatch,
+    BroadcastMulZeroExtent {
+        tensor: ElementwiseTensor,
+    },
+    BroadcastMulNonContiguous {
+        tensor: ElementwiseTensor,
+    },
+    BroadcastMulUnsupportedDType {
+        tensor: ElementwiseTensor,
+        actual: DType,
+    },
+    BroadcastMulUnsupportedEncoding {
+        tensor: ElementwiseTensor,
+        actual: Encoding,
+    },
     SigmoidMulShapeMismatch,
     EmbeddingZeroExtent,
     EmbeddingNonContiguous,
@@ -2746,6 +3272,36 @@ pub enum OpError {
     SparseMoeContractRequired,
     SparseMoeInvalidContract,
     SparseMoeTensorContractMismatch,
+    DeepSeekV4MoeRouteContractRequired,
+    DeepSeekV4MoeRouteInvalidRoutedScale {
+        bits: u32,
+    },
+    DeepSeekV4MoeRouteTokenCountOutOfRange {
+        token_count: usize,
+    },
+    DeepSeekV4MoeRouteMetadataSizeOverflow {
+        token_count: usize,
+    },
+    DeepSeekV4MoeRouteLogitsContractMismatch,
+    DeepSeekV4MoeRouteBiasContractMismatch {
+        mode: DeepSeekV4MoeRouteMode,
+    },
+    DeepSeekV4MoeRouteHashContractMismatch {
+        mode: DeepSeekV4MoeRouteMode,
+    },
+    DeepSeekV4MoeRouteOutputContractMismatch,
+    MiniMaxM3MoeRouteContractRequired,
+    MiniMaxM3MoeRouteTokenCountOutOfRange {
+        token_count: usize,
+    },
+    MiniMaxM3MoeRouteMetadataSizeOverflow {
+        token_count: usize,
+    },
+    MiniMaxM3MoeRouteLogitsContractMismatch,
+    MiniMaxM3MoeRouteBiasContractMismatch,
+    MiniMaxM3MoeRouteOutputContractMismatch,
+    MoeRouteTensorContractMismatch,
+    MoeExpertTensorContractMismatch,
 }
 
 impl fmt::Display for OpError {
@@ -2828,6 +3384,23 @@ impl fmt::Display for OpError {
             Self::BroadcastAddUnsupportedEncoding { tensor, actual } => write!(
                 formatter,
                 "broadcast_add {tensor} must use unquantized encoding, got {actual:?}"
+            ),
+            Self::BroadcastMulShapeMismatch => formatter.write_str(
+                "broadcast_mul requires contiguous BF16 input/output [M,H] and vector [H]",
+            ),
+            Self::BroadcastMulZeroExtent { tensor } => {
+                write!(formatter, "broadcast_mul {tensor} must not have zero extents")
+            }
+            Self::BroadcastMulNonContiguous { tensor } => {
+                write!(formatter, "broadcast_mul {tensor} must be row-major contiguous")
+            }
+            Self::BroadcastMulUnsupportedDType { tensor, actual } => write!(
+                formatter,
+                "broadcast_mul {tensor} must use bf16, got {actual}"
+            ),
+            Self::BroadcastMulUnsupportedEncoding { tensor, actual } => write!(
+                formatter,
+                "broadcast_mul {tensor} must use unquantized encoding, got {actual:?}"
             ),
             Self::SigmoidMulShapeMismatch => formatter.write_str(
                 "sigmoid_mul requires identical contiguous BF16 [M,H,256] gate, attention value, and output",
@@ -3164,8 +3737,343 @@ impl fmt::Display for OpError {
             Self::SparseMoeTensorContractMismatch => formatter.write_str(
                 "sparse_moe input/output must be matching contiguous unquantized BF16 [M,H] tensors",
             ),
+            Self::DeepSeekV4MoeRouteContractRequired => formatter
+                .write_str("deepseek_v4_moe_route requires an explicit routing contract"),
+            Self::DeepSeekV4MoeRouteInvalidRoutedScale { bits } => write!(
+                formatter,
+                "deepseek_v4_moe_route routed_scale must be finite and positive (bits 0x{bits:08x})"
+            ),
+            Self::DeepSeekV4MoeRouteTokenCountOutOfRange { token_count } => write!(
+                formatter,
+                "deepseek_v4_moe_route token count {token_count} is outside the supported 1..=65536 range"
+            ),
+            Self::DeepSeekV4MoeRouteMetadataSizeOverflow { token_count } => write!(
+                formatter,
+                "deepseek_v4_moe_route metadata size overflowed for {token_count} tokens"
+            ),
+            Self::DeepSeekV4MoeRouteLogitsContractMismatch => formatter.write_str(
+                "deepseek_v4_moe_route logits must be contiguous unquantized BF16 [M,256]",
+            ),
+            Self::DeepSeekV4MoeRouteBiasContractMismatch { mode } => write!(
+                formatter,
+                "deepseek_v4_moe_route {mode:?} bias must be contiguous unquantized F32 [256] in score mode or the canonical empty F32 [0] placeholder in hash mode"
+            ),
+            Self::DeepSeekV4MoeRouteHashContractMismatch { mode } => write!(
+                formatter,
+                "deepseek_v4_moe_route {mode:?} hash IDs must be contiguous unquantized I32 [M,6] in hash mode or the canonical empty I32 [0,6] placeholder in score mode"
+            ),
+            Self::DeepSeekV4MoeRouteOutputContractMismatch => formatter.write_str(
+                "deepseek_v4_moe_route output must be contiguous unquantized U8 canonical route metadata",
+            ),
+            Self::MiniMaxM3MoeRouteContractRequired => formatter
+                .write_str("minimax_m3_moe_route requires its explicit fixed routing contract"),
+            Self::MiniMaxM3MoeRouteTokenCountOutOfRange { token_count } => write!(
+                formatter,
+                "minimax_m3_moe_route token count {token_count} is outside the supported 1..=65536 range"
+            ),
+            Self::MiniMaxM3MoeRouteMetadataSizeOverflow { token_count } => write!(
+                formatter,
+                "minimax_m3_moe_route metadata size overflowed for {token_count} tokens"
+            ),
+            Self::MiniMaxM3MoeRouteLogitsContractMismatch => formatter.write_str(
+                "minimax_m3_moe_route logits must be contiguous unquantized F32 [M,128]",
+            ),
+            Self::MiniMaxM3MoeRouteBiasContractMismatch => formatter.write_str(
+                "minimax_m3_moe_route selection bias must be contiguous unquantized F32 [128]",
+            ),
+            Self::MiniMaxM3MoeRouteOutputContractMismatch => formatter.write_str(
+                "minimax_m3_moe_route output must be contiguous unquantized U8 canonical route metadata",
+            ),
+            Self::MoeRouteTensorContractMismatch => formatter.write_str(
+                "moe_route requires contiguous BF16 logits [M,128] and canonical top-8 U8 route metadata",
+            ),
+            Self::MoeExpertTensorContractMismatch => formatter.write_str(
+                "moe_expert requires Gemma 4 v2 BF16 [M,2816], canonical top-8 route metadata, and a 428215552-byte layer blob",
+            ),
         }
     }
 }
 
 impl std::error::Error for OpError {}
+
+#[cfg(test)]
+mod minimax_m3_moe_route_tests {
+    use super::*;
+
+    fn descriptor(token_count: usize) -> Result<SemanticOpDescriptor, OpError> {
+        SemanticOpDescriptor::new_minimax_m3_moe_route(
+            vec![
+                TensorView::contiguous(
+                    DType::F32,
+                    &[token_count, MiniMaxM3MoeRouteContractV1::EXPERT_COUNT],
+                )
+                .unwrap(),
+                TensorView::contiguous(DType::F32, &[MiniMaxM3MoeRouteContractV1::EXPERT_COUNT])
+                    .unwrap(),
+            ],
+            vec![
+                TensorView::contiguous(
+                    DType::U8,
+                    &[MiniMaxM3MoeRouteContractV1::metadata_bytes(token_count).unwrap()],
+                )
+                .unwrap(),
+            ],
+            MiniMaxM3MoeRouteContractV1::new(),
+        )
+    }
+
+    #[test]
+    fn fixed_m3_contract_and_layout_are_exact() {
+        let descriptor = descriptor(3).unwrap();
+        assert_eq!(descriptor.kind(), SemanticOpKind::MiniMaxM3MoeRoute);
+        assert_eq!(MiniMaxM3MoeRouteContractV1::metadata_bytes(3), Some(1_224));
+        assert_eq!(
+            descriptor.minimax_m3_moe_route_contract(),
+            Some(MiniMaxM3MoeRouteContractV1::new())
+        );
+    }
+
+    #[test]
+    fn missing_contract_and_shape_boundaries_fail_closed() {
+        let valid = descriptor(3).unwrap();
+        assert!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::MiniMaxM3MoeRoute,
+                valid.inputs().to_vec(),
+                valid.outputs().to_vec(),
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            descriptor(0),
+            Err(OpError::MiniMaxM3MoeRouteTokenCountOutOfRange { token_count: 0 })
+        ));
+        assert!(matches!(
+            descriptor(MiniMaxM3MoeRouteContractV1::MAX_TOKEN_COUNT + 1),
+            Err(OpError::MiniMaxM3MoeRouteTokenCountOutOfRange { .. })
+        ));
+
+        let mut wrong_logits = valid.inputs().to_vec();
+        wrong_logits[0] = TensorView::contiguous(DType::Bf16, &[3, 128]).unwrap();
+        assert!(matches!(
+            SemanticOpDescriptor::new_minimax_m3_moe_route(
+                wrong_logits,
+                valid.outputs().to_vec(),
+                MiniMaxM3MoeRouteContractV1::new(),
+            ),
+            Err(OpError::MiniMaxM3MoeRouteLogitsContractMismatch)
+        ));
+
+        let mut wrong_bias = valid.inputs().to_vec();
+        wrong_bias[1] = TensorView::contiguous(DType::F32, &[127]).unwrap();
+        assert!(matches!(
+            SemanticOpDescriptor::new_minimax_m3_moe_route(
+                wrong_bias,
+                valid.outputs().to_vec(),
+                MiniMaxM3MoeRouteContractV1::new(),
+            ),
+            Err(OpError::MiniMaxM3MoeRouteBiasContractMismatch)
+        ));
+    }
+
+    #[test]
+    fn metadata_size_overflow_is_checked() {
+        assert_eq!(
+            MiniMaxM3MoeRouteContractV1::metadata_bytes(usize::MAX),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
+mod deepseek_v4_moe_route_tests {
+    use super::*;
+
+    fn view(dtype: DType, shape: &[usize]) -> TensorView {
+        TensorView::contiguous(dtype, shape).unwrap()
+    }
+
+    fn score_inputs(token_count: usize) -> Vec<TensorView> {
+        vec![
+            view(
+                DType::Bf16,
+                &[token_count, DeepSeekV4MoeRouteContractV1::EXPERT_COUNT],
+            ),
+            view(DType::F32, &[DeepSeekV4MoeRouteContractV1::EXPERT_COUNT]),
+            view(
+                DType::I32,
+                &[0, DeepSeekV4MoeRouteContractV1::SELECTED_EXPERT_COUNT],
+            ),
+        ]
+    }
+
+    fn hash_inputs(token_count: usize) -> Vec<TensorView> {
+        vec![
+            view(
+                DType::Bf16,
+                &[token_count, DeepSeekV4MoeRouteContractV1::EXPERT_COUNT],
+            ),
+            view(DType::F32, &[0]),
+            view(
+                DType::I32,
+                &[
+                    token_count,
+                    DeepSeekV4MoeRouteContractV1::SELECTED_EXPERT_COUNT,
+                ],
+            ),
+        ]
+    }
+
+    fn output(token_count: usize) -> Vec<TensorView> {
+        vec![view(
+            DType::U8,
+            &[DeepSeekV4MoeRouteContractV1::metadata_bytes(token_count).unwrap()],
+        )]
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_score_mode_accepts_non_aligned_m3() {
+        let contract =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Score, true, 1.5).unwrap();
+        let descriptor =
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(score_inputs(3), output(3), contract)
+                .unwrap();
+
+        assert_eq!(
+            SemanticOpKind::DeepSeekV4MoeRoute.name(),
+            "deepseek_v4_moe_route"
+        );
+        assert_eq!(descriptor.arity(), (3, 1));
+        assert_eq!(descriptor.kind(), SemanticOpKind::DeepSeekV4MoeRoute);
+        assert_eq!(descriptor.deepseek_v4_moe_route_contract(), Some(contract));
+        assert_eq!(contract.mode(), DeepSeekV4MoeRouteMode::Score);
+        assert!(contract.renormalize_selected_weights());
+        assert_eq!(contract.routed_scale(), 1.5);
+        assert_eq!(DeepSeekV4MoeRouteContractV1::metadata_bytes(3), Some(2_344));
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_hash_mode_accepts_non_aligned_m3() {
+        let contract =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Hash, false, 1.5).unwrap();
+        let descriptor =
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(hash_inputs(3), output(3), contract)
+                .unwrap();
+
+        assert_eq!(descriptor.deepseek_v4_moe_route_contract(), Some(contract));
+        assert_eq!(contract.mode(), DeepSeekV4MoeRouteMode::Hash);
+        assert!(!contract.renormalize_selected_weights());
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_rejects_zero_and_too_many_tokens() {
+        let contract =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Score, true, 1.5).unwrap();
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(score_inputs(0), output(0), contract,),
+            Err(OpError::DeepSeekV4MoeRouteTokenCountOutOfRange { token_count: 0 })
+        );
+
+        let too_many = DeepSeekV4MoeRouteContractV1::MAX_TOKEN_COUNT + 1;
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(
+                score_inputs(too_many),
+                output(too_many),
+                contract,
+            ),
+            Err(OpError::DeepSeekV4MoeRouteTokenCountOutOfRange {
+                token_count: too_many,
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_rejects_invalid_dtype_and_shapes() {
+        let score =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Score, true, 1.5).unwrap();
+        let mut inputs = score_inputs(3);
+        inputs[0] = view(DType::F32, &[3, 256]);
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(inputs, output(3), score),
+            Err(OpError::DeepSeekV4MoeRouteLogitsContractMismatch)
+        );
+
+        let mut inputs = score_inputs(3);
+        inputs[1] = view(DType::F32, &[255]);
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(inputs, output(3), score),
+            Err(OpError::DeepSeekV4MoeRouteBiasContractMismatch {
+                mode: DeepSeekV4MoeRouteMode::Score,
+            })
+        );
+
+        let hash =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Hash, true, 1.5).unwrap();
+        let mut inputs = hash_inputs(3);
+        inputs[2] = view(DType::I32, &[3, 5]);
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(inputs, output(3), hash),
+            Err(OpError::DeepSeekV4MoeRouteHashContractMismatch {
+                mode: DeepSeekV4MoeRouteMode::Hash,
+            })
+        );
+
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(
+                score_inputs(3),
+                vec![view(DType::F32, &[2_344])],
+                score,
+            ),
+            Err(OpError::DeepSeekV4MoeRouteOutputContractMismatch)
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_rejects_non_positive_or_non_finite_scale() {
+        for scale in [0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(
+                DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Score, true, scale,),
+                Err(OpError::DeepSeekV4MoeRouteInvalidRoutedScale {
+                    bits: scale.to_bits(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_requires_contract_and_exact_placeholders() {
+        assert_eq!(
+            SemanticOpDescriptor::new(
+                SemanticOpKind::DeepSeekV4MoeRoute,
+                score_inputs(3),
+                output(3),
+            ),
+            Err(OpError::DeepSeekV4MoeRouteContractRequired)
+        );
+
+        let contract =
+            DeepSeekV4MoeRouteContractV1::new(DeepSeekV4MoeRouteMode::Score, true, 1.5).unwrap();
+        let mut inputs = score_inputs(3);
+        inputs[2] = view(DType::I32, &[0]);
+        assert_eq!(
+            SemanticOpDescriptor::new_deepseek_v4_moe_route(inputs, output(3), contract),
+            Err(OpError::DeepSeekV4MoeRouteHashContractMismatch {
+                mode: DeepSeekV4MoeRouteMode::Score,
+            })
+        );
+    }
+
+    #[test]
+    fn deepseek_v4_moe_route_metadata_size_is_checked() {
+        assert_eq!(
+            DeepSeekV4MoeRouteContractV1::metadata_bytes(usize::MAX),
+            None
+        );
+        assert!(
+            DeepSeekV4MoeRouteContractV1::metadata_bytes(
+                DeepSeekV4MoeRouteContractV1::MAX_TOKEN_COUNT
+            )
+            .is_some()
+        );
+    }
+}

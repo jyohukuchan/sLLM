@@ -15,6 +15,10 @@ constexpr const char *kPackedKvLogicalKernelId =
     "causal_attention.online_softmax_gqa.packed_kv.v3";
 constexpr const char *kPackedKvDeviceSymbol =
     "sllm_causal_attention_online_softmax_gqa_packed_kv_v3";
+constexpr const char *kSlidingStaticFp8LogicalKernelId =
+    "causal_attention.sliding_static_fp8_gqa.v1";
+constexpr const char *kSlidingStaticFp8DeviceSymbol =
+    "sllm_causal_attention_sliding_static_fp8_gqa_v1";
 constexpr const char *kGfx1201WaveLogicalKernelId =
     "causal_attention.online_softmax_gqa.gfx1201_wave.v4";
 constexpr const char *kGfx1201WaveDeviceSymbol =
@@ -71,7 +75,13 @@ hipError_t launch(const uint16_t *query, const void *key, const void *value,
                   float static_value_scale, bool use_gfx1201_wave_provider,
                   bool use_decode_wave_split,
                   bool use_decode_wave_split_q_preload, bool use_prefill_gqa4,
-                  bool use_prefill_gqa4_qtile4, hipStream_t stream) noexcept;
+                  bool use_prefill_gqa4_qtile4, uint64_t sliding_window,
+                  float score_scale, hipStream_t stream) noexcept;
+
+constexpr const char *kScaledStaticFp8LogicalKernelId =
+    "causal_attention.scaled_static_fp8_gqa.v1";
+constexpr const char *kScaledStaticFp8DeviceSymbol =
+    "sllm_causal_attention_scaled_static_fp8_gqa_v1";
 
 hipError_t launch_scaled_prefill_gemm(
     const uint16_t *query, const void *key, const void *value,

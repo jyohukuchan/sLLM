@@ -207,6 +207,12 @@ ROCR_VISIBLE_DEVICES=GPU-76a08c022586fed6 sllm-server \
   --device-index 0 --target gfx1030 [server options]
 ```
 
+Source-tree startup also launches the loopback WebUI at `http://localhost:65457`
+by default. Use `--webui false` for a headless/API-only deployment, or
+`--webui-port PORT` to select a port independently from `--listen`. When WebUI
+is enabled, omitted metrics default to enabled and the two local WebUI origins
+are added to the exact CORS allowlist.
+
 The corresponding canonical R9700 invocation uses UUID
 `GPU-a8e9ddefa2d60f55` and target `gfx1201`. A global physical device index in a
 multi-visible-GPU process is not a supported initial deployment: HIP current
@@ -492,6 +498,51 @@ The machine-readable contract is [`phase45_adapter_lifecycle_v1.json`](../../tes
 validator, and mutation tests record the bounded V620 `gfx1030`/R9700 `gfx1201` release-build evidence: disabled/LoRA/control/combined cases are
 bitwise-identical across two runs, HIP-only with fallback false, and cleanup/baseline restored. `gfx942`/MI300X runtime remains deferred.
 
+## Phase 55 Gemma 4 MoE profile
+
+The reviewed `gemma4moe` GGUF uses the existing Chat Completions, Completions,
+Responses, SSE, model-list, metrics, cancellation, and dynamic model-lifecycle
+transports without an architecture-specific wire field. Its current terminal
+provider exposes device Argmax rather than logits, so requests must select
+greedy semantics (`temperature: 0`, `top_p: 1`) and may not request grammar,
+logprobs, logit bias, random sampling, reasoning mode, adapters, embeddings,
+rerank, infill, image input, or draft execution. Unsupported capabilities are
+rejected before request-state allocation and never fall back to CPU or another
+model topology.
+
+The artifact fixes KV storage to implicit-unit static E4M3. Process/model
+configuration may omit the KV option or name `fp8-static`; FP16, retired
+block-16, MXFP8, and NVFP4 KV options are rejected for this architecture.
+Prefix-cache and checkpoint startup options use the same 30 opaque KV states;
+an exact hit reuses its terminal Argmax, a partial hit executes only the new
+suffix as M=1 transitions, and a divergent token history fails closed.
+The bundled WebUI sends the same greedy request and continues to expose only
+the output-token limit in its chat settings. It uses the canonical strict-profile
+`max_completion_tokens` field; the legacy `max_tokens` alias remains confined to
+the explicitly selected OpenWebUI compatibility profile.
+
+## Phase 56 Gemma 4 MTP profile
+
+Gemma 4 MTP adds no architecture-specific JSON field. Chat Completions,
+Completions, model listing, non-stream responses, SSE, usage, stop exclusion,
+cancellation, metrics, and lifecycle admin routes keep their existing wire
+contracts. The initial assistant path is exact `gfx1201`, greedy only,
+draft width 1, context at most 2,048, and the reviewed target/assistant pair.
+Requests must select greedy semantics with `temperature: 0`; unsupported
+sampling, logprobs, or structured generation fails before request execution.
+
+Static startup supplies `--mtp-assistant-gguf PATH`,
+`--mtp-assistant-derived-lock PATH`, and `--draft mtp-auto` beside the ordinary
+target GGUF options. Dynamic WebUI startup instead selects a server-side model
+folder; the library exposes the assistant as a disabled companion row and
+attaches it to the compatible target alias. No assistant path or draft control
+is accepted from an inference request. Target-only aliases remain target-only.
+
+The server audit and Prometheus memory gauges include both target and assistant
+resident allocations. Draft proposed/accepted/rejected counts remain bounded
+backend audit data and do not change OpenAI response usage, which counts prompt
+and visible completion tokens under the existing profile.
+
 ## Phase 42 inference profiles
 
 Phase 42 adds separate, versioned wire contracts for inference modes. The
@@ -542,3 +593,16 @@ Jinja or template kwargs, multimodal embedding/rerank/infill, wire session
 resume, or llama.cpp endpoint aliases. It also does not alter the existing
 Chat Completions profile-v1 fields, reject matrix, response envelopes, or SSE
 terminal behavior.
+
+## Phase 60 Ministral 3 API status
+
+Ministral 3 text execution is wired through the existing model-list, Chat
+Completions, non-stream response, SSE, usage, cancellation, and dynamic model
+library contracts. The initial path is greedy text-only generation; image
+input, vision execution, tools, logprobs, structured output, and unsupported
+sampling options fail closed rather than falling back to another model path.
+
+This is an integration-status statement, not a production-quality claim. The
+same official GGUF executes on exact `gfx1030` and `gfx1201`, but its greedy
+output currently diverges from the fixed llama.cpp oracle. The alias must not
+be presented as quality-accepted until that numerical mismatch is resolved.

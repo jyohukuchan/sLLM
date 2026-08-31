@@ -357,6 +357,32 @@ Qwen BF16 visionの233-token prefillを両target、GGUF MTPとQwen OpenAI server
 3 warmup + 10 measured固定laneはR9700/V620でload 10.654/10.331 s、median TTFT 46.653/184.143 ms、
 median TPOT 26.689/29.685 msだった。この証拠は固定artifact、single request、実行済みtargetに限定する。
 
+Phase 55のGemma 4 26B-A4B MoEはR9700 exact `gfx1201`とV620 exact `gfx1030`の両方で17.6 GBの全resident
+weightを配置できた。最終primary `gfx1201` source／GGUF runは17-token prefill/decode、全30 static E4M3 KV state、routed expert
+570 submission／8,400 active pair、cancel/replayをHIP-only、fallback 0、cleanup 0でPASSし、35-token digestは両方
+`57c2f914705c86657a3537810e6ed5ba17972b67857c183135d1d0b8a117ccb1`だった。同じtargetのdynamic API/WebUI load／生成／unload／
+shutdownもPASSした。`gfx1030`はstate image追加前の
+full-resident draft runに加え、最終sourceと同じoperator ABIでrouter、NVFP4 expert、broadcast、full/sliding attentionを独立oracleへ
+照合した。primary以外のfull-service成熟度や別SKUをこの結果から推定しない。
+
+Phase 57では同じcanonical V620 `gfx1030`とR9700 `gfx1201`で、DeepSeek V4専用top-6 MoE routing operatorを
+target別Code Object V6／wave32 binaryとして実行した。M=1/3/5/17のscore／hash route、stable tie、selection-only bias、
+unbiased weight、renormalize有無、expert 0／255と不正hash ID、nonfinite、positive routed-scale境界を独立CPU oracleへ照合し、
+不正入力が公開completionのquery／wait／deferred finalizeでterminal Failureになることも確認した。HIP-only、fallback 0、cleanup 0を
+PASSした。この結果はmodel-free operatorだけの証拠であり、166,878,536,440-byte checkpointの
+single-GPU resident、mHC、CSA／HCA、expert execution、DSpark／DFlash、full-model generation、性能やmulti-GPUを主張しない。
+
+Phase 58では同じcanonical V620 `gfx1030`とR9700 `gfx1201`で、MiniMax M3専用sigmoid top-4 MoE routing operatorを
+target別Code Object V6／wave32 binaryとして実行した。M=1/3/5/17、stable tie、selection-only bias、unbiased sigmoid weight、
+scale 2.0、expert 0／127、nonfinite／zero normalizerを独立CPU oracleへ照合し、不正入力が公開completionの
+query／wait／deferred finalizeでterminal Failureになることも確認した。HIP-only、fallback 0、cleanup 0をPASSした。
+この結果はmodel-free operatorだけの証拠であり、公式checkpointのresident、MSA、expert execution、full-model generation、
+multimodal／MTP、性能やmulti-GPUを主張しない。
+
+Phase 59 DiffusionGemmaは公式BF16 shard file合計51,647,701,024 bytesがいずれの単一local GPUにも収まらないため、
+V620 `gfx1030`／R9700 `gfx1201`へfull-modelを配置していない。hostのidentity／header／graph／sampler foundationだけを完了し、
+既存Gemma 4 operator evidenceをbidirectional decoder、read-only encoder KV、self-conditioning、full generationへ一般化しない。
+
 ### 2026-08-19 Phase 30 RDNA4 attention/KV evidence
 
 canonical R9700 UUID `GPU-a8e9ddefa2d60f55`のexact `gfx1201`で、causal attentionのE4M3FN readを
@@ -603,6 +629,25 @@ MI300XでもFNUZへbyte reinterpretせずsoftware OCP encode/decodeを使う。�
 host/fake-HIP admissionに加え、V620 `gfx1030`とR9700 `gfx1201`のdirect GPU byte／attention oracleはPASSした。
 一回のQwen3.5-4B測定ではKLD p99は両方`0.004945428206833837`、top-1一致はgfx1030 `1.0`、gfx1201 `0.85`で、
 gfx1201はfreeze済み品質閾値未達である。このtarget splitを保持し、MI300X `gfx942`はfresh実機取得まで`unverified`とする。
+
+### 2026-08-31 Phase56 Gemma 4 MTP
+
+R9700 exact `gfx1201`をGemma 4 12B target＋公式MTP assistantの初期supported targetとする。target tokenizer、pair identity、Q-only 4層、
+target KV read-only mapping、greedy width 1、context 2,048、合計residentがdevice VRAM内という全条件を満たす場合だけmodel libraryがpairを付加する。
+gfx1030／gfx942はこのcompanion admissionをfail closedにし、target-only能力をMTP supportへ読み替えない。
+
+actual CLI/API/WebUIはtoken完全一致、HIP-only、fallback 0、cancel recovery、unload、shutdown後GPU process 0とVRAM基準値復帰をPASSした。
+短caseは全draft rejectで遅く、性能採用を意味しない。software lifecycleは`experimental`を維持し、32 GiB RDNA4一般や別ROCm tupleへ推論しない。
+
+### 2026-08-31 Phase60 Ministral 3 text実行
+
+公式Ministral 3 3B BF16 GGUFの短いgreedy requestを、canonical V620 exact `gfx1030`とR9700 exact `gfx1201`で実行した。
+両targetともHIP-only、fallback false、394 submission／394 kernel dispatch、shutdown後のcurrent request／workspace 0を確認した。
+raw `Hello`の出力tokenは両targetで`[1307, 1278, 3950, 1044]`となり、GPU間では一致した。
+
+固定llama.cpp oracleは同じpromptとspecial-token条件で`[1307, 1278, 4304, 1033]`を返し、3番目の生成tokenからずれる。
+gfx1030のbaseline matmul強制でもsLLM出力は変わらなかったため、現時点の差をGPU target固有dispatchへ帰属しない。この実行は
+Ministral経路の実GPU到達と資源cleanupの証拠であり、数値品質またはarchitecture compatibilityのPASSではない。
 
 ## 将来AMD候補
 

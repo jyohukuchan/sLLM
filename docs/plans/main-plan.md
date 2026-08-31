@@ -388,13 +388,19 @@
 | 完了（ホスト＋RDNA GPU、MI300X保留） | 45 | LoRA/control vector、複数モデル台帳、動的load/unload/cacheを実装 |
 | 完了 | 46 | 変換、量子化、imatrix、分割・結合、ベンチマーク、品質・デバッグ用ツールとKV default品質policy |
 | 要承認 | 47 | 組込みtool/MCP実行。別worker/sandboxと信頼境界の承認前は開始しない |
-| 計画済み | 48 | 公開APIだけを使う最小WebUI・管理画面 |
+| prototype完了・継続中 | 48 | GPU／throughput dashboardを主画面、chatを副画面として実装。loopback server側のmodel folder管理と、固定`hf` CLIによるHugging Face検索・command copy・download jobを追加済み。製品組込み等は継続項目 |
 | 完了・限定採用 | 49 | V620 `gfx1030`でGQA P32を限定採用し、long-prefill v2とHIP Graphを棄却。通常5行の退行確認まで完了 |
 | 完了・限定採用 | 50 | R9700 `gfx1201`でPhase 49変更を採否し、MI300X `gfx942`向けwave64引継ぎを準備 |
 | 完了・target分離 | 51 | MI300X `gfx942`の7行とprofileをPASSし、GDN wave64候補を既定無効でtarget分離 |
 | 完了 | 52 | R9700 `gfx1201`の長capacityをresident KVへ限定routeし、`10,001/2`と`100,000/2`の自動経路を再検証 |
-| 完了・target分離 | 53 | block16 descriptor v2／`StandardMxFloorPowerV1`を実装・再検証。gfx1201／gfx1030は品質未達で`retain-fp16`、gfx942実機は延期 |
+| 完了・superseded | 53 | block16 descriptor v2をtarget別評価。当時は品質未達で`retain-fp16`、後のPhase 54決定で製品経路を廃止 |
 | 完了・経路廃止 | 54 | exact gfx1030でblock16候補を評価したがMXFP8を上回らず、2026-08-30決定でblock16経路を廃止 |
+| 完了 | 55 | Gemma 4 26B-A4B MoEをNVFP4 artifactから単一GPUのCLI/API/WebUIへ統合 |
+| 完了 | 56 | Gemma 4 12B公式assistantによるMTPをtarget-only同値のCLI/API/WebUI経路へ統合 |
+| 完了・foundation | 57 | DeepSeek V4 Flashの公式identity、圧縮attention、mHC、MoE、混合FP4／FP8、容量fail-closeを実装 |
+| 完了・foundation | 58 | MiniMax M3の公式identity、MSA、MoE、MTP／multimodal metadata、manifest不整合／容量fail-closeを実装 |
+| 完了・foundation | 59 | DiffusionGemmaの公式identity、causal encoder／bidirectional decoder、self-conditioning、block refinementを実装 |
+| 一時停止・品質未達 | 60 | Ministral 3 3Bのtext production経路は実GPUまで到達。固定llama.cppと3番目の生成tokenからずれるため対応済みへ未昇格 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -411,6 +417,53 @@ superseded履歴となった。v2のfresh correctnessは両local targetでPASS�
 gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
 フェーズ47〜48は予約済みの機能経路として保持し、フェーズ47の開始には引き続き明示承認を要する。
 フェーズ37〜38はコード変更や実機検証へ着手する前にこの性能経路へ再編した。
+WebUI統合後のモデルarchitecture追加はフェーズ55から開始した。最初の対象は、既存Gemma attention、Qwen MoE、NVFP4を
+交差利用でき、32 GiB単一GPU向けartifactが存在するGemma 4 26B-A4B MoEとする。semantic sourceは
+`google/gemma-4-26B-A4B-it` revision `4d7ae4984b7db7de8f8457170b3f1a419ee76d52`、primary artifactは
+`nvidia/Gemma-4-26B-A4B-NVFP4` revision `a19cfe00be84568a6867111c9a68c9c44fdcffe6`へ固定する。
+source／canonical GGUFの35-token出力列完全一致、通常CLI、OpenAI API非stream／SSE、dynamic model library、metrics、
+Hugging Face検索、default WebUI起動、load／unload、cancel／recovery、clean shutdownをR9700 exact `gfx1201`でPASSして完了した。
+詳細なscopeと結果は[フェーズ55保存済み計画](archive/2026/08/21-31/phase55-gemma4-moe.md)を正本とする。
+Gemma 4 MTPは`google/gemma-4-12B-it-assistant` revision
+`46d4c6f13f0ac0ad827b915669b8df9b81c64c51`を、既存12B-itのmixed NVFP4 W4A4／FP8 W8A8 targetへ接続した。
+single GPU、greedy、draft width 1、context 2,048でtarget-only token完全一致、canonical GGUF、通常CLI、static／dynamic API、
+model folder、WebUI、metrics、cancel／recovery、unload、clean shutdownをR9700 exact `gfx1201`でPASSした。fixed 5入力／4出力では
+12 draftを全rejectしてtarget-onlyより遅く、性能向上は主張しない。詳細は
+[フェーズ56保存済み計画](archive/2026/08/21-31/phase56-gemma4-mtp.md)と
+[履歴](../history/2026/08/21-31/phase56-gemma4-mtp.md)を正本とする。
+DeepSeek V4 Flashは[フェーズ57保存済み計画](archive/2026/08/21-31/phase57-deepseek-v4-foundation.md)として、
+`deepseek-ai/DeepSeek-V4-Flash-0731` revision `7872f01b1d1fe23eabc4c98b48bffcef5a386062`を固定した。
+公式48 shardのtensor payloadは166,878,536,440 bytesで単一32 GiBに収まらないため、identity、semantic、mHC／圧縮attention、
+専用route operator／verified slice、lossless GGUF dry-run、model library容量fail-closeまでをfoundationとして実装した。
+exact `gfx1030`／`gfx1201`ではscore／hashと不正入力を公開completion fail-closeまで確認し、fallback 0、cleanup 0をPASSした。
+full-model CLI／API／WebUI production対応とは区別し、checkpoint内DSparkを要件上のDFlashへ読み替えず、両production経路は
+後段で別identityとして扱う。詳細結果は[履歴](../history/2026/08/21-31/phase57-deepseek-v4-foundation.md)を正本とする。
+MiniMax M3は[フェーズ58保存済み計画](archive/2026/08/21-31/phase58-minimax-m3-foundation.md)として、
+`MiniMaxAI/MiniMax-M3` revision `f0e1c1e04d40177e4673a22097036854f536e9c0`を固定した。
+公式59 shardのfile size合計854,176,398,808 bytesに対しindex `metadata.total_size`は869,157,697,024 bytesで整合せず、
+いずれも現行local GPU topologyへ収まらない。Phase 58では不整合を保持したcapacity fail-close、typed config／tensor catalog、
+MSA／MoE semantic、GGUF dry-run、model library gray表示までをfoundationとして進め、full-model生成とmultimodal／MTP productionを
+別条件とする。typed config／header／MSA／MoE oracle、GGUF dry-run、model library灰色表示を完了し、専用sigmoid top-4
+route operatorをexact `gfx1030`／`gfx1201`でPASSした。公式23,416 tensorのmapping digestは
+`93ad9f5467bb9a7ba3b77c96db5aa0641e5d9e9801f99dc49bf46a8a4a18dd3f`である。full-model、MSA GPU、multimodal／MTP、
+性能はこのfoundation evidenceへ含めない。
+DiffusionGemmaは[フェーズ59保存済み計画](archive/2026/08/21-31/phase59-diffusion-gemma-foundation.md)として、
+`google/diffusiongemma-26B-A4B-it` revision `f7f5b7f5fa82ffc52addd066915886d497f5517b`を固定した。
+公式11 shardは1,047 tensor、index payload 51,647,562,456 bytesで単一32 GiBへ収まらない。Phase 59では既存Gemma 4
+MoE backboneとdiffusion固有のcausal encoder／bidirectional canvas decoder、self-conditioning、entropy-bounded refinementを分離した。
+typed identity／semantic／GGUF parser-only dry-run／model library fail-close、11 shard header geometryまでをfoundationとして完了した。
+full-model生成、multimodal execution、API／WebUIのdiffusion production経路、性能は後段条件とし、このfoundation evidenceへ含めない。
+Ministral 3 3Bは[フェーズ60 active計画](active/2026/08/21-31/phase60-ministral3-3b-production.md)として、
+`mistralai/Ministral-3-3B-Instruct-2512-BF16` revision `b6d637bef2393152b3da2b2fde72eecdee30557e`を固定した。
+Apache-2.0、public／ungatedで、公式2 shardは458 tensor、index上4,251,743,232 parameter、physical
+3,849,090,048 element、payload 7,698,180,096 bytesであり、
+単一32 GiBへ収まる。Phase 60ではYaRN 16x、GQA dense text、Tekken tokenizer／chat、text／vision分離を固定し、
+text-onlyの通常CLI／API／WebUI production統合まで進める。production inputはMistral公式GGUF revision
+`eb599d408350ea2bb60452cb86be7c7b2fc28227`の6,866,745,504-byte BF16 text artifactへ固定する。
+実装とexact `gfx1030`／`gfx1201` HIP実行までは到達したが、raw `Hello`のgreedy列が両targetで
+`[1307,1278,3950,1044]`、固定llama.cppで`[1307,1278,4304,1033]`となり、3 token目から品質不一致が残る。
+tokenizer／template、target固有差、optimized matmul単独は切り分け済みで、共有model execution数値境界を未解決として
+2026-08-31に一時停止した。production対応済みへは昇格しない。vision forward、OCR／document Q&A、262K性能保証は後段条件とする。
 フェーズ37以降の詳細な依存関係と受入条件は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
 フェーズXの詳細は
@@ -663,6 +716,8 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
 
 ### 現在地
 
+- Phase 60 Ministral 3 3Bは公式GGUFのCLI／API／WebUI経路とexact `gfx1030`／`gfx1201` HIP実行まで到達したが、
+  固定llama.cppとのgreedy token不一致により一時停止中である。次architectureはユーザーの再開指示まで自動開始しない。
 - 機能経路はフェーズ45まで完了している。現在の`main`には、構造化生成、状態再利用、追加推論API、
   Responses/Anthropic、汎用template、対話CLI、LoRA/control vector、動的モデル管理までが統合済みである。
 - MI300Xの既存`gfx942`経路はフェーズ36で実機確認済みである。対象は99演算子、Qwen3.5-4B BF16/FNUZ FP8、
@@ -713,15 +768,15 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
 3. **フェーズ46・tool／品質評価基盤（完了）**: converter、quantization、benchmark、quality/debug toolと、
    FP16 baselineだけからfreezeしたKV default判定policyを実装した。詳細は
    [フェーズ46保存済み計画](archive/2026/08/21-31/phase46-conversion-quantization-benchmark-quality-tools.md)を正本とする。
-4. **フェーズ53・KV FP8 block16実装とdefault採用（完了・target分離）**: block16をdescriptor v2／
+4. **フェーズ53・KV FP8 block16実装とdefault採用（完了・後に経路廃止）**: block16をdescriptor v2／
    `StandardMxFloorPowerV1`へ更新した。descriptor v1のgfx1201／gfx1030 correctness・品質・非採用判定はsupersededで、
    v2のfresh correctnessは両targetでPASS、品質はthreshold未達で両方`retain-fp16`とした。gfx942は今後の一括実機検証へ延期し、
-   空mappingとFP16 safety defaultを維持する。詳細は
+   当時は空mappingとFP16 safety defaultを維持したが、2026-08-30のMXFP8 E4既定化でsupersededとなった。詳細は
    [フェーズ53保存済み計画](archive/2026/08/21-31/phase53-kv-fp8-block16-default-adoption.md)を正本とする。
    E5M2限定のscale selector診断ではlocal MSEとparent32-guard付きMSEがともにKLD p99 `0.04063529273873547`で、
    production v2 `0.03659844555378746`とMXFP8 block32 `0.03218873133110086`に未達だったため棄却した。詳細は
    [保存済み診断計画](archive/2026/08/21-31/phase53-e5-block16-scale-selector-experiment.md)を正本とする。
-5. **フェーズ54・KV FP8 block16精度改善研究（完了・no-improvement）**: exact gfx1030／E5M2でK/V・layer attribution、
+5. **フェーズ54・KV FP8 block16精度改善研究（完了・経路廃止）**: exact gfx1030／E5M2でK/V・layer attribution、
    scale recipe、Q/K固定変換、V/O layer 19／layers 19+31を段階評価した。V/O layers 19+31はKLD p99を
    `0.03337377972334127`へ改善したがMXFP8 `0.03218873133110086`未達かつtop-1 `0.8`へ悪化し、layer 19単独も
    `0.033918254226008415`でMXFP8未達だった。finalistなしのため3-repeat／gfx1201 transfer／MI300Xは実行せず、
@@ -734,15 +789,43 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
    FP16へのexact bit mappingを使わない未最適化baselineだったためformat選定には無効と訂正した。E5M2を8 bit左shift＋
    `v_cvt_f32_f16`、E4M3もnormal値のFP32 bit直接構築へ最適化したresearch-only再測定では、全case／全pairでE5M2が速く、
    short 6 caseの幾何平均で`5.259%`、long 6 caseで`11.870%`高速だった。attention単体でappend／全model throughputと
-   同一V620品質は未比較なのでproduction mappingは変更せず、次の判断単位をfull-model品質とend-to-end A/Bとする。
-6. **フェーズ47〜48・残る機能経路**: 承認制の組込みtool/MCPとWebUIを予約済みのまま保持する。フェーズ47だけは
-   引き続き明示承認を必要とし、フェーズ46／53の完了条件へ混ぜない。
+   同一V620品質は未比較なのでE5へのproduction mapping変更は行わない。現行defaultはユーザー決定によるstandard OCP MXFP8 E4であり、
+   E5を再検討する場合だけfull-model品質とend-to-end A/Bを新しい判断単位とする。
+6. **フェーズ47〜48・残る機能経路**: 承認制の組込みtool/MCPは予約済みのまま保持する。フェーズ47は
+   引き続き明示承認を必要とする。フェーズ48はGPU／throughput dashboardを主画面、chatをsecondary viewとして実装した。
+   追加承認によりloopback dynamic serverへmodel sourceなし起動と`/admin/model-library*`を追加し、server側folder選択の永続化、
+   direct GGUF走査、architecture／derived lock／reviewed identity／weight-plan／resident capacity検証、対応aliasのlive登録、非対応理由表示を
+   実装した。さらにユーザー承認済みの開発者向け経路として、固定`hf` CLIによるGGUF model検索、完全commit SHA付きdownload command copy、
+   選択済みserver folderへの単一非同期download job、未認証rate-limit警告を追加した。command／destination／tokenはrequestから受けず、
+   任意command runnerやPhase 47のtool実行へ拡張しない。推論とload／unloadはalias-onlyを維持する。製品組込み、session／adapter／slot管理等は
+   同フェーズの後続項目として残す。
+
+### Phase 48 WebUI起動統合（2026-08-31実装）
+
+- `sllm-server`の標準起動はsource treeのlocal WebUI processもdefault enabledで起動する。`--webui false`でheadless／API-only運用へ戻し、
+  `--webui-port PORT`でAPIとは独立したWebUI portを変更する。defaultは`65457`とし、port 0、APIと同じport、使用中portは起動errorにする。
+- WebUI有効時に`--metrics`を省略するとmetricsも有効にし、`http://localhost:<port>`と`http://127.0.0.1:<port>`をexact CORS originへ
+  追加する。operatorの明示`--metrics false`と追加CORS originは維持する。
+- sLLMはWebUIへ実際のAPI base URLだけをruntime注入し、browserは初回にlive接続する。user／admin credentialは注入、URL保存、log出力をせず、
+  認証構成時は従来のmemory-only入力へ戻る。sLLMのgraceful shutdownでは専用process groupのnpm／Vinext／workerも回収する。
+- 現在の統合対象はrepository sourceとinstall済みNode dependenciesを使うlocal development形態である。server binaryへのstatic asset埋込み、
+  versioned WebUI artifactのinstall layout、Node非依存のrelease packagingは後続製品化項目として残す。
+- Phase 55のactual model統合ではmodel sourceなしの標準起動から`gemma4moe` folder選択、load、Unicode非stream、code SSE、
+  raw Completions、metrics差分、prefix再利用、cancel／recovery、unload、clean shutdownをPASSした。WebUIの出力上限fieldはstrict profileでも
+  動くcanonical `max_completion_tokens`へ統一した。
+- Phase 56では同じ起動経路からGemma 4 12B target＋公式MTP assistantをcompanionとして選択・loadし、raw／SSE生成、MTP付き
+  resident metrics、unload、clean shutdownをPASSした。動的metricsはloaded lifecycleのruntime snapshotを参照し、paired residentを
+  10,046,932,204 bytesとして表示する。
 
 フェーズ37以降の作業単位、依存関係、受入条件、除外範囲は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
 フェーズ49の3候補判定、フェーズ50のR9700採否、フェーズ51のMI300X実機検証、フェーズ52の100k OOM解消を完了した。
-Phase 53 descriptor v2のgfx1201／gfx1030 fresh correctness・品質とPhase 54の精度改善研究は完了した。
-Phase 47は承認制、Phase 48は予約済みの独立laneとして維持し、ここでは新しい既定laneを自動選択しない。
+Phase 53 descriptor v2のgfx1201／gfx1030 fresh correctness・品質とPhase 54の精度改善研究は完了し、block16製品経路は廃止した。
+reviewed Qwen3.5-4B BF16 dense textの省略時KVはstandard OCP MXFP8 E4、明示rollbackはFP16である。
+Phase 47は承認制の独立laneとして維持する。Phase 48はGPU／throughput dashboardを主画面、chatを副画面とする最小WebUI、
+loopback server側model library、Hugging Face検索／copy／download prototype、source treeでのWebUI／server起動統合まで完了した。
+残るstatic asset／versioned artifact配布等の製品化項目は
+自動開始しない。
 gfx942のPhase 53相当実機証拠は、追加のMI300X検証項目がまとまった時点の一括実行候補へ移した。
 フェーズ50の詳細計画は[保存済み計画](archive/2026/08/21-31/phase50-r9700-port-and-mi300x-handoff.md)を正本とし、
 番号上の既定実行順は50→51→52だが、フェーズ51と52は相互に待たず、フェーズ49または50の全7行llama.cpp同等達成を

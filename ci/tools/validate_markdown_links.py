@@ -23,7 +23,10 @@ def slug(value: str) -> str:
 def main() -> int:
     errors: list[str] = []
     for source in sorted(ROOT.rglob("*.md")):
-        if any(part in {".git", ".local-artifacts", "reference", "target"} for part in source.relative_to(ROOT).parts):
+        if any(
+            part in {".git", ".local-artifacts", "node_modules", "reference", "target"}
+            for part in source.relative_to(ROOT).parts
+        ):
             continue
         text = source.read_text(encoding="utf-8")
         links = LINK_RE.findall(text) + REF_RE.findall(text)

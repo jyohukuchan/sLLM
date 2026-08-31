@@ -300,8 +300,10 @@ pub struct Gemma4ExecutionOutput {
     token_ids: Vec<i32>,
     last_logits: Option<Vec<f32>>,
     selection: Option<SamplingSelectionV1>,
-    /// Final-RMSNorm output rows used by the explicit embedding execution
-    /// mode. This remains separate from generation logits and token output.
+    /// Final-RMSNorm output rows used by embedding execution or the target
+    /// side of Gemma MTP. This remains separate from generation logits and
+    /// token output; MTP mode publishes both this value and the target token
+    /// from the same transition.
     embeddings_bf16: Option<Vec<u16>>,
     state: crate::Gemma4RequestStateSnapshot,
     audit: PreparedExecutionAudit,
@@ -773,6 +775,40 @@ impl Gemma4ExecutionAudit {
     }
 }
 
+fn merge_gemma_execution_audits(
+    left: Option<Gemma4ExecutionAudit>,
+    right: Option<Gemma4ExecutionAudit>,
+) -> Result<Option<Gemma4ExecutionAudit>, Gemma4ExecutionLayoutError> {
+    let (mut left, right) = match (left, right) {
+        (None, right) => return Ok(right),
+        (left, None) => return Ok(left),
+        (Some(left), Some(right)) => (left, right),
+    };
+    if left.target != right.target {
+        return Err(Gemma4ExecutionLayoutError::invalid(
+            "Gemma speculative audit targets differ",
+        ));
+    }
+    left.submission_count = left
+        .submission_count
+        .checked_add(right.submission_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.kernel_dispatch_count = left
+        .kernel_dispatch_count
+        .checked_add(right.kernel_dispatch_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.segment_count = left
+        .segment_count
+        .checked_add(right.segment_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.boundary_count = left
+        .boundary_count
+        .checked_add(right.boundary_count)
+        .ok_or_else(|| Gemma4ExecutionLayoutError::invalid("Gemma audit count overflowed"))?;
+    left.fallback_used |= right.fallback_used;
+    Ok(Some(left))
+}
+
 /// One exact-HIP Gemma request owner used by the shared generation service.
 /// The model is uploaded once for this owner; every decode transition reuses
 /// the same weight, constant, and K/V allocations.
@@ -793,6 +829,178 @@ pub struct Gemma4ExecutionRequest {
     audit: Option<Gemma4ExecutionAudit>,
     opaque_kv_states: Option<BTreeMap<u32, crate::KvState>>,
     last_output: Option<Gemma4ExecutionOutput>,
+    pending_mtp_block: Option<PendingGemma4MtpBlock>,
+}
+
+/// Device-owned speculative branch. The canonical request is left untouched
+/// until `resolve_decode_block` selects a non-empty input prefix.
+struct PendingGemma4MtpBlock {
+    token_ids: Vec<i32>,
+    full_prefix: Gemma4PrefixStateV1,
+    speculative_audit: Option<Gemma4ExecutionAudit>,
+}
+
+/// Borrowed, read-only view of the exact Gemma target state consumed by the
+/// fixed Gemma 4 MTP assistant.
+///
+/// The lifetime is tied to the request owner.  Holding this lease therefore
+/// prevents a caller from starting another mutable target transition while an
+/// assistant proposal is reading the published tail.  The opaque full-KV
+/// handle and sliding buffers are deliberately private: the only operations
+/// exposed to the assistant runtime bind sliding planes for read access or
+/// submit full attention.  There is no append or writable-state operation.
+pub struct Gemma4MtpTargetKvLease<'a> {
+    session: &'a ExecutionSession,
+    queue: &'a ExecutionQueue,
+    request_state: &'a crate::Gemma4RequestState,
+    target_embedding: &'a ExecutionBuffer,
+    sliding_key: &'a ExecutionBuffer,
+    sliding_value: &'a ExecutionBuffer,
+    full_state: &'a KvState,
+    session_id: crate::ExecutionSessionId,
+    committed_length: u64,
+    rope_position_delta: i64,
+    state_generation: u64,
+    binding_generation: u64,
+    sliding_plane_bytes: u64,
+}
+
+impl fmt::Debug for Gemma4MtpTargetKvLease<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Gemma4MtpTargetKvLease")
+            .field("session_id", &self.session_id)
+            .field("committed_length", &self.committed_length)
+            .field("state_generation", &self.state_generation)
+            .field("binding_generation", &self.binding_generation)
+            .field("sliding_target_layer", &46_u32)
+            .field("full_target_layer", &47_u32)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Gemma4MtpTargetKvLease<'_> {
+    pub const fn session_id(&self) -> crate::ExecutionSessionId {
+        self.session_id
+    }
+
+    pub const fn committed_length(&self) -> u64 {
+        self.committed_length
+    }
+
+    /// All assistant layers use the target's published terminal position.
+    pub const fn query_position(&self) -> u64 {
+        self.committed_length - 1
+    }
+
+    /// Exact absolute RoPE position of the target tail.  Compact logical
+    /// state may retain a non-zero absolute-minus-logical delta.
+    pub fn absolute_query_position(&self) -> Result<u64, Gemma4ExecutionLayoutError> {
+        let logical = i64::try_from(self.query_position()).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("Gemma MTP logical position exceeds i64")
+        })?;
+        u64::try_from(
+            logical
+                .checked_add(self.rope_position_delta)
+                .ok_or_else(|| {
+                    Gemma4ExecutionLayoutError::invalid("Gemma MTP absolute position overflowed")
+                })?,
+        )
+        .map_err(|_| Gemma4ExecutionLayoutError::invalid("Gemma MTP absolute position is negative"))
+    }
+
+    pub const fn state_generation(&self) -> u64 {
+        self.state_generation
+    }
+
+    pub const fn binding_generation(&self) -> u64 {
+        self.binding_generation
+    }
+
+    pub const fn sliding_target_layer(&self) -> u32 {
+        46
+    }
+
+    pub const fn full_target_layer(&self) -> u32 {
+        47
+    }
+
+    /// Revalidates the publication ledger and opaque full-KV length after an
+    /// assistant proposal.  Sliding K/V has no independent length scalar; its
+    /// visible range is derived from the same immutable publication snapshot.
+    pub fn verify_unchanged(&self) -> Result<(), Gemma4ExecutionLayoutError> {
+        let published = self
+            .request_state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let full = self
+            .session
+            .kv_state_snapshot(self.full_state)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if published.poisoned
+            || published.committed_length != self.committed_length
+            || published.state_generation != self.state_generation
+            || published.binding_generation != self.binding_generation
+            || full.length() != self.committed_length
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP target state changed while a read-only lease was active",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn bind_sliding(
+        &self,
+        plane: Gemma4KvPlane,
+    ) -> Result<OwnedTensorBinding, Gemma4ExecutionLayoutError> {
+        let buffer = match plane {
+            Gemma4KvPlane::Key => self.sliding_key,
+            Gemma4KvPlane::Value => self.sliding_value,
+        };
+        let length = usize::try_from(self.committed_length).map_err(|_| {
+            Gemma4ExecutionLayoutError::invalid("Gemma MTP KV length does not fit usize")
+        })?;
+        let view = TensorView::contiguous(DType::Bf16, &[length, 8, 256])
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if view.payload_bytes() != self.sliding_plane_bytes {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP sliding target byte range differs",
+            ));
+        }
+        self.session
+            .bind(buffer, view, AccessMode::Read)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+
+    pub(crate) fn bind_target_embedding(
+        &self,
+    ) -> Result<OwnedTensorBinding, Gemma4ExecutionLayoutError> {
+        let view = TensorView::contiguous(
+            DType::Bf16,
+            &[
+                crate::GEMMA4_VOCAB_SIZE as usize,
+                GEMMA4_HIDDEN_SIZE as usize,
+            ],
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.session
+            .bind(self.target_embedding, view, AccessMode::Read)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
+
+    pub(crate) fn submit_full_attention(
+        &self,
+        query: OwnedTensorBinding,
+        output: OwnedTensorBinding,
+    ) -> Result<crate::CausalAttentionSubmission, Gemma4ExecutionLayoutError> {
+        let descriptor =
+            crate::CausalAttentionDescriptor::new(self.query_position(), 1, self.committed_length)
+                .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        self.session
+            .causal_attention(self.full_state, self.queue, query, output, descriptor)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))
+    }
 }
 
 impl fmt::Debug for Gemma4ResidentModel {
@@ -1528,6 +1736,7 @@ impl Gemma4ResidentModel {
             audit: None,
             opaque_kv_states: Some(opaque_kv_states),
             last_output: None,
+            pending_mtp_block: None,
         })
     }
 
@@ -1758,7 +1967,7 @@ impl Gemma4ExecutionRequest {
                     .map_err(|_| Gemma4ExecutionLayoutError::invalid("position does not fit i32"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.prefill_impl_with_positions(token_ids, false, None, Some(&positions), false)
+        self.prefill_impl_with_positions(token_ids, false, None, Some(&positions), false, false)
     }
 
     pub fn prefill_with_last_logits(
@@ -1775,7 +1984,16 @@ impl Gemma4ExecutionRequest {
         &mut self,
         token_ids: &[i32],
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.prefill_impl_with_positions(token_ids, false, None, None, true)
+        self.prefill_impl_with_positions(token_ids, false, None, None, true, false)
+    }
+
+    /// Runs the target prefill once and publishes both its greedy token and
+    /// the final-normalized hidden rows required by the paired MTP assistant.
+    pub fn prefill_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.prefill_impl_with_positions(token_ids, false, None, None, false, true)
     }
 
     /// Runs prefill with the bounded device token-selector subset.  The
@@ -1795,7 +2013,14 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        self.prefill_impl_with_positions(token_ids, include_last_logits, selector, None, false)
+        self.prefill_impl_with_positions(
+            token_ids,
+            include_last_logits,
+            selector,
+            None,
+            false,
+            false,
+        )
     }
 
     fn prefill_impl_with_positions(
@@ -1805,8 +2030,10 @@ impl Gemma4ExecutionRequest {
         selector: Option<&DeviceTokenSelectorRequestV1>,
         positions: Option<&[i32]>,
         include_embeddings: bool,
+        include_mtp_hidden: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        if self.committed_length != 0
+        if self.pending_mtp_block.is_some()
+            || self.committed_length != 0
             || token_ids.len() as u64 != layout_token_count(&self.layout)?
             || positions.is_some_and(|positions| positions.len() != token_ids.len())
         {
@@ -1840,7 +2067,13 @@ impl Gemma4ExecutionRequest {
             self.rotary_position_mode,
         )
         .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
-        self.run_graph(graph, include_last_logits, selector, include_embeddings)
+        self.run_graph(
+            graph,
+            include_last_logits,
+            selector,
+            include_embeddings,
+            include_mtp_hidden,
+        )
     }
 
     pub fn decode(
@@ -1855,6 +2088,108 @@ impl Gemma4ExecutionRequest {
         token_id: i32,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.decode_impl(token_id, true, None)
+    }
+
+    /// Runs one target decode transition and publishes the greedy token and
+    /// final-normalized hidden row together for width-one MTP verification.
+    pub fn decode_with_mtp_state(
+        &mut self,
+        token_id: i32,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.decode_impl_with_mtp_hidden(token_id, true)
+    }
+
+    /// Executes the pending target token plus one width-one draft token on a
+    /// forked device-state owner. The canonical request is unchanged and all
+    /// other request operations are rejected until `resolve_decode_block`.
+    pub fn decode_block_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() || self.committed_length == 0 || token_ids.len() != 2 {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP decode block requires exactly two rows and no pending block",
+            ));
+        }
+        validate_gemma_input_token_ids(token_ids)?;
+        let base = self.publish_prefix()?;
+        let resident = Gemma4ResidentModel {
+            inner: Arc::clone(&self._resident),
+        };
+        let mut speculative = resident.new_request_from_prefix(
+            &base,
+            token_ids.len() as u64,
+            self.state_capacity()?,
+        )?;
+        let output = speculative.decode_block_transition_with_mtp_state(token_ids)?;
+        let full_prefix = speculative.publish_prefix()?;
+        self.pending_mtp_block = Some(PendingGemma4MtpBlock {
+            token_ids: token_ids.to_vec(),
+            full_prefix,
+            speculative_audit: speculative.audit.clone(),
+        });
+        Ok(output)
+    }
+
+    /// Commits a non-empty prefix of the pending width-one target block.
+    /// Keeping both rows installs the already-computed fork. Keeping only the
+    /// first row deterministically replays that row from the untouched owner.
+    pub fn resolve_decode_block(
+        &mut self,
+        committed_input_rows: usize,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        let state_capacity = self.state_capacity()?;
+        let pending = self.pending_mtp_block.take().ok_or_else(|| {
+            Gemma4ExecutionLayoutError::invalid("no Gemma MTP target block is pending resolution")
+        })?;
+        if committed_input_rows == 0 || committed_input_rows > pending.token_ids.len() {
+            self.pending_mtp_block = Some(pending);
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP committed row count is outside the pending block",
+            ));
+        }
+        if committed_input_rows == pending.token_ids.len() {
+            let base_audit = self.audit.clone();
+            let resident = Gemma4ResidentModel {
+                inner: Arc::clone(&self._resident),
+            };
+            let mut resolved =
+                match resident.new_request_from_prefix(&pending.full_prefix, 1, state_capacity) {
+                    Ok(resolved) => resolved,
+                    Err(error) => {
+                        self.pending_mtp_block = Some(pending);
+                        return Err(error);
+                    }
+                };
+            resolved.audit =
+                match merge_gemma_execution_audits(base_audit, pending.speculative_audit.clone()) {
+                    Ok(audit) => audit,
+                    Err(error) => {
+                        self.pending_mtp_block = Some(pending);
+                        return Err(error);
+                    }
+                };
+            let Some(output) = resolved.last_output.clone() else {
+                self.pending_mtp_block = Some(pending);
+                return Err(Gemma4ExecutionLayoutError::invalid(
+                    "resolved Gemma MTP block omitted its cached target output",
+                ));
+            };
+            *self = resolved;
+            return Ok(output);
+        }
+
+        let speculative_audit = pending.speculative_audit;
+        let output = self
+            .decode_block_transition_with_mtp_state(&pending.token_ids[..committed_input_rows])?;
+        self.audit = match merge_gemma_execution_audits(self.audit.take(), speculative_audit) {
+            Ok(audit) => audit,
+            Err(error) => {
+                self.state.cancel();
+                return Err(error);
+            }
+        };
+        Ok(output)
     }
 
     /// Runs decode with the bounded device token-selector subset.  No full
@@ -1873,7 +2208,25 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
-        if self.committed_length == 0 {
+        self.decode_impl_inner(token_id, include_last_logits, selector, false)
+    }
+
+    fn decode_impl_with_mtp_hidden(
+        &mut self,
+        token_id: i32,
+        include_mtp_hidden: bool,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.decode_impl_inner(token_id, false, None, include_mtp_hidden)
+    }
+
+    fn decode_impl_inner(
+        &mut self,
+        token_id: i32,
+        include_last_logits: bool,
+        selector: Option<&DeviceTokenSelectorRequestV1>,
+        include_mtp_hidden: bool,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() || self.committed_length == 0 {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "Gemma decode cannot precede prefill",
             ));
@@ -1928,10 +2281,85 @@ impl Gemma4ExecutionRequest {
         }
         self.layout = layout;
         self.buffers = buffers;
-        self.run_graph(graph, include_last_logits, selector, false)
+        self.run_graph(
+            graph,
+            include_last_logits,
+            selector,
+            false,
+            include_mtp_hidden,
+        )
     }
 
-    pub fn cancel(&self) {
+    fn decode_block_transition_with_mtp_state(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() || self.committed_length == 0 || token_ids.is_empty() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma target block lifecycle differs",
+            ));
+        }
+        validate_gemma_input_token_ids(token_ids)?;
+        let position_mode = if self.rope_position_delta == 0 {
+            crate::RotaryPositionModeV1::Contiguous
+        } else {
+            crate::RotaryPositionModeV1::Explicit
+        };
+        let graph = crate::build_gemma4_graph_with_position_mode(
+            &self.lock,
+            &self.plan,
+            token_ids.len() as u64,
+            self.committed_length,
+            self.state_capacity()?,
+            position_mode,
+        )
+        .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        let layout = if let Some(artifact) = self._resident.quantized_model.as_deref() {
+            build_gemma4_quantized_execution_layout_source(&graph, &self.plan, artifact)?
+        } else {
+            match self._resident.nvfp4_sidecar.as_deref() {
+                Some(sidecar) => build_gemma4_nvfp4_execution_layout(&graph, &self.plan, sidecar)?,
+                None => build_gemma4_execution_layout(&graph, &self.plan)?,
+            }
+        };
+        let buffers = self.buffers.rebind_transition(&self.layout, &layout)?;
+        if self.rope_position_delta == 0 {
+            buffers.upload_transition_inputs(
+                &layout,
+                &self.queue,
+                token_ids,
+                self.completion_timeout,
+            )?;
+        } else {
+            let positions = (0..token_ids.len())
+                .map(|row| {
+                    i64::try_from(self.committed_length)
+                        .ok()
+                        .and_then(|position| position.checked_add(row as i64))
+                        .and_then(|position| position.checked_add(self.rope_position_delta))
+                        .and_then(|position| i32::try_from(position).ok())
+                        .ok_or_else(|| {
+                            Gemma4ExecutionLayoutError::invalid(
+                                "Gemma block absolute RoPE position does not fit I32",
+                            )
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            buffers.upload_transition_inputs_with_positions(
+                &layout,
+                &self.queue,
+                token_ids,
+                &positions,
+                self.completion_timeout,
+            )?;
+        }
+        self.layout = layout;
+        self.buffers = buffers;
+        self.run_graph(graph, false, None, false, true)
+    }
+
+    pub fn cancel(&mut self) {
+        self.pending_mtp_block = None;
         self.state.cancel();
     }
 
@@ -1939,6 +2367,11 @@ impl Gemma4ExecutionRequest {
     /// backend-neutral, encoding-native image. No workspace, queue, prepared
     /// operation, or native handle is retained.
     pub fn state_image(&self) -> Result<Gemma4StateImageV1, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma state export cannot observe a pending MTP block",
+            ));
+        }
         let state_snapshot = self
             .state
             .snapshot()
@@ -2428,6 +2861,11 @@ impl Gemma4ExecutionRequest {
     /// opaque state. Local destination ownership keeps the source untouched if
     /// any layer or snapshot validation fails.
     pub fn publish_prefix(&self) -> Result<Gemma4PrefixStateV1, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma prefix publication cannot observe a pending MTP block",
+            ));
+        }
         let state_snapshot = self
             .state
             .snapshot()
@@ -2870,6 +3308,114 @@ impl Gemma4ExecutionRequest {
         self.committed_length
     }
 
+    /// Borrows the two reviewed target KV sources and target embedding used
+    /// by the fixed Gemma 4 assistant.  The lease is available only after a
+    /// transition that also published the final-normalized hidden row.
+    pub fn mtp_target_kv_lease(
+        &self,
+    ) -> Result<Gemma4MtpTargetKvLease<'_>, Gemma4ExecutionLayoutError> {
+        if self.pending_mtp_block.is_some() {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP target lease cannot observe a pending verification block",
+            ));
+        }
+        let published = self
+            .state
+            .snapshot()
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if published.poisoned
+            || self.committed_length == 0
+            || published.committed_length != self.committed_length
+            || self
+                .last_output
+                .as_ref()
+                .and_then(Gemma4ExecutionOutput::final_hidden_states_bf16)
+                .is_none()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP target lease requires a quiescent hidden-publishing transition",
+            ));
+        }
+
+        let sliding_identity = Gemma4SlidingLayerIdentity {
+            heads: 8,
+            head_dim: 256,
+            capacity: self.state_capacity()?,
+            retention_window: crate::GEMMA4_SLIDING_WINDOW,
+        };
+        let sliding_plane_bytes =
+            gemma_sliding_plane_bytes(sliding_identity, self.committed_length)?;
+        let sliding_key_tensor = gemma_request_kv_tensor(&self.layout, 46, Gemma4KvPlane::Key)?;
+        let sliding_value_tensor = gemma_request_kv_tensor(&self.layout, 46, Gemma4KvPlane::Value)?;
+        validate_gemma_sliding_tensor(
+            sliding_key_tensor,
+            sliding_identity,
+            self.committed_length,
+            sliding_plane_bytes,
+        )?;
+        validate_gemma_sliding_tensor(
+            sliding_value_tensor,
+            sliding_identity,
+            self.committed_length,
+            sliding_plane_bytes,
+        )?;
+        let sliding_key = self.buffers.buffer(sliding_key_tensor.id())?;
+        let sliding_value = self.buffers.buffer(sliding_value_tensor.id())?;
+        let target_embedding = self
+            ._resident
+            .immutable
+            .get("model.language_model.embed_tokens.weight")
+            .map(|(_, buffer)| buffer)
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid("Gemma MTP target embedding weight is absent")
+            })?;
+
+        let full_state = self
+            .opaque_kv_states
+            .as_ref()
+            .and_then(|states| states.get(&47))
+            .ok_or_else(|| {
+                Gemma4ExecutionLayoutError::invalid(
+                    "Gemma MTP full-attention target layer 47 is absent",
+                )
+            })?;
+        let full_descriptor = full_state.descriptor();
+        let full_snapshot = self
+            .session
+            .kv_state_snapshot(full_state)
+            .map_err(|error| Gemma4ExecutionLayoutError::invalid(error.to_string()))?;
+        if full_descriptor.layer_id() != 47
+            || full_descriptor.layout().heads() != 1
+            || full_descriptor.layout().head_dim() != 512
+            || full_snapshot.length() != self.committed_length
+            || sliding_key.session_id() != self.session.id()
+            || sliding_value.session_id() != self.session.id()
+            || target_embedding.session_id() != self.session.id()
+            || full_state.session_id() != self.session.id()
+            || self.queue.session_id() != self.session.id()
+        {
+            return Err(Gemma4ExecutionLayoutError::invalid(
+                "Gemma MTP target KV identity or published length differs",
+            ));
+        }
+
+        Ok(Gemma4MtpTargetKvLease {
+            session: &self.session,
+            queue: &self.queue,
+            request_state: &self.state,
+            target_embedding,
+            sliding_key,
+            sliding_value,
+            full_state,
+            session_id: self.session.id(),
+            committed_length: self.committed_length,
+            rope_position_delta: self.rope_position_delta,
+            state_generation: published.state_generation,
+            binding_generation: published.binding_generation,
+            sliding_plane_bytes,
+        })
+    }
+
     pub const fn rope_position_delta(&self) -> i64 {
         self.rope_position_delta
     }
@@ -2882,7 +3428,7 @@ impl Gemma4ExecutionRequest {
         &mut self,
         delta: i64,
     ) -> Result<(), Gemma4ExecutionLayoutError> {
-        if delta < 0 {
+        if self.pending_mtp_block.is_some() || delta < 0 {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "Gemma RoPE position delta must be non-negative",
             ));
@@ -2958,6 +3504,7 @@ impl Gemma4ExecutionRequest {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
         include_embeddings: bool,
+        include_mtp_hidden: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         self.binding_generation = self
             .binding_generation
@@ -2975,6 +3522,15 @@ impl Gemma4ExecutionRequest {
         }
         let output = if include_embeddings {
             self.buffers.execute_transition_with_embeddings_and_kv(
+                &graph,
+                &self.layout,
+                &self.queue,
+                &self.state,
+                self.opaque_kv_states.as_ref(),
+                options,
+            )
+        } else if include_mtp_hidden {
+            self.buffers.execute_transition_with_mtp_state_and_kv(
                 &graph,
                 &self.layout,
                 &self.queue,
@@ -3670,6 +4226,30 @@ impl Gemma4ProvisionedBuffers {
             false,
             None,
             true,
+            false,
+        )
+    }
+
+    fn execute_transition_with_mtp_state_and_kv(
+        &self,
+        graph: &Gemma4Graph,
+        layout: &Gemma4ExecutionLayout,
+        queue: &ExecutionQueue,
+        request_state: &crate::Gemma4RequestState,
+        opaque_kv_states: Option<&BTreeMap<u32, crate::KvState>>,
+        options: Gemma4ExecutionOptions,
+    ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
+        self.execute_transition_impl(
+            graph,
+            layout,
+            queue,
+            request_state,
+            opaque_kv_states,
+            options,
+            false,
+            None,
+            false,
+            true,
         )
     }
 
@@ -3693,6 +4273,7 @@ impl Gemma4ProvisionedBuffers {
             options,
             false,
             selector,
+            false,
             false,
         )
     }
@@ -3734,6 +4315,7 @@ impl Gemma4ProvisionedBuffers {
             true,
             None,
             false,
+            false,
         )
     }
 
@@ -3749,6 +4331,7 @@ impl Gemma4ProvisionedBuffers {
         include_last_logits: bool,
         selector: Option<&DeviceTokenSelectorRequestV1>,
         include_embeddings: bool,
+        include_mtp_hidden: bool,
     ) -> Result<Gemma4ExecutionOutput, Gemma4ExecutionLayoutError> {
         if options.completion_timeout.is_zero()
             || queue.session_id() != self.session.id()
@@ -3756,6 +4339,8 @@ impl Gemma4ProvisionedBuffers {
             || graph.weight_plan_digest() != &layout.plan_digest
             || graph.nodes().len() != layout.nodes.len()
             || (include_embeddings && (include_last_logits || selector.is_some()))
+            || (include_mtp_hidden
+                && (include_embeddings || include_last_logits || selector.is_some()))
         {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "execution graph, layout, queue, or timeout differs",
@@ -4101,7 +4686,7 @@ impl Gemma4ProvisionedBuffers {
         } else {
             None
         };
-        let embeddings_bf16 = if include_embeddings {
+        let embeddings_bf16 = if include_embeddings || include_mtp_hidden {
             Some(self.read_final_hidden_states(graph, layout, queue, options.completion_timeout)?)
         } else {
             None
@@ -6109,6 +6694,30 @@ mod tests {
             [3; 32],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn speculative_audits_merge_without_masking_target_or_fallback_drift() {
+        let audit = |submissions, dispatches| Gemma4ExecutionAudit {
+            target: "gfx1201".to_owned(),
+            submission_count: submissions,
+            kernel_dispatch_count: dispatches,
+            segment_count: submissions,
+            boundary_count: submissions,
+            fallback_used: false,
+        };
+        let merged = merge_gemma_execution_audits(Some(audit(3, 5)), Some(audit(7, 11)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged.submission_count(), 10);
+        assert_eq!(merged.kernel_dispatch_count(), 16);
+        assert_eq!(merged.segment_count(), 10);
+        assert_eq!(merged.boundary_count(), 10);
+        assert!(!merged.fallback_used());
+
+        let mut wrong_target = audit(1, 1);
+        wrong_target.target = "gfx1030".to_owned();
+        assert!(merge_gemma_execution_audits(Some(audit(1, 1)), Some(wrong_target)).is_err());
     }
 
     #[test]

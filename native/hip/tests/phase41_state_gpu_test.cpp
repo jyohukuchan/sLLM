@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -212,6 +214,21 @@ expected_fp16_words(const std::vector<uint16_t> &bf16_words) {
       std::abort();
     }
   }
+  return result;
+}
+
+uint16_t f32_to_bf16_rne(const float value) {
+  uint32_t bits = 0U;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const uint32_t upper = bits >> 16U;
+  bits += UINT32_C(0x7fff) + (upper & 1U);
+  return static_cast<uint16_t>(bits >> 16U);
+}
+
+float bf16_to_f32(const uint16_t value) {
+  const uint32_t bits = static_cast<uint32_t>(value) << 16U;
+  float result = 0.0F;
+  std::memcpy(&result, &bits, sizeof(result));
   return result;
 }
 
@@ -619,6 +636,322 @@ bool run_lowbit_case(const sllm_context_t *const context,
   return case_result && cleaned;
 }
 
+float attention_pattern(const uint64_t value) {
+  constexpr std::array<float, 5> values{-2.0F, -1.0F, 0.0F, 1.0F, 2.0F};
+  return values[static_cast<std::size_t>(value % values.size())];
+}
+
+bool run_explicit_scale_attention_case(const sllm_context_t *const context,
+                                       const sllm_queue_t *const queue,
+                                       const bool sliding,
+                                       const uint32_t head_dim,
+                                       const uint32_t q_heads) {
+  constexpr uint64_t window = SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4;
+  const uint64_t final_length = sliding ? 1026U : 1025U;
+  const uint64_t capacity =
+      sliding ? SLLM_HIP_KV_SLIDING_MAX_CAPACITY : final_length;
+  const uint64_t elements_per_token =
+      static_cast<uint64_t>(kKvHeads) * head_dim;
+  const uint64_t input_bytes = final_length * elements_per_token * 2U;
+  const uint64_t query_elements = UINT64_C(2) * q_heads * head_dim;
+  sllm_kv_state_t *state = nullptr;
+  sllm_kv_state_t *fresh_recovery = nullptr;
+  std::array<sllm_buffer_t *, 4> buffers{};
+  Error error;
+  sllm_completion_t *completion = nullptr;
+  const bool case_result = [&]() {
+    sllm_kv_state_create_info_v2_t create{};
+    create.struct_size = sizeof(create);
+    create.abi_version = SLLM_HIP_ABI_VERSION;
+    create.create_info_version =
+        sliding ? SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION
+                : SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION;
+    create.session_id = sliding ? UINT64_C(0x7155) : UINT64_C(0x7156);
+    create.layer_id = sliding ? 55U : 56U;
+    create.capacity_tokens = capacity;
+    create.head_count = kKvHeads;
+    create.head_dim = head_dim;
+    create.memory_kind = sliding ? SLLM_HIP_KV_MEMORY_KIND_VIRTUAL_CONTIGUOUS
+                                 : SLLM_HIP_KV_MEMORY_KIND_CONTIGUOUS_RESIDENT;
+    create.layout = SLLM_HIP_KV_LAYOUT_TOKEN_MAJOR;
+    create.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    create.encoding = SLLM_HIP_KV_ENCODING_FP8_STATIC_V1;
+    create.scale_dtype = SLLM_TENSOR_DTYPE_F32;
+    const float unit = 1.0F;
+    std::memcpy(&create.reserved[0], &unit, sizeof(unit));
+    std::memcpy(&create.reserved[1], &unit, sizeof(unit));
+    if (sliding) {
+      create.reserved[2] = static_cast<uint32_t>(window);
+      create.reserved[3] = static_cast<uint32_t>(window >> 32U);
+    }
+    if (!expect(sllm_kv_state_create_v2(context, &create, &state, &error.sink),
+                SLLM_STATUS_OK, "scaled static KV create", error) ||
+        state == nullptr) {
+      return false;
+    }
+
+    std::vector<uint16_t> key_words(
+        static_cast<std::size_t>(final_length * elements_per_token));
+    std::vector<uint16_t> value_words(key_words.size());
+    for (uint64_t token = 0U; token != final_length; ++token) {
+      for (uint32_t head = 0U; head != kKvHeads; ++head) {
+        for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+          const std::size_t index = static_cast<std::size_t>(
+              (token * kKvHeads + head) * head_dim + dimension);
+          key_words[index] = f32_to_bf16_rne(
+              dimension == 0U ? attention_pattern(token + head) : 0.0F);
+          value_words[index] =
+              f32_to_bf16_rne(attention_pattern(token * 3U + head + dimension));
+        }
+      }
+    }
+    std::vector<uint16_t> query_words(static_cast<std::size_t>(query_elements),
+                                      UINT16_C(0));
+    for (uint64_t row = 0U; row != 2U; ++row) {
+      for (uint32_t head = 0U; head != q_heads; ++head) {
+        const std::size_t index =
+            static_cast<std::size_t>((row * q_heads + head) * head_dim);
+        query_words[index] = f32_to_bf16_rne(1.0F);
+      }
+    }
+    if (!create_buffer(context, input_bytes, &buffers[0]) ||
+        !create_buffer(context, input_bytes, &buffers[1]) ||
+        !create_buffer(context, query_elements * 2U, &buffers[2]) ||
+        !create_buffer(context, query_elements * 2U, &buffers[3]) ||
+        !upload(queue, buffers[0], key_words.data(), input_bytes) ||
+        !upload(queue, buffers[1], value_words.data(), input_bytes) ||
+        !upload(queue, buffers[2], query_words.data(), query_elements * 2U)) {
+      return false;
+    }
+
+    const auto append_range = [&](const uint64_t count, const uint64_t position,
+                                  const sllm_status_t expected_status) {
+      const uint64_t shape[] = {count, kKvHeads, head_dim};
+      sllm_kv_append_desc_t descriptor{};
+      descriptor.struct_size = sizeof(descriptor);
+      descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+      descriptor.append_version = SLLM_HIP_KV_STATE_VERSION;
+      descriptor.expected_length = position;
+      descriptor.start_position = position;
+      descriptor.key_input =
+          binding(buffers[0], SLLM_TENSOR_DTYPE_BF16, 3U, shape);
+      descriptor.value_input =
+          binding(buffers[1], SLLM_TENSOR_DTYPE_BF16, 3U, shape);
+      // A rejected saturated M > 1 append still needs otherwise-valid input
+      // bindings so the oracle proves the sliding-state restriction itself.
+      const uint64_t offset =
+          expected_status == SLLM_STATUS_OK
+              ? position * elements_per_token * sizeof(uint16_t)
+              : 0U;
+      descriptor.key_input.byte_offset = offset;
+      descriptor.value_input.byte_offset = offset;
+      sllm_kv_append_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = SLLM_HIP_ABI_VERSION;
+      info.info_version = SLLM_HIP_KV_APPEND_INFO_VERSION;
+      completion = nullptr;
+      if (!expect(sllm_kv_state_append(state, queue, &descriptor, &completion,
+                                       &info, &error.sink),
+                  expected_status, "scaled static append", error)) {
+        return false;
+      }
+      if (expected_status != SLLM_STATUS_OK) {
+        return completion == nullptr;
+      }
+      return completion != nullptr && info.dispatch_count == 1U &&
+             info.fallback_allowed == 0U && info.fallback_used == 0U &&
+             std::strcmp(info.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0 &&
+             wait_and_release(&completion, "scaled static append wait");
+    };
+    const auto query_length = [&](const uint64_t length) {
+      sllm_kv_view_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = SLLM_HIP_ABI_VERSION;
+      info.info_version = SLLM_HIP_KV_VIEW_INFO_VERSION;
+      if (!expect(sllm_kv_state_query(state, &info, &error.sink),
+                  SLLM_STATUS_OK, "scaled static query", error) ||
+          info.observed_length != length) {
+        return false;
+      }
+      return !sliding ||
+             (info.info_version == SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION &&
+              info.mapped_token_capacity <= window + 1U &&
+              info.reserved[0] == window &&
+              info.reserved[2] == static_cast<uint32_t>(
+                                      length > window ? length - window : 0U));
+    };
+    const auto execute_attention = [&](const uint64_t start,
+                                       const uint32_t query_count,
+                                       const uint64_t length) {
+      const uint64_t shape[] = {query_count, q_heads, head_dim};
+      sllm_causal_attention_desc_t descriptor{};
+      descriptor.struct_size = sizeof(descriptor);
+      descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+      descriptor.op_version = SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION;
+      descriptor.start_position = start;
+      descriptor.expected_kv_length = length;
+      descriptor.kv_state = state;
+      descriptor.query = binding(buffers[2], SLLM_TENSOR_DTYPE_BF16, 3U, shape);
+      descriptor.output =
+          binding(buffers[3], SLLM_TENSOR_DTYPE_BF16, 3U, shape);
+      if (sliding) {
+        descriptor.reserved[0] = static_cast<uint32_t>(window);
+      }
+      std::memcpy(&descriptor.reserved[2], &unit, sizeof(unit));
+      sllm_causal_attention_dispatch_info_t dispatch{};
+      dispatch.struct_size = sizeof(dispatch);
+      dispatch.abi_version = SLLM_HIP_ABI_VERSION;
+      dispatch.info_version = SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION;
+      completion = nullptr;
+      if (!expect(sllm_causal_attention_execute(context, queue, &descriptor,
+                                                &completion, &dispatch,
+                                                &error.sink),
+                  SLLM_STATUS_OK, "explicit-scale causal attention", error) ||
+          completion == nullptr || dispatch.dispatch_count != 1U ||
+          dispatch.kernel_id !=
+              (sliding
+                   ? SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1
+                   : SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1) ||
+          dispatch.fallback_allowed != 0U || dispatch.fallback_used != 0U ||
+          dispatch.scale_denominator != 0U ||
+          dispatch.reserved[4] != UINT32_C(0x3f800000) ||
+          dispatch.reserved[5] != 1U ||
+          std::strcmp(dispatch.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) != 0 ||
+          !wait_and_release(&completion, "explicit-scale attention wait")) {
+        return false;
+      }
+      const uint64_t output_elements =
+          static_cast<uint64_t>(query_count) * q_heads * head_dim;
+      std::vector<uint16_t> observed(static_cast<std::size_t>(output_elements));
+      if (!download(queue, buffers[3], observed.data(), output_elements * 2U)) {
+        return false;
+      }
+      const auto oracle = [&](const float score_scale) {
+        std::vector<uint16_t> expected(
+            static_cast<std::size_t>(output_elements));
+        for (uint32_t row = 0U; row != query_count; ++row) {
+          const uint64_t query_position = start + row;
+          const uint64_t key_begin = sliding && query_position + 1U > window
+                                         ? query_position + 1U - window
+                                         : 0U;
+          for (uint32_t query_head = 0U; query_head != q_heads; ++query_head) {
+            const uint32_t kv_head = query_head / (q_heads / kKvHeads);
+            std::vector<float> accumulation(head_dim, 0.0F);
+            float maximum = -std::numeric_limits<float>::infinity();
+            float denominator = 0.0F;
+            for (uint64_t token = key_begin; token <= query_position; ++token) {
+              const float score =
+                  attention_pattern(token + kv_head) * score_scale;
+              const float next_maximum = std::max(maximum, score);
+              const float rescale = std::exp(maximum - next_maximum);
+              const float contribution = std::exp(score - next_maximum);
+              denominator = denominator * rescale + contribution;
+              for (uint32_t dimension = 0U; dimension != head_dim;
+                   ++dimension) {
+                accumulation[dimension] =
+                    accumulation[dimension] * rescale +
+                    contribution *
+                        attention_pattern(token * 3U + kv_head + dimension);
+              }
+              maximum = next_maximum;
+            }
+            for (uint32_t dimension = 0U; dimension != head_dim; ++dimension) {
+              const std::size_t index = static_cast<std::size_t>(
+                  (static_cast<uint64_t>(row) * q_heads + query_head) *
+                      head_dim +
+                  dimension);
+              expected[index] =
+                  f32_to_bf16_rne(accumulation[dimension] / denominator);
+            }
+          }
+        }
+        return expected;
+      };
+      const std::vector<uint16_t> expected = oracle(1.0F);
+      const std::vector<uint16_t> legacy =
+          oracle(1.0F / std::sqrt(static_cast<float>(head_dim)));
+      bool distinguishes_legacy = query_count > 1U || length > 2U;
+      bool exact = true;
+      bool observed_differs_from_legacy = false;
+      for (std::size_t index = 0U; index != observed.size(); ++index) {
+        const float actual = bf16_to_f32(observed[index]);
+        const float wanted = bf16_to_f32(expected[index]);
+        if (std::fabs(actual - wanted) > 0.03125F) {
+          exact = false;
+          std::cerr << "explicit-scale oracle mismatch index=" << index
+                    << " actual=" << actual << " expected=" << wanted
+                    << " start=" << start << " length=" << length << '\n';
+          break;
+        }
+        observed_differs_from_legacy =
+            observed_differs_from_legacy || observed[index] != legacy[index];
+      }
+      if (!exact || (distinguishes_legacy && !observed_differs_from_legacy)) {
+        std::cerr << "explicit 1.0 scale did not separate from rsqrt(head_dim)"
+                  << " start=" << start << " length=" << length << '\n';
+        return false;
+      }
+      return true;
+    };
+
+    if (sliding) {
+      if (!append_range(2U, 0U, SLLM_STATUS_OK) || !query_length(2U) ||
+          !execute_attention(0U, 2U, 2U) ||
+          !append_range(1021U, 2U, SLLM_STATUS_OK) || !query_length(1023U) ||
+          !execute_attention(1022U, 1U, 1023U) ||
+          !append_range(1U, 1023U, SLLM_STATUS_OK) || !query_length(1024U) ||
+          !execute_attention(1023U, 1U, 1024U) ||
+          !append_range(1U, 1024U, SLLM_STATUS_OK) || !query_length(1025U) ||
+          !execute_attention(1024U, 1U, 1025U) ||
+          !append_range(2U, 1025U, SLLM_STATUS_INVALID_KV_APPEND_DESCRIPTOR) ||
+          !append_range(1U, 1025U, SLLM_STATUS_OK) || !query_length(1026U) ||
+          !execute_attention(1025U, 1U, 1026U)) {
+        return false;
+      }
+      sllm_kv_append_desc_t canceled =
+          append_descriptor(buffers[0], buffers[1], 1U, 1026U);
+      canceled.key_input.byte_offset = 1025U * elements_per_token * 2U;
+      canceled.value_input.byte_offset = 1025U * elements_per_token * 2U;
+      sllm_kv_append_info_t cancel_info{};
+      cancel_info.struct_size = sizeof(cancel_info);
+      cancel_info.abi_version = SLLM_HIP_ABI_VERSION;
+      cancel_info.info_version = SLLM_HIP_KV_APPEND_INFO_VERSION;
+      if (!expect(sllm_kv_state_append(state, queue, &canceled, &completion,
+                                       &cancel_info, &error.sink),
+                  SLLM_STATUS_OK, "sliding cancel submission", error) ||
+          completion == nullptr ||
+          !expect(sllm_kv_state_append_cancel(state, completion, &error.sink),
+                  SLLM_STATUS_OK, "sliding cancel", error) ||
+          !wait_and_release(&completion, "sliding canceled completion") ||
+          !query_length(1026U)) {
+        return false;
+      }
+      if (!expect(sllm_kv_state_create_v2(context, &create, &fresh_recovery,
+                                          &error.sink),
+                  SLLM_STATUS_OK, "fresh sliding recovery state", error) ||
+          fresh_recovery == nullptr) {
+        return false;
+      }
+    } else if (!append_range(final_length, 0U, SLLM_STATUS_OK) ||
+               !query_length(final_length) ||
+               !execute_attention(final_length - 1U, 1U, final_length)) {
+      return false;
+    }
+    return true;
+  }();
+
+  if (completion != nullptr) {
+    Error completion_error;
+    (void)sllm_completion_release(&completion, &completion_error.sink);
+  }
+  bool cleaned = release_kv_state(&fresh_recovery) && release_kv_state(&state);
+  for (auto iterator = buffers.rbegin(); iterator != buffers.rend();
+       ++iterator) {
+    cleaned = release_buffer(&*iterator) && cleaned;
+  }
+  return case_result && cleaned;
+}
+
 bool import_linear_bytes(const sllm_linear_attention_state_t *const state,
                          const uint32_t plane,
                          std::vector<uint8_t> *const bytes) {
@@ -939,6 +1272,16 @@ int main() {
       success = false;
     }
   }
+  if (success &&
+      !run_explicit_scale_attention_case(context, queue, false, 512U, 8U)) {
+    std::cerr << "full static FP8 explicit-scale attention case failed\n";
+    success = false;
+  }
+  if (success &&
+      !run_explicit_scale_attention_case(context, queue, true, 256U, 16U)) {
+    std::cerr << "sliding static FP8 explicit-scale attention case failed\n";
+    success = false;
+  }
   if (success && !run_linear_case(context, queue)) {
     std::cerr << "linear state image/fork case failed\n";
     success = false;
@@ -958,7 +1301,9 @@ int main() {
   if (success) {
     std::cout << "phase41 state GPU PASS target=" << SLLM_TEST_EXPECTED_TARGET
               << " fp16_boundaries=6 lowbit_encodings=3 linear_planes=5"
-                 " numerical_oracles=7 fallback=false cleanup_failures=0\n";
+                 " explicit_scale_oracles=full512+sliding256"
+                 " sliding_boundaries=1023,1024,1025 wrap=1026"
+                 " numerical_oracles=13 fallback=false cleanup_failures=0\n";
   }
   return success ? 0 : 1;
 }

@@ -234,3 +234,12 @@ end-to-end decode throughputを交互paired runで取得して行う。raw repor
 
 [対応する保存済み計画](../../../../plans/archive/2026/08/21-31/phase54-kv-fp8-block16-accuracy-research.md) /
 [全体計画](../../../../plans/main-plan.md)
+
+## 2026-08-30: 製品経路の最終決定
+
+ユーザー決定によりblock16の製品経路を廃止し、reviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
+`kv-mxfp8-e4`へ変更した。上記の`FP16 default`、空mapping、block16 production descriptor維持は研究完了時点の事実として
+supersededであり、現行方針ではない。format-aware E5速度結果は将来E5を再検討する場合の参考に限り、現行E4 defaultを変更しない。
+
+[対応する保存済み計画](../../../../plans/archive/2026/08/21-31/phase54-kv-fp8-block16-accuracy-research.md) /
+[全体計画](../../../../plans/main-plan.md)

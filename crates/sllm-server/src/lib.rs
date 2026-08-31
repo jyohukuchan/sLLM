@@ -6,8 +6,10 @@
 
 mod api;
 mod batching;
+mod hugging_face;
 mod lifecycle;
 mod metrics;
+mod model_library;
 mod model_lifecycle;
 mod model_manifest;
 mod phase42_api;
@@ -31,6 +33,11 @@ pub use lifecycle::{ServerLifecycleStateV1, ServerLifecycleV1};
 pub use metrics::{
     CancellationReasonV1, HttpEndpointV1, MetricsConfigError, MetricsRequestHandleV1,
     RequestOutcomeV1, ServerMetricsV1,
+};
+pub use model_library::{
+    MAX_MODEL_LIBRARY_DIRECTORIES_V1, MAX_MODEL_LIBRARY_FILES_V1, ModelLibraryBrowseV1,
+    ModelLibraryDeviceV1, ModelLibraryDirectoryV1, ModelLibraryModelV1, ModelLibraryRegistrationV1,
+    ModelLibrarySnapshotV1, ModelLibraryV1,
 };
 pub use model_lifecycle::{
     MAX_CONFIGURED_ALIASES_V1, MAX_IDENTITY_BYTES_V1, MAX_LOADED_MODELS_V1, ModelLifecycleConfigV1,
@@ -69,14 +76,18 @@ pub use phase43_transport::{
 };
 pub use production::{
     CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
-    Gemma4BackendConfigV1, Gemma4ChatBackendV1, KvCacheExplicitSourceV1, KvCacheSelectionReportV1,
-    Phase41ProductionConfigV1, PrefixCacheStartupConfigV1, ProductionCheckpointOperationV1,
-    ProductionCheckpointResultV1, ProductionDraftProviderV1, ProductionPhase41AuditV1,
-    ProductionPrefixCacheResultV1, ProductionRequestAuditV1, ProductionShutdownAuditV1,
-    QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1, QwenBackendConfigV1,
-    QwenChatBackendV1, QwenPersistentChatFinishReasonV1, QwenPersistentChatSessionConfigV1,
-    QwenPersistentChatSessionV1, QwenPersistentChatTurnRequestV1, QwenPersistentChatTurnResultV1,
-    dynamic_model_plan_digest_preflight, qwen_adapter_catalog_identity_preflight,
+    Gemma4BackendConfigV1, Gemma4ChatBackendV1, Gemma4MoeBackendConfigV1, Gemma4MoeChatBackendV1,
+    KvCacheExplicitSourceV1, KvCacheSelectionReportV1, Ministral3BackendConfigV1,
+    Ministral3ChatBackendV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
+    ProductionCheckpointOperationV1, ProductionCheckpointResultV1, ProductionDraftProviderV1,
+    ProductionPhase41AuditV1, ProductionPrefixCacheResultV1, ProductionRequestAuditV1,
+    ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1,
+    QwenBackendConfigV1, QwenChatBackendV1, QwenPersistentChatFinishReasonV1,
+    QwenPersistentChatSessionConfigV1, QwenPersistentChatSessionV1,
+    QwenPersistentChatTurnRequestV1, QwenPersistentChatTurnResultV1,
+    dynamic_model_plan_digest_preflight, dynamic_model_plan_preflight_v1,
+    dynamic_model_resident_bytes_preflight, ministral3_model_plan_preflight_v1,
+    qwen_adapter_catalog_identity_preflight,
 };
 pub use resume::{ReplayErrorV1, ReplayEventV1, ReplayReadV1, ResumableStoreV1};
 pub use runtime::{

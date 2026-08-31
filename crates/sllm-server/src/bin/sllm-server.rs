@@ -5,28 +5,113 @@ use std::io::Read;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+#[path = "sllm-server/webui.rs"]
+mod sllm_server_webui;
+
+use sllm_server_webui::{DEFAULT_WEBUI_PORT, WebUiProcess};
 
 const MAX_TLS_PEM_BYTES: usize = 1024 * 1024;
 
 use sllm_core::{
-    GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, KvCacheSelectionRequest,
-    QWEN35_MOE_MODEL_FINGERPRINT, QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock,
-    builtin_reviewed_model_lock, read_derived_gguf_lock, resolve_kv_cache_selection,
+    GEMMA4_MOE_MODEL_FINGERPRINT, GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding,
+    KvCacheSelectionRequest, MINISTRAL3_GRAPH_ORIGINAL_CONTEXT, MINISTRAL3_MODEL_ALIAS,
+    MINISTRAL3_MODEL_LOCK_FINGERPRINT, QWEN35_MOE_MODEL_FINGERPRINT,
+    QWEN35_RECOMMENDED_CONTEXT_TOKENS, ReviewedModelLock, builtin_reviewed_model_lock,
+    read_derived_gguf_lock, resolve_kv_cache_selection,
 };
+use sllm_hip::Context as HipContext;
 use sllm_server::{
     ChatGenerationBackendV1, CheckpointStartupConfigV1, ContextWindowStartupConfigV1,
     CredentialStoreV1, DraftStartupConfigV1, Gemma4BackendConfigV1, Gemma4ChatBackendV1,
-    KvCacheExplicitSourceV1, KvCacheSelectionReportV1, ModelLifecycleConfigV1,
+    Gemma4MoeBackendConfigV1, Gemma4MoeChatBackendV1, KvCacheExplicitSourceV1,
+    KvCacheSelectionReportV1, Ministral3BackendConfigV1, Ministral3ChatBackendV1,
+    ModelLibraryDeviceV1, ModelLibraryRegistrationV1, ModelLibraryV1, ModelLifecycleConfigV1,
     ModelLifecycleDescriptorV1, ModelLifecycleLoadedV1, ModelLifecycleRegistryV1,
     ModelRegistryEntryV1, ModelRegistryV1, Phase41ProductionConfigV1, PrefixCacheStartupConfigV1,
     ProductionShutdownAuditV1, QwenAdapterArtifactConfigV1, QwenAdapterCatalogConfigV1,
     QwenBackendConfigV1, QwenChatBackendV1, ResumableStoreV1, SchedulerConfigV1, SchedulerV1,
     ServerConfigV1, ServerLifecycleStateV1, ServerLifecycleV1, ServerMetricsV1,
     build_dynamic_router_v1, build_router_v1, dynamic_model_plan_digest_preflight,
-    qwen_adapter_catalog_identity_preflight, read_model_manifest_v1,
+    ministral3_model_plan_preflight_v1, qwen_adapter_catalog_identity_preflight,
+    read_model_manifest_v1,
 };
+
+#[derive(Clone)]
+struct DynamicModelEntryV1 {
+    gguf: PathBuf,
+    derived_lock: Option<PathBuf>,
+    mtp_assistant_gguf_path: Option<PathBuf>,
+    mtp_assistant_derived_lock_path: Option<PathBuf>,
+    device_index: u32,
+    target: String,
+    kv_cache_encoding: Option<KvCacheEncoding>,
+    adapter_catalog: Option<QwenAdapterCatalogConfigV1>,
+}
+
+impl DynamicModelEntryV1 {
+    fn from_manifest(entry: &sllm_server::ModelManifestEntryV1) -> Result<Self, String> {
+        Ok(Self {
+            gguf: entry.gguf().to_owned(),
+            derived_lock: Some(entry.derived_lock().to_owned()),
+            // The manifest format predates model-library companion pairing.
+            // Keep this path target-only; WebUI library registration is the
+            // only route that can opt a Gemma target into MTP today.
+            mtp_assistant_gguf_path: None,
+            mtp_assistant_derived_lock_path: None,
+            device_index: entry.device_index(),
+            target: entry.target().to_owned(),
+            kv_cache_encoding: entry.kv_cache_encoding(),
+            adapter_catalog: dynamic_adapter_catalog(entry)?,
+        })
+    }
+
+    fn from_library(entry: &ModelLibraryRegistrationV1) -> Self {
+        Self {
+            gguf: entry.gguf_path.clone(),
+            derived_lock: entry.derived_lock_path.clone(),
+            mtp_assistant_gguf_path: entry.mtp_assistant_gguf_path.clone(),
+            mtp_assistant_derived_lock_path: entry.mtp_assistant_derived_lock_path.clone(),
+            device_index: entry.device_index,
+            target: entry.target.clone(),
+            kv_cache_encoding: None,
+            adapter_catalog: None,
+        }
+    }
+}
+
+/// Select the draft mode for a dynamically loaded Gemma target.
+///
+/// A model-library registration is the WebUI's opt-in point for a canonical
+/// assistant pair.  Keep the pair invariant here so a partially resolved
+/// registration cannot reach backend construction, and force target-only
+/// loads to remain explicitly disabled even when a process-wide draft option
+/// was supplied for another model type.
+fn dynamic_gemma_phase41(
+    base: &Phase41ProductionConfigV1,
+    assistant_gguf: Option<&PathBuf>,
+    assistant_derived_lock: Option<&PathBuf>,
+) -> Result<Phase41ProductionConfigV1, String> {
+    let paired = match (assistant_gguf, assistant_derived_lock) {
+        (None, None) => false,
+        (Some(_), Some(_)) => true,
+        _ => {
+            return Err(
+                "Gemma MTP assistant GGUF and derived-lock paths must be configured together"
+                    .to_owned(),
+            );
+        }
+    };
+    let mut phase41 = base.clone();
+    phase41.draft = if paired {
+        DraftStartupConfigV1::MtpAuto
+    } else {
+        DraftStartupConfigV1::Disabled
+    };
+    Ok(phase41)
+}
 
 fn main() -> ExitCode {
     match parse_args().and_then(run) {
@@ -41,11 +126,16 @@ fn main() -> ExitCode {
 #[derive(Debug)]
 struct Config {
     models: Option<PathBuf>,
+    library_only: bool,
     gguf: PathBuf,
-    derived_lock: PathBuf,
+    derived_lock: Option<PathBuf>,
+    mtp_assistant_gguf_path: Option<PathBuf>,
+    mtp_assistant_derived_lock_path: Option<PathBuf>,
     device_index: u32,
     target: String,
     listen: SocketAddr,
+    webui: bool,
+    webui_port: u16,
     model: String,
     api_key_env: Option<String>,
     api_key_file: Option<PathBuf>,
@@ -96,10 +186,25 @@ where
     }
     let legacy_gguf = values.remove("--gguf");
     let legacy_derived_lock = values.remove("--derived-lock");
+    let mtp_assistant_gguf_path = values.remove("--mtp-assistant-gguf").map(PathBuf::from);
+    let mtp_assistant_derived_lock_path = values
+        .remove("--mtp-assistant-derived-lock")
+        .map(PathBuf::from);
+    if mtp_assistant_gguf_path.is_some() != mtp_assistant_derived_lock_path.is_some() {
+        return Err(
+            "--mtp-assistant-gguf and --mtp-assistant-derived-lock must be configured together"
+                .to_owned(),
+        );
+    }
     let legacy_device_index = values.remove("--device-index");
     let legacy_target = values.remove("--target");
     let requested_model = values.remove("--model");
-    let (gguf, derived_lock, device_index, target, model) = if models.is_some() {
+    let has_legacy_source = legacy_gguf.is_some()
+        || legacy_derived_lock.is_some()
+        || legacy_device_index.is_some()
+        || legacy_target.is_some()
+        || requested_model.is_some();
+    let (library_only, gguf, derived_lock, device_index, target, model) = if models.is_some() {
         if legacy_gguf.is_some()
             || legacy_derived_lock.is_some()
             || legacy_device_index.is_some()
@@ -115,8 +220,18 @@ where
         // fields populated for the shared Config shape; the dynamic startup
         // branch must never consume them.
         (
+            false,
             PathBuf::new(),
+            None,
+            0,
+            String::new(),
+            "dynamic".to_owned(),
+        )
+    } else if !has_legacy_source {
+        (
+            true,
             PathBuf::new(),
+            None,
             0,
             String::new(),
             "dynamic".to_owned(),
@@ -125,10 +240,7 @@ where
         let gguf = PathBuf::from(
             legacy_gguf.ok_or_else(|| "missing required argument --gguf".to_owned())?,
         );
-        let derived_lock = PathBuf::from(
-            legacy_derived_lock
-                .ok_or_else(|| "missing required argument --derived-lock".to_owned())?,
-        );
+        let derived_lock = legacy_derived_lock.map(PathBuf::from);
         let device_index = parse_value(
             &legacy_device_index
                 .ok_or_else(|| "missing required argument --device-index".to_owned())?,
@@ -136,28 +248,66 @@ where
         )?;
         let target =
             legacy_target.ok_or_else(|| "missing required argument --target".to_owned())?;
-        let model = requested_model.unwrap_or_else(|| "qwen3.5-4b".to_owned());
-        (gguf, derived_lock, device_index, target, model)
+        let model = requested_model.unwrap_or_else(|| {
+            if derived_lock.is_none() {
+                MINISTRAL3_MODEL_ALIAS.to_owned()
+            } else {
+                "qwen3.5-4b".to_owned()
+            }
+        });
+        (false, gguf, derived_lock, device_index, target, model)
     };
-    let listen = parse_value(
+    let listen: SocketAddr = parse_value(
         &values
             .remove("--listen")
             .unwrap_or_else(|| "127.0.0.1:8080".to_owned()),
         "listen address",
     )?;
+    let webui = parse_default(&mut values, "--webui", true)?;
+    let webui_port_specified = values.contains_key("--webui-port");
+    let webui_port = parse_default(&mut values, "--webui-port", DEFAULT_WEBUI_PORT)?;
+    if !webui && webui_port_specified {
+        return Err("--webui-port requires --webui true".to_owned());
+    }
+    if webui && webui_port == 0 {
+        return Err("--webui-port must be nonzero".to_owned());
+    }
+    if webui && listen.port() == 0 {
+        return Err("--listen port 0 cannot be used while WebUI is enabled".to_owned());
+    }
+    if webui && listen.port() == webui_port {
+        return Err("API and WebUI ports must be different".to_owned());
+    }
     let api_key_env = values.remove("--api-key-env");
     let api_key_file = values.remove("--api-key-file").map(PathBuf::from);
     if api_key_env.is_some() && api_key_file.is_some() {
         return Err("--api-key-env and --api-key-file are mutually exclusive".to_owned());
     }
-    let cors_origins = values
+    let mut cors_origins = values
         .remove("--cors-origins")
         .map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
         .unwrap_or_default();
     if cors_origins.iter().any(String::is_empty) {
         return Err("--cors-origins must be a comma-separated list of exact origins".to_owned());
     }
-    let metrics = parse_default(&mut values, "--metrics", false)?;
+    if webui {
+        for origin in [
+            format!("http://localhost:{webui_port}"),
+            format!("http://127.0.0.1:{webui_port}"),
+        ] {
+            if !cors_origins.contains(&origin) {
+                cors_origins.push(origin);
+            }
+        }
+    }
+    if cors_origins.len() > 32 {
+        return Err("CORS origin count exceeds the bounded limit".to_owned());
+    }
+    let metrics = values
+        .remove("--metrics")
+        .map(|value| parse_value(&value, "--metrics"))
+        .transpose()?
+        .unwrap_or(webui);
     let resumable_sse = parse_default(&mut values, "--resumable-sse", false)?;
     let replay_sessions = parse_default(&mut values, "--replay-sessions", 64_usize)?;
     let replay_events = parse_default(&mut values, "--replay-events", 256_usize)?;
@@ -349,6 +499,17 @@ where
         checkpoint,
         draft,
     };
+    if mtp_assistant_gguf_path.is_some() {
+        if models.is_some() || library_only {
+            return Err(
+                "Gemma MTP assistant options require the static --gguf/--derived-lock source"
+                    .to_owned(),
+            );
+        }
+        if !matches!(phase41.draft, DraftStartupConfigV1::MtpAuto) {
+            return Err("Gemma MTP assistant options require --draft mtp-auto".to_owned());
+        }
+    }
     phase41
         .validate()
         .map_err(|error| format!("Phase41 configuration invalid: {error}"))?;
@@ -357,11 +518,16 @@ where
     }
     Ok(Config {
         models,
+        library_only,
         gguf,
         derived_lock,
+        mtp_assistant_gguf_path,
+        mtp_assistant_derived_lock_path,
         device_index,
         target,
         listen,
+        webui,
+        webui_port,
         model,
         api_key_env,
         api_key_file,
@@ -418,14 +584,19 @@ fn run(config: Config) -> Result<(), String> {
             (None, None) => None,
             _ => unreachable!("TLS certificate/key pairing was checked during parsing"),
         };
+        if config.library_only {
+            return run_dynamic_manifest(config, None, credentials, tls).await;
+        }
         if let Some(manifest_path) = config.models.clone() {
-            return run_dynamic_manifest(config, manifest_path, credentials, tls).await;
+            return run_dynamic_manifest(config, Some(manifest_path), credentials, tls).await;
         }
         let lifecycle = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
-        let derived = read_derived_gguf_lock(&config.derived_lock)
+        let (backend, startup_kv_selection) = if let Some(derived_lock_path) = config.derived_lock.clone() {
+        let derived = read_derived_gguf_lock(&derived_lock_path)
             .map_err(|error| format!("derived GGUF lock validation failed: {error}"))?;
         let gguf_moe = derived.semantic_model_id.starts_with("qwen35moe:");
-        let reviewed = if gguf_moe {
+        let gemma_moe = derived.semantic_model_id.starts_with("gemma4moe:");
+        let reviewed = if gguf_moe || gemma_moe {
             None
         } else {
             Some(
@@ -433,7 +604,15 @@ fn run(config: Config) -> Result<(), String> {
                     .map_err(|error| format!("built-in model lock resolution failed: {error}"))?,
             )
         };
-        let (backend, startup_kv_selection) = if gguf_moe {
+        if config.mtp_assistant_gguf_path.is_some()
+            && !matches!(reviewed.as_ref(), Some(ReviewedModelLock::Gemma4(_)))
+        {
+            return Err(
+                "Gemma MTP assistant options require a reviewed dense Gemma 4 target"
+                    .to_owned(),
+            );
+        }
+        if gguf_moe {
             let (kv_cache_resolved_selection, kv_cache_selection) = resolve_server_kv_selection(
                 config.kv_cache_encoding,
                 &config.target,
@@ -443,10 +622,10 @@ fn run(config: Config) -> Result<(), String> {
             )?;
             let kv_cache_encoding = kv_cache_resolved_selection.resolved();
             let backend_config = QwenBackendConfigV1 {
-                gguf_path: config.gguf,
-                derived_lock_path: config.derived_lock,
+                gguf_path: config.gguf.clone(),
+                derived_lock_path: derived_lock_path.clone(),
                 device_index: config.device_index,
-                target: config.target,
+                target: config.target.clone(),
                 completion_timeout: config.completion_timeout,
                 shutdown_timeout: config.shutdown_timeout,
                 context_length: config
@@ -465,6 +644,41 @@ fn run(config: Config) -> Result<(), String> {
                 )),
                 kv_cache_selection,
             )
+        } else if gemma_moe {
+            validate_gemma4_moe_kv_request(config.kv_cache_encoding)?;
+            validate_gemma4_moe_context_override(config.context_length)?;
+            let kv_cache_selection = KvCacheSelectionReportV1 {
+                requested: config
+                    .kv_cache_encoding
+                    .map(KvCacheEncoding::canonical_name)
+                    .unwrap_or("auto")
+                    .to_owned(),
+                resolved: "fp8-static".to_owned(),
+                selection_source: "model-recipe-explicit".to_owned(),
+                reason: "Gemma 4 MoE uses its fixed reviewed static FP8 KV recipe".to_owned(),
+                physical_variant: Some("E4M3-OCP".to_owned()),
+                descriptor_id: None,
+                policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+            };
+            let backend_config = Gemma4MoeBackendConfigV1 {
+                gguf_path: config.gguf.clone(),
+                derived_lock_path: derived_lock_path.clone(),
+                device_index: config.device_index,
+                target: config.target.clone(),
+                completion_timeout: config.completion_timeout,
+                shutdown_timeout: config.shutdown_timeout,
+                context_length: config
+                    .context_length
+                    .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
+                phase41: config.phase41.clone(),
+            };
+            (
+                ActiveBackend::GemmaMoe(Arc::new(
+                    Gemma4MoeChatBackendV1::open(backend_config)
+                        .map_err(|error| error.to_string())?,
+                )),
+                kv_cache_selection,
+            )
         } else {
             match reviewed.expect("non-MoE GGUF resolved a reviewed lock") {
                 ReviewedModelLock::Qwen35(lock) => {
@@ -478,10 +692,10 @@ fn run(config: Config) -> Result<(), String> {
                         )?;
                     let kv_cache_encoding = kv_cache_resolved_selection.resolved();
                     let backend_config = QwenBackendConfigV1 {
-                        gguf_path: config.gguf,
-                        derived_lock_path: config.derived_lock,
+                        gguf_path: config.gguf.clone(),
+                        derived_lock_path: derived_lock_path.clone(),
                         device_index: config.device_index,
-                        target: config.target,
+                        target: config.target.clone(),
                         completion_timeout: config.completion_timeout,
                         shutdown_timeout: config.shutdown_timeout,
                         context_length: config
@@ -527,10 +741,12 @@ fn run(config: Config) -> Result<(), String> {
                         policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
                     };
                     let backend_config = Gemma4BackendConfigV1 {
-                        gguf_path: config.gguf,
-                        derived_lock_path: config.derived_lock,
+                        gguf_path: config.gguf.clone(),
+                        derived_lock_path: derived_lock_path.clone(),
+                        mtp_assistant_gguf_path: config.mtp_assistant_gguf_path,
+                        mtp_assistant_derived_lock_path: config.mtp_assistant_derived_lock_path,
                         device_index: config.device_index,
-                        target: config.target,
+                        target: config.target.clone(),
                         completion_timeout: config.completion_timeout,
                         shutdown_timeout: config.shutdown_timeout,
                         context_length: config
@@ -546,7 +762,32 @@ fn run(config: Config) -> Result<(), String> {
                         kv_cache_selection,
                     )
                 }
+                ReviewedModelLock::Ministral3(_) => {
+                    return Err(
+                        "the official Ministral 3 model must be loaded directly without a derived lock"
+                            .to_owned(),
+                    );
+                }
             }
+        }
+        } else {
+            validate_ministral3_static_config(&config)?;
+            let kv_cache_selection = ministral3_kv_selection(config.kv_cache_encoding);
+            let backend = Ministral3ChatBackendV1::open(Ministral3BackendConfigV1 {
+                gguf_path: config.gguf.clone(),
+                device_index: config.device_index,
+                target: config.target.clone(),
+                completion_timeout: config.completion_timeout,
+                shutdown_timeout: config.shutdown_timeout,
+                context_length: config
+                    .context_length
+                    .unwrap_or(MINISTRAL3_GRAPH_ORIGINAL_CONTEXT as u32),
+            })
+            .map_err(|error| error.to_string())?;
+            (
+                ActiveBackend::Ministral3(Arc::new(backend)),
+                kv_cache_selection,
+            )
         };
         let shutdown_guard = BackendShutdownGuard::new(&backend);
         if let Some(warning) = context_length_warning(
@@ -592,6 +833,9 @@ fn run(config: Config) -> Result<(), String> {
         .with_lifecycle(lifecycle.clone())
         .with_cors_origins(&config.cors_origins)
         .map_err(|error| error.to_string())?;
+        if let Some(hardware) = detect_model_library_device(config.device_index) {
+            server_config = server_config.with_hardware(hardware);
+        }
         if config.metrics {
             server_config = server_config.with_metrics(
                 ServerMetricsV1::new(model_aliases).map_err(|error| error.to_string())?,
@@ -612,6 +856,10 @@ fn run(config: Config) -> Result<(), String> {
         let address = listener
             .local_addr()
             .map_err(|error| format!("local address query failed: {error}"))?;
+        let webui_process = config
+            .webui
+            .then(|| WebUiProcess::start(config.webui_port, address, tls.is_some()))
+            .transpose()?;
         lifecycle.transition(ServerLifecycleStateV1::Ready);
         println!(
             "{}",
@@ -629,6 +877,8 @@ fn run(config: Config) -> Result<(), String> {
                 "metrics": config.metrics,
                 "resumable_sse": config.resumable_sse,
                 "cors": !config.cors_origins.is_empty(),
+                "webui": config.webui,
+                "webui_url": webui_process.as_ref().map(WebUiProcess::url),
             })
         );
         let handle = axum_server::Handle::new();
@@ -759,27 +1009,130 @@ fn context_length_warning(
     })
 }
 
+fn ministral3_kv_selection(requested: Option<KvCacheEncoding>) -> KvCacheSelectionReportV1 {
+    KvCacheSelectionReportV1 {
+        requested: requested
+            .map(KvCacheEncoding::canonical_name)
+            .unwrap_or("auto")
+            .to_owned(),
+        resolved: KvCacheEncoding::Fp16.canonical_name().to_owned(),
+        selection_source: "model-fixed-fp16".to_owned(),
+        reason: "Ministral 3 uses its fixed reviewed FP16 KV cache recipe".to_owned(),
+        physical_variant: None,
+        descriptor_id: None,
+        policy_version: sllm_core::KV_CACHE_SELECTION_POLICY_VERSION_V1,
+    }
+}
+
+fn validate_ministral3_static_config(config: &Config) -> Result<(), String> {
+    validate_ministral3_dynamic_config(config.kv_cache_encoding, &config.phase41, None)?;
+    if config.mtp_assistant_gguf_path.is_some() || config.mtp_assistant_derived_lock_path.is_some()
+    {
+        return Err(
+            "Ministral 3 is text-only and does not support MTP assistant artifacts".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_ministral3_dynamic_config(
+    requested_kv: Option<KvCacheEncoding>,
+    phase41: &Phase41ProductionConfigV1,
+    adapter_catalog: Option<&QwenAdapterCatalogConfigV1>,
+) -> Result<(), String> {
+    if requested_kv.is_some_and(|encoding| encoding != KvCacheEncoding::Fp16) {
+        return Err("Ministral 3 supports only the reviewed FP16 KV cache recipe".to_owned());
+    }
+    if adapter_catalog.is_some() {
+        return Err("Ministral 3 does not support adapter catalogs".to_owned());
+    }
+    if !matches!(phase41.prefix_cache, PrefixCacheStartupConfigV1::Disabled)
+        || !matches!(
+            phase41.context_window,
+            ContextWindowStartupConfigV1::Disabled
+        )
+        || !matches!(phase41.checkpoint, CheckpointStartupConfigV1::Disabled)
+        || !matches!(phase41.draft, DraftStartupConfigV1::Disabled)
+    {
+        return Err(
+            "Ministral 3 currently supports only the baseline Phase41 lifecycle configuration"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn detect_model_library_device(device_index: u32) -> Option<ModelLibraryDeviceV1> {
+    let info = HipContext::query_device(device_index).ok()?;
+    let logical_target = info.gcn_arch_name.split(':').next().unwrap_or_default();
+    if !matches!(logical_target, "gfx1030" | "gfx1201" | "gfx942") {
+        return None;
+    }
+    Some(ModelLibraryDeviceV1 {
+        device_index: info.device_index,
+        target: info.gcn_arch_name,
+        name: info.name,
+        total_memory_bytes: info.total_memory_bytes,
+    })
+}
+
+fn default_model_library_state_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from) {
+        if path.is_absolute() {
+            return Ok(path.join("sllm/model-library.json"));
+        }
+    }
+    if let Some(path) = env::var_os("HOME").map(PathBuf::from) {
+        if path.is_absolute() {
+            return Ok(path.join(".config/sllm/model-library.json"));
+        }
+    }
+    env::current_dir()
+        .map(|path| path.join(".sllm/model-library.json"))
+        .map_err(|_| "model-library state directory could not be resolved".to_owned())
+}
+
+fn default_model_library_initial_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("HOME").map(PathBuf::from) {
+        if path.is_absolute() && path.is_dir() {
+            return fs::canonicalize(path)
+                .map_err(|_| "initial model folder could not be resolved".to_owned());
+        }
+    }
+    env::current_dir()
+        .and_then(fs::canonicalize)
+        .map_err(|_| "initial model folder could not be resolved".to_owned())
+}
+
 /// Start the manifest-backed dynamic model registry.  All locks and identities
 /// are admitted before the first backend is opened; the loader then repeats the
 /// lock admission immediately before each GPU load.
 async fn run_dynamic_manifest(
     config: Config,
-    manifest_path: PathBuf,
+    manifest_path: Option<PathBuf>,
     credentials: CredentialStoreV1,
     tls: Option<axum_server::tls_rustls::RustlsConfig>,
 ) -> Result<(), String> {
-    let manifest = read_model_manifest_v1(&manifest_path)
+    let manifest = manifest_path
+        .as_ref()
+        .map(read_model_manifest_v1)
+        .transpose()
         .map_err(|error| format!("model manifest validation failed: {error}"))?;
-    let mut descriptors = Vec::with_capacity(manifest.models().len());
+    let manifest_models = manifest.as_ref().map_or(&[][..], |value| value.models());
+    let mut descriptors = Vec::with_capacity(manifest_models.len());
     let mut entries = BTreeMap::new();
     let mut resident_quota = 0_u64;
-    for entry in manifest.models() {
+    for entry in manifest_models {
         let derived = read_derived_gguf_lock(entry.derived_lock()).map_err(|error| {
             format!(
                 "model {} derived lock validation failed: {error}",
                 entry.alias()
             )
         })?;
+        if derived.semantic_model_id.starts_with("gemma4moe:") {
+            validate_gemma4_moe_context_override(config.context_length)
+                .map_err(|error| format!("model {}: {error}", entry.alias()))?;
+        }
         let model_identity = dynamic_model_identity(&derived)?;
         let adapter_identity = dynamic_adapter_identity(entry)?;
         let plan_identity =
@@ -807,12 +1160,20 @@ async fn run_dynamic_manifest(
                 )
             })?,
         );
-        entries.insert(entry.alias().to_owned(), entry.clone());
+        entries.insert(
+            entry.alias().to_owned(),
+            DynamicModelEntryV1::from_manifest(entry)?,
+        );
     }
+    let library_device = detect_model_library_device(0);
+    if let Some(device) = library_device.as_ref() {
+        resident_quota = resident_quota.max(device.total_memory_bytes);
+    }
+    resident_quota = resident_quota.max(1);
     let lifecycle_config = ModelLifecycleConfigV1::new(resident_quota)
         .and_then(|value| value.with_timeouts(config.completion_timeout, config.shutdown_timeout))
         .map_err(|error| format!("dynamic lifecycle configuration invalid: {error:?}"))?;
-    let entries = Arc::new(entries);
+    let entries = Arc::new(RwLock::new(entries));
     let active = Arc::new(std::sync::Mutex::new(
         BTreeMap::<String, Arc<ActiveBackend>>::new(),
     ));
@@ -825,125 +1186,234 @@ async fn run_dynamic_manifest(
     let load_shutdown_timeout = config.shutdown_timeout;
     let loader = move |descriptor: &ModelLifecycleDescriptorV1| {
         let entry = load_entries
+            .read()
+            .map_err(|_| "dynamic model catalog is poisoned".to_owned())?
             .get(descriptor.alias())
-            .ok_or_else(|| "manifest alias disappeared".to_owned())?;
-        let derived = read_derived_gguf_lock(entry.derived_lock())
-            .map_err(|error| format!("derived lock validation failed: {error}"))?;
-        let model_identity = dynamic_model_identity(&derived)?;
-        let plan_identity_before = dynamic_model_plan_digest_preflight(entry.gguf(), &derived)
-            .map_err(|error| format!("verified weight-plan preflight failed: {error}"))?;
+            .cloned()
+            .ok_or_else(|| "dynamic model alias disappeared".to_owned())?;
+        let (derived, model_identity, plan_identity_before, resident_bytes_before) =
+            match entry.derived_lock.as_ref() {
+                Some(derived_lock) => {
+                    let derived = read_derived_gguf_lock(derived_lock)
+                        .map_err(|error| format!("derived lock validation failed: {error}"))?;
+                    let model_identity = dynamic_model_identity(&derived)?;
+                    let plan_identity_before =
+                        dynamic_model_plan_digest_preflight(&entry.gguf, &derived).map_err(
+                            |error| format!("verified weight-plan preflight failed: {error}"),
+                        )?;
+                    (Some(derived), model_identity, plan_identity_before, None)
+                }
+                None => {
+                    let (plan_identity_before, resident_bytes_before) =
+                        ministral3_model_plan_preflight_v1(&entry.gguf).map_err(|error| {
+                            format!("official Ministral 3 weight-plan preflight failed: {error}")
+                        })?;
+                    (
+                        None,
+                        MINISTRAL3_MODEL_LOCK_FINGERPRINT.to_owned(),
+                        plan_identity_before,
+                        Some(resident_bytes_before),
+                    )
+                }
+            };
         if model_identity != descriptor.identity().model_identity()
             || plan_identity_before != descriptor.identity().plan_identity()
+            || resident_bytes_before
+                .is_some_and(|bytes| bytes != descriptor.declared_resident_bytes())
         {
-            return Err("model identity changed since manifest preflight".to_owned());
+            return Err(
+                "model, weight-plan, or resident-byte identity changed since preflight".to_owned(),
+            );
         }
-        let is_moe = derived.semantic_model_id.starts_with("qwen35moe:");
-        let adapter_identity_before = dynamic_adapter_identity(entry)?;
+        let is_moe = derived
+            .as_ref()
+            .is_some_and(|value| value.semantic_model_id.starts_with("qwen35moe:"));
+        let is_gemma_moe = derived
+            .as_ref()
+            .is_some_and(|value| value.semantic_model_id.starts_with("gemma4moe:"));
+        let empty_adapter_catalog = QwenAdapterCatalogConfigV1::default();
+        let adapter_identity_before = qwen_adapter_catalog_identity_preflight(
+            entry
+                .adapter_catalog
+                .as_ref()
+                .unwrap_or(&empty_adapter_catalog),
+        )
+        .map_err(|error| error.to_string())?;
         if adapter_identity_before != descriptor.identity().adapter_identity() {
             return Err("adapter catalog identity changed since manifest preflight".to_owned());
         }
-        let adapter_catalog = dynamic_adapter_catalog(entry)?;
-        let backend = if is_moe {
-            if adapter_catalog.is_some() {
-                return Err("MoE models do not support adapter catalogs".to_owned());
+        let adapter_catalog = entry.adapter_catalog.clone();
+        let backend = match derived.as_ref() {
+            None => {
+                validate_ministral3_dynamic_config(
+                    load_kv,
+                    &load_phase41,
+                    adapter_catalog.as_ref(),
+                )?;
+                ActiveBackend::Ministral3(Arc::new(
+                    Ministral3ChatBackendV1::open(Ministral3BackendConfigV1 {
+                        gguf_path: entry.gguf.clone(),
+                        device_index: entry.device_index,
+                        target: entry.target.clone(),
+                        completion_timeout: load_completion_timeout,
+                        shutdown_timeout: load_shutdown_timeout,
+                        context_length: load_context_length
+                            .unwrap_or(MINISTRAL3_GRAPH_ORIGINAL_CONTEXT as u32),
+                    })
+                    .map_err(|error| error.to_string())?,
+                ))
             }
-            let (requested_kv, explicit_source) =
-                effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
-            let (kv_cache_resolved_selection, kv_cache_selection) = resolve_server_kv_selection(
-                requested_kv,
-                entry.target(),
-                QWEN35_MOE_MODEL_FINGERPRINT,
-                false,
-                explicit_source,
-            )?;
-            let kv_cache_encoding = kv_cache_resolved_selection.resolved();
-            ActiveBackend::Qwen(Arc::new(
-                QwenChatBackendV1::open(QwenBackendConfigV1 {
-                    gguf_path: entry.gguf().to_owned(),
-                    derived_lock_path: entry.derived_lock().to_owned(),
-                    device_index: entry.device_index(),
-                    target: entry.target().to_owned(),
-                    completion_timeout: load_completion_timeout,
-                    shutdown_timeout: load_shutdown_timeout,
-                    context_length: load_context_length
-                        .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                    kv_cache_encoding,
-                    kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
-                    kv_cache_selection: Some(kv_cache_selection),
-                    phase41: load_phase41.clone(),
-                    adapter_catalog: None,
-                })
-                .map_err(|error| error.to_string())?,
-            ))
-        } else {
-            match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
-                .map_err(|error| format!("reviewed model lock resolution failed: {error}"))?
-            {
-                ReviewedModelLock::Qwen35(lock) => {
-                    let (requested_kv, explicit_source) =
-                        effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
-                    let (kv_cache_resolved_selection, kv_cache_selection) =
-                        resolve_server_kv_selection(
-                            requested_kv,
-                            entry.target(),
-                            lock.fingerprint(),
-                            true,
-                            explicit_source,
-                        )?;
-                    let kv_cache_encoding = kv_cache_resolved_selection.resolved();
-                    ActiveBackend::Qwen(Arc::new(
-                        QwenChatBackendV1::open(QwenBackendConfigV1 {
-                            gguf_path: entry.gguf().to_owned(),
-                            derived_lock_path: entry.derived_lock().to_owned(),
-                            device_index: entry.device_index(),
-                            target: entry.target().to_owned(),
-                            completion_timeout: load_completion_timeout,
-                            shutdown_timeout: load_shutdown_timeout,
-                            context_length: load_context_length
-                                .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
-                            kv_cache_encoding,
-                            kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
-                            kv_cache_selection: Some(kv_cache_selection),
-                            phase41: load_phase41.clone(),
-                            adapter_catalog,
-                        })
-                        .map_err(|error| error.to_string())?,
-                    ))
+            Some(_) if is_moe => {
+                let derived_lock = entry
+                    .derived_lock
+                    .as_ref()
+                    .ok_or_else(|| "derived lock disappeared for MoE dynamic entry".to_owned())?;
+                if adapter_catalog.is_some() {
+                    return Err("MoE models do not support adapter catalogs".to_owned());
                 }
-                ReviewedModelLock::Gemma4(lock) => {
-                    if adapter_catalog.is_some() {
-                        return Err("Gemma models do not support adapter catalogs".to_owned());
-                    }
-                    let (requested_kv, explicit_source) =
-                        effective_server_kv_request(entry.kv_cache_encoding(), load_kv);
-                    let (kv_cache_resolved_selection, _) = resolve_server_kv_selection(
+                let (requested_kv, explicit_source) =
+                    effective_server_kv_request(entry.kv_cache_encoding, load_kv);
+                let (kv_cache_resolved_selection, kv_cache_selection) =
+                    resolve_server_kv_selection(
                         requested_kv,
-                        entry.target(),
-                        lock.fingerprint(),
+                        &entry.target,
+                        QWEN35_MOE_MODEL_FINGERPRINT,
                         false,
                         explicit_source,
                     )?;
-                    let kv_cache_encoding = kv_cache_resolved_selection.resolved();
-                    if kv_cache_encoding != KvCacheEncoding::Fp16 {
-                        return Err(
-                            "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
-                                .to_owned(),
-                        );
+                let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                ActiveBackend::Qwen(Arc::new(
+                    QwenChatBackendV1::open(QwenBackendConfigV1 {
+                        gguf_path: entry.gguf.clone(),
+                        derived_lock_path: derived_lock.clone(),
+                        device_index: entry.device_index,
+                        target: entry.target.clone(),
+                        completion_timeout: load_completion_timeout,
+                        shutdown_timeout: load_shutdown_timeout,
+                        context_length: load_context_length
+                            .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                        kv_cache_encoding,
+                        kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                        kv_cache_selection: Some(kv_cache_selection),
+                        phase41: load_phase41.clone(),
+                        adapter_catalog: None,
+                    })
+                    .map_err(|error| error.to_string())?,
+                ))
+            }
+            Some(_) if is_gemma_moe => {
+                let derived_lock = entry.derived_lock.as_ref().ok_or_else(|| {
+                    "derived lock disappeared for Gemma MoE dynamic entry".to_owned()
+                })?;
+                if adapter_catalog.is_some() {
+                    return Err("Gemma 4 MoE models do not support adapter catalogs".to_owned());
+                }
+                let (requested_kv, _) =
+                    effective_server_kv_request(entry.kv_cache_encoding, load_kv);
+                validate_gemma4_moe_kv_request(requested_kv)?;
+                ActiveBackend::GemmaMoe(Arc::new(
+                    Gemma4MoeChatBackendV1::open(Gemma4MoeBackendConfigV1 {
+                        gguf_path: entry.gguf.clone(),
+                        derived_lock_path: derived_lock.clone(),
+                        device_index: entry.device_index,
+                        target: entry.target.clone(),
+                        completion_timeout: load_completion_timeout,
+                        shutdown_timeout: load_shutdown_timeout,
+                        context_length: load_context_length
+                            .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
+                        phase41: load_phase41.clone(),
+                    })
+                    .map_err(|error| error.to_string())?,
+                ))
+            }
+            Some(derived) => {
+                let derived_lock = entry.derived_lock.as_ref().ok_or_else(|| {
+                    "derived lock disappeared for reviewed dynamic entry".to_owned()
+                })?;
+                match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+                    .map_err(|error| format!("reviewed model lock resolution failed: {error}"))?
+                {
+                    ReviewedModelLock::Qwen35(lock) => {
+                        let (requested_kv, explicit_source) =
+                            effective_server_kv_request(entry.kv_cache_encoding, load_kv);
+                        let (kv_cache_resolved_selection, kv_cache_selection) =
+                            resolve_server_kv_selection(
+                                requested_kv,
+                                &entry.target,
+                                lock.fingerprint(),
+                                true,
+                                explicit_source,
+                            )?;
+                        let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                        ActiveBackend::Qwen(Arc::new(
+                            QwenChatBackendV1::open(QwenBackendConfigV1 {
+                                gguf_path: entry.gguf.clone(),
+                                derived_lock_path: derived_lock.clone(),
+                                device_index: entry.device_index,
+                                target: entry.target.clone(),
+                                completion_timeout: load_completion_timeout,
+                                shutdown_timeout: load_shutdown_timeout,
+                                context_length: load_context_length
+                                    .unwrap_or(QWEN35_RECOMMENDED_CONTEXT_TOKENS as u32),
+                                kv_cache_encoding,
+                                kv_cache_resolved_selection: Some(kv_cache_resolved_selection),
+                                kv_cache_selection: Some(kv_cache_selection),
+                                phase41: load_phase41.clone(),
+                                adapter_catalog,
+                            })
+                            .map_err(|error| error.to_string())?,
+                        ))
                     }
-                    ActiveBackend::Gemma(Arc::new(
-                        Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
-                            gguf_path: entry.gguf().to_owned(),
-                            derived_lock_path: entry.derived_lock().to_owned(),
-                            device_index: entry.device_index(),
-                            target: entry.target().to_owned(),
-                            completion_timeout: load_completion_timeout,
-                            shutdown_timeout: load_shutdown_timeout,
-                            context_length: load_context_length
-                                .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
-                            phase41: load_phase41.clone(),
-                        })
-                        .map_err(|error| error.to_string())?,
-                    ))
+                    ReviewedModelLock::Gemma4(lock) => {
+                        if adapter_catalog.is_some() {
+                            return Err("Gemma models do not support adapter catalogs".to_owned());
+                        }
+                        let (requested_kv, explicit_source) =
+                            effective_server_kv_request(entry.kv_cache_encoding, load_kv);
+                        let (kv_cache_resolved_selection, _) = resolve_server_kv_selection(
+                            requested_kv,
+                            &entry.target,
+                            lock.fingerprint(),
+                            false,
+                            explicit_source,
+                        )?;
+                        let kv_cache_encoding = kv_cache_resolved_selection.resolved();
+                        if kv_cache_encoding != KvCacheEncoding::Fp16 {
+                            return Err(
+                                "--kv-cache-encoding applies to Qwen; Gemma uses its fixed recipe"
+                                    .to_owned(),
+                            );
+                        }
+                        let phase41 = dynamic_gemma_phase41(
+                            &load_phase41,
+                            entry.mtp_assistant_gguf_path.as_ref(),
+                            entry.mtp_assistant_derived_lock_path.as_ref(),
+                        )?;
+                        ActiveBackend::Gemma(Arc::new(
+                            Gemma4ChatBackendV1::open(Gemma4BackendConfigV1 {
+                                gguf_path: entry.gguf.clone(),
+                                derived_lock_path: derived_lock.clone(),
+                                mtp_assistant_gguf_path: entry.mtp_assistant_gguf_path.clone(),
+                                mtp_assistant_derived_lock_path: entry
+                                    .mtp_assistant_derived_lock_path
+                                    .clone(),
+                                device_index: entry.device_index,
+                                target: entry.target.clone(),
+                                completion_timeout: load_completion_timeout,
+                                shutdown_timeout: load_shutdown_timeout,
+                                context_length: load_context_length
+                                    .unwrap_or(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32),
+                                phase41,
+                            })
+                            .map_err(|error| error.to_string())?,
+                        ))
+                    }
+                    ReviewedModelLock::Ministral3(_) => {
+                        return Err(
+                        "the official Ministral 3 model must be loaded directly without a derived lock"
+                            .to_owned(),
+                    );
+                    }
                 }
             }
         };
@@ -963,16 +1433,43 @@ async fn run_dynamic_manifest(
                 "loaded backend adapter catalog identity differs",
             ));
         }
-        let derived_after = read_derived_gguf_lock(entry.derived_lock())
-            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
-        let model_identity_after = dynamic_model_identity(&derived_after)
-            .map_err(|error| fail_after_backend_open(&backend, error))?;
-        let plan_identity_after = dynamic_model_plan_digest_preflight(entry.gguf(), &derived_after)
-            .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
-        let adapter_identity_after = dynamic_adapter_identity(entry)
-            .map_err(|error| fail_after_backend_open(&backend, error))?;
+        let (model_identity_after, plan_identity_after, resident_bytes_after) = match entry
+            .derived_lock
+            .as_ref()
+        {
+            Some(derived_lock) => {
+                let derived_after = read_derived_gguf_lock(derived_lock)
+                    .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+                let model_identity_after = dynamic_model_identity(&derived_after)
+                    .map_err(|error| fail_after_backend_open(&backend, error))?;
+                let plan_identity_after =
+                    dynamic_model_plan_digest_preflight(&entry.gguf, &derived_after)
+                        .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+                (model_identity_after, plan_identity_after, None)
+            }
+            None => {
+                let (plan_identity_after, resident_bytes_after) =
+                    ministral3_model_plan_preflight_v1(&entry.gguf)
+                        .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
+                (
+                    MINISTRAL3_MODEL_LOCK_FINGERPRINT.to_owned(),
+                    plan_identity_after,
+                    Some(resident_bytes_after),
+                )
+            }
+        };
+        let empty_adapter_catalog = QwenAdapterCatalogConfigV1::default();
+        let adapter_identity_after = qwen_adapter_catalog_identity_preflight(
+            entry
+                .adapter_catalog
+                .as_ref()
+                .unwrap_or(&empty_adapter_catalog),
+        )
+        .map_err(|error| fail_after_backend_open(&backend, error.to_string()))?;
         if model_identity_after != descriptor.identity().model_identity()
             || plan_identity_after != descriptor.identity().plan_identity()
+            || resident_bytes_after
+                .is_some_and(|bytes| bytes != descriptor.declared_resident_bytes())
             || adapter_identity_after != descriptor.identity().adapter_identity()
         {
             return Err(fail_after_backend_open(
@@ -1055,7 +1552,7 @@ async fn run_dynamic_manifest(
         ModelLifecycleRegistryV1::new_with_fns(descriptors, loader, shutdown, lifecycle_config)
             .map_err(|error| format!("dynamic lifecycle registry invalid: {error:?}"))?;
     let lifecycle_state = ServerLifecycleV1::new(ServerLifecycleStateV1::Loading);
-    for entry in manifest.models().iter().filter(|entry| entry.preload()) {
+    for entry in manifest_models.iter().filter(|entry| entry.preload()) {
         if let Err(error) = lifecycle.preload(entry.alias()) {
             let cleanup = unload_dynamic_registry(&lifecycle);
             lifecycle_state.transition(ServerLifecycleStateV1::Failed);
@@ -1068,6 +1565,78 @@ async fn run_dynamic_manifest(
             });
         }
     }
+
+    if config.library_only && !config.listen.ip().is_loopback() {
+        return Err("WebUI model-library startup requires a loopback --listen address".to_owned());
+    }
+    let dynamic_metrics = if config.metrics {
+        Some(
+            ServerMetricsV1::new_dynamic(lifecycle.configured_aliases())
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let model_library = if config.listen.ip().is_loopback() {
+        let register_lifecycle = lifecycle.clone();
+        let register_entries = Arc::clone(&entries);
+        let register_metrics = dynamic_metrics.clone();
+        let register = move |registration: ModelLibraryRegistrationV1| {
+            if let Some(metrics) = register_metrics.as_ref() {
+                metrics
+                    .register_model_alias(&registration.alias)
+                    .map_err(|error| format!("metrics registration failed: {error}"))?;
+            }
+            let descriptor = ModelLifecycleDescriptorV1::new(
+                &registration.alias,
+                &registration.model_identity,
+                &registration.plan_identity,
+                "adapter:none-v1",
+                registration.resident_bytes,
+            )
+            .map_err(|error| format!("lifecycle descriptor is invalid: {error:?}"))?;
+            let runtime_entry = DynamicModelEntryV1::from_library(&registration);
+            {
+                let mut catalog = register_entries
+                    .write()
+                    .map_err(|_| "dynamic model catalog is poisoned".to_owned())?;
+                if catalog.contains_key(&registration.alias) {
+                    return Err("model alias already exists".to_owned());
+                }
+                catalog.insert(registration.alias.clone(), runtime_entry);
+            }
+            if let Err(error) = register_lifecycle.register(descriptor) {
+                if let Ok(mut catalog) = register_entries.write() {
+                    catalog.remove(&registration.alias);
+                }
+                return Err(format!("lifecycle registration failed: {error:?}"));
+            }
+            Ok(())
+        };
+        let unregister_lifecycle = lifecycle.clone();
+        let unregister_entries = Arc::clone(&entries);
+        let unregister = move |alias: &str| {
+            unregister_lifecycle
+                .unregister(alias)
+                .map_err(|error| format!("lifecycle removal failed: {error:?}"))?;
+            unregister_entries
+                .write()
+                .map_err(|_| "dynamic model catalog is poisoned".to_owned())?
+                .remove(alias);
+            Ok(())
+        };
+        let state_path = default_model_library_state_path()?;
+        let initial_path = default_model_library_initial_path()?;
+        Some(ModelLibraryV1::open(
+            state_path,
+            initial_path,
+            library_device.clone(),
+            register,
+            unregister,
+        )?)
+    } else {
+        None
+    };
     let aliases = lifecycle.configured_aliases();
     let scheduler = SchedulerV1::new(
         SchedulerConfigV1::new(
@@ -1087,10 +1656,19 @@ async fn run_dynamic_manifest(
     .with_lifecycle(lifecycle_state.clone())
     .with_cors_origins(&config.cors_origins)
     .map_err(|error| error.to_string())?;
-    if config.metrics {
-        server_config = server_config.with_metrics(
-            ServerMetricsV1::new(aliases.clone()).map_err(|error| error.to_string())?,
-        );
+    if let Some(hardware) = library_device.clone() {
+        server_config = server_config.with_hardware(hardware);
+    }
+    if config.listen.ip().is_loopback() {
+        server_config = server_config
+            .with_loopback_admin(config.listen)
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(model_library) = model_library {
+        server_config = server_config.with_model_library(model_library);
+    }
+    if let Some(metrics) = dynamic_metrics {
+        server_config = server_config.with_metrics(metrics);
     }
     if config.resumable_sse {
         server_config = server_config.with_resumable_store(
@@ -1107,6 +1685,10 @@ async fn run_dynamic_manifest(
     let address = listener
         .local_addr()
         .map_err(|error| format!("local address query failed: {error}"))?;
+    let webui_process = config
+        .webui
+        .then(|| WebUiProcess::start(config.webui_port, address, tls.is_some()))
+        .transpose()?;
     lifecycle_state.transition(ServerLifecycleStateV1::Ready);
     println!(
         "{}",
@@ -1120,6 +1702,8 @@ async fn run_dynamic_manifest(
             "metrics": config.metrics,
             "resumable_sse": config.resumable_sse,
             "cors": !config.cors_origins.is_empty(),
+            "webui": config.webui,
+            "webui_url": webui_process.as_ref().map(WebUiProcess::url),
         })
     );
     let handle = axum_server::Handle::new();
@@ -1172,7 +1756,7 @@ async fn run_dynamic_manifest(
             "event": "shutdown_audit",
             "dynamic": true,
             "aliases": shutdown_aliases,
-            "count": manifest.models().len(),
+            "count": shutdown_aliases.len(),
             "clean": clean,
         })
     );
@@ -1203,13 +1787,24 @@ fn unload_dynamic_registry(lifecycle: &ModelLifecycleRegistryV1) -> Option<Strin
 fn dynamic_model_identity(derived: &sllm_core::DerivedGgufLock) -> Result<String, String> {
     if derived.semantic_model_id.starts_with("qwen35moe:") {
         Ok(QWEN35_MOE_MODEL_FINGERPRINT.to_owned())
+    } else if derived.semantic_model_id.starts_with("gemma4moe:") {
+        if derived.semantic_model_id != format!("gemma4moe:{GEMMA4_MOE_MODEL_FINGERPRINT}")
+            || derived.source_lock_fingerprints.as_slice() != [GEMMA4_MOE_MODEL_FINGERPRINT]
+        {
+            return Err("Gemma 4 MoE derived GGUF source identity differs".to_owned());
+        }
+        Ok(GEMMA4_MOE_MODEL_FINGERPRINT.to_owned())
     } else {
-        Ok(
-            builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
-                .map_err(|error| format!("built-in model lock resolution failed: {error}"))?
-                .fingerprint()
-                .to_owned(),
-        )
+        match builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
+            .map_err(|error| format!("built-in model lock resolution failed: {error}"))?
+        {
+            ReviewedModelLock::Qwen35(lock) => Ok(lock.fingerprint().to_owned()),
+            ReviewedModelLock::Gemma4(lock) => Ok(lock.fingerprint().to_owned()),
+            ReviewedModelLock::Ministral3(_) => Err(
+                "the official Ministral 3 model lock cannot be used as a derived GGUF source"
+                    .to_owned(),
+            ),
+        }
     }
 }
 
@@ -1251,6 +1846,8 @@ fn dynamic_adapter_catalog(
 enum ActiveBackend {
     Qwen(Arc<QwenChatBackendV1>),
     Gemma(Arc<Gemma4ChatBackendV1>),
+    GemmaMoe(Arc<Gemma4MoeChatBackendV1>),
+    Ministral3(Arc<Ministral3ChatBackendV1>),
 }
 
 fn fail_after_backend_open(backend: &Arc<ActiveBackend>, reason: impl Into<String>) -> String {
@@ -1276,6 +1873,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.clone(),
             Self::Gemma(backend) => backend.clone(),
+            Self::GemmaMoe(backend) => backend.clone(),
+            Self::Ministral3(backend) => backend.clone(),
         }
     }
 
@@ -1283,6 +1882,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.model_fingerprint(),
             Self::Gemma(backend) => backend.model_fingerprint(),
+            Self::GemmaMoe(backend) => backend.model_fingerprint(),
+            Self::Ministral3(backend) => backend.model_fingerprint(),
         }
     }
 
@@ -1290,6 +1891,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.plan_digest(),
             Self::Gemma(backend) => backend.plan_digest(),
+            Self::GemmaMoe(backend) => backend.plan_digest(),
+            Self::Ministral3(backend) => backend.plan_digest(),
         }
     }
 
@@ -1297,6 +1900,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.target(),
             Self::Gemma(backend) => backend.target(),
+            Self::GemmaMoe(backend) => backend.target(),
+            Self::Ministral3(backend) => backend.target(),
         }
     }
 
@@ -1304,6 +1909,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.context_length(),
             Self::Gemma(backend) => backend.context_length(),
+            Self::GemmaMoe(backend) => backend.context_length(),
+            Self::Ministral3(backend) => backend.context_length(),
         }
     }
 
@@ -1311,6 +1918,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.recommended_context_tokens(),
             Self::Gemma(backend) => backend.recommended_context_tokens(),
+            Self::GemmaMoe(backend) => backend.recommended_context_tokens(),
+            Self::Ministral3(backend) => backend.recommended_context_tokens(),
         }
     }
 
@@ -1326,7 +1935,9 @@ impl ActiveBackend {
             Self::Qwen(backend) => backend
                 .adapter_catalog_identity()
                 .map_err(|error| error.to_string()),
-            Self::Gemma(_) => Ok("adapter:none-v1".to_owned()),
+            Self::Gemma(_) | Self::GemmaMoe(_) | Self::Ministral3(_) => {
+                Ok("adapter:none-v1".to_owned())
+            }
         }
     }
 
@@ -1334,6 +1945,8 @@ impl ActiveBackend {
         match self {
             Self::Qwen(backend) => backend.shutdown(),
             Self::Gemma(backend) => backend.shutdown(),
+            Self::GemmaMoe(backend) => backend.shutdown(),
+            Self::Ministral3(backend) => backend.shutdown(),
         }
     }
 }
@@ -1435,6 +2048,26 @@ fn effective_server_kv_request(
     }
 }
 
+fn validate_gemma4_moe_kv_request(requested: Option<KvCacheEncoding>) -> Result<(), String> {
+    if requested.is_some_and(|encoding| encoding != KvCacheEncoding::Fp8E4M3FnStatic) {
+        return Err(
+            "Gemma 4 MoE uses its fixed static FP8 E4M3 KV recipe; omit --kv-cache-encoding (auto) or use --kv-cache-encoding fp8-static"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_gemma4_moe_context_override(context: Option<u32>) -> Result<(), String> {
+    if context.is_some_and(|value| value > GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32) {
+        return Err(format!(
+            "Gemma 4 MoE does not support a context length above {} tokens",
+            GEMMA4_RECOMMENDED_CONTEXT_TOKENS
+        ));
+    }
+    Ok(())
+}
+
 fn reject_disabled_options(
     values: &BTreeMap<String, String>,
     options: &[&str],
@@ -1447,23 +2080,32 @@ fn reject_disabled_options(
 }
 
 fn usage() -> &'static str {
-    "usage: sllm-server (--models PATH | --gguf PATH --derived-lock PATH --device-index N --target GFX) [--listen HOST:PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (default for reviewed Qwen3.5-4B BF16 dense text: kv-mxfp8-e4; rollback: fp16) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
+    "usage: sllm-server [--models PATH | --gguf PATH [--derived-lock PATH] --device-index N --target GFX [--mtp-assistant-gguf PATH --mtp-assistant-derived-lock PATH --draft mtp-auto]] [--listen HOST:PORT] [--webui true|false] [--webui-port PORT] [--model ALIAS] [--api-key-env NAME | --api-key-file PATH] [--cors-origins ORIGIN,...] [--metrics true|false] [--resumable-sse true|false] [--replay-sessions N] [--replay-events N] [--tls-cert PATH --tls-key PATH] [--compatibility-profile strict|openwebui] [--context-length TOKENS] [--kv-cache-encoding fp16|fp8|fp8-static|nvfp4|kv-mxfp8-e4|kv-mxfp8-e5] (Qwen default: kv-mxfp8-e4; Gemma 4 MoE: auto or fp8-static only; direct official Ministral 3: FP16 only; FP16 rollback applies to Qwen) [--queue-capacity N] [--event-capacity N] [--request-timeout-seconds N] [--completion-timeout-seconds N] [--shutdown-timeout-seconds N] [--prefix-cache disabled|enabled --prefix-cache-max-entries N --prefix-cache-max-tokens N --prefix-cache-max-resident-bytes N] [--context-policy disabled|keep-prefix-recent-v1 --context-keep-prefix N --context-keep-recent N] [--checkpoint disabled|enabled --checkpoint-directory PATH --checkpoint-quota-bytes N [--checkpoint-load NAME] [--checkpoint-save NAME]] [--draft disabled|mtp-auto|ngram|external [--draft-ngram-order N --draft-width N] [--draft-model-identity ID --draft-tokenizer-identity ID --draft-vocabulary-size N --draft-width N]]"
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        context_length_warning, effective_server_kv_request, parse_args_from,
+        DEFAULT_WEBUI_PORT, DynamicModelEntryV1, context_length_warning, dynamic_gemma_phase41,
+        dynamic_model_identity, effective_server_kv_request, parse_args_from,
         read_private_key_file, read_tls_cert_file, resolve_server_kv_selection, usage,
+        validate_gemma4_moe_context_override, validate_gemma4_moe_kv_request,
     };
-    use sllm_core::{KvCacheEncoding, QWEN35_4B_FINGERPRINT};
+    use sllm_core::{
+        DerivedGgufConverter, DerivedGgufLock, DerivedGgufOutput, GEMMA4_MOE_MODEL_FINGERPRINT,
+        GEMMA4_RECOMMENDED_CONTEXT_TOKENS, KvCacheEncoding, MINISTRAL3_MODEL_ALIAS,
+        QWEN35_4B_FINGERPRINT,
+    };
     use sllm_server::{
         CheckpointStartupConfigV1, ContextWindowStartupConfigV1, DraftStartupConfigV1,
-        KvCacheExplicitSourceV1, PrefixCacheStartupConfigV1,
+        KvCacheExplicitSourceV1, ModelLibraryRegistrationV1, Phase41ProductionConfigV1,
+        PrefixCacheStartupConfigV1,
     };
+    use std::collections::BTreeMap;
 
     fn base_args(extra: &[&str]) -> Vec<String> {
         let mut args = vec![
@@ -1491,10 +2133,78 @@ mod tests {
         assert_eq!(warning["official_recommended_context_tokens"], 262_144);
     }
 
+    fn synthetic_derived_identity(
+        semantic_model_id: &str,
+        source_lock_fingerprints: Vec<String>,
+    ) -> DerivedGgufLock {
+        DerivedGgufLock {
+            schema_version: "derived-gguf-lock-v1".to_owned(),
+            fingerprint: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_owned(),
+            semantic_model_id: semantic_model_id.to_owned(),
+            source_lock_fingerprints,
+            converter: DerivedGgufConverter {
+                repository: "sllm-test".to_owned(),
+                commit: "test".to_owned(),
+                arguments: vec!["test".to_owned()],
+                effective_config: BTreeMap::new(),
+                environment: BTreeMap::new(),
+            },
+            output: DerivedGgufOutput {
+                path: "test.gguf".to_owned(),
+                size_bytes: 1,
+                sha256: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                metadata_sha256:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+                tensor_catalog_sha256:
+                    "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                        .to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn gemma4moe_dynamic_identity_requires_the_exact_reviewed_source() {
+        let semantic = format!("gemma4moe:{GEMMA4_MOE_MODEL_FINGERPRINT}");
+        let valid =
+            synthetic_derived_identity(&semantic, vec![GEMMA4_MOE_MODEL_FINGERPRINT.to_owned()]);
+        assert_eq!(
+            dynamic_model_identity(&valid).unwrap(),
+            GEMMA4_MOE_MODEL_FINGERPRINT
+        );
+
+        let wrong_source =
+            synthetic_derived_identity(&semantic, vec![QWEN35_4B_FINGERPRINT.into()]);
+        assert!(dynamic_model_identity(&wrong_source).is_err());
+
+        let wrong_semantic = synthetic_derived_identity(
+            "gemma4moe:sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            vec![GEMMA4_MOE_MODEL_FINGERPRINT.to_owned()],
+        );
+        assert!(dynamic_model_identity(&wrong_semantic).is_err());
+    }
+
     #[test]
     fn phase41_cli_defaults_every_opt_in_disabled() {
         let config = parse_args_from(base_args(&[])).expect("default CLI should parse");
         assert_eq!(config.kv_cache_encoding, None);
+        assert!(config.mtp_assistant_gguf_path.is_none());
+        assert!(config.mtp_assistant_derived_lock_path.is_none());
+        assert!(config.webui);
+        assert_eq!(config.webui_port, DEFAULT_WEBUI_PORT);
+        assert!(config.metrics);
+        assert!(
+            config
+                .cors_origins
+                .contains(&"http://localhost:65457".to_owned())
+        );
+        assert!(
+            config
+                .cors_origins
+                .contains(&"http://127.0.0.1:65457".to_owned())
+        );
         assert!(matches!(
             config.phase41.prefix_cache,
             PrefixCacheStartupConfigV1::Disabled
@@ -1511,6 +2221,180 @@ mod tests {
             config.phase41.draft,
             DraftStartupConfigV1::Disabled
         ));
+    }
+
+    #[test]
+    fn static_gemma_mtp_companion_options_require_a_complete_pair_and_mtp_auto() {
+        let config = parse_args_from(base_args(&[
+            "--draft",
+            "mtp-auto",
+            "--mtp-assistant-gguf",
+            "assistant.gguf",
+            "--mtp-assistant-derived-lock",
+            "assistant.lock.json",
+        ]))
+        .expect("static MTP companion pair should parse");
+        assert_eq!(
+            config.mtp_assistant_gguf_path,
+            Some(PathBuf::from("assistant.gguf"))
+        );
+        assert_eq!(
+            config.mtp_assistant_derived_lock_path,
+            Some(PathBuf::from("assistant.lock.json"))
+        );
+        assert!(matches!(
+            config.phase41.draft,
+            DraftStartupConfigV1::MtpAuto
+        ));
+        assert!(usage().contains("--mtp-assistant-gguf PATH"));
+        assert!(usage().contains("--mtp-assistant-derived-lock PATH"));
+
+        for arguments in [
+            base_args(&["--mtp-assistant-gguf", "assistant.gguf"]),
+            base_args(&["--mtp-assistant-derived-lock", "assistant.lock.json"]),
+            base_args(&[
+                "--mtp-assistant-gguf",
+                "assistant.gguf",
+                "--mtp-assistant-derived-lock",
+                "assistant.lock.json",
+            ]),
+            base_args(&[
+                "--draft",
+                "ngram",
+                "--draft-ngram-order",
+                "2",
+                "--draft-width",
+                "1",
+                "--mtp-assistant-gguf",
+                "assistant.gguf",
+                "--mtp-assistant-derived-lock",
+                "assistant.lock.json",
+            ]),
+        ] {
+            assert!(
+                parse_args_from(arguments).is_err(),
+                "invalid static MTP companion options must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn static_gemma_mtp_companion_options_are_not_available_to_dynamic_sources() {
+        let pair = [
+            "--mtp-assistant-gguf",
+            "assistant.gguf",
+            "--mtp-assistant-derived-lock",
+            "assistant.lock.json",
+            "--draft",
+            "mtp-auto",
+        ];
+        let error = parse_args_from(pair)
+            .expect_err("library-only startup must reject static MTP companion options");
+        assert!(error.contains("static --gguf/--derived-lock"));
+
+        let mut manifest = vec!["--models", "/etc/sllm/models.json"];
+        manifest.extend_from_slice(&pair);
+        let error = parse_args_from(manifest)
+            .expect_err("manifest startup must reject static MTP companion options");
+        assert!(error.contains("static --gguf/--derived-lock"));
+    }
+
+    #[test]
+    fn model_library_gemma_pair_reaches_dynamic_entry_and_enables_mtp() {
+        let registration = ModelLibraryRegistrationV1 {
+            alias: "gemma4".to_owned(),
+            gguf_path: PathBuf::from("/models/gemma4.gguf"),
+            derived_lock_path: Some(PathBuf::from("/models/gemma4.lock.json")),
+            architecture: "gemma4".to_owned(),
+            model_identity: "target".to_owned(),
+            plan_identity: "plan".to_owned(),
+            resident_bytes: 1,
+            device_index: 0,
+            target: "gfx1201".to_owned(),
+            mtp_assistant_gguf_path: Some(PathBuf::from("/models/gemma4-mtp.gguf")),
+            mtp_assistant_derived_lock_path: Some(PathBuf::from("/models/gemma4-mtp.lock.json")),
+            mtp_assistant_identity: Some("assistant".to_owned()),
+            mtp_semantic_pair_identity: Some("pair".to_owned()),
+        };
+        let entry = DynamicModelEntryV1::from_library(&registration);
+        assert_eq!(
+            entry.mtp_assistant_gguf_path,
+            registration.mtp_assistant_gguf_path
+        );
+        assert_eq!(
+            entry.mtp_assistant_derived_lock_path,
+            registration.mtp_assistant_derived_lock_path
+        );
+        let phase41 = dynamic_gemma_phase41(
+            &Phase41ProductionConfigV1::default(),
+            entry.mtp_assistant_gguf_path.as_ref(),
+            entry.mtp_assistant_derived_lock_path.as_ref(),
+        )
+        .expect("complete assistant pair should select MTP auto");
+        assert!(matches!(phase41.draft, DraftStartupConfigV1::MtpAuto));
+    }
+
+    #[test]
+    fn dynamic_gemma_without_pair_disables_mtp_and_rejects_partial_pair() {
+        let base = Phase41ProductionConfigV1 {
+            draft: DraftStartupConfigV1::MtpAuto,
+            ..Phase41ProductionConfigV1::default()
+        };
+        let target_only = dynamic_gemma_phase41(&base, None, None)
+            .expect("target-only dynamic Gemma load should be valid");
+        assert!(matches!(target_only.draft, DraftStartupConfigV1::Disabled));
+        assert!(
+            dynamic_gemma_phase41(&base, Some(&PathBuf::from("assistant.gguf")), None).is_err()
+        );
+    }
+
+    #[test]
+    fn webui_cli_supports_headless_and_custom_port_without_duplicate_cors() {
+        let headless = parse_args_from(base_args(&["--webui", "false"]))
+            .expect("headless server should parse");
+        assert!(!headless.webui);
+        assert!(!headless.metrics);
+        assert!(headless.cors_origins.is_empty());
+
+        let custom = parse_args_from(base_args(&[
+            "--webui",
+            "true",
+            "--webui-port",
+            "32123",
+            "--cors-origins",
+            "http://localhost:32123",
+            "--metrics",
+            "false",
+        ]))
+        .expect("custom WebUI port should parse");
+        assert_eq!(custom.webui_port, 32_123);
+        assert!(!custom.metrics, "an explicit metrics setting must win");
+        assert_eq!(
+            custom
+                .cors_origins
+                .iter()
+                .filter(|origin| origin.as_str() == "http://localhost:32123")
+                .count(),
+            1
+        );
+        assert!(
+            custom
+                .cors_origins
+                .contains(&"http://127.0.0.1:32123".to_owned())
+        );
+    }
+
+    #[test]
+    fn webui_cli_rejects_ambiguous_or_unusable_ports() {
+        for arguments in [
+            vec!["--webui", "false", "--webui-port", "32123"],
+            vec!["--webui-port", "0"],
+            vec!["--listen", "127.0.0.1:0"],
+            vec!["--listen", "127.0.0.1:65457"],
+        ] {
+            assert!(parse_args_from(base_args(&arguments)).is_err());
+        }
+        assert!(usage().contains("[--webui true|false] [--webui-port PORT]"));
     }
 
     #[test]
@@ -1542,7 +2426,39 @@ mod tests {
         }
         assert!(usage().contains("kv-mxfp8-e4|kv-mxfp8-e5"));
         assert!(!usage().contains("kv-fp8-e4-block16|"));
-        assert!(usage().contains("default for reviewed Qwen3.5-4B BF16 dense text: kv-mxfp8-e4"));
+        assert!(usage().contains("Qwen default: kv-mxfp8-e4"));
+        assert!(usage().contains("Gemma 4 MoE: auto or fp8-static only"));
+    }
+
+    #[test]
+    fn gemma4moe_kv_policy_accepts_only_auto_or_canonical_static_fp8() {
+        assert!(validate_gemma4_moe_kv_request(None).is_ok());
+        assert!(validate_gemma4_moe_kv_request(Some(KvCacheEncoding::Fp8E4M3FnStatic)).is_ok());
+        for encoding in [
+            KvCacheEncoding::Fp16,
+            KvCacheEncoding::Fp8E4M3Fn,
+            KvCacheEncoding::Nvfp4,
+            KvCacheEncoding::Mxfp8E4,
+            KvCacheEncoding::Mxfp8E5,
+        ] {
+            let error = validate_gemma4_moe_kv_request(Some(encoding)).unwrap_err();
+            assert!(error.contains("fp8-static"));
+        }
+    }
+
+    #[test]
+    fn gemma4moe_context_override_is_bounded_at_startup() {
+        assert!(validate_gemma4_moe_context_override(None).is_ok());
+        assert!(
+            validate_gemma4_moe_context_override(Some(GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32))
+                .is_ok()
+        );
+        assert!(
+            validate_gemma4_moe_context_override(Some(
+                GEMMA4_RECOMMENDED_CONTEXT_TOKENS as u32 + 1
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1681,6 +2597,63 @@ mod tests {
             Some(std::path::Path::new("/etc/sllm/models.json"))
         );
         assert_eq!(config.model, "dynamic");
+    }
+
+    #[test]
+    fn direct_official_ministral_source_omits_optional_derived_lock() {
+        let config = parse_args_from([
+            "--gguf",
+            "/models/Ministral-3-3B-Instruct-2512-BF16.gguf",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1201",
+        ])
+        .expect("direct official Ministral source should parse");
+        assert_eq!(config.derived_lock, None);
+        assert_eq!(config.model, MINISTRAL3_MODEL_ALIAS);
+
+        let derived = parse_args_from(base_args(&[])).expect("derived source should still parse");
+        assert_eq!(derived.derived_lock, Some(PathBuf::from("model.lock.json")));
+        assert_eq!(derived.model, "qwen3.5-4b");
+        assert!(usage().contains("[--derived-lock PATH]"));
+    }
+
+    #[test]
+    fn model_library_direct_registration_propagates_no_derived_lock() {
+        let registration = ModelLibraryRegistrationV1 {
+            alias: MINISTRAL3_MODEL_ALIAS.to_owned(),
+            gguf_path: PathBuf::from("/models/Ministral-3-3B-Instruct-2512-BF16.gguf"),
+            derived_lock_path: None,
+            architecture: "mistral3".to_owned(),
+            model_identity: "model".to_owned(),
+            plan_identity: "plan".to_owned(),
+            resident_bytes: 1,
+            device_index: 0,
+            target: "gfx1201".to_owned(),
+            mtp_assistant_gguf_path: None,
+            mtp_assistant_derived_lock_path: None,
+            mtp_assistant_identity: None,
+            mtp_semantic_pair_identity: None,
+        };
+        let entry = DynamicModelEntryV1::from_library(&registration);
+        assert_eq!(entry.derived_lock, None);
+        assert_eq!(entry.gguf, registration.gguf_path);
+    }
+
+    #[test]
+    fn no_model_source_starts_in_webui_library_mode() {
+        let config = parse_args_from(std::iter::empty::<String>())
+            .expect("model source is selected later from the loopback WebUI");
+        assert!(config.library_only);
+        assert!(config.models.is_none());
+        assert!(config.listen.ip().is_loopback());
+
+        let partial = parse_args_from(["--gguf", "model.gguf"]);
+        assert!(
+            partial.is_err(),
+            "partial legacy model flags remain invalid"
+        );
     }
 
     #[test]

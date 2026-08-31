@@ -22,6 +22,9 @@ struct DescriptorMetadata final {
   uint64_t start_position = 0U;
   uint64_t expected_kv_length = 0U;
   uint64_t query_count = 0U;
+  uint64_t sliding_window = 0U;
+  float score_scale = 0.0F;
+  bool explicit_score_scale = false;
 };
 
 sllm_status_t

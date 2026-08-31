@@ -16,7 +16,8 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt};
 const GGUF_MAGIC: &[u8; 4] = b"GGUF";
 const WRITE_CHUNK_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WRITE_METADATA: usize = 16_384;
-const MAX_WRITE_TENSORS: usize = 65_536;
+// The reviewed DeepSeek V4 Flash catalog contains 72,317 tensors.
+const MAX_WRITE_TENSORS: usize = 100_000;
 
 #[cfg(unix)]
 const O_CLOEXEC: i32 = 0o2000000;
@@ -256,7 +257,10 @@ fn validate_write_plan(plan: &GgufWritePlan) -> Result<(), GgufError> {
         Some(GgufValue::String(value)) => value.as_str(),
         _ => return Err(invalid("GGUF write architecture is missing")),
     };
-    if !matches!(architecture, "qwen35" | "qwen35moe" | "gemma4") {
+    if !matches!(
+        architecture,
+        "qwen35" | "qwen35moe" | "gemma4" | "gemma4moe" | "gemma4mtp" | "deepseek4" | "minimax-m3"
+    ) {
         return Err(invalid("GGUF write architecture is unsupported"));
     }
     match plan.metadata.get("general.alignment") {

@@ -54,7 +54,7 @@ impl std::error::Error for WeightPlanError {}
 pub struct WeightUploadError(String);
 
 impl WeightUploadError {
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -120,6 +120,14 @@ pub enum WeightConsumer {
     MtpFinalNorm,
     MoeRouter,
     MoeLayerBlob,
+    Gemma4MoePreFeedforwardNorm2,
+    Gemma4MoePostFeedforwardNorm1,
+    Gemma4MoePostFeedforwardNorm2,
+    Gemma4MoeRouterScale,
+    Gemma4MoeRouterPerExpertScale,
+    Gemma4MoeLayerBlob,
+    Gemma4MtpPreProjection,
+    Gemma4MtpPostProjection,
 }
 
 impl WeightConsumer {
@@ -159,6 +167,14 @@ impl WeightConsumer {
             Self::MtpFinalNorm => 32,
             Self::MoeRouter => 33,
             Self::MoeLayerBlob => 34,
+            Self::Gemma4MoePreFeedforwardNorm2 => 35,
+            Self::Gemma4MoePostFeedforwardNorm1 => 36,
+            Self::Gemma4MoePostFeedforwardNorm2 => 37,
+            Self::Gemma4MoeRouterScale => 38,
+            Self::Gemma4MoeRouterPerExpertScale => 39,
+            Self::Gemma4MoeLayerBlob => 40,
+            Self::Gemma4MtpPreProjection => 41,
+            Self::Gemma4MtpPostProjection => 42,
         }
     }
 }
@@ -587,7 +603,7 @@ pub struct WeightUploadReceipt {
     pub peak_host_staging_bytes: u64,
 }
 
-trait WeightRangeSource {
+pub(crate) trait WeightRangeSource {
     fn lock_fingerprint(&self) -> &str;
     fn tensor(&self, tensor_name: &str) -> Option<&TensorDescriptor>;
     fn read_tensor_range(
@@ -770,7 +786,7 @@ pub fn upload_verified_gguf_weight(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn upload_weight_from_source<S, F>(
+pub(crate) fn upload_weight_from_source<S, F>(
     plan: &WeightLoadPlan,
     expected_plan_digest: [u8; 32],
     source: &S,
@@ -2021,6 +2037,136 @@ pub fn build_verified_gemma4_weight_load_plan(
     build_gemma4_weight_load_plan(lock, cache.tensors())
 }
 
+/// Build the exact lossless BF16 resident plan for the reviewed Gemma 4 MTP
+/// assistant. The assistant is a separately resident draft model: its layer
+/// namespace is therefore `0..4` and never aliases the 48-layer target plan.
+pub fn build_gemma4_mtp_weight_load_plan<'a>(
+    lock: &crate::gemma4_mtp::Gemma4MtpModelLock,
+    descriptors: impl IntoIterator<Item = &'a TensorDescriptor>,
+) -> Result<WeightLoadPlan, WeightPlanError> {
+    if lock.schema_version != "gemma4-mtp-model-lock-v1"
+        || lock.model.repo_id != crate::gemma4_mtp::GEMMA4_MTP_REPO_ID
+        || lock.model.resolved_revision != crate::gemma4_mtp::GEMMA4_MTP_REVISION
+        || lock.fingerprint() != crate::gemma4_mtp::GEMMA4_MTP_FINGERPRINT
+        || lock.model.architecture.layer_types != crate::gemma4_mtp::reviewed_mtp_layer_schedule()
+        || lock.model.architecture.use_ordered_embeddings
+        || lock.model.architecture.own_kv_projection_tensor_count != 0
+    {
+        return Err(WeightPlanError::invalid(
+            "model identity is not the reviewed Gemma 4 MTP assistant contract",
+        ));
+    }
+    let locked_files = locked_file_map_from_files(&lock.model.files)?;
+    let mut by_name = BTreeMap::new();
+    for descriptor in descriptors {
+        if by_name
+            .insert(descriptor.tensor_name.as_str(), descriptor)
+            .is_some()
+        {
+            return Err(WeightPlanError::invalid(format!(
+                "duplicate tensor descriptor: {}",
+                descriptor.tensor_name
+            )));
+        }
+    }
+
+    let expected_consumers = expected_gemma4_mtp_consumers();
+    let mut observed_consumers = BTreeSet::new();
+    let mut entries = Vec::with_capacity(by_name.len());
+    let mut destination_cursor = 0_u64;
+    for descriptor in by_name.values() {
+        validate_descriptor(descriptor, &locked_files)?;
+        if descriptor.dtype != TensorDType::Bf16 {
+            return Err(WeightPlanError::invalid(format!(
+                "Gemma 4 MTP tensor is not BF16: {}",
+                descriptor.tensor_name
+            )));
+        }
+        let consumer = classify_gemma4_mtp_name(&descriptor.tensor_name)?;
+        if !observed_consumers.insert(consumer) {
+            return Err(WeightPlanError::invalid(format!(
+                "duplicate Gemma 4 MTP weight consumer: {consumer:?}"
+            )));
+        }
+        let locked = locked_files
+            .get(descriptor.source_file.as_str())
+            .expect("descriptor source was validated");
+        let destination_start = destination_cursor;
+        let chunks = split_chunks(descriptor, destination_start)?;
+        destination_cursor = destination_cursor
+            .checked_add(descriptor.byte_size)
+            .ok_or_else(|| WeightPlanError::invalid("MTP destination size overflow"))?;
+        entries.push(WeightLoadEntry {
+            tensor_name: descriptor.tensor_name.clone(),
+            classification: WeightClassification::Required,
+            consumer: Some(consumer),
+            dtype: descriptor.dtype,
+            shape: descriptor.shape.clone(),
+            source_file: descriptor.source_file.clone(),
+            locked_file_size: locked.size_bytes,
+            locked_file_sha256: locked.sha256.clone(),
+            source_range: descriptor.absolute_byte_range,
+            destination_start: Some(destination_start),
+            chunks,
+        });
+    }
+    if observed_consumers != expected_consumers
+        || entries.len() as u64 != crate::gemma4_mtp::GEMMA4_MTP_TENSOR_COUNT
+        || destination_cursor
+            != crate::gemma4_mtp::GEMMA4_MTP_MODEL_BYTES
+                - crate::gemma4_mtp::GEMMA4_MTP_HEADER_BYTES
+                - 8
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "Gemma 4 MTP consumer/count/resident byte contract differs: consumers={}/{}, tensors={}/{}, bytes={destination_cursor}",
+            observed_consumers.len(),
+            expected_consumers.len(),
+            entries.len(),
+            crate::gemma4_mtp::GEMMA4_MTP_TENSOR_COUNT,
+        )));
+    }
+    let digest = digest_plan(
+        &PlanDigestHeader {
+            schema_version: &lock.schema_version,
+            repo_id: &lock.model.repo_id,
+            resolved_revision: &lock.model.resolved_revision,
+            fingerprint: lock.fingerprint(),
+            tied_embeddings: true,
+            chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+            total_destination_bytes: destination_cursor,
+        },
+        &entries,
+    )?;
+    Ok(WeightLoadPlan {
+        schema_version: lock.schema_version.clone(),
+        repo_id: lock.model.repo_id.clone(),
+        resolved_revision: lock.model.resolved_revision.clone(),
+        lock_fingerprint: lock.fingerprint().to_owned(),
+        tied_embeddings: true,
+        chunk_size: WEIGHT_LOAD_CHUNK_BYTES,
+        total_destination_bytes: destination_cursor,
+        entries,
+        digest,
+    })
+}
+
+pub fn build_verified_gemma4_mtp_weight_load_plan<S>(
+    lock: &crate::gemma4_mtp::Gemma4MtpModelLock,
+    source: &S,
+) -> Result<WeightLoadPlan, WeightPlanError>
+where
+    S: crate::gemma4_mtp::Gemma4MtpWeightSource + ?Sized,
+{
+    if source.lock_fingerprint() != lock.fingerprint()
+        || source.target_fingerprint() != lock.target_fingerprint()
+    {
+        return Err(WeightPlanError::invalid(
+            "verified Gemma 4 MTP source identity differs from the assistant pair lock",
+        ));
+    }
+    build_gemma4_mtp_weight_load_plan(lock, source.tensors().values())
+}
+
 /// Build the Gemma execution topology directly from the verified first-class
 /// Unsloth artifact. Source ranges describe encoded values; they are never
 /// presented as BF16 upload ranges. The resulting plan remains bound to the
@@ -2328,6 +2474,102 @@ fn expected_gemma4_consumers() -> BTreeSet<WeightConsumerKey> {
                     role: WeightConsumer::AttentionKAndV,
                 });
             }
+        }
+    }
+    expected
+}
+
+fn classify_gemma4_mtp_name(name: &str) -> Result<WeightConsumerKey, WeightPlanError> {
+    let top_level = match name {
+        "model.embed_tokens.weight" => Some(WeightConsumer::EmbeddingAndTiedOutput),
+        "model.norm.weight" => Some(WeightConsumer::FinalNorm),
+        "pre_projection.weight" => Some(WeightConsumer::Gemma4MtpPreProjection),
+        "post_projection.weight" => Some(WeightConsumer::Gemma4MtpPostProjection),
+        _ => None,
+    };
+    if let Some(role) = top_level {
+        return Ok(WeightConsumerKey { layer: None, role });
+    }
+    const PREFIX: &str = "model.layers.";
+    let remainder = name
+        .strip_prefix(PREFIX)
+        .ok_or_else(|| WeightPlanError::invalid(format!("unknown Gemma 4 MTP tensor: {name}")))?;
+    let (layer_text, suffix) = remainder.split_once('.').ok_or_else(|| {
+        WeightPlanError::invalid(format!("malformed Gemma 4 MTP layer tensor: {name}"))
+    })?;
+    let layer = layer_text
+        .parse::<u64>()
+        .map_err(|_| WeightPlanError::invalid(format!("invalid MTP layer index: {name}")))?;
+    if layer.to_string() != layer_text
+        || usize::try_from(layer)
+            .ok()
+            .is_none_or(|index| index >= crate::gemma4_mtp::reviewed_mtp_layer_schedule().len())
+    {
+        return Err(WeightPlanError::invalid(format!(
+            "Gemma 4 MTP layer index is noncanonical or out of range: {name}"
+        )));
+    }
+    let role = match suffix {
+        "input_layernorm.weight" => WeightConsumer::InputNorm,
+        "post_attention_layernorm.weight" => WeightConsumer::PostAttentionNorm,
+        "pre_feedforward_layernorm.weight" => WeightConsumer::PreFeedforwardNorm,
+        "post_feedforward_layernorm.weight" => WeightConsumer::PostFeedforwardNorm,
+        "layer_scalar" => WeightConsumer::LayerScalar,
+        "mlp.gate_proj.weight" => WeightConsumer::MlpGate,
+        "mlp.up_proj.weight" => WeightConsumer::MlpUp,
+        "mlp.down_proj.weight" => WeightConsumer::MlpDown,
+        "self_attn.q_proj.weight" => WeightConsumer::AttentionQ,
+        "self_attn.q_norm.weight" => WeightConsumer::AttentionQNorm,
+        "self_attn.o_proj.weight" => WeightConsumer::AttentionO,
+        _ => {
+            return Err(WeightPlanError::invalid(format!(
+                "tensor suffix is invalid for Gemma 4 MTP: {name}"
+            )));
+        }
+    };
+    Ok(WeightConsumerKey {
+        layer: Some(layer),
+        role,
+    })
+}
+
+fn expected_gemma4_mtp_consumers() -> BTreeSet<WeightConsumerKey> {
+    let mut expected = BTreeSet::from([
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::EmbeddingAndTiedOutput,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::FinalNorm,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::Gemma4MtpPreProjection,
+        },
+        WeightConsumerKey {
+            layer: None,
+            role: WeightConsumer::Gemma4MtpPostProjection,
+        },
+    ]);
+    for layer in 0..4_u64 {
+        for role in [
+            WeightConsumer::InputNorm,
+            WeightConsumer::PostAttentionNorm,
+            WeightConsumer::PreFeedforwardNorm,
+            WeightConsumer::PostFeedforwardNorm,
+            WeightConsumer::LayerScalar,
+            WeightConsumer::MlpGate,
+            WeightConsumer::MlpUp,
+            WeightConsumer::MlpDown,
+            WeightConsumer::AttentionQ,
+            WeightConsumer::AttentionQNorm,
+            WeightConsumer::AttentionO,
+        ] {
+            expected.insert(WeightConsumerKey {
+                layer: Some(layer),
+                role,
+            });
         }
     }
     expected
@@ -2760,6 +3002,76 @@ mod tests {
             crate::gemma4::GEMMA4_12B_IT_FINGERPRINT
         );
         assert_eq!(plan.total_destination_bytes, 23_814_700_640);
+    }
+
+    #[test]
+    fn gemma4_mtp_plan_closes_the_exact_query_only_catalog() {
+        let lock = crate::gemma4_mtp::parse_gemma4_mtp_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-it-assistant-bf16.json"
+        ))
+        .expect("reviewed Gemma 4 MTP lock parses");
+        let catalog = crate::gemma4_mtp::expected_gemma4_mtp_tensor_catalog()
+            .expect("reviewed Gemma 4 MTP catalog derives");
+        let plan = build_gemma4_mtp_weight_load_plan(&lock, catalog.values())
+            .expect("reviewed Gemma 4 MTP load plan builds");
+        assert_eq!(plan.entries.len(), 48);
+        assert_eq!(plan.total_destination_bytes, 845_713_928);
+        let consumer = |name: &str| {
+            plan.entries
+                .iter()
+                .find(|entry| entry.tensor_name == name)
+                .and_then(|entry| entry.consumer)
+                .map(|consumer| consumer.role)
+        };
+        assert_eq!(
+            consumer("pre_projection.weight"),
+            Some(WeightConsumer::Gemma4MtpPreProjection)
+        );
+        assert_eq!(
+            consumer("post_projection.weight"),
+            Some(WeightConsumer::Gemma4MtpPostProjection)
+        );
+        assert_eq!(
+            consumer("model.layers.3.self_attn.q_proj.weight"),
+            Some(WeightConsumer::AttentionQ)
+        );
+        assert!(plan.entries.iter().all(|entry| {
+            !matches!(
+                entry.consumer.map(|consumer| consumer.role),
+                Some(
+                    WeightConsumer::AttentionK
+                        | WeightConsumer::AttentionV
+                        | WeightConsumer::AttentionKAndV
+                )
+            )
+        }));
+    }
+
+    #[test]
+    fn gemma4_mtp_plan_rejects_missing_extra_kv_and_wrong_dtype() {
+        let lock = crate::gemma4_mtp::parse_gemma4_mtp_model_lock(include_bytes!(
+            "../../../docs/models/locks/gemma4-12b-it-assistant-bf16.json"
+        ))
+        .expect("reviewed Gemma 4 MTP lock parses");
+        let mut catalog = crate::gemma4_mtp::expected_gemma4_mtp_tensor_catalog()
+            .expect("reviewed Gemma 4 MTP catalog derives");
+        let original = catalog
+            .remove("model.layers.0.layer_scalar")
+            .expect("boundary tensor exists");
+        assert!(build_gemma4_mtp_weight_load_plan(&lock, catalog.values()).is_err());
+
+        catalog.insert(original.tensor_name.clone(), original.clone());
+        let mut unexpected_kv = original.clone();
+        unexpected_kv.tensor_name = "model.layers.0.self_attn.k_proj.weight".to_owned();
+        catalog.insert(unexpected_kv.tensor_name.clone(), unexpected_kv);
+        assert!(build_gemma4_mtp_weight_load_plan(&lock, catalog.values()).is_err());
+
+        catalog.remove("model.layers.0.self_attn.k_proj.weight");
+        let descriptor = catalog
+            .get_mut("model.layers.0.layer_scalar")
+            .expect("restored tensor exists");
+        descriptor.dtype = TensorDType::F32;
+        assert!(build_gemma4_mtp_weight_load_plan(&lock, catalog.values()).is_err());
     }
 
     #[test]

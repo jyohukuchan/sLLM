@@ -269,6 +269,42 @@ multimodal text prefill/decodeを実行した。vision projected digestはtarget
 全dispatch HIP、fallbackなし、cleanup 0だった。R9700ではCLI local PNGから1 token生成もPASSした。MTP逐次verifyは性能採用せず、
 通常serviceはtarget-onlyを維持する。software lifecycleは`experimental`のままで、別tupleやlow-bit visionへ一般化しない。
 
+### 2026-08-31 Phase 55 Gemma 4 MoE tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、LLVM 23の
+local tupleで、固定Gemma 4 26B-A4B NVFP4 artifactをexact `gfx1201`／`gfx1030`へ全resident化した。最終primary
+`gfx1201` candidateはstatic E4M3 full/sliding KV、NVFP4 routed expert、CLI/server共通prepared executionをHIP-only、fallback
+なし、nonfiniteなし、cleanup 0で実行した。sourceとcanonical GGUFの35-token digestは
+`57c2f914705c86657a3537810e6ed5ba17972b67857c183135d1d0b8a117ccb1`へ一致し、通常CLIとdynamic API/WebUI serviceも同じtupleで
+load／生成／cancel／unload／clean shutdownをPASSした。`gfx1030` full-resident値はstate API前のdraft evidenceであり、最終sourceでは両targetの
+operator matrixを保持する。このtuple以外のdriver/runtime、GPU、multi-GPU、長時間安定性を主張しない。
+
+### 2026-08-31 Phase 57 DeepSeek V4 route-operator tuple
+
+Phase 55と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm build/runtime 7.14.0、LLVM 23 tupleで、
+DeepSeek V4専用top-6 MoE routing operatorをexact `gfx1030`／`gfx1201`へtarget別Code Object V6／wave32 binaryとして実行した。
+`gfx1030` binary SHA-256は`a3190e16ce3abceb304c19fece79662070ecd1d01bc626eed2a8f5f373e162c2`、`gfx1201`は
+`ba7c0f2ef30c3e3668e97acd2a82984f07dc79acad90e4882b570a80eb629a48`である。M=1/3/5/17のscore／hash routeと不正入力を
+独立oracleへ照合し、不正入力の公開completion fail-close、HIP-only、fallback 0、cleanup 0をPASSした。このtupleはmodel-free operatorだけを対象とし、official checkpointの
+resident、full graph／service、性能、multi-GPU、別driver/runtime/GPUへ一般化しない。
+
+### 2026-08-31 Phase 58 MiniMax M3 route-operator tuple
+
+Phase 57と同じlocal software tupleで、MiniMax M3専用sigmoid top-4 MoE routing operatorをexact `gfx1030`／`gfx1201`へ
+target別Code Object V6／wave32 binaryとして実行した。`gfx1030` binary SHA-256は
+`b14988e6916286c730720a49b997ec99fed052d5c8f0fba4cda916f619247edc`、`gfx1201`は
+`212bfcf6f9dd28d2773d01d0890edc9d6165566b8cdb064f55380fcddcd27bc7`である。M=1/3/5/17と不正入力を独立oracleへ照合し、
+公開completion fail-close、HIP-only、fallback 0、KFD process残留なし、VRAM baseline復帰をPASSした。このtupleは
+model-free operatorだけを対象とし、official checkpointのresident、MSA／full graph／service、multimodal／MTP、性能、
+multi-GPU、別driver/runtime/GPUへ一般化しない。
+
+### 2026-08-31 Phase 59 DiffusionGemma host-foundation tuple
+
+Phase 59はRust host testsとfixed-revision metadata／bounded safetensors header照合だけを実行した。公式BF16 shard file合計
+51,647,701,024 bytesが単一32 GiB GPUへ収まらないため、新しいHIP binaryまたはexact `gfx1030`／`gfx1201` full-model runはない。
+従ってsoftware／GPU compatibility表は拡張せず、identity／graph／sampler／GGUF write-disabled dry-runの証拠をGPU実行PASSへ
+読み替えない。
+
 ### 2026-08-16 Phase 18 exact MTP tuple
 
 Phase 17と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、LLVM 23 tupleで、
@@ -506,6 +542,26 @@ reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256
 明示`fp16`をrollbackとして残す。V620 `gfx1030`とR9700 `gfx1201`ではfresh direct GPU byte／attention oracleをPASSしたが、
 一回のfull-model測定でgfx1201 top-1一致が`0.85`となりfreeze済み`>=0.99`に未達だった。default変更はユーザー明示決定に
 基づくN2であり、software lifecycleまたはrelease品質の自動昇格ではない。gfx942はfresh実GPU evidence未取得である。
+
+### 2026-08-31 Phase56 local R9700 Gemma 4 MTP tuple
+
+Phase 50と同じlocal R9700、ROCm 7.14.0、HIP 7.14.60850、LLVM 23、Code Object V6、wave32、UUID
+`GPU-a8e9ddefa2d60f55`、exact `gfx1201`でfresh release buildした。最終binary SHA-256は`sllm`
+`37368b55f9abe886e2316342e2b7e40e2c6f5e2ad4b24be516f2059338b3a6b4`、`sllm-server`
+`0c9a99dfc233ccb7a66110f035b076876065be3e24ee3e05091227a6827fd4a1`である。
+
+reviewed mixed low-bit Gemma 4 12B targetとBF16 assistantをcontext 2,048、greedy width 1で実行し、CLI benchmark、static server、
+source-tree WebUI dynamic server、metrics、cancel、unload、shutdownをPASSした。これはmodel／artifact／software tupleを同時に固定した狭いevidenceであり、
+別ROCm、driver、kernel、GPU、Node-free release packagingへ一般化しない。
+
+### 2026-08-31 Phase60 local RDNA Ministral 3 tuple
+
+local Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
+LLVM 23のtupleで、公式Ministral 3 3B BF16 GGUFをexact `gfx1030`とexact `gfx1201`向けにそれぞれbuild／実行した。
+両targetは同じ短いtoken列、HIP-only、fallback false、394／394 dispatch、shutdown cleanup 0となった。
+
+固定llama.cpp oracleとは3番目の生成tokenから一致しないため、このtupleはbuild／dispatch／lifecycle到達だけを示す。
+Ministral 3のproduction数値品質、別OS／driver／ROCm／GPU、または広いcontext／performance evidenceへ一般化しない。
 
 ## 公式資料
 

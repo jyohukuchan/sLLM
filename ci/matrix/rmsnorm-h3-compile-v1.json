@@ -2,7 +2,7 @@
   "$schema": "https://sllm-project.local/ci/schema/rmsnorm-h3-compile-v1.schema.json",
   "schema_version": "rmsnorm-h3-compile-v1",
   "matrix_id": "rmsnorm-h3-compile-v1",
-  "revision": 6,
+  "revision": 7,
   "suite_id": "h3-rmsnorm-compile-only",
   "tier": "tier_h3_rmsnorm",
   "toolchain_id": "rocm-7.14.0",
@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "08f2b37f046961b2325e8d952759dc1ba19e7fe1c3777c41639a94d570d98a45"
+          "sha256": "9f4992ec02a87a5c13a70823f37350da8b7bee4f54befacb48ba4115cf79fb1a"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,10 +42,11 @@
           "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "987859f4bae5d2f73706a11ae708ca89bd43de9954b978dd3d0d0872d0e1dc05"
+      "source_set_sha256": "d118e863ca9ad85ad76f29577fd6c98c0f602dd4d69e8be342612481ebc59e25"
     },
     "host_abi": {
       "canonical_order": [
+        "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
         "native/hip/src/public_runtime.hip.cpp",
         "native/hip/src/public_runtime_internal.hpp",
         "native/hip/src/rmsnorm_api.cpp",
@@ -53,8 +54,12 @@
       ],
       "files": [
         {
+          "path": "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
+          "sha256": "957f00f695d4482335e0cb900d471915ca7981fe07d8b4cbdc5397546a58d2cf"
+        },
+        {
           "path": "native/hip/src/public_runtime.hip.cpp",
-          "sha256": "0f5c0e79a4512a97ba025845ace97a93d25e71c8bc4168ae63d44780a1f1cf37"
+          "sha256": "87e5a089e69fce047bc3969b4dc4c05e819e8801bcc1196203394dd56d02c3b3"
         },
         {
           "path": "native/hip/src/public_runtime_internal.hpp",
@@ -69,7 +74,7 @@
           "sha256": "62675cd693719f711541768a2f52182fdc22a98fc70d21fe66f6ea041df4be19"
         }
       ],
-      "source_set_sha256": "67a102fca4ad0927d7cb13f3561d500a943b1a09d0b81e4d371ca7bc2afa28b7"
+      "source_set_sha256": "6ea43e0dae9d586e77bed6b0633e719b5b9135d8f0cb04f27491aecd99da11fb"
     },
     "binding_build": {
       "canonical_order": [
@@ -82,11 +87,11 @@
       "files": [
         {
           "path": "crates/sllm-hip-sys/build.rs",
-          "sha256": "e53e0612e667612ff996d5f1cfaa49440caa21c76c1bef3e91de8e8dd1f7c731"
+          "sha256": "03418d3d310dd8887cb1fc1d411d67b0476d88af206c35a0103fbae8c24b231f"
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "d11d975d5606b1e0a29c70dea8215fe5d78418d1f04b4224d3b5bfacda12d82b"
+          "sha256": "8c2f3c91208858f1bdf04400f3a9c064823e12b367416445e6eeb1b8e8ea154c"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
@@ -94,14 +99,14 @@
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "82f28b17792245cd079ed526eb5891167d31f74e6fbbe6cf7ac85c7b9906bc1d"
+          "sha256": "6b212246496f25926410b459121586fe838fb55a64eb52656b601ad21087af2b"
         },
         {
           "path": "native/hip/CMakeLists.txt",
-          "sha256": "16aa2181da8eb9516fc96e88cd4afc6cbfec31949c1133579719187a0eeb2ffb"
+          "sha256": "3ace7e715e12660a5d738f771e414b660760f83114af7a710ccd2bb1e1fe2efd"
         }
       ],
-      "source_set_sha256": "f5ccbe67aac21cdc8c0281ef4ecea0a219bcf4663c51e0e16b76fc5af7f714c1"
+      "source_set_sha256": "0715d9ad4a2512eaaea01cbdc66cc8d1133ca1dbfdaaed6fd3f5b79c26ceb4ad"
     },
     "ci_contract": {
       "canonical_order": [
@@ -123,7 +128,7 @@
       "files": [
         {
           "path": "ci/schema/rmsnorm-h3-compile-v1.schema.json",
-          "sha256": "59c48ddc913e037a03d82ff0cde49f29be8d4c0d355d6ecaadfcadd986df9019"
+          "sha256": "082d1c1494921c9f6d88a48ad7c950a68ff474693f3732f1609185810e4bedcf"
         },
         {
           "path": "ci/schema/rmsnorm-h3-artifact-v1.schema.json",
@@ -143,15 +148,15 @@
         },
         {
           "path": "ci/tools/run_rmsnorm_h3_compile.py",
-          "sha256": "b28fe6cd5328d1707b0955cd4d71ac941d6c1711c3ac1b013f0180bedb525ce2"
+          "sha256": "c8d60c1d53c64049587905bd7db0ef09448d73b1e2fc5bb806b40cefae4f5d55"
         },
         {
           "path": "ci/tools/run_h3_public_runtime_compile.py",
-          "sha256": "10d41a1b081ff8586c1c4eede43d54f836f21fbd4ee7686ee5280e516bda8abe"
+          "sha256": "ac4e7199c0fdb1c8a6861ccabbdf3e32474f1648cb2cec1624b74d4fe7429146"
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "e250e2106b42dc535afa7bd328871cb885612790fe0429e2875cd41c4eb154aa"
+          "sha256": "f6bc0001a29cf2fc74e2ce3a5c6df1dd4854d179f3bee7c77abc87d57c46b3fb"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -178,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "55b1943fc74749746f17dbe2389a8c9e29c0defbb7187877a110410c4232424d"
+      "source_set_sha256": "f2a6412fe499a2b09c62e1144f868a90655e9bed85161c5bf97094f89ab9766c"
     }
   },
   "source_symbol_map": [
@@ -232,6 +237,10 @@
     "sllm_context_create",
     "sllm_context_probe",
     "sllm_context_release",
+    "sllm_deepseek_v4_moe_route_execute",
+    "sllm_deepseek_v4_moe_route_plan_release",
+    "sllm_deepseek_v4_moe_route_prepare",
+    "sllm_deepseek_v4_moe_route_query",
     "sllm_device_count",
     "sllm_device_query",
     "sllm_elementwise_execute",
@@ -278,6 +287,13 @@
     "sllm_matmul_execute",
     "sllm_matmul_plan_release",
     "sllm_matmul_prepare",
+    "sllm_minimax_m3_moe_route_execute",
+    "sllm_minimax_m3_moe_route_plan_release",
+    "sllm_minimax_m3_moe_route_prepare",
+    "sllm_minimax_m3_moe_route_query",
+    "sllm_ministral3_yarn_execute",
+    "sllm_ministral3_yarn_plan_release",
+    "sllm_ministral3_yarn_prepare",
     "sllm_mlp_gate_up_silu_bundle_execute",
     "sllm_mlp_gate_up_silu_bundle_plan_release",
     "sllm_mlp_gate_up_silu_bundle_prepare",
@@ -348,7 +364,7 @@
         "language_standard": "gnu++17",
         "sources": [
           "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "native/hip/src/public_runtime.hip.cpp",
+          "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
           "native/hip/src/rmsnorm_api.cpp"
         ],
         "commands": [
@@ -392,7 +408,7 @@
             "-x",
             "hip",
             "-c",
-            "{repo}/native/hip/src/public_runtime.hip.cpp"
+            "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp"
           ],
           [
             "/opt/rocm/bin/amdclang++",
@@ -438,11 +454,14 @@
             "{repo}/native/hip/src/argmax_api.cpp",
             "{repo}/native/hip/src/attention_preprocess_api.cpp",
             "{repo}/native/hip/src/causal_attention_api.cpp",
+            "{repo}/native/hip/src/deepseek_v4_moe_route_api.cpp",
             "{repo}/native/hip/src/elementwise_api.cpp",
             "{repo}/native/hip/src/embedding_api.cpp",
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/minimax_m3_moe_route_api.cpp",
+            "{repo}/native/hip/src/ministral3_yarn_api.cpp",
             "{repo}/native/hip/src/moe_expert_api.cpp",
             "{repo}/native/hip/src/moe_route_api.cpp",
             "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
@@ -454,6 +473,7 @@
             "{repo}/native/hip/src/argmax_kernel.hip.cpp",
             "{repo}/native/hip/src/attention_preprocess_kernel.hip.cpp",
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/deepseek_v4_moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
             "{repo}/native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
@@ -461,6 +481,8 @@
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/minimax_m3_moe_route_kernel.hip.cpp",
+            "{repo}/native/hip/src/ministral3_yarn_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",
@@ -530,7 +552,7 @@
         "language_standard": "gnu++17",
         "sources": [
           "native/hip/src/rmsnorm_kernel.hip.cpp",
-          "native/hip/src/public_runtime.hip.cpp",
+          "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
           "native/hip/src/rmsnorm_api.cpp"
         ],
         "commands": [
@@ -574,7 +596,7 @@
             "-x",
             "hip",
             "-c",
-            "{repo}/native/hip/src/public_runtime.hip.cpp"
+            "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp"
           ],
           [
             "/opt/rocm/bin/amdclang++",
@@ -620,11 +642,14 @@
             "{repo}/native/hip/src/argmax_api.cpp",
             "{repo}/native/hip/src/attention_preprocess_api.cpp",
             "{repo}/native/hip/src/causal_attention_api.cpp",
+            "{repo}/native/hip/src/deepseek_v4_moe_route_api.cpp",
             "{repo}/native/hip/src/elementwise_api.cpp",
             "{repo}/native/hip/src/embedding_api.cpp",
             "{repo}/native/hip/src/kv_state_api.cpp",
             "{repo}/native/hip/src/linear_attention_api.cpp",
             "{repo}/native/hip/src/matmul_api.cpp",
+            "{repo}/native/hip/src/minimax_m3_moe_route_api.cpp",
+            "{repo}/native/hip/src/ministral3_yarn_api.cpp",
             "{repo}/native/hip/src/moe_expert_api.cpp",
             "{repo}/native/hip/src/moe_route_api.cpp",
             "{repo}/native/hip/src/residual_rmsnorm_api.cpp",
@@ -636,6 +661,7 @@
             "{repo}/native/hip/src/argmax_kernel.hip.cpp",
             "{repo}/native/hip/src/attention_preprocess_kernel.hip.cpp",
             "{repo}/native/hip/src/causal_attention_kernel.hip.cpp",
+            "{repo}/native/hip/src/deepseek_v4_moe_route_kernel.hip.cpp",
             "{repo}/native/hip/src/elementwise_kernel.hip.cpp",
             "{repo}/native/hip/src/embedding_kernel.hip.cpp",
             "{repo}/native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
@@ -643,6 +669,8 @@
             "{repo}/native/hip/src/kv_state_kernel.hip.cpp",
             "{repo}/native/hip/src/linear_attention_kernel.hip.cpp",
             "{repo}/native/hip/src/matmul_kernel.hip.cpp",
+            "{repo}/native/hip/src/minimax_m3_moe_route_kernel.hip.cpp",
+            "{repo}/native/hip/src/ministral3_yarn_kernel.hip.cpp",
             "{repo}/native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_expert_kernel.hip.cpp",
             "{repo}/native/hip/src/moe_route_kernel.hip.cpp",

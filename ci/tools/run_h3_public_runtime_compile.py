@@ -48,18 +48,21 @@ EXPECTED_FEATURES = {"xnack": "unsupported", "sramecc": "unsupported", "generic_
 EXPECTED_SOURCE_PATHS = (
     "include/sllm/hip.h",
     "native/hip/src/hip_compile_probe.hip.cpp",
-    "native/hip/src/public_runtime.hip.cpp",
+    "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
     "native/hip/src/public_runtime_internal.hpp",
 )
 PUBLIC_RUNTIME_API_SOURCE_PATHS = (
     "native/hip/src/argmax_api.cpp",
     "native/hip/src/attention_preprocess_api.cpp",
     "native/hip/src/causal_attention_api.cpp",
+    "native/hip/src/deepseek_v4_moe_route_api.cpp",
     "native/hip/src/elementwise_api.cpp",
     "native/hip/src/embedding_api.cpp",
     "native/hip/src/kv_state_api.cpp",
     "native/hip/src/linear_attention_api.cpp",
     "native/hip/src/matmul_api.cpp",
+    "native/hip/src/minimax_m3_moe_route_api.cpp",
+    "native/hip/src/ministral3_yarn_api.cpp",
     "native/hip/src/moe_expert_api.cpp",
     "native/hip/src/moe_route_api.cpp",
     "native/hip/src/rmsnorm_api.cpp",
@@ -72,6 +75,7 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/argmax_kernel.hip.cpp",
     "native/hip/src/attention_preprocess_kernel.hip.cpp",
     "native/hip/src/causal_attention_kernel.hip.cpp",
+    "native/hip/src/deepseek_v4_moe_route_kernel.hip.cpp",
     "native/hip/src/elementwise_kernel.hip.cpp",
     "native/hip/src/embedding_kernel.hip.cpp",
     "native/hip/src/gdn_projection_bundle_kernel.hip.cpp",
@@ -79,6 +83,8 @@ PUBLIC_RUNTIME_KERNEL_SOURCE_PATHS = (
     "native/hip/src/kv_state_kernel.hip.cpp",
     "native/hip/src/linear_attention_kernel.hip.cpp",
     "native/hip/src/matmul_kernel.hip.cpp",
+    "native/hip/src/minimax_m3_moe_route_kernel.hip.cpp",
+    "native/hip/src/ministral3_yarn_kernel.hip.cpp",
     "native/hip/src/mlp_gate_up_silu_bundle_kernel.hip.cpp",
     "native/hip/src/moe_expert_kernel.hip.cpp",
     "native/hip/src/moe_route_kernel.hip.cpp",
@@ -96,6 +102,9 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/causal_attention_api.hpp",
     "native/hip/src/causal_attention_kernel_internal.hpp",
     "native/hip/src/causal_attention_runtime.inc",
+    "native/hip/src/deepseek_v4_moe_route_api.hpp",
+    "native/hip/src/deepseek_v4_moe_route_kernel_internal.hpp",
+    "native/hip/src/deepseek_v4_moe_route_runtime.inc",
     "native/hip/src/elementwise_api.hpp",
     "native/hip/src/elementwise_kernel_internal.hpp",
     "native/hip/src/embedding_api.hpp",
@@ -113,6 +122,12 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/matmul_api.hpp",
     "native/hip/src/matmul_kernel_internal.hpp",
     "native/hip/src/matmul_runtime.inc",
+    "native/hip/src/minimax_m3_moe_route_api.hpp",
+    "native/hip/src/minimax_m3_moe_route_kernel_internal.hpp",
+    "native/hip/src/minimax_m3_moe_route_runtime.inc",
+    "native/hip/src/ministral3_yarn_api.hpp",
+    "native/hip/src/ministral3_yarn_kernel_internal.hpp",
+    "native/hip/src/ministral3_yarn_runtime.inc",
     "native/hip/src/mlp_gate_up_silu_bundle_kernel_internal.hpp",
     "native/hip/src/mlp_gate_up_silu_bundle_runtime.inc",
     "native/hip/src/moe_expert_api.hpp",
@@ -121,6 +136,7 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/moe_route_api.hpp",
     "native/hip/src/moe_route_kernel_internal.hpp",
     "native/hip/src/moe_route_runtime.inc",
+    "native/hip/src/public_runtime.hip.cpp",
     "native/hip/src/residual_rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_api.hpp",
     "native/hip/src/rmsnorm_kernel_internal.hpp",
@@ -163,6 +179,8 @@ PUBLIC_SYMBOLS = tuple(sorted({
     "sllm_completion_query", "sllm_completion_read", "sllm_completion_release",
     "sllm_completion_timing", "sllm_completion_wait", "sllm_context_create",
     "sllm_context_probe", "sllm_context_release", "sllm_device_count",
+    "sllm_deepseek_v4_moe_route_execute", "sllm_deepseek_v4_moe_route_plan_release",
+    "sllm_deepseek_v4_moe_route_prepare", "sllm_deepseek_v4_moe_route_query",
     "sllm_device_query", "sllm_elementwise_execute", "sllm_elementwise_plan_release",
     "sllm_elementwise_prepare", "sllm_embedding_execute", "sllm_embedding_plan_release",
     "sllm_embedding_prepare", "sllm_event_create", "sllm_event_release",
@@ -178,6 +196,10 @@ PUBLIC_SYMBOLS = tuple(sorted({
     "sllm_linear_attention_state_image_query", "sllm_linear_attention_state_import", "sllm_linear_attention_state_import_finalize",
     "sllm_linear_attention_state_query", "sllm_linear_attention_state_release", "sllm_linear_attention_state_rewind_last",
     "sllm_matmul_execute", "sllm_matmul_plan_release", "sllm_matmul_prepare",
+    "sllm_minimax_m3_moe_route_execute", "sllm_minimax_m3_moe_route_plan_release",
+    "sllm_minimax_m3_moe_route_prepare", "sllm_minimax_m3_moe_route_query",
+    "sllm_ministral3_yarn_execute", "sllm_ministral3_yarn_plan_release",
+    "sllm_ministral3_yarn_prepare",
     "sllm_mlp_gate_up_silu_bundle_execute", "sllm_mlp_gate_up_silu_bundle_plan_release", "sllm_mlp_gate_up_silu_bundle_prepare",
     "sllm_moe_expert_execute", "sllm_moe_expert_plan_release", "sllm_moe_expert_prepare",
     "sllm_moe_route_execute", "sllm_moe_route_plan_release", "sllm_moe_route_prepare",
@@ -224,6 +246,8 @@ KERNEL_SYMBOLS = (
     "sllm_argmax_bf16_f32_v1",
     "sllm_attention_preprocess_headwise_norm_rope_v1",
     "sllm_attention_preprocess_headwise_norm_rope_wave32_v1",
+    "sllm_deepseek_v4_moe_route_score_hash_v1",
+    "sllm_deepseek_v4_moe_route_stable_group_v1",
     "sllm_elementwise_add_bf16_fp32_v1",
     "sllm_elementwise_broadcast_add_bf16_fp32_v1",
     "sllm_elementwise_copy_bf16_v1",
@@ -262,6 +286,9 @@ KERNEL_SYMBOLS = (
     "sllm_matmul_nvfp4_block16_packed_dequant_v1",
     "sllm_matmul_nvfp4_block16_prefill_row8_tiled256_v2",
     "sllm_matmul_nvfp4_w4a4_block16_packed_v1",
+    "sllm_minimax_m3_moe_route_sigmoid_top4_v1",
+    "sllm_minimax_m3_moe_route_stable_group_v1",
+    "sllm_ministral3_yarn_bf16_v1",
     "sllm_mlp_gate_up_silu_bundle_bf16_fp32_decode_v1",
     "sllm_moe_down_combine_v1",
     "sllm_moe_route_bf16_stable_topk_v1",
@@ -868,7 +895,7 @@ def expected_build_commands() -> list[list[str]]:
             "-I", "{repo}/include", "-I", "{repo}/native/hip/src", "--offload-arch={target}",
             "-mcode-object-version=6", "-mno-wavefrontsize64", "-o",
             "{build_dir}/public-runtime-{target}.o", "-x", "hip", "-c",
-            "{repo}/native/hip/src/public_runtime.hip.cpp",
+            "{repo}/native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp",
         ],
         [
             "/opt/rocm/bin/amdclang++", "-D__HIP_ROCclr__=1", "-O3", "-DNDEBUG", "-std=gnu++17",
@@ -907,7 +934,7 @@ def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[st
     toolchain = read_json(repo / "ci/toolchains/rocm-7.14.0.json")
     if set(matrix) != {"$schema", "schema_version", "matrix_id", "revision", "toolchain_id", "container", "sources", "direct_compile_sources", "public_abi_symbols", "targets", "rows"}:
         raise RuntimeContractError("public-runtime matrix has missing or unknown top-level fields")
-    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 10:
+    if matrix.get("schema_version") != "hip-runtime-compile-v1" or matrix.get("matrix_id") != "hip-runtime-compile-v1" or matrix.get("revision") != 11:
         raise RuntimeContractError("public-runtime matrix identity is invalid")
     if matrix.get("toolchain_id") != "rocm-7.14.0" or matrix.get("targets") != list(TARGETS):
         raise RuntimeContractError("public-runtime matrix is not bound to ROCm 7.14.0 and the exact two targets")
@@ -957,7 +984,7 @@ def validate_matrix(repo: Path) -> tuple[dict[str, Any], dict[str, Any], dict[st
             raise RuntimeContractError(f"{row_id} build fields are missing or unknown")
         if build.get("commands") != expected_build_commands():
             raise RuntimeContractError(f"{row_id} commands are not the exact five-command generic build")
-        if build.get("probe_source") != "native/hip/src/hip_compile_probe.hip.cpp" or build.get("public_runtime_source") != "native/hip/src/public_runtime.hip.cpp" or build.get("public_runtime_header") != "native/hip/src/public_runtime_internal.hpp" or build.get("rmsnorm_kernel_source") != "native/hip/src/rmsnorm_kernel.hip.cpp" or build.get("rmsnorm_kernel_header") != "native/hip/src/rmsnorm_kernel_internal.hpp" or build.get("rmsnorm_api_source") != "native/hip/src/rmsnorm_api.cpp" or build.get("rmsnorm_api_header") != "native/hip/src/rmsnorm_api.hpp" or build.get("link_library") != "/opt/rocm/lib/libamdhip64.so":
+        if build.get("probe_source") != "native/hip/src/hip_compile_probe.hip.cpp" or build.get("public_runtime_source") != "native/hip/src/minimax_m3_moe_route_public_runtime.hip.cpp" or build.get("public_runtime_header") != "native/hip/src/public_runtime_internal.hpp" or build.get("rmsnorm_kernel_source") != "native/hip/src/rmsnorm_kernel.hip.cpp" or build.get("rmsnorm_kernel_header") != "native/hip/src/rmsnorm_kernel_internal.hpp" or build.get("rmsnorm_api_source") != "native/hip/src/rmsnorm_api.cpp" or build.get("rmsnorm_api_header") != "native/hip/src/rmsnorm_api.hpp" or build.get("link_library") != "/opt/rocm/lib/libamdhip64.so":
             raise RuntimeContractError(f"{row_id} source paths are not the public-runtime tuple")
         if row.get("output") != EXPECTED_OUTPUT:
             raise RuntimeContractError(f"{row_id} output contract is not row-private and versioned")

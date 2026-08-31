@@ -1,13 +1,25 @@
 use core::fmt;
 
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use sllm_core::{FrontendAssetKind, GgufValue, ModelLock, VerifiedCache, VerifiedGguf};
+use sllm_core::{
+    FrontendAssetKind, GEMMA4_MOE_MODEL_FINGERPRINT, GgufValue, ModelLock, VerifiedCache,
+    VerifiedGguf,
+};
+
+use crate::tokenizer::has_reviewed_gemma4_moe_gguf_identity;
+use crate::{GenericTemplateErrorV1, GenericTemplateIdentityV1, GenericTemplateProviderV1};
 
 pub const QWEN35_CHAT_RENDERER_VERSION: u8 = 1;
 pub const QWEN35_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
 pub const QWEN35_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_756;
 pub const QWEN35_CHAT_TEMPLATE_SHA256: &str =
     "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
+
+pub const GEMMA4_MOE_CHAT_TEMPLATE_FILENAME: &str = "chat_template.jinja";
+pub const GEMMA4_MOE_CHAT_TEMPLATE_SIZE_BYTES: usize = 16_934;
+pub const GEMMA4_MOE_CHAT_TEMPLATE_SHA256: &str =
+    "94899c0f917d93f6fe81c95744d1e8ddab2d21d39228d2e4aec1fb2a25bff413";
 
 const QWEN35_2B_CHAT_TEMPLATE_SIZE_BYTES: u64 = 7_755;
 const QWEN35_2B_CHAT_TEMPLATE_SHA256: &str =
@@ -77,6 +89,16 @@ pub struct Qwen35RenderOptionsV1 {
     pub add_generation_prompt: bool,
     pub thinking: ThinkingModeV1,
 }
+
+/// Model-neutral spelling for the canonical text-only chat message contract.
+///
+/// The Qwen-prefixed name remains the defining public type so existing callers
+/// and pattern matches remain source compatible. New model adapters can use
+/// this alias without claiming Qwen-specific prompt semantics.
+pub type ChatMessageV1 = Qwen35ChatMessageV1;
+
+/// Model-neutral spelling for the shared chat rendering options.
+pub type ChatRenderOptionsV1 = Qwen35RenderOptionsV1;
 
 impl Default for Qwen35RenderOptionsV1 {
     fn default() -> Self {
@@ -311,6 +333,385 @@ impl fmt::Display for ChatRenderError {
 }
 
 impl std::error::Error for ChatRenderError {}
+
+/// Errors produced by the additive model-neutral renderer boundary.
+///
+/// The existing [`ChatRenderError`] stays closed and source compatible for
+/// callers which exhaustively match the reviewed Qwen error contract.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ChatTemplateRendererErrorV1 {
+    Chat(ChatRenderError),
+    GenericTemplate(GenericTemplateErrorV1),
+    EmptyTemplateOutput,
+}
+
+impl fmt::Display for ChatTemplateRendererErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Chat(error) => error.fmt(formatter),
+            Self::GenericTemplate(error) => {
+                write!(formatter, "generic chat template failed: {error}")
+            }
+            Self::EmptyTemplateOutput => {
+                formatter.write_str("generic chat template rendered an empty prompt")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ChatTemplateRendererErrorV1 {}
+
+impl From<ChatRenderError> for ChatTemplateRendererErrorV1 {
+    fn from(error: ChatRenderError) -> Self {
+        Self::Chat(error)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Gemma4MoeChatTemplateErrorV1 {
+    UnsupportedIdentity,
+    TemplateUnavailable,
+    GenericTemplate(GenericTemplateErrorV1),
+}
+
+impl fmt::Display for Gemma4MoeChatTemplateErrorV1 {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedIdentity => {
+                formatter.write_str("Gemma 4 MoE chat template identity differs")
+            }
+            Self::TemplateUnavailable => {
+                formatter.write_str("Gemma 4 MoE chat template is unavailable")
+            }
+            Self::GenericTemplate(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for Gemma4MoeChatTemplateErrorV1 {}
+
+/// Additional data admitted to a reviewed generic chat template.
+///
+/// Only fixed special-token strings and a model default for the existing
+/// thinking switch are configurable. Request-defined kwargs, tool metadata,
+/// loaders, includes, imports, and inheritance are not introduced here.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct GenericChatTemplateConfigV1 {
+    special_tokens: Map<String, Value>,
+    default_thinking: bool,
+}
+
+impl GenericChatTemplateConfigV1 {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_special_token(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.special_tokens
+            .insert(name.into(), Value::String(value.into()));
+        self
+    }
+
+    pub const fn with_default_thinking(mut self, default_thinking: bool) -> Self {
+        self.default_thinking = default_thinking;
+        self
+    }
+
+    pub fn special_tokens(&self) -> &Map<String, Value> {
+        &self.special_tokens
+    }
+
+    pub const fn default_thinking(&self) -> bool {
+        self.default_thinking
+    }
+}
+
+/// Exact reviewed Gemma 4 MoE instruction-template owner.
+///
+/// Construction accepts only the fixed source artifact or its canonical
+/// `gemma4moe` GGUF identity. The owned provider uses the same bounded generic
+/// engine with a narrowly extended reviewed-Gemma builtin profile.
+#[derive(Clone, Debug)]
+pub struct Gemma4MoeChatTemplateV1 {
+    provider: GenericTemplateProviderV1,
+    config: GenericChatTemplateConfigV1,
+    consistency_label: String,
+}
+
+impl Gemma4MoeChatTemplateV1 {
+    pub fn from_verified_artifact(
+        artifact: &sllm_core::VerifiedGemma4Moe,
+    ) -> Result<Self, Gemma4MoeChatTemplateErrorV1> {
+        let bytes = artifact
+            .read_support_file(GEMMA4_MOE_CHAT_TEMPLATE_FILENAME)
+            .map_err(|_| Gemma4MoeChatTemplateErrorV1::TemplateUnavailable)?;
+        Self::from_verified_bytes(&bytes, GEMMA4_MOE_MODEL_FINGERPRINT)
+    }
+
+    pub fn from_gemma4_moe_gguf(gguf: &VerifiedGguf) -> Result<Self, Gemma4MoeChatTemplateErrorV1> {
+        if !has_reviewed_gemma4_moe_gguf_identity(gguf)
+            || !gemma4_moe_gguf_template_digest_matches(
+                gguf.metadata_value("tokenizer.chat_template.sha256"),
+            )
+        {
+            return Err(Gemma4MoeChatTemplateErrorV1::UnsupportedIdentity);
+        }
+        let bytes = match gguf.metadata_value("tokenizer.chat_template") {
+            Some(GgufValue::String(value)) => value.as_bytes(),
+            _ => return Err(Gemma4MoeChatTemplateErrorV1::TemplateUnavailable),
+        };
+        let consistency_label = format!("gemma4moe:{GEMMA4_MOE_MODEL_FINGERPRINT}");
+        Self::from_verified_bytes(bytes, &consistency_label)
+    }
+
+    fn from_verified_bytes(
+        bytes: &[u8],
+        consistency_label: &str,
+    ) -> Result<Self, Gemma4MoeChatTemplateErrorV1> {
+        let semantic_identity = format!("gemma4moe:{GEMMA4_MOE_MODEL_FINGERPRINT}");
+        if consistency_label != GEMMA4_MOE_MODEL_FINGERPRINT
+            && consistency_label != semantic_identity
+        {
+            return Err(Gemma4MoeChatTemplateErrorV1::UnsupportedIdentity);
+        }
+        if bytes.len() != GEMMA4_MOE_CHAT_TEMPLATE_SIZE_BYTES {
+            return Err(Gemma4MoeChatTemplateErrorV1::UnsupportedIdentity);
+        }
+        let expected_digest = format!("sha256:{GEMMA4_MOE_CHAT_TEMPLATE_SHA256}");
+        let provider =
+            GenericTemplateProviderV1::from_reviewed_gemma4_bytes(bytes, &expected_digest)
+                .map_err(Gemma4MoeChatTemplateErrorV1::GenericTemplate)?;
+        let config = GenericChatTemplateConfigV1::new()
+            .with_special_token("bos", "<bos>")
+            .with_special_token("bos_token", "<bos>")
+            .with_special_token("eos", "<eos>")
+            .with_special_token("eos_token", "<eos>")
+            .with_special_token("pad_token", "<pad>")
+            .with_special_token("unk_token", "<unk>")
+            .with_special_token("mask_token", "<mask>")
+            .with_default_thinking(false);
+        Ok(Self {
+            provider,
+            config,
+            consistency_label: consistency_label.to_owned(),
+        })
+    }
+
+    pub fn renderer(&self) -> ChatTemplateRendererV1<'_> {
+        ChatTemplateRendererV1::generic_with_config(&self.provider, self.config.clone())
+    }
+
+    pub fn provider(&self) -> &GenericTemplateProviderV1 {
+        &self.provider
+    }
+
+    pub fn config(&self) -> &GenericChatTemplateConfigV1 {
+        &self.config
+    }
+
+    pub fn consistency_label(&self) -> &str {
+        &self.consistency_label
+    }
+}
+
+fn gemma4_moe_gguf_template_digest_matches(value: Option<&GgufValue>) -> bool {
+    let expected = format!("sha256:{GEMMA4_MOE_CHAT_TEMPLATE_SHA256}");
+    matches!(value, Some(GgufValue::String(digest)) if digest == &expected)
+}
+
+/// The bounded result of rendering one canonical chat request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChatTemplateRenderResultV1 {
+    rendered: String,
+    generic_identity: Option<GenericTemplateIdentityV1>,
+}
+
+impl ChatTemplateRenderResultV1 {
+    fn qwen35(rendered: String) -> Self {
+        Self {
+            rendered,
+            generic_identity: None,
+        }
+    }
+
+    fn generic(rendered: String, identity: GenericTemplateIdentityV1) -> Self {
+        Self {
+            rendered,
+            generic_identity: Some(identity),
+        }
+    }
+
+    pub fn rendered(&self) -> &str {
+        &self.rendered
+    }
+
+    pub fn text(&self) -> &str {
+        self.rendered()
+    }
+
+    pub fn generic_identity(&self) -> Option<&GenericTemplateIdentityV1> {
+        self.generic_identity.as_ref()
+    }
+}
+
+/// Borrowed, model-neutral renderer selected by a resident model owner.
+///
+/// `Qwen35` delegates byte-for-byte to the reviewed handwritten renderer.
+/// `Generic` admits only the bounded, digest-verified provider and supplies a
+/// closed text-chat context. The provider's existing sandbox, fuel,
+/// recursion, context, and output limits remain the sole template engine
+/// contract.
+#[derive(Clone, Debug)]
+pub enum ChatTemplateRendererV1<'a> {
+    Qwen35(&'a Qwen35ChatTemplateV1),
+    Generic {
+        provider: &'a GenericTemplateProviderV1,
+        config: GenericChatTemplateConfigV1,
+    },
+}
+
+impl<'a> ChatTemplateRendererV1<'a> {
+    pub const fn qwen35(renderer: &'a Qwen35ChatTemplateV1) -> Self {
+        Self::Qwen35(renderer)
+    }
+
+    pub fn generic(provider: &'a GenericTemplateProviderV1) -> Self {
+        Self::generic_with_config(provider, GenericChatTemplateConfigV1::default())
+    }
+
+    pub const fn generic_with_config(
+        provider: &'a GenericTemplateProviderV1,
+        config: GenericChatTemplateConfigV1,
+    ) -> Self {
+        Self::Generic { provider, config }
+    }
+
+    pub fn render(
+        &self,
+        messages: &[ChatMessageV1],
+        options: ChatRenderOptionsV1,
+    ) -> Result<ChatTemplateRenderResultV1, ChatTemplateRendererErrorV1> {
+        match self {
+            Self::Qwen35(renderer) => renderer
+                .render(messages, options)
+                .map_err(ChatTemplateRendererErrorV1::Chat)
+                .map(ChatTemplateRenderResultV1::qwen35),
+            Self::Generic { provider, config } => {
+                render_generic_chat(provider, config, messages, options)
+            }
+        }
+    }
+
+    pub fn render_with_assistant_prefill(
+        &self,
+        messages: &[ChatMessageV1],
+        options: ChatRenderOptionsV1,
+    ) -> Result<ChatTemplateRenderResultV1, ChatTemplateRendererErrorV1> {
+        match self {
+            Self::Qwen35(renderer) => renderer
+                .render_with_assistant_prefill(messages, options, "")
+                .map_err(ChatTemplateRendererErrorV1::Chat)
+                .map(ChatTemplateRenderResultV1::qwen35),
+            Self::Generic { provider, config } => render_generic_chat(
+                provider,
+                config,
+                messages,
+                ChatRenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking: options.thinking,
+                },
+            ),
+        }
+    }
+
+    pub fn render_untrusted(
+        &self,
+        request: UntrustedChatRequestV1,
+    ) -> Result<ChatTemplateRenderResultV1, ChatTemplateRendererErrorV1> {
+        let (messages, options) =
+            validate_untrusted_request(request).map_err(ChatTemplateRendererErrorV1::Chat)?;
+        self.render(&messages, options)
+    }
+}
+
+fn render_generic_chat(
+    provider: &GenericTemplateProviderV1,
+    config: &GenericChatTemplateConfigV1,
+    messages: &[ChatMessageV1],
+    options: ChatRenderOptionsV1,
+) -> Result<ChatTemplateRenderResultV1, ChatTemplateRendererErrorV1> {
+    validate_typed_messages(messages).map_err(ChatTemplateRendererErrorV1::Chat)?;
+
+    let messages = messages
+        .iter()
+        .map(|message| match message {
+            ChatMessageV1::System { content } => generic_text_message("system", content),
+            ChatMessageV1::User { content } => generic_text_message("user", content),
+            ChatMessageV1::Assistant {
+                content,
+                reasoning_content,
+            } => {
+                let mut value = Map::new();
+                value.insert("role".to_owned(), Value::String("assistant".to_owned()));
+                value.insert("content".to_owned(), Value::String(content.clone()));
+                value.insert("reasoning".to_owned(), Value::Null);
+                value.insert(
+                    "reasoning_content".to_owned(),
+                    reasoning_content
+                        .as_ref()
+                        .map_or(Value::Null, |content| Value::String(content.clone())),
+                );
+                value.insert("tool_calls".to_owned(), Value::Null);
+                value.insert("tool_responses".to_owned(), Value::Null);
+                Value::Object(value)
+            }
+        })
+        .collect();
+    let enable_thinking = match options.thinking {
+        ThinkingModeV1::TemplateDefault => config.default_thinking,
+        ThinkingModeV1::Enabled => true,
+        ThinkingModeV1::Disabled => false,
+    };
+    let mut context = Map::new();
+    context.insert("messages".to_owned(), Value::Array(messages));
+    context.insert("tools".to_owned(), Value::Array(Vec::new()));
+    context.insert(
+        "special_tokens".to_owned(),
+        Value::Object(config.special_tokens.clone()),
+    );
+    context.insert(
+        "add_generation_prompt".to_owned(),
+        Value::Bool(options.add_generation_prompt),
+    );
+    context.insert("enable_thinking".to_owned(), Value::Bool(enable_thinking));
+    context.insert("kwargs".to_owned(), Value::Object(Map::new()));
+    context.insert("custom_kwargs".to_owned(), Value::Object(Map::new()));
+    for (name, value) in &config.special_tokens {
+        context.insert(name.clone(), value.clone());
+    }
+
+    let result = provider
+        .render_json(Value::Object(context))
+        .map_err(ChatTemplateRendererErrorV1::GenericTemplate)?;
+    if result.rendered().is_empty() {
+        return Err(ChatTemplateRendererErrorV1::EmptyTemplateOutput);
+    }
+    Ok(ChatTemplateRenderResultV1::generic(
+        result.rendered().to_owned(),
+        result.identity().clone(),
+    ))
+}
+
+fn generic_text_message(role: &str, content: &str) -> Value {
+    serde_json::json!({
+        "role": role,
+        "content": content,
+        "reasoning": null,
+        "reasoning_content": null,
+        "tool_calls": null,
+        "tool_responses": null,
+    })
+}
 
 /// Versioned renderer for the one reviewed Qwen3.5 text-only template.
 ///
@@ -1275,6 +1676,113 @@ mod tests {
             validate_template_bytes(&invalid_utf8, &"0".repeat(64)),
             Err(ChatRenderError::UnsupportedTemplateIdentity)
         );
+    }
+
+    #[test]
+    fn model_neutral_qwen_adapter_is_bit_exact_for_every_golden_case() {
+        let renderer = renderer();
+        let adapter = ChatTemplateRendererV1::qwen35(&renderer);
+        for case in positive_cases() {
+            let direct = renderer
+                .render(&case.messages, case.options)
+                .expect("reviewed Qwen case renders directly");
+            let adapted = adapter
+                .render(&case.messages, case.options)
+                .expect("reviewed Qwen case renders through shared adapter");
+            assert_eq!(adapted.rendered(), direct, "case {}", case.case_id);
+            assert_eq!(adapted.generic_identity(), None);
+        }
+    }
+
+    #[test]
+    fn gemma4_moe_source_factory_rejects_wrong_identity_and_template_bytes() {
+        let bytes = vec![b'x'; GEMMA4_MOE_CHAT_TEMPLATE_SIZE_BYTES];
+        assert!(matches!(
+            Gemma4MoeChatTemplateV1::from_verified_bytes(
+                &bytes,
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+            Err(Gemma4MoeChatTemplateErrorV1::UnsupportedIdentity)
+        ));
+        assert!(matches!(
+            Gemma4MoeChatTemplateV1::from_verified_bytes(&bytes, GEMMA4_MOE_MODEL_FINGERPRINT,),
+            Err(Gemma4MoeChatTemplateErrorV1::GenericTemplate(
+                GenericTemplateErrorV1::DigestMismatch { .. }
+            ))
+        ));
+        assert!(matches!(
+            Gemma4MoeChatTemplateV1::from_verified_bytes(
+                &bytes[..bytes.len() - 1],
+                GEMMA4_MOE_MODEL_FINGERPRINT,
+            ),
+            Err(Gemma4MoeChatTemplateErrorV1::UnsupportedIdentity)
+        ));
+    }
+
+    #[test]
+    fn gemma4_moe_gguf_template_digest_uses_canonical_prefixed_form() {
+        let canonical = GgufValue::String(format!("sha256:{GEMMA4_MOE_CHAT_TEMPLATE_SHA256}"));
+        let legacy_unprefixed = GgufValue::String(GEMMA4_MOE_CHAT_TEMPLATE_SHA256.to_owned());
+        assert!(gemma4_moe_gguf_template_digest_matches(Some(&canonical)));
+        assert!(!gemma4_moe_gguf_template_digest_matches(Some(
+            &legacy_unprefixed
+        )));
+        assert!(!gemma4_moe_gguf_template_digest_matches(None));
+    }
+
+    #[test]
+    fn reviewed_gemma_profile_renders_unicode_chat_and_opens_assistant_prefill() {
+        let source = concat!(
+            "{%- set ns = namespace(count=0) -%}",
+            "{{ bos_token }}",
+            "{%- for i in range(messages|length) -%}",
+            "{%- set ns.count = ns.count + 1 -%}",
+            "{{ messages[i].role|upper }}={{ messages[i].content }};",
+            "{%- endfor -%}",
+            "[{{ ['a', 'b']|map('upper')|list|join(',') }}:{{ {'z': 1, 'a': 2}|dictsort|length }}:{{ ns.count }}]",
+            "{%- if add_generation_prompt -%}MODEL={%- endif -%}",
+        );
+        let expected_digest = format!("sha256:{:x}", Sha256::digest(source.as_bytes()));
+        let provider = GenericTemplateProviderV1::from_reviewed_gemma4_bytes(
+            source.as_bytes(),
+            &expected_digest,
+        )
+        .expect("reviewed Gemma builtins compile");
+        let config = GenericChatTemplateConfigV1::new()
+            .with_special_token("bos_token", "<bos>")
+            .with_default_thinking(false);
+        let renderer = ChatTemplateRendererV1::generic_with_config(&provider, config);
+        let messages = vec![
+            ChatMessageV1::system("規則 {{ data }}"),
+            ChatMessageV1::user("雪 🌍"),
+            ChatMessageV1::assistant("答え", None),
+            ChatMessageV1::user("続けて"),
+        ];
+        let rendered = renderer
+            .render(&messages, ChatRenderOptionsV1::default())
+            .expect("reviewed Gemma profile renders ordinary chat");
+        assert_eq!(
+            rendered.rendered(),
+            "<bos>SYSTEM=規則 {{ data }};USER=雪 🌍;ASSISTANT=答え;USER=続けて;[A,B:2:4]MODEL="
+        );
+        assert_eq!(
+            rendered
+                .generic_identity()
+                .expect("generic identity retained")
+                .profile_version(),
+            crate::GENERIC_TEMPLATE_REVIEWED_GEMMA4_PROFILE_VERSION_V1
+        );
+
+        let continued = renderer
+            .render_with_assistant_prefill(
+                &messages,
+                ChatRenderOptionsV1 {
+                    add_generation_prompt: false,
+                    thinking: ThinkingModeV1::Disabled,
+                },
+            )
+            .expect("assistant prefill forces the model turn marker");
+        assert!(continued.rendered().ends_with("MODEL="));
     }
 
     #[test]

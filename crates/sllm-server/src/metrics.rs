@@ -1,14 +1,14 @@
 //! Bounded, dependency-free Prometheus metrics for the server.
 //!
-//! The metrics registry is deliberately built from the served model aliases at
-//! startup.  No request value is ever used as a label.  In particular, a
+//! The metrics registry is deliberately built from or explicitly extended by
+//! the bounded served model catalog. No request value is ever used as a label. In particular, a
 //! request id, prompt, generated token, API key, path, or backend error string
 //! must not reach this module.  This keeps both the number of series and the
 //! amount of memory used by the exporter bounded independently of traffic.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use crate::runtime::{
@@ -408,7 +408,7 @@ impl ModelSeries {
 }
 
 struct MetricsInner {
-    aliases: Vec<String>,
+    aliases: RwLock<Vec<String>>,
     models: Vec<ModelSeries>,
     http: [AtomicU64; HTTP_ENDPOINT_COUNT * STATUS_CLASS_COUNT],
 }
@@ -424,7 +424,7 @@ impl fmt::Debug for ServerMetricsV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServerMetricsV1")
-            .field("model_aliases", &self.inner.aliases)
+            .field("model_aliases", &self.model_aliases())
             .finish_non_exhaustive()
     }
 }
@@ -436,11 +436,29 @@ impl ServerMetricsV1 {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
+        Self::build(model_aliases, false)
+    }
+
+    /// Create a bounded registry whose aliases may be extended only by the
+    /// operator-controlled dynamic model catalog.
+    pub fn new_dynamic<I, S>(model_aliases: I) -> Result<Self, MetricsConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::build(model_aliases, true)
+    }
+
+    fn build<I, S>(model_aliases: I, allow_empty: bool) -> Result<Self, MetricsConfigError>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         let aliases = model_aliases
             .into_iter()
             .map(Into::into)
             .collect::<Vec<_>>();
-        if aliases.is_empty() {
+        if aliases.is_empty() && !allow_empty {
             return Err(MetricsConfigError::EmptyModelList);
         }
         if aliases.len() > MAX_METRIC_MODELS {
@@ -468,23 +486,62 @@ impl ServerMetricsV1 {
                 return Err(MetricsConfigError::DuplicateModelAlias(alias.clone()));
             }
         }
-        let model_count = aliases.len();
         Ok(Self {
             inner: Arc::new(MetricsInner {
-                aliases,
-                models: (0..model_count).map(|_| ModelSeries::new()).collect(),
+                aliases: RwLock::new(aliases),
+                models: (0..MAX_METRIC_MODELS).map(|_| ModelSeries::new()).collect(),
                 http: std::array::from_fn(|_| AtomicU64::new(0)),
             }),
         })
     }
 
-    /// Return the immutable model set represented by this registry.
-    pub fn model_aliases(&self) -> &[String] {
-        &self.inner.aliases
+    /// Return the current bounded model set represented by this registry.
+    pub fn model_aliases(&self) -> Vec<String> {
+        self.inner
+            .aliases
+            .read()
+            .expect("metrics alias lock poisoned")
+            .clone()
+    }
+
+    pub fn register_model_alias(&self, alias: &str) -> Result<(), MetricsConfigError> {
+        if alias.is_empty() {
+            return Err(MetricsConfigError::EmptyModelAlias);
+        }
+        if alias.len() > MAX_MODEL_ALIAS_BYTES {
+            return Err(MetricsConfigError::ModelAliasTooLong {
+                bytes: alias.len(),
+                maximum: MAX_MODEL_ALIAS_BYTES,
+            });
+        }
+        if alias.contains('\0') {
+            return Err(MetricsConfigError::NulInModelAlias);
+        }
+        let mut aliases = self
+            .inner
+            .aliases
+            .write()
+            .expect("metrics alias lock poisoned");
+        if aliases.iter().any(|known| known == alias) {
+            return Ok(());
+        }
+        if aliases.len() == MAX_METRIC_MODELS {
+            return Err(MetricsConfigError::TooManyModels {
+                count: aliases.len() + 1,
+                maximum: MAX_METRIC_MODELS,
+            });
+        }
+        aliases.push(alias.to_owned());
+        Ok(())
     }
 
     fn model_index(&self, alias: &str) -> Option<usize> {
-        self.inner.aliases.iter().position(|known| known == alias)
+        self.inner
+            .aliases
+            .read()
+            .expect("metrics alias lock poisoned")
+            .iter()
+            .position(|known| known == alias)
     }
 
     fn stream_index(stream: bool) -> usize {
@@ -594,13 +651,14 @@ impl ServerMetricsV1 {
         snapshots: &[(&str, BackendObservabilitySnapshotV1)],
     ) -> String {
         let mut output = String::new();
+        let aliases = self.model_aliases();
         write_help_type(
             &mut output,
             "sllm_requests_total",
             "HTTP generation request lifecycle counts.",
             "counter",
         );
-        for (model, model_series) in self.inner.aliases.iter().zip(&self.inner.models) {
+        for (model, model_series) in aliases.iter().zip(&self.inner.models) {
             for stream in [false, true] {
                 let series = &model_series.streams[Self::stream_index(stream)];
                 for outcome in OUTCOMES {
@@ -624,7 +682,7 @@ impl ServerMetricsV1 {
             "Input and generated token counts.",
             "counter",
         );
-        for (model, model_series) in self.inner.aliases.iter().zip(&self.inner.models) {
+        for (model, model_series) in aliases.iter().zip(&self.inner.models) {
             for stream in [false, true] {
                 let series = &model_series.streams[Self::stream_index(stream)];
                 for direction in TOKEN_DIRECTIONS {
@@ -646,7 +704,7 @@ impl ServerMetricsV1 {
             &mut output,
             "sllm_request_ttft_seconds",
             "Time to first generated delta in seconds.",
-            &self.inner.aliases,
+            &aliases,
             &self.inner.models,
             |series| &series.ttft,
         );
@@ -654,7 +712,7 @@ impl ServerMetricsV1 {
             &mut output,
             "sllm_request_e2e_seconds",
             "End-to-end generation time in seconds.",
-            &self.inner.aliases,
+            &aliases,
             &self.inner.models,
             |series| &series.e2e,
         );
@@ -665,7 +723,7 @@ impl ServerMetricsV1 {
             "Generation cancellation counts by bounded reason.",
             "counter",
         );
-        for (model, model_series) in self.inner.aliases.iter().zip(&self.inner.models) {
+        for (model, model_series) in aliases.iter().zip(&self.inner.models) {
             for stream in [false, true] {
                 let series = &model_series.streams[Self::stream_index(stream)];
                 for reason in CANCELLATION_REASONS {
@@ -710,7 +768,7 @@ impl ServerMetricsV1 {
             "Whether the model is resident and ready to accept generation.",
             "gauge",
         );
-        for (model, model_series) in self.inner.aliases.iter().zip(&self.inner.models) {
+        for (model, model_series) in aliases.iter().zip(&self.inner.models) {
             sample(
                 &mut output,
                 "sllm_model_ready",
@@ -774,7 +832,7 @@ impl ServerMetricsV1 {
             "Current scheduler slots by known model and bounded state.",
             "gauge",
         );
-        for model in &self.inner.aliases {
+        for model in &aliases {
             for state in [
                 SchedulerSlotStateV1::Queued,
                 SchedulerSlotStateV1::Active,
@@ -796,7 +854,7 @@ impl ServerMetricsV1 {
                 );
             }
         }
-        render_backend_memory(&mut output, &self.inner.aliases, snapshots);
+        render_backend_memory(&mut output, &aliases, snapshots);
         output
     }
 }
@@ -946,11 +1004,10 @@ impl Drop for MetricsRequestHandleV1 {
     fn drop(&mut self) {
         if !self.terminal {
             self.finish(RequestOutcomeV1::Cancelled);
-            self.metrics.record_cancellation(
-                &self.metrics.inner.aliases[self.model],
-                self.stream,
-                CancellationReasonV1::ClientDisconnect,
-            );
+            self.metrics.inner.models[self.model].streams
+                [ServerMetricsV1::stream_index(self.stream)]
+            .cancellations[CancellationReasonV1::ClientDisconnect.index()]
+            .fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -1128,6 +1185,25 @@ mod tests {
             ServerMetricsV1::new(too_many),
             Err(MetricsConfigError::TooManyModels { .. })
         ));
+    }
+
+    #[test]
+    fn dynamic_registry_starts_empty_and_only_accepts_bounded_catalog_aliases() {
+        let metrics = ServerMetricsV1::new_dynamic(Vec::<String>::new()).unwrap();
+        assert!(metrics.model_aliases().is_empty());
+        metrics.register_model_alias("library").unwrap();
+        metrics.register_model_alias("library").unwrap();
+        assert_eq!(metrics.model_aliases(), vec!["library"]);
+        assert!(metrics.record_request(
+            "library",
+            true,
+            RequestOutcomeV1::Success,
+            Some(Duration::from_millis(1)),
+            Some(Duration::from_millis(2)),
+            2,
+            1,
+        ));
+        assert!(metrics.render(&snapshot()).contains("model=\"library\""));
     }
 
     #[test]

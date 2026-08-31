@@ -83,6 +83,7 @@ typedef uint32_t sllm_status_t;
 #define SLLM_STATUS_TOKEN_SELECTOR_NONFINITE UINT32_C(0x12a)
 #define SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED UINT32_C(0x12b)
 #define SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE UINT32_C(0x12c)
+#define SLLM_STATUS_INVALID_MINISTRAL3_YARN_DESCRIPTOR UINT32_C(0x12d)
 
 #define SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1 UINT32_C(1)
@@ -107,6 +108,7 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1 UINT32_C(6)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1 UINT32_C(7)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1 UINT32_C(8)
+#define SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1 UINT32_C(9)
 #define SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE UINT32_C(256)
@@ -178,10 +180,57 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MOE_ROUTE_MAX_EXPERTS UINT64_C(256)
 #define SLLM_HIP_MOE_ROUTE_MAX_SELECTED UINT32_C(16)
 
+/* DeepSeek V4 routing is deliberately separate from the generic MoE route
+ * ABI.  Phase 57 fixes the reviewed shape to 256 experts and top-6 while
+ * retaining an explicit shape in every tensor binding. */
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION UINT32_C(1)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_SCORE_V1 UINT32_C(1)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1 UINT32_C(2)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS UINT64_C(65536)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT UINT64_C(256)
+#define SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT UINT32_C(6)
+
+typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE UINT32_C(1)
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH UINT32_C(2)
+
+/* Device-written status stored at the final i32 of the metadata buffer. */
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK INT32_C(0)
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE INT32_C(1)
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE INT32_C(2)
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT INT32_C(3)
+#define SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER INT32_C(4)
+
+/* MiniMax M3 routing is a separate, fixed model semantic: F32 sigmoid
+ * scores, selection-only F32 bias, stable top-4, selected-score
+ * renormalization, and routed scale 2.0. */
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION UINT32_C(1)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1 UINT32_C(1)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_MAX_TOKENS UINT64_C(65536)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT UINT64_C(128)
+#define SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT UINT32_C(4)
+
+#define SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK INT32_C(0)
+#define SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE INT32_C(1)
+#define SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER INT32_C(2)
+
 #define SLLM_HIP_MOE_EXPERT_VERSION UINT32_C(1)
+#define SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION UINT32_C(2)
 #define SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1 UINT32_C(1)
 #define SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1 UINT32_C(2)
+#define SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2 UINT32_C(3)
+#define SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2 UINT32_C(4)
 #define SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE UINT32_C(256)
@@ -191,6 +240,12 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MOE_EXPERT_TOPK UINT32_C(8)
 #define SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES UINT64_C(434114560)
 #define SLLM_HIP_MOE_EXPERT_MAX_TOKENS UINT64_C(65536)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE UINT32_C(2816)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE UINT32_C(704)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT UINT32_C(128)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK UINT32_C(8)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES UINT64_C(428215552)
+#define SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN UINT64_C(27104)
 
 #define SLLM_HIP_ATTENTION_PREPROCESS_VERSION UINT32_C(1)
 #define SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION UINT32_C(1)
@@ -221,6 +276,24 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_ROTARY_MAX_M UINT64_C(262144)
 #define SLLM_HIP_ROTARY_MAX_POSITION UINT32_C(4294967295)
 
+/* Ministral 3 3B uses a fixed BF16 split-half YaRN RoPE contract.  This is
+ * intentionally a separate versioned ABI: the existing model-neutral rotary
+ * operation must not silently interpret a plain theta as the model's YaRN
+ * schedule or apply the long-position query scale to K. */
+#define SLLM_HIP_MINISTRAL3_YARN_VERSION UINT32_C(1)
+#define SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1 UINT32_C(1)
+#define SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX UINT32_C(64)
+#define SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE UINT32_C(256)
+#define SLLM_HIP_MINISTRAL3_YARN_Q_HEADS UINT32_C(32)
+#define SLLM_HIP_MINISTRAL3_YARN_KV_HEADS UINT32_C(8)
+#define SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM UINT32_C(128)
+#define SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM UINT32_C(128)
+#define SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT UINT32_C(16384)
+#define SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION UINT32_C(262144)
+#define SLLM_HIP_MINISTRAL3_YARN_MAX_M UINT64_C(262144)
+
 #define SLLM_HIP_WINDOWED_ATTENTION_VERSION UINT32_C(1)
 #define SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1       \
@@ -235,13 +308,17 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_KV_STATE_VERSION UINT32_C(2)
 #define SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION UINT32_C(1)
 #define SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION UINT32_C(2)
+#define SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION UINT32_C(3)
 #define SLLM_HIP_KV_VIEW_INFO_VERSION UINT32_C(2)
+#define SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION UINT32_C(3)
 #define SLLM_HIP_KV_APPEND_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_KV_HEAD_COUNT UINT32_C(4)
 #define SLLM_HIP_KV_HEAD_DIM UINT32_C(256)
 #define SLLM_HIP_KV_MAX_HEAD_DIM UINT32_C(512)
 #define SLLM_HIP_KV_MAX_CAPACITY UINT64_C(4294967295)
 #define SLLM_HIP_KV_MAX_M UINT64_C(262144)
+#define SLLM_HIP_KV_SLIDING_MAX_CAPACITY UINT64_C(262144)
+#define SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4 UINT64_C(1024)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1 UINT32_C(1)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2 UINT32_C(2)
 #define SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1 UINT32_C(3)
@@ -275,6 +352,7 @@ typedef uint32_t sllm_status_t;
 /* Additive Phase 41 state-fork and raw-plane persistence ABI. */
 #define SLLM_HIP_STATE_FORK_VERSION UINT32_C(1)
 #define SLLM_HIP_STATE_FORK_INFO_VERSION UINT32_C(1)
+#define SLLM_HIP_STATE_IMAGE_SLIDING_VERSION UINT32_C(2)
 #define SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY UINT32_C(1)
 #define SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES UINT32_C(2)
 #define SLLM_HIP_KV_STATE_PLANE_KEY UINT32_C(1)
@@ -291,10 +369,14 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_STATE_CHUNK_MAX_BYTES UINT64_C(1073741824)
 
 #define SLLM_HIP_CAUSAL_ATTENTION_VERSION UINT32_C(1)
+#define SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION UINT32_C(2)
+#define SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION UINT32_C(3)
 #define SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1 UINT32_C(1)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2 UINT32_C(2)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3 UINT32_C(3)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1 UINT32_C(4)
+#define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1 UINT32_C(5)
 #define SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE UINT32_C(256)
@@ -376,6 +458,7 @@ typedef uint32_t sllm_elementwise_operation_t;
 #define SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL UINT32_C(6)
 #define SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP UINT32_C(7)
 #define SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD UINT32_C(8)
+#define SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL UINT32_C(9)
 
 #define SLLM_COMPLETION_STATE_PENDING UINT32_C(0)
 #define SLLM_COMPLETION_STATE_SUCCESS UINT32_C(1)
@@ -404,10 +487,15 @@ typedef struct sllm_mlp_gate_up_silu_bundle_plan_t
 typedef struct sllm_argmax_plan_t sllm_argmax_plan_t;
 typedef struct sllm_token_selector_plan_t sllm_token_selector_plan_t;
 typedef struct sllm_moe_route_plan_t sllm_moe_route_plan_t;
+typedef struct sllm_deepseek_v4_moe_route_plan_t
+    sllm_deepseek_v4_moe_route_plan_t;
+typedef struct sllm_minimax_m3_moe_route_plan_t
+    sllm_minimax_m3_moe_route_plan_t;
 typedef struct sllm_moe_expert_plan_t sllm_moe_expert_plan_t;
 typedef struct sllm_attention_preprocess_plan_t
     sllm_attention_preprocess_plan_t;
 typedef struct sllm_rotary_plan_t sllm_rotary_plan_t;
+typedef struct sllm_ministral3_yarn_plan_t sllm_ministral3_yarn_plan_t;
 typedef struct sllm_windowed_attention_plan_t sllm_windowed_attention_plan_t;
 typedef struct sllm_kv_state_t sllm_kv_state_t;
 typedef struct sllm_kv_view_t sllm_kv_view_t;
@@ -938,10 +1026,142 @@ typedef struct sllm_moe_route_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_moe_route_dispatch_info_t;
 
-/* One Qwen3.5 MoE layer. `routing_metadata` is the exact output byte layout of
- * sllm_moe_route_execute. `layer_blob` is the container-neutral packed layer
- * layout documented by the Rust loader: routed gate/up/down MXFP4 planes,
- * followed by BF16 shared gate/up/down and shared-expert gate. */
+/* DeepSeek V4 score mode selects top-6 from
+ *   sqrt(softplus(BF16 logits)) + F32 selection_bias.
+ * The output weight always uses the unbiased sqrt(softplus(logit)) value.
+ * Hash mode consumes I32 expert IDs [M,6] directly, requires the bias binding
+ * to be all-zero, and still obtains weights from the unbiased BF16 logits.
+ * Score mode conversely requires hash_expert_ids to be all-zero.  Duplicate
+ * or out-of-range hash IDs and every nonfinite input fail closed through the
+ * device-written status.
+ *
+ * `metadata` has the same stable grouped layout as sllm_moe_route_desc_t:
+ *   i32 expert_ids[M,6], f32 expert_weights[M,6], i32 counts[256],
+ *   i32 offsets[257], i32 grouped_token_ids[M,6],
+ *   i32 grouped_topk_slots[M,6], i32 status.
+ * If renormalize is nonzero, the six selected unbiased scores are normalized
+ * before routed_scale is applied.  Otherwise each raw score is multiplied by
+ * routed_scale. `routed_scale` must be finite and strictly positive.  It is
+ * intentionally not fixed to one model-card default: the operator remains
+ * reusable by reviewed DeepSeek V4 layer configurations while the model lock
+ * owns the exact per-artifact value. */
+typedef struct sllm_deepseek_v4_moe_route_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  sllm_deepseek_v4_moe_route_mode_t mode;
+  uint32_t selected_expert_count;
+  uint32_t renormalize;
+  float routed_scale;
+  uint32_t reserved0;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t logits;
+  sllm_tensor_binding_t selection_bias;
+  sllm_tensor_binding_t hash_expert_ids;
+  sllm_tensor_binding_t metadata;
+} sllm_deepseek_v4_moe_route_desc_t;
+
+typedef struct sllm_deepseek_v4_moe_route_query_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  sllm_deepseek_v4_moe_route_mode_t mode;
+  uint64_t token_count;
+  uint64_t expert_count;
+  uint64_t pair_count;
+  uint64_t metadata_bytes;
+  uint32_t selected_expert_count;
+  uint32_t renormalize;
+  float routed_scale;
+  uint32_t reserved0;
+  uint32_t reserved[8];
+} sllm_deepseek_v4_moe_route_query_info_t;
+
+typedef struct sllm_deepseek_v4_moe_route_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint64_t expert_count;
+  uint64_t pair_count;
+  uint32_t selected_expert_count;
+  sllm_deepseek_v4_moe_route_mode_t mode;
+  uint32_t renormalize;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_deepseek_v4_moe_route_dispatch_info_t;
+
+/* `metadata` uses the canonical grouped layout:
+ *   i32 expert_ids[M,4], f32 expert_weights[M,4], i32 counts[128],
+ *   i32 offsets[129], i32 grouped_token_ids[M,4],
+ *   i32 grouped_topk_slots[M,4], i32 status.
+ * The bias affects selection only. Weights use the unbiased sigmoid(logit),
+ * are normalized over the four selected experts, then multiplied by 2.0. */
+typedef struct sllm_minimax_m3_moe_route_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t selected_expert_count;
+  uint32_t reserved[4];
+  sllm_tensor_binding_t logits;
+  sllm_tensor_binding_t selection_bias;
+  sllm_tensor_binding_t metadata;
+} sllm_minimax_m3_moe_route_desc_t;
+
+typedef struct sllm_minimax_m3_moe_route_query_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t selected_expert_count;
+  uint64_t token_count;
+  uint64_t expert_count;
+  uint64_t pair_count;
+  uint64_t metadata_bytes;
+  uint32_t reserved[8];
+} sllm_minimax_m3_moe_route_query_info_t;
+
+typedef struct sllm_minimax_m3_moe_route_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint64_t expert_count;
+  uint64_t pair_count;
+  uint32_t selected_expert_count;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  uint32_t reserved0;
+  char kernel_symbol[SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_minimax_m3_moe_route_dispatch_info_t;
+
+/* One routed MoE layer. Version 1 is the byte-exact Qwen3.5 MXFP4 routed plus
+ * BF16 shared-expert contract. Version 2 is Gemma 4 26B-A4B: 128 routed
+ * experts, top-8, hidden 2816, intermediate 704, no shared branch. Its layer
+ * blob stores projection-major gate/up/down planes. Each plane is all expert
+ * packed E2M1 values, all block-16 E4M3FN scales, F32 outer scales, then F32
+ * input scales; the three planes are followed by BF16 per-expert scales.
+ * `routing_metadata` is the exact matching expert-count/top-k output byte
+ * layout of sllm_moe_route_execute. */
 typedef struct sllm_moe_expert_desc_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1076,6 +1296,61 @@ typedef struct sllm_rotary_dispatch_info_t {
   uint32_t reserved[8];
 } sllm_rotary_dispatch_info_t;
 
+/* Fixed Ministral 3 BF16 Q/K split-half YaRN. Inputs and outputs are
+ * contiguous [M,32,128] and [M,8,128], positions is contiguous I32 [M].
+ * Parameters are carried as IEEE-754 binary32 bits and are validated against
+ * the reviewed checkpoint constants. Query receives the Llama-4
+ * position-dependent scale after rotation; key never receives that scale. */
+typedef struct sllm_ministral3_yarn_desc_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t op_version;
+  uint32_t position_payload_mode;
+  uint64_t start_position;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t rotary_dim;
+  uint32_t theta_bits;
+  uint32_t factor_bits;
+  uint32_t original_context;
+  uint32_t max_position;
+  uint32_t beta_fast_bits;
+  uint32_t beta_slow_bits;
+  uint32_t query_scale_beta_bits;
+  uint32_t reserved[5];
+  sllm_tensor_binding_t query;
+  sllm_tensor_binding_t key;
+  sllm_tensor_binding_t positions;
+  sllm_tensor_binding_t query_output;
+  sllm_tensor_binding_t key_output;
+} sllm_ministral3_yarn_desc_t;
+
+typedef struct sllm_ministral3_yarn_dispatch_info_t {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint32_t info_version;
+  uint32_t backend;
+  uint64_t dispatch_id;
+  uint32_t dispatch_count;
+  uint32_t kernel_id;
+  uint32_t workgroup_size_x;
+  uint32_t grid_size_x;
+  uint64_t token_count;
+  uint32_t q_heads;
+  uint32_t kv_heads;
+  uint32_t head_dim;
+  uint32_t rotary_dim;
+  uint32_t start_position;
+  uint32_t max_position;
+  uint32_t fallback_allowed;
+  uint32_t fallback_used;
+  char kernel_symbol[SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX];
+  char device_symbol[SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX];
+  char gcn_arch_name[SLLM_HIP_MAX_GCN_ARCH_NAME];
+  uint32_t reserved[8];
+} sllm_ministral3_yarn_dispatch_info_t;
+
 /* Model-neutral BF16 GQA causal attention. K/V are complete token-major
  * histories [expected_kv_length,kv_heads,head_dim]. A zero sliding window
  * selects full attention; otherwise the window is inclusive of the current
@@ -1146,7 +1421,9 @@ typedef struct sllm_kv_state_create_info_t {
 
 /* Additive low-bit create contract. The legacy create function remains the
  * exact FP16 v1 ABI above. Low-bit values and their scale planes are owned by
- * the opaque state and are never exposed as scheduler-visible pointers. */
+ * the opaque state and are never exposed as scheduler-visible pointers.
+ * create_info_version=3 uses reserved[0:2] for the unit static FP8 decode
+ * scales and reserved[2:4] for a little-endian uint64 sliding window. */
 typedef struct sllm_kv_state_create_info_v2_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1233,10 +1510,15 @@ typedef struct sllm_kv_append_info_t {
   uint32_t reserved[8];
 } sllm_kv_append_info_t;
 
-/* C3b causal full attention. Q and output are contiguous unquantized BF16
- * [M, 16, 256]. The referenced state is one committed token-major FP16, FP8,
- * or packed NVFP4 [capacity, 4, 256] snapshot; no repeated or unpacked K/V
- * payload is part of this descriptor. */
+/* C3b causal full/windowed attention. Q and output are contiguous unquantized
+ * BF16 [M,Hq,D], including the reviewed [M,16,256] and [M,32,128] shapes. The
+ * referenced state is one committed token-major FP16, FP8, or packed NVFP4
+ * [capacity,Hkv,D] snapshot; no repeated or unpacked K/V payload is part of
+ * this descriptor. op_version=2 stores a little-endian
+ * uint64 sliding window in reserved[0:2]; reserved[2:4] remain zero.
+ * op_version=3 stores an optional sliding window in reserved[0:2], an exact
+ * positive finite binary32 score scale in reserved[2], and zero in
+ * reserved[3]. Version 3 is baseline-provider-only. */
 typedef struct sllm_causal_attention_desc_t {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -1266,6 +1548,9 @@ typedef struct sllm_causal_attention_dispatch_info_t {
   uint32_t q_heads;
   uint32_t kv_heads;
   uint32_t head_dim;
+  /* Exact integer denominator for the implicit 1/sqrt(head_dim) scale. When
+   * sqrt(head_dim) is non-integral this is zero and reserved[4] contains the
+   * exact binary32 scale bits with reserved[5] equal to one. */
   uint32_t scale_denominator;
   uint32_t fallback_allowed;
   uint32_t fallback_used;
@@ -1683,6 +1968,50 @@ SLLM_HIP_API sllm_status_t sllm_moe_route_execute(
     sllm_moe_route_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
+/* query validates the complete copied descriptor and reports its checked
+ * shape/layout without dereferencing or retaining buffer handles. */
+SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_query(
+    const sllm_deepseek_v4_moe_route_desc_t *descriptor,
+    sllm_deepseek_v4_moe_route_query_info_t *info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_prepare(
+    const sllm_context_t *context,
+    const sllm_deepseek_v4_moe_route_desc_t *descriptor,
+    sllm_deepseek_v4_moe_route_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_plan_release(
+    sllm_deepseek_v4_moe_route_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_execute(
+    const sllm_deepseek_v4_moe_route_plan_t *plan,
+    const sllm_queue_t *queue, sllm_completion_t **completion,
+    sllm_deepseek_v4_moe_route_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_query(
+    const sllm_minimax_m3_moe_route_desc_t *descriptor,
+    sllm_minimax_m3_moe_route_query_info_t *info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_prepare(
+    const sllm_context_t *context,
+    const sllm_minimax_m3_moe_route_desc_t *descriptor,
+    sllm_minimax_m3_moe_route_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_plan_release(
+    sllm_minimax_m3_moe_route_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_execute(
+    const sllm_minimax_m3_moe_route_plan_t *plan,
+    const sllm_queue_t *queue, sllm_completion_t **completion,
+    sllm_minimax_m3_moe_route_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
 SLLM_HIP_API sllm_status_t sllm_moe_expert_prepare(
     const sllm_context_t *context, const sllm_moe_expert_desc_t *descriptor,
     sllm_moe_expert_plan_t **plan,
@@ -1724,6 +2053,22 @@ SLLM_HIP_API sllm_status_t sllm_rotary_plan_release(
 SLLM_HIP_API sllm_status_t sllm_rotary_execute(
     const sllm_rotary_plan_t *plan, const sllm_queue_t *queue,
     sllm_completion_t **completion, sllm_rotary_dispatch_info_t *dispatch_info,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_ministral3_yarn_prepare(
+    const sllm_context_t *context,
+    const sllm_ministral3_yarn_desc_t *descriptor,
+    sllm_ministral3_yarn_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_ministral3_yarn_plan_release(
+    sllm_ministral3_yarn_plan_t **plan,
+    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+
+SLLM_HIP_API sllm_status_t sllm_ministral3_yarn_execute(
+    const sllm_ministral3_yarn_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
+    sllm_ministral3_yarn_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_windowed_attention_prepare(

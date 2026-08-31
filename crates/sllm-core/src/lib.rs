@@ -6,6 +6,16 @@
 mod adapter;
 mod backend;
 mod context_window;
+mod deepseek_v4;
+mod deepseek_v4_attention;
+mod deepseek_v4_gguf;
+mod deepseek_v4_headers;
+mod deepseek_v4_semantics;
+mod diffusion_gemma;
+pub mod diffusion_gemma_gguf;
+mod diffusion_gemma_graph;
+mod diffusion_gemma_headers;
+pub mod diffusion_gemma_semantics;
 mod dtype;
 mod execution;
 mod fake;
@@ -15,6 +25,13 @@ mod fp8_sidecar;
 mod gemma4;
 mod gemma4_execution;
 mod gemma4_graph;
+mod gemma4_moe;
+mod gemma4_moe_execution;
+mod gemma4_moe_graph;
+mod gemma4_mtp;
+mod gemma4_mtp_execution;
+mod gemma4_mtp_gguf;
+mod gemma4_mtp_graph;
 mod gguf;
 mod gguf_convert;
 mod gguf_writer;
@@ -26,6 +43,19 @@ mod kv_fp8;
 mod kv_mxfp8;
 mod kv_state;
 mod linear_attention;
+mod minimax_m3;
+mod minimax_m3_attention;
+mod minimax_m3_gguf;
+mod minimax_m3_headers;
+mod minimax_m3_semantics;
+mod ministral3;
+mod ministral3_execution;
+mod ministral3_gguf;
+mod ministral3_graph;
+mod ministral3_headers;
+mod ministral3_lock;
+pub mod ministral3_semantics;
+mod ministral3_weights;
 mod model;
 mod moe;
 mod mxfp;
@@ -69,20 +99,111 @@ pub use context_window::{
     ContextPositionPolicyV1, ContextRetainedRangesV1, ContextShiftDecisionV1, ContextShiftError,
     ContextShiftKindV1, ContextShiftTransactionV1, ContextTokenRangeV1, ContextWindowStateV1,
 };
+pub use deepseek_v4::{
+    DEEPSEEK_V4_CATALOG_SHA256, DEEPSEEK_V4_CONFIG_BYTES,
+    DEEPSEEK_V4_CONFIG_NEXTN_PREDICT_LAYER_COUNT, DEEPSEEK_V4_CONFIG_SHA256,
+    DEEPSEEK_V4_DSPARK_CHECKPOINT_STAGE_COUNT, DEEPSEEK_V4_HASH_ROUTED_LAYER_COUNT,
+    DEEPSEEK_V4_INDEX_BYTES, DEEPSEEK_V4_INDEX_SHA256, DEEPSEEK_V4_LICENSE,
+    DEEPSEEK_V4_MAIN_LAYER_COUNT, DEEPSEEK_V4_REPOSITORY, DEEPSEEK_V4_REVISION,
+    DEEPSEEK_V4_SHARD_COUNT, DEEPSEEK_V4_SHARD_FILE_BYTES, DEEPSEEK_V4_SHARDS,
+    DEEPSEEK_V4_TENSOR_COUNT, DEEPSEEK_V4_TENSOR_PAYLOAD_BYTES, DeepSeekV4Compression,
+    DeepSeekV4Config, DeepSeekV4Index, DeepSeekV4LayerSummary, DeepSeekV4ModelError,
+    DeepSeekV4Quantization, DeepSeekV4ShardIdentity, DeepSeekV4TensorClass,
+    DeepSeekV4TensorSummary, DeepSeekV4YarnRope, checked_deepseek_v4_shard_file_bytes,
+    classify_deepseek_v4_tensor, deepseek_v4_layer_summary, deepseek_v4_locked_shard,
+    validate_deepseek_v4_config, validate_deepseek_v4_index,
+    validate_deepseek_v4_shard_lfs_identity,
+};
+pub use deepseek_v4_attention::{
+    DEEPSEEK_V4_CSA_RATIO, DEEPSEEK_V4_HCA_RATIO, DEEPSEEK_V4_LIGHTNING_INDEXER_TOP_K,
+    DEEPSEEK_V4_RAW_SLIDING_WINDOW, DeepSeekV4AttentionCompression, DeepSeekV4AttentionPlane,
+    DeepSeekV4AttentionSemanticError, DeepSeekV4AttentionStage, DeepSeekV4AttentionVisibility,
+    DeepSeekV4CompressedKv, DeepSeekV4CompressionCandidate, DeepSeekV4CompressionDescriptor,
+    DeepSeekV4CsaCompressionInput, DeepSeekV4HcaCompressionInput,
+    DeepSeekV4LightningIndexerDescriptor, deepseek_v4_attention_completed_blocks,
+    deepseek_v4_attention_visible_blocks_at, reference_deepseek_v4_csa_compression,
+    reference_deepseek_v4_hca_compression, reference_deepseek_v4_lightning_indexer,
+};
+pub use deepseek_v4_gguf::{
+    DEEPSEEK_V4_GGUF_COMBINED_PHYSICAL_TENSOR_COUNT, DEEPSEEK_V4_GGUF_DIRECT_TENSOR_COUNT,
+    DEEPSEEK_V4_GGUF_DSPARK_PHYSICAL_TENSOR_COUNT, DEEPSEEK_V4_GGUF_MAIN_PHYSICAL_TENSOR_COUNT,
+    DEEPSEEK_V4_GGUF_MAPPING_SERIALIZATION, DEEPSEEK_V4_GGUF_MAPPING_SHA256,
+    DEEPSEEK_V4_GGUF_PASS_SCOPE, DEEPSEEK_V4_GGUF_ROUTED_EXPERT_SOURCE_TENSOR_COUNT,
+    DEEPSEEK_V4_GGUF_SOURCE_DSPARK_TENSOR_COUNT, DEEPSEEK_V4_GGUF_SOURCE_TARGET_TENSOR_COUNT,
+    DEEPSEEK_V4_GGUF_STACKED_EXPERT_OUTPUT_COUNT, DeepSeekV4ArtifactRole,
+    DeepSeekV4AttentionTensorRole, DeepSeekV4DsparkSpecialTensorRole, DeepSeekV4ExpertProjection,
+    DeepSeekV4ExpertStackPlan, DeepSeekV4FeedForwardTensorRole, DeepSeekV4GgufCatalogRow,
+    DeepSeekV4GgufFoundationCatalogPlan, DeepSeekV4GgufFoundationError,
+    DeepSeekV4HyperConnectionParameter, DeepSeekV4HyperConnectionSite, DeepSeekV4RootTensorRole,
+    DeepSeekV4RoutedExpertPair, DeepSeekV4SourceTensorMapping, DeepSeekV4TensorPlane,
+    DeepSeekV4TensorRole, build_deepseek_v4_gguf_foundation_catalog,
+    deepseek_v4_gguf_foundation_metadata, map_deepseek_v4_source_tensor,
+    validate_deepseek_v4_gguf_foundation_catalog,
+};
+pub use deepseek_v4_headers::{
+    DEEPSEEK_V4_HEADER_CATALOG_SHA256, DEEPSEEK_V4_HEADER_IDENTITIES,
+    DEEPSEEK_V4_SAFETENSORS_HEADER_LENGTH_FIELD_BYTES, DeepSeekV4HeaderCatalog,
+    DeepSeekV4HeaderError, DeepSeekV4HeaderIdentity, DeepSeekV4HeaderTensor,
+    DeepSeekV4SafetensorsDType, DeepSeekV4ShardHeader, deepseek_v4_locked_header,
+    parse_deepseek_v4_safetensors_header, validate_deepseek_v4_header_catalog,
+};
+pub use deepseek_v4_semantics::{
+    DeepSeekV4MhcDescriptor, DeepSeekV4MhcReference, DeepSeekV4RouterLocation, DeepSeekV4Routing,
+    DeepSeekV4SemanticError, DeepSeekV4SemanticRole, DeepSeekV4SemanticStage,
+    deepseek_v4_completed_visible_blocks, deepseek_v4_compression_capacity,
+    reference_deepseek_v4_hash_route, reference_deepseek_v4_mhc, reference_deepseek_v4_score_route,
+    validate_deepseek_v4_compression_ratio,
+};
+pub use diffusion_gemma::{
+    DIFFUSION_GEMMA_ARTIFACT_EVIDENCE, DIFFUSION_GEMMA_CANVAS_LENGTH,
+    DIFFUSION_GEMMA_CAPACITY_ADMISSION_BYTES, DIFFUSION_GEMMA_CATALOG_SHA256,
+    DIFFUSION_GEMMA_CONFIG_BYTES, DIFFUSION_GEMMA_CONFIG_SHA256, DIFFUSION_GEMMA_EXPERT_COUNT,
+    DIFFUSION_GEMMA_INDEX_ADVERTISED_BYTES, DIFFUSION_GEMMA_INDEX_BYTES,
+    DIFFUSION_GEMMA_INDEX_SHA256, DIFFUSION_GEMMA_LICENSE, DIFFUSION_GEMMA_MANIFEST_DELTA_BYTES,
+    DIFFUSION_GEMMA_REPOSITORY, DIFFUSION_GEMMA_REVISION, DIFFUSION_GEMMA_SELECTED_EXPERT_COUNT,
+    DIFFUSION_GEMMA_SHARD_COUNT, DIFFUSION_GEMMA_SHARD_FILE_BYTES, DIFFUSION_GEMMA_SHARDS,
+    DIFFUSION_GEMMA_SUPPORT_FILES, DIFFUSION_GEMMA_TENSOR_COUNT, DIFFUSION_GEMMA_TEXT_LAYER_COUNT,
+    DIFFUSION_GEMMA_TOTAL_PARAMETERS, DIFFUSION_GEMMA_VISION_LAYER_COUNT,
+    DiffusionGemmaArtifactEvidence, DiffusionGemmaCapacityDecision, DiffusionGemmaConfig,
+    DiffusionGemmaError, DiffusionGemmaIndex, DiffusionGemmaManifestState,
+    DiffusionGemmaRopeConfig, DiffusionGemmaShardIdentity, DiffusionGemmaSupportFileIdentity,
+    DiffusionGemmaSupportFileRole, DiffusionGemmaTensorClass, DiffusionGemmaTensorSummary,
+    DiffusionGemmaTextConfig, DiffusionGemmaTextLayerType, DiffusionGemmaVisionConfig,
+    checked_diffusion_gemma_shard_file_bytes, classify_diffusion_gemma_tensor,
+    diffusion_gemma_capacity_decision, diffusion_gemma_locked_shard,
+    diffusion_gemma_manifest_state, diffusion_gemma_support_file, validate_diffusion_gemma_config,
+    validate_diffusion_gemma_index, validate_diffusion_gemma_shard_lfs_identity,
+    validate_diffusion_gemma_support_file,
+};
+pub use diffusion_gemma_graph::{
+    DIFFUSION_GEMMA_GRAPH_CANVAS_LENGTH, DIFFUSION_GEMMA_GRAPH_MAX_CONTEXT_TOKENS,
+    DIFFUSION_GEMMA_GRAPH_MAX_DENOISING_STEPS, DIFFUSION_GEMMA_GRAPH_TEXT_LAYER_COUNT,
+    DiffusionGemmaCanvasPlan, DiffusionGemmaGraph, DiffusionGemmaGraphAttentionMode,
+    DiffusionGemmaGraphError, DiffusionGemmaGraphStage, build_diffusion_gemma_graph,
+};
+pub use diffusion_gemma_headers::{
+    DIFFUSION_GEMMA_HEADER_CATALOG_SHA256, DIFFUSION_GEMMA_HEADER_IDENTITIES,
+    DIFFUSION_GEMMA_HEADER_PREFIX_BYTES, DIFFUSION_GEMMA_SAFETENSORS_HEADER_LENGTH_FIELD_BYTES,
+    DIFFUSION_GEMMA_TENSOR_PAYLOAD_BYTES, DiffusionGemmaHeaderCatalog, DiffusionGemmaHeaderError,
+    DiffusionGemmaHeaderIdentity, DiffusionGemmaHeaderTensor, DiffusionGemmaSafetensorsDType,
+    DiffusionGemmaShardHeader, diffusion_gemma_locked_header,
+    parse_diffusion_gemma_safetensors_header, validate_diffusion_gemma_header_catalog,
+};
 pub use dtype::{DType, Encoding, EncodingError, Fp8ResidentRepresentation, Fp8ScaleGranularity};
 pub use execution::{
     AdapterResource, AllocationCategory, AllocationCategorySnapshot, AllocationSnapshot,
     BoundSemanticOp, BufferRange, BufferReadback, CausalAttentionSubmission, DeviceCopy,
     DeviceCopyAuditV1, DispatchEvidence, ExecutionAdapterAccess, ExecutionBuffer,
     ExecutionBufferId, ExecutionCausalAttentionSubmissionAdapter, ExecutionError,
-    ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter, ExecutionQueue,
-    ExecutionQueueFence, ExecutionQueueFenceAdapter, ExecutionQueueId, ExecutionReadbackAdapter,
-    ExecutionSession, ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest,
-    ExecutionState, ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter,
-    KvState, KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
-    LinearAttentionStateId, LinearAttentionSubmission, OwnedTensorBinding, PrepareSupport,
-    PreparedOperation, PreparedOperationId, QueueCompletionMode, Readback, ShutdownReport,
-    Submission, Transfer,
+    ExecutionKvStateSubmissionAdapter, ExecutionLinearAttentionSubmissionAdapter,
+    ExecutionMinistral3YarnSubmissionAdapter, ExecutionQueue, ExecutionQueueFence,
+    ExecutionQueueFenceAdapter, ExecutionQueueId, ExecutionReadbackAdapter, ExecutionSession,
+    ExecutionSessionAdapter, ExecutionSessionId, ExecutionSessionRequest, ExecutionState,
+    ExecutionStateImageV1, ExecutionSubmissionAdapter, ExecutionTransferAdapter, KvState,
+    KvStateAppendSubmission, KvStateId, LinearAttentionBindings, LinearAttentionState,
+    LinearAttentionStateId, LinearAttentionSubmission, Ministral3YarnSubmission,
+    OwnedTensorBinding, PrepareSupport, PreparedOperation, PreparedOperationId,
+    QueueCompletionMode, Readback, ShutdownReport, Submission, Transfer,
 };
 pub use fake::{FakeBackend, MAX_FAKE_MATERIALIZATION_BYTES};
 pub use final_output::{
@@ -108,11 +229,11 @@ pub use gemma4::{
 pub use gemma4_execution::{
     Gemma4ExecutionAudit, Gemma4ExecutionLayout, Gemma4ExecutionLayoutError, Gemma4ExecutionNode,
     Gemma4ExecutionOptions, Gemma4ExecutionOutput, Gemma4ExecutionRequest, Gemma4ExecutionTensor,
-    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4KvStateImageV1, Gemma4PrefixForkAuditV1,
-    Gemma4PrefixStateV1, Gemma4ProvisionedBuffers, Gemma4ResidentModel, Gemma4SlidingStateImageV1,
-    Gemma4StateImageV1, Gemma4TensorBacking, build_gemma4_execution_layout,
-    build_gemma4_nvfp4_execution_layout, build_gemma4_quantized_execution_layout,
-    provision_gemma4_execution_buffers,
+    Gemma4KvAppendLayout, Gemma4KvPlane, Gemma4KvStateImageV1, Gemma4MtpTargetKvLease,
+    Gemma4PrefixForkAuditV1, Gemma4PrefixStateV1, Gemma4ProvisionedBuffers, Gemma4ResidentModel,
+    Gemma4SlidingStateImageV1, Gemma4StateImageV1, Gemma4TensorBacking,
+    build_gemma4_execution_layout, build_gemma4_nvfp4_execution_layout,
+    build_gemma4_quantized_execution_layout, provision_gemma4_execution_buffers,
 };
 pub use gemma4_graph::{
     GEMMA4_HIDDEN_SIZE, GEMMA4_INTERMEDIATE_SIZE, GEMMA4_LAYER_COUNT,
@@ -123,6 +244,76 @@ pub use gemma4_graph::{
     Gemma4RequestStateSnapshot, Gemma4RequestTransition, Gemma4RopeDescriptor, Gemma4RopeType,
     build_gemma4_graph, build_gemma4_graph_with_position_mode,
 };
+pub use gemma4_moe::{
+    GEMMA4_MOE_ADVERTISED_PAYLOAD_BYTES, GEMMA4_MOE_DOWN_INPUT_SCALES_OFFSET,
+    GEMMA4_MOE_DOWN_OUTER_SCALES_OFFSET, GEMMA4_MOE_DOWN_SCALES_OFFSET,
+    GEMMA4_MOE_DOWN_VALUES_OFFSET, GEMMA4_MOE_EXPERT_BLOCK_SCALE_BYTES,
+    GEMMA4_MOE_EXPERT_PROJECTION_COUNT, GEMMA4_MOE_EXPERT_VALUE_BYTES,
+    GEMMA4_MOE_GATE_INPUT_SCALES_OFFSET, GEMMA4_MOE_GATE_OUTER_SCALES_OFFSET,
+    GEMMA4_MOE_GATE_SCALES_OFFSET, GEMMA4_MOE_GATE_VALUES_OFFSET, GEMMA4_MOE_LAYER_BLOB_BYTES,
+    GEMMA4_MOE_LAYER_BLOB_PREFIX, GEMMA4_MOE_LICENSE, GEMMA4_MOE_MODEL_FINGERPRINT,
+    GEMMA4_MOE_PER_EXPERT_SCALES_OFFSET, GEMMA4_MOE_REPOSITORY, GEMMA4_MOE_REVISION,
+    GEMMA4_MOE_SEMANTIC_REPOSITORY, GEMMA4_MOE_SEMANTIC_REVISION, GEMMA4_MOE_SHARDS,
+    GEMMA4_MOE_SUPPORT_FILES, GEMMA4_MOE_TENSOR_COUNT, GEMMA4_MOE_TEXT_RESIDENT_BYTES,
+    GEMMA4_MOE_TEXT_TENSOR_COUNT, GEMMA4_MOE_UP_INPUT_SCALES_OFFSET,
+    GEMMA4_MOE_UP_OUTER_SCALES_OFFSET, GEMMA4_MOE_UP_SCALES_OFFSET, GEMMA4_MOE_UP_VALUES_OFFSET,
+    GEMMA4_MOE_VISION_TENSOR_COUNT, Gemma4MoeConfig, Gemma4MoeExpertPlanes,
+    Gemma4MoeExpertProjection, Gemma4MoeExpertTensor, Gemma4MoeFileIdentity, Gemma4MoeIndex,
+    Gemma4MoeLayerBlobPackInput, Gemma4MoeModelError, Gemma4MoeRecipe, Gemma4MoeTensorPlane,
+    VerifiedGemma4Moe, VerifiedGgufGemma4Moe, build_gemma4_moe_weight_load_plan,
+    build_gguf_gemma4_moe_weight_load_plan, gemma4_moe_generation_stop_policy,
+    gemma4_moe_layer_blob_name, gemma4_moe_layer_blob_pack_inputs,
+    gemma4_moe_per_expert_scale_destination, validate_gemma4_moe_config, validate_gemma4_moe_index,
+    verify_gemma4_moe_artifact, verify_gguf_gemma4_moe,
+};
+pub use gemma4_moe_execution::{
+    Gemma4MoeAttentionHook, Gemma4MoeExecutionError, Gemma4MoeExecutionLayout,
+    Gemma4MoeExecutionNode, Gemma4MoeExecutionOutput, Gemma4MoeExecutionRequest,
+    Gemma4MoeExecutionSegment, Gemma4MoeExecutionTensor, Gemma4MoeKvStateImageV1,
+    Gemma4MoeLowering, Gemma4MoeOpaqueKvState, Gemma4MoePrefixForkAuditV1, Gemma4MoePrefixStateV1,
+    Gemma4MoePreparedAudit, Gemma4MoeRequestState, Gemma4MoeResidentAudit, Gemma4MoeResidentModel,
+    Gemma4MoeStateImageV1, Gemma4MoeTensorBacking, Gemma4MoeTransitionSegment,
+    Gemma4MoeWeightSource, build_gemma4_moe_execution_layout,
+    build_gemma4_moe_resident_weight_load_plan, pack_gemma4_moe_layer_blob,
+    plan_gemma4_moe_transitions,
+};
+pub use gemma4_moe_graph::{
+    Gemma4MoeAddRole, Gemma4MoeAttentionDescriptor, Gemma4MoeExecutionBoundary, Gemma4MoeGraph,
+    Gemma4MoeGraphBindingClass, Gemma4MoeGraphError, Gemma4MoeGraphExpertTensorFamily,
+    Gemma4MoeGraphNode, Gemma4MoeGraphNodeKind, Gemma4MoeGraphTensorDtype,
+    Gemma4MoeGraphTensorEncoding, Gemma4MoeGraphTensorSpec, Gemma4MoeKvDescriptor,
+    Gemma4MoeKvScaleSource, Gemma4MoeKvStorageFormat, Gemma4MoeLayerPlan, Gemma4MoeLinearRole,
+    Gemma4MoeNormRole, Gemma4MoeProviderContract, Gemma4MoeRmsScaleMode, Gemma4MoeRopeDescriptor,
+    Gemma4MoeRopeType, Gemma4MoeRouteWeightSemantics, Gemma4MoeValueShape,
+    build_gemma4_moe_gguf_graph, build_gemma4_moe_graph, expected_gemma4_moe_text_tensor_catalog,
+};
+pub use gemma4_mtp::{
+    GEMMA4_MTP_ALIAS, GEMMA4_MTP_CATALOG_SHA256, GEMMA4_MTP_DRAFT_TO_TARGET_KV_LAYERS,
+    GEMMA4_MTP_FINGERPRINT, GEMMA4_MTP_HEADER_BYTES, GEMMA4_MTP_HEADER_SHA256,
+    GEMMA4_MTP_MERGE_COUNT, GEMMA4_MTP_MERGES_SEMANTIC_SHA256, GEMMA4_MTP_MODEL_BYTES,
+    GEMMA4_MTP_MODEL_SHA256, GEMMA4_MTP_REPO_ID, GEMMA4_MTP_REVISION, GEMMA4_MTP_TENSOR_COUNT,
+    GEMMA4_MTP_VOCAB_SEMANTIC_SHA256, GEMMA4_MTP_VOCAB_SIZE, Gemma4MtpArchitectureContract,
+    Gemma4MtpConfig, Gemma4MtpGenerationContract, Gemma4MtpLicenseContract, Gemma4MtpLockedModel,
+    Gemma4MtpModelLock, Gemma4MtpTargetCompatibility, Gemma4MtpTensorContract,
+    Gemma4MtpTokenizerContract, Gemma4MtpWeightSource, VerifiedGemma4Mtp,
+    expected_gemma4_mtp_tensor_catalog, gemma4_mtp_catalog_sha256, parse_gemma4_mtp_model_lock,
+    reviewed_mtp_layer_schedule, validate_gemma4_mtp_config, validate_gemma4_mtp_generation_config,
+    validate_gemma4_mtp_target, validate_gemma4_mtp_tokenizer_config, verify_gemma4_mtp_cache,
+};
+pub use gemma4_mtp_execution::{
+    Gemma4MtpExecutionAudit, Gemma4MtpExecutionError, Gemma4MtpExecutionLayout,
+    Gemma4MtpExecutionNode, Gemma4MtpExecutionOutput, Gemma4MtpExecutionRequest,
+    Gemma4MtpExecutionTensor, Gemma4MtpLowering, Gemma4MtpResidentModel, Gemma4MtpTensorBacking,
+    build_gemma4_mtp_execution_layout,
+};
+pub use gemma4_mtp_gguf::{VerifiedGgufGemma4Mtp, verify_gguf_gemma4_mtp};
+pub use gemma4_mtp_graph::{
+    GEMMA4_MTP_BACKBONE_HIDDEN_SIZE, GEMMA4_MTP_HIDDEN_SIZE, GEMMA4_MTP_INTERMEDIATE_SIZE,
+    GEMMA4_MTP_LAYER_COUNT, GEMMA4_MTP_SLIDING_WINDOW, Gemma4MtpAttentionDescriptor,
+    Gemma4MtpBindingClass, Gemma4MtpGraph, Gemma4MtpGraphError, Gemma4MtpGraphNode,
+    Gemma4MtpGraphNodeKind, Gemma4MtpNormRole, Gemma4MtpRopeDescriptor, Gemma4MtpRopeType,
+    build_gemma4_mtp_graph,
+};
 pub use gguf::{
     GGUF_ALIGNMENT, GGUF_VERSION, GgufArray, GgufError, GgufExtensionV1, GgufLogicalShapeBinding,
     GgufRecipeEncoding, GgufScaleBinding, GgufScaleRole, GgufStaticFp8KvBinding, GgufTensorBinding,
@@ -132,8 +323,10 @@ pub use gguf::{
     SLLM_TENSOR_RECIPE_KEY, SLLM_TENSOR_RECIPE_SHA256_KEY, VerifiedGguf,
 };
 pub use gguf_convert::{
+    build_gemma4_moe_nvfp4_gguf_plan, build_gemma4_mtp_bf16_gguf_plan,
     build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan,
-    build_qwen35_moe_mxfp4_gguf_plan, repack_mxfp4_standard, repack_nvfp4_standard,
+    build_qwen35_moe_mxfp4_gguf_plan, gemma4_mtp_pair_semantic_id, repack_mxfp4_standard,
+    repack_nvfp4_standard, write_gemma4_moe_nvfp4_gguf, write_gemma4_mtp_bf16_gguf,
     write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf, write_qwen35_fp8_gguf,
     write_qwen35_moe_mxfp4_gguf,
 };
@@ -181,6 +374,138 @@ pub use linear_attention::{
     LinearAttentionDescriptor, LinearAttentionError, LinearAttentionLayout, LinearAttentionRequest,
     LinearAttentionStateDescriptor, LinearAttentionStateSnapshot,
 };
+pub use minimax_m3::{
+    MINIMAX_M3_ADMISSION_BASE_BYTES, MINIMAX_M3_ARTIFACT_EVIDENCE,
+    MINIMAX_M3_CAPACITY_ADMISSION_BYTES, MINIMAX_M3_CATALOG_SHA256, MINIMAX_M3_CONFIG_BYTES,
+    MINIMAX_M3_CONFIG_SHA256, MINIMAX_M3_DENSE_LAYER_COUNT, MINIMAX_M3_INDEX_ADVERTISED_BYTES,
+    MINIMAX_M3_INDEX_BYTES, MINIMAX_M3_INDEX_METADATA_BYTES, MINIMAX_M3_INDEX_SHA256,
+    MINIMAX_M3_LICENSE, MINIMAX_M3_MANIFEST_DELTA_BYTES, MINIMAX_M3_MOE_LAYER_COUNT,
+    MINIMAX_M3_MTP_MODULE_COUNT, MINIMAX_M3_REPOSITORY, MINIMAX_M3_REVISION,
+    MINIMAX_M3_SHARD_COUNT, MINIMAX_M3_SHARD_FILE_BYTES, MINIMAX_M3_SHARDS,
+    MINIMAX_M3_TENSOR_COUNT, MINIMAX_M3_TENSOR_PAYLOAD_BYTES, MINIMAX_M3_TEXT_LAYER_COUNT,
+    MiniMaxM3ArtifactEvidence, MiniMaxM3CapacityDecision, MiniMaxM3Config, MiniMaxM3Index,
+    MiniMaxM3ManifestState, MiniMaxM3ModelError, MiniMaxM3MultimodalConfig, MiniMaxM3ShardIdentity,
+    MiniMaxM3SparseAttentionConfig, MiniMaxM3TensorClass, MiniMaxM3TensorSummary,
+    MiniMaxM3TextConfig, MiniMaxM3VisionConfig, checked_minimax_m3_shard_file_bytes,
+    classify_minimax_m3_tensor, minimax_m3_capacity_decision, minimax_m3_locked_shard,
+    minimax_m3_manifest_state, validate_minimax_m3_config, validate_minimax_m3_index,
+    validate_minimax_m3_shard_lfs_identity,
+};
+pub use minimax_m3_attention::{
+    MINIMAX_M3_ATTENTION_LAYER_COUNT, MINIMAX_M3_DENSE_ATTENTION_LAYER_COUNT,
+    MINIMAX_M3_MSA_BLOCK_SIZE, MINIMAX_M3_MSA_GQA_GROUP_COUNT, MINIMAX_M3_MSA_INDEX_DIMENSION,
+    MINIMAX_M3_MSA_INDEX_HEAD_COUNT, MINIMAX_M3_MSA_TOP_K_BLOCKS, MiniMaxM3AttentionKind,
+    MiniMaxM3MsaAttentionInput, MiniMaxM3MsaDescriptor, MiniMaxM3MsaGroupSelection,
+    MiniMaxM3MsaIndexInput, MiniMaxM3MsaOutput, MiniMaxM3MsaPlane, MiniMaxM3MsaSelection,
+    MiniMaxM3MsaSemanticError, MiniMaxM3MsaStage, minimax_m3_attention_kind,
+    reference_minimax_m3_msa_attention, reference_minimax_m3_msa_selection,
+};
+pub use minimax_m3_gguf::{
+    MINIMAX_M3_GGUF_ARCHITECTURE, MINIMAX_M3_GGUF_COMBINED_PHYSICAL_CANDIDATE_COUNT,
+    MINIMAX_M3_GGUF_DIRECT_SOURCE_TENSOR_COUNT, MINIMAX_M3_GGUF_MAPPING_SERIALIZATION,
+    MINIMAX_M3_GGUF_MAPPING_SHA256, MINIMAX_M3_GGUF_PASS_SCOPE,
+    MINIMAX_M3_GGUF_ROUTED_EXPERT_SOURCE_TENSOR_COUNT, MINIMAX_M3_GGUF_SOURCE_TEXT_TENSOR_COUNT,
+    MINIMAX_M3_GGUF_SOURCE_VISION_PROJECTOR_TENSOR_COUNT,
+    MINIMAX_M3_GGUF_STACKED_EXPERT_OUTPUT_COUNT, MiniMaxM3ArtifactPlane,
+    MiniMaxM3AttentionTensorRole, MiniMaxM3ExpertProjection, MiniMaxM3ExpertStackPlan,
+    MiniMaxM3FeedForwardTensorRole, MiniMaxM3GgufCatalogRow, MiniMaxM3GgufFoundationCatalogPlan,
+    MiniMaxM3GgufFoundationError, MiniMaxM3Parameter, MiniMaxM3ProjectorKind,
+    MiniMaxM3RequiredPayloadTransform, MiniMaxM3RootTensorRole, MiniMaxM3RoutedExpertSource,
+    MiniMaxM3SourceTensorMapping, MiniMaxM3TensorRole, MiniMaxM3VisionLayerTensorRole,
+    MiniMaxM3VisionRootTensorRole, build_minimax_m3_gguf_foundation_catalog,
+    map_minimax_m3_source_tensor, minimax_m3_gguf_foundation_metadata,
+    validate_minimax_m3_gguf_foundation_catalog,
+};
+pub use minimax_m3_headers::{
+    MINIMAX_M3_HEADER_BYTES, MINIMAX_M3_HEADER_CATALOG_SHA256,
+    MINIMAX_M3_SAFETENSORS_HEADER_LENGTH_FIELD_BYTES, MINIMAX_M3_SHARD_IDENTITIES,
+    MiniMaxM3HeaderCatalog, MiniMaxM3HeaderError, MiniMaxM3HeaderTensor, MiniMaxM3SafetensorsDType,
+    MiniMaxM3ShardHeader, build_minimax_m3_header_catalog,
+    minimax_m3_locked_shard as minimax_m3_locked_header_shard, parse_minimax_m3_safetensors_header,
+    validate_minimax_m3_header_catalog,
+    validate_minimax_m3_index as validate_minimax_m3_header_index,
+};
+pub use minimax_m3_semantics::{
+    MINIMAX_M3_CONFIG_URL, MINIMAX_M3_EXPERT_COUNT, MINIMAX_M3_NEXTN_PREDICT_LAYER_COUNT,
+    MINIMAX_M3_ROUTED_SCALING_FACTOR, MINIMAX_M3_SELECTED_EXPERT_COUNT,
+    MINIMAX_M3_SEMANTIC_REPOSITORY, MINIMAX_M3_SEMANTIC_REVISION, MINIMAX_M3_SHARED_EXPERT_COUNT,
+    MINIMAX_M3_TRANSFORMERS_REFERENCE_REVISION, MINIMAX_M3_TRANSFORMERS_REFERENCE_URL,
+    MiniMaxM3LayerKind, MiniMaxM3MtpStage, MiniMaxM3MtpTopology, MiniMaxM3Routing,
+    MiniMaxM3SemanticError, MiniMaxM3SemanticRole, MiniMaxM3SemanticStage,
+    MiniMaxM3UnsupportedFeature, minimax_m3_layer_kind, reference_minimax_m3_route,
+    reference_minimax_m3_route_from_selection, reference_minimax_m3_sparse_moe_combine,
+};
+pub use ministral3::{
+    MINISTRAL3_ARTIFACT_EVIDENCE, MINISTRAL3_CAPACITY_ADMISSION_BYTES, MINISTRAL3_CONFIG_BYTES,
+    MINISTRAL3_CONFIG_SHA256, MINISTRAL3_CONTEXT_LENGTH, MINISTRAL3_HEADER_BYTES,
+    MINISTRAL3_INDEX_BYTES, MINISTRAL3_INDEX_SHA256, MINISTRAL3_INDEX_TOTAL_PARAMETERS,
+    MINISTRAL3_INDEX_TOTAL_SIZE, MINISTRAL3_LICENSE, MINISTRAL3_PHYSICAL_PARAMETERS,
+    MINISTRAL3_REPOSITORY, MINISTRAL3_REVISION, MINISTRAL3_SHARD_COUNT,
+    MINISTRAL3_SHARD_FILE_BYTES, MINISTRAL3_SHARDS, MINISTRAL3_SUPPORT_FILES,
+    MINISTRAL3_TENSOR_COUNT, MINISTRAL3_TENSOR_PAYLOAD_BYTES, MINISTRAL3_TEXT_FFN_SIZE,
+    MINISTRAL3_TEXT_HIDDEN_SIZE, MINISTRAL3_TEXT_LAYER_COUNT, MINISTRAL3_VISION_LAYER_COUNT,
+    MINISTRAL3_VOCAB_SIZE, Ministral3ArtifactEvidence, Ministral3Config, Ministral3Error,
+    Ministral3RopeParameters, Ministral3ShardIdentity, Ministral3SupportFileIdentity,
+    Ministral3SupportFileRole, Ministral3TextConfig, Ministral3VisionConfig, ministral3_shard,
+    ministral3_support_file, validate_ministral3_config, validate_ministral3_shard_lfs_identity,
+    validate_ministral3_support_file,
+};
+pub use ministral3_execution::{
+    Ministral3DispatchAudit, Ministral3ExecutionError, Ministral3ExecutionOutput,
+    Ministral3ExecutionRequest, Ministral3ResidentModel,
+};
+pub use ministral3_gguf::{
+    MINISTRAL3_GGUF_ARCHITECTURE, MINISTRAL3_GGUF_BF16_TENSOR_COUNT,
+    MINISTRAL3_GGUF_F32_NORM_TENSOR_COUNT, MINISTRAL3_GGUF_KEY_PERMUTATION_COUNT,
+    MINISTRAL3_GGUF_KNOWN_UNCONSUMED_TENSOR_COUNT, MINISTRAL3_GGUF_MAPPING_SERIALIZATION,
+    MINISTRAL3_GGUF_MAPPING_SHA256, MINISTRAL3_GGUF_OUTPUT_CANDIDATE_COUNT,
+    MINISTRAL3_GGUF_PASS_SCOPE, MINISTRAL3_GGUF_QUERY_PERMUTATION_COUNT,
+    MINISTRAL3_GGUF_SOURCE_PROJECTOR_TENSOR_COUNT, MINISTRAL3_GGUF_SOURCE_TEXT_TENSOR_COUNT,
+    MINISTRAL3_GGUF_SOURCE_VISION_TENSOR_COUNT, MINISTRAL3_OFFICIAL_GGUF_FILE_BYTES,
+    MINISTRAL3_OFFICIAL_GGUF_FILE_NAME, MINISTRAL3_OFFICIAL_GGUF_LFS_SHA256,
+    MINISTRAL3_OFFICIAL_GGUF_METADATA_SHA256, MINISTRAL3_OFFICIAL_GGUF_REPOSITORY,
+    MINISTRAL3_OFFICIAL_GGUF_REVISION, MINISTRAL3_OFFICIAL_GGUF_TENSOR_CATALOG_SHA256,
+    MINISTRAL3_TEXT_MODEL_TYPE, Ministral3ArtifactPlane, Ministral3GgufCatalogRow,
+    Ministral3GgufDryRunPlan, Ministral3GgufError, Ministral3PayloadTransform,
+    Ministral3ProjectorRole, Ministral3SourceTensorMapping, Ministral3TensorRole,
+    Ministral3TextLayerRole, Ministral3TextRootRole, Ministral3VisionLayerRole,
+    Ministral3VisionRootRole, VerifiedOfficialMinistral3Gguf, build_ministral3_gguf_dry_run,
+    map_ministral3_source_tensor, ministral3_gguf_metadata,
+    open_and_verify_official_ministral3_gguf, validate_ministral3_architecture_spelling,
+    validate_ministral3_gguf_dry_run, validate_ministral3_gguf_source_index,
+    verify_official_ministral3_gguf,
+};
+pub use ministral3_graph::{
+    MINISTRAL3_GRAPH_HEAD_DIM, MINISTRAL3_GRAPH_HIDDEN_SIZE, MINISTRAL3_GRAPH_INTERMEDIATE_SIZE,
+    MINISTRAL3_GRAPH_KV_HEADS, MINISTRAL3_GRAPH_KV_WIDTH, MINISTRAL3_GRAPH_LAYER_COUNT,
+    MINISTRAL3_GRAPH_LLAMA4_SCALING_BETA, MINISTRAL3_GRAPH_MAX_CONTEXT,
+    MINISTRAL3_GRAPH_ORIGINAL_CONTEXT, MINISTRAL3_GRAPH_Q_HEADS, MINISTRAL3_GRAPH_Q_WIDTH,
+    MINISTRAL3_GRAPH_RMS_EPSILON, MINISTRAL3_GRAPH_ROPE_THETA, MINISTRAL3_GRAPH_VOCAB_SIZE,
+    MINISTRAL3_GRAPH_YARN_BETA_FAST, MINISTRAL3_GRAPH_YARN_BETA_SLOW, MINISTRAL3_GRAPH_YARN_FACTOR,
+    Ministral3GraphError, Ministral3GraphNode, Ministral3GraphNodeKind, Ministral3GraphTensor,
+    Ministral3KvAppendContract, Ministral3NormRole, Ministral3QueryScaleApplication,
+    Ministral3RotaryPairing, Ministral3TensorClass, Ministral3TextGraph,
+    Ministral3YarnQueryScaleStage, build_ministral3_text_graph,
+};
+pub use ministral3_headers::{
+    MINISTRAL3_HEADER_CATALOG_SHA256, MINISTRAL3_HEADER_IDENTITIES, MINISTRAL3_HEADER_PREFIX_BYTES,
+    MINISTRAL3_SAFETENSORS_HEADER_LENGTH_FIELD_BYTES, Ministral3HeaderCatalog,
+    Ministral3HeaderError, Ministral3HeaderIdentity, Ministral3HeaderTensor, Ministral3Index,
+    Ministral3SafetensorsDType, Ministral3ShardHeader, build_ministral3_header_catalog,
+    ministral3_locked_header, parse_ministral3_safetensors_header,
+    validate_ministral3_header_catalog, validate_ministral3_index,
+};
+pub use ministral3_lock::{
+    MINISTRAL3_MODEL_ALIAS, MINISTRAL3_MODEL_LOCK_FINGERPRINT, MINISTRAL3_MODEL_LOCK_SCHEMA,
+    Ministral3ModelLock, parse_ministral3_model_lock,
+};
+pub use ministral3_weights::{
+    MINISTRAL3_WEIGHT_BF16_TENSOR_COUNT, MINISTRAL3_WEIGHT_F32_NORM_TENSOR_COUNT,
+    MINISTRAL3_WEIGHT_LOCK_FINGERPRINT, MINISTRAL3_WEIGHT_PLAN_SCHEMA,
+    MINISTRAL3_WEIGHT_RESIDENT_BYTES, MINISTRAL3_WEIGHT_TENSOR_COUNT, Ministral3WeightError,
+    VerifiedMinistral3WeightSource, build_ministral3_weight_load_plan,
+    build_verified_ministral3_weight_load_plan,
+};
 pub use model::{
     AccumulationDType, BaseModel, BudgetBoundary, ClassificationStatus, ComponentMetadata,
     ComponentStatus, ConfigEos, ExcludedFile, FrontendAssetKind, GenerationConfig,
@@ -198,8 +523,12 @@ pub use model::{
     verify_gemma4_model_cache, verify_model_cache,
 };
 pub use moe::{
+    GEMMA4_MOE_EXPERT_COUNT, GEMMA4_MOE_HIDDEN_SIZE, GEMMA4_MOE_ROUTER_EPSILON,
+    GEMMA4_MOE_SELECTED_EXPERT_COUNT, Gemma4MoeRouterAccumulation, Gemma4MoeRouterDescriptor,
+    Gemma4MoeRouterError, Gemma4MoeRouterReference, Gemma4MoeRouterStage, Gemma4MoeRouterTensor,
     QWEN35_MOE_EXPERT_COUNT, QWEN35_MOE_SELECTED_EXPERT_COUNT, SparseMoeRouting,
-    SparseMoeRoutingContract, SparseMoeRoutingError, reference_sparse_moe_route,
+    SparseMoeRoutingContract, SparseMoeRoutingError, reference_gemma4_moe_route,
+    reference_sparse_moe_route,
 };
 pub use mxfp::{MX_BLOCK_SIZE, MxElementFormat, MxError, decode_e8m0, decode_mxfp4, decode_mxfp8};
 pub use nvfp4::{
@@ -213,7 +542,8 @@ pub use nvfp4_sidecar::{
 pub use op::{
     ArgmaxTensor, AttentionPreprocessContract, AttentionPreprocessPacking,
     AttentionPreprocessPositionMode, AttentionPreprocessPositionPayloadModeV1,
-    AttentionPreprocessTensor, ElementwiseTensor, GdnProjectionBundleContractV1,
+    AttentionPreprocessTensor, DeepSeekV4MoeRouteContractV1, DeepSeekV4MoeRouteMode,
+    ElementwiseTensor, GdnProjectionBundleContractV1, MiniMaxM3MoeRouteContractV1,
     MlpGateUpSiluBundleContractV1, OpError, RmsNormAliasPolicy, RmsNormContract, RmsNormEpsilon,
     RmsNormScaleMode, RmsNormTensor, RotaryPositionModeV1, RotaryTensor, SemanticOp,
     SemanticOpDescriptor, SemanticOpKind, SparseMoeContract, SplitHalfRotaryContract,
@@ -346,8 +676,9 @@ pub use weights::{
     GgufWeightUploadRequest, QwenComponentSelection, VerifiedGgufGemmaSource,
     VerifiedGgufWeightSource, WEIGHT_LOAD_CHUNK_BYTES, WeightClassification, WeightConsumer,
     WeightConsumerKey, WeightLoadChunk, WeightLoadEntry, WeightLoadPlan, WeightPlanError,
-    WeightUploadError, WeightUploadReceipt, WeightUploadRequest, build_gemma4_weight_load_plan,
-    build_qwen_component_weight_load_plan, build_unsloth_gemma4_nvfp4_weight_load_plan,
+    WeightUploadError, WeightUploadReceipt, WeightUploadRequest, build_gemma4_mtp_weight_load_plan,
+    build_gemma4_weight_load_plan, build_qwen_component_weight_load_plan,
+    build_unsloth_gemma4_nvfp4_weight_load_plan, build_verified_gemma4_mtp_weight_load_plan,
     build_verified_gemma4_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
     build_verified_gguf_qwen_weight_load_plan, build_verified_qwen_component_weight_load_plan,
     build_verified_weight_load_plan, build_weight_load_plan, upload_verified_gguf_weight,

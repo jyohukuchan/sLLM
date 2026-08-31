@@ -155,25 +155,83 @@ uint64_t environment_u64(const char *const name, const uint64_t fallback) {
 } // namespace
 
 int main() {
+  const char *const gemma4_environment = std::getenv("SLLM_MOE_GEMMA4");
+  const bool gemma4 = gemma4_environment != nullptr &&
+                      std::strcmp(gemma4_environment, "1") == 0;
   const char *const blob_path = std::getenv("SLLM_MOE_LAYER_BLOB");
   const char *const hidden_path = std::getenv("SLLM_MOE_HIDDEN");
   const char *const expected_path = std::getenv("SLLM_MOE_EXPECTED");
-  if (blob_path == nullptr || hidden_path == nullptr ||
-      expected_path == nullptr) {
+  if (!gemma4 && (blob_path == nullptr || hidden_path == nullptr ||
+                  expected_path == nullptr)) {
     std::cerr << "MoE fixture environment is absent\n";
     return 2;
   }
   const uint64_t token_count = environment_u64("SLLM_MOE_TOKENS", 1U);
   const uint64_t expert_start = environment_u64("SLLM_MOE_EXPERT_START", 0U);
-  if (token_count == 0U || expert_start + 8U > 256U) {
+  const uint64_t expert_count =
+      gemma4 ? SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT : SLLM_HIP_MOE_EXPERT_COUNT;
+  const uint64_t hidden_size = gemma4 ? SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE
+                                      : SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE;
+  if (token_count == 0U || expert_start + 8U > expert_count) {
     std::cerr << "MoE fixture dimensions are invalid\n";
     return 2;
   }
-  const auto blob = read_file(blob_path, SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES);
-  const auto hidden = read_file(
-      hidden_path, token_count * SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE * 2U);
-  const auto expected_bytes = read_file(
-      expected_path, token_count * SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE * 4U);
+  std::vector<uint8_t> blob =
+      gemma4 ? std::vector<uint8_t>(static_cast<std::size_t>(
+                   SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES))
+             : read_file(blob_path, SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES);
+  std::vector<uint8_t> hidden =
+      gemma4 ? std::vector<uint8_t>(
+                   static_cast<std::size_t>(token_count * hidden_size * 2U))
+             : read_file(hidden_path, token_count * hidden_size * 2U);
+  std::vector<uint8_t> expected_bytes =
+      gemma4 ? std::vector<uint8_t>(
+                   static_cast<std::size_t>(token_count * hidden_size * 4U))
+             : read_file(expected_path, token_count * hidden_size * 4U);
+  if (gemma4) {
+    constexpr uint64_t gate_scales = UINT64_C(126877696);
+    constexpr uint64_t gate_outer = UINT64_C(142737408);
+    constexpr uint64_t gate_input = UINT64_C(142737920);
+    constexpr uint64_t up_values = UINT64_C(142738432);
+    constexpr uint64_t up_scales = UINT64_C(269616128);
+    constexpr uint64_t up_outer = UINT64_C(285475840);
+    constexpr uint64_t up_input = UINT64_C(285476352);
+    constexpr uint64_t down_values = UINT64_C(285476864);
+    constexpr uint64_t down_scales = UINT64_C(412354560);
+    constexpr uint64_t down_outer = UINT64_C(428214272);
+    constexpr uint64_t down_input = UINT64_C(428214784);
+    constexpr uint64_t expert_scales = UINT64_C(428215296);
+    const auto store_f32 = [&blob](const uint64_t offset, const float value) {
+      std::memcpy(blob.data() + offset, &value, sizeof(value));
+    };
+    for (uint64_t expert = 0U; expert < expert_count; ++expert) {
+      store_f32(gate_outer + expert * 4U, 1.0F);
+      store_f32(gate_input + expert * 4U, 1.0F);
+      store_f32(up_outer + expert * 4U, 1.0F);
+      store_f32(up_input + expert * 4U, 1.0F);
+      store_f32(down_outer + expert * 4U, 1.0F);
+      store_f32(down_input + expert * 4U, 6.0F);
+      const uint16_t one = UINT16_C(0x3f80);
+      std::memcpy(blob.data() + expert_scales + expert * 2U, &one, sizeof(one));
+    }
+    /* Only expert zero, output row zero, and input column zero are nonzero.
+     * E2M1 code 2 is 1, E4M3FN code 0x38 is 1. Hidden 6 quantizes exactly;
+     * GELU-tanh rounds to BF16 6, so the selected route contributes
+     * 6*6*(1/8)=4.5. */
+    blob[0] = UINT8_C(0x02);
+    blob[gate_scales] = UINT8_C(0x38);
+    blob[up_values] = UINT8_C(0x02);
+    blob[up_scales] = UINT8_C(0x38);
+    blob[down_values] = UINT8_C(0x02);
+    blob[down_scales] = UINT8_C(0x38);
+    for (uint64_t token = 0U; token < token_count; ++token) {
+      const uint16_t six = UINT16_C(0x40c0);
+      std::memcpy(hidden.data() + token * hidden_size * 2U, &six, sizeof(six));
+      const float expected = 4.5F;
+      std::memcpy(expected_bytes.data() + token * hidden_size * 4U, &expected,
+                  sizeof(expected));
+    }
+  }
   if (blob.empty() || hidden.empty() || expected_bytes.empty()) {
     std::cerr << "MoE fixture file differs\n";
     return 2;
@@ -196,22 +254,27 @@ int main() {
               SLLM_STATUS_OK, "queue", error))
     return 1;
   const uint64_t pair_count = token_count * 8U;
-  const uint64_t route_bytes = pair_count * 16U + 256U * 4U + 257U * 4U + 4U;
-  const uint64_t workspace_bytes = token_count * (2048U / 2U + 2048U / 32U) +
-                                   pair_count * 512U * 2U +
-                                   pair_count * (512U / 2U + 512U / 32U) +
-                                   token_count * 512U * 2U + token_count * 4U;
+  const uint64_t route_bytes =
+      pair_count * 16U + expert_count * 4U + (expert_count + 1U) * 4U + 4U;
+  const uint64_t workspace_bytes =
+      gemma4
+          ? token_count * SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN
+          : token_count * (2048U / 2U + 2048U / 32U) + pair_count * 512U * 2U +
+                pair_count * (512U / 2U + 512U / 32U) +
+                token_count * 512U * 2U + token_count * 4U;
   sllm_buffer_t *hidden_buffer = create(context, hidden.size());
-  sllm_buffer_t *logits_buffer = create(context, token_count * 256U * 2U);
+  sllm_buffer_t *logits_buffer =
+      create(context, token_count * expert_count * 2U);
   sllm_buffer_t *route_buffer = create(context, route_bytes);
   sllm_buffer_t *blob_buffer = create(context, blob.size());
   sllm_buffer_t *workspace_buffer = create(context, workspace_bytes);
-  sllm_buffer_t *output_buffer = create(context, token_count * 2048U * 2U);
-  std::vector<uint16_t> logits(static_cast<std::size_t>(token_count * 256U),
-                               UINT16_C(0xc120));
+  sllm_buffer_t *output_buffer =
+      create(context, token_count * hidden_size * 2U);
+  std::vector<uint16_t> logits(
+      static_cast<std::size_t>(token_count * expert_count), UINT16_C(0xc120));
   for (uint64_t token = 0U; token < token_count; ++token) {
     for (uint64_t expert = expert_start; expert < expert_start + 8U; ++expert) {
-      logits[static_cast<std::size_t>(token * 256U + expert)] = 0U;
+      logits[static_cast<std::size_t>(token * expert_count + expert)] = 0U;
     }
   }
   bool ok = hidden_buffer != nullptr && logits_buffer != nullptr &&
@@ -225,8 +288,8 @@ int main() {
   route_desc.abi_version = SLLM_HIP_ABI_VERSION;
   route_desc.op_version = SLLM_HIP_MOE_ROUTE_VERSION;
   route_desc.selected_expert_count = 8U;
-  route_desc.logits =
-      binding(logits_buffer, SLLM_TENSOR_DTYPE_BF16, 2U, token_count, 256U);
+  route_desc.logits = binding(logits_buffer, SLLM_TENSOR_DTYPE_BF16, 2U,
+                              token_count, expert_count);
   route_desc.metadata =
       binding(route_buffer, SLLM_TENSOR_DTYPE_U8, 1U, route_bytes);
   sllm_moe_route_plan_t *route_plan = nullptr;
@@ -246,17 +309,18 @@ int main() {
   sllm_moe_expert_desc_t expert_desc{};
   expert_desc.struct_size = sizeof(expert_desc);
   expert_desc.abi_version = SLLM_HIP_ABI_VERSION;
-  expert_desc.op_version = SLLM_HIP_MOE_EXPERT_VERSION;
-  expert_desc.hidden =
-      binding(hidden_buffer, SLLM_TENSOR_DTYPE_BF16, 2U, token_count, 2048U);
+  expert_desc.op_version =
+      gemma4 ? SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION : SLLM_HIP_MOE_EXPERT_VERSION;
+  expert_desc.hidden = binding(hidden_buffer, SLLM_TENSOR_DTYPE_BF16, 2U,
+                               token_count, hidden_size);
   expert_desc.routing_metadata =
       binding(route_buffer, SLLM_TENSOR_DTYPE_U8, 1U, route_bytes);
   expert_desc.layer_blob =
       binding(blob_buffer, SLLM_TENSOR_DTYPE_U8, 1U, blob.size());
   expert_desc.workspace =
       binding(workspace_buffer, SLLM_TENSOR_DTYPE_U8, 1U, workspace_bytes);
-  expert_desc.output =
-      binding(output_buffer, SLLM_TENSOR_DTYPE_BF16, 2U, token_count, 2048U);
+  expert_desc.output = binding(output_buffer, SLLM_TENSOR_DTYPE_BF16, 2U,
+                               token_count, hidden_size);
   sllm_moe_expert_plan_t *expert_plan = nullptr;
   ok = ok && expect(sllm_moe_expert_prepare(context, &expert_desc, &expert_plan,
                                             &error.sink),
@@ -270,7 +334,8 @@ int main() {
                                       &expert_info, &error.sink),
               SLLM_STATUS_OK, "expert execute", error) &&
        wait_release(&completion);
-  std::vector<uint16_t> output(static_cast<std::size_t>(token_count * 2048U));
+  std::vector<uint16_t> output(
+      static_cast<std::size_t>(token_count * hidden_size));
   ok = ok && download(queue, output_buffer, output.data(), output.size() * 2U);
   const auto *const expected =
       reinterpret_cast<const float *>(expected_bytes.data());
@@ -285,16 +350,33 @@ int main() {
     ok = std::isfinite(actual) && relative <= 0.025F;
   }
   ok = ok && route_info.fallback_used == 0U &&
-       expert_info.fallback_used == 0U &&
+       route_info.fallback_allowed == 0U && expert_info.fallback_used == 0U &&
+       expert_info.fallback_allowed == 0U &&
        expert_info.active_pair_count == pair_count &&
-       expert_info.shared_expert_count == 1U &&
+       expert_info.dispatch_count == (gemma4 ? 4U : 5U) &&
+       expert_info.workspace_bytes == workspace_bytes &&
+       expert_info.selected_expert_count == 8U &&
+       expert_info.shared_expert_count == (gemma4 ? 0U : 1U) &&
+       std::strcmp(expert_info.gcn_arch_name, SLLM_TEST_EXPECTED_TARGET) == 0 &&
+       (!gemma4 ||
+        std::strcmp(expert_info.device_symbol,
+                    "sllm_gemma4_moe_expert_active8_nvfp4_v2") == 0) &&
+       (!gemma4 ||
+        std::strcmp(expert_info.kernel_symbol,
+                    token_count == 1U
+                        ? "moe_expert.gemma4.nvfp4.decode.active8.v2"
+                        : "moe_expert.gemma4.nvfp4.prefill.active8.v2") == 0) &&
        expert_info.kernel_id ==
-           (token_count == 1U ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1
-                              : SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1);
+           (gemma4 ? (token_count == 1U
+                          ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2
+                          : SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2)
+                   : (token_count == 1U
+                          ? SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1
+                          : SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1));
   std::cout << (ok ? "PASS" : "FAIL") << " target=" << SLLM_TEST_EXPECTED_TARGET
             << " tokens=" << token_count << " expert_start=" << expert_start
-            << " active_pairs=" << pair_count
-            << " shared=1 max_abs=" << maximum_absolute
+            << " active_pairs=" << pair_count << " shared=" << (gemma4 ? 0 : 1)
+            << " max_abs=" << maximum_absolute
             << " max_rel=" << maximum_relative << " fallback=0\n";
   if (expert_plan != nullptr)
     sllm_moe_expert_plan_release(&expert_plan, &error.sink);

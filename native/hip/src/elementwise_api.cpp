@@ -186,7 +186,8 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
        descriptor->operation != SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL &&
        descriptor->operation != SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL &&
        descriptor->operation != SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP &&
-       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD)) {
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD &&
+       descriptor->operation != SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL)) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ELEMENTWISE_DESCRIPTOR,
         "elementwise descriptor has an unsupported operation contract");
@@ -224,7 +225,8 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
       descriptor->operation == SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL ||
       descriptor->operation == SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP;
   const bool broadcast_input =
-      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD;
+      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD ||
+      descriptor->operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL;
   const bool input1_layout_valid =
       descriptor->operation == SLLM_ELEMENTWISE_OPERATION_COPY ||
       (broadcast_input
@@ -238,7 +240,10 @@ validate_and_copy_descriptor(const sllm_elementwise_desc_t *const descriptor,
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
         broadcast_input
-            ? "broadcast add requires input/output [M,H] and vector [H]"
+            ? (descriptor->operation == SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD
+                   ? "broadcast add requires input/output [M,H] and vector [H]"
+                   : "broadcast multiply requires input/output [M,H] and "
+                     "vector [H]")
             : (scalar_input
                    ? "scalar elementwise operation requires equal input/output "
                      "layouts and one BF16 scalar"

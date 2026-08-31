@@ -1,4 +1,5 @@
-//! Safe active-pair Qwen3.5 MoE expert execution over the public HIP ABI.
+//! Safe active-pair Qwen3.5 and Gemma 4 MoE expert execution over the public
+//! HIP ABI.
 
 use std::mem::size_of;
 use std::ptr::NonNull;
@@ -16,6 +17,10 @@ pub const fn moe_expert_workspace_bytes(token_count: u64) -> Option<u64> {
     token_count.checked_mul(12_484)
 }
 
+pub const fn gemma4_moe_expert_workspace_bytes(token_count: u64) -> Option<u64> {
+    token_count.checked_mul(sys::SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN)
+}
+
 #[derive(Clone, Debug)]
 pub struct MoeExpertDescriptor {
     hidden: TensorBinding,
@@ -24,6 +29,7 @@ pub struct MoeExpertDescriptor {
     workspace: TensorBinding,
     output: TensorBinding,
     token_count: u64,
+    op_version: u32,
 }
 
 impl MoeExpertDescriptor {
@@ -34,19 +40,84 @@ impl MoeExpertDescriptor {
         workspace: TensorBinding,
         output: TensorBinding,
     ) -> Result<Self, RuntimeError> {
+        Self::new_fixed(
+            hidden,
+            routing_metadata,
+            layer_blob,
+            workspace,
+            output,
+            sys::SLLM_HIP_MOE_EXPERT_VERSION,
+            sys::SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE as u64,
+            sys::SLLM_HIP_MOE_EXPERT_COUNT as u64,
+            sys::SLLM_HIP_MOE_EXPERT_TOPK as u64,
+            sys::SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES,
+            moe_expert_workspace_bytes,
+            "MoE expert bindings differ from the fixed Qwen3.5 layer contract",
+        )
+    }
+
+    pub fn new_gemma4(
+        hidden: TensorBinding,
+        routing_metadata: TensorBinding,
+        layer_blob: TensorBinding,
+        workspace: TensorBinding,
+        output: TensorBinding,
+    ) -> Result<Self, RuntimeError> {
+        Self::new_fixed(
+            hidden,
+            routing_metadata,
+            layer_blob,
+            workspace,
+            output,
+            sys::SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION,
+            sys::SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE as u64,
+            sys::SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT as u64,
+            sys::SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK as u64,
+            sys::SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES,
+            gemma4_moe_expert_workspace_bytes,
+            "MoE expert bindings differ from the fixed Gemma 4 26B-A4B routed-expert contract",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_fixed(
+        hidden: TensorBinding,
+        routing_metadata: TensorBinding,
+        layer_blob: TensorBinding,
+        workspace: TensorBinding,
+        output: TensorBinding,
+        op_version: u32,
+        hidden_size: u64,
+        expert_count: u64,
+        top_k: u64,
+        layer_blob_bytes: u64,
+        workspace_size: fn(u64) -> Option<u64>,
+        contract_error: &'static str,
+    ) -> Result<Self, RuntimeError> {
         let tokens = hidden.view().shape().first().copied().unwrap_or(0) as u64;
         let route_bytes = tokens
-            .checked_mul(8)
+            .checked_mul(top_k)
             .and_then(|pairs| pairs.checked_mul(16))
-            .and_then(|bytes| bytes.checked_add(256 * 4 + 257 * 4 + 4))
+            .and_then(|bytes| {
+                expert_count
+                    .checked_mul(4)
+                    .and_then(|counts| {
+                        expert_count
+                            .checked_add(1)
+                            .and_then(|offsets| offsets.checked_mul(4))
+                            .and_then(|offsets| counts.checked_add(offsets))
+                    })
+                    .and_then(|grouped| bytes.checked_add(grouped))
+            })
+            .and_then(|bytes| bytes.checked_add(4))
             .ok_or_else(|| {
                 RuntimeError::local(RuntimeStatus::InvalidArgument, "MoE layout overflow")
             })?;
-        let workspace_bytes = moe_expert_workspace_bytes(tokens).ok_or_else(|| {
+        let workspace_bytes = workspace_size(tokens).ok_or_else(|| {
             RuntimeError::local(RuntimeStatus::InvalidArgument, "MoE workspace overflow")
         })?;
         let matrix = |binding: &TensorBinding| {
-            binding.view().shape() == [tokens as usize, 2048]
+            binding.view().shape() == [tokens as usize, hidden_size as usize]
                 && binding.view().dtype() == DType::Bf16
                 && binding.view().encoding() == Encoding::Unquantized
                 && binding.view().is_contiguous()
@@ -62,12 +133,12 @@ impl MoeExpertDescriptor {
             || !matrix(&hidden)
             || !matrix(&output)
             || !bytes(&routing_metadata, route_bytes)
-            || !bytes(&layer_blob, sys::SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES)
+            || !bytes(&layer_blob, layer_blob_bytes)
             || !bytes(&workspace, workspace_bytes)
         {
             return Err(RuntimeError::local(
                 RuntimeStatus::InvalidArgument,
-                "MoE expert bindings differ from the fixed Qwen3.5 layer contract",
+                contract_error,
             ));
         }
         Ok(Self {
@@ -77,6 +148,7 @@ impl MoeExpertDescriptor {
             workspace,
             output,
             token_count: tokens,
+            op_version,
         })
     }
 
@@ -88,7 +160,7 @@ impl MoeExpertDescriptor {
         Ok(sys::sllm_moe_expert_desc_t {
             struct_size: size_of::<sys::sllm_moe_expert_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version: sys::SLLM_HIP_MOE_EXPERT_VERSION,
+            op_version: self.op_version,
             reserved0: 0,
             reserved: [0; 4],
             hidden: self.hidden.raw()?,
@@ -279,5 +351,31 @@ impl PreparedMoeExpert {
             },
             dispatch,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gemma4_moe_expert_workspace_bytes, moe_expert_workspace_bytes};
+
+    #[test]
+    fn versioned_workspace_sizes_keep_qwen_v1_unchanged() {
+        assert_eq!(moe_expert_workspace_bytes(1), Some(12_484));
+        assert_eq!(moe_expert_workspace_bytes(3), Some(37_452));
+        assert_eq!(gemma4_moe_expert_workspace_bytes(1), Some(27_104));
+        assert_eq!(gemma4_moe_expert_workspace_bytes(3), Some(81_312));
+        assert_eq!(
+            gemma4_moe_expert_workspace_bytes(65_536),
+            Some(1_776_287_744)
+        );
+    }
+
+    #[test]
+    fn versioned_workspace_sizes_reject_overflow() {
+        assert_eq!(
+            gemma4_moe_expert_workspace_bytes(u64::MAX / 27_104 + 1),
+            None
+        );
+        assert_eq!(moe_expert_workspace_bytes(u64::MAX / 12_484 + 1), None);
     }
 }

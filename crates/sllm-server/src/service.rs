@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::convert::Infallible;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -14,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use base64::Engine;
 use futures_util::stream::{self, Stream};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sllm_core::{CosineEmbeddingRerankV1, EmbeddingVectorV1};
 use sllm_frontend::{
     DecodeModeV1, Qwen35ChatMessageV1, Qwen35RenderOptionsV1, ThinkingModeV1, TokenPieceV1,
@@ -27,8 +28,10 @@ use crate::api::{
     GenerationRequestInputV1, MAX_REQUEST_BODY_BYTES, ReasoningOptionsV1, TokenUsageV1,
     parse_chat_completion_request_for_profile,
 };
+use crate::hugging_face::{HuggingFaceErrorV1, HuggingFaceHubV1};
 use crate::lifecycle::ServerLifecycleV1;
 use crate::metrics::{HttpEndpointV1, MetricsRequestHandleV1, RequestOutcomeV1, ServerMetricsV1};
+use crate::model_library::{ModelLibraryDeviceV1, ModelLibraryV1};
 use crate::model_lifecycle::{
     ModelLifecycleErrorV1, ModelLifecycleLeaseV1, ModelLifecycleRegistryV1,
 };
@@ -58,6 +61,10 @@ pub struct ServerConfigV1 {
     pub(crate) metrics: Option<ServerMetricsV1>,
     pub(crate) replay: Option<ResumableStoreV1>,
     cors_origins: Vec<HeaderValue>,
+    hardware: Option<ModelLibraryDeviceV1>,
+    model_library: Option<ModelLibraryV1>,
+    hugging_face: Option<HuggingFaceHubV1>,
+    loopback_admin: bool,
 }
 
 impl ServerConfigV1 {
@@ -74,6 +81,10 @@ impl ServerConfigV1 {
             metrics: None,
             replay: None,
             cors_origins: Vec::new(),
+            hardware: None,
+            model_library: None,
+            hugging_face: None,
+            loopback_admin: false,
         })
     }
 
@@ -101,6 +112,29 @@ impl ServerConfigV1 {
     pub fn with_resumable_store(mut self, replay: ResumableStoreV1) -> Self {
         self.replay = Some(replay);
         self
+    }
+
+    pub fn with_hardware(mut self, hardware: ModelLibraryDeviceV1) -> Self {
+        self.hardware = Some(hardware);
+        self
+    }
+
+    pub fn with_model_library(mut self, model_library: ModelLibraryV1) -> Self {
+        self.hugging_face = Some(HuggingFaceHubV1::new(model_library.clone()));
+        self.model_library = Some(model_library);
+        self
+    }
+
+    /// Allows credential-free administrative actions only for an explicitly
+    /// verified loopback listener.
+    pub fn with_loopback_admin(mut self, listen: SocketAddr) -> Result<Self, ApiErrorV1> {
+        if !listen.ip().is_loopback() {
+            return Err(ApiErrorV1::generation_failed(
+                "credential-free admin requires a loopback listener",
+            ));
+        }
+        self.loopback_admin = true;
+        Ok(self)
     }
 
     pub fn with_cors_origins<I, S>(mut self, origins: I) -> Result<Self, ApiErrorV1>
@@ -263,6 +297,33 @@ pub fn build_dynamic_router_v1(
             post(admin_model_clear_quarantine),
         )
         .route("/admin/models/evict-idle", post(admin_model_evict_idle))
+        .route("/admin/model-library", get(admin_model_library))
+        .route(
+            "/admin/model-library/browse",
+            post(admin_model_library_browse),
+        )
+        .route(
+            "/admin/model-library/select",
+            post(admin_model_library_select),
+        )
+        .route(
+            "/admin/model-library/rescan",
+            post(admin_model_library_rescan),
+        )
+        .route("/admin/hugging-face/status", get(admin_hugging_face_status))
+        .route(
+            "/admin/hugging-face/search",
+            post(admin_hugging_face_search),
+        )
+        .route("/admin/hugging-face/files", post(admin_hugging_face_files))
+        .route(
+            "/admin/hugging-face/downloads",
+            post(admin_hugging_face_start_download),
+        )
+        .route(
+            "/admin/hugging-face/downloads/{id}",
+            get(admin_hugging_face_download_job),
+        )
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(create_chat_completion))
         .route("/v1/completions", post(create_completion))
@@ -366,11 +427,19 @@ async fn metrics(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Re
                 metrics.set_model_ready(entry.alias(), ready);
             }
         }
-        let memory = state
-            .registry
-            .entries()
+        let memory = if let Some(lifecycle) = state.lifecycle.as_ref() {
+            lifecycle.observability_snapshots()
+        } else {
+            state
+                .registry
+                .entries()
+                .iter()
+                .map(|entry| (entry.alias().to_owned(), entry.observability_snapshot()))
+                .collect::<Vec<_>>()
+        };
+        let memory = memory
             .iter()
-            .map(|entry| (entry.alias(), entry.observability_snapshot()))
+            .map(|(alias, snapshot)| (alias.as_str(), *snapshot))
             .collect::<Vec<_>>();
         (
             StatusCode::OK,
@@ -422,12 +491,20 @@ async fn props(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Resp
             "state": state.config.lifecycle.state(),
             "models": models,
             "scheduler": state.scheduler.snapshot(),
+            "hardware": state.config.hardware.as_ref().map(|hardware| serde_json::json!({
+                "vendor": "AMD",
+                "device_index": hardware.device_index,
+                "name": hardware.name,
+                "target": hardware.target,
+                "memory_bytes": hardware.total_memory_bytes,
+            })),
             "features": {
                 "metrics": state.config.metrics.is_some(),
                 "resumable_sse": state.config.replay.is_some(),
                 "cors": !state.config.cors_origins.is_empty(),
                 "authentication": !state.config.credentials.is_open(),
-                "admin": state.config.credentials.has_admin_credentials(),
+                "admin": state.config.credentials.has_admin_credentials() || state.config.loopback_admin,
+                "model_library": state.config.model_library.is_some(),
             }
         }))
         .into_response()
@@ -609,6 +686,280 @@ async fn admin_model_evict_idle(
     };
     record_http(&state, HttpEndpointV1::Props, &response);
     response
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelLibraryBrowseQueryV1 {
+    path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelLibrarySelectRequestV1 {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HuggingFaceSearchRequestV1 {
+    query: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HuggingFaceFilesRequestV1 {
+    repo_id: String,
+    revision: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HuggingFaceDownloadRequestV1 {
+    repo_id: String,
+    revision: String,
+    file_path: String,
+    derived_lock_path: Option<String>,
+}
+
+async fn admin_model_library(State(state): State<Arc<AppStateV1>>, headers: HeaderMap) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.model_library.as_ref() {
+            Some(library) => axum::Json(library.snapshot()).into_response(),
+            None => model_library_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_library_browse(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    axum::Json(query): axum::Json<ModelLibraryBrowseQueryV1>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.model_library.as_ref() {
+            Some(library) => {
+                let library = library.clone();
+                let path = query.path.map(std::path::PathBuf::from);
+                match tokio::task::spawn_blocking(move || library.browse(path.as_deref())).await {
+                    Ok(Ok(listing)) => axum::Json(listing).into_response(),
+                    Ok(Err(error)) => ApiErrorV1::invalid_value("path", error).into_response(),
+                    Err(_) => ApiErrorV1::generation_failed("model folder browser worker failed")
+                        .into_response(),
+                }
+            }
+            None => model_library_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_library_select(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<ModelLibrarySelectRequestV1>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else if request.path.len() > 4096 || request.path.contains('\0') {
+        ApiErrorV1::invalid_value("path", "model folder path is invalid").into_response()
+    } else {
+        match state.config.model_library.as_ref() {
+            Some(library) => {
+                let library = library.clone();
+                let path = std::path::PathBuf::from(request.path);
+                match tokio::task::spawn_blocking(move || library.select(&path)).await {
+                    Ok(Ok(snapshot)) => axum::Json(snapshot).into_response(),
+                    Ok(Err(error)) => ApiErrorV1::invalid_value("path", error).into_response(),
+                    Err(_) => ApiErrorV1::generation_failed("model folder selection worker failed")
+                        .into_response(),
+                }
+            }
+            None => model_library_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_model_library_rescan(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    request: Request<Body>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match reject_admin_body(request).await {
+            Err(response) => response,
+            Ok(()) => match state.config.model_library.as_ref() {
+                Some(library) => {
+                    let library = library.clone();
+                    match tokio::task::spawn_blocking(move || library.rescan()).await {
+                        Ok(Ok(snapshot)) => axum::Json(snapshot).into_response(),
+                        Ok(Err(error)) => ApiErrorV1::generation_failed(error).into_response(),
+                        Err(_) => {
+                            ApiErrorV1::generation_failed("model folder rescan worker failed")
+                                .into_response()
+                        }
+                    }
+                }
+                None => model_library_unavailable(),
+            },
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_hugging_face_status(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.hugging_face.as_ref() {
+            Some(hub) => {
+                let hub = hub.clone();
+                match tokio::task::spawn_blocking(move || hub.status()).await {
+                    Ok(status) => axum::Json(status).into_response(),
+                    Err(_) => ApiErrorV1::generation_failed("Hugging Face status worker failed")
+                        .into_response(),
+                }
+            }
+            None => hugging_face_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_hugging_face_search(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<HuggingFaceSearchRequestV1>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.hugging_face.as_ref() {
+            Some(hub) => {
+                let hub = hub.clone();
+                match tokio::task::spawn_blocking(move || hub.search(&request.query)).await {
+                    Ok(Ok(results)) => axum::Json(results).into_response(),
+                    Ok(Err(error)) => hugging_face_error(error),
+                    Err(_) => ApiErrorV1::generation_failed("Hugging Face search worker failed")
+                        .into_response(),
+                }
+            }
+            None => hugging_face_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_hugging_face_files(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<HuggingFaceFilesRequestV1>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.hugging_face.as_ref() {
+            Some(hub) => {
+                let hub = hub.clone();
+                match tokio::task::spawn_blocking(move || {
+                    hub.files(&request.repo_id, &request.revision)
+                })
+                .await
+                {
+                    Ok(Ok(files)) => axum::Json(files).into_response(),
+                    Ok(Err(error)) => hugging_face_error(error),
+                    Err(_) => {
+                        ApiErrorV1::generation_failed("Hugging Face repository worker failed")
+                            .into_response()
+                    }
+                }
+            }
+            None => hugging_face_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_hugging_face_start_download(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    axum::Json(request): axum::Json<HuggingFaceDownloadRequestV1>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.hugging_face.as_ref() {
+            Some(hub) => match hub.start_download(
+                &request.repo_id,
+                &request.revision,
+                &request.file_path,
+                request.derived_lock_path.as_deref(),
+            ) {
+                Ok(job) => (StatusCode::ACCEPTED, axum::Json(job)).into_response(),
+                Err(error) => hugging_face_error(error),
+            },
+            None => hugging_face_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+async fn admin_hugging_face_download_job(
+    State(state): State<Arc<AppStateV1>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let response = if let Err(error) = authorize_admin(&headers, &state.config) {
+        error.into_response()
+    } else {
+        match state.config.hugging_face.as_ref() {
+            Some(hub) => match hub.download_job(&id) {
+                Ok(job) => axum::Json(job).into_response(),
+                Err(error) => hugging_face_error(error),
+            },
+            None => hugging_face_unavailable(),
+        }
+    };
+    record_http(&state, HttpEndpointV1::Props, &response);
+    response
+}
+
+fn hugging_face_error(error: HuggingFaceErrorV1) -> Response {
+    match error.param {
+        Some(param) => ApiErrorV1::invalid_value(param, error.message).into_response(),
+        None => ApiErrorV1::generation_failed(error.message).into_response(),
+    }
+}
+
+fn hugging_face_unavailable() -> Response {
+    ApiErrorV1::generation_failed(
+        "Hugging Face integration is available only on the loopback dynamic server",
+    )
+    .into_response()
+}
+
+fn model_library_unavailable() -> Response {
+    ApiErrorV1::generation_failed("model library is available only on the loopback dynamic server")
+        .into_response()
 }
 
 async fn reject_admin_body(request: Request<Body>) -> Result<(), Response> {
@@ -2092,7 +2443,8 @@ fn authorize(headers: &HeaderMap, config: &ServerConfigV1, admin: bool) -> Resul
     let unique = values.next().is_none();
     let accepted = unique
         && if admin {
-            config.credentials.authorize_admin(first)
+            (config.loopback_admin && config.credentials.is_open() && first.is_none())
+                || config.credentials.authorize_admin(first)
         } else {
             config.credentials.authorize_user(first)
         };
@@ -3009,4 +3361,21 @@ struct StreamDeltaV1<'a> {
     content: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServerConfigV1, authorize_admin};
+    use axum::http::HeaderMap;
+
+    #[test]
+    fn credential_free_admin_can_only_be_enabled_for_loopback() {
+        let loopback = ServerConfigV1::default()
+            .with_loopback_admin("127.0.0.1:8080".parse().unwrap())
+            .unwrap();
+        assert!(authorize_admin(&HeaderMap::new(), &loopback).is_ok());
+
+        let remote = ServerConfigV1::default().with_loopback_admin("0.0.0.0:8080".parse().unwrap());
+        assert!(remote.is_err());
+    }
 }

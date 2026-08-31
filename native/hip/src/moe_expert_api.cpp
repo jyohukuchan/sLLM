@@ -88,25 +88,44 @@ validate_and_copy_descriptor(const sllm_moe_expert_desc_t *const descriptor,
   const sllm_status_t prefix = validate_descriptor_prefix(descriptor, sink);
   if (prefix != SLLM_STATUS_OK)
     return prefix;
-  if (metadata == nullptr ||
-      descriptor->op_version != SLLM_HIP_MOE_EXPERT_VERSION ||
-      descriptor->reserved0 != 0U ||
+  if (metadata == nullptr || descriptor->reserved0 != 0U ||
       !all_zero(descriptor->reserved, sizeof(descriptor->reserved))) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_ARGUMENT,
         "MoE expert version or reserved fields differ");
+  }
+  const bool qwen = descriptor->op_version == SLLM_HIP_MOE_EXPERT_VERSION;
+  const bool gemma4 =
+      descriptor->op_version == SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION;
+  if (!qwen && !gemma4) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_UNSUPPORTED,
+        "MoE expert operation version is unsupported");
   }
   const uint64_t tokens = descriptor->hidden.shape[0];
   if (tokens == 0U || tokens > SLLM_HIP_MOE_EXPERT_MAX_TOKENS) {
     return sllm_public_runtime::write_error(sink, SLLM_STATUS_UNSUPPORTED,
                                             "MoE expert token count differs");
   }
+  metadata->op_version = descriptor->op_version;
+  metadata->expert_count =
+      qwen ? SLLM_HIP_MOE_EXPERT_COUNT : SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT;
+  metadata->selected_expert_count =
+      qwen ? SLLM_HIP_MOE_EXPERT_TOPK : SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK;
+  metadata->shared_expert_count = qwen ? 1U : 0U;
+  metadata->hidden_size = qwen ? SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE
+                               : SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE;
+  metadata->intermediate_size =
+      qwen ? SLLM_HIP_MOE_EXPERT_INTERMEDIATE_SIZE
+           : SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE;
   metadata->token_count = tokens;
-  metadata->active_pair_count = tokens * SLLM_HIP_MOE_EXPERT_TOPK;
+  metadata->active_pair_count = tokens * metadata->selected_expert_count;
   metadata->routing_metadata_bytes = metadata->active_pair_count * 16U +
-                                     SLLM_HIP_MOE_EXPERT_COUNT * 4U +
-                                     (SLLM_HIP_MOE_EXPERT_COUNT + 1U) * 4U + 4U;
-  metadata->workspace_bytes = tokens * UINT64_C(12484);
+                                     metadata->expert_count * 4U +
+                                     (metadata->expert_count + 1U) * 4U + 4U;
+  metadata->workspace_bytes =
+      tokens * (qwen ? UINT64_C(12484)
+                     : SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN);
   const sllm_tensor_binding_t bindings[] = {
       descriptor->hidden, descriptor->routing_metadata, descriptor->layer_blob,
       descriptor->workspace, descriptor->output};
@@ -115,10 +134,11 @@ validate_and_copy_descriptor(const sllm_moe_expert_desc_t *const descriptor,
                              SLLM_TENSOR_DTYPE_BF16};
   const uint32_t ranks[] = {2U, 1U, 1U, 1U, 2U};
   const uint64_t first[] = {tokens, metadata->routing_metadata_bytes,
-                            SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES,
+                            qwen ? SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES
+                                 : SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES,
                             metadata->workspace_bytes, tokens};
-  const uint64_t second[] = {SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE, 0U, 0U, 0U,
-                             SLLM_HIP_MOE_EXPERT_HIDDEN_SIZE};
+  const uint64_t second[] = {metadata->hidden_size, 0U, 0U, 0U,
+                             metadata->hidden_size};
   const uint64_t bytes[] = {2U, 1U, 1U, 1U, 2U};
   for (uint32_t index = 0U; index < 5U; ++index) {
     const sllm_status_t status =

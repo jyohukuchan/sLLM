@@ -4,35 +4,49 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use sllm_core::{
-    Backend, ExecutionSessionRequest, Gemma4ModelLock, Gemma4ResidentModel, KvCacheEncoding,
-    KvCacheSelection, KvCacheSelectionRequest, KvCacheSelectionSource, KvFp8PhysicalVariant,
-    ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS, QwenComponentSelection,
-    QwenExecutionRequest, QwenMultimodalImageEmbedding, QwenMultimodalPrompt, QwenResidentModel,
-    QwenVisionExecutionInput, QwenVisionResidentModel, ReviewedModelLock, SamplingParametersV1,
-    VerifiedCache, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe, VerifiedGgufWeightSource,
-    WeightClassification, assemble_gguf_qwen35_multimodal_prompt,
-    assemble_qwen35_multimodal_prompt, build_gguf_qwen35_moe_weight_load_plan,
+    Backend, CheckpointIdentity, CheckpointStore, ExecutionSessionRequest,
+    GEMMA4_12B_IT_FINGERPRINT, Gemma4ModelLock, Gemma4MoeExecutionOutput,
+    Gemma4MoeExecutionRequest, Gemma4MoeResidentModel, Gemma4MtpModelLock, Gemma4MtpResidentModel,
+    Gemma4ResidentModel, KvCacheEncoding, KvCacheSelection, KvCacheSelectionRequest,
+    KvCacheSelectionSource, KvFp8PhysicalVariant, MINISTRAL3_GRAPH_MAX_CONTEXT,
+    MINISTRAL3_MODEL_ALIAS, MINISTRAL3_MODEL_LOCK_FINGERPRINT, Ministral3ModelLock,
+    Ministral3ResidentModel, ModelLock, OsSamplingRandom, QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+    QwenComponentSelection, QwenExecutionRequest, QwenMultimodalImageEmbedding,
+    QwenMultimodalPrompt, QwenResidentModel, QwenVisionExecutionInput, QwenVisionResidentModel,
+    ReviewedModelLock, SamplingParametersV1, SessionCheckpoint, VerifiedCache,
+    VerifiedGgufGemma4Moe, VerifiedGgufGemmaSource, VerifiedGgufQwen35Moe,
+    VerifiedGgufWeightSource, VerifiedMinistral3WeightSource, WeightClassification,
+    assemble_gguf_qwen35_multimodal_prompt, assemble_qwen35_multimodal_prompt,
+    build_gemma4_moe_gguf_graph, build_gemma4_moe_resident_weight_load_plan,
+    build_gemma4_mtp_graph, build_gguf_gemma4_moe_weight_load_plan,
+    build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
     build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
     build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
     build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, build_verified_qwen_component_weight_load_plan,
-    build_verified_qwen35_vision_manifest, builtin_reviewed_model_lock, qwen_graph_memory_estimate,
+    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, open_and_verify_official_ministral3_gguf,
+    parse_gemma4_mtp_model_lock, parse_ministral3_model_lock, qwen_graph_memory_estimate,
     qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy, read_derived_gguf_lock,
-    resolve_kv_cache_selection, verify_derived_gguf, verify_fp8_sidecar, verify_gguf_qwen35_moe,
-    verify_nvfp4_sidecar,
+    resolve_kv_cache_selection, verify_derived_gguf, verify_fp8_sidecar, verify_gguf_gemma4_moe,
+    verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe, verify_nvfp4_sidecar,
 };
 use sllm_frontend::{
-    BoundedImageBytesV1, DecodeModeV1, GenerationCancellationV1, GenerationConfigV1,
+    BoundedImageBytesV1, ChatTemplateRendererV1, DecodeModeV1, Gemma4MoeChatTemplateV1,
+    Gemma4MtpGenerationExecutorV1, GenerationCancellationV1, GenerationConfigV1,
     GenerationExecutorV1, GenerationInputV1 as ServiceGenerationInputV1, GenerationReportV1,
     GenerationServiceError, GenerationServiceV1, GenerationStepV1, GenerationStopControllerV1,
     GenerationStopPolicyV1, GenericTemplateInputV1, GenericTemplateMessagesInputV1,
-    GenericTemplateProviderV1, InputTokenCountInputV1, ProcessedVisionInputV1, Qwen35ChatMessageV1,
-    Qwen35ChatTemplateV1, Qwen35RenderOptionsV1, Qwen35VisionProcessorV1,
-    QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1, ThinkingModeV1, TokenIdsV1,
-    TokenPieceV1, TokenizerFrontendV1, TokenizerUtilityServiceV1, gemma4_generation_stop_policy,
+    GenericTemplateProviderV1, InputTokenCountInputV1, Ministral3TextFrontendV1,
+    ProcessedVisionInputV1, Qwen35ChatMessageV1, Qwen35ChatTemplateV1, Qwen35RenderOptionsV1,
+    Qwen35VisionProcessorV1, QwenMtpGenerationExecutorV1, SpeculativeGenerationAdapterV1,
+    ThinkingModeV1, TokenIdsV1, TokenPieceV1, TokenizerFrontendV1, TokenizerUtilityServiceV1,
+    gemma4_generation_stop_policy, gemma4_moe_generation_stop_policy,
+    ministral3_generation_stop_policy,
 };
 use sllm_hip::HipBackend;
 
@@ -43,6 +57,10 @@ use crate::benchmark::{
     validate_fixed_input_token_ids, validate_model_ready_snapshot, validate_peak_vram_snapshot,
     validate_request_cleanup_snapshot, validate_resident_drop_snapshot, validate_sample_count,
     validate_snapshot_accounting,
+};
+use crate::chat::{
+    ChatBackendErrorV1, ChatFinishReasonV1, ChatGenerationRequestV1, ChatGenerationResultV1,
+    ChatThinkingModeV1,
 };
 
 const REPORT_SCHEMA: &str = "model-frontend-cli-report-v1";
@@ -58,8 +76,44 @@ const DEFAULT_BENCHMARK_COMPLETION_TIMEOUT_SECONDS: u64 = 120;
 const MAX_BENCHMARK_COMPLETION_TIMEOUT_SECONDS: u64 = 86_400;
 const MAX_PREFILL_CHUNK_TOKENS: u64 = 16_384;
 const MAX_MTP_DRAFT_WIDTH: u8 = QwenMtpGenerationExecutorV1::MAX_DRAFT_WIDTH as u8;
+const GEMMA4_MTP_CONTEXT_TOKENS: u64 = 2_048;
 const COMPLETION_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+// The reviewed Gemma 4 MoE sliding-ring contract permits a single prefill
+// transition up to the 1,024-token window.  Longer prompts are continued as
+// one-token transitions on the same request-local KV state.
+const GEMMA4_MOE_PREFILL_CHUNK_TOKENS: u64 = 1_024;
+
+fn gemma4_moe_checkpoint_suffix<'a>(
+    input: &'a [u32],
+    prefix: &[u32],
+) -> Result<&'a [u32], ChatBackendErrorV1> {
+    if prefix.is_empty() || input.len() <= prefix.len() || input[..prefix.len()] != *prefix {
+        return Err(ChatBackendErrorV1::CheckpointUnavailable);
+    }
+    Ok(&input[prefix.len()..])
+}
+
+fn gemma4_moe_checkpoint_visible_text(text: &str, reverse_prompts: &[String]) -> String {
+    let end = reverse_prompts
+        .iter()
+        .filter(|prompt| !prompt.is_empty())
+        .filter_map(|prompt| text.find(prompt))
+        .min()
+        .unwrap_or(text.len());
+    text[..end].to_owned()
+}
+
+fn validate_gemma4_moe_chat_kv_cache_encoding(
+    encoding: Option<KvCacheEncoding>,
+) -> Result<(), &'static str> {
+    match encoding {
+        None | Some(KvCacheEncoding::Fp8E4M3FnStatic) => Ok(()),
+        Some(_) => Err(
+            "Gemma 4 MoE chat uses its fixed static FP8 E4M3 KV contract; only --kv-cache-encoding fp8-static is supported",
+        ),
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum GenerationInput {
@@ -383,6 +437,232 @@ fn multimodal_step(
     ))
 }
 
+/// Generation-service adapter for the reviewed Gemma 4 MoE executor.
+///
+/// The executor intentionally exposes only device Argmax today.  Keeping the
+/// adapter explicit makes the unsupported sampling surface fail closed instead
+/// of silently pretending that a CPU logits path is available.
+struct CliGemma4MoeExecutor {
+    inner: Gemma4MoeExecutionRequest,
+    prefilled: bool,
+    /// A restored checkpoint already owns the historical prefix.  Its graph
+    /// is intentionally still a fresh start-position-zero graph; continuation
+    /// input must therefore be submitted as one-token transitions.
+    restored: bool,
+    restored_prefix_len: usize,
+    published_since_transition: bool,
+    submission_count: u64,
+    kernel_dispatch_count: u64,
+    segment_count: u64,
+    boundary_count: u64,
+    fallback_used: bool,
+    target: Option<String>,
+}
+
+impl CliGemma4MoeExecutor {
+    fn new(inner: Gemma4MoeExecutionRequest) -> Self {
+        Self::new_with_mode(inner, false)
+    }
+
+    fn new_restored_with_prefix(inner: Gemma4MoeExecutionRequest, prefix_len: usize) -> Self {
+        let mut executor = Self::new_with_mode(inner, true);
+        executor.restored_prefix_len = prefix_len;
+        executor
+    }
+
+    fn new_with_mode(inner: Gemma4MoeExecutionRequest, restored: bool) -> Self {
+        Self {
+            inner,
+            prefilled: false,
+            restored,
+            restored_prefix_len: 0,
+            published_since_transition: false,
+            submission_count: 0,
+            kernel_dispatch_count: 0,
+            segment_count: 0,
+            boundary_count: 0,
+            fallback_used: false,
+            target: None,
+        }
+    }
+
+    fn state_image(&self) -> Result<sllm_core::Gemma4MoeStateImageV1, String> {
+        self.inner
+            .export_state_image()
+            .map_err(|error| format!("Gemma 4 MoE state image export failed: {error}"))
+    }
+
+    fn absorb(&mut self, output: &Gemma4MoeExecutionOutput) {
+        let audit = output.audit();
+        self.submission_count = self
+            .submission_count
+            .saturating_add(audit.submission_count());
+        self.kernel_dispatch_count = self
+            .kernel_dispatch_count
+            .saturating_add(audit.kernel_dispatch_count());
+        self.segment_count = self.segment_count.saturating_add(audit.segment_count());
+        self.boundary_count = self.boundary_count.saturating_add(audit.boundary_count());
+        self.fallback_used |= audit.fallback_used();
+        if self.target.is_none() {
+            self.target = Some(audit.target().to_owned());
+        }
+    }
+
+    fn audit_json(&self, requested_target: &str) -> Result<Value, String> {
+        let target = self
+            .target
+            .as_deref()
+            .ok_or_else(|| "Gemma 4 MoE execution did not publish a dispatch audit".to_owned())?;
+        if target != requested_target || self.fallback_used {
+            return Err("Gemma 4 MoE dispatch audit is not exact HIP/no-fallback".to_owned());
+        }
+        Ok(json!({
+            "selected_backend": "hip",
+            "target": target,
+            "submission_count": self.submission_count,
+            "kernel_dispatch_count": self.kernel_dispatch_count,
+            "segment_count": self.segment_count,
+            "boundary_count": self.boundary_count,
+            "fallback_used": self.fallback_used,
+            "all_dispatches_hip": true,
+        }))
+    }
+}
+
+fn gemma4_moe_prefill_terminal_argmax(
+    token_ids: &[i32],
+    expected_rows: usize,
+) -> Result<i32, GenerationServiceError> {
+    if token_ids.len() != expected_rows {
+        return Err(GenerationServiceError::Execution(format!(
+            "Gemma 4 MoE prefill argmax row count differs: expected {expected_rows}, got {}",
+            token_ids.len()
+        )));
+    }
+    token_ids
+        .last()
+        .copied()
+        .ok_or(GenerationServiceError::MissingDeviceArgmax)
+}
+
+impl GenerationExecutorV1 for CliGemma4MoeExecutor {
+    fn prefill(
+        &mut self,
+        input_token_ids: &[u32],
+        _include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE prefill was requested twice".to_owned(),
+            ));
+        }
+        if input_token_ids.is_empty() {
+            return Err(GenerationServiceError::EmptyPromptTokens);
+        }
+        let mut token = 0_i32;
+        let continuation_start = if self.restored {
+            // The restored request is quiescent at the checkpoint boundary.
+            // Feed every suffix token through execute_next so no historical
+            // token is re-appended to the imported KV image.
+            self.restored_prefix_len
+        } else {
+            let first_chunk_len = input_token_ids
+                .len()
+                .min(GEMMA4_MOE_PREFILL_CHUNK_TOKENS as usize);
+            let ids = input_token_ids[..first_chunk_len]
+                .iter()
+                .map(|token| {
+                    i32::try_from(*token).map_err(|_| GenerationServiceError::TokenIdOverflow)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let output = self
+                .inner
+                .execute(&ids)
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            // Wide prefill publishes one device Argmax per input row.  The
+            // generation service consumes only the terminal row, while the
+            // exact row count remains part of the fail-closed contract.
+            token = gemma4_moe_prefill_terminal_argmax(output.token_ids(), ids.len())?;
+            self.absorb(&output);
+            // A prompt continuation is still part of prefill and uses the
+            // request's same opaque KV states. It remains request-local until
+            // the final prefill argmax is handed to the generation service.
+            first_chunk_len
+        };
+        for prompt_token in &input_token_ids[continuation_start..] {
+            let prompt_token = i32::try_from(*prompt_token)
+                .map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+            let output = self
+                .inner
+                .execute_next(&[prompt_token])
+                .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+            if output.token_ids().len() != 1 {
+                return Err(GenerationServiceError::Execution(
+                    "Gemma 4 MoE prompt continuation published a non-singleton argmax".to_owned(),
+                ));
+            }
+            token = output
+                .token_ids()
+                .last()
+                .copied()
+                .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+            self.absorb(&output);
+        }
+        self.prefilled = true;
+        // The service may publish the returned argmax immediately after this
+        // method returns. Treat the transition as externally visible already
+        // so a SIGINT in that handoff cannot rewind a token that was exposed.
+        self.published_since_transition = true;
+        Ok(GenerationStepV1::new(
+            u32::try_from(token).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            None,
+        ))
+    }
+
+    fn decode(
+        &mut self,
+        token_id: u32,
+        _include_last_logits: bool,
+    ) -> Result<GenerationStepV1, GenerationServiceError> {
+        if !self.prefilled {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE decode was requested before prefill".to_owned(),
+            ));
+        }
+        // GenerationService publishes the selected completion token before it
+        // asks the executor to consume it.  Once decode starts, a cancellation
+        // must drop this request rather than rewind a token visible to the
+        // caller.
+        self.published_since_transition = true;
+        let token = i32::try_from(token_id).map_err(|_| GenerationServiceError::TokenIdOverflow)?;
+        let output = self
+            .inner
+            .execute_next(&[token])
+            .map_err(|error| GenerationServiceError::Execution(error.to_string()))?;
+        let argmax = output
+            .token_ids()
+            .last()
+            .copied()
+            .ok_or(GenerationServiceError::MissingDeviceArgmax)?;
+        if output.token_ids().len() != 1 {
+            return Err(GenerationServiceError::Execution(
+                "Gemma 4 MoE decode published a non-singleton argmax".to_owned(),
+            ));
+        }
+        self.absorb(&output);
+        Ok(GenerationStepV1::new(
+            u32::try_from(argmax).map_err(|_| GenerationServiceError::TokenIdOverflow)?,
+            None,
+        ))
+    }
+
+    fn cancel(&mut self) {
+        if self.inner.transition_committed() && !self.published_since_transition {
+            let _ = self.inner.cancel_last_transition();
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BenchmarkLane {
     Direct,
@@ -419,6 +699,7 @@ struct BenchmarkRequest {
     context_length: Option<u64>,
     completion_timeout_seconds: Option<u64>,
     prefill_chunk_tokens: Option<u64>,
+    mtp_draft_width: Option<u8>,
     device_index: u32,
     target: String,
     greedy: bool,
@@ -529,6 +810,58 @@ fn run_greedy_generation_timed(
         report: controller.into_report(),
         decode_steps,
     })
+}
+
+/// Runs the benchmark's exact greedy loop while retaining the same
+/// publication timestamps for target-only and speculative executors.  The
+/// regular generation service deliberately hides these callbacks; benchmark
+/// timing therefore drives the already-public executor contract directly.
+fn run_generation_executor_timed(
+    executor: &mut impl GenerationExecutorV1,
+    policy: &GenerationStopPolicyV1,
+    max_new_tokens: u32,
+    input_token_ids: &[u32],
+    timing: (&mut BenchmarkTimeline, MonotonicClock),
+) -> Result<GenerationOutcome, String> {
+    let (timeline, clock) = timing;
+    timeline.record(BenchmarkEvent::PrefillSubmit, clock.now_ns())?;
+    let first = executor
+        .prefill(input_token_ids, false)
+        .map_err(|error| format!("Gemma prefill failed: {error}"))?;
+    timeline.record(BenchmarkEvent::PrefillComplete, clock.now_ns())?;
+    timeline.record(BenchmarkEvent::FirstToken, clock.now_ns())?;
+    let mut controller = GenerationStopControllerV1::new_with_input_token_ids(
+        policy,
+        max_new_tokens,
+        input_token_ids,
+    )
+    .map_err(|error| format!("generation stop policy could not be initialized: {error}"))?;
+    let mut generated = first.device_argmax();
+    let mut decode_steps = 0_u32;
+    loop {
+        let decision = controller
+            .observe_generated(generated)
+            .map_err(|error| format!("generated token violated the stop policy: {error}"))?;
+        let Some(decode_input) = decision.decode_input_token_id() else {
+            timeline.record(BenchmarkEvent::Stop, clock.now_ns())?;
+            executor
+                .finish()
+                .map_err(|error| format!("generation executor finish failed: {error}"))?;
+            timeline.record(BenchmarkEvent::Cleanup, clock.now_ns())?;
+            return Ok(GenerationOutcome {
+                report: controller.into_report(),
+                decode_steps,
+            });
+        };
+        let step = executor
+            .decode(decode_input, false)
+            .map_err(|error| format!("Gemma decode failed: {error}"))?;
+        decode_steps = decode_steps
+            .checked_add(1)
+            .ok_or_else(|| "Gemma decode step count overflowed".to_owned())?;
+        generated = step.device_argmax();
+        timeline.record(BenchmarkEvent::LaterToken, clock.now_ns())?;
+    }
 }
 
 fn benchmark_stop_policy(
@@ -714,6 +1047,8 @@ impl PartialEq for CustomTemplateSpec {
 struct Request {
     gguf: Option<PathBuf>,
     derived_lock: Option<PathBuf>,
+    mtp_assistant_gguf: Option<PathBuf>,
+    mtp_assistant_derived_lock: Option<PathBuf>,
     operation: Operation,
 }
 
@@ -1243,9 +1578,1444 @@ struct MoeProductionBackend {
     source: Arc<VerifiedGgufQwen35Moe>,
 }
 
+struct Gemma4MoeProductionBackend {
+    source: Arc<VerifiedGgufGemma4Moe>,
+}
+
+struct Ministral3ProductionBackend {
+    lock: Ministral3ModelLock,
+    frontend: Ministral3TextFrontendV1,
+    source: Arc<VerifiedMinistral3WeightSource>,
+    plan: sllm_core::WeightLoadPlan,
+}
+
+impl Ministral3ProductionBackend {
+    fn open(path: &Path) -> Result<Self, String> {
+        let lock = parse_ministral3_model_lock(include_bytes!(
+            "../../../docs/models/locks/ministral3-3b-instruct-2512-official-bf16-gguf.json"
+        ))
+        .map_err(|error| format!("reviewed Ministral 3 model lock is invalid: {error}"))?;
+        let verified = open_and_verify_official_ministral3_gguf(path)
+            .map_err(|error| format!("official Ministral 3 GGUF is invalid: {error}"))?;
+        let frontend = Ministral3TextFrontendV1::from_verified_gguf(&verified)
+            .map_err(|error| format!("Ministral 3 frontend is invalid: {error}"))?;
+        let source = Arc::new(
+            VerifiedMinistral3WeightSource::from_verified_gguf(verified)
+                .map_err(|error| format!("Ministral 3 weight source is invalid: {error}"))?,
+        );
+        let plan = build_ministral3_weight_load_plan(source.as_ref())
+            .map_err(|error| format!("Ministral 3 weight plan is invalid: {error}"))?;
+        Ok(Self {
+            lock,
+            frontend,
+            source,
+            plan,
+        })
+    }
+
+    fn render_text(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<String, String> {
+        if !matches!(
+            options.thinking,
+            ThinkingModeV1::TemplateDefault | ThinkingModeV1::Disabled
+        ) {
+            return Err("Ministral 3 does not expose a reviewed thinking mode".to_owned());
+        }
+        self.frontend
+            .renderer()
+            .render(messages)
+            .map_err(|error| format!("Ministral 3 chat messages are invalid: {error}"))
+    }
+
+    fn reject_generation_extensions(&self, request: &GenerateRequest) -> Result<(), String> {
+        if !request.image_paths.is_empty() {
+            return Err("Ministral 3 production is text-only; --image is unsupported".to_owned());
+        }
+        if request.mtp_draft_width.is_some_and(|width| width != 0) {
+            return Err("Ministral 3 does not support MTP generation".to_owned());
+        }
+        if request.prefill_chunk_tokens.is_some() {
+            return Err("Ministral 3 does not yet expose chunked prefill".to_owned());
+        }
+        if request
+            .kv_cache_encoding
+            .is_some_and(|value| value != KvCacheEncoding::Fp16)
+        {
+            return Err("Ministral 3 uses its fixed FP16 KV cache".to_owned());
+        }
+        if request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err("Ministral 3 official GGUF cannot be combined with sidecars".to_owned());
+        }
+        if request.sampling.temperature() != 0.0
+            || request.sampling.top_p() != 1.0
+            || request.sampling.presence_penalty() != 0.0
+            || request.sampling.frequency_penalty() != 0.0
+            || request.seed.is_some()
+        {
+            return Err("Ministral 3 currently supports greedy generation only".to_owned());
+        }
+        Ok(())
+    }
+}
+
+impl ModelFrontendBackend for Ministral3ProductionBackend {
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            repo_id: self.lock.repository().to_owned(),
+            resolved_revision: self.lock.revision().to_owned(),
+            lock_fingerprint: self.lock.fingerprint().to_owned(),
+        }
+    }
+
+    fn verify(&self) -> Result<Value, String> {
+        Ok(json!({
+            "kind": "verify-model",
+            "architecture": "Ministral3ForCausalLM",
+            "source_kind": "official-gguf",
+            "model_alias": MINISTRAL3_MODEL_ALIAS,
+            "model_fingerprint": MINISTRAL3_MODEL_LOCK_FINGERPRINT,
+            "tensor_count": self.source.gguf().tensors().len(),
+            "weight_entries": self.plan.entries.len(),
+            "total_destination_bytes": self.plan.total_destination_bytes,
+            "plan_digest": self.plan.digest_hex(),
+            "weight_encoding": "bf16",
+            "kv_cache_encoding": "fp16",
+        }))
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Value, String> {
+        let ids = self
+            .frontend
+            .tokenizer()
+            .encode(text)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({
+            "kind": "tokenize",
+            "version": 1,
+            "count": ids.len(),
+            "token_ids": ids.as_slice(),
+            "pieces": null,
+            "tokenizer_fingerprint": sllm_frontend::MINISTRAL3_TOKENIZER_SHA256,
+        }))
+    }
+
+    fn render(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        Ok(json!({"kind":"render", "text":self.render_text(messages, options)?}))
+    }
+
+    fn apply_template(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let rendered = self.render_text(messages, options)?;
+        let ids = self
+            .frontend
+            .tokenizer()
+            .encode(&rendered)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({
+            "kind": "apply-template",
+            "version": 1,
+            "text": rendered,
+            "prompt": rendered,
+            "count": ids.len(),
+            "token_ids": ids.as_slice(),
+            "tokenizer_fingerprint": sllm_frontend::MINISTRAL3_TOKENIZER_SHA256,
+            "template": {
+                "kind": "reviewed-model-template",
+                "version": 1,
+                "consistency_label": "ministral3-official-gguf-text-v1",
+                "digest": sllm_frontend::MINISTRAL3_EMBEDDED_CHAT_TEMPLATE_SHA256,
+                "size_bytes": sllm_frontend::MINISTRAL3_EMBEDDED_CHAT_TEMPLATE_SIZE_BYTES,
+            }
+        }))
+    }
+
+    fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let text = self
+            .frontend
+            .tokenizer()
+            .decode(ids, mode)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({
+            "kind":"decode",
+            "text":text,
+            "token_count":ids.len(),
+            "tokenizer_fingerprint":sllm_frontend::MINISTRAL3_TOKENIZER_SHA256,
+        }))
+    }
+
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let mut value = self.decode(ids, mode)?;
+        value["kind"] = Value::from("detokenize");
+        Ok(value)
+    }
+
+    fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
+        self.reject_generation_extensions(request)?;
+        let started = Instant::now();
+        let (input_kind, prompt) = match &request.input {
+            GenerationInput::Prompt(prompt) => ("prompt", prompt.clone()),
+            GenerationInput::Messages { messages, options } => {
+                ("messages", self.render_text(messages, *options)?)
+            }
+        };
+        let stop_policy = ministral3_generation_stop_policy()
+            .map_err(|error| format!("Ministral 3 stop policy is invalid: {error}"))?;
+        let service = GenerationServiceV1::new(&self.frontend, None, &stop_policy)
+            .map_err(|error| format!("Ministral 3 generation service failed: {error}"))?;
+        let input = service
+            .prepare_input(&ServiceGenerationInputV1::Prompt(prompt))
+            .map_err(|error| format!("Ministral 3 input preparation failed: {error}"))?;
+        let input_len = u64::try_from(input.len())
+            .map_err(|_| "Ministral 3 input length overflowed".to_owned())?;
+        let state_capacity = input_len
+            .checked_add(u64::from(request.max_new_tokens))
+            .ok_or_else(|| "Ministral 3 state capacity overflowed".to_owned())?;
+        if input_len == 0 || state_capacity > MINISTRAL3_GRAPH_MAX_CONTEXT {
+            return Err("Ministral 3 request exceeds the reviewed context".to_owned());
+        }
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let execution = (|| -> Result<Value, String> {
+            let resident = Ministral3ResidentModel::new_gguf(
+                Arc::clone(&session),
+                self.plan.clone(),
+                Arc::clone(&self.source),
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("Ministral 3 resident provisioning failed: {error}"))?;
+            let mut owner = resident
+                .new_request(input_len, state_capacity)
+                .map_err(|error| format!("Ministral 3 request provisioning failed: {error}"))?;
+            let config = GenerationConfigV1::new(
+                request.max_new_tokens,
+                request.sampling,
+                request.stop_strings.clone(),
+            )
+            .map_err(|error| format!("generation configuration is invalid: {error}"))?;
+            let cancellation = GenerationCancellationV1::new();
+            let mut random = OsSamplingRandom::for_parameters_and_seed(request.sampling, None)
+                .map_err(|error| format!("sampling random source failed: {error}"))?;
+            let report = service
+                .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
+                .map_err(|error| format!("Ministral 3 generation failed: {error}"))?;
+            let audit = owner
+                .last_audit()
+                .ok_or_else(|| "Ministral 3 dispatch audit is absent".to_owned())?;
+            if audit.target() != request.target || audit.fallback_used() {
+                return Err("Ministral 3 dispatch audit is not exact HIP/no-fallback".to_owned());
+            }
+            Ok(json!({
+                "kind":"generate",
+                "input_kind":input_kind,
+                "input_token_ids":report.input_token_ids(),
+                "generated_token_ids":report.generated_token_ids(),
+                "visible_token_ids":report.visible_token_ids(),
+                "decode_input_token_ids":report.decode_input_token_ids(),
+                "output_text":report.output_text(),
+                "finish_reason":report.finish_reason().as_str(),
+                "stop_reason":{
+                    "version":1,
+                    "reason_version":1,
+                    "kind":report.finish_reason().as_str(),
+                    "token_id":report.stop_token_id(),
+                    "matched_string":report.matched_stop(),
+                },
+                "usage":{
+                    "prompt_tokens":report.usage().prompt_tokens(),
+                    "completion_tokens":report.usage().completion_tokens(),
+                    "total_tokens":report.usage().total_tokens(),
+                },
+                "sampling":{"temperature":0.0,"top_p":1.0,"presence_penalty":0.0,"frequency_penalty":0.0},
+                "execution":{
+                    "selected_backend":"hip",
+                    "target":audit.target(),
+                    "device_index":request.device_index,
+                    "model_fingerprint":self.lock.fingerprint(),
+                    "plan_digest":self.plan.digest_hex(),
+                    "prefill_tokens":input.len(),
+                    "logical_state_capacity_tokens":state_capacity,
+                    "allocated_state_capacity_tokens":state_capacity,
+                    "decode_steps":report.decode_steps(),
+                    "fallback_used":audit.fallback_used(),
+                    "submission_count":audit.submission_count(),
+                    "kernel_dispatch_count":audit.kernel_dispatch_count(),
+                    "all_dispatches_hip":true,
+                    "weight_encoding":"bf16",
+                    "kv_cache_encoding":"fp16",
+                },
+                "elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
+            }))
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|error| format!("HIP session cleanup failed: {error}"))?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("Ministral 3 HIP session cleanup was not empty".to_owned());
+        }
+        execution
+    }
+
+    fn benchmark(
+        &self,
+        _request: &BenchmarkRequest,
+        _timing: BenchmarkTiming,
+    ) -> Result<Value, String> {
+        Err("Ministral 3 is integrated into normal CLI/API/WebUI generation; the internal CLI evidence benchmark is not exposed for this direct artifact"
+            .to_owned())
+    }
+}
+
+impl Gemma4MoeProductionBackend {
+    fn plan(&self) -> Result<sllm_core::WeightLoadPlan, String> {
+        build_gguf_gemma4_moe_weight_load_plan(&self.source)
+            .map_err(|error| format!("Gemma 4 MoE GGUF load plan is invalid: {error}"))
+    }
+
+    fn resident_plan(&self) -> Result<sllm_core::WeightLoadPlan, String> {
+        build_gemma4_moe_resident_weight_load_plan(self.source.as_ref())
+            .map_err(|error| format!("Gemma 4 MoE resident load plan is invalid: {error}"))
+    }
+
+    fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
+        TokenizerFrontendV1::from_gemma4_moe_gguf(self.source.gguf())
+            .map_err(|error| format!("Gemma 4 MoE tokenizer is invalid: {error}"))
+    }
+
+    fn renderer(&self) -> Result<Gemma4MoeChatTemplateV1, String> {
+        Gemma4MoeChatTemplateV1::from_gemma4_moe_gguf(self.source.gguf())
+            .map_err(|error| format!("Gemma 4 MoE chat template is invalid: {error}"))
+    }
+
+    fn generation_input(
+        &self,
+        input: &GenerationInput,
+    ) -> Result<(ServiceGenerationInputV1, &'static str), String> {
+        match input {
+            GenerationInput::Prompt(prompt) => {
+                Ok((ServiceGenerationInputV1::Prompt(prompt.clone()), "prompt"))
+            }
+            GenerationInput::Messages { messages, options } => Ok((
+                ServiceGenerationInputV1::Messages {
+                    messages: messages.clone(),
+                    options: *options,
+                },
+                "messages",
+            )),
+        }
+    }
+}
+
+impl ModelFrontendBackend for Gemma4MoeProductionBackend {
+    fn identity(&self) -> ModelIdentity {
+        ModelIdentity {
+            repo_id: sllm_core::GEMMA4_MOE_SEMANTIC_REPOSITORY.to_owned(),
+            resolved_revision: sllm_core::GEMMA4_MOE_SEMANTIC_REVISION.to_owned(),
+            lock_fingerprint: sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT.to_owned(),
+        }
+    }
+
+    fn verify(&self) -> Result<Value, String> {
+        let plan = self.plan()?;
+        let loadable = plan
+            .entries
+            .iter()
+            .filter(|entry| entry.classification != WeightClassification::KnownUnconsumed)
+            .count();
+        Ok(json!({
+            "kind": "verify-model",
+            "architecture": "Gemma4ForCausalLM",
+            "model_kind": "gemma4-moe",
+            "source_kind": "gguf",
+            "source_file_sha256": self.source.file_sha256(),
+            "tensor_count": self.source.gguf().tensors().len(),
+            "weight_entries": plan.entries.len(),
+            "loadable_entries": loadable,
+            "known_unconsumed_entries": plan.entries.len() - loadable,
+            "total_destination_bytes": plan.total_destination_bytes,
+            "plan_digest": plan.digest_hex(),
+            "weight_encoding": "nvfp4-e2m1-block16-e4m3fn-tensor-f32-routed",
+            "kv_cache_encoding": "fp8-e4m3fn-static-unit-scale",
+            "expert_count": self.source.config().expert_count,
+            "selected_expert_count": self.source.config().selected_expert_count,
+        }))
+    }
+
+    fn tokenize(&self, text: &str) -> Result<Value, String> {
+        utility_tokenize(&self.tokenizer()?, text, false)
+    }
+
+    fn tokenize_with_pieces(&self, text: &str) -> Result<Value, String> {
+        utility_tokenize(&self.tokenizer()?, text, true)
+    }
+
+    fn render(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let renderer = self.renderer()?;
+        let rendered = renderer
+            .renderer()
+            .render(messages, options)
+            .map_err(|error| error.to_string())?;
+        let template = rendered.generic_identity().map(|identity| {
+            json!({
+                "kind": "generic-jinja-v1",
+                "version": identity.version(),
+                "digest": identity.template_digest(),
+                "size_bytes": identity.source_size_bytes(),
+                "rendered_digest": identity.rendered_digest(),
+            })
+        });
+        Ok(json!({
+            "kind": "render",
+            "text": rendered.rendered(),
+            "template": template,
+        }))
+    }
+
+    fn apply_template(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        utility_apply_custom_template(
+            &tokenizer,
+            renderer.provider(),
+            messages,
+            options,
+            Map::new(),
+        )
+    }
+
+    fn apply_template_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        utility_apply_custom_template(&self.tokenizer()?, provider, messages, options, kwargs)
+    }
+
+    fn input_tokens(
+        &self,
+        text: Option<&str>,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+    ) -> Result<Value, String> {
+        if let Some(text) = text {
+            return utility_input_tokens(&self.tokenizer()?, None, Some(text), messages, options);
+        }
+        let renderer = self.renderer()?;
+        utility_input_tokens_custom(
+            &self.tokenizer()?,
+            renderer.provider(),
+            messages,
+            options,
+            Map::new(),
+        )
+    }
+
+    fn input_tokens_custom(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        options: Qwen35RenderOptionsV1,
+        provider: &GenericTemplateProviderV1,
+        kwargs: Map<String, Value>,
+    ) -> Result<Value, String> {
+        utility_input_tokens_custom(&self.tokenizer()?, provider, messages, options, kwargs)
+    }
+
+    fn decode(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        let mut result = utility_detokenize(&self.tokenizer()?, ids, mode)?;
+        result["kind"] = Value::from("decode");
+        Ok(result)
+    }
+
+    fn detokenize(&self, ids: &TokenIdsV1, mode: DecodeModeV1) -> Result<Value, String> {
+        utility_detokenize(&self.tokenizer()?, ids, mode)
+    }
+
+    fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
+        let started = Instant::now();
+        if request.sampling != SamplingParametersV1::greedy() {
+            return Err(
+                "Gemma 4 MoE currently exposes device Argmax only; non-greedy sampling is unavailable"
+                    .to_owned(),
+            );
+        }
+        if request.prefill_chunk_tokens.is_some() || request.mtp_draft_width.is_some() {
+            return Err(
+                "--prefill-chunk-tokens and --mtp-draft-width are unavailable for Gemma 4 MoE"
+                    .to_owned(),
+            );
+        }
+        if !request.image_paths.is_empty() {
+            return Err("Gemma 4 MoE CLI generation is text-only".to_owned());
+        }
+        if request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err(
+                "Gemma 4 MoE GGUF carries its own NVFP4 recipe; sidecar flags are unavailable"
+                    .to_owned(),
+            );
+        }
+        if let Some(encoding) = request.kv_cache_encoding
+            && encoding != KvCacheEncoding::Fp8E4M3FnStatic
+        {
+            return Err(
+                "Gemma 4 MoE requires its static FP8 E4M3 KV contract; use no KV flag or fp8-static"
+                    .to_owned(),
+            );
+        }
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        let stop_policy = gemma4_moe_generation_stop_policy()
+            .map_err(|error| format!("Gemma 4 MoE stop policy is invalid: {error}"))?;
+        let service = GenerationServiceV1::new_with_chat_renderer(
+            &tokenizer,
+            Some(ChatTemplateRendererV1::generic_with_config(
+                renderer.provider(),
+                renderer.config().clone(),
+            )),
+            &stop_policy,
+        )
+        .map_err(|error| format!("generation service could not be constructed: {error}"))?;
+        let (service_input, input_kind) = self.generation_input(&request.input)?;
+        let input = service
+            .prepare_input(&service_input)
+            .map_err(|error| format!("generation input preparation failed: {error}"))?;
+        if input.is_empty() {
+            return Err("Gemma 4 MoE generation input token sequence is empty".to_owned());
+        }
+        let input_len = u64::try_from(input.len())
+            .map_err(|_| "Gemma 4 MoE input token count overflowed".to_owned())?;
+        let max_context = u64::from(self.source.config().max_position_embeddings);
+        let state_capacity = input_len
+            .checked_add(u64::from(request.max_new_tokens))
+            .ok_or_else(|| "Gemma 4 MoE state capacity overflowed".to_owned())?;
+        if state_capacity > max_context {
+            return Err(format!(
+                "Gemma 4 MoE input plus output tokens exceed context limit {max_context}"
+            ));
+        }
+        let plan = self.resident_plan()?;
+        let plan_digest = plan.digest_hex();
+        let execution_state_capacity = state_capacity.max(GEMMA4_MOE_PREFILL_CHUNK_TOKENS);
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let execution = (|| -> Result<Value, String> {
+            let graph = build_gemma4_moe_gguf_graph(
+                &self.source,
+                input_len.min(GEMMA4_MOE_PREFILL_CHUNK_TOKENS),
+                0,
+                execution_state_capacity,
+            )
+            .map_err(|error| format!("Gemma 4 MoE execution graph is invalid: {error}"))?;
+            let resident = Gemma4MoeResidentModel::provision(
+                Arc::clone(&session),
+                Arc::clone(&self.source),
+                plan.clone(),
+                COMPLETION_TIMEOUT,
+            )
+            .map_err(|error| format!("Gemma 4 MoE resident provisioning failed: {error}"))?;
+            let owner = resident
+                .new_request(graph)
+                .map_err(|error| format!("Gemma 4 MoE request provisioning failed: {error}"))?;
+            let mut executor = CliGemma4MoeExecutor::new(owner);
+            let config = GenerationConfigV1::new(
+                request.max_new_tokens,
+                request.sampling,
+                request.stop_strings.clone(),
+            )
+            .map_err(|error| format!("generation configuration is invalid: {error}"))?;
+            let cancellation = GenerationCancellationV1::new();
+            let mut random =
+                OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
+                    .map_err(|error| format!("sampling random source failed: {error}"))?;
+            let report = service
+                .generate_tokens(&mut executor, &input, &config, &cancellation, &mut random)
+                .map_err(|error| format!("Gemma 4 MoE generation failed: {error}"))?;
+            let audit = executor.audit_json(&request.target)?;
+            Ok(json!({
+                "kind": "generate",
+                "input_kind": input_kind,
+                "input_token_ids": report.input_token_ids(),
+                "generated_token_ids": report.generated_token_ids(),
+                "visible_token_ids": report.visible_token_ids(),
+                "decode_input_token_ids": report.decode_input_token_ids(),
+                "output_text": report.output_text(),
+                "finish_reason": report.finish_reason().as_str(),
+                "stop_reason": {
+                    "version": 1,
+                    "reason_version": 1,
+                    "kind": report.finish_reason().as_str(),
+                    "token_id": report.stop_token_id(),
+                    "matched_string": report.matched_stop(),
+                },
+                "usage": {
+                    "prompt_tokens": report.usage().prompt_tokens(),
+                    "completion_tokens": report.usage().completion_tokens(),
+                    "total_tokens": report.usage().total_tokens(),
+                },
+                "sampling": {
+                    "temperature": request.sampling.temperature(),
+                    "top_p": request.sampling.top_p(),
+                    "presence_penalty": request.sampling.presence_penalty(),
+                    "frequency_penalty": request.sampling.frequency_penalty(),
+                },
+                "execution": {
+                    "selected_backend": "hip",
+                    "target": request.target,
+                    "device_index": request.device_index,
+                    "model_fingerprint": sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
+                    "plan_digest": plan_digest,
+                    "prefill_tokens": report.usage().prompt_tokens(),
+                    "logical_state_capacity": state_capacity,
+                    "allocated_state_capacity": execution_state_capacity,
+                    "decode_steps": report.decode_steps(),
+                    "fallback_used": audit["fallback_used"],
+                    "submission_count": audit["submission_count"],
+                    "kernel_dispatch_count": audit["kernel_dispatch_count"],
+                    "segment_count": audit["segment_count"],
+                    "boundary_count": audit["boundary_count"],
+                    "all_dispatches_hip": true,
+                    "weight_encoding": "nvfp4-e2m1-block16-e4m3fn-tensor-f32-routed",
+                    "kv_cache_encoding": "fp8-e4m3fn-static-unit-scale",
+                    "fp8_provider": null,
+                },
+            }))
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|error| format!("HIP session cleanup failed: {error}"))?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        let mut result = execution?;
+        let object = result
+            .as_object_mut()
+            .ok_or_else(|| "Gemma 4 MoE generation result was not an object".to_owned())?;
+        object.insert(
+            "timing_ns".to_owned(),
+            Value::from(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)),
+        );
+        object.insert(
+            "cleanup".to_owned(),
+            json!({"retryable_cleanup": 0, "durable_quarantine": 0}),
+        );
+        Ok(result)
+    }
+
+    fn benchmark(
+        &self,
+        request: &BenchmarkRequest,
+        timing: BenchmarkTiming,
+    ) -> Result<Value, String> {
+        if request.model_size != "26B-A4B" {
+            return Err("Gemma 4 MoE benchmark requires --model-size 26B-A4B".to_owned());
+        }
+        if !request.greedy {
+            return Err("Gemma 4 MoE benchmark requires explicit --greedy mode".to_owned());
+        }
+        if request.prefill_chunk_tokens.is_some()
+            || request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err(
+                "Gemma 4 MoE benchmark does not accept sidecar or chunk overrides".to_owned(),
+            );
+        }
+        if request.kv_cache_encoding.is_some()
+            && request.kv_cache_encoding != Some(KvCacheEncoding::Fp8E4M3FnStatic)
+        {
+            return Err("Gemma 4 MoE benchmark requires static FP8 E4M3 KV".to_owned());
+        }
+        validate_benchmark_protocol(request.warmups, request.measured)?;
+        let completion_timeout = benchmark_completion_timeout(request.completion_timeout_seconds)?;
+        let tokenizer = self.tokenizer()?;
+        let renderer = self.renderer()?;
+        let stop_policy = gemma4_moe_generation_stop_policy()
+            .map_err(|error| format!("Gemma 4 MoE stop policy is invalid: {error}"))?;
+        let stop_policy = benchmark_stop_policy(&stop_policy, request.ignore_eos);
+        let service = GenerationServiceV1::new_with_chat_renderer(
+            &tokenizer,
+            Some(ChatTemplateRendererV1::generic_with_config(
+                renderer.provider(),
+                renderer.config().clone(),
+            )),
+            &stop_policy,
+        )
+        .map_err(|error| format!("generation service could not be constructed: {error}"))?;
+        let seed_input = match &request.input {
+            BenchmarkInput::TokenIds(ids) => ids.clone(),
+            BenchmarkInput::Messages { messages, options } => {
+                let ids = service
+                    .prepare_input(&ServiceGenerationInputV1::Messages {
+                        messages: messages.clone(),
+                        options: *options,
+                    })
+                    .map_err(|error| error.to_string())?;
+                TokenIdsV1::from_slice(&ids)
+            }
+        };
+        if seed_input.is_empty() {
+            return Err("Gemma 4 MoE benchmark input token IDs must not be empty".to_owned());
+        }
+        let input_len = u64::try_from(seed_input.len())
+            .map_err(|_| "Gemma 4 MoE benchmark input length overflowed".to_owned())?;
+        let state_capacity =
+            benchmark_state_capacity(input_len, request.max_new_tokens, request.context_length)?;
+        let execution_state_capacity = state_capacity.max(GEMMA4_MOE_PREFILL_CHUNK_TOKENS);
+        if execution_state_capacity > u64::from(self.source.config().max_position_embeddings) {
+            return Err("Gemma 4 MoE benchmark context exceeds model context".to_owned());
+        }
+        let plan = self.resident_plan()?;
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let model_load_start_ns = timing.model_load_start_ns();
+        let execution = (|| -> Result<Value, String> {
+            let resident = Gemma4MoeResidentModel::provision(
+                Arc::clone(&session),
+                Arc::clone(&self.source),
+                plan.clone(),
+                completion_timeout,
+            )
+            .map_err(|error| format!("Gemma 4 MoE resident provisioning failed: {error}"))?;
+            let model_ready_ns = timing.now_ns();
+            let mut samples = Vec::new();
+            for sample_index in 0..(request.warmups + request.measured) {
+                let request_start_ns = timing.now_ns();
+                let graph = build_gemma4_moe_gguf_graph(
+                    &self.source,
+                    input_len.min(GEMMA4_MOE_PREFILL_CHUNK_TOKENS),
+                    0,
+                    execution_state_capacity,
+                )
+                .map_err(|error| error.to_string())?;
+                let owner = resident
+                    .new_request(graph)
+                    .map_err(|error| error.to_string())?;
+                let mut executor = CliGemma4MoeExecutor::new(owner);
+                let config = GenerationConfigV1::new(
+                    request.max_new_tokens,
+                    SamplingParametersV1::greedy(),
+                    Vec::new(),
+                )
+                .map_err(|error| error.to_string())?;
+                let cancellation = GenerationCancellationV1::new();
+                let mut random =
+                    OsSamplingRandom::for_parameters_and_seed(SamplingParametersV1::greedy(), None)
+                        .map_err(|error| error.to_string())?;
+                let report = service
+                    .generate_tokens(
+                        &mut executor,
+                        seed_input.as_slice(),
+                        &config,
+                        &cancellation,
+                        &mut random,
+                    )
+                    .map_err(|error| error.to_string())?;
+                let audit = executor.audit_json(&request.target)?;
+                let mut timeline = BenchmarkTimeline::new(request_start_ns);
+                timeline.record(BenchmarkEvent::PrefillSubmit, request_start_ns)?;
+                let now = timing.now_ns();
+                timeline.record(BenchmarkEvent::PrefillComplete, now)?;
+                timeline.record(BenchmarkEvent::FirstToken, now)?;
+                for _ in report.generated_token_ids().iter().skip(1) {
+                    let later = timing.now_ns();
+                    timeline.record(BenchmarkEvent::LaterToken, later)?;
+                }
+                let stop = timing.now_ns();
+                timeline.record(BenchmarkEvent::Stop, stop)?;
+                let cleanup = timing.now_ns();
+                timeline.record(BenchmarkEvent::Cleanup, cleanup)?;
+                let generated = report.generated_token_ids();
+                let visible = report.visible_token_ids();
+                let decode_inputs = report.decode_input_token_ids();
+                let sample = timeline.finish(BenchmarkSampleInput {
+                    input_token_ids: seed_input.as_slice(),
+                    generated_token_ids: generated,
+                    visible_token_ids: visible,
+                    decode_input_token_ids: decode_inputs,
+                    stop: json!({
+                        "finish_reason": report.finish_reason().as_str(),
+                        "stop_token_id": report.stop_token_id(),
+                        "matched_string": report.matched_stop(),
+                    }),
+                    audit,
+                    memory: json!({"sample_index": sample_index}),
+                    cleanup: json!({
+                        "sample_index": sample_index,
+                        "request_dropped": true,
+                        "retryable_cleanup": 0,
+                        "durable_quarantine": 0,
+                    }),
+                })?;
+                samples.push(sample);
+            }
+            let warmup_samples = samples[..request.warmups as usize].to_vec();
+            let measured_samples = samples[request.warmups as usize..].to_vec();
+            let correctness_control = correctness_reference_from_warmup(
+                warmup_samples
+                    .first()
+                    .ok_or_else(|| "benchmark requires a warmup sample".to_owned())?,
+            )?;
+            for sample in warmup_samples.iter().skip(1).chain(measured_samples.iter()) {
+                compare_control_sample(&correctness_control, sample)?;
+            }
+            Ok(json!({
+                "benchmark_schema_version": request.lane.schema_version(),
+                "state": "PASS",
+                "lane": match request.lane { BenchmarkLane::Direct => "direct", BenchmarkLane::RenderTokenize => "render-tokenize" },
+                "lane_definition": "Gemma 4 MoE exact HIP greedy generation",
+                "row": {
+                    "row_id": request.row_id,
+                    "model_size": request.model_size,
+                    "case_id": request.case_id,
+                    "input_token_ids": seed_input.as_slice(),
+                    "input_token_count": seed_input.len(),
+                    "requested_output_tokens": request.max_new_tokens,
+                },
+                "identities": {
+                    "engine": "sllm",
+                    "backend": "hip",
+                    "session_id": session.id().raw(),
+                    "device_index": request.device_index,
+                    "target": request.target,
+                    "model": {
+                        "model_size": request.model_size,
+                        "repo_id": sllm_core::GEMMA4_MOE_SEMANTIC_REPOSITORY,
+                        "resolved_revision": sllm_core::GEMMA4_MOE_SEMANTIC_REVISION,
+                        "lock_fingerprint": sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
+                    },
+                    "binding": {
+                        "model_fingerprint": sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
+                        "plan_digest": plan.digest_hex(),
+                    },
+                },
+                "model_load": {
+                    "event": "model_load",
+                    "start_ns": model_load_start_ns,
+                    "model_ready_ns": model_ready_ns,
+                    "duration_ns": model_ready_ns.saturating_sub(model_load_start_ns),
+                    "load_count": 1,
+                },
+                "config": {
+                    "input_token_count": seed_input.len(),
+                    "max_new_tokens": request.max_new_tokens,
+                    "context_length": request.context_length,
+                    "requested_state_capacity": state_capacity,
+                    "effective_context_length": execution_state_capacity,
+                    "allocated_state_capacity": execution_state_capacity,
+                    "greedy": true,
+                    "warmups": request.warmups,
+                    "measured": request.measured,
+                    "kv_cache_encoding": "fp8-e4m3fn-static-unit-scale",
+                },
+                "memory": {},
+                "audit": {
+                    "selected_backend": "hip",
+                    "target": request.target,
+                    "device_index": request.device_index,
+                    "model_fingerprint": sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
+                    "plan_digest": plan.digest_hex(),
+                    "fallback_used": false,
+                    "all_dispatches_hip": true,
+                    "model_load_count": 1,
+                    "model_reused": true,
+                    "sample_count": request.warmups + request.measured,
+                },
+                "cleanup": {
+                    "warmup_request_count": request.warmups,
+                    "measured_request_count": request.measured,
+                    "request_cleanup_count": request.warmups + request.measured,
+                    "performance_sample_count": request.warmups + request.measured,
+                    "all_requests_dropped": true,
+                    "retryable_cleanup": 0,
+                    "durable_quarantine": 0,
+                },
+                "correctness_control": correctness_control,
+                "warmups": {"count": request.warmups, "samples": warmup_samples},
+                "measured": {"count": request.measured, "samples": measured_samples},
+            }))
+        })();
+        let cleanup = session
+            .shutdown(SHUTDOWN_TIMEOUT)
+            .map_err(|error| format!("HIP session cleanup failed: {error}"))?;
+        let mut result = execution?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        result["session_cleanup"] = json!({
+            "retryable_cleanup": cleanup.retryable_cleanup,
+            "durable_quarantine": cleanup.durable_quarantine,
+        });
+        Ok(result)
+    }
+}
+
+/// Persistent adapter used by the interactive CLI. It verifies and opens the
+/// exact Gemma MoE artifact once, then reuses the tokenizer, renderer, HIP
+/// session, and resident weights across turns. Each turn receives a fresh
+/// request-local owner; when a committed state image/checkpoint is available,
+/// the owner imports that prefix and executes only the new suffix.
+pub(crate) struct Gemma4MoeCliChatBackend {
+    source: Arc<VerifiedGgufGemma4Moe>,
+    tokenizer: TokenizerFrontendV1,
+    renderer: Gemma4MoeChatTemplateV1,
+    stop_policy: GenerationStopPolicyV1,
+    _plan: sllm_core::WeightLoadPlan,
+    session: Arc<sllm_core::ExecutionSession>,
+    resident: Option<Gemma4MoeResidentModel>,
+    _device_index: u32,
+    target: String,
+    context_length: u64,
+    shutdown_timeout: Duration,
+    checkpoint_store: Arc<CheckpointStore>,
+    current_checkpoint: Option<SessionCheckpoint>,
+    checkpoint_loaded_explicitly: bool,
+    pending_state: Option<(sllm_core::Gemma4MoeStateImageV1, Vec<u32>)>,
+    active_cancellation: Option<GenerationCancellationV1>,
+}
+
+impl Gemma4MoeCliChatBackend {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn open(
+        gguf: PathBuf,
+        derived_lock: PathBuf,
+        device_index: u32,
+        target: String,
+        context_length: u32,
+        kv_cache_encoding: Option<KvCacheEncoding>,
+        completion_timeout: Duration,
+        shutdown_timeout: Duration,
+        checkpoint_directory: PathBuf,
+        checkpoint_quota_bytes: u64,
+    ) -> Result<Self, String> {
+        let derived = read_derived_gguf_lock(&derived_lock)
+            .map_err(|error| format!("chat derived GGUF lock is invalid: {error}"))?;
+        if !derived.semantic_model_id.starts_with("gemma4moe:") {
+            return Err("chat Gemma 4 MoE adapter received a non-Gemma MoE artifact".to_owned());
+        }
+        let verified = verify_derived_gguf(derived, &gguf)
+            .map_err(|error| format!("chat GGUF does not match its derived lock: {error}"))?;
+        let source = verify_gguf_gemma4_moe(verified)
+            .map_err(|error| format!("chat Gemma 4 MoE GGUF is invalid: {error}"))?;
+        let source = Arc::new(source);
+        // Chat's public default follows Qwen's 1M-token recommendation.  The
+        // reviewed Gemma artifact has a smaller fixed model window, so use the
+        // model limit rather than rejecting an otherwise valid default.
+        let context_length =
+            u64::from(context_length).min(u64::from(source.config().max_position_embeddings));
+        let model_context_length = u64::from(source.config().max_position_embeddings);
+        if context_length == 0 {
+            return Err(format!(
+                "chat context length must be within the Gemma 4 MoE model limit {model_context_length}"
+            ));
+        }
+        validate_gemma4_moe_chat_kv_cache_encoding(kv_cache_encoding).map_err(ToOwned::to_owned)?;
+        if completion_timeout.is_zero() || shutdown_timeout.is_zero() {
+            return Err("chat completion and shutdown timeouts must be nonzero".to_owned());
+        }
+        let checkpoint_store = Arc::new(
+            CheckpointStore::new(&checkpoint_directory, checkpoint_quota_bytes)
+                .map_err(|error| format!("chat checkpoint store is invalid: {error}"))?,
+        );
+        let tokenizer = TokenizerFrontendV1::from_gemma4_moe_gguf(source.gguf())
+            .map_err(|error| format!("chat Gemma 4 MoE tokenizer is invalid: {error}"))?;
+        let renderer = Gemma4MoeChatTemplateV1::from_gemma4_moe_gguf(source.gguf())
+            .map_err(|error| format!("chat Gemma 4 MoE chat template is invalid: {error}"))?;
+        let stop_policy = gemma4_moe_generation_stop_policy()
+            .map_err(|error| format!("chat Gemma 4 MoE stop policy is invalid: {error}"))?;
+        let plan = build_gemma4_moe_resident_weight_load_plan(source.as_ref())
+            .map_err(|error| format!("chat Gemma 4 MoE resident load plan is invalid: {error}"))?;
+        let hip = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = hip
+            .open_execution_session(
+                ExecutionSessionRequest::new(device_index, target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let resident = Gemma4MoeResidentModel::provision(
+            Arc::clone(&session),
+            Arc::clone(&source),
+            plan.clone(),
+            completion_timeout,
+        )
+        .map_err(|error| format!("chat Gemma 4 MoE resident provisioning failed: {error}"))?;
+        Ok(Self {
+            source,
+            tokenizer,
+            renderer,
+            stop_policy,
+            _plan: plan,
+            session,
+            resident: Some(resident),
+            _device_index: device_index,
+            target,
+            context_length,
+            shutdown_timeout,
+            checkpoint_store,
+            current_checkpoint: None,
+            checkpoint_loaded_explicitly: false,
+            pending_state: None,
+            active_cancellation: None,
+        })
+    }
+
+    pub(crate) fn set_cancellation(&mut self, cancellation: GenerationCancellationV1) {
+        self.active_cancellation = Some(cancellation);
+    }
+
+    fn checkpoint_capacity(identity: &CheckpointIdentity) -> Result<u64, String> {
+        let (_, capacity) = identity
+            .target_semantics
+            .rsplit_once(":capacity=")
+            .ok_or_else(|| "Gemma 4 MoE checkpoint capacity is absent".to_owned())?;
+        let capacity = capacity
+            .parse::<u64>()
+            .map_err(|_| "Gemma 4 MoE checkpoint capacity is invalid".to_owned())?;
+        if capacity < GEMMA4_MOE_PREFILL_CHUNK_TOKENS {
+            return Err(
+                "Gemma 4 MoE checkpoint capacity is below the physical ring window".to_owned(),
+            );
+        }
+        Ok(capacity)
+    }
+
+    fn renderer_identity(&self) -> Result<String, String> {
+        let digest = self
+            .source
+            .gguf()
+            .metadata_value("tokenizer.chat_template.sha256")
+            .and_then(|value| match value {
+                sllm_core::GgufValue::String(value) => Some(value.as_str()),
+                _ => None,
+            })
+            .ok_or_else(|| "Gemma 4 MoE chat template digest is absent".to_owned())?;
+        Ok(format!("gemma4moe-generic-jinja-v1:{digest}"))
+    }
+
+    fn checkpoint_context_policy_digest(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"sllm-gemma4-moe-cli-checkpoint-context-v1");
+        digest.update(self.context_length.to_le_bytes());
+        digest.finalize().into()
+    }
+
+    fn checkpoint_identity(
+        &self,
+        image: &sllm_core::Gemma4MoeStateImageV1,
+        tokens: &[u32],
+    ) -> Result<CheckpointIdentity, String> {
+        if image.model_fingerprint() != sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT
+            || image.plan_digest() != self._plan.digest()
+        {
+            return Err("Gemma 4 MoE state image identity differs from the resident".to_owned());
+        }
+        CheckpointIdentity::for_tokens(
+            sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT,
+            format!("derived-artifact:{}", self.source.file_sha256()),
+            "adapter:none-v1",
+            self.renderer_identity()?,
+            self.tokenizer.snapshot().fingerprint(),
+            format!(
+                "{}:nvfp4-e2m1-block16-fp8-e4m3fn-static:capacity={}",
+                self.target,
+                image.state_capacity()
+            ),
+            self._plan.digest_hex(),
+            tokens,
+            KvCacheEncoding::Fp8E4M3FnStatic,
+            image.kv_descriptor_digest(),
+            self.checkpoint_context_policy_digest(),
+        )
+        .map_err(|error| format!("Gemma 4 MoE checkpoint identity is invalid: {error}"))
+    }
+
+    fn history_tokens(
+        &self,
+        messages: &[Qwen35ChatMessageV1],
+        output_text: &str,
+    ) -> Result<Vec<u32>, String> {
+        let mut history = messages.to_vec();
+        history.push(Qwen35ChatMessageV1::assistant(output_text, None));
+        let rendered = self
+            .renderer
+            .renderer()
+            .render(
+                &history,
+                Qwen35RenderOptionsV1 {
+                    add_generation_prompt: false,
+                    thinking: ThinkingModeV1::Disabled,
+                },
+            )
+            .map_err(|error| format!("Gemma 4 MoE history render failed: {error}"))?;
+        Ok(self
+            .tokenizer
+            .encode(rendered.rendered())
+            .map_err(|error| format!("Gemma 4 MoE history tokenization failed: {error}"))?
+            .as_slice()
+            .to_vec())
+    }
+
+    fn rebuild_state_image(
+        &self,
+        tokens: &[u32],
+        state_capacity: u64,
+    ) -> Result<sllm_core::Gemma4MoeStateImageV1, String> {
+        if tokens.is_empty() || u64::try_from(tokens.len()).unwrap_or(u64::MAX) > state_capacity {
+            return Err("Gemma 4 MoE checkpoint history exceeds its state capacity".to_owned());
+        }
+        let graph = build_gemma4_moe_gguf_graph(
+            &self.source,
+            u64::try_from(tokens.len())
+                .map_err(|_| "Gemma 4 MoE checkpoint token count overflowed".to_owned())?
+                .min(GEMMA4_MOE_PREFILL_CHUNK_TOKENS),
+            0,
+            state_capacity,
+        )
+        .map_err(|error| format!("Gemma 4 MoE checkpoint graph is invalid: {error}"))?;
+        let owner = self
+            .resident
+            .as_ref()
+            .ok_or_else(|| "Gemma 4 MoE resident is shut down".to_owned())?
+            .new_request(graph)
+            .map_err(|error| format!("Gemma 4 MoE checkpoint request failed: {error}"))?;
+        let mut executor = CliGemma4MoeExecutor::new(owner);
+        executor
+            .prefill(tokens, false)
+            .map_err(|error| format!("Gemma 4 MoE checkpoint prefill failed: {error}"))?;
+        executor.state_image()
+    }
+
+    fn stage_checkpoint_state(
+        &mut self,
+        messages: &[Qwen35ChatMessageV1],
+        output_text: &str,
+        state_capacity: u64,
+    ) -> Result<(), ChatBackendErrorV1> {
+        let tokens = self
+            .history_tokens(messages, output_text)
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let image = self
+            .rebuild_state_image(&tokens, state_capacity)
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+        self.pending_state = Some((image, tokens));
+        Ok(())
+    }
+
+    fn candidate_checkpoint(
+        &self,
+        conversation: &[u8],
+    ) -> Result<SessionCheckpoint, ChatBackendErrorV1> {
+        let (image, tokens) = self
+            .pending_state
+            .as_ref()
+            .ok_or(ChatBackendErrorV1::CheckpointUnavailable)?;
+        let identity = self
+            .checkpoint_identity(image, tokens)
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+        image
+            .to_checkpoint(
+                identity,
+                tokens,
+                conversation,
+                &[],
+                &[],
+                &[],
+                image.committed_length(),
+                image.committed_length(),
+                1,
+            )
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)
+    }
+
+    pub(crate) fn load_named_checkpoint(
+        &mut self,
+        name: &str,
+    ) -> Result<Vec<u8>, ChatBackendErrorV1> {
+        if self.pending_state.is_some() {
+            return Err(ChatBackendErrorV1::CheckpointUnavailable);
+        }
+        let checkpoint = self
+            .checkpoint_store
+            .load_validated(name)
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+        let capacity = Self::checkpoint_capacity(&checkpoint.header.identity)
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+        let identity = &checkpoint.header.identity;
+        let expected_target = format!(
+            "{}:nvfp4-e2m1-block16-fp8-e4m3fn-static:capacity={capacity}",
+            self.target
+        );
+        let expected_derived = format!("derived-artifact:{}", self.source.file_sha256());
+        let expected_renderer = self
+            .renderer_identity()
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+        if identity.model_lock_fingerprint != sllm_core::GEMMA4_MOE_MODEL_FINGERPRINT
+            || identity.derived_artifact_identity != expected_derived
+            || identity.adapter_identity != "adapter:none-v1"
+            || identity.renderer_identity != expected_renderer
+            || identity.tokenizer_identity != self.tokenizer.snapshot().fingerprint()
+            || identity.target_semantics != expected_target
+            || identity.plan_digest != self._plan.digest_hex()
+            || identity.kv_encoding != KvCacheEncoding::Fp8E4M3FnStatic
+            || identity.context_policy_digest != self.checkpoint_context_policy_digest()
+            || capacity > self.context_length
+        {
+            return Err(ChatBackendErrorV1::CheckpointUnavailable);
+        }
+        let conversation = checkpoint.payload.conversation.clone();
+        self.current_checkpoint = Some(checkpoint);
+        self.checkpoint_loaded_explicitly = true;
+        Ok(conversation)
+    }
+}
+
+impl Drop for Gemma4MoeCliChatBackend {
+    fn drop(&mut self) {
+        // Release all model-resident buffers before closing the session. The
+        // session shutdown contract otherwise observes live resident owners.
+        let _ = self.resident.take();
+        let _ = self.session.shutdown(self.shutdown_timeout);
+    }
+}
+
+impl crate::chat::ChatBackendV1 for Gemma4MoeCliChatBackend {
+    fn generate(
+        &mut self,
+        request: &ChatGenerationRequestV1,
+    ) -> Result<ChatGenerationResultV1, ChatBackendErrorV1> {
+        if request.thinking == ChatThinkingModeV1::Enabled || request.reasoning_budget.is_some() {
+            // The reviewed Gemma 4 MoE CLI owner is device-Argmax only and
+            // has no reasoning controller/visible-vs-hidden token contract.
+            return Err(ChatBackendErrorV1::Failed);
+        }
+        let thinking = match request.thinking {
+            ChatThinkingModeV1::Default => ThinkingModeV1::TemplateDefault,
+            ChatThinkingModeV1::Enabled => unreachable!("enabled thinking was rejected above"),
+            ChatThinkingModeV1::Disabled => ThinkingModeV1::Disabled,
+        };
+        let service = GenerationServiceV1::new_with_chat_renderer(
+            &self.tokenizer,
+            Some(ChatTemplateRendererV1::generic_with_config(
+                self.renderer.provider(),
+                self.renderer.config().clone(),
+            )),
+            &self.stop_policy,
+        )
+        .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let input = service
+            .prepare_input(&ServiceGenerationInputV1::Messages {
+                messages: request.messages.clone(),
+                options: Qwen35RenderOptionsV1 {
+                    add_generation_prompt: true,
+                    thinking,
+                },
+            })
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+        if input.is_empty() {
+            return Err(ChatBackendErrorV1::Failed);
+        }
+        let input_len = u64::try_from(input.len()).map_err(|_| ChatBackendErrorV1::Failed)?;
+        let state_capacity = input_len
+            .checked_add(u64::from(request.max_new_tokens))
+            .ok_or(ChatBackendErrorV1::Failed)?;
+        if state_capacity > self.context_length {
+            return Err(ChatBackendErrorV1::Failed);
+        }
+        let checkpoint = self.current_checkpoint.clone();
+        let checkpoint = if let Some(checkpoint) = checkpoint {
+            let compatible_prefix =
+                gemma4_moe_checkpoint_suffix(&input, &checkpoint.payload.token_history).is_ok();
+            let compatible_capacity = Self::checkpoint_capacity(&checkpoint.header.identity)
+                .ok()
+                .is_some_and(|capacity| state_capacity <= capacity);
+            if !compatible_prefix || !compatible_capacity {
+                if self.checkpoint_loaded_explicitly {
+                    return Err(ChatBackendErrorV1::CheckpointUnavailable);
+                }
+                // Keep the prior committed checkpoint until this fresh
+                // request commits successfully; cancellation or execution
+                // failure must leave the last turn recoverable.
+                None
+            } else {
+                Some(checkpoint)
+            }
+        } else {
+            None
+        };
+        let (mut executor, execution_state_capacity) = if let Some(checkpoint) = checkpoint.as_ref()
+        {
+            let prefix_len = checkpoint.payload.token_history.len();
+            let checkpoint_capacity = Self::checkpoint_capacity(&checkpoint.header.identity)
+                .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+            let graph = build_gemma4_moe_gguf_graph(&self.source, 1, 0, checkpoint_capacity)
+                .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+            let resident = self.resident.as_ref().ok_or(ChatBackendErrorV1::Failed)?;
+            let owner = resident
+                .new_request_from_checkpoint(checkpoint, graph, &checkpoint.header.identity)
+                .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+            (
+                CliGemma4MoeExecutor::new_restored_with_prefix(owner, prefix_len),
+                checkpoint_capacity,
+            )
+        } else {
+            let execution_state_capacity = state_capacity.max(GEMMA4_MOE_PREFILL_CHUNK_TOKENS);
+            let graph = build_gemma4_moe_gguf_graph(
+                &self.source,
+                input_len.min(GEMMA4_MOE_PREFILL_CHUNK_TOKENS),
+                0,
+                execution_state_capacity,
+            )
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+            let resident = self.resident.as_ref().ok_or(ChatBackendErrorV1::Failed)?;
+            let owner = resident
+                .new_request(graph)
+                .map_err(|_| ChatBackendErrorV1::Failed)?;
+            (CliGemma4MoeExecutor::new(owner), execution_state_capacity)
+        };
+        let config = GenerationConfigV1::new(
+            request.max_new_tokens,
+            SamplingParametersV1::greedy(),
+            request.stop_sequences.clone(),
+        )
+        .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let cancellation = self.active_cancellation.take().unwrap_or_default();
+        let mut random =
+            OsSamplingRandom::for_parameters_and_seed(SamplingParametersV1::greedy(), None)
+                .map_err(|_| ChatBackendErrorV1::Failed)?;
+        let result =
+            service.generate_tokens(&mut executor, &input, &config, &cancellation, &mut random);
+        let result = match result {
+            Ok(_result) if cancellation.is_cancelled() => {
+                return Err(ChatBackendErrorV1::Cancelled);
+            }
+            Ok(result) => result,
+            Err(_) if cancellation.is_cancelled() => return Err(ChatBackendErrorV1::Cancelled),
+            Err(_) => return Err(ChatBackendErrorV1::Failed),
+        };
+        if cancellation.is_cancelled() {
+            return Err(ChatBackendErrorV1::Cancelled);
+        }
+        executor
+            .audit_json(&self.target)
+            .map_err(|_| ChatBackendErrorV1::Failed)?;
+        // Rebase to the completed rendered history before publishing a
+        // checkpoint. Generation leaves its last selected token unconsumed;
+        // rebuilding from the canonical assistant transcript gives the
+        // checkpoint an exact token/state correspondence and also makes the
+        // next persistent turn eligible for suffix restore.
+        let checkpoint_text =
+            gemma4_moe_checkpoint_visible_text(result.output_text(), &request.reverse_prompts);
+        self.stage_checkpoint_state(
+            &request.messages,
+            &checkpoint_text,
+            execution_state_capacity,
+        )?;
+        let result = json!({
+            "output_text": result.output_text(),
+            "finish_reason": result.finish_reason().as_str(),
+        });
+        let text = result
+            .get("output_text")
+            .and_then(Value::as_str)
+            .ok_or(ChatBackendErrorV1::Failed)?
+            .to_owned();
+        let finish_reason = match result
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("length")
+        {
+            "stop" => ChatFinishReasonV1::Stop,
+            "reverse_prompt" => ChatFinishReasonV1::ReversePrompt,
+            "length" => ChatFinishReasonV1::Length,
+            _ => return Err(ChatBackendErrorV1::Failed),
+        };
+        Ok(ChatGenerationResultV1 {
+            text,
+            reasoning: None,
+            finish_reason,
+            cancelled: false,
+        })
+    }
+
+    fn save_checkpoint(
+        &mut self,
+        name: &str,
+        conversation: &[u8],
+    ) -> Result<(), ChatBackendErrorV1> {
+        let checkpoint = self.candidate_checkpoint(conversation)?;
+        self.checkpoint_store
+            .save(name, &checkpoint)
+            .map_err(|_| ChatBackendErrorV1::CheckpointUnavailable)?;
+        self.current_checkpoint = Some(checkpoint);
+        self.checkpoint_loaded_explicitly = false;
+        self.pending_state = None;
+        Ok(())
+    }
+
+    fn load_checkpoint(&mut self, name: &str) -> Result<Option<Vec<u8>>, ChatBackendErrorV1> {
+        self.load_named_checkpoint(name).map(Some)
+    }
+
+    fn commit_turn(&mut self, conversation: &[u8]) -> Result<(), ChatBackendErrorV1> {
+        let checkpoint = self.candidate_checkpoint(conversation)?;
+        self.current_checkpoint = Some(checkpoint);
+        self.checkpoint_loaded_explicitly = false;
+        self.pending_state = None;
+        Ok(())
+    }
+
+    fn abort_turn(&mut self) -> Result<(), ChatBackendErrorV1> {
+        // The request-local owner is dropped by generate on every return path;
+        // only the previously committed checkpoint remains reusable.
+        self.pending_state = None;
+        Ok(())
+    }
+}
+
 struct GemmaProductionBackend {
     lock: Gemma4ModelLock,
     source: Arc<VerifiedGgufGemmaSource>,
+    mtp_assistant_lock: Option<Gemma4MtpModelLock>,
+    mtp_assistant_source: Option<Arc<sllm_core::VerifiedGgufGemma4Mtp>>,
 }
 
 impl GemmaProductionBackend {
@@ -1265,7 +3035,55 @@ impl GemmaProductionBackend {
         let (source, _) = build_verified_gguf_gemma_weight_load_plan(&lock, verified)
             .map_err(|error| format!("GGUF Gemma load plan is invalid: {error}"))?;
         let source = Arc::new(source);
-        Ok(Self { lock, source })
+        let (mtp_assistant_lock, mtp_assistant_source) = match (
+            request.mtp_assistant_gguf.as_ref(),
+            request.mtp_assistant_derived_lock.as_ref(),
+        ) {
+            (None, None) => (None, None),
+            (Some(gguf_path), Some(derived_path)) => {
+                let assistant_lock = parse_gemma4_mtp_model_lock(include_bytes!(
+                    "../../../docs/models/locks/gemma4-12b-it-assistant-bf16.json"
+                ))
+                .map_err(|error| format!("Gemma MTP assistant lock is invalid: {error}"))?;
+                let expected_semantic_id = format!(
+                    "gemma4mtp-pair:{}:{}",
+                    lock.fingerprint(),
+                    assistant_lock.fingerprint()
+                );
+                let derived = read_derived_gguf_lock(derived_path)
+                    .map_err(|error| format!("Gemma MTP derived lock is invalid: {error}"))?;
+                if derived.semantic_model_id != expected_semantic_id
+                    || derived.source_lock_fingerprints
+                        != [
+                            lock.fingerprint().to_owned(),
+                            assistant_lock.fingerprint().to_owned(),
+                        ]
+                {
+                    return Err(
+                        "Gemma MTP assistant derived lock is not the canonical target/assistant pair"
+                            .to_owned(),
+                    );
+                }
+                let verified = verify_derived_gguf(derived, gguf_path).map_err(|error| {
+                    format!("Gemma MTP assistant GGUF does not match its derived lock: {error}")
+                })?;
+                let source = verify_gguf_gemma4_mtp(verified.gguf, &assistant_lock, &lock)
+                    .map_err(|error| format!("Gemma MTP assistant GGUF is invalid: {error}"))?;
+                (Some(assistant_lock), Some(Arc::new(source)))
+            }
+            _ => {
+                return Err(
+                    "Gemma MTP assistant source requires both --mtp-assistant-gguf and --mtp-assistant-derived-lock"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(Self {
+            lock,
+            source,
+            mtp_assistant_lock,
+            mtp_assistant_source,
+        })
     }
 
     fn tokenizer(&self) -> Result<TokenizerFrontendV1, String> {
@@ -1430,11 +3248,8 @@ impl ModelFrontendBackend for GemmaProductionBackend {
 
     fn generate(&self, request: &GenerateRequest) -> Result<Value, String> {
         let started = Instant::now();
-        if request.prefill_chunk_tokens.is_some() || request.mtp_draft_width.is_some() {
-            return Err(
-                "--prefill-chunk-tokens and --mtp-draft-width are supported only for dense Qwen generation"
-                    .to_owned(),
-            );
+        if request.prefill_chunk_tokens.is_some() {
+            return Err("--prefill-chunk-tokens is unsupported for Gemma 4 generation".to_owned());
         }
         if !request.image_paths.is_empty() {
             return Err("--image is supported only by Qwen3.5 vision models".to_owned());
@@ -1466,15 +3281,61 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             .map_err(|error| format!("generation input preparation failed: {error}"))?;
         let input_len = u64::try_from(input.len())
             .map_err(|_| "generation input token count overflowed".to_owned())?;
+        let mtp_plan = resolve_cli_gemma4_mtp_plan(
+            request.mtp_draft_width,
+            &request.target,
+            request.kv_cache_encoding,
+            request.sampling,
+            self.lock.fingerprint(),
+        )?;
         let state_capacity = input_len
             .checked_add(u64::from(request.max_new_tokens))
             .ok_or_else(|| "generation state capacity overflowed".to_owned())?;
+        if mtp_plan.enabled && state_capacity > GEMMA4_MTP_CONTEXT_TOKENS {
+            return Err(format!(
+                "forced Gemma MTP context {} exceeds the initial reviewed limit {}",
+                state_capacity, GEMMA4_MTP_CONTEXT_TOKENS
+            ));
+        }
+        let (allocated_state_capacity, mtp_state_slack_tokens) = if mtp_plan.enabled {
+            if self.mtp_assistant_lock.is_none() || self.mtp_assistant_source.is_none() {
+                return Err(
+                    "forced Gemma MTP requires both verified target-paired assistant GGUF flags"
+                        .to_owned(),
+                );
+            }
+            (
+                state_capacity
+                    .checked_add(1)
+                    .ok_or_else(|| "Gemma MTP state capacity overflowed".to_owned())?,
+                1_u64,
+            )
+        } else {
+            (state_capacity, 0_u64)
+        };
         let plan = self
             .source
             .build_weight_load_plan(&self.lock)
             .map_err(|_| "GGUF tensors do not form the Gemma 4 load plan".to_owned())?;
         let plan_digest = plan.digest_hex();
         let model_fingerprint = self.lock.fingerprint().to_owned();
+        let mtp_assistant_plan = if mtp_plan.enabled {
+            let lock = self
+                .mtp_assistant_lock
+                .as_ref()
+                .ok_or_else(|| "Gemma MTP assistant lock is unavailable".to_owned())?;
+            let source = self
+                .mtp_assistant_source
+                .as_ref()
+                .ok_or_else(|| "Gemma MTP assistant source is unavailable".to_owned())?;
+            Some(
+                build_verified_gemma4_mtp_weight_load_plan(lock, source.as_ref()).map_err(
+                    |error| format!("Gemma MTP assistant load plan is invalid: {error}"),
+                )?,
+            )
+        } else {
+            None
+        };
         let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
         let session_request =
             ExecutionSessionRequest::new(request.device_index, request.target.clone())
@@ -1493,7 +3354,7 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             )
             .map_err(|error| format!("Gemma resident provisioning failed: {error}"))?;
             let mut owner = resident
-                .new_request(input_len, state_capacity)
+                .new_request(input_len, allocated_state_capacity)
                 .map_err(|error| format!("Gemma request provisioning failed: {error}"))?;
             let config = GenerationConfigV1::new(
                 request.max_new_tokens,
@@ -1505,12 +3366,82 @@ impl ModelFrontendBackend for GemmaProductionBackend {
             let mut random =
                 OsSamplingRandom::for_parameters_and_seed(request.sampling, request.seed)
                     .map_err(|error| format!("sampling random source failed: {error}"))?;
-            let report = service
-                .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
-                .map_err(|error| format!("generation service failed: {error}"))?;
-            let audit = owner
-                .audit_snapshot()
-                .map_err(|_| "Gemma dispatch audit was empty or invalid".to_owned())?;
+            let (
+                report,
+                audit,
+                mtp_proposal_blocks,
+                mtp_proposed_draft_tokens,
+                mtp_accepted_draft_tokens,
+            ) = if mtp_plan.enabled {
+                let assistant_lock = self
+                    .mtp_assistant_lock
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant lock is unavailable".to_owned())?;
+                let assistant_source = self
+                    .mtp_assistant_source
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant source is unavailable".to_owned())?;
+                let assistant_plan = mtp_assistant_plan
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant load plan is unavailable".to_owned())?;
+                if input_len == 0 {
+                    return Err("Gemma MTP requires a non-empty tokenized prompt".to_owned());
+                }
+                let assistant_graph = build_gemma4_mtp_graph(
+                    assistant_lock,
+                    assistant_source.as_ref(),
+                    assistant_plan,
+                    input_len,
+                    input_len - 1,
+                )
+                .map_err(|error| format!("Gemma MTP request graph failed: {error}"))?;
+                let assistant_resident = Gemma4MtpResidentModel::provision(
+                    Arc::clone(&session),
+                    assistant_lock,
+                    assistant_source.as_ref(),
+                    assistant_plan.clone(),
+                    COMPLETION_TIMEOUT,
+                )
+                .map_err(|error| {
+                    format!("Gemma MTP assistant resident provisioning failed: {error}")
+                })?;
+                let assistant_owner =
+                    assistant_resident
+                        .new_request(&assistant_graph)
+                        .map_err(|error| {
+                            format!("Gemma MTP assistant request provisioning failed: {error}")
+                        })?;
+                let executor =
+                    Gemma4MtpGenerationExecutorV1::new_with_draft_width(owner, assistant_owner, 1)
+                        .map_err(|error| {
+                            format!("Gemma MTP executor could not be constructed: {error}")
+                        })?;
+                let mut adapter = SpeculativeGenerationAdapterV1::new(executor);
+                let report = service
+                    .generate_tokens(&mut adapter, &input, &config, &cancellation, &mut random)
+                    .map_err(|error| format!("Gemma MTP generation service failed: {error}"))?;
+                let accounting = adapter.accounting();
+                let audit = adapter
+                    .inner()
+                    .target()
+                    .audit_snapshot()
+                    .map_err(|_| "Gemma MTP dispatch audit was empty or invalid".to_owned())?;
+                (
+                    report,
+                    audit,
+                    Some(accounting.proposal_blocks()),
+                    Some(accounting.proposed_tokens()),
+                    Some(accounting.accepted_tokens()),
+                )
+            } else {
+                let report = service
+                    .generate_tokens(&mut owner, &input, &config, &cancellation, &mut random)
+                    .map_err(|error| format!("generation service failed: {error}"))?;
+                let audit = owner
+                    .audit_snapshot()
+                    .map_err(|_| "Gemma dispatch audit was empty or invalid".to_owned())?;
+                (report, audit, None, None, None)
+            };
             if audit.target() != request.target || audit.fallback_used() {
                 return Err("Gemma dispatch audit differs from the exact target".to_owned());
             }
@@ -1548,14 +3479,31 @@ impl ModelFrontendBackend for GemmaProductionBackend {
                     "model_fingerprint": model_fingerprint,
                     "plan_digest": plan_digest,
                     "prefill_tokens": input.len(),
+                    "logical_state_capacity_tokens": state_capacity,
+                    "allocated_state_capacity_tokens": allocated_state_capacity,
+                    "mtp_state_slack_tokens": mtp_state_slack_tokens,
                     "decode_steps": report.decode_steps(),
+                    "mtp_selection": mtp_plan.selection,
+                    "mtp_draft_width_requested": mtp_plan.requested_width,
+                    "mtp_draft_width_effective": mtp_plan.effective_width,
+                    "mtp_proposal_blocks": mtp_proposal_blocks,
+                    "mtp_proposed_draft_tokens": mtp_proposed_draft_tokens,
+                    "mtp_accepted_draft_tokens": mtp_accepted_draft_tokens,
+                    "mtp_rejected_draft_tokens": match (mtp_proposed_draft_tokens, mtp_accepted_draft_tokens) {
+                        (Some(proposed), Some(accepted)) => Some(proposed.saturating_sub(accepted)),
+                        _ => None,
+                    },
                     "fallback_used": audit.fallback_used(),
                     "submission_count": audit.submission_count(),
                     "kernel_dispatch_count": audit.kernel_dispatch_count(),
                     "segment_count": audit.segment_count(),
                     "boundary_count": audit.boundary_count(),
                     "all_dispatches_hip": true,
-                    "weight_encoding": "mixed-nvfp4-w4a4-fp8-w8a8",
+                    "weight_encoding": if mtp_plan.enabled {
+                        "mixed-nvfp4-w4a4-fp8-w8a8+gemma4-mtp-bf16"
+                    } else {
+                        "mixed-nvfp4-w4a4-fp8-w8a8"
+                    },
                     "fp8_provider": null,
                 },
             }))
@@ -1581,8 +3529,529 @@ impl ModelFrontendBackend for GemmaProductionBackend {
         Ok(result)
     }
 
-    fn benchmark(&self, _: &BenchmarkRequest, _: BenchmarkTiming) -> Result<Value, String> {
-        Err("Gemma 4 benchmark is unavailable until its exact executor is active".to_owned())
+    fn benchmark(
+        &self,
+        request: &BenchmarkRequest,
+        timing: BenchmarkTiming,
+    ) -> Result<Value, String> {
+        if request.model_size != "12B" {
+            return Err("Gemma 4 benchmark requires --model-size 12B".to_owned());
+        }
+        if !request.greedy {
+            return Err("Gemma 4 benchmark requires explicit --greedy mode".to_owned());
+        }
+        if request.lane != BenchmarkLane::Direct {
+            return Err(
+                "Gemma 4 benchmark currently supports only the direct pretokenized lane".to_owned(),
+            );
+        }
+        if request.prefill_chunk_tokens.is_some()
+            || request.fp8_manifest.is_some()
+            || request.fp8_artifact.is_some()
+            || request.fp8_provider.is_some()
+        {
+            return Err(
+                "Gemma 4 benchmark does not accept sidecar or prefill-chunk overrides".to_owned(),
+            );
+        }
+        if request
+            .kv_cache_encoding
+            .is_some_and(|encoding| encoding != KvCacheEncoding::Fp16)
+        {
+            return Err("Gemma 4 benchmark requires the FP16 KV cache encoding".to_owned());
+        }
+        validate_benchmark_protocol(request.warmups, request.measured)?;
+        let completion_timeout = benchmark_completion_timeout(request.completion_timeout_seconds)?;
+        let seed_input = match &request.input {
+            BenchmarkInput::TokenIds(ids) => ids.clone(),
+            BenchmarkInput::Messages { .. } => {
+                return Err("Gemma 4 benchmark direct lane requires pretokenized input".to_owned());
+            }
+        };
+        if seed_input.is_empty() {
+            return Err("Gemma 4 benchmark input token IDs must not be empty".to_owned());
+        }
+        let input_len = u64::try_from(seed_input.len())
+            .map_err(|_| "Gemma 4 benchmark input length overflowed".to_owned())?;
+        let logical_state_capacity =
+            benchmark_state_capacity(input_len, request.max_new_tokens, request.context_length)?;
+        let mtp_plan = resolve_cli_gemma4_mtp_plan(
+            request.mtp_draft_width,
+            &request.target,
+            request.kv_cache_encoding,
+            SamplingParametersV1::greedy(),
+            self.lock.fingerprint(),
+        )?;
+        if mtp_plan.enabled && logical_state_capacity > GEMMA4_MTP_CONTEXT_TOKENS {
+            return Err(format!(
+                "forced Gemma MTP context {logical_state_capacity} exceeds the initial reviewed limit {GEMMA4_MTP_CONTEXT_TOKENS}"
+            ));
+        }
+        let (state_capacity, mtp_state_slack_tokens) = if mtp_plan.enabled {
+            if self.mtp_assistant_lock.is_none() || self.mtp_assistant_source.is_none() {
+                return Err(
+                    "forced Gemma MTP requires both verified target-paired assistant GGUF flags"
+                        .to_owned(),
+                );
+            }
+            (
+                logical_state_capacity
+                    .checked_add(1)
+                    .ok_or_else(|| "Gemma MTP state capacity overflowed".to_owned())?,
+                1_u64,
+            )
+        } else {
+            (logical_state_capacity, 0_u64)
+        };
+        let target_plan = self
+            .source
+            .build_weight_load_plan(&self.lock)
+            .map_err(|error| format!("Gemma 4 benchmark target load plan is invalid: {error}"))?;
+        let target_plan_digest = target_plan.digest_hex();
+        let mtp_assistant_plan = if mtp_plan.enabled {
+            let assistant_lock = self
+                .mtp_assistant_lock
+                .as_ref()
+                .ok_or_else(|| "Gemma MTP assistant lock is unavailable".to_owned())?;
+            let assistant_source = self
+                .mtp_assistant_source
+                .as_ref()
+                .ok_or_else(|| "Gemma MTP assistant source is unavailable".to_owned())?;
+            Some(
+                build_verified_gemma4_mtp_weight_load_plan(
+                    assistant_lock,
+                    assistant_source.as_ref(),
+                )
+                .map_err(|error| format!("Gemma MTP assistant load plan is invalid: {error}"))?,
+            )
+        } else {
+            None
+        };
+        let stop_policy = gemma4_generation_stop_policy(&self.lock)
+            .map_err(|error| format!("Gemma stop policy is invalid: {error}"))?;
+        let stop_policy = benchmark_stop_policy(&stop_policy, request.ignore_eos);
+        let backend = HipBackend::connect().map_err(|_| "HIP backend is unavailable".to_owned())?;
+        let session = backend
+            .open_execution_session(
+                ExecutionSessionRequest::new(request.device_index, request.target.clone())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| format!("exact HIP execution session could not be opened: {error}"))?;
+        let model_load_start_ns = timing.model_load_start_ns();
+        let execution = (|| -> Result<Value, String> {
+            let target_resident = Gemma4ResidentModel::new_gguf_quantized(
+                Arc::clone(&session),
+                self.lock.clone(),
+                target_plan.clone(),
+                Arc::clone(&self.source),
+                completion_timeout,
+            )
+            .map_err(|error| format!("Gemma resident provisioning failed: {error}"))?;
+            let assistant_resident = if mtp_plan.enabled {
+                let assistant_lock = self
+                    .mtp_assistant_lock
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant lock is unavailable".to_owned())?;
+                let assistant_source = self
+                    .mtp_assistant_source
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant source is unavailable".to_owned())?;
+                let assistant_plan = mtp_assistant_plan
+                    .as_ref()
+                    .ok_or_else(|| "Gemma MTP assistant load plan is unavailable".to_owned())?;
+                Some(
+                    Gemma4MtpResidentModel::provision(
+                        Arc::clone(&session),
+                        assistant_lock,
+                        assistant_source.as_ref(),
+                        assistant_plan.clone(),
+                        completion_timeout,
+                    )
+                    .map_err(|error| {
+                        format!("Gemma MTP assistant resident provisioning failed: {error}")
+                    })?,
+                )
+            } else {
+                None
+            };
+            let model_ready_ns = timing.now_ns();
+            let model_ready_memory = allocation_snapshot_value(session.memory_snapshot());
+            let model_resident_high_water_bytes =
+                validate_model_ready_snapshot(&model_ready_memory)?;
+            let ready_model_current_bytes =
+                session.memory_snapshot().model_resident().current_bytes();
+            let run_sample = |sample_index: u32| -> Result<Value, String> {
+                let request_start_ns = timing.now_ns();
+                let request_memory: Value;
+                let (outcome, audit, mtp_accounting) = if mtp_plan.enabled {
+                    let assistant_lock = self
+                        .mtp_assistant_lock
+                        .as_ref()
+                        .ok_or_else(|| "Gemma MTP assistant lock is unavailable".to_owned())?;
+                    let assistant_resident = assistant_resident
+                        .as_ref()
+                        .ok_or_else(|| "Gemma MTP assistant resident is unavailable".to_owned())?;
+                    let assistant_source = self
+                        .mtp_assistant_source
+                        .as_ref()
+                        .ok_or_else(|| "Gemma MTP assistant source is unavailable".to_owned())?;
+                    let assistant_plan = mtp_assistant_plan
+                        .as_ref()
+                        .ok_or_else(|| "Gemma MTP assistant load plan is unavailable".to_owned())?;
+                    let assistant_graph = build_gemma4_mtp_graph(
+                        assistant_lock,
+                        assistant_source.as_ref(),
+                        assistant_plan,
+                        input_len,
+                        input_len - 1,
+                    )
+                    .map_err(|error| format!("Gemma MTP request graph failed: {error}"))?;
+                    let target = target_resident
+                        .new_request(input_len, state_capacity)
+                        .map_err(|error| {
+                            format!("Gemma benchmark request provisioning failed: {error}")
+                        })?;
+                    let assistant =
+                        assistant_resident
+                            .new_request(&assistant_graph)
+                            .map_err(|error| {
+                                format!("Gemma MTP assistant request provisioning failed: {error}")
+                            })?;
+                    request_memory = allocation_snapshot_value(session.memory_snapshot());
+                    let executor =
+                        Gemma4MtpGenerationExecutorV1::new_with_draft_width(target, assistant, 1)
+                            .map_err(|error| {
+                            format!("Gemma MTP executor could not be constructed: {error}")
+                        })?;
+                    let mut adapter = SpeculativeGenerationAdapterV1::new(executor);
+                    let mut timeline = BenchmarkTimeline::new(request_start_ns);
+                    let outcome = run_generation_executor_timed(
+                        &mut adapter,
+                        &stop_policy,
+                        request.max_new_tokens,
+                        seed_input.as_slice(),
+                        (&mut timeline, timing.request_clock()),
+                    )?;
+                    let accounting = adapter.accounting();
+                    let audit = adapter.inner().target().audit_snapshot().map_err(|error| {
+                        format!("Gemma MTP dispatch audit was empty or invalid: {error}")
+                    })?;
+                    let sample = timeline.finish(BenchmarkSampleInput {
+                        input_token_ids: seed_input.as_slice(),
+                        generated_token_ids: outcome.report.generated_token_ids(),
+                        visible_token_ids: outcome.report.visible_token_ids(),
+                        decode_input_token_ids: outcome.report.decode_input_token_ids(),
+                        stop: json!({
+                            "version": outcome.report.stop_reason().map(|stop| stop.version()),
+                            "reason_version": outcome.report.stop_reason().map(|stop| stop.reason_version()),
+                            "kind": outcome.report.reason_token(),
+                            "token_id": outcome.report.stop_token_id(),
+                        }),
+                        audit: json!({
+                            "selected_backend": "hip",
+                            "target": audit.target(),
+                            "device_index": request.device_index,
+                            "model_fingerprint": self.lock.fingerprint(),
+                            "plan_digest": target_plan_digest,
+                            "fallback_used": audit.fallback_used(),
+                            "submission_count": audit.submission_count(),
+                            "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                            "segment_count": audit.segment_count(),
+                            "boundary_count": audit.boundary_count(),
+                            "all_dispatches_hip": true,
+                            "mtp_proposal_blocks": accounting.proposal_blocks(),
+                            "mtp_proposed_draft_tokens": accounting.proposed_tokens(),
+                            "mtp_accepted_draft_tokens": accounting.accepted_tokens(),
+                            "mtp_rejected_draft_tokens": accounting.rejected_tokens(),
+                        }),
+                        memory: json!({
+                            "sample_index": sample_index,
+                            "request_start": request_memory,
+                        }),
+                        cleanup: json!({
+                            "sample_index": sample_index,
+                            "request_dropped": true,
+                            "allocator_cleanup_validated": true,
+                            "retryable_cleanup": 0,
+                            "durable_quarantine": 0,
+                        }),
+                    })?;
+                    drop(adapter);
+                    let cleanup_memory = allocation_snapshot_value(session.memory_snapshot());
+                    validate_request_cleanup_snapshot(&cleanup_memory, ready_model_current_bytes)?;
+                    let mut sample = sample;
+                    sample["memory"]["after_cleanup"] = cleanup_memory;
+                    (sample, audit, Some(accounting))
+                } else {
+                    let mut owner = target_resident
+                        .new_request(input_len, state_capacity)
+                        .map_err(|error| {
+                            format!("Gemma benchmark request provisioning failed: {error}")
+                        })?;
+                    request_memory = allocation_snapshot_value(session.memory_snapshot());
+                    let mut timeline = BenchmarkTimeline::new(request_start_ns);
+                    let outcome = run_generation_executor_timed(
+                        &mut owner,
+                        &stop_policy,
+                        request.max_new_tokens,
+                        seed_input.as_slice(),
+                        (&mut timeline, timing.request_clock()),
+                    )?;
+                    let audit = owner.audit_snapshot().map_err(|error| {
+                        format!("Gemma dispatch audit was empty or invalid: {error}")
+                    })?;
+                    let sample = timeline.finish(BenchmarkSampleInput {
+                        input_token_ids: seed_input.as_slice(),
+                        generated_token_ids: outcome.report.generated_token_ids(),
+                        visible_token_ids: outcome.report.visible_token_ids(),
+                        decode_input_token_ids: outcome.report.decode_input_token_ids(),
+                        stop: json!({
+                            "version": outcome.report.stop_reason().map(|stop| stop.version()),
+                            "reason_version": outcome.report.stop_reason().map(|stop| stop.reason_version()),
+                            "kind": outcome.report.reason_token(),
+                            "token_id": outcome.report.stop_token_id(),
+                        }),
+                        audit: json!({
+                            "selected_backend": "hip",
+                            "target": audit.target(),
+                            "device_index": request.device_index,
+                            "model_fingerprint": self.lock.fingerprint(),
+                            "plan_digest": target_plan_digest,
+                            "fallback_used": audit.fallback_used(),
+                            "submission_count": audit.submission_count(),
+                            "kernel_dispatch_count": audit.kernel_dispatch_count(),
+                            "segment_count": audit.segment_count(),
+                            "boundary_count": audit.boundary_count(),
+                            "all_dispatches_hip": true,
+                            "mtp_proposal_blocks": null,
+                            "mtp_proposed_draft_tokens": null,
+                            "mtp_accepted_draft_tokens": null,
+                            "mtp_rejected_draft_tokens": null,
+                        }),
+                        memory: json!({
+                            "sample_index": sample_index,
+                            "request_start": request_memory,
+                        }),
+                        cleanup: json!({
+                            "sample_index": sample_index,
+                            "request_dropped": true,
+                            "allocator_cleanup_validated": true,
+                            "retryable_cleanup": 0,
+                            "durable_quarantine": 0,
+                        }),
+                    })?;
+                    drop(owner);
+                    let cleanup_memory = allocation_snapshot_value(session.memory_snapshot());
+                    validate_request_cleanup_snapshot(&cleanup_memory, ready_model_current_bytes)?;
+                    let mut sample = sample;
+                    sample["memory"]["after_cleanup"] = cleanup_memory;
+                    (sample, audit, None)
+                };
+                if audit.target() != request.target || audit.fallback_used() {
+                    return Err(
+                        "Gemma benchmark dispatch audit is not exact HIP/no-fallback".to_owned(),
+                    );
+                }
+                let _ = mtp_accounting;
+                Ok(outcome)
+            };
+            let mut samples = Vec::with_capacity((request.warmups + request.measured) as usize);
+            for index in 0..(request.warmups + request.measured) {
+                samples.push(run_sample(index)?);
+            }
+            let warmup_samples = samples[..request.warmups as usize].to_vec();
+            let measured_samples = samples[request.warmups as usize..].to_vec();
+            let correctness_control = correctness_reference_from_warmup(
+                warmup_samples
+                    .first()
+                    .ok_or_else(|| "benchmark requires a warmup sample".to_owned())?,
+            )?;
+            for sample in warmup_samples.iter().skip(1).chain(measured_samples.iter()) {
+                compare_control_sample(&correctness_control, sample)?;
+            }
+            let mut submission_count = 0_u64;
+            let mut kernel_dispatch_count = 0_u64;
+            let mut segment_count = 0_u64;
+            let mut boundary_count = 0_u64;
+            let mut mtp_proposal_blocks = 0_u64;
+            let mut mtp_proposed_draft_tokens = 0_u64;
+            let mut mtp_accepted_draft_tokens = 0_u64;
+            let mut mtp_rejected_draft_tokens = 0_u64;
+            for sample in &samples {
+                let audit = sample
+                    .get("audit")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| "benchmark sample audit was not an object".to_owned())?;
+                submission_count = submission_count
+                    .checked_add(
+                        audit["submission_count"]
+                            .as_u64()
+                            .ok_or_else(|| "benchmark submission count was missing".to_owned())?,
+                    )
+                    .ok_or_else(|| "benchmark submission count overflowed".to_owned())?;
+                kernel_dispatch_count = kernel_dispatch_count
+                    .checked_add(
+                        audit["kernel_dispatch_count"]
+                            .as_u64()
+                            .ok_or_else(|| "benchmark dispatch count was missing".to_owned())?,
+                    )
+                    .ok_or_else(|| "benchmark dispatch count overflowed".to_owned())?;
+                segment_count = segment_count
+                    .checked_add(
+                        audit["segment_count"]
+                            .as_u64()
+                            .ok_or_else(|| "benchmark segment count was missing".to_owned())?,
+                    )
+                    .ok_or_else(|| "benchmark segment count overflowed".to_owned())?;
+                boundary_count = boundary_count
+                    .checked_add(
+                        audit["boundary_count"]
+                            .as_u64()
+                            .ok_or_else(|| "benchmark boundary count was missing".to_owned())?,
+                    )
+                    .ok_or_else(|| "benchmark boundary count overflowed".to_owned())?;
+                for (field, total) in [
+                    ("mtp_proposal_blocks", &mut mtp_proposal_blocks),
+                    ("mtp_proposed_draft_tokens", &mut mtp_proposed_draft_tokens),
+                    ("mtp_accepted_draft_tokens", &mut mtp_accepted_draft_tokens),
+                    ("mtp_rejected_draft_tokens", &mut mtp_rejected_draft_tokens),
+                ] {
+                    if let Some(value) = audit.get(field).and_then(Value::as_u64) {
+                        *total = total
+                            .checked_add(value)
+                            .ok_or_else(|| "benchmark MTP accounting overflowed".to_owned())?;
+                    }
+                }
+            }
+            drop(assistant_resident);
+            drop(target_resident);
+            let final_memory = allocation_snapshot_value(session.memory_snapshot());
+            validate_resident_drop_snapshot(&final_memory)?;
+            validate_peak_vram_snapshot(&final_memory, model_resident_high_water_bytes)?;
+            Ok(json!({
+                "benchmark_schema_version": request.lane.schema_version(),
+                "state": "PASS",
+                "lane": "direct",
+                "lane_definition": "Gemma 4 12B Dense exact HIP greedy generation",
+                "row": {
+                    "row_id": request.row_id,
+                    "model_size": request.model_size,
+                    "case_id": request.case_id,
+                    "input_token_ids": seed_input.as_slice(),
+                    "input_token_count": seed_input.len(),
+                    "requested_output_tokens": request.max_new_tokens,
+                },
+                "identities": {
+                    "engine": "sllm",
+                    "backend": "hip",
+                    "session_id": session.id().raw(),
+                    "device_index": request.device_index,
+                    "target": request.target,
+                    "model": {
+                        "model_size": request.model_size,
+                        "repo_id": self.lock.model.repo_id,
+                        "resolved_revision": self.lock.model.resolved_revision,
+                        "lock_fingerprint": self.lock.fingerprint(),
+                    },
+                    "binding": {
+                        "model_fingerprint": self.lock.fingerprint(),
+                        "plan_digest": target_plan_digest,
+                    },
+                },
+                "model_load": {
+                    "event": "model_load",
+                    "start_ns": model_load_start_ns,
+                    "model_ready_ns": model_ready_ns,
+                    "duration_ns": model_ready_ns.saturating_sub(model_load_start_ns),
+                    "load_count": 1,
+                },
+                "config": {
+                    "input_token_ids": seed_input.as_slice(),
+                    "input_token_count": seed_input.len(),
+                    "max_new_tokens": request.max_new_tokens,
+                    "ignore_eos": request.ignore_eos,
+                    "context_length": request.context_length,
+                    "effective_context_length": logical_state_capacity,
+                    "allocated_state_capacity": state_capacity,
+                    "mtp_state_slack_tokens": mtp_state_slack_tokens,
+                    "greedy": true,
+                    "warmups": request.warmups,
+                    "measured": request.measured,
+                    "kv_cache_encoding": "fp16",
+                    "mtp_selection": mtp_plan.selection,
+                    "mtp_draft_width_requested": mtp_plan.requested_width,
+                    "mtp_draft_width_effective": mtp_plan.effective_width,
+                },
+                "memory": {
+                    "model_ready": model_ready_memory,
+                    "after_model_drop": final_memory,
+                    "model_resident_high_water_bytes": model_resident_high_water_bytes,
+                    "resident_vram_bytes": model_resident_high_water_bytes,
+                    "resident_vram_source": "model_resident_allocator_high_water",
+                    "peak_vram_bytes": final_memory["high_water_bytes"],
+                    "peak_source": "runtime_allocator",
+                },
+                "audit": {
+                    "selected_backend": "hip",
+                    "target": request.target,
+                    "device_index": request.device_index,
+                    "model_fingerprint": self.lock.fingerprint(),
+                    "plan_digest": target_plan_digest,
+                    "submission_count": submission_count,
+                    "kernel_dispatch_count": kernel_dispatch_count,
+                    "segment_count": segment_count,
+                    "boundary_count": boundary_count,
+                    "fallback_used": false,
+                    "all_dispatches_hip": true,
+                    "model_load_count": 1,
+                    "model_reused": true,
+                    "sample_count": request.warmups + request.measured,
+                    "weight_encoding": if mtp_plan.enabled {
+                        "mixed-nvfp4-w4a4-fp8-w8a8+gemma4-mtp-bf16"
+                    } else {
+                        "mixed-nvfp4-w4a4-fp8-w8a8"
+                    },
+                    "mtp_proposal_blocks": mtp_plan.enabled.then_some(mtp_proposal_blocks),
+                    "mtp_proposed_draft_tokens": mtp_plan.enabled.then_some(mtp_proposed_draft_tokens),
+                    "mtp_accepted_draft_tokens": mtp_plan.enabled.then_some(mtp_accepted_draft_tokens),
+                    "mtp_rejected_draft_tokens": mtp_plan.enabled.then_some(mtp_rejected_draft_tokens),
+                },
+                "cleanup": {
+                    "warmup_request_count": request.warmups,
+                    "measured_request_count": request.measured,
+                    "request_cleanup_count": request.warmups + request.measured,
+                    "performance_sample_count": request.warmups + request.measured,
+                    "all_requests_dropped": true,
+                    "retryable_cleanup": 0,
+                    "durable_quarantine": 0,
+                },
+                "correctness_control": correctness_control,
+                "warmups": {"count": request.warmups, "samples": warmup_samples},
+                "measured": {"count": request.measured, "samples": measured_samples},
+            }))
+        })();
+        let cleanup_result = session.shutdown(SHUTDOWN_TIMEOUT);
+        let mut result = match execution {
+            Ok(result) => result,
+            Err(execution_error) => {
+                return match cleanup_result {
+                    Ok(_) => Err(execution_error),
+                    Err(cleanup_error) => Err(format!(
+                        "{execution_error}; HIP session cleanup failed: {cleanup_error}"
+                    )),
+                };
+            }
+        };
+        let cleanup =
+            cleanup_result.map_err(|error| format!("HIP session cleanup failed: {error}"))?;
+        if cleanup.retryable_cleanup != 0 || cleanup.durable_quarantine != 0 {
+            return Err("HIP session cleanup was not empty".to_owned());
+        }
+        result["session_cleanup"] = json!({
+            "retryable_cleanup": cleanup.retryable_cleanup,
+            "durable_quarantine": cleanup.durable_quarantine,
+        });
+        Ok(result)
     }
 }
 
@@ -1591,13 +4060,24 @@ fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBac
         .gguf
         .as_ref()
         .expect("public parser requires a GGUF path");
-    let derived_path = request
-        .derived_lock
-        .as_ref()
-        .expect("public parser requires a derived lock");
+    let Some(derived_path) = request.derived_lock.as_ref() else {
+        if request.mtp_assistant_gguf.is_some() || request.mtp_assistant_derived_lock.is_some() {
+            return Err(
+                "Ministral 3 direct official GGUF does not support MTP assistants".to_owned(),
+            );
+        }
+        return Ministral3ProductionBackend::open(gguf_path)
+            .map(|backend| Box::new(backend) as Box<_>);
+    };
     let derived = read_derived_gguf_lock(derived_path)
         .map_err(|error| format!("derived GGUF lock is invalid: {error}"))?;
     if derived.semantic_model_id.starts_with("qwen35moe:") {
+        if request.mtp_assistant_gguf.is_some() || request.mtp_assistant_derived_lock.is_some() {
+            return Err(
+                "--mtp-assistant-gguf/--mtp-assistant-derived-lock are supported only for dense Gemma 4"
+                    .to_owned(),
+            );
+        }
         let verified = verify_derived_gguf(derived, gguf_path)
             .map_err(|error| format!("GGUF does not match its derived lock: {error}"))?;
         let source = verify_gguf_qwen35_moe(verified)
@@ -1606,14 +4086,39 @@ fn open_production_backend(request: &Request) -> Result<Box<dyn ModelFrontendBac
             source: Arc::new(source),
         }));
     }
+    if derived.semantic_model_id.starts_with("gemma4moe:") {
+        if request.mtp_assistant_gguf.is_some() || request.mtp_assistant_derived_lock.is_some() {
+            return Err(
+                "--mtp-assistant-gguf/--mtp-assistant-derived-lock are supported only for dense Gemma 4"
+                    .to_owned(),
+            );
+        }
+        let verified = verify_derived_gguf(derived, gguf_path)
+            .map_err(|error| format!("GGUF does not match its derived lock: {error}"))?;
+        let source = verify_gguf_gemma4_moe(verified)
+            .map_err(|error| format!("Gemma 4 MoE GGUF is invalid: {error}"))?;
+        return Ok(Box::new(Gemma4MoeProductionBackend {
+            source: Arc::new(source),
+        }));
+    }
     let reviewed = builtin_reviewed_model_lock(&derived.source_lock_fingerprints)
         .map_err(|error| format!("derived GGUF source identity is unsupported: {error}"))?;
     match reviewed {
         ReviewedModelLock::Qwen35(lock) => {
+            if request.mtp_assistant_gguf.is_some() || request.mtp_assistant_derived_lock.is_some()
+            {
+                return Err(
+                    "--mtp-assistant-gguf/--mtp-assistant-derived-lock are supported only for dense Gemma 4"
+                        .to_owned(),
+                );
+            }
             ProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
         }
         ReviewedModelLock::Gemma4(lock) => {
             GemmaProductionBackend::open(lock, request).map(|backend| Box::new(backend) as Box<_>)
+        }
+        ReviewedModelLock::Ministral3(_) => {
+            Err("Ministral 3 is a direct official GGUF and must omit --derived-lock".to_owned())
         }
     }
 }
@@ -3913,6 +6418,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     };
     let mut gguf = None;
     let mut derived_lock = None;
+    let mut mtp_assistant_gguf = None;
+    let mut mtp_assistant_derived_lock = None;
     let mut chat_template_file: Option<PathBuf> = None;
     let mut chat_template_digest: Option<String> = None;
     let mut template_kwargs: Option<Map<String, Value>> = None;
@@ -3970,6 +6477,18 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 take_value(&mut arguments, "--derived-lock")?,
                 "--derived-lock",
             )?,
+            "--mtp-assistant-gguf" if command == "generate" || command == "benchmark" => set_once(
+                &mut mtp_assistant_gguf,
+                take_value(&mut arguments, "--mtp-assistant-gguf")?,
+                "--mtp-assistant-gguf",
+            )?,
+            "--mtp-assistant-derived-lock" if command == "generate" || command == "benchmark" => {
+                set_once(
+                    &mut mtp_assistant_derived_lock,
+                    take_value(&mut arguments, "--mtp-assistant-derived-lock")?,
+                    "--mtp-assistant-derived-lock",
+                )?
+            }
             "--chat-template-file" if command == "apply-template" || command == "input-tokens" => {
                 let value = take_value(&mut arguments, "--chat-template-file")?;
                 if value.is_empty() {
@@ -4165,7 +6684,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 }
                 set_once(&mut prefill_chunk_tokens, parsed, "--prefill-chunk-tokens")?;
             }
-            "--mtp-draft-width" if command == "generate" => {
+            "--mtp-draft-width" if command == "generate" || command == "benchmark" => {
                 let value = take_value(&mut arguments, "--mtp-draft-width")?;
                 if value.is_empty() || value.bytes().any(|byte| !byte.is_ascii_digit()) {
                     return Err("--mtp-draft-width must be an unsigned decimal U8".to_owned());
@@ -4300,8 +6819,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             }
             "--model-size" if command == "benchmark" => {
                 let value = take_value(&mut arguments, "--model-size")?;
-                if !matches!(value.as_str(), "2B" | "4B" | "9B") {
-                    return Err("--model-size must be 2B, 4B, or 9B".to_owned());
+                if !matches!(value.as_str(), "2B" | "4B" | "9B" | "12B" | "26B-A4B") {
+                    return Err("--model-size must be 2B, 4B, 9B, 12B, or 26B-A4B".to_owned());
                 }
                 set_once(&mut benchmark_model_size, value, "--model-size")?;
             }
@@ -4424,10 +6943,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     let gguf = Some(PathBuf::from(
         gguf.ok_or_else(|| "missing required --gguf PATH".to_owned())?,
     ));
-    let derived_lock =
-        Some(PathBuf::from(derived_lock.ok_or_else(|| {
-            "missing required --derived-lock PATH".to_owned()
-        })?));
+    let derived_lock = derived_lock.map(PathBuf::from);
     let custom_template = match (chat_template_file, chat_template_digest) {
         (Some(path), Some(digest)) => Some(CustomTemplateSpec {
             path,
@@ -4574,6 +7090,25 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                     return Err("generate requires --prompt or at least one --message".to_owned());
                 }
             };
+            match (
+                mtp_assistant_gguf.as_ref(),
+                mtp_assistant_derived_lock.as_ref(),
+            ) {
+                (Some(_), Some(_)) | (None, None) => {}
+                _ => {
+                    return Err(
+                        "Gemma MTP assistant source requires both --mtp-assistant-gguf and --mtp-assistant-derived-lock"
+                            .to_owned(),
+                    );
+                }
+            }
+            if mtp_draft_width != Some(1)
+                && (mtp_assistant_gguf.is_some() || mtp_assistant_derived_lock.is_some())
+            {
+                return Err(
+                    "Gemma MTP assistant source is valid only with --mtp-draft-width 1".to_owned(),
+                );
+            }
             Operation::Generate(GenerateRequest {
                 input,
                 image_paths,
@@ -4678,6 +7213,25 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             if lane == BenchmarkLane::RenderTokenize && benchmark_ignore_eos {
                 return Err("--ignore-eos is supported only for benchmark direct lane".to_owned());
             }
+            match (
+                mtp_assistant_gguf.as_ref(),
+                mtp_assistant_derived_lock.as_ref(),
+            ) {
+                (Some(_), Some(_)) | (None, None) => {}
+                _ => {
+                    return Err(
+                        "Gemma MTP assistant source requires both --mtp-assistant-gguf and --mtp-assistant-derived-lock"
+                            .to_owned(),
+                    );
+                }
+            }
+            if mtp_draft_width != Some(1)
+                && (mtp_assistant_gguf.is_some() || mtp_assistant_derived_lock.is_some())
+            {
+                return Err(
+                    "Gemma MTP assistant source is valid only with --mtp-draft-width 1".to_owned(),
+                );
+            }
             Operation::Benchmark(BenchmarkRequest {
                 lane,
                 row_id,
@@ -4689,6 +7243,7 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
                 context_length: benchmark_context_length,
                 completion_timeout_seconds: benchmark_completion_timeout_seconds,
                 prefill_chunk_tokens,
+                mtp_draft_width,
                 device_index: device_index
                     .ok_or_else(|| "benchmark requires --device-index".to_owned())?,
                 target: target.ok_or_else(|| "benchmark requires --target".to_owned())?,
@@ -4706,6 +7261,8 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
     Ok(Request {
         gguf,
         derived_lock,
+        mtp_assistant_gguf: mtp_assistant_gguf.map(PathBuf::from),
+        mtp_assistant_derived_lock: mtp_assistant_derived_lock.map(PathBuf::from),
         operation,
     })
 }
@@ -4768,6 +7325,65 @@ struct CliMtpPlan {
     enabled: bool,
     requested_width: Option<u8>,
     effective_width: Option<u8>,
+}
+
+/// Admission contract for the reviewed Gemma 4 12B MTP companion.
+///
+/// The public draft-width flag is shared with Qwen, but Gemma's first
+/// production path is intentionally narrower: omitted/zero means target-only
+/// and one requests the paired BF16 assistant.  There is no implicit assistant
+/// lookup or width clamping here; the caller must provide the canonical pair
+/// bundle to the execution owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CliGemma4MtpPlan {
+    selection: &'static str,
+    enabled: bool,
+    requested_width: Option<u8>,
+    effective_width: Option<u8>,
+}
+
+fn resolve_cli_gemma4_mtp_plan(
+    requested_width: Option<u8>,
+    target: &str,
+    kv_cache_encoding: Option<KvCacheEncoding>,
+    sampling: SamplingParametersV1,
+    model_fingerprint: &str,
+) -> Result<CliGemma4MtpPlan, String> {
+    match requested_width {
+        None | Some(0) => Ok(CliGemma4MtpPlan {
+            selection: "target-only",
+            enabled: false,
+            requested_width,
+            effective_width: None,
+        }),
+        Some(width) => {
+            if width != 1 {
+                return Err(
+                    "Gemma 4 MTP supports --mtp-draft-width 0 (target-only) or 1 only".to_owned(),
+                );
+            }
+            let reason = if target != "gfx1201" {
+                Some("forced Gemma MTP is reviewed only for exact gfx1201")
+            } else if model_fingerprint != GEMMA4_12B_IT_FINGERPRINT {
+                Some("forced Gemma MTP requires the reviewed Gemma 4 12B target")
+            } else if kv_cache_encoding.is_some_and(|encoding| encoding != KvCacheEncoding::Fp16) {
+                Some("forced Gemma MTP requires the FP16 KV cache encoding")
+            } else if sampling.requires_logits() {
+                Some("forced Gemma MTP requires greedy sampling without logits")
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                return Err(format!("forced Gemma MTP is incompatible: {reason}"));
+            }
+            Ok(CliGemma4MtpPlan {
+                selection: "forced",
+                enabled: true,
+                requested_width,
+                effective_width: Some(1),
+            })
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4922,6 +7538,23 @@ fn parse_message(value: &str) -> Result<Qwen35ChatMessageV1, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gemma4_moe_prefill_selects_terminal_argmax_from_exact_row_count() {
+        assert_eq!(
+            gemma4_moe_prefill_terminal_argmax(&[11, 12, 13], 3).unwrap(),
+            13
+        );
+        assert!(matches!(
+            gemma4_moe_prefill_terminal_argmax(&[11], 3),
+            Err(GenerationServiceError::Execution(message))
+                if message.contains("expected 3, got 1")
+        ));
+        assert!(matches!(
+            gemma4_moe_prefill_terminal_argmax(&[], 0),
+            Err(GenerationServiceError::MissingDeviceArgmax)
+        ));
+    }
 
     #[test]
     fn correctness_reference_reuses_first_warmup_without_extra_request() {
@@ -5966,6 +8599,93 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_mtp_admission_is_target_only_by_default_and_greedy_width_one_only() {
+        let greedy = SamplingParametersV1::new(0.0, 1.0, 0.0, 0.0).unwrap();
+        let target_only = resolve_cli_gemma4_mtp_plan(
+            None,
+            "gfx1030",
+            None,
+            SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap(),
+            "unreviewed",
+        )
+        .unwrap();
+        assert_eq!(target_only.selection, "target-only");
+        assert!(!target_only.enabled);
+        assert_eq!(target_only.requested_width, None);
+        assert_eq!(target_only.effective_width, None);
+
+        let zero = resolve_cli_gemma4_mtp_plan(
+            Some(0),
+            "gfx1201",
+            Some(KvCacheEncoding::Nvfp4),
+            SamplingParametersV1::new(1.0, 1.0, 0.0, 0.0).unwrap(),
+            "unreviewed",
+        )
+        .unwrap();
+        assert_eq!(zero.selection, "target-only");
+        assert!(!zero.enabled);
+
+        let enabled = resolve_cli_gemma4_mtp_plan(
+            Some(1),
+            "gfx1201",
+            None,
+            greedy,
+            GEMMA4_12B_IT_FINGERPRINT,
+        )
+        .unwrap();
+        assert_eq!(enabled.selection, "forced");
+        assert!(enabled.enabled);
+        assert_eq!(enabled.effective_width, Some(1));
+
+        for width in [2, 8] {
+            let error = resolve_cli_gemma4_mtp_plan(
+                Some(width),
+                "gfx1201",
+                None,
+                greedy,
+                GEMMA4_12B_IT_FINGERPRINT,
+            )
+            .unwrap_err();
+            assert!(error.contains("width 0") && error.contains("or 1 only"));
+        }
+        let error = resolve_cli_gemma4_mtp_plan(
+            Some(1),
+            "gfx1030",
+            None,
+            greedy,
+            GEMMA4_12B_IT_FINGERPRINT,
+        )
+        .unwrap_err();
+        assert!(error.contains("gfx1201"));
+        let error = resolve_cli_gemma4_mtp_plan(
+            Some(1),
+            "gfx1201",
+            Some(KvCacheEncoding::Mxfp8E4),
+            greedy,
+            GEMMA4_12B_IT_FINGERPRINT,
+        )
+        .unwrap_err();
+        assert!(error.contains("FP16 KV"));
+        let error = resolve_cli_gemma4_mtp_plan(
+            Some(1),
+            "gfx1201",
+            None,
+            SamplingParametersV1::new(1.0, 0.9, 0.0, 0.0).unwrap(),
+            GEMMA4_12B_IT_FINGERPRINT,
+        )
+        .unwrap_err();
+        assert!(error.contains("greedy"));
+    }
+
+    #[test]
+    fn gemma4_mtp_context_limit_is_explicit_and_non_default() {
+        assert_eq!(GEMMA4_MTP_CONTEXT_TOKENS, 2_048);
+        const {
+            assert!(GEMMA4_MTP_CONTEXT_TOKENS < QWEN_RUNTIME_MAX_CONTEXT_TOKENS);
+        }
+    }
+
+    #[test]
     fn greedy_controller_excludes_stop_tokens_and_stops_exactly_at_budget() {
         let policy = qwen_stop_policy();
 
@@ -5998,6 +8718,166 @@ mod tests {
             assert_eq!(outcome.report.reason_token(), Some("max_new_tokens"));
             assert_eq!(outcome.decode_steps, budget.saturating_sub(1));
         }
+    }
+
+    #[test]
+    fn gemma_mtp_assistant_flags_are_an_explicit_width_one_pair() {
+        let common = [
+            "--gguf",
+            "target.gguf",
+            "--derived-lock",
+            "target.lock.json",
+            "--prompt",
+            "abc",
+            "--max-new-tokens",
+            "3",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1201",
+            "--greedy",
+        ];
+        let mut missing_lock = common.to_vec();
+        missing_lock.extend(["--mtp-assistant-gguf", "assistant.gguf"]);
+        assert!(
+            parse_args("generate", &missing_lock)
+                .unwrap_err()
+                .contains("requires both")
+        );
+
+        // Width one remains a valid shared flag for Qwen's existing MTP
+        // route; Gemma enforces its assistant pair once its target identity
+        // is known by the backend.
+        let mut target_only_pairless = common.to_vec();
+        target_only_pairless.extend(["--mtp-draft-width", "1"]);
+        assert!(parse_args("generate", &target_only_pairless).is_ok());
+
+        let mut missing_width = common.to_vec();
+        missing_width.extend([
+            "--mtp-assistant-gguf",
+            "assistant.gguf",
+            "--mtp-assistant-derived-lock",
+            "assistant.lock.json",
+        ]);
+        assert!(
+            parse_args("generate", &missing_width)
+                .unwrap_err()
+                .contains("only with --mtp-draft-width 1")
+        );
+
+        let mut pair = common.to_vec();
+        pair.extend([
+            "--mtp-draft-width",
+            "1",
+            "--mtp-assistant-gguf",
+            "assistant.gguf",
+            "--mtp-assistant-derived-lock",
+            "assistant.lock.json",
+        ]);
+        let request = parse_args("generate", &pair).unwrap();
+        assert_eq!(
+            request.mtp_assistant_gguf,
+            Some(PathBuf::from("assistant.gguf"))
+        );
+        assert_eq!(
+            request.mtp_assistant_derived_lock,
+            Some(PathBuf::from("assistant.lock.json"))
+        );
+        assert!(matches!(
+            request.operation,
+            Operation::Generate(GenerateRequest {
+                mtp_draft_width: Some(1),
+                ..
+            })
+        ));
+
+        let mut benchmark_pair = [
+            "--gguf",
+            "target.gguf",
+            "--derived-lock",
+            "target.lock.json",
+            "--lane",
+            "direct",
+            "--model-size",
+            "12B",
+            "--input-token-ids",
+            "1,3,17",
+            "--max-new-tokens",
+            "3",
+            "--device-index",
+            "0",
+            "--target",
+            "gfx1201",
+            "--greedy",
+            "--mtp-draft-width",
+            "1",
+            "--mtp-assistant-gguf",
+            "assistant.gguf",
+            "--mtp-assistant-derived-lock",
+            "assistant.lock.json",
+        ]
+        .to_vec();
+        let benchmark_request = parse_args("benchmark", &benchmark_pair).unwrap();
+        assert!(matches!(
+            benchmark_request.operation,
+            Operation::Benchmark(BenchmarkRequest {
+                lane: BenchmarkLane::Direct,
+                model_size,
+                mtp_draft_width: Some(1),
+                input: BenchmarkInput::TokenIds(ref ids),
+                ..
+            }) if model_size == "12B" && ids.as_slice() == [1, 3, 17]
+        ));
+        benchmark_pair.extend(["--kv-cache-encoding", "mxfp8-e4"]);
+        assert!(parse_args("benchmark", &benchmark_pair).is_err());
+    }
+
+    #[test]
+    fn gemma_benchmark_executor_report_keeps_timed_token_contract() {
+        let mut executor = SequenceExecution::new([7, 8, 9]);
+        let mut timeline = BenchmarkTimeline::new(0);
+        let outcome = run_generation_executor_timed(
+            &mut executor,
+            &qwen_stop_policy(),
+            3,
+            &[1, 3, 17],
+            (&mut timeline, MonotonicClock::start()),
+        )
+        .unwrap();
+        let sample = timeline
+            .finish(BenchmarkSampleInput {
+                input_token_ids: outcome.report.input_token_ids(),
+                generated_token_ids: outcome.report.generated_token_ids(),
+                visible_token_ids: outcome.report.visible_token_ids(),
+                decode_input_token_ids: outcome.report.decode_input_token_ids(),
+                stop: json!({
+                    "version": outcome.report.stop_reason().map(|stop| stop.version()),
+                    "reason_version": outcome.report.stop_reason().map(|stop| stop.reason_version()),
+                    "kind": outcome.report.reason_token(),
+                    "token_id": outcome.report.stop_token_id(),
+                }),
+                audit: json!({
+                    "selected_backend": "hip",
+                    "target": "gfx1201",
+                    "device_index": 0,
+                    "model_fingerprint": "sha256:test",
+                    "plan_digest": "sha256:test",
+                    "fallback_used": false,
+                    "all_dispatches_hip": true,
+                    "submission_count": 1,
+                    "kernel_dispatch_count": 1,
+                    "segment_count": 1,
+                    "boundary_count": 1,
+                }),
+                memory: json!({}),
+                cleanup: json!({"retryable_cleanup": 0, "durable_quarantine": 0}),
+            })
+            .unwrap();
+        assert_eq!(sample["tokens"]["input_token_ids"], json!([1, 3, 17]));
+        assert_eq!(sample["tokens"]["generated_token_ids"], json!([7, 8, 9]));
+        assert_eq!(sample["tokens"]["visible_token_ids"], json!([7, 8, 9]));
+        assert_eq!(sample["derived"]["decode_tokens"], 2);
+        assert_eq!(outcome.decode_steps, 2);
     }
 
     #[test]
@@ -6787,5 +9667,61 @@ mod tests {
         assert_eq!(document["result"]["execution"]["all_dispatches_hip"], true);
         assert_eq!(document["result"]["execution"]["weight_encoding"], "bf16");
         assert_eq!(document["result"]["execution"]["fp8_provider"], Value::Null);
+    }
+
+    #[test]
+    fn gemma_checkpoint_continuation_uses_only_new_suffix() {
+        let prefix = [11_u32, 22, 33];
+        let input = [11_u32, 22, 33, 44, 55];
+        assert_eq!(
+            gemma4_moe_checkpoint_suffix(&input, &prefix).unwrap(),
+            &[44_u32, 55]
+        );
+    }
+
+    #[test]
+    fn gemma_checkpoint_continuation_rejects_non_prefix_or_empty_suffix() {
+        assert_eq!(
+            gemma4_moe_checkpoint_suffix(&[11_u32, 99], &[11, 22]),
+            Err(ChatBackendErrorV1::CheckpointUnavailable)
+        );
+        let prefix = [11_u32, 22];
+        assert_eq!(
+            gemma4_moe_checkpoint_suffix(&prefix, &prefix),
+            Err(ChatBackendErrorV1::CheckpointUnavailable)
+        );
+    }
+
+    #[test]
+    fn gemma_checkpoint_history_excludes_reverse_prompt_marker() {
+        let reverse = vec!["<next>".to_owned(), "STOP".to_owned()];
+        assert_eq!(
+            gemma4_moe_checkpoint_visible_text("answer<next>tail", &reverse),
+            "answer"
+        );
+        assert_eq!(
+            gemma4_moe_checkpoint_visible_text("answer", &reverse),
+            "answer"
+        );
+    }
+
+    #[test]
+    fn gemma_chat_accepts_default_or_explicit_static_fp8_only() {
+        assert!(validate_gemma4_moe_chat_kv_cache_encoding(None).is_ok());
+        assert!(
+            validate_gemma4_moe_chat_kv_cache_encoding(Some(KvCacheEncoding::Fp8E4M3FnStatic))
+                .is_ok()
+        );
+        for encoding in [
+            KvCacheEncoding::Fp16,
+            KvCacheEncoding::Fp8E4M3Fn,
+            KvCacheEncoding::Nvfp4,
+            KvCacheEncoding::Fp8E4M3Block16,
+            KvCacheEncoding::Fp8E5M2Block16,
+            KvCacheEncoding::Mxfp8E4,
+            KvCacheEncoding::Mxfp8E5,
+        ] {
+            assert!(validate_gemma4_moe_chat_kv_cache_encoding(Some(encoding)).is_err());
+        }
     }
 }

@@ -155,6 +155,36 @@ shutdownもPASSした。Qwen BF16固定laneのR9700/V620 median TTFTは46.653/18
 26.689/29.685 msである。この証拠は固定artifact、single request、実行済みtargetへ限定し、性能倍率、別artifact、multi-GPUを
 主張しない。
 
+Phase 55では固定`nvidia/Gemma-4-26B-A4B-NVFP4` artifactのGemma 4 26B-A4B MoEをsingle GPUで実行した。
+exact `gfx1201`の最終source／GGUF full-resident runはresident/peak 17,636,771,900/17,861,078,900 byte、sourceの
+17-token prefill/decodeが2.882/8.376秒、GGUFが2.696/8.250秒、routed expert 570 submission／8,400 active pairだった。
+両containerの35-token output digestは`57c2f914705c86657a3537810e6ed5ba17972b67857c183135d1d0b8a117ccb1`へ一致した。exact `gfx1030`の
+draft full-resident runと、両targetのrouter、expert、broadcast、static FP8 full/sliding attention oracleもPASSした。
+最終primary runは35 output全て語彙内、30 KV stateのlength 34、fallback 0、nonfinite 0、cleanup/quarantine 0を確認した。
+dynamic API/WebUIのload、非stream／SSE／raw、prefix、cancel/recovery、unload、clean shutdownも同じR9700でPASSした。
+これは固定artifact、text-only、single active request、実行済みtargetの証拠であり、multimodal、MTP、multi-GPU、別Gemma 4
+artifactへ一般化しない。
+
+Phase 57ではDeepSeek V4専用top-6 MoE routing operatorだけを、canonical V620 exact `gfx1030`とR9700 exact
+`gfx1201`で実機検証した。各target専用Code Object V6／wave32 binaryでM=1/3/5/17、score／hash、stable tie、
+bias-selection-only、unbiased weight、renormalize有無、expert 0／255、duplicate／out-of-range hash ID、nonfinite、
+positive routed-scale境界を独立oracleへ照合した。不正入力はmetadataだけでなく公開completionでもterminal Failureへなり、
+query／wait／deferred finalizeをfail-closeする。HIP-only、fallback 0、cleanup 0をPASSした。これはmodel-free route operatorの
+`project-verified` evidenceだけであり、166,878,536,440-byte official payloadのresident、mHC、CSA／HCA、expert execution、
+DSpark／DFlash、full graph、CLI／API／WebUI generation、性能またはmulti-GPUを証明しない。
+
+Phase 58ではMiniMax M3専用sigmoid top-4 MoE routing operatorだけを、同じcanonical V620 exact `gfx1030`とR9700 exact
+`gfx1201`で実機検証した。各target専用Code Object V6／wave32 binaryでM=1/3/5/17、stable tie、selection-only bias、
+unbiased weight正規化、routed scale 2.0、expert 0／127、nonfinite／zero normalizerを独立oracleへ照合した。不正入力は公開completionの
+query／wait／deferred finalizeでterminal Failureとなり、HIP-only、fallback 0、cleanup 0をPASSした。これはmodel-free route operatorの
+`project-verified` evidenceに限り、869,157,697,024-byte admission、MSA GPU、expert execution、full-model generation、
+multimodal／MTP、性能またはmulti-GPUを証明しない。
+
+Phase 59 DiffusionGemmaはhost-only foundationである。公式BF16 shard file合計51,647,701,024 bytesが単一32 GiB GPU容量を
+KV／workspace前から超えるため、exact `gfx1030`／`gfx1201`のfull-model resident、bidirectional decoder、generation、性能を
+PASSとして主張しない。既存Gemma 4のoperator evidenceもDiffusionGemmaのread-only encoder KV、bidirectional canvas、
+self-conditioningを自動的に証明しない。
+
 Phase 30ではexact R9700 `gfx1201`へnative E4M3FN readとwave32 causal-attention providerを限定採用した。
 gfx1201/gfx1030 × FP16/FP8の各17 caseは全出力一致、fallbackなし、cleanup 0で、gfx1201の全256 E4M3FN codeも
 software contractと一致した。Qwen3.5-4B BF16、4108 inputの3 process中央値はgfx1201 baseline比でTTFT 9.60%、
@@ -375,6 +405,18 @@ block 32、E8M0 scaleを使う。gfx942はnative FNUZ byteへ置換せず、OCP 
 PASSした。Qwen3.5-4Bの一回測定はKLD p99 `0.004945428206833837`、KV request-state peak 11.935%減だったが、top-1一致は
 gfx1030 `1.0`、gfx1201 `0.85`であり、gfx1201はfreeze済み品質閾値`>=0.99`に未達である。default変更はこの品質結果による
 自動昇格ではなくユーザー明示決定であり、gfx942と別tupleは引き続き`unverified`とする。
+
+### 2026-08-31 Phase56 Gemma 4 MTP exact `gfx1201`
+
+canonical R9700 UUID `GPU-a8e9ddefa2d60f55`だけをvisibleにし、logical device 0、exact `gfx1201`、context 2,048、single request、greedy、
+draft width 1で検証した。targetはreviewed mixed NVFP4 W4A4／FP8 W8A8 Gemma 4 12B GGUF、assistantは公式48 tensor BF16
+`gemma4mtp` GGUFである。target-only／MTPはfixed `[818,5279,529,6056,563]`から同じ4 token
+`[236772,236770,236770,236772]`を生成し、CLI、static API、dynamic WebUI、SSE、stop、cancel/recovery、unloadをHIP-only、fallback 0、
+cleanup 0でPASSした。
+
+MTP residentは10,046,932,204 bytes、runtime peakは11,574,306,638 bytesだった。fixed benchmarkは12 draftを全rejectし、measured decodeは
+target-only約9.34 tok/sに対してMTP約2.91 tok/sであり、性能向上は確認していない。このevidenceは上記artifact／target／greedy幅1へ限定し、
+gfx1030、gfx942、sampling、幅2以上、別Gemma model、一般的なMTP高速化へ拡張しない。
 
 ### software.mdとの関係
 

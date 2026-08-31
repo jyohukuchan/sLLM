@@ -65,6 +65,7 @@ pub const SLLM_STATUS_INVALID_TOKEN_SELECTOR_DESCRIPTOR: sllm_status_t = 0x129;
 pub const SLLM_STATUS_TOKEN_SELECTOR_NONFINITE: sllm_status_t = 0x12a;
 pub const SLLM_STATUS_TOKEN_SELECTOR_ALL_MASKED: sllm_status_t = 0x12b;
 pub const SLLM_STATUS_TOKEN_SELECTOR_INVALID_TEMPERATURE: sllm_status_t = 0x12c;
+pub const SLLM_STATUS_INVALID_MINISTRAL3_YARN_DESCRIPTOR: sllm_status_t = 0x12d;
 
 pub const SLLM_HIP_RMSNORM_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_RMSNORM_KERNEL_ID_BASELINE_WAVE32_V1: u32 = 1;
@@ -84,6 +85,7 @@ pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_SCALAR_MUL_V1: u32 = 5;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_GELU_TANH_MUL_V1: u32 = 6;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_TANH_SOFTCAP_V1: u32 = 7;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_ADD_V1: u32 = 8;
+pub const SLLM_HIP_ELEMENTWISE_KERNEL_ID_BROADCAST_MUL_V1: u32 = 9;
 pub const SLLM_HIP_ELEMENTWISE_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ELEMENTWISE_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ELEMENTWISE_WORKGROUP_SIZE: u32 = 256;
@@ -154,10 +156,45 @@ pub const SLLM_HIP_MOE_ROUTE_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_MOE_ROUTE_MAX_TOKENS: u64 = 65_536;
 pub const SLLM_HIP_MOE_ROUTE_MAX_EXPERTS: u64 = 256;
 pub const SLLM_HIP_MOE_ROUTE_MAX_SELECTED: u32 = 16;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_VERSION: u32 = 1;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_SCORE_V1: u32 = 1;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_ID_HASH_V1: u32 = 2;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS: u64 = 65_536;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT: u64 = 256;
+pub const SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT: u32 = 6;
+pub type sllm_deepseek_v4_moe_route_mode_t = u32;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_SCORE: sllm_deepseek_v4_moe_route_mode_t = 1;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_MODE_HASH: sllm_deepseek_v4_moe_route_mode_t = 2;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK: i32 = 0;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_NONFINITE: i32 = 1;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_EXPERT_OUT_OF_RANGE: i32 = 2;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT: i32 = 3;
+pub const SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_ZERO_NORMALIZER: i32 = 4;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_VERSION: u32 = 1;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1: u32 = 1;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_MAX_TOKENS: u64 = 65_536;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_EXPERT_COUNT: u64 = 128;
+pub const SLLM_HIP_MINIMAX_M3_MOE_ROUTE_SELECTED_EXPERT_COUNT: u32 = 4;
+pub const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK: i32 = 0;
+pub const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE: i32 = 1;
+pub const SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER: i32 = 2;
 pub const SLLM_HIP_MOE_EXPERT_VERSION: u32 = 1;
+pub const SLLM_HIP_MOE_EXPERT_GEMMA4_VERSION: u32 = 2;
 pub const SLLM_HIP_MOE_EXPERT_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_DECODE_V1: u32 = 1;
 pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_PREFILL_V1: u32 = 2;
+pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_DECODE_V2: u32 = 3;
+pub const SLLM_HIP_MOE_EXPERT_KERNEL_ID_GEMMA4_PREFILL_V2: u32 = 4;
 pub const SLLM_HIP_MOE_EXPERT_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_MOE_EXPERT_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_MOE_EXPERT_WORKGROUP_SIZE: u32 = 256;
@@ -167,6 +204,12 @@ pub const SLLM_HIP_MOE_EXPERT_COUNT: u32 = 256;
 pub const SLLM_HIP_MOE_EXPERT_TOPK: u32 = 8;
 pub const SLLM_HIP_MOE_EXPERT_LAYER_BLOB_BYTES: u64 = 434_114_560;
 pub const SLLM_HIP_MOE_EXPERT_MAX_TOKENS: u64 = 65_536;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_HIDDEN_SIZE: u32 = 2_816;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_INTERMEDIATE_SIZE: u32 = 704;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_COUNT: u32 = 128;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_TOPK: u32 = 8;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_LAYER_BLOB_BYTES: u64 = 428_215_552;
+pub const SLLM_HIP_GEMMA4_MOE_EXPERT_WORKSPACE_BYTES_PER_TOKEN: u64 = 27_104;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_VERSION: u32 = 1;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_ATTENTION_PREPROCESS_KERNEL_ID_BASELINE_BF16_V1: u32 = 1;
@@ -194,6 +237,19 @@ pub const SLLM_HIP_ROTARY_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_ROTARY_WORKGROUP_SIZE: u32 = 256;
 pub const SLLM_HIP_ROTARY_MAX_M: u64 = 262_144;
 pub const SLLM_HIP_ROTARY_MAX_POSITION: u32 = 4_294_967_295;
+pub const SLLM_HIP_MINISTRAL3_YARN_VERSION: u32 = 1;
+pub const SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1: u32 = 1;
+pub const SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX: u32 = 64;
+pub const SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE: u32 = 256;
+pub const SLLM_HIP_MINISTRAL3_YARN_Q_HEADS: u32 = 32;
+pub const SLLM_HIP_MINISTRAL3_YARN_KV_HEADS: u32 = 8;
+pub const SLLM_HIP_MINISTRAL3_YARN_HEAD_DIM: u32 = 128;
+pub const SLLM_HIP_MINISTRAL3_YARN_ROTARY_DIM: u32 = 128;
+pub const SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT: u32 = 16_384;
+pub const SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION: u32 = 262_144;
+pub const SLLM_HIP_MINISTRAL3_YARN_MAX_M: u64 = 262_144;
 pub const SLLM_HIP_WINDOWED_ATTENTION_VERSION: u32 = 1;
 pub const SLLM_HIP_WINDOWED_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_WINDOWED_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_GQA_BF16_V1: u32 = 1;
@@ -206,13 +262,17 @@ pub const SLLM_HIP_WINDOWED_ATTENTION_MAX_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_KV_STATE_VERSION: u32 = 2;
 pub const SLLM_HIP_KV_STATE_CREATE_INFO_V2_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_STATE_CREATE_INFO_STATIC_FP8_VERSION: u32 = 2;
+pub const SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION: u32 = 3;
 pub const SLLM_HIP_KV_VIEW_INFO_VERSION: u32 = 2;
+pub const SLLM_HIP_KV_VIEW_INFO_SLIDING_VERSION: u32 = 3;
 pub const SLLM_HIP_KV_APPEND_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_KV_HEAD_COUNT: u32 = 4;
 pub const SLLM_HIP_KV_HEAD_DIM: u32 = 256;
 pub const SLLM_HIP_KV_MAX_HEAD_DIM: u32 = 512;
 pub const SLLM_HIP_KV_MAX_CAPACITY: u64 = 4_294_967_295;
 pub const SLLM_HIP_KV_MAX_M: u64 = 262_144;
+pub const SLLM_HIP_KV_SLIDING_MAX_CAPACITY: u64 = 262_144;
+pub const SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4: u64 = 1_024;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TRANSPOSE_V1: u32 = 1;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_F16_TOKEN_MAJOR_V2: u32 = 2;
 pub const SLLM_HIP_KV_KERNEL_ID_BF16_TO_FP8_TOKEN_MAJOR_V1: u32 = 3;
@@ -243,6 +303,7 @@ pub const SLLM_HIP_KV_ENCODING_FP8_E4_BLOCK16_V2: u32 = 8;
 pub const SLLM_HIP_KV_ENCODING_FP8_E5_BLOCK16_V2: u32 = 9;
 pub const SLLM_HIP_STATE_FORK_VERSION: u32 = 1;
 pub const SLLM_HIP_STATE_FORK_INFO_VERSION: u32 = 1;
+pub const SLLM_HIP_STATE_IMAGE_SLIDING_VERSION: u32 = 2;
 pub const SLLM_HIP_STATE_FORK_MODE_DEVICE_COPY: u32 = 1;
 pub const SLLM_HIP_STATE_FORK_MODE_SHARED_READ_ONLY_PAGES: u32 = 2;
 pub const SLLM_HIP_KV_STATE_PLANE_KEY: u32 = 1;
@@ -258,10 +319,14 @@ pub const SLLM_HIP_LINEAR_STATE_PLANE_RECURRENT_SLOT1: u32 = 4;
 pub const SLLM_HIP_LINEAR_STATE_PLANE_SCRATCH: u32 = 5;
 pub const SLLM_HIP_STATE_CHUNK_MAX_BYTES: u64 = 1_073_741_824;
 pub const SLLM_HIP_CAUSAL_ATTENTION_VERSION: u32 = 1;
+pub const SLLM_HIP_CAUSAL_ATTENTION_SLIDING_VERSION: u32 = 2;
+pub const SLLM_HIP_CAUSAL_ATTENTION_EXPLICIT_SCALE_VERSION: u32 = 3;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DISPATCH_INFO_VERSION: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_STABLE_SOFTMAX_V1: u32 = 1;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_ONLINE_SOFTMAX_V2: u32 = 2;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_PACKED_KV_V3: u32 = 3;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SLIDING_STATIC_FP8_V1: u32 = 4;
+pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_ID_SCALED_STATIC_FP8_V1: u32 = 5;
 pub const SLLM_HIP_CAUSAL_ATTENTION_KERNEL_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_DEVICE_SYMBOL_MAX: u32 = 64;
 pub const SLLM_HIP_CAUSAL_ATTENTION_WORKGROUP_SIZE: u32 = 256;
@@ -339,6 +404,7 @@ pub const SLLM_ELEMENTWISE_OPERATION_SCALAR_MUL: sllm_elementwise_operation_t = 
 pub const SLLM_ELEMENTWISE_OPERATION_GELU_TANH_MUL: sllm_elementwise_operation_t = 6;
 pub const SLLM_ELEMENTWISE_OPERATION_TANH_SOFTCAP: sllm_elementwise_operation_t = 7;
 pub const SLLM_ELEMENTWISE_OPERATION_BROADCAST_ADD: sllm_elementwise_operation_t = 8;
+pub const SLLM_ELEMENTWISE_OPERATION_BROADCAST_MUL: sllm_elementwise_operation_t = 9;
 
 pub const SLLM_COMPLETION_STATE_PENDING: u32 = 0;
 pub const SLLM_COMPLETION_STATE_SUCCESS: u32 = 1;
@@ -422,6 +488,16 @@ pub struct sllm_moe_route_plan_t {
 }
 
 #[repr(C)]
+pub struct sllm_deepseek_v4_moe_route_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_minimax_m3_moe_route_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
 pub struct sllm_moe_expert_plan_t {
     _private: [u8; 0],
 }
@@ -433,6 +509,11 @@ pub struct sllm_attention_preprocess_plan_t {
 
 #[repr(C)]
 pub struct sllm_rotary_plan_t {
+    _private: [u8; 0],
+}
+
+#[repr(C)]
+pub struct sllm_ministral3_yarn_plan_t {
     _private: [u8; 0],
 }
 
@@ -987,6 +1068,121 @@ pub struct sllm_moe_route_dispatch_info_t {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+pub struct sllm_deepseek_v4_moe_route_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub mode: sllm_deepseek_v4_moe_route_mode_t,
+    pub selected_expert_count: u32,
+    pub renormalize: u32,
+    pub routed_scale: f32,
+    pub reserved0: u32,
+    pub reserved: [u32; 4],
+    pub logits: sllm_tensor_binding_t,
+    pub selection_bias: sllm_tensor_binding_t,
+    pub hash_expert_ids: sllm_tensor_binding_t,
+    pub metadata: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_deepseek_v4_moe_route_query_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub mode: sllm_deepseek_v4_moe_route_mode_t,
+    pub token_count: u64,
+    pub expert_count: u64,
+    pub pair_count: u64,
+    pub metadata_bytes: u64,
+    pub selected_expert_count: u32,
+    pub renormalize: u32,
+    pub routed_scale: f32,
+    pub reserved0: u32,
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_deepseek_v4_moe_route_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub expert_count: u64,
+    pub pair_count: u64,
+    pub selected_expert_count: u32,
+    pub mode: sllm_deepseek_v4_moe_route_mode_t,
+    pub renormalize: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub reserved0: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_minimax_m3_moe_route_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub selected_expert_count: u32,
+    pub reserved: [u32; 4],
+    pub logits: sllm_tensor_binding_t,
+    pub selection_bias: sllm_tensor_binding_t,
+    pub metadata: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_minimax_m3_moe_route_query_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub selected_expert_count: u32,
+    pub token_count: u64,
+    pub expert_count: u64,
+    pub pair_count: u64,
+    pub metadata_bytes: u64,
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_minimax_m3_moe_route_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub expert_count: u64,
+    pub pair_count: u64,
+    pub selected_expert_count: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub reserved0: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct sllm_moe_expert_desc_t {
     pub struct_size: u32,
     pub abi_version: u32,
@@ -1095,6 +1291,60 @@ pub struct sllm_rotary_desc_t {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct sllm_rotary_dispatch_info_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub info_version: u32,
+    pub backend: u32,
+    pub dispatch_id: u64,
+    pub dispatch_count: u32,
+    pub kernel_id: u32,
+    pub workgroup_size_x: u32,
+    pub grid_size_x: u32,
+    pub token_count: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub rotary_dim: u32,
+    pub start_position: u32,
+    pub max_position: u32,
+    pub fallback_allowed: u32,
+    pub fallback_used: u32,
+    pub kernel_symbol: [c_char; 64],
+    pub device_symbol: [c_char; 64],
+    pub gcn_arch_name: [c_char; 64],
+    pub reserved: [u32; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_ministral3_yarn_desc_t {
+    pub struct_size: u32,
+    pub abi_version: u32,
+    pub op_version: u32,
+    pub position_payload_mode: u32,
+    pub start_position: u64,
+    pub q_heads: u32,
+    pub kv_heads: u32,
+    pub head_dim: u32,
+    pub rotary_dim: u32,
+    pub theta_bits: u32,
+    pub factor_bits: u32,
+    pub original_context: u32,
+    pub max_position: u32,
+    pub beta_fast_bits: u32,
+    pub beta_slow_bits: u32,
+    pub query_scale_beta_bits: u32,
+    pub reserved: [u32; 5],
+    pub query: sllm_tensor_binding_t,
+    pub key: sllm_tensor_binding_t,
+    pub positions: sllm_tensor_binding_t,
+    pub query_output: sllm_tensor_binding_t,
+    pub key_output: sllm_tensor_binding_t,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct sllm_ministral3_yarn_dispatch_info_t {
     pub struct_size: u32,
     pub abi_version: u32,
     pub info_version: u32,
@@ -1761,6 +2011,50 @@ unsafe extern "C" {
         dispatch_info: *mut sllm_moe_route_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
+    pub fn sllm_deepseek_v4_moe_route_query(
+        descriptor: *const sllm_deepseek_v4_moe_route_desc_t,
+        info: *mut sllm_deepseek_v4_moe_route_query_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_deepseek_v4_moe_route_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_deepseek_v4_moe_route_desc_t,
+        plan: *mut *mut sllm_deepseek_v4_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_deepseek_v4_moe_route_plan_release(
+        plan: *mut *mut sllm_deepseek_v4_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_deepseek_v4_moe_route_execute(
+        plan: *const sllm_deepseek_v4_moe_route_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_deepseek_v4_moe_route_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_minimax_m3_moe_route_query(
+        descriptor: *const sllm_minimax_m3_moe_route_desc_t,
+        info: *mut sllm_minimax_m3_moe_route_query_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_minimax_m3_moe_route_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_minimax_m3_moe_route_desc_t,
+        plan: *mut *mut sllm_minimax_m3_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_minimax_m3_moe_route_plan_release(
+        plan: *mut *mut sllm_minimax_m3_moe_route_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_minimax_m3_moe_route_execute(
+        plan: *const sllm_minimax_m3_moe_route_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_minimax_m3_moe_route_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
     pub fn sllm_moe_expert_prepare(
         context: *const sllm_context_t,
         descriptor: *const sllm_moe_expert_desc_t,
@@ -1810,6 +2104,23 @@ unsafe extern "C" {
         queue: *const sllm_queue_t,
         completion: *mut *mut sllm_completion_t,
         dispatch_info: *mut sllm_rotary_dispatch_info_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_ministral3_yarn_prepare(
+        context: *const sllm_context_t,
+        descriptor: *const sllm_ministral3_yarn_desc_t,
+        plan: *mut *mut sllm_ministral3_yarn_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_ministral3_yarn_plan_release(
+        plan: *mut *mut sllm_ministral3_yarn_plan_t,
+        error_sink: *mut sllm_error_sink_t,
+    ) -> sllm_status_t;
+    pub fn sllm_ministral3_yarn_execute(
+        plan: *const sllm_ministral3_yarn_plan_t,
+        queue: *const sllm_queue_t,
+        completion: *mut *mut sllm_completion_t,
+        dispatch_info: *mut sllm_ministral3_yarn_dispatch_info_t,
         error_sink: *mut sllm_error_sink_t,
     ) -> sllm_status_t;
     pub fn sllm_windowed_attention_prepare(
