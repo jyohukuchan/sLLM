@@ -82,12 +82,27 @@ impl MatmulDescriptor {
         })
     }
 
-    fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
-        let op_version = if self.weight.view().encoding()
+    fn op_version(&self) -> u32 {
+        if self.weight.view().encoding()
+            == (sllm_core::Encoding::Mxfp8W8A8 {
+                block_size: 32,
+                scale_dtype: sllm_core::DType::U8,
+            })
+        {
+            sys::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION
+        } else if self.weight.view().encoding()
+            == (sllm_core::Encoding::Mxfp6W6A6 {
+                block_size: 32,
+                scale_dtype: sllm_core::DType::U8,
+            })
+        {
+            sys::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION
+        } else if self.weight.view().encoding()
             == (sllm_core::Encoding::Mxfp4W4A4 {
                 block_size: 32,
                 scale_dtype: sllm_core::DType::U8,
-            }) {
+            })
+        {
             sys::SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION
         } else if self.weight.view().encoding()
             == (sllm_core::Encoding::Nvfp4W4A4 {
@@ -110,11 +125,14 @@ impl MatmulDescriptor {
             sys::SLLM_HIP_MATMUL_FP8_VERSION
         } else {
             sys::SLLM_HIP_MATMUL_VERSION
-        };
+        }
+    }
+
+    fn raw(&self) -> Result<sys::sllm_matmul_desc_t, RuntimeError> {
         Ok(sys::sllm_matmul_desc_t {
             struct_size: size_of::<sys::sllm_matmul_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version,
+            op_version: self.op_version(),
             reserved: [0; 5],
             activation: self.activation.raw()?,
             weight: self.weight.raw()?,
@@ -388,6 +406,40 @@ mod tests {
         assert_eq!(descriptor.semantic().inputs()[1].shape(), &[7, 5]);
         assert_eq!(descriptor.semantic().outputs()[0].shape(), &[3, 7]);
         assert_eq!(size_of::<sys::sllm_matmul_desc_t>(), 584);
+    }
+
+    #[test]
+    fn descriptor_lowering_selects_ocp_mx_weight_activation_versions() {
+        for (dtype, encoding, expected_version) in [
+            (
+                DType::F8E4M3Fn,
+                sllm_core::Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+                sys::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION,
+            ),
+            (
+                DType::U8,
+                sllm_core::Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+                sys::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION,
+            ),
+        ] {
+            let context = Context::test_without_native();
+            let activation = Buffer::test_without_native(&context)
+                .binding(TensorView::contiguous(DType::Bf16, &[3, 64]).unwrap());
+            let weight = Buffer::test_without_native(&context)
+                .binding(TensorView::with_encoding(dtype, encoding, &[7, 64]).unwrap());
+            let output = Buffer::test_without_native(&context)
+                .binding(TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap());
+            let descriptor = MatmulDescriptor::new(activation, weight, output).unwrap();
+            assert_eq!(descriptor.op_version(), expected_version);
+            assert_eq!(descriptor.semantic().inputs()[1].dtype(), dtype);
+            assert_eq!(descriptor.semantic().inputs()[1].encoding(), encoding);
+        }
     }
 
     #[test]

@@ -323,12 +323,13 @@ pub use gguf::{
     SLLM_TENSOR_RECIPE_KEY, SLLM_TENSOR_RECIPE_SHA256_KEY, VerifiedGguf,
 };
 pub use gguf_convert::{
-    build_gemma4_moe_nvfp4_gguf_plan, build_gemma4_mtp_bf16_gguf_plan,
-    build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan,
-    build_qwen35_moe_mxfp4_gguf_plan, gemma4_mtp_pair_semantic_id, repack_mxfp4_standard,
-    repack_nvfp4_standard, write_gemma4_moe_nvfp4_gguf, write_gemma4_mtp_bf16_gguf,
-    write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf, write_qwen35_fp8_gguf,
-    write_qwen35_moe_mxfp4_gguf,
+    QwenMxWeightActivationFormat, build_gemma4_moe_nvfp4_gguf_plan,
+    build_gemma4_mtp_bf16_gguf_plan, build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan,
+    build_qwen35_fp8_gguf_plan, build_qwen35_moe_mxfp4_gguf_plan,
+    build_qwen35_mx_weight_activation_gguf_plan, gemma4_mtp_pair_semantic_id,
+    repack_mxfp4_standard, repack_nvfp4_standard, write_gemma4_moe_nvfp4_gguf,
+    write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf,
+    write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf, write_qwen35_mx_weight_activation_gguf,
 };
 pub use gguf_writer::{
     DerivedGgufConverter, DerivedGgufLock, DerivedGgufOutput, GgufWritePlan, GgufWriteReport,
@@ -530,7 +531,10 @@ pub use moe::{
     SparseMoeRoutingContract, SparseMoeRoutingError, reference_gemma4_moe_route,
     reference_sparse_moe_route,
 };
-pub use mxfp::{MX_BLOCK_SIZE, MxElementFormat, MxError, decode_e8m0, decode_mxfp4, decode_mxfp8};
+pub use mxfp::{
+    MX_BLOCK_SIZE, MxElementFormat, MxError, QuantizedMx, decode_e3m2, decode_e8m0, decode_mxfp4,
+    decode_mxfp6, decode_mxfp8, encode_e3m2, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
+};
 pub use nvfp4::{
     E2M1_MAX, NVFP4_BLOCK_SIZE, NVFP4_E4M3_MAX, Nvfp4Error, Nvfp4Provider, QuantizedNvfp4,
     decode_e2m1, encode_e2m1, quantize_nvfp4_weights, select_nvfp4_provider,
@@ -608,7 +612,8 @@ pub use qwen_graph::{
     QwenGraphNodeKind, QwenGraphState, QwenGraphStateDescriptor, QwenGraphStateKind,
     QwenGraphTensor, QwenGraphTensorBacking, QwenGraphWeightBinding, build_qwen35_fp8_fnuz_graph,
     build_qwen35_fp8_graph, build_qwen35_fp8_graph_with_kv_cache_encoding,
-    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
+    build_qwen35_gguf_fp8_graph, build_qwen35_gguf_moe_execution_graph,
+    build_qwen35_gguf_mx_weight_activation_graph, build_qwen35_graph,
     build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
     build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
     build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,

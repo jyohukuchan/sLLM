@@ -30,7 +30,8 @@ validate_tensor(const sllm_tensor_binding_t &binding,
                 TensorMetadata *const copied, const uint32_t expected_dtype,
                 const uint32_t expected_encoding, const uint64_t element_bytes,
                 const bool append_outer_scales, const bool packed_nvfp4,
-                const bool packed_mxfp4, const bool append_input_tensor_scale,
+                const bool packed_mxfp4, const bool packed_mxfp8,
+                const bool packed_mxfp6, const bool append_input_tensor_scale,
                 sllm_error_sink_t *const sink) noexcept {
   if (binding.struct_size != sizeof(binding)) {
     return sllm_public_runtime::write_error(
@@ -93,6 +94,12 @@ validate_tensor(const sllm_tensor_binding_t &binding,
         sink, SLLM_STATUS_METADATA_OVERFLOW,
         "matmul tensor byte interval overflowed u64");
   }
+  if ((packed_mxfp8 || packed_mxfp6) &&
+      binding.shape[1] % UINT64_C(32) != 0U) {
+    return sllm_public_runtime::write_error(
+        sink, SLLM_STATUS_SHAPE_MISMATCH,
+        "MXFP8/MXFP6 matmul K must be padded to a multiple of 32");
+  }
   if (packed_nvfp4) {
     payload_bytes = elements / UINT64_C(2) +
                     (elements % UINT64_C(2) != 0U ? UINT64_C(1) : UINT64_C(0));
@@ -105,6 +112,16 @@ validate_tensor(const sllm_tensor_binding_t &binding,
       return sllm_public_runtime::write_error(
           sink, SLLM_STATUS_METADATA_OVERFLOW,
           "matmul MXFP4 value interval overflowed u64");
+    }
+  } else if (packed_mxfp6) {
+    uint64_t packed_row_bytes = 0U;
+    if (multiply_overflows(binding.shape[1], UINT64_C(3),
+                           &packed_row_bytes) ||
+        multiply_overflows(binding.shape[0], packed_row_bytes / UINT64_C(4),
+                           &payload_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul MXFP6 value interval overflowed u64");
     }
   } else if (multiply_overflows(elements, element_bytes, &payload_bytes)) {
     return sllm_public_runtime::write_error(
@@ -168,6 +185,19 @@ validate_tensor(const sllm_tensor_binding_t &binding,
     }
     payload_bytes += block_scale_bytes;
   }
+  if (packed_mxfp8 || packed_mxfp6) {
+    uint64_t block_scale_bytes = 0U;
+    if (multiply_overflows(binding.shape[0], binding.shape[1] / UINT64_C(32),
+                           &block_scale_bytes) ||
+        sllm_public_runtime::add_overflows(payload_bytes, block_scale_bytes) ||
+        sllm_public_runtime::add_overflows(binding.byte_offset,
+                                           payload_bytes + block_scale_bytes)) {
+      return sllm_public_runtime::write_error(
+          sink, SLLM_STATUS_METADATA_OVERFLOW,
+          "matmul MXFP8/MXFP6 value/scale interval overflowed u64");
+    }
+    payload_bytes += block_scale_bytes;
+  }
   copied->byte_offset = binding.byte_offset;
   copied->payload_bytes = payload_bytes;
   copied->end_offset = binding.byte_offset + payload_bytes;
@@ -219,7 +249,9 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       descriptor->op_version != SLLM_HIP_MATMUL_FP8_VERSION &&
       descriptor->op_version != SLLM_HIP_MATMUL_NVFP4_VERSION &&
       descriptor->op_version != SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION &&
-      descriptor->op_version != SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION) {
+      descriptor->op_version != SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION &&
+      descriptor->op_version != SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION &&
+      descriptor->op_version != SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_INVALID_MATMUL_DESCRIPTOR,
         "matmul descriptor version is unsupported");
@@ -234,12 +266,17 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION;
   const bool mxfp4_w4a4 =
       descriptor->op_version == SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION;
+  const bool mxfp8_w8a8 =
+      descriptor->op_version == SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
+  const bool mxfp6_w6a6 =
+      descriptor->op_version == SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
   const bool nvfp4 =
       descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION || nvfp4_w4a4;
   sllm_status_t status =
       validate_tensor(descriptor->activation, &metadata->activation,
                       SLLM_TENSOR_DTYPE_BF16, SLLM_TENSOR_ENCODING_UNQUANTIZED,
-                      UINT64_C(2), false, false, false, false, sink);
+                      UINT64_C(2), false, false, false, false, false, false,
+                      sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -252,22 +289,30 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   }
   status = validate_tensor(
       descriptor->weight, &metadata->weight,
-      nvfp4 || mxfp4_w4a4 ? SLLM_TENSOR_DTYPE_U8
+      nvfp4 || mxfp4_w4a4 || mxfp6_w6a6
+          ? SLLM_TENSOR_DTYPE_U8
+          : mxfp8_w8a8 ? SLLM_TENSOR_DTYPE_F8_E4M3_FN
                           : (fp8_outer ? fp8_dtype : SLLM_TENSOR_DTYPE_BF16),
-      mxfp4_w4a4 ? SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0
+      mxfp6_w6a6 ? SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0
+      : mxfp8_w8a8 ? SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
+      : mxfp4_w4a4 ? SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0
       : nvfp4 ? (nvfp4_w4a4 ? SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32
                             : SLLM_TENSOR_ENCODING_NVFP4_BLOCK16_E4M3FN_F32)
               : (fp8_outer ? SLLM_TENSOR_ENCODING_FP8_OUTER_F32
                            : SLLM_TENSOR_ENCODING_UNQUANTIZED),
-      fp8_outer || nvfp4 || mxfp4_w4a4 ? UINT64_C(1) : UINT64_C(2), fp8_outer,
-      nvfp4, mxfp4_w4a4, nvfp4_w4a4, sink);
+      fp8_outer || nvfp4 || mxfp4_w4a4 || mxfp8_w8a8 || mxfp6_w6a6
+          ? UINT64_C(1)
+          : UINT64_C(2),
+      fp8_outer, nvfp4, mxfp4_w4a4, mxfp8_w8a8, mxfp6_w6a6, nvfp4_w4a4,
+      sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
   status =
       validate_tensor(descriptor->output, &metadata->output,
                       SLLM_TENSOR_DTYPE_BF16, SLLM_TENSOR_ENCODING_UNQUANTIZED,
-                      UINT64_C(2), false, false, false, false, sink);
+                      UINT64_C(2), false, false, false, false, false, false,
+                      sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -291,9 +336,14 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   metadata->nvfp4 = nvfp4;
   metadata->nvfp4_w4a4 = nvfp4_w4a4;
   metadata->mxfp4_w4a4 = mxfp4_w4a4;
+  metadata->mxfp8_w8a8 = mxfp8_w8a8;
+  metadata->mxfp6_w6a6 = mxfp6_w6a6;
   metadata->fp8_dtype = fp8_outer ? fp8_dtype : 0U;
   metadata->weight_value_bytes =
-      mxfp4_w4a4 ? metadata->n * ((metadata->k + UINT64_C(1)) / UINT64_C(2))
+      mxfp6_w6a6
+          ? metadata->n * (metadata->k * UINT64_C(3) / UINT64_C(4))
+      : mxfp8_w8a8 ? metadata->n * metadata->k
+      : mxfp4_w4a4 ? metadata->n * ((metadata->k + UINT64_C(1)) / UINT64_C(2))
       : nvfp4
           ? metadata->n * metadata->k / UINT64_C(2) +
                 (metadata->n * metadata->k % UINT64_C(2) != 0U ? UINT64_C(1)

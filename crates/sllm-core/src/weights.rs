@@ -545,6 +545,40 @@ impl VerifiedGgufWeightSource {
             })
     }
 
+    pub fn has_mx_weight_activation_recipe(&self) -> bool {
+        !self.recipe_bindings.is_empty()
+            && self.recipe_bindings.values().all(|binding| {
+                matches!(
+                    binding.encoding,
+                    GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                        | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
+                )
+            })
+    }
+
+    pub fn has_quantized_linear_recipe(&self) -> bool {
+        self.has_fp8_recipe() || self.has_mx_weight_activation_recipe()
+    }
+
+    pub fn mx_weight_activation_encoding_name(&self) -> Option<&'static str> {
+        if !self.has_mx_weight_activation_recipe() {
+            return None;
+        }
+        let mut encodings = self
+            .recipe_bindings
+            .values()
+            .map(|binding| binding.encoding);
+        let first = encodings.next()?;
+        if encodings.any(|encoding| encoding != first) {
+            return Some("mixed-mxfp-invalid");
+        }
+        Some(match first {
+            GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 => "mxfp8-e4m3-w8a8",
+            GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => "mxfp6-e3m2-w6a6",
+            _ => unreachable!("MX recipe predicate excluded other encodings"),
+        })
+    }
+
     pub fn recipe_digest(&self) -> Option<&str> {
         self.gguf
             .extension()
@@ -1337,10 +1371,21 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
             binding.encoding,
             GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
                 | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
+                | GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
         )
     }) {
         return Err(WeightPlanError::invalid(
             "Qwen3.5 dense GGUF has an unsupported quantization recipe",
+        ));
+    }
+    let value_bindings: BTreeMap<_, _> = recipe_bindings
+        .values()
+        .map(|binding| (binding.value_tensor.as_str(), binding))
+        .collect();
+    if value_bindings.len() != recipe_bindings.len() {
+        return Err(WeightPlanError::invalid(
+            "Qwen3.5 dense GGUF recipe value tensors are not one-to-one",
         ));
     }
     let scale_names: BTreeSet<_> = recipe_bindings
@@ -1374,7 +1419,7 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
             GgufTensorType::Bf16 => TensorDType::Bf16,
             GgufTensorType::F16 => TensorDType::F16,
             GgufTensorType::F32 => TensorDType::F32,
-            GgufTensorType::I8Carrier if recipe_bindings.contains_key(&tensor.name) => {
+            GgufTensorType::I8Carrier if value_bindings.contains_key(tensor.name.as_str()) => {
                 TensorDType::U8
             }
             _ => {
@@ -1384,7 +1429,8 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
                 )));
             }
         };
-        let shape = if let Some(binding) = recipe_bindings.get(&tensor.name) {
+        let recipe_binding = value_bindings.get(tensor.name.as_str()).copied();
+        let shape = if let Some(binding) = recipe_binding {
             binding.logical_shape.clone()
         } else if let Some(shape) = logical_shapes.get(tensor.name.as_str()) {
             shape.to_vec()
@@ -1398,7 +1444,10 @@ pub fn build_verified_gguf_qwen_weight_load_plan(
             .checked_add(tensor.byte_length())
             .ok_or_else(|| WeightPlanError::invalid("GGUF relative tensor range overflows"))?;
         let descriptor = TensorDescriptor {
-            tensor_name: tensor.name.clone(),
+            tensor_name: recipe_binding.map_or_else(
+                || tensor.name.clone(),
+                |binding| binding.logical_tensor.clone(),
+            ),
             source_file: source_file.clone(),
             dtype,
             shape,

@@ -558,10 +558,27 @@ source-tree WebUI dynamic server、metrics、cancel、unload、shutdownをPASS�
 
 local Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
 LLVM 23のtupleで、公式Ministral 3 3B BF16 GGUFをexact `gfx1030`とexact `gfx1201`向けにそれぞれbuild／実行した。
-両targetは同じ短いtoken列、HIP-only、fallback false、394／394 dispatch、shutdown cleanup 0となった。
+初回は公式GGUFでhead permutation済みのQ/Kへsplit-half RoPEを適用して固定llama.cppと3 token目からずれたが、
+terminal logits比較で原因を特定し、productionをadjacent-pair v2へ修正した。旧split-half ABI v1は互換用に残す。
 
-固定llama.cpp oracleとは3番目の生成tokenから一致しないため、このtupleはbuild／dispatch／lifecycle到達だけを示す。
-Ministral 3のproduction数値品質、別OS／driver／ROCm／GPU、または広いcontext／performance evidenceへ一般化しない。
+修正後は両targetと固定llama.cppがraw `Hello`の4 token `[1307,1278,4304,1033]`およびcommon-prefix top-1で一致し、
+HIP-only、fallback false、394／394 dispatch、shutdown cleanup 0となった。513-token resident測定のprefill／decode中央値は
+gfx1030 `138.29／18.34 tok/s`、gfx1201 `1351.30／19.29 tok/s`である。このtupleを別OS／driver／ROCm／GPU、
+vision、262K context、または一律の性能保証へ一般化しない。
+
+### 2026-08-31 Phase61 local RDNA OCP MX W/A tuple
+
+同じlocal Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP
+`7.14.60850`、LLVM 23、Code Object V6、wave32 tupleで、target別の`gfx1030`／`gfx1201` release artifactを生成した。
+`sllm-mxfp-wa-evidence`はOCP MXFP8 E4M3 W8A8とMXFP6 E3M2 W6A6についてM=1/K=32/N=7と
+M=3/K=64/N=5を実行し、両targetの全caseでCPU oracle一致、dispatch count 2、fallback false、cleanup 0を返した。
+R9700は`HIP_VISIBLE_DEVICES=2`で単独可視化し、論理device 0へ接続した。
+
+後続follow-upでは同じtupleのexact `gfx1030`でQwen3.5-4B BF16／MXFP8／MXFP6 GGUFを完全直列実行した。
+MXFP8／MXFP6の20-row top-1は`0.80／0.75`、resident削減は`41.10%／51.71%`、17-token prefillは
+`48.10／100.16 tok/s`、decodeは`20.17／20.06 tok/s`で、BF16の`284.03／45.68 tok/s`より遅かった。
+従って形式対応とmemory削減は確認したが、品質または速度を根拠とするdefault採用はしない。full-model claimはこのexact gfx1030短caseに限り、
+長時間安定性、gfx1201／gfx942 full-model、別software tupleへ一般化しない。push/release時のimmutable candidate identityは別途固定する。
 
 ## 公式資料
 

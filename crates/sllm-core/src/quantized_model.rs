@@ -34,6 +34,7 @@ pub enum QuantizedTensorEncoding {
     Nvfp4E2M1Block16E4M3FnF32Outer,
     Mxfp4E2M1Block32E8M0,
     Mxfp8E4M3Block32E8M0,
+    Mxfp6E3M2Block32E8M0,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -919,6 +920,10 @@ mod tests {
         assert_ne!(
             QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0,
             QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0
+        );
+        assert_ne!(
+            QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0,
+            QuantizedTensorEncoding::Mxfp6E3M2Block32E8M0
         );
     }
 

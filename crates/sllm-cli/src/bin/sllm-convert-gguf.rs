@@ -1,13 +1,15 @@
 use sllm_core::{
     DerivedGgufConverter, DerivedGgufLock, GEMMA4_MOE_MODEL_FINGERPRINT, GgufWritePlan,
-    GgufWriteReport, QWEN35_MOE_MODEL_FINGERPRINT, UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256,
-    build_gemma4_moe_nvfp4_gguf_plan, build_gemma4_mtp_bf16_gguf_plan,
-    build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan, build_qwen35_fp8_gguf_plan,
-    build_qwen35_moe_mxfp4_gguf_plan, gemma4_mtp_pair_semantic_id, parse_gemma4_mtp_model_lock,
-    read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar, verify_gemma4_moe_artifact,
-    verify_qwen35_moe_artifact, verify_unsloth_gemma4_nvfp4, write_gemma4_moe_nvfp4_gguf,
-    write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf, write_qwen35_bf16_gguf,
-    write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf,
+    GgufWriteReport, QWEN35_MOE_MODEL_FINGERPRINT, QwenMxWeightActivationFormat,
+    UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256, build_gemma4_moe_nvfp4_gguf_plan,
+    build_gemma4_mtp_bf16_gguf_plan, build_gemma4_nvfp4_gguf_plan, build_qwen35_bf16_gguf_plan,
+    build_qwen35_fp8_gguf_plan, build_qwen35_moe_mxfp4_gguf_plan,
+    build_qwen35_mx_weight_activation_gguf_plan, gemma4_mtp_pair_semantic_id,
+    parse_gemma4_mtp_model_lock, read_model_lock, read_reviewed_model_lock, verify_fp8_sidecar,
+    verify_gemma4_moe_artifact, verify_qwen35_moe_artifact, verify_unsloth_gemma4_nvfp4,
+    write_gemma4_moe_nvfp4_gguf, write_gemma4_mtp_bf16_gguf, write_gemma4_nvfp4_gguf,
+    write_qwen35_bf16_gguf, write_qwen35_fp8_gguf, write_qwen35_moe_mxfp4_gguf,
+    write_qwen35_mx_weight_activation_gguf,
 };
 use sllm_tools::{
     AtomicBundleV1, TOOL_JSON_CANONICALIZATION_V1, TOOL_RUN_SCHEMA_VERSION_V1,
@@ -61,6 +63,8 @@ fn run(raw: Vec<String>) -> Result<String, String> {
     match arguments.kind.as_str() {
         "qwen35-bf16" => run_qwen35_bf16(&arguments),
         "qwen35-fp8" => run_qwen35_fp8(&arguments),
+        "qwen35-mxfp8-w8a8" => run_qwen35_mx(&arguments, QwenMxWeightActivationFormat::Mxfp8E4m3),
+        "qwen35-mxfp6-w6a6" => run_qwen35_mx(&arguments, QwenMxWeightActivationFormat::Mxfp6E3m2),
         "gemma4-nvfp4" => run_gemma4_nvfp4(&arguments),
         "gemma4moe-nvfp4" => run_gemma4_moe_nvfp4(&arguments),
         "gemma4-mtp-bf16" => run_gemma4_mtp_bf16(&arguments),
@@ -110,6 +114,31 @@ fn run_qwen35_fp8(arguments: &Arguments) -> Result<String, String> {
         "FP8 E4M3FN values with F32 channel scales",
         &plan,
         |output| write_qwen35_fp8_gguf(&lock, &cache, &sidecar, output).map_err(|e| e.to_string()),
+    )
+}
+
+fn run_qwen35_mx(
+    arguments: &Arguments,
+    format: QwenMxWeightActivationFormat,
+) -> Result<String, String> {
+    let lock_path = required_path(&arguments.lock, "--lock")?;
+    let lock = read_model_lock(lock_path).map_err(|error| error.to_string())?;
+    let cache = lock
+        .verify_cache(&arguments.cache)
+        .map_err(|error| error.to_string())?;
+    let plan = build_qwen35_mx_weight_activation_gguf_plan(&lock, &cache, format)
+        .map_err(|error| error.to_string())?;
+    finish_conversion(
+        arguments,
+        "qwen35",
+        format!("qwen35:{}", lock.fingerprint()),
+        vec![lock.fingerprint().to_owned()],
+        format.tensor_mode(),
+        &plan,
+        |output| {
+            write_qwen35_mx_weight_activation_gguf(&lock, &cache, format, output)
+                .map_err(|error| error.to_string())
+        },
     )
 }
 
@@ -614,7 +643,7 @@ fn required_path<'a>(path: &'a Option<PathBuf>, flag: &str) -> Result<&'a PathBu
 }
 
 fn help() -> String {
-    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4moe-nvfp4 --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH --cache ASSISTANT_CACHE_PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
+    "Usage: sllm-convert-gguf --kind qwen35-bf16 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-fp8 --lock PATH --cache PATH --manifest PATH --artifact PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp8-w8a8 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind qwen35-mxfp6-w6a6 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-nvfp4 --lock PATH --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4moe-nvfp4 --cache PATH --dry-run\n       sllm-convert-gguf --kind gemma4-mtp-bf16 --lock TARGET_LOCK_PATH --cache ASSISTANT_CACHE_PATH --dry-run\n       sllm-convert-gguf --kind qwen35moe-mxfp4 --cache PATH --dry-run\n       Replace --dry-run with --output-bundle DIR --converter-commit SHA40 for atomic GGUF/lock/manifest publication. Legacy --output/--derived-lock publication is rejected.".to_owned()
 }
 
 #[cfg(test)]

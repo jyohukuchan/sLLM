@@ -247,6 +247,17 @@ descriptor/cache identityはencoding、scale layout、provider、exact target、
 requestごとにunpackせず、packed weightからBF16 activationとの積をFP32 accumulateしてBF16 outputを返す。
 exact `gfx1030`/`gfx1201`以外、scale欠落、provider未指定、runtime failureではBF16/FP8へfallbackしない。
 
+Phase 61は同じlinear bindingへOCP MXFP8 E4M3 W8A8とMXFP6 E3M2 W6A6を追加する。weightはlogical
+`[N,K]`、K-axis block 32で、MXFP8は1 byte/value、MXFP6 E3M2は4 value/3 byteのsLLM resident packingを使い、
+各blockのE8M0 scale byteをvalue plane直後へ置く。GGUF上ではvalue／scaleを別I8 carrier tensorとして保持し、upload時だけ
+このresident順へ結合する。activation／outputはgraph上でunquantized BF16のまま、matmulがBF16 activationを同じMX形式へ
+動的量子化して2 dispatch目でFP32 accumulate／BF16 RNE outputを生成する。K非32倍、MXFP8とMXFP6のgraph内混在、
+E8M0 NaN scaleはblock全体へNaN伝播し、Infはelement最大有限値へsaturationする。
+exact `gfx1030`／`gfx1201`以外はfail-closedで、BF16や別量子化providerへfallbackしない。
+exact `gfx1030`のQwen3.5-4B実測ではMXFP8／MXFP6 residentをBF16比`41.10%／51.71%`削減した一方、
+top-1は`0.80／0.75`、prefill／decodeともBF16より遅かった。従って現行経路はformat／correctness／memory foundationであり、
+production defaultやperformance providerへ昇格しない。
+
 Phase 15Qでは同じbindingをGemma 4のMLP gate/up/downへ接続した。`Gemma4ResidentModel::new_nvfp4`はverified Gemma source lockと
 sidecar fingerprintをresident identityへ含め、sidecarに存在するweightだけをpacked NVFP4 allocation/uploadへ置換し、残りを
 exact BF16 cacheからloadする。primary comparisonは144 MLP tensorを要求する。1〜143 tensorのpartial sidecarはlayer単独・累積
@@ -260,7 +271,7 @@ resident BF16 weightを作らない。prepare/runtime failure時の別dtype/prov
 
 ## 量子化modelの選択と内部状態
 
-公開runtimeの最終interfaceはmodel artifactを指定する同一操作をBF16、FP8、NVFP4、MXFP4へ使う。GGUF metadataとexact targetから
+公開runtimeの最終interfaceはmodel artifactを指定する同一操作をBF16、FP8、NVFP4、MXFP4、MXFP8 W8A8、MXFP6 W6A6へ使う。GGUF metadataとexact targetから
 encoding、mixed-precision recipe、providerをloaderが自動解決し、低bit modelだけに追加の許可flag、確認prompt、通常警告を要求しない。
 量子化済みartifactの選択をユーザーの明示選択とみなす。provider名やscale layoutは`doctor`、明示的なdiagnostic、benchmark reportで
 確認可能にするが、通常のgenerate/server応答へ品質警告を注入しない。

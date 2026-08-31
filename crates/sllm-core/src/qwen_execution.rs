@@ -3410,6 +3410,79 @@ impl QwenProvisionSource for GgufProvisionSource {
         completion_timeout: Duration,
     ) -> Result<(), QwenExecutionError> {
         if let Some(recipe) = self.source.recipe_binding(binding.tensor_name()) {
+            if matches!(
+                recipe.encoding,
+                crate::GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                    | crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
+            ) {
+                let expected_dtype = match recipe.encoding {
+                    crate::GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 => DType::F8E4M3Fn,
+                    crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => DType::U8,
+                    _ => unreachable!(),
+                };
+                if resident_dtype != expected_dtype {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "GGUF MX resident dtype differs from its W8A8/W6A6 recipe".to_owned(),
+                    ));
+                }
+                let value = self
+                    .source
+                    .gguf()
+                    .tensor(&recipe.value_tensor)
+                    .ok_or_else(|| {
+                        QwenExecutionError::InvalidRequest(
+                            "GGUF MX value tensor is absent after verification".to_owned(),
+                        )
+                    })?;
+                let value_len = usize::try_from(value.byte_length()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest("GGUF MX value is too large".to_owned())
+                })?;
+                let mut resident = self
+                    .source
+                    .gguf()
+                    .read_tensor_range(&recipe.value_tensor, 0, value_len)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                let scale = recipe.scales.first().ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF MX E8M0 scale binding is absent".to_owned(),
+                    )
+                })?;
+                if recipe.scales.len() != 1 || scale.role != crate::GgufScaleRole::Block {
+                    return Err(QwenExecutionError::InvalidRequest(
+                        "GGUF MX recipe is not exact block-32 E8M0 scaling".to_owned(),
+                    ));
+                }
+                let scale_info = self.source.gguf().tensor(&scale.tensor).ok_or_else(|| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF MX E8M0 scale tensor is absent after verification".to_owned(),
+                    )
+                })?;
+                let scale_len = usize::try_from(scale_info.byte_length()).map_err(|_| {
+                    QwenExecutionError::InvalidRequest(
+                        "GGUF MX E8M0 scale plane is too large".to_owned(),
+                    )
+                })?;
+                let scales = self
+                    .source
+                    .gguf()
+                    .read_tensor_range(&scale.tensor, 0, scale_len)
+                    .map_err(|error| QwenExecutionError::InvalidRequest(error.to_string()))?;
+                resident.extend_from_slice(&scales);
+                if u64::try_from(resident.len()).ok() != Some(destination.size_bytes()) {
+                    return Err(QwenExecutionError::InvalidRequest(format!(
+                        "GGUF MX resident allocation differs for {}",
+                        binding.tensor_name()
+                    )));
+                }
+                return upload_buffer_bytes(
+                    session,
+                    queue,
+                    &destination,
+                    &resident,
+                    completion_timeout,
+                    "GGUF MX weight/E8M0 upload",
+                );
+            }
             if !matches!(resident_dtype, DType::F8E4M3Fn | DType::F8E4M3FnuZ) {
                 return Err(QwenExecutionError::InvalidRequest(
                     "GGUF FP8 recipe requires an OCP E4M3FN or FNUZ resident dtype".to_owned(),
@@ -3470,7 +3543,7 @@ impl QwenProvisionSource for GgufProvisionSource {
                 "GGUF FP8 weight/scale upload",
             );
         }
-        if self.source.has_fp8_recipe() {
+        if self.source.has_quantized_linear_recipe() {
             let tensor = self
                 .source
                 .gguf()
@@ -8889,8 +8962,9 @@ fn validate_graph_plan_with_terminal_mode(
             && tensor.view().encoding() == Encoding::Unquantized;
         let fp8_dtype = is_fp8_weight_view(tensor.view());
         let nvfp4_dtype = is_nvfp4_weight_view(tensor.view());
+        let mx_weight_activation_dtype = is_mx_weight_activation_view(tensor.view());
         if tensor.backing() != QwenGraphTensorBacking::Owned
-            || (!source_dtype && !fp8_dtype && !nvfp4_dtype)
+            || (!source_dtype && !fp8_dtype && !nvfp4_dtype && !mx_weight_activation_dtype)
             || !shape_matches(tensor.view().shape(), binding.shape())?
         {
             return Err(QwenExecutionError::InvalidGraph(format!(
@@ -9198,7 +9272,49 @@ fn is_nvfp4_weight_view(view: &TensorView) -> bool {
         && view.shape().len() == 2
 }
 
+fn is_mx_weight_activation_view(view: &TensorView) -> bool {
+    view.shape().len() == 2
+        && matches!(
+            (view.dtype(), view.encoding()),
+            (
+                DType::F8E4M3Fn,
+                Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                }
+            ) | (
+                DType::U8,
+                Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                }
+            )
+        )
+}
+
 fn resident_weight_bytes(view: &TensorView) -> Result<u64, QwenExecutionError> {
+    if is_mx_weight_activation_view(view) {
+        let rows = u64::try_from(view.shape()[0]).map_err(|_| {
+            QwenExecutionError::InvalidGraph("MX weight row count does not fit u64".to_owned())
+        })?;
+        let columns = u64::try_from(view.shape()[1]).map_err(|_| {
+            QwenExecutionError::InvalidGraph("MX weight column count does not fit u64".to_owned())
+        })?;
+        if columns % 32 != 0 {
+            return Err(QwenExecutionError::InvalidGraph(
+                "MX weight K is not divisible by 32".to_owned(),
+            ));
+        }
+        let scale_bytes = rows.checked_mul(columns / 32).ok_or_else(|| {
+            QwenExecutionError::InvalidGraph("MX scale byte count overflowed".to_owned())
+        })?;
+        return view
+            .payload_bytes()
+            .checked_add(scale_bytes)
+            .ok_or_else(|| {
+                QwenExecutionError::InvalidGraph("MX resident byte count overflowed".to_owned())
+            });
+    }
     if is_nvfp4_weight_view(view) {
         let rows = u64::try_from(view.shape()[0]).map_err(|_| {
             QwenExecutionError::InvalidGraph("NVFP4 row count does not fit u64".to_owned())
@@ -10566,6 +10682,33 @@ mod tests {
         assert!(!is_fp8_weight_view(
             &TensorView::contiguous(DType::Bf16, &[3, 17]).unwrap()
         ));
+    }
+
+    #[test]
+    fn resident_mx_weight_activation_bytes_include_exact_e8m0_plane() {
+        let mxfp8 = TensorView::with_encoding(
+            DType::F8E4M3Fn,
+            Encoding::Mxfp8W8A8 {
+                block_size: 32,
+                scale_dtype: DType::U8,
+            },
+            &[3, 64],
+        )
+        .unwrap();
+        assert!(is_mx_weight_activation_view(&mxfp8));
+        assert_eq!(resident_weight_bytes(&mxfp8).unwrap(), 192 + 6);
+
+        let mxfp6 = TensorView::with_encoding(
+            DType::U8,
+            Encoding::Mxfp6W6A6 {
+                block_size: 32,
+                scale_dtype: DType::U8,
+            },
+            &[3, 64],
+        )
+        .unwrap();
+        assert!(is_mx_weight_activation_view(&mxfp6));
+        assert_eq!(resident_weight_bytes(&mxfp6).unwrap(), 144 + 6);
     }
 
     #[test]

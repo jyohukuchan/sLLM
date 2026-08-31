@@ -87,6 +87,20 @@ pub enum Encoding {
         block_size: usize,
         scale_dtype: DType,
     },
+    /// OCP MXFP8 E4M3 weights consumed through dynamic MXFP8 activation
+    /// quantization. Values use one byte each and every consecutive K-axis
+    /// block of 32 owns one separately resident E8M0 scale byte.
+    Mxfp8W8A8 {
+        block_size: usize,
+        scale_dtype: DType,
+    },
+    /// OCP MXFP6 E3M2 weights consumed through dynamic MXFP6 activation
+    /// quantization. Four six-bit values are packed into three bytes and every
+    /// consecutive K-axis block of 32 owns one E8M0 scale byte.
+    Mxfp6W6A6 {
+        block_size: usize,
+        scale_dtype: DType,
+    },
     /// One byte per FP8 value with scales stored in a distinct resident region.
     ///
     /// Keeping scales out of the value payload makes the safetensors layout,
@@ -131,7 +145,11 @@ impl Encoding {
             Self::Unquantized => dtype.size_bytes(),
             // NVFP4 values are packed into bytes.  Scale alignment is an
             // internal encoding detail and does not change the view offset.
-            Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } | Self::Mxfp4W4A4 { .. } => 1,
+            Self::Nvfp4 { .. }
+            | Self::Nvfp4W4A4 { .. }
+            | Self::Mxfp4W4A4 { .. }
+            | Self::Mxfp8W8A8 { .. }
+            | Self::Mxfp6W6A6 { .. } => 1,
             Self::Fp8Scaled { resident, .. } => match resident {
                 Fp8ResidentRepresentation::PackedBytes => 1,
                 Fp8ResidentRepresentation::ConvertedBf16 => DType::Bf16.size_bytes(),
@@ -173,6 +191,36 @@ impl Encoding {
                 }
                 if scale_dtype != DType::U8 {
                     return Err(EncodingError::Mxfp4BlockScaleMustBeE8M0 { dtype: scale_dtype });
+                }
+                Ok(())
+            }
+            Self::Mxfp8W8A8 {
+                block_size,
+                scale_dtype,
+            } => {
+                if block_size != 32 {
+                    return Err(EncodingError::InvalidMxfp8BlockSize { block_size });
+                }
+                if dtype != DType::F8E4M3Fn {
+                    return Err(EncodingError::Mxfp8StorageMustBeE4M3Fn { dtype });
+                }
+                if scale_dtype != DType::U8 {
+                    return Err(EncodingError::Mxfp8BlockScaleMustBeE8M0 { dtype: scale_dtype });
+                }
+                Ok(())
+            }
+            Self::Mxfp6W6A6 {
+                block_size,
+                scale_dtype,
+            } => {
+                if block_size != 32 {
+                    return Err(EncodingError::InvalidMxfp6BlockSize { block_size });
+                }
+                if dtype != DType::U8 {
+                    return Err(EncodingError::PackedStorageMustBeU8 { dtype });
+                }
+                if scale_dtype != DType::U8 {
+                    return Err(EncodingError::Mxfp6BlockScaleMustBeE8M0 { dtype: scale_dtype });
                 }
                 Ok(())
             }
@@ -219,6 +267,12 @@ impl Encoding {
             Self::Nvfp4 { .. } | Self::Nvfp4W4A4 { .. } | Self::Mxfp4W4A4 { .. } => {
                 Ok(elements / 2 + u64::from(elements % 2 != 0))
             }
+            Self::Mxfp8W8A8 { .. } => Ok(elements),
+            Self::Mxfp6W6A6 { .. } => elements
+                .checked_mul(6)
+                .and_then(|bits| bits.checked_add(7))
+                .map(|bits| bits / 8)
+                .ok_or(EncodingError::SizeOverflow),
             Self::Fp8Scaled { resident, .. } => elements
                 .checked_mul(match resident {
                     Fp8ResidentRepresentation::PackedBytes => 1,
@@ -234,9 +288,14 @@ pub enum EncodingError {
     ZeroBlockSize,
     InvalidNvfp4BlockSize { block_size: usize },
     InvalidMxfp4BlockSize { block_size: usize },
+    InvalidMxfp8BlockSize { block_size: usize },
+    InvalidMxfp6BlockSize { block_size: usize },
     PackedStorageMustBeU8 { dtype: DType },
     Nvfp4BlockScaleMustBeE4M3Fn { dtype: DType },
     Mxfp4BlockScaleMustBeE8M0 { dtype: DType },
+    Mxfp8StorageMustBeE4M3Fn { dtype: DType },
+    Mxfp8BlockScaleMustBeE8M0 { dtype: DType },
+    Mxfp6BlockScaleMustBeE8M0 { dtype: DType },
     Fp8StorageRequired { dtype: DType },
     InvalidScaleDType { dtype: DType },
     ConvertedBf16MustUseTensorScale,
@@ -252,6 +311,12 @@ impl fmt::Display for EncodingError {
             }
             Self::InvalidMxfp4BlockSize { block_size } => {
                 write!(formatter, "MXFP4 block size must be 32, got {block_size}")
+            }
+            Self::InvalidMxfp8BlockSize { block_size } => {
+                write!(formatter, "MXFP8 block size must be 32, got {block_size}")
+            }
+            Self::InvalidMxfp6BlockSize { block_size } => {
+                write!(formatter, "MXFP6 block size must be 32, got {block_size}")
             }
             Self::PackedStorageMustBeU8 { dtype } => {
                 write!(formatter, "packed NVFP4 storage must use u8, got {dtype}")
@@ -272,6 +337,24 @@ impl fmt::Display for EncodingError {
                 write!(
                     formatter,
                     "MXFP4 block scale must use E8M0 u8 storage, got {dtype}"
+                )
+            }
+            Self::Mxfp8StorageMustBeE4M3Fn { dtype } => {
+                write!(
+                    formatter,
+                    "MXFP8 E4M3 storage must use f8e4m3fn, got {dtype}"
+                )
+            }
+            Self::Mxfp8BlockScaleMustBeE8M0 { dtype } => {
+                write!(
+                    formatter,
+                    "MXFP8 block scale must use E8M0 u8 storage, got {dtype}"
+                )
+            }
+            Self::Mxfp6BlockScaleMustBeE8M0 { dtype } => {
+                write!(
+                    formatter,
+                    "MXFP6 block scale must use E8M0 u8 storage, got {dtype}"
                 )
             }
             Self::InvalidScaleDType { dtype } => {
@@ -317,5 +400,40 @@ mod tests {
             outer_e8m0.validate(DType::F8E4M3Fn),
             Err(EncodingError::InvalidScaleDType { .. })
         ));
+    }
+
+    #[test]
+    fn ocp_mx_weight_activation_encodings_fix_types_block_and_value_bytes() {
+        let mxfp8 = Encoding::Mxfp8W8A8 {
+            block_size: 32,
+            scale_dtype: DType::U8,
+        };
+        assert_eq!(mxfp8.validate(DType::F8E4M3Fn), Ok(()));
+        assert_eq!(mxfp8.storage_bytes(DType::F8E4M3Fn, 192), Ok(192));
+        assert!(mxfp8.validate(DType::F8E4M3FnuZ).is_err());
+        assert!(
+            Encoding::Mxfp8W8A8 {
+                block_size: 16,
+                scale_dtype: DType::U8,
+            }
+            .validate(DType::F8E4M3Fn)
+            .is_err()
+        );
+
+        let mxfp6 = Encoding::Mxfp6W6A6 {
+            block_size: 32,
+            scale_dtype: DType::U8,
+        };
+        assert_eq!(mxfp6.validate(DType::U8), Ok(()));
+        assert_eq!(mxfp6.storage_bytes(DType::U8, 192), Ok(144));
+        assert!(mxfp6.validate(DType::F8E4M3Fn).is_err());
+        assert!(
+            Encoding::Mxfp6W6A6 {
+                block_size: 32,
+                scale_dtype: DType::Bf16,
+            }
+            .validate(DType::U8)
+            .is_err()
+        );
     }
 }

@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-24
+> 最終更新: 2026-08-31
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。Phase 61ではOCP MXFP8 W8A8／MXFP6 W6A6のmodel-free decode/prefill oracleを両target、Qwen3.5-4B短caseをexact `gfx1030`で検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -417,6 +417,19 @@ cleanup 0でPASSした。
 MTP residentは10,046,932,204 bytes、runtime peakは11,574,306,638 bytesだった。fixed benchmarkは12 draftを全rejectし、measured decodeは
 target-only約9.34 tok/sに対してMTP約2.91 tok/sであり、性能向上は確認していない。このevidenceは上記artifact／target／greedy幅1へ限定し、
 gfx1030、gfx942、sampling、幅2以上、別Gemma model、一般的なMTP高速化へ拡張しない。
+
+### 2026-08-31 Phase61 OCP MX weight／activation
+
+canonical V620 exact `gfx1030`とR9700 exact `gfx1201`向けにtarget別release code objectを生成し、OCP MXFP8 E4M3
+W8A8とMXFP6 E3M2 W6A6を実行した。各形式はdecode `M=1,K=32,N=7`と非整列prefill
+`M=3,K=64,N=5`をBF16入力から動的量子化し、resident weight value／E8M0 planeを直接消費する。全8 target-format-shape
+caseはCPUのOCP encode/decode＋FP32 dot oracleへ相対誤差`0.02`以内で一致し、2 dispatch、HIP-only、fallback 0、cleanup 0だった。
+両targetの4 output hashは形式・shapeごとに完全一致した。R9700は`HIP_VISIBLE_DEVICES=2`で単独可視化し論理device 0へ接続した。
+
+後続のexact `gfx1030` Qwen3.5-4B full-model短caseでは、MXFP8／MXFP6の20-row top-1 `0.80／0.75`、resident削減
+`41.10%／51.71%`、prefill `48.10／100.16 tok/s`、decode `20.17／20.06 tok/s`を取得した。BF16は
+`284.03／45.68 tok/s`であり、現providerをperformance pathまたはdefaultへ昇格しない。full-model evidenceはこの固定artifact、
+FP16 KV、10品質case、17 input／4 outputだけに限定し、gfx1201／gfx942、長context、別SKU／tupleへ一般化しない。
 
 ### software.mdとの関係
 

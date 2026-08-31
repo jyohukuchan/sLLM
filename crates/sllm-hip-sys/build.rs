@@ -1382,6 +1382,8 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_NVFP4_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_NVFP4_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_NVFP4_W4A4_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_MXFP4_W4A4_VERSION);\n\
+             println!(\"const SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION);\n\
+             println!(\"const SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_BASELINE_BF16_FP32_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_TILED16_BF16_FP32_V2);\n\
@@ -1395,6 +1397,10 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_SERIAL_ROWS_WAVE64_BF16_FP32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_SERIAL_ROWS_WAVE64_BF16_FP32_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_DECODE_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_PREFILL_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP4_W4A4_PREFILL_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_DECODE_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_DECODE_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MATMUL_WORKGROUP_SIZE);\n\
@@ -1535,6 +1541,7 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0);\n\
              println!(\"const SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_FP8_BLOCK16_E8M0);\n\
              println!(\"const SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0);\n\
+             println!(\"const SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0={{}}\", bindings::SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0);\n\
              println!(\"const SLLM_RMSNORM_ACCUMULATION_F32={{}}\", bindings::SLLM_RMSNORM_ACCUMULATION_F32);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_OFFSET_ONE);\n\
              println!(\"const SLLM_RMSNORM_SCALE_MODE_DIRECT={{}}\", bindings::SLLM_RMSNORM_SCALE_MODE_DIRECT);\n\

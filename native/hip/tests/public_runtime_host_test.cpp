@@ -3709,6 +3709,155 @@ bool matmul_prepare_execute_and_negative_contract() {
          fake_hip::live_allocations() == 0U;
 }
 
+bool matmul_mxfp_weight_activation_descriptor_contract() {
+  fake_hip::reset();
+  sllm_public_runtime::FaultInjector::reset();
+  sllm_context_t *context = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *mxfp8_weight = nullptr;
+  sllm_buffer_t *mxfp6_weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  constexpr uint64_t m = 3U;
+  constexpr uint64_t n = 7U;
+  constexpr uint64_t k = 64U;
+  constexpr uint64_t blocks = n * k / 32U;
+  if (!create_context(&context) ||
+      !create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) ||
+      !create_buffer_sized(context, n * k + blocks, &mxfp8_weight) ||
+      !create_buffer_sized(context, n * k * 3U / 4U + blocks,
+                           &mxfp6_weight) ||
+      !create_buffer_sized(context, m * n * sizeof(uint16_t), &output)) {
+    return false;
+  }
+
+  Error error;
+  sllm_matmul_plan_t *plan = nullptr;
+  auto prepare_and_release = [&](const uint32_t version,
+                                 sllm_buffer_t *const weight,
+                                 const uint32_t dtype,
+                                 const uint32_t encoding,
+                                 const char *const label) {
+    auto descriptor =
+        matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
+    descriptor.op_version = version;
+    descriptor.weight.dtype = dtype;
+    descriptor.weight.encoding = encoding;
+    return expect_status(
+               sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+               SLLM_STATUS_OK, label, error) &&
+           plan != nullptr &&
+           expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                         SLLM_STATUS_OK, label, error) &&
+           plan == nullptr;
+  };
+  bool valid = prepare_and_release(
+      SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION, mxfp8_weight,
+      SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+      SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0, "MXFP8 W8A8 prepare");
+  valid = valid && prepare_and_release(
+                       SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION, mxfp6_weight,
+                       SLLM_TENSOR_DTYPE_U8,
+                       SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0,
+                       "MXFP6 W6A6 prepare");
+
+  for (const uint64_t nonaligned_k : {UINT64_C(31), UINT64_C(33)}) {
+    auto nonaligned = matmul_descriptor(activation, 0U, mxfp8_weight, 0U,
+                                        output, 0U, 1U, nonaligned_k, 1U);
+    nonaligned.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
+    nonaligned.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    nonaligned.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
+    valid = valid &&
+            expect_status(
+                sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
+                SLLM_STATUS_SHAPE_MISMATCH, "MXFP8 non-block K rejection",
+                error) &&
+            plan == nullptr;
+    nonaligned.op_version = SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
+    nonaligned.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+    nonaligned.weight.encoding = SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0;
+    valid = valid &&
+            expect_status(
+                sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
+                SLLM_STATUS_SHAPE_MISMATCH, "MXFP6 non-block K rejection",
+                error) &&
+            plan == nullptr;
+  }
+
+  valid = release_buffer(&activation) && release_buffer(&mxfp8_weight) &&
+          release_buffer(&mxfp6_weight) && release_buffer(&output) &&
+          release_context(&context) && valid;
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
+}
+
+bool matmul_mxfp_prefill_selector_contract() {
+  constexpr const char *const baseline =
+      "SLLM_MX_WA_PREFILL_FORCE_BASELINE";
+  constexpr const char *const mxfp8_tiled16 =
+      "SLLM_MXFP8_PREFILL_FORCE_TILED16";
+  constexpr const char *const mxfp6_row8 =
+      "SLLM_MXFP6_PREFILL_FORCE_ROW8";
+  const char *const old_baseline = std::getenv(baseline);
+  const bool had_baseline = old_baseline != nullptr;
+  const std::string old_baseline_value = had_baseline ? old_baseline : "";
+  const char *const old_mxfp8_tiled16 = std::getenv(mxfp8_tiled16);
+  const bool had_mxfp8_tiled16 = old_mxfp8_tiled16 != nullptr;
+  const std::string old_mxfp8_tiled16_value =
+      had_mxfp8_tiled16 ? old_mxfp8_tiled16 : "";
+  const char *const old_mxfp6_row8 = std::getenv(mxfp6_row8);
+  const bool had_mxfp6_row8 = old_mxfp6_row8 != nullptr;
+  const std::string old_mxfp6_row8_value =
+      had_mxfp6_row8 ? old_mxfp6_row8 : "";
+  const auto restore_environment = [&]() {
+    if (had_baseline) {
+      setenv(baseline, old_baseline_value.c_str(), 1);
+    } else {
+      unsetenv(baseline);
+    }
+    if (had_mxfp8_tiled16) {
+      setenv(mxfp8_tiled16, old_mxfp8_tiled16_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_tiled16);
+    }
+    if (had_mxfp6_row8) {
+      setenv(mxfp6_row8, old_mxfp6_row8_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp6_row8);
+    }
+  };
+
+  unsetenv(baseline);
+  unsetenv(mxfp8_tiled16);
+  unsetenv(mxfp6_row8);
+  bool valid =
+      sllm_matmul_kernel::select_mxfp8_variant(1U) ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U) ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U) ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp6_variant(17U) ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+
+  setenv(mxfp8_tiled16, "1", 1);
+  setenv(mxfp6_row8, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillTiled16 &&
+          sllm_matmul_kernel::select_mxfp6_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillRow8;
+
+  setenv(baseline, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Prefill &&
+          sllm_matmul_kernel::select_mxfp6_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Prefill;
+
+  restore_environment();
+  return valid;
+}
+
 bool matmul_short_mixed_metadata_dispatch_contract() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
@@ -8473,6 +8622,8 @@ int main() {
   }
   if (!context_device_property_snapshot_contract() ||
       !matmul_prepare_execute_and_negative_contract() ||
+      !matmul_mxfp_weight_activation_descriptor_contract() ||
+      !matmul_mxfp_prefill_selector_contract() ||
       !matmul_short_mixed_metadata_dispatch_contract() ||
       !matmul_short_mixed_rocblas_solution_selector_contract() ||
       !matmul_async_lifetime_and_cleanup()) {

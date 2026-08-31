@@ -23,9 +23,10 @@ use sllm_core::{
     build_gemma4_mtp_graph, build_gguf_gemma4_moe_weight_load_plan,
     build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph,
-    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
-    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
+    build_qwen35_graph, build_qwen35_graph_with_kv_cache_encoding,
+    build_qwen35_graph_with_kv_cache_selection, build_qwen35_mtp_graph,
+    build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
     build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
     build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
     build_verified_qwen_component_weight_load_plan, build_verified_qwen35_vision_manifest,
@@ -4575,6 +4576,22 @@ impl ProductionBackend {
         kv_cache_selection: Option<KvCacheSelection>,
     ) -> Result<sllm_core::QwenGraph, sllm_core::QwenGraphError> {
         match &self.source {
+            QwenDenseSource::Gguf(source) if source.has_mx_weight_activation_recipe() => {
+                if !matches!(target, "gfx1030" | "gfx1201") {
+                    return Err(sllm_core::QwenGraphError::InvalidModel(
+                        "OCP MXFP8 W8A8/MXFP6 W6A6 requires exact target gfx1030 or gfx1201"
+                            .to_owned(),
+                    ));
+                }
+                build_qwen35_gguf_mx_weight_activation_graph(
+                    &self.lock,
+                    plan,
+                    source,
+                    token_count,
+                    state_capacity,
+                    kv_cache_encoding,
+                )
+            }
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe() => {
                 let provider = select_cli_gguf_fp8_provider(target)
                     .map_err(sllm_core::QwenGraphError::InvalidModel)?;
@@ -4883,6 +4900,14 @@ impl ModelFrontendBackend for ProductionBackend {
             &self.source,
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
         );
+        let embedded_quantized = matches!(
+            &self.source,
+            QwenDenseSource::Gguf(source) if source.has_quantized_linear_recipe()
+        );
+        let embedded_mx_encoding = match &self.source {
+            QwenDenseSource::Gguf(source) => source.mx_weight_activation_encoding_name(),
+            QwenDenseSource::Cache(_) => None,
+        };
         let embedded_fp8_provider = embedded_fp8
             .then(|| select_cli_gguf_fp8_provider(&request.target))
             .transpose()?;
@@ -4919,7 +4944,7 @@ impl ModelFrontendBackend for ProductionBackend {
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
         if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
-            && (has_sidecar || embedded_fp8)
+            && (has_sidecar || embedded_quantized)
         {
             return Err(
                 "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
@@ -4939,7 +4964,7 @@ impl ModelFrontendBackend for ProductionBackend {
             request.mtp_draft_width,
             !processed_images.is_empty(),
             has_sidecar,
-            embedded_fp8,
+            embedded_quantized,
             &request.target,
             kv_cache_encoding,
             request.sampling,
@@ -5381,7 +5406,7 @@ impl ModelFrontendBackend for ProductionBackend {
                 "segment_count": audit.segment_count(),
                 "boundary_count": audit.boundary_count(),
                 "all_dispatches_hip": audit.all_dispatches_hip(),
-                "weight_encoding": cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider)),
+                "weight_encoding": embedded_mx_encoding.unwrap_or_else(|| cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider))),
                 "kv_cache_encoding": kv_cache_encoding.canonical_name(),
                 "kv_cache_selection": kv_selection_report(kv_selection),
                 "fp8_provider": embedded_fp8_provider
@@ -5544,6 +5569,14 @@ impl ModelFrontendBackend for ProductionBackend {
             &self.source,
             QwenDenseSource::Gguf(source) if source.has_fp8_recipe()
         );
+        let embedded_quantized = matches!(
+            &self.source,
+            QwenDenseSource::Gguf(source) if source.has_quantized_linear_recipe()
+        );
+        let embedded_mx_encoding = match &self.source {
+            QwenDenseSource::Gguf(source) => source.mx_weight_activation_encoding_name(),
+            QwenDenseSource::Cache(_) => None,
+        };
         let embedded_fp8_provider = embedded_fp8
             .then(|| select_cli_gguf_fp8_provider(&request.target))
             .transpose()?;
@@ -5580,7 +5613,7 @@ impl ModelFrontendBackend for ProductionBackend {
         };
         let has_sidecar = sidecar.is_some() || nvfp4_sidecar.is_some();
         if (kv_cache_encoding.is_kv_fp8_block16() || kv_cache_encoding.is_kv_mxfp8())
-            && (has_sidecar || embedded_fp8)
+            && (has_sidecar || embedded_quantized)
         {
             return Err(
                 "block-scaled KV FP8 is currently scoped to Qwen3.5-4B BF16 text weights"
@@ -6182,7 +6215,7 @@ impl ModelFrontendBackend for ProductionBackend {
                     "fallback_used": false,
                     "all_dispatches_hip": true,
                     "model_load_count": 1,
-                    "weight_encoding": cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider)),
+                    "weight_encoding": embedded_mx_encoding.unwrap_or_else(|| cli_fp8_weight_encoding(embedded_fp8_provider.or(fp8_provider))),
                     "fp8_provider": embedded_fp8_provider
                         .map(cli_gguf_fp8_provider_label)
                         .or_else(|| fp8_provider.map(CliFp8Provider::label)),

@@ -240,6 +240,28 @@ hipError_t launch_mxfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
                              uint64_t, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
+
+hipError_t launch_mxfp8_quantize(const uint16_t *, uint8_t *, uint8_t *,
+                                 uint64_t, uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_mxfp8_w8a8(const uint8_t *, const uint8_t *, const uint8_t *,
+                             const uint8_t *, uint16_t *, uint64_t, uint64_t,
+                             uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_mxfp6_quantize(const uint16_t *, uint8_t *, uint8_t *,
+                                 uint64_t, uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
+
+hipError_t launch_mxfp6_w6a6(const uint8_t *, const uint8_t *, const uint8_t *,
+                             const uint8_t *, uint16_t *, uint64_t, uint64_t,
+                             uint64_t, hipStream_t) noexcept {
+  return hipErrorInvalidValue;
+}
 } // namespace sllm_matmul_kernel
 
 namespace sllm_moe_route_kernel {
@@ -3628,7 +3650,11 @@ void initialize_matmul_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   const auto variant =
-      metadata.mxfp4_w4a4
+      metadata.mxfp8_w8a8
+          ? ::sllm_matmul_kernel::select_mxfp8_variant(metadata.m)
+      : metadata.mxfp6_w6a6
+          ? ::sllm_matmul_kernel::select_mxfp6_variant(metadata.m)
+      : metadata.mxfp4_w4a4
           ? ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m)
       : metadata.nvfp4_w4a4
           ? ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed
@@ -3642,6 +3668,7 @@ void initialize_matmul_dispatch_info(
                                                  metadata.n, arch_name);
   info->dispatch_count =
       metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+              metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6 ||
               variant == ::sllm_matmul_kernel::KernelVariant::PrefillShortMixed
           ? 2U
           : 1U;

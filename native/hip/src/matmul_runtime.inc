@@ -97,7 +97,19 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
       try {
         candidate = std::make_unique<ElementwisePlan>(context, activation,
                                                       weight, output, metadata);
+        // The gfx1030 short-mixed provider is a BF16-only execution path.  In
+        // particular, its M*N FP32 output workspace is not interchangeable
+        // with the activation value/scale workspace required by the dynamic
+        // FP8/NVFP4/MX quantizers.  Keeping the predicates exclusive also
+        // prevents a quantized plan from being sized for short-mixed at
+        // prepare time and then correctly dispatched to its quantized kernel
+        // at execute time.
+        const bool quantized_weight_path =
+            metadata.fp8_outer || metadata.nvfp4 || metadata.nvfp4_w4a4 ||
+            metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+            metadata.mxfp6_w6a6;
         bool short_mixed_shape =
+            !quantized_weight_path &&
             ::sllm_matmul_kernel::phase49_gfx1030_short_mixed_shape(
                 metadata.m, metadata.k, metadata.n);
 #if !defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
@@ -134,7 +146,8 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
         short_mixed_shape = false;
 #endif
         if (metadata.fp8_outer || metadata.nvfp4_w4a4 ||
-            metadata.mxfp4_w4a4 || short_mixed_shape) {
+            metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+            metadata.mxfp6_w6a6 || short_mixed_shape) {
           const sllm_status_t device_status =
               select_context_device(context, error_sink);
           if (device_status != SLLM_STATUS_OK) {
@@ -168,22 +181,32 @@ sllm_matmul_prepare(const sllm_context_t *const raw_context,
             candidate->matmul_workspace_bytes = workspace_bytes;
           } else {
             const uint64_t value_bytes =
-                metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                metadata.mxfp6_w6a6
+                    ? metadata.m * (metadata.k * UINT64_C(3) / UINT64_C(4))
+                : metadata.mxfp8_w8a8
+                    ? metadata.m * metadata.k
+                : metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
                     ? metadata.m * ((metadata.k + UINT64_C(1)) / UINT64_C(2))
                     : metadata.m * metadata.k;
             scale_offset =
-                metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+                        metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6
                                               ? value_bytes
                                               : (value_bytes + UINT64_C(3)) &
                                                     ~UINT64_C(3);
             candidate->matmul_workspace_bytes =
                 scale_offset +
-                (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4
+                (metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
+                         metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6
                      ? metadata.m *
                            ((metadata.k +
-                             (metadata.mxfp4_w4a4 ? UINT64_C(31)
+                             ((metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+                               metadata.mxfp6_w6a6)
+                                  ? UINT64_C(31)
                                                  : UINT64_C(15))) /
-                            (metadata.mxfp4_w4a4 ? UINT64_C(32)
+                            ((metadata.mxfp4_w4a4 || metadata.mxfp8_w8a8 ||
+                              metadata.mxfp6_w6a6)
+                                 ? UINT64_C(32)
                                                 : UINT64_C(16)))
                      : metadata.m * UINT64_C(4));
           }
@@ -574,7 +597,79 @@ sllm_matmul_execute(const sllm_matmul_plan_t *const raw_plan,
         plan->matmul_metadata.m, plan->matmul_metadata.k,
         plan->matmul_metadata.n, arch_name);
     hipError_t launch_status = hipSuccess;
-    if (plan->matmul_metadata.mxfp4_w4a4) {
+    if (plan->matmul_metadata.mxfp8_w8a8) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      launch_status = hipErrorInvalidValue;
+#else
+      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
+        launch_status = hipErrorNotSupported;
+      } else {
+        const uint64_t activation_value_bytes =
+            plan->matmul_metadata.m * plan->matmul_metadata.k;
+        const uint64_t activation_scale_bytes =
+            plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
+        if (plan->matmul_workspace == nullptr ||
+            plan->matmul_workspace_bytes <
+                activation_value_bytes + activation_scale_bytes) {
+          launch_status = hipErrorOutOfMemory;
+        } else {
+          auto *const quantized = static_cast<uint8_t *>(plan->matmul_workspace);
+          auto *const activation_scales = quantized + activation_value_bytes;
+          const auto *const fp8_weight =
+              static_cast<const uint8_t *>(weight_storage);
+          const auto *const weight_scales =
+              fp8_weight + plan->matmul_metadata.weight_value_bytes;
+          launch_status = ::sllm_matmul_kernel::launch_mxfp8_quantize(
+              activation, quantized, activation_scales,
+              plan->matmul_metadata.m, plan->matmul_metadata.k,
+              queue->stream);
+          if (launch_status == hipSuccess) {
+            launch_status = ::sllm_matmul_kernel::launch_mxfp8_w8a8(
+                quantized, activation_scales, fp8_weight, weight_scales,
+                output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n, queue->stream);
+          }
+        }
+      }
+#endif
+    } else if (plan->matmul_metadata.mxfp6_w6a6) {
+#if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
+      launch_status = hipErrorInvalidValue;
+#else
+      if (!matches_runtime_gcn_arch(arch_name, "gfx1201") &&
+          !matches_runtime_gcn_arch(arch_name, "gfx1030")) {
+        launch_status = hipErrorNotSupported;
+      } else {
+        const uint64_t activation_value_bytes =
+            plan->matmul_metadata.m *
+            (plan->matmul_metadata.k * UINT64_C(3) / UINT64_C(4));
+        const uint64_t activation_scale_bytes =
+            plan->matmul_metadata.m * plan->matmul_metadata.k / UINT64_C(32);
+        if (plan->matmul_workspace == nullptr ||
+            plan->matmul_workspace_bytes <
+                activation_value_bytes + activation_scale_bytes) {
+          launch_status = hipErrorOutOfMemory;
+        } else {
+          auto *const packed = static_cast<uint8_t *>(plan->matmul_workspace);
+          auto *const activation_scales = packed + activation_value_bytes;
+          const auto *const packed_weight =
+              static_cast<const uint8_t *>(weight_storage);
+          const auto *const weight_scales =
+              packed_weight + plan->matmul_metadata.weight_value_bytes;
+          launch_status = ::sllm_matmul_kernel::launch_mxfp6_quantize(
+              activation, packed, activation_scales, plan->matmul_metadata.m,
+              plan->matmul_metadata.k, queue->stream);
+          if (launch_status == hipSuccess) {
+            launch_status = ::sllm_matmul_kernel::launch_mxfp6_w6a6(
+                packed, activation_scales, packed_weight, weight_scales,
+                output, plan->matmul_metadata.m, plan->matmul_metadata.k,
+                plan->matmul_metadata.n, queue->stream);
+          }
+        }
+      }
+#endif
+    } else if (plan->matmul_metadata.mxfp4_w4a4) {
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
       launch_status = hipErrorInvalidValue;
 #else

@@ -5571,7 +5571,8 @@ fn build_unsloth_gemma_resident_bytes(
             }
         }
         QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0
-        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0 => {
+        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0
+        | QuantizedTensorEncoding::Mxfp6E3M2Block32E8M0 => {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "MX encoding is not part of the reviewed Gemma recipe",
             ));
@@ -6511,7 +6512,8 @@ fn quantized_gemma_tensor_view(
             },
         ),
         QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0
-        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0 => {
+        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0
+        | QuantizedTensorEncoding::Mxfp6E3M2Block32E8M0 => {
             return Err(Gemma4ExecutionLayoutError::invalid(
                 "MX encoding is not part of the reviewed Gemma recipe",
             ));

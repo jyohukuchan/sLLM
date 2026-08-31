@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-24
+> 最終更新: 2026-08-31
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
 
@@ -642,12 +642,27 @@ actual CLI/API/WebUIはtoken完全一致、HIP-only、fallback 0、cancel recove
 ### 2026-08-31 Phase60 Ministral 3 text実行
 
 公式Ministral 3 3B BF16 GGUFの短いgreedy requestを、canonical V620 exact `gfx1030`とR9700 exact `gfx1201`で実行した。
-両targetともHIP-only、fallback false、394 submission／394 kernel dispatch、shutdown後のcurrent request／workspace 0を確認した。
-raw `Hello`の出力tokenは両targetで`[1307, 1278, 3950, 1044]`となり、GPU間では一致した。
+初回の参照不一致は、公式GGUFでhead permutation済みのQ/Kへsplit-half RoPEを適用した共有実装の誤りだった。
+productionをadjacent-pair v2へ修正し、互換用split-half v1とともにhost、exact `gfx1030`、exact `gfx1201`の
+public C ABI数値oracleをPASSした。
 
-固定llama.cpp oracleは同じpromptとspecial-token条件で`[1307, 1278, 4304, 1033]`を返し、3番目の生成tokenからずれる。
-gfx1030のbaseline matmul強制でもsLLM出力は変わらなかったため、現時点の差をGPU target固有dispatchへ帰属しない。この実行は
-Ministral経路の実GPU到達と資源cleanupの証拠であり、数値品質またはarchitecture compatibilityのPASSではない。
+修正後は両targetと固定llama.cppがraw `Hello`を`[1307,1278,4304,1033]`として生成し、common-prefix 3行もtop-1全一致した。
+両targetともHIP-only、fallback false、394／394 dispatch、shutdown後のcurrent request／workspace 0である。513-token
+resident測定のprefill／decode中央値はgfx1030 `138.29／18.34 tok/s`、gfx1201 `1351.30／19.29 tok/s`だった。
+gfx1201のM=1 logitsは演算順によるbit差を持つが参照top-1を維持し、baseline強制は品質を一様に改善せず大幅に遅いため採用しない。
+
+### 2026-08-31 Phase61 MXFP8 W8A8／MXFP6 W6A6
+
+V620 exact `gfx1030`とR9700 exact `gfx1201`で、OCP MXFP8 E4M3およびMXFP6 E3M2のblock-32／E8M0
+weightと、BF16から同形式へ動的量子化したactivationのmatmulを実行した。decode M=1とprefill M=3、K=32/64、
+N=7/5の各caseは独立CPU oracle、kernel ID／symbol、dispatch count 2、fallback 0、cleanup 0をPASSし、両GPUのoutput hashも一致した。
+native matrix instructionの利用は主張せず、現実装はsoftware encode/decodeとFP32 accumulationのcorrectness pathである。
+
+admissionはexact `gfx1030`／`gfx1201`だけであり、`gfx1031`–`gfx1036`、`gfx1200`、`gfx942`、generic targetはfail closedにする。
+後続のexact `gfx1030` Qwen3.5-4B短caseでは、MXFP8／MXFP6のtop-1 `0.80／0.75`、resident削減
+`41.10%／51.71%`、prefill `48.10／100.16 tok/s`、decode `20.17／20.06 tok/s`を取得した。同じBF16は
+`284.03／45.68 tok/s`であり、現correctness providerをperformance pathへ昇格しない。gfx1201 full-modelは未検証で、
+両targetのlifecycleは`experimental`のままとする。
 
 ## 将来AMD候補
 

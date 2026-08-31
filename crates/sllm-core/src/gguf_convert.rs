@@ -15,11 +15,13 @@ use crate::{
     GEMMA4_MOE_SEMANTIC_REPOSITORY, GEMMA4_MOE_SEMANTIC_REVISION, GEMMA4_MTP_CATALOG_SHA256,
     Gemma4ModelLock, Gemma4MoeExpertTensor, Gemma4MoeTensorPlane, Gemma4MtpModelLock, ModelLock,
     QWEN35_MOE_LICENSE, QWEN35_MOE_MODEL_FINGERPRINT, QWEN35_MOE_REPOSITORY, QWEN35_MOE_REVISION,
-    QuantizedScalePlane, QuantizedTensorDescriptor, QuantizedTensorEncoding, QuantizedTensorRole,
-    Qwen35MoeExpertTensor, ScalePlaneRole, TensorDType, UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256,
-    UNSLOTH_GEMMA4_NVFP4_REPOSITORY, UNSLOTH_GEMMA4_NVFP4_REVISION, VerifiedCache,
-    VerifiedFp8Sidecar, VerifiedGemma4Moe, VerifiedGemma4Mtp, VerifiedQwen35Moe,
-    VerifiedUnslothGemma4Nvfp4, qwen35_reviewed_spec,
+    QuantizedMx, QuantizedScalePlane, QuantizedTensorDescriptor, QuantizedTensorEncoding,
+    QuantizedTensorRole, Qwen35MoeExpertTensor, QwenComponentSelection, ScalePlaneRole,
+    TensorDType, UNSLOTH_GEMMA4_NVFP4_MODEL_SHA256, UNSLOTH_GEMMA4_NVFP4_REPOSITORY,
+    UNSLOTH_GEMMA4_NVFP4_REVISION, VerifiedCache, VerifiedFp8Sidecar, VerifiedGemma4Moe,
+    VerifiedGemma4Mtp, VerifiedQwen35Moe, VerifiedUnslothGemma4Nvfp4, WeightConsumer,
+    build_verified_qwen_component_weight_load_plan, quantize_mxfp6_e3m2, quantize_mxfp8_e4m3,
+    qwen35_reviewed_spec,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -41,6 +43,31 @@ const GEMMA4_MTP_TOKENIZER_IDENTITY_KEY: &str = "gemma4mtp.tokenizer_identity";
 const GEMMA4_MTP_SOURCE_RANGES_KEY: &str = "gemma4mtp.source_ranges";
 const GEMMA4_MTP_SOURCE_MODEL_SHA256_KEY: &str = "gemma4mtp.source_model_sha256";
 const GEMMA4_MTP_SOURCE_HEADER_SHA256_KEY: &str = "gemma4mtp.source_header_sha256";
+const QWEN_MX_VALUE_SOURCE_PREFIX: &str = "qwen-mx-value::";
+const QWEN_MX_SCALE_SOURCE_PREFIX: &str = "qwen-mx-scale::";
+const CONVERSION_READ_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QwenMxWeightActivationFormat {
+    Mxfp8E4m3,
+    Mxfp6E3m2,
+}
+
+impl QwenMxWeightActivationFormat {
+    pub const fn tensor_mode(self) -> &'static str {
+        match self {
+            Self::Mxfp8E4m3 => "OCP MXFP8 E4M3 block-32 E8M0 W8A8",
+            Self::Mxfp6E3m2 => "OCP MXFP6 E3M2 block-32 E8M0 W6A6",
+        }
+    }
+
+    const fn recipe_encoding(self) -> GgufRecipeEncoding {
+        match self {
+            Self::Mxfp8E4m3 => GgufRecipeEncoding::Mxfp8E4m3Block32E8m0,
+            Self::Mxfp6E3m2 => GgufRecipeEncoding::Mxfp6E3m2Block32E8m0,
+        }
+    }
+}
 
 /// Build the canonical semantic identity for the two-artifact Gemma 4 MTP
 /// pair.  The target is deliberately part of the identity: an assistant
@@ -523,6 +550,250 @@ pub fn write_qwen35_bf16_gguf(
             .read_tensor_range(tensor, offset, length)
             .map_err(|error| invalid(error.to_string()))
     })
+}
+
+/// Build a reviewed Qwen3.5 text GGUF whose exact matmul weight set uses one
+/// OCP MX format. Embedding, normalization, convolution, and other non-matmul
+/// tensors remain source-preserving. The recipe keeps the logical [N,K]
+/// shapes separate from the byte-carrier value and E8M0 scale planes.
+pub fn build_qwen35_mx_weight_activation_gguf_plan(
+    lock: &ModelLock,
+    cache: &VerifiedCache,
+    format: QwenMxWeightActivationFormat,
+) -> Result<GgufWritePlan, GgufError> {
+    let mut plan = build_qwen35_bf16_gguf_plan(lock, cache)?;
+    let original_recipe = recipe_from_metadata(&plan.metadata)?;
+    let weight_plan = build_verified_qwen_component_weight_load_plan(
+        lock,
+        cache,
+        QwenComponentSelection::TEXT_ONLY,
+    )
+    .map_err(|error| invalid(error.to_string()))?;
+    let mut bindings = Vec::new();
+    let mut scale_tensors = Vec::new();
+    for entry in weight_plan.entries.iter().filter(|entry| {
+        entry
+            .consumer
+            .is_some_and(|consumer| is_qwen_mx_linear_consumer(consumer.role))
+    }) {
+        if entry.dtype != TensorDType::Bf16 || entry.shape.len() != 2 {
+            return Err(invalid(format!(
+                "Qwen MX linear {} must be rank-two BF16",
+                entry.tensor_name
+            )));
+        }
+        let rows = entry.shape[0];
+        let columns = entry.shape[1];
+        if rows == 0 || columns == 0 || columns % 32 != 0 {
+            return Err(invalid(format!(
+                "Qwen MX linear {} requires nonzero [N,K] and K divisible by 32",
+                entry.tensor_name
+            )));
+        }
+        let elements = rows
+            .checked_mul(columns)
+            .ok_or_else(|| invalid("Qwen MX element count overflows"))?;
+        let value_bytes = match format {
+            QwenMxWeightActivationFormat::Mxfp8E4m3 => elements,
+            QwenMxWeightActivationFormat::Mxfp6E3m2 => elements
+                .checked_mul(3)
+                .map(|bytes| bytes / 4)
+                .ok_or_else(|| invalid("Qwen MXFP6 value byte count overflows"))?,
+        };
+        let value_tensor = plan
+            .tensors
+            .iter_mut()
+            .find(|tensor| tensor.name == entry.tensor_name)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "Qwen MX source tensor is absent: {}",
+                    entry.tensor_name
+                ))
+            })?;
+        if value_tensor.tensor_type != GgufTensorType::Bf16 {
+            return Err(invalid(format!(
+                "Qwen MX source tensor is not BF16: {}",
+                entry.tensor_name
+            )));
+        }
+        value_tensor.source_name = format!("{QWEN_MX_VALUE_SOURCE_PREFIX}{}", entry.tensor_name);
+        value_tensor.dimensions = vec![value_bytes];
+        value_tensor.tensor_type = GgufTensorType::I8Carrier;
+
+        let scale_name = format!("{}.sllm.scale.block32_e8m0", entry.tensor_name);
+        let scale_count = elements / 32;
+        scale_tensors.push(GgufWriteTensor {
+            name: scale_name.clone(),
+            source_name: format!("{QWEN_MX_SCALE_SOURCE_PREFIX}{}", entry.tensor_name),
+            dimensions: vec![scale_count],
+            tensor_type: GgufTensorType::I8Carrier,
+        });
+        bindings.push(GgufTensorBinding {
+            logical_tensor: entry.tensor_name.clone(),
+            value_tensor: entry.tensor_name.clone(),
+            encoding: format.recipe_encoding(),
+            role: "text-linear-weight".to_owned(),
+            logical_shape: entry.shape.clone(),
+            scope: GgufTensorScope::Consumed,
+            scales: vec![GgufScaleBinding {
+                tensor: scale_name,
+                role: GgufScaleRole::Block,
+            }],
+        });
+    }
+    if bindings.is_empty() {
+        return Err(invalid("Qwen MX plan selected no text-linear weights"));
+    }
+    plan.tensors.extend(scale_tensors);
+    let recipe = GgufTensorRecipeV1 {
+        schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
+        semantic_model_id: original_recipe.semantic_model_id,
+        source_lock_fingerprints: original_recipe.source_lock_fingerprints,
+        bindings,
+        logical_shapes: original_recipe.logical_shapes,
+        static_fp8_kv: original_recipe.static_fp8_kv,
+        known_unconsumed_tensors: original_recipe.known_unconsumed_tensors,
+    };
+    insert_recipe_metadata(&mut plan.metadata, &recipe)?;
+    Ok(plan)
+}
+
+pub fn write_qwen35_mx_weight_activation_gguf(
+    lock: &ModelLock,
+    cache: &VerifiedCache,
+    format: QwenMxWeightActivationFormat,
+    output_path: impl AsRef<Path>,
+) -> Result<GgufWriteReport, GgufError> {
+    let plan = build_qwen35_mx_weight_activation_gguf_plan(lock, cache, format)?;
+    let mut cached_quantized: Option<(String, QuantizedMx)> = None;
+    write_gguf(output_path, &plan, |source, offset, length| {
+        let plane = source
+            .strip_prefix(QWEN_MX_VALUE_SOURCE_PREFIX)
+            .map(|name| (name, false))
+            .or_else(|| {
+                source
+                    .strip_prefix(QWEN_MX_SCALE_SOURCE_PREFIX)
+                    .map(|name| (name, true))
+            });
+        let Some((name, scale_plane)) = plane else {
+            return cache
+                .read_tensor_range(source, offset, length)
+                .map_err(|error| invalid(error.to_string()));
+        };
+        if cached_quantized
+            .as_ref()
+            .is_none_or(|(cached_name, _)| cached_name != name)
+        {
+            cached_quantized = Some((
+                name.to_owned(),
+                quantize_qwen_mx_source_tensor(cache, name, format)?,
+            ));
+        }
+        let quantized = &cached_quantized
+            .as_ref()
+            .expect("MX tensor cache was populated")
+            .1;
+        let bytes = if scale_plane {
+            quantized.scales()
+        } else {
+            quantized.values()
+        };
+        bounded_plane_range(bytes, offset, length, source)
+    })
+}
+
+fn quantize_qwen_mx_source_tensor(
+    cache: &VerifiedCache,
+    name: &str,
+    format: QwenMxWeightActivationFormat,
+) -> Result<QuantizedMx, GgufError> {
+    let descriptor = cache
+        .tensor(name)
+        .ok_or_else(|| invalid(format!("Qwen MX source tensor is absent: {name}")))?;
+    if descriptor.dtype != TensorDType::Bf16 || descriptor.shape.len() != 2 {
+        return Err(invalid(format!(
+            "Qwen MX source tensor {name} must be rank-two BF16"
+        )));
+    }
+    let rows = usize::try_from(descriptor.shape[0])
+        .map_err(|_| invalid(format!("Qwen MX source rows exceed usize: {name}")))?;
+    let columns = usize::try_from(descriptor.shape[1])
+        .map_err(|_| invalid(format!("Qwen MX source columns exceed usize: {name}")))?;
+    let elements = rows
+        .checked_mul(columns)
+        .ok_or_else(|| invalid(format!("Qwen MX source shape overflows: {name}")))?;
+    let source_bytes = elements
+        .checked_mul(2)
+        .ok_or_else(|| invalid(format!("Qwen MX BF16 byte count overflows: {name}")))?;
+    if u64::try_from(source_bytes).ok() != Some(descriptor.byte_size) {
+        return Err(invalid(format!(
+            "Qwen MX source tensor byte count differs: {name}"
+        )));
+    }
+    let mut input = Vec::with_capacity(elements);
+    let mut offset = 0_usize;
+    while offset < source_bytes {
+        let length = (source_bytes - offset).min(CONVERSION_READ_CHUNK_BYTES);
+        let bytes = cache
+            .read_tensor_range(name, offset as u64, length)
+            .map_err(|error| invalid(error.to_string()))?;
+        if bytes.len() != length || bytes.len() % 2 != 0 {
+            return Err(invalid(format!(
+                "Qwen MX BF16 read was short or odd: {name}"
+            )));
+        }
+        input.extend(
+            bytes.chunks_exact(2).map(|pair| {
+                f32::from_bits(u32::from(u16::from_le_bytes([pair[0], pair[1]])) << 16)
+            }),
+        );
+        offset += length;
+    }
+    if input.len() != elements {
+        return Err(invalid(format!(
+            "Qwen MX decoded BF16 element count differs: {name}"
+        )));
+    }
+    match format {
+        QwenMxWeightActivationFormat::Mxfp8E4m3 => quantize_mxfp8_e4m3(&input, rows, columns),
+        QwenMxWeightActivationFormat::Mxfp6E3m2 => quantize_mxfp6_e3m2(&input, rows, columns),
+    }
+    .map_err(|error| invalid(format!("quantize Qwen MX source tensor {name}: {error}")))
+}
+
+fn bounded_plane_range(
+    bytes: &[u8],
+    offset: u64,
+    length: usize,
+    source: &str,
+) -> Result<Vec<u8>, GgufError> {
+    let start = usize::try_from(offset)
+        .map_err(|_| invalid(format!("converted plane offset exceeds usize: {source}")))?;
+    let end = start
+        .checked_add(length)
+        .ok_or_else(|| invalid(format!("converted plane range overflows: {source}")))?;
+    bytes
+        .get(start..end)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| invalid(format!("converted plane range is out of bounds: {source}")))
+}
+
+fn is_qwen_mx_linear_consumer(consumer: WeightConsumer) -> bool {
+    matches!(
+        consumer,
+        WeightConsumer::MlpGate
+            | WeightConsumer::MlpUp
+            | WeightConsumer::MlpDown
+            | WeightConsumer::GdnInProjQkv
+            | WeightConsumer::GdnInProjZ
+            | WeightConsumer::GdnInProjB
+            | WeightConsumer::GdnInProjA
+            | WeightConsumer::GdnOutProj
+            | WeightConsumer::AttentionQ
+            | WeightConsumer::AttentionK
+            | WeightConsumer::AttentionV
+            | WeightConsumer::AttentionO
+    )
 }
 
 pub fn build_qwen35_fp8_gguf_plan(

@@ -71,6 +71,38 @@ constexpr const char *kMxfp4W4A4PrefillLogicalKernelId =
     "matmul.mxfp4.w4a4.block32.prefill.v1";
 constexpr const char *kMxfp4W4A4PrefillDeviceSymbol =
     "sllm_matmul_mxfp4_w4a4_block32_prefill_v1";
+constexpr const char *kMxfp8W8A8DecodeLogicalKernelId =
+    "matmul.mxfp8.w8a8.e4m3.block32.decode.v1";
+constexpr const char *kMxfp8W8A8DecodeDeviceSymbol =
+    "sllm_matmul_mxfp8_w8a8_e4m3_block32_decode_v1";
+constexpr const char *kMxfp8W8A8PrefillLogicalKernelId =
+    "matmul.mxfp8.w8a8.e4m3.block32.prefill.v1";
+constexpr const char *kMxfp8W8A8PrefillDeviceSymbol =
+    "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_v1";
+constexpr const char *kMxfp8W8A8PrefillRow8LogicalKernelId =
+    "matmul.mxfp8.w8a8.e4m3.block32.prefill.row8.v2";
+constexpr const char *kMxfp8W8A8PrefillRow8DeviceSymbol =
+    "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_row8_v2";
+constexpr const char *kMxfp8W8A8PrefillTiled16LogicalKernelId =
+    "matmul.mxfp8.w8a8.e4m3.block32.prefill.tiled16.v3";
+constexpr const char *kMxfp8W8A8PrefillTiled16DeviceSymbol =
+    "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_tiled16_v3";
+constexpr const char *kMxfp6W6A6DecodeLogicalKernelId =
+    "matmul.mxfp6.w6a6.e3m2.block32.decode.v1";
+constexpr const char *kMxfp6W6A6DecodeDeviceSymbol =
+    "sllm_matmul_mxfp6_w6a6_e3m2_block32_decode_v1";
+constexpr const char *kMxfp6W6A6PrefillLogicalKernelId =
+    "matmul.mxfp6.w6a6.e3m2.block32.prefill.v1";
+constexpr const char *kMxfp6W6A6PrefillDeviceSymbol =
+    "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_v1";
+constexpr const char *kMxfp6W6A6PrefillRow8LogicalKernelId =
+    "matmul.mxfp6.w6a6.e3m2.block32.prefill.row8.v2";
+constexpr const char *kMxfp6W6A6PrefillRow8DeviceSymbol =
+    "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_row8_v2";
+constexpr const char *kMxfp6W6A6PrefillTiled16LogicalKernelId =
+    "matmul.mxfp6.w6a6.e3m2.block32.prefill.tiled16.v3";
+constexpr const char *kMxfp6W6A6PrefillTiled16DeviceSymbol =
+    "sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_tiled16_v3";
 
 enum class KernelVariant : uint32_t {
   Baseline = 1U,
@@ -90,11 +122,51 @@ enum class KernelVariant : uint32_t {
   Mxfp4W4A4Prefill = 15U,
   PrefillShortSerial = 16U,
   PrefillShortMixed = 17U,
+  Mxfp8W8A8Decode = 18U,
+  Mxfp8W8A8Prefill = 19U,
+  Mxfp6W6A6Decode = 20U,
+  Mxfp6W6A6Prefill = 21U,
+  Mxfp8W8A8PrefillRow8 = 22U,
+  Mxfp6W6A6PrefillRow8 = 23U,
+  Mxfp8W8A8PrefillTiled16 = 24U,
+  Mxfp6W6A6PrefillTiled16 = 25U,
 };
 
 inline KernelVariant select_mxfp4_variant(const uint64_t m) noexcept {
   return m == 1U ? KernelVariant::Mxfp4W4A4Decode
                  : KernelVariant::Mxfp4W4A4Prefill;
+}
+
+inline KernelVariant select_mxfp8_variant(const uint64_t m) noexcept {
+  if (m == 1U) {
+    return KernelVariant::Mxfp8W8A8Decode;
+  }
+  const char *const force_baseline =
+      std::getenv("SLLM_MX_WA_PREFILL_FORCE_BASELINE");
+  if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
+    return KernelVariant::Mxfp8W8A8Prefill;
+  }
+  const char *const force_tiled16 =
+      std::getenv("SLLM_MXFP8_PREFILL_FORCE_TILED16");
+  return force_tiled16 != nullptr && std::strcmp(force_tiled16, "1") == 0
+             ? KernelVariant::Mxfp8W8A8PrefillTiled16
+             : KernelVariant::Mxfp8W8A8PrefillRow8;
+}
+
+inline KernelVariant select_mxfp6_variant(const uint64_t m) noexcept {
+  if (m == 1U) {
+    return KernelVariant::Mxfp6W6A6Decode;
+  }
+  const char *const force_baseline =
+      std::getenv("SLLM_MX_WA_PREFILL_FORCE_BASELINE");
+  if (force_baseline != nullptr && std::strcmp(force_baseline, "1") == 0) {
+    return KernelVariant::Mxfp6W6A6Prefill;
+  }
+  const char *const force_row8 =
+      std::getenv("SLLM_MXFP6_PREFILL_FORCE_ROW8");
+  return force_row8 != nullptr && std::strcmp(force_row8, "1") == 0
+             ? KernelVariant::Mxfp6W6A6PrefillRow8
+             : KernelVariant::Mxfp6W6A6PrefillTiled16;
 }
 
 inline KernelVariant select_nvfp4_variant(const uint64_t m) noexcept {
@@ -332,6 +404,22 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kMxfp4W4A4DecodeLogicalKernelId
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? kMxfp4W4A4PrefillLogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8Decode
+             ? kMxfp8W8A8DecodeLogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8Prefill
+             ? kMxfp8W8A8PrefillLogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8PrefillRow8
+             ? kMxfp8W8A8PrefillRow8LogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8PrefillTiled16
+             ? kMxfp8W8A8PrefillTiled16LogicalKernelId
+         : variant == KernelVariant::Mxfp6W6A6Decode
+             ? kMxfp6W6A6DecodeLogicalKernelId
+         : variant == KernelVariant::Mxfp6W6A6Prefill
+             ? kMxfp6W6A6PrefillLogicalKernelId
+         : variant == KernelVariant::Mxfp6W6A6PrefillRow8
+             ? kMxfp6W6A6PrefillRow8LogicalKernelId
+         : variant == KernelVariant::Mxfp6W6A6PrefillTiled16
+             ? kMxfp6W6A6PrefillTiled16LogicalKernelId
          : variant == KernelVariant::PrefillShortSerial
              ? kShortSerialLogicalKernelId
          : variant == KernelVariant::PrefillShortMixed
@@ -364,6 +452,22 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kMxfp4W4A4DecodeDeviceSymbol
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? kMxfp4W4A4PrefillDeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8Decode
+             ? kMxfp8W8A8DecodeDeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8Prefill
+             ? kMxfp8W8A8PrefillDeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8PrefillRow8
+             ? kMxfp8W8A8PrefillRow8DeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8PrefillTiled16
+             ? kMxfp8W8A8PrefillTiled16DeviceSymbol
+         : variant == KernelVariant::Mxfp6W6A6Decode
+             ? kMxfp6W6A6DecodeDeviceSymbol
+         : variant == KernelVariant::Mxfp6W6A6Prefill
+             ? kMxfp6W6A6PrefillDeviceSymbol
+         : variant == KernelVariant::Mxfp6W6A6PrefillRow8
+             ? kMxfp6W6A6PrefillRow8DeviceSymbol
+         : variant == KernelVariant::Mxfp6W6A6PrefillTiled16
+             ? kMxfp6W6A6PrefillTiled16DeviceSymbol
          : variant == KernelVariant::PrefillShortSerial
              ? kShortSerialDeviceSymbol
          : variant == KernelVariant::PrefillShortMixed ? kShortMixedDeviceSymbol
@@ -394,6 +498,22 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Mxfp4W4A4Decode ? static_cast<uint32_t>(n)
          : variant == KernelVariant::Mxfp4W4A4Prefill
              ? static_cast<uint32_t>(m * n)
+         : variant == KernelVariant::Mxfp8W8A8Decode
+             ? static_cast<uint32_t>(n)
+         : variant == KernelVariant::Mxfp8W8A8Prefill
+             ? static_cast<uint32_t>(m * n)
+         : variant == KernelVariant::Mxfp8W8A8PrefillRow8
+             ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
+         : variant == KernelVariant::Mxfp8W8A8PrefillTiled16
+             ? static_cast<uint32_t>((n + 15U) / 16U)
+         : variant == KernelVariant::Mxfp6W6A6Decode
+             ? static_cast<uint32_t>(n)
+         : variant == KernelVariant::Mxfp6W6A6Prefill
+             ? static_cast<uint32_t>(m * n)
+         : variant == KernelVariant::Mxfp6W6A6PrefillRow8
+             ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
+         : variant == KernelVariant::Mxfp6W6A6PrefillTiled16
+             ? static_cast<uint32_t>((n + 15U) / 16U)
          : variant == KernelVariant::PrefillShortSerial
              ? static_cast<uint32_t>(((m + 7U) / 8U) * n)
          : variant == KernelVariant::PrefillShortMixed
@@ -463,6 +583,30 @@ hipError_t launch_mxfp4_quantize(const uint16_t *activation,
                                  hipStream_t stream) noexcept;
 
 hipError_t launch_mxfp4_w4a4(const uint8_t *packed_activation,
+                             const uint8_t *activation_block_scales,
+                             const uint8_t *packed_weight,
+                             const uint8_t *weight_block_scales,
+                             uint16_t *output, uint64_t m, uint64_t k,
+                             uint64_t n, hipStream_t stream) noexcept;
+
+hipError_t launch_mxfp8_quantize(const uint16_t *activation,
+                                 uint8_t *quantized, uint8_t *block_scales,
+                                 uint64_t m, uint64_t k,
+                                 hipStream_t stream) noexcept;
+
+hipError_t launch_mxfp8_w8a8(const uint8_t *activation,
+                             const uint8_t *activation_block_scales,
+                             const uint8_t *weight,
+                             const uint8_t *weight_block_scales,
+                             uint16_t *output, uint64_t m, uint64_t k,
+                             uint64_t n, hipStream_t stream) noexcept;
+
+hipError_t launch_mxfp6_quantize(const uint16_t *activation,
+                                 uint8_t *packed_activation,
+                                 uint8_t *block_scales, uint64_t m, uint64_t k,
+                                 hipStream_t stream) noexcept;
+
+hipError_t launch_mxfp6_w6a6(const uint8_t *packed_activation,
                              const uint8_t *activation_block_scales,
                              const uint8_t *packed_weight,
                              const uint8_t *weight_block_scales,

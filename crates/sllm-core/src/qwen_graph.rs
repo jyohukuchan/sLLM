@@ -1115,6 +1115,7 @@ fn build_qwen35_graph_with_kv_cache_descriptor_and_position_payload_mode(
         plan_digest: *plan.digest(),
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
+        quantized_weight_encoding: None,
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding,
         mtp: false,
@@ -1281,6 +1282,7 @@ fn build_qwen35_moe_execution_graph_config(
         plan_digest: *plan.digest(),
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
+        quantized_weight_encoding: None,
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -1369,6 +1371,7 @@ pub fn build_qwen35_multimodal_graph(
         plan_digest: *plan.digest(),
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
+        quantized_weight_encoding: None,
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: false,
@@ -1411,6 +1414,7 @@ pub fn build_qwen35_mtp_graph(
         plan_digest: *plan.digest(),
         fp8_tensor_names: BTreeSet::new(),
         fp8_dtype: None,
+        quantized_weight_encoding: None,
         fp8_sidecar_fingerprint: None,
         kv_cache_encoding: crate::KvCacheEncoding::Fp16,
         mtp: true,
@@ -1553,6 +1557,138 @@ pub fn build_qwen35_gguf_fp8_graph(
         plan_digest: *plan.digest(),
         fp8_tensor_names,
         fp8_dtype: Some(fp8_dtype),
+        quantized_weight_encoding: Some(Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::OuterDimension,
+            scale_dtype: DType::F32,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        }),
+        fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
+        kv_cache_encoding,
+        mtp: false,
+        multimodal: false,
+        moe: false,
+        position_payload_mode: AttentionPreprocessPositionPayloadModeV1::Contiguous,
+    })?
+    .build()
+}
+
+/// Builds the reviewed dense Qwen graph from an sLLM GGUF recipe whose exact
+/// text-linear set is resident OCP MXFP8 E4M3 W8A8 or MXFP6 E3M2 W6A6.
+/// Activations and outputs remain BF16 at graph boundaries; each matmul
+/// dynamically quantizes its activation in block-32 groups.
+pub fn build_qwen35_gguf_mx_weight_activation_graph(
+    lock: &ModelLock,
+    plan: &WeightLoadPlan,
+    source: &VerifiedGgufWeightSource,
+    token_count: u64,
+    state_capacity: u64,
+    kv_cache_encoding: crate::KvCacheEncoding,
+) -> Result<QwenGraph, QwenGraphError> {
+    if source.lock_fingerprint() != lock.fingerprint() || !source.has_mx_weight_activation_recipe()
+    {
+        return Err(QwenGraphError::InvalidModel(
+            "GGUF MX weight/activation recipe differs from the reviewed Qwen identity".to_owned(),
+        ));
+    }
+    let spec = validate_reviewed_model(lock)?;
+    let dimensions = QwenGraphDimensions::from_spec(spec)?;
+    if token_count == 0 {
+        return Err(QwenGraphError::ZeroTokenCount);
+    }
+    if state_capacity == 0 {
+        return Err(QwenGraphError::ZeroStateCapacity);
+    }
+    if token_count > state_capacity {
+        return Err(QwenGraphError::TokenCountExceedsCapacity {
+            token_count,
+            capacity: state_capacity,
+        });
+    }
+    if state_capacity > QWEN_RUNTIME_MAX_CONTEXT_TOKENS {
+        return Err(QwenGraphError::CapacityExceedsMax {
+            capacity: state_capacity,
+            max_position: QWEN_RUNTIME_MAX_CONTEXT_TOKENS,
+        });
+    }
+    let (bindings, known_unconsumed) = validate_plan(lock, plan, dimensions)?;
+    let by_name: BTreeMap<_, _> = bindings
+        .iter()
+        .map(|binding| (binding.tensor_name.as_str(), binding))
+        .collect();
+    let mut tensor_names = BTreeSet::new();
+    let mut resident_contract = None;
+    for recipe in source
+        .gguf()
+        .extension()
+        .expect("has_mx_weight_activation_recipe requires an extension")
+        .recipe
+        .bindings
+        .iter()
+    {
+        let binding = by_name.get(recipe.logical_tensor.as_str()).ok_or_else(|| {
+            QwenGraphError::InvalidPlan(format!(
+                "GGUF MX tensor is not a required Qwen weight: {}",
+                recipe.logical_tensor
+            ))
+        })?;
+        if recipe.logical_shape.as_slice() != binding.shape.as_slice()
+            || !is_fp8_linear_consumer(binding.consumer.role)
+            || !tensor_names.insert(recipe.logical_tensor.clone())
+        {
+            return Err(QwenGraphError::InvalidPlan(format!(
+                "GGUF MX recipe differs from its graph binding: {}",
+                recipe.logical_tensor
+            )));
+        }
+        let contract = match recipe.encoding {
+            crate::GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 => (
+                DType::F8E4M3Fn,
+                Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+            ),
+            crate::GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => (
+                DType::U8,
+                Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+            ),
+            _ => unreachable!("MX recipe predicate excluded other encodings"),
+        };
+        if resident_contract.is_some_and(|current| current != contract) {
+            return Err(QwenGraphError::InvalidPlan(
+                "GGUF cannot mix MXFP8 W8A8 and MXFP6 W6A6 in one graph".to_owned(),
+            ));
+        }
+        resident_contract = Some(contract);
+    }
+    let expected: BTreeSet<_> = bindings
+        .iter()
+        .filter(|binding| is_fp8_linear_consumer(binding.consumer.role))
+        .map(|binding| binding.tensor_name.clone())
+        .collect();
+    if tensor_names != expected {
+        return Err(QwenGraphError::InvalidPlan(
+            "GGUF MX recipe does not cover the exact text-linear weight set".to_owned(),
+        ));
+    }
+    let (dtype, encoding) = resident_contract.ok_or_else(|| {
+        QwenGraphError::InvalidPlan("GGUF MX recipe contains no linear weights".to_owned())
+    })?;
+    GraphBuilder::new(GraphBuilderConfig {
+        layer_types: lock.model.architecture.text_config.layer_types.clone(),
+        dimensions,
+        token_count,
+        state_capacity,
+        bindings,
+        known_unconsumed,
+        model_fingerprint: lock.fingerprint().to_owned(),
+        plan_digest: *plan.digest(),
+        fp8_tensor_names: tensor_names,
+        fp8_dtype: Some(dtype),
+        quantized_weight_encoding: Some(encoding),
         fp8_sidecar_fingerprint: source.recipe_digest().map(ToOwned::to_owned),
         kv_cache_encoding,
         mtp: false,
@@ -1681,6 +1817,10 @@ pub fn build_qwen35_nvfp4_graph_with_kv_cache_encoding(
         plan_digest: *plan.digest(),
         fp8_tensor_names: tensor_names,
         fp8_dtype: Some(DType::U8),
+        quantized_weight_encoding: Some(Encoding::Nvfp4 {
+            block_size: 16,
+            scale_dtype: DType::F8E4M3Fn,
+        }),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -1769,6 +1909,11 @@ fn build_qwen35_fp8_graph_with_dtype(
         plan_digest: *plan.digest(),
         fp8_tensor_names,
         fp8_dtype: Some(fp8_dtype),
+        quantized_weight_encoding: Some(Encoding::Fp8Scaled {
+            granularity: Fp8ScaleGranularity::OuterDimension,
+            scale_dtype: DType::F32,
+            resident: Fp8ResidentRepresentation::PackedBytes,
+        }),
         fp8_sidecar_fingerprint: Some(sidecar.manifest_fingerprint().to_owned()),
         kv_cache_encoding,
         mtp: false,
@@ -2581,6 +2726,7 @@ struct GraphBuilderConfig {
     plan_digest: [u8; 32],
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
+    quantized_weight_encoding: Option<Encoding>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
     mtp: bool,
@@ -2635,6 +2781,7 @@ struct GraphBuilder {
     plan_digest: [u8; 32],
     fp8_tensor_names: BTreeSet<String>,
     fp8_dtype: Option<DType>,
+    quantized_weight_encoding: Option<Encoding>,
     fp8_sidecar_fingerprint: Option<String>,
     kv_cache_encoding: crate::KvCacheEncoding,
     kv_fp8_block16_descriptor: Option<crate::KvFp8Block16Descriptor>,
@@ -2664,6 +2811,7 @@ impl GraphBuilder {
             plan_digest,
             fp8_tensor_names,
             fp8_dtype,
+            quantized_weight_encoding,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
             mtp,
@@ -2698,6 +2846,7 @@ impl GraphBuilder {
             plan_digest,
             fp8_tensor_names,
             fp8_dtype,
+            quantized_weight_encoding,
             fp8_sidecar_fingerprint,
             kv_cache_encoding,
             kv_fp8_block16_descriptor: crate::KvFp8Block16Descriptor::canonical_for_encoding(
@@ -4339,6 +4488,11 @@ impl GraphBuilder {
                 self.fp8_dtype.ok_or_else(|| {
                     QwenGraphError::InvalidPlan("FP8 tensor set has no resident dtype".to_owned())
                 })?,
+                self.quantized_weight_encoding.ok_or_else(|| {
+                    QwenGraphError::InvalidPlan(
+                        "quantized tensor set has no resident encoding".to_owned(),
+                    )
+                })?,
             )?
         } else {
             view(to_dtype(binding.dtype)?, &shape)?
@@ -4349,25 +4503,17 @@ impl GraphBuilder {
     }
 }
 
-fn fp8_weight_view(shape: &[u64], dtype: DType) -> Result<TensorView, QwenGraphError> {
+fn fp8_weight_view(
+    shape: &[u64],
+    dtype: DType,
+    encoding: Encoding,
+) -> Result<TensorView, QwenGraphError> {
     let shape: Vec<usize> = shape
         .iter()
         .map(|&dimension| {
             usize::try_from(dimension).map_err(|_| QwenGraphError::Overflow("FP8 tensor shape"))
         })
         .collect::<Result<_, _>>()?;
-    let encoding = if dtype == DType::U8 {
-        Encoding::Nvfp4 {
-            block_size: 16,
-            scale_dtype: DType::F8E4M3Fn,
-        }
-    } else {
-        Encoding::Fp8Scaled {
-            granularity: Fp8ScaleGranularity::OuterDimension,
-            scale_dtype: DType::F32,
-            resident: Fp8ResidentRepresentation::PackedBytes,
-        }
-    };
     Ok(TensorView::with_encoding(dtype, encoding, &shape)?)
 }
 
@@ -4720,6 +4866,7 @@ mod tests {
             plan_digest: [7; 32],
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
+            quantized_weight_encoding: None,
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,
@@ -5605,6 +5752,7 @@ mod tests {
             plan_digest: [9; 32],
             fp8_tensor_names: BTreeSet::new(),
             fp8_dtype: None,
+            quantized_weight_encoding: None,
             fp8_sidecar_fingerprint: None,
             kv_cache_encoding: crate::KvCacheEncoding::Fp16,
             mtp: false,

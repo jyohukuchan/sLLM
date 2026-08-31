@@ -109,6 +109,14 @@ name = "sllm-mxfp4-w4a4-evidence"
 path = "src/bin/sllm-mxfp4-w4a4-evidence.rs"
 
 [[bin]]
+name = "sllm-mxfp-wa-evidence"
+path = "src/bin/sllm-mxfp-wa-evidence.rs"
+
+[[bin]]
+name = "sllm-qwen35-mx-weight-quality"
+path = "src/bin/sllm-qwen35-mx-weight-quality.rs"
+
+[[bin]]
 name = "sllm-ministral3-logits-evidence"
 path = "src/bin/sllm-ministral3-logits-evidence.rs"
 

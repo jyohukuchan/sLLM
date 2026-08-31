@@ -192,6 +192,8 @@ pub enum GgufRecipeEncoding {
     Fp8E4m3fnChannelF32Scale,
     Nvfp4E2m1Block16E4m3fnF32Outer,
     Mxfp4E2m1Block32E8m0,
+    Mxfp8E4m3Block32E8m0,
+    Mxfp6E3m2Block32E8m0,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -981,6 +983,76 @@ fn validate_recipe_bindings(
                     )));
                 }
             }
+            GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => {
+                if value.tensor_type != GgufTensorType::I8Carrier {
+                    return Err(invalid(format!(
+                        "MX value tensor {} is not the I8 carrier",
+                        value.name
+                    )));
+                }
+                if binding.logical_shape.len() != 2 || binding.logical_shape[1] % 32 != 0 {
+                    return Err(invalid(format!(
+                        "MX binding {} requires rank-two [N,K] with K divisible by 32",
+                        binding.logical_tensor
+                    )));
+                }
+                let blocks = binding.logical_shape[0]
+                    .checked_mul(binding.logical_shape[1] / 32)
+                    .ok_or_else(|| invalid("MX block count overflowed"))?;
+                let expected_values = binding.logical_shape[0]
+                    .checked_mul(binding.logical_shape[1])
+                    .and_then(|elements| match binding.encoding {
+                        GgufRecipeEncoding::Mxfp8E4m3Block32E8m0 => Some(elements),
+                        GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => {
+                            elements.checked_mul(3).map(|bytes| bytes / 4)
+                        }
+                        _ => unreachable!(),
+                    })
+                    .ok_or_else(|| invalid("MX value byte count overflowed"))?;
+                if value.byte_length() != expected_values {
+                    return Err(invalid(format!(
+                        "MX value tensor {} has {} bytes, expected {expected_values}",
+                        value.name,
+                        value.byte_length()
+                    )));
+                }
+                let block_scales: Vec<_> = binding
+                    .scales
+                    .iter()
+                    .filter(|scale| scale.role == GgufScaleRole::Block)
+                    .collect();
+                if block_scales.len() != 1 || binding.scales.len() != 1 {
+                    return Err(invalid(format!(
+                        "MX binding {} requires exactly one E8M0 block-scale plane",
+                        binding.logical_tensor
+                    )));
+                }
+                let scale = tensor_map
+                    .get(block_scales[0].tensor.as_str())
+                    .ok_or_else(|| invalid("MX block-scale tensor is absent"))?;
+                let scale_binding_count = recipe
+                    .bindings
+                    .iter()
+                    .flat_map(|candidate| candidate.scales.iter())
+                    .filter(|candidate| candidate.tensor == scale.name)
+                    .count();
+                let aliases_value_plane = recipe
+                    .bindings
+                    .iter()
+                    .any(|candidate| candidate.value_tensor == scale.name);
+                if scale_binding_count != 1 || aliases_value_plane {
+                    return Err(invalid(format!(
+                        "MX block-scale tensor {} must be one exclusive plane",
+                        scale.name
+                    )));
+                }
+                if scale.tensor_type != GgufTensorType::I8Carrier || scale.byte_length() != blocks {
+                    return Err(invalid(format!(
+                        "MX block-scale tensor {} must contain {blocks} E8M0 bytes",
+                        scale.name
+                    )));
+                }
+            }
         }
         let mut scale_roles = BTreeSet::new();
         let mut scale_names = BTreeSet::new();
@@ -1016,12 +1088,16 @@ fn validate_recipe_bindings(
                         GgufTensorType::F32 | GgufTensorType::Bf16
                     )
                 }
-                GgufScaleRole::Block => {
-                    matches!(
+                GgufScaleRole::Block => match binding.encoding {
+                    GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                    | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0 => {
+                        scale_tensor.tensor_type == GgufTensorType::I8Carrier
+                    }
+                    _ => matches!(
                         scale_tensor.tensor_type,
                         GgufTensorType::I8Carrier | GgufTensorType::Bf16
-                    )
-                }
+                    ),
+                },
             };
             if !valid_type {
                 return Err(invalid(format!(
@@ -1123,12 +1199,24 @@ fn validate_i8_carriers(
                 binding.encoding,
                 GgufRecipeEncoding::Fp8E4m3fnChannelBf16Scale
                     | GgufRecipeEncoding::Fp8E4m3fnChannelF32Scale
+                    | GgufRecipeEncoding::Mxfp8E4m3Block32E8m0
+                    | GgufRecipeEncoding::Mxfp6E3m2Block32E8m0
             )
         })
-        .map(|binding| binding.value_tensor.as_str())
+        .flat_map(|binding| {
+            std::iter::once(binding.value_tensor.as_str()).chain(
+                binding
+                    .scales
+                    .iter()
+                    .filter(|scale| scale.role == GgufScaleRole::Block)
+                    .map(|scale| scale.tensor.as_str()),
+            )
+        })
         .collect();
     if i8_names != bound {
-        return Err(invalid("I8 carrier tensors and FP8 recipe bindings differ"));
+        return Err(invalid(
+            "I8 carrier tensors and FP8/MX recipe bindings differ",
+        ));
     }
     Ok(())
 }
@@ -1442,6 +1530,122 @@ impl<'a> BoundedReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mx_recipe_fixture(
+        encoding: GgufRecipeEncoding,
+        logical_shape: Vec<u64>,
+        value_bytes: u64,
+        scale_bytes: u64,
+    ) -> (GgufTensorRecipeV1, Vec<GgufTensorInfo>) {
+        let recipe = GgufTensorRecipeV1 {
+            schema_version: "sllm-gguf-tensor-recipe-v1".to_owned(),
+            semantic_model_id: "mx-fixture".to_owned(),
+            source_lock_fingerprints: vec![format!("sha256:{}", "1".repeat(64))],
+            bindings: vec![GgufTensorBinding {
+                logical_tensor: "linear.weight".to_owned(),
+                value_tensor: "linear.weight.values".to_owned(),
+                encoding,
+                role: "linear".to_owned(),
+                logical_shape,
+                scope: GgufTensorScope::Consumed,
+                scales: vec![GgufScaleBinding {
+                    tensor: "linear.weight.e8m0".to_owned(),
+                    role: GgufScaleRole::Block,
+                }],
+            }],
+            logical_shapes: Vec::new(),
+            static_fp8_kv: Vec::new(),
+            known_unconsumed_tensors: Vec::new(),
+        };
+        let tensors = vec![
+            GgufTensorInfo {
+                name: "linear.weight.values".to_owned(),
+                dimensions: vec![value_bytes],
+                tensor_type: GgufTensorType::I8Carrier,
+                relative_offset: 0,
+                absolute_range: [0, value_bytes],
+            },
+            GgufTensorInfo {
+                name: "linear.weight.e8m0".to_owned(),
+                dimensions: vec![scale_bytes],
+                tensor_type: GgufTensorType::I8Carrier,
+                relative_offset: value_bytes,
+                absolute_range: [value_bytes, value_bytes + scale_bytes],
+            },
+        ];
+        (recipe, tensors)
+    }
+
+    #[test]
+    fn mx_weight_activation_recipes_validate_exact_resident_planes() {
+        for (encoding, value_bytes, serialized) in [
+            (
+                GgufRecipeEncoding::Mxfp8E4m3Block32E8m0,
+                3 * 64,
+                "mxfp8-e4m3-block32-e8m0",
+            ),
+            (
+                GgufRecipeEncoding::Mxfp6E3m2Block32E8m0,
+                3 * 64 * 3 / 4,
+                "mxfp6-e3m2-block32-e8m0",
+            ),
+        ] {
+            let (recipe, tensors) = mx_recipe_fixture(encoding, vec![3, 64], value_bytes, 6);
+            validate_recipe_bindings(&recipe, &tensors).expect("valid OCP MX recipe");
+            assert_eq!(
+                serde_json::to_value(encoding).unwrap(),
+                serde_json::Value::String(serialized.to_owned())
+            );
+        }
+    }
+
+    #[test]
+    fn mx_weight_activation_recipes_reject_non_block_k_and_plane_lengths() {
+        let (nonaligned, tensors) =
+            mx_recipe_fixture(GgufRecipeEncoding::Mxfp8E4m3Block32E8m0, vec![3, 33], 99, 3);
+        assert!(
+            validate_recipe_bindings(&nonaligned, &tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("K divisible by 32")
+        );
+
+        let (bad_values, tensors) = mx_recipe_fixture(
+            GgufRecipeEncoding::Mxfp6E3m2Block32E8m0,
+            vec![3, 64],
+            143,
+            6,
+        );
+        assert!(
+            validate_recipe_bindings(&bad_values, &tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("expected 144")
+        );
+
+        let (bad_scales, tensors) = mx_recipe_fixture(
+            GgufRecipeEncoding::Mxfp8E4m3Block32E8m0,
+            vec![3, 64],
+            192,
+            5,
+        );
+        assert!(
+            validate_recipe_bindings(&bad_scales, &tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("must contain 6 E8M0 bytes")
+        );
+
+        let (mut aliased, tensors) =
+            mx_recipe_fixture(GgufRecipeEncoding::Mxfp8E4m3Block32E8m0, vec![1, 32], 32, 1);
+        aliased.bindings[0].scales[0].tensor = "linear.weight.values".to_owned();
+        assert!(
+            validate_recipe_bindings(&aliased, &tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("exclusive plane")
+        );
+    }
 
     #[test]
     fn gemma4_mtp_extension_is_fail_closed_without_pair_metadata() {

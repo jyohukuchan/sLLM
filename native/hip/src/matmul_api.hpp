@@ -31,6 +31,8 @@ struct DescriptorMetadata final {
   bool nvfp4;
   bool nvfp4_w4a4;
   bool mxfp4_w4a4;
+  bool mxfp8_w8a8;
+  bool mxfp6_w6a6;
 };
 
 sllm_status_t validate_descriptor_prefix(const sllm_matmul_desc_t *descriptor,

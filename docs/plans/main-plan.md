@@ -129,15 +129,22 @@
   - NVFP4。
   - [MXFP4。]
   - FP8。
-  - [MXFP8。]
+  - MXFP8 E4M3（block 32、E8M0 scale、W8A8）。
+  - MXFP6 E3M2（block 32、E8M0 scale、W6A6）。
   - BF16。
 - 活性値:
   - FP8。
-  - [MXFP8。]
+  - MXFP8 E4M3（動的block 32量子化）。
+  - MXFP6 E3M2（動的block 32量子化）。
   - BF16。
 - CDNA3では、e4m3fnモデルをVRAMへ読み込む際にe4m3fnuzへ変換する。
 - 混乱を避けるため、テスト専用のe4m3fnuz量子化モデルは作成しない。
 - NVFP4ではtensor scaleをtensor表現とkernel契約に含める。
+- OCP MXFP8 W8A8／MXFP6 W6A6ではweightをvalue planeとblockごとのE8M0 scale planeとして常駐させ、
+  BF16 activationを各matmulの前段で同じOCP block-32形式へ動的量子化する。積はFP32で累積し、graph境界のoutputは
+  BF16 RNEとする。E8M0 NaN scaleはblock全体へNaN伝播し、Infはelement最大有限値へsaturationする。
+  Kが32の倍数でないtensor、scale欠落、未対応targetはfallbackせず拒否する。
+  初期実行targetはexact `gfx1030`／`gfx1201`に限定する。
 
 ## GPU互換性方針
 
@@ -400,7 +407,8 @@
 | 完了・foundation | 57 | DeepSeek V4 Flashの公式identity、圧縮attention、mHC、MoE、混合FP4／FP8、容量fail-closeを実装 |
 | 完了・foundation | 58 | MiniMax M3の公式identity、MSA、MoE、MTP／multimodal metadata、manifest不整合／容量fail-closeを実装 |
 | 完了・foundation | 59 | DiffusionGemmaの公式identity、causal encoder／bidirectional decoder、self-conditioning、block refinementを実装 |
-| 一時停止・品質未達 | 60 | Ministral 3 3Bのtext production経路は実GPUまで到達。固定llama.cppと3番目の生成tokenからずれるため対応済みへ未昇格 |
+| 完了 | 60 | Ministral 3 3Bの公式GGUF head permutationに合わせRoPEをadjacent-pairへ修正し、固定llama.cpp top-1、両RDNA実GPU、resident速度を確認 |
+| 完了・実モデル評価済み | 61 | OCP MXFP8 E4M3 W8A8／MXFP6 E3M2 W6A6を統合。両RDNA operatorとgfx1030 Qwen3.5-4B品質／VRAM／速度を測定し、現providerは非defaultと判定 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -415,6 +423,15 @@ superseded履歴となった。v2のfresh correctnessは両local targetでPASS�
 フェーズ53を完了した。その後2026-08-30のユーザー決定でblock16経路を廃止し、同じreviewed Qwen3.5-4B BF16 dense scopeの
 省略時KVをstandard OCP MXFP8 E4M3へ変更した。Phase 53/54のblock16 evidenceは採用根拠ではなく履歴としてのみ保持する。
 gfx942実機は今後の検証項目との一括実行へ延期し、local RDNA follow-upをblockしない。
+フェーズ61はKV形式とは独立したmodel weight／activation経路である。OCP MX v1.0のE4M3／E3M2、block 32、E8M0、
+roundTiesToEven、saturationを実装し、GGUFでは未標準のMXFP8／MXFP6 type番号を発明せずI8 carrierのvalue／scale面を
+versioned recipeで結合する。exact `gfx1030`／`gfx1201`のdecode M=1、短prefill M=3、実モデルshape由来の非整列prefill M=17を
+独立CPU oracleへ照合し、6 caseずつHIP-only、2 dispatch、fallback 0、cleanup 0でPASSした。両targetの12 outputは
+形式・shapeごとにbit一致し、観測最大相対誤差は`0.0038314175`だった。後続のexact `gfx1030` Qwen3.5-4B実モデル比較では、
+MXFP8／MXFP6のtop-1一致は`0.80／0.75`、resident削減は`41.10%／51.71%`、17-token prefillは
+`48.10／100.16 tok/s`、decodeは`20.17／20.06 tok/s`だった。同じBF16は`284.03／45.68 tok/s`であり、
+現行software correctness providerはVRAMを削減する一方で品質と速度の両方に残差があるためdefault候補にしない。
+full-model claimは固定gfx1030短caseに限定し、gfx1201／gfx942、長context、別modelへ一般化しない。
 フェーズ47〜48は予約済みの機能経路として保持し、フェーズ47の開始には引き続き明示承認を要する。
 フェーズ37〜38はコード変更や実機検証へ着手する前にこの性能経路へ再編した。
 WebUI統合後のモデルarchitecture追加はフェーズ55から開始した。最初の対象は、既存Gemma attention、Qwen MoE、NVFP4を
@@ -453,17 +470,19 @@ DiffusionGemmaは[フェーズ59保存済み計画](archive/2026/08/21-31/phase5
 MoE backboneとdiffusion固有のcausal encoder／bidirectional canvas decoder、self-conditioning、entropy-bounded refinementを分離した。
 typed identity／semantic／GGUF parser-only dry-run／model library fail-close、11 shard header geometryまでをfoundationとして完了した。
 full-model生成、multimodal execution、API／WebUIのdiffusion production経路、性能は後段条件とし、このfoundation evidenceへ含めない。
-Ministral 3 3Bは[フェーズ60 active計画](active/2026/08/21-31/phase60-ministral3-3b-production.md)として、
+Ministral 3 3Bは[フェーズ60保存済み計画](archive/2026/08/21-31/phase60-ministral3-3b-production.md)として、
 `mistralai/Ministral-3-3B-Instruct-2512-BF16` revision `b6d637bef2393152b3da2b2fde72eecdee30557e`を固定した。
 Apache-2.0、public／ungatedで、公式2 shardは458 tensor、index上4,251,743,232 parameter、physical
 3,849,090,048 element、payload 7,698,180,096 bytesであり、
 単一32 GiBへ収まる。Phase 60ではYaRN 16x、GQA dense text、Tekken tokenizer／chat、text／vision分離を固定し、
 text-onlyの通常CLI／API／WebUI production統合まで進める。production inputはMistral公式GGUF revision
 `eb599d408350ea2bb60452cb86be7c7b2fc28227`の6,866,745,504-byte BF16 text artifactへ固定する。
-実装とexact `gfx1030`／`gfx1201` HIP実行までは到達したが、raw `Hello`のgreedy列が両targetで
-`[1307,1278,3950,1044]`、固定llama.cppで`[1307,1278,4304,1033]`となり、3 token目から品質不一致が残る。
-tokenizer／template、target固有差、optimized matmul単独は切り分け済みで、共有model execution数値境界を未解決として
-2026-08-31に一時停止した。production対応済みへは昇格しない。vision forward、OCR／document Q&A、262K性能保証は後段条件とする。
+初期実装は公式GGUFでhead permutation済みのQ/Kへsplit-half RoPEを適用していたため3 token目から参照とずれた。
+terminal logits比較でposition 1以降のRoPEへ原因を特定し、productionをadjacent-pair v2へ修正した。修正後のraw `Hello`は
+exact `gfx1030`／`gfx1201`と固定llama.cppで`[1307,1278,4304,1033]`へ一致し、common-prefix 3行もtop-1全一致、
+HIP-only、fallback 0、cleanup 0となった。513-token prefill／decode中央値はgfx1030 `138.29／18.34 tok/s`、
+gfx1201 `1351.30／19.29 tok/s`である。gfx1030 prefillと両target decodeの性能残差、vision forward、OCR／document Q&A、
+262K性能保証は後段条件とする。
 フェーズ37以降の詳細な依存関係と受入条件は
 [フェーズ37以降の進行中計画](active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)を正本とする。
 フェーズXの詳細は
@@ -716,8 +735,10 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
 
 ### 現在地
 
-- Phase 60 Ministral 3 3Bは公式GGUFのCLI／API／WebUI経路とexact `gfx1030`／`gfx1201` HIP実行まで到達したが、
-  固定llama.cppとのgreedy token不一致により一時停止中である。次architectureはユーザーの再開指示まで自動開始しない。
+- Phase 60 Ministral 3 3Bは公式GGUFのRoPE pairingを修正し、CLI／API／WebUI共通executor、固定llama.cpp top-1、
+  exact `gfx1030`／`gfx1201` HIP実行、resident速度、cleanupを確認して完了した。性能残差は後続最適化候補として保持する。
+- Phase 61 MXFP8／MXFP6 W/Aは形式・GGUF・Qwen・両RDNA operatorを完了し、exact `gfx1030`の実モデルでも
+  品質／VRAM／速度を取得した。現providerはBF16より遅くtop-1も未一致のため、対応形式だがproduction defaultにはしない。
 - 機能経路はフェーズ45まで完了している。現在の`main`には、構造化生成、状態再利用、追加推論API、
   Responses/Anthropic、汎用template、対話CLI、LoRA/control vector、動的モデル管理までが統合済みである。
 - MI300Xの既存`gfx942`経路はフェーズ36で実機確認済みである。対象は99演算子、Qwen3.5-4B BF16/FNUZ FP8、

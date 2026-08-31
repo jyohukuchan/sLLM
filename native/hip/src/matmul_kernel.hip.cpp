@@ -42,19 +42,25 @@ float_to_bf16_rne_bits(const float value) noexcept {
 }
 
 __device__ __forceinline__ float e4m3fn_to_float(const uint8_t bits) noexcept {
-  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
+  const uint32_t sign = static_cast<uint32_t>(bits & UINT8_C(0x80)) << 24U;
   const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & UINT8_C(0x0f));
   const uint8_t mantissa = static_cast<uint8_t>(bits & UINT8_C(0x07));
   if (exponent == 0U) {
-    return mantissa == 0U
-               ? copysignf(0.0F, sign)
-               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -9);
+    if (mantissa == 0U) {
+      return __uint_as_float(sign);
+    }
+    const float magnitude = static_cast<float>(mantissa) * 0.001953125F;
+    return __uint_as_float(__float_as_uint(magnitude) | sign);
   }
   if (exponent == UINT8_C(0x0f) && mantissa == UINT8_C(0x07)) {
     return NAN;
   }
-  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
-         ldexpf(1.0F, static_cast<int>(exponent) - 7);
+  // E4M3FN's normal values map directly onto an FP32 exponent and the top
+  // three FP32 mantissa bits.  Constructing the result avoids an ldexpf in
+  // every low-precision multiply while preserving every representable bit.
+  return __uint_as_float(
+      sign | (static_cast<uint32_t>(exponent) + UINT32_C(120)) << 23U |
+      static_cast<uint32_t>(mantissa) << 20U);
 }
 
 __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) noexcept {
@@ -66,25 +72,24 @@ __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) noexcept {
   if (!isfinite(value) || value >= 448.0F) {
     return static_cast<uint8_t>(sign | UINT8_C(0x7e));
   }
-  uint32_t low = 0U;
-  uint32_t high = UINT32_C(0x7e);
-  while (low < high) {
-    const uint32_t middle = (low + high) >> 1U;
-    if (e4m3fn_to_float(static_cast<uint8_t>(middle)) < value) {
-      low = middle + 1U;
-    } else {
-      high = middle;
-    }
+  if (value < 0.015625F) {
+    const float scaled = value * 512.0F;
+    const uint32_t floor = static_cast<uint32_t>(scaled);
+    const float fraction = scaled - static_cast<float>(floor);
+    const uint32_t rounded =
+        floor + static_cast<uint32_t>(fraction > 0.5F ||
+                                      (fraction == 0.5F && (floor & 1U) != 0U));
+    return static_cast<uint8_t>(sign | static_cast<uint8_t>(rounded));
   }
-  const uint8_t upper = static_cast<uint8_t>(low);
-  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
-  const float lower_error = value - e4m3fn_to_float(lower);
-  const float upper_error = e4m3fn_to_float(upper) - value;
-  const bool select_upper =
-      upper_error < lower_error ||
-      (upper_error == lower_error && (upper & UINT8_C(1)) == 0U &&
-       (lower & UINT8_C(1)) != 0U);
-  return static_cast<uint8_t>(sign | (select_upper ? upper : lower));
+  // Remove the lower 20 FP32 mantissa bits with round-to-nearest-even. The
+  // retained exponent/top-three-mantissa layout then maps directly to E4M3.
+  const uint32_t bits = __float_as_uint(value);
+  const uint32_t rounded =
+      bits + UINT32_C(0x0007ffff) + ((bits >> 20U) & UINT32_C(1));
+  const uint32_t exponent = ((rounded >> 23U) & UINT32_C(0xff)) - 120U;
+  const uint32_t code = (exponent << 3U) | ((rounded >> 20U) & UINT32_C(0x07));
+  return static_cast<uint8_t>(sign |
+                              static_cast<uint8_t>(min(code, UINT32_C(0x7e))));
 }
 
 __device__ __forceinline__ float
@@ -177,6 +182,50 @@ __device__ __forceinline__ uint8_t float_to_e2m1(float value) noexcept {
   return static_cast<uint8_t>(sign | selected);
 }
 
+__device__ __forceinline__ float e3m2_to_float(const uint8_t raw) noexcept {
+  const uint8_t bits = raw & UINT8_C(0x3f);
+  const uint32_t sign = static_cast<uint32_t>(bits & UINT8_C(0x20)) << 26U;
+  const uint8_t exponent = (bits >> 2U) & UINT8_C(0x07);
+  const uint8_t mantissa = bits & UINT8_C(0x03);
+  if (exponent == 0U) {
+    if (mantissa == 0U) {
+      return __uint_as_float(sign);
+    }
+    const float magnitude = static_cast<float>(mantissa) * 0.0625F;
+    return __uint_as_float(__float_as_uint(magnitude) | sign);
+  }
+  return __uint_as_float(
+      sign | (static_cast<uint32_t>(exponent) + UINT32_C(124)) << 23U |
+      static_cast<uint32_t>(mantissa) << 21U);
+}
+
+__device__ __forceinline__ uint8_t float_to_e3m2(float value) noexcept {
+  const uint8_t sign = signbit(value) ? UINT8_C(0x20) : 0U;
+  value = fabsf(value);
+  if (value == 0.0F) {
+    return sign;
+  }
+  if (!isfinite(value) || value >= 28.0F) {
+    return static_cast<uint8_t>(sign | UINT8_C(0x1f));
+  }
+  if (value < 0.25F) {
+    const float scaled = value * 16.0F;
+    const uint32_t floor = static_cast<uint32_t>(scaled);
+    const float fraction = scaled - static_cast<float>(floor);
+    const uint32_t rounded =
+        floor + static_cast<uint32_t>(fraction > 0.5F ||
+                                      (fraction == 0.5F && (floor & 1U) != 0U));
+    return static_cast<uint8_t>(sign | static_cast<uint8_t>(rounded));
+  }
+  const uint32_t bits = __float_as_uint(value);
+  const uint32_t rounded =
+      bits + UINT32_C(0x000fffff) + ((bits >> 21U) & UINT32_C(1));
+  const uint32_t exponent = ((rounded >> 23U) & UINT32_C(0xff)) - 124U;
+  const uint32_t code = (exponent << 2U) | ((rounded >> 21U) & UINT32_C(0x03));
+  return static_cast<uint8_t>(sign |
+                              static_cast<uint8_t>(min(code, UINT32_C(0x1f))));
+}
+
 __device__ __forceinline__ float e8m0_to_float(const uint8_t bits) noexcept {
   if (bits == UINT8_C(0xff)) {
     return NAN;
@@ -202,6 +251,39 @@ mxfp4_even_scale_code(const float maximum) noexcept {
   int32_t code = static_cast<int32_t>(rounded_exponent >> 23U) - 2;
   code = code < 0 ? 0 : (code > 254 ? 254 : code);
   return static_cast<uint8_t>(code);
+}
+
+__device__ __forceinline__ uint8_t
+ocp_mx_scale_code(const float maximum, const int32_t element_power) noexcept {
+  if (isnan(maximum)) {
+    return UINT8_C(0xff);
+  }
+  if (maximum == 0.0F || isinf(maximum)) {
+    return UINT8_C(127);
+  }
+  const uint32_t bits = __float_as_uint(maximum) & UINT32_C(0x7fffffff);
+  const uint32_t biased = (bits >> 23U) & UINT32_C(0xff);
+  int32_t floor_exponent;
+  if (biased != 0U) {
+    floor_exponent = static_cast<int32_t>(biased) - 127;
+  } else {
+    const uint32_t mantissa = bits & UINT32_C(0x007fffff);
+    floor_exponent = static_cast<int32_t>(31 - __builtin_clz(mantissa)) - 149;
+  }
+  int32_t exponent = floor_exponent - element_power;
+  exponent = exponent < -127 ? -127 : (exponent > 127 ? 127 : exponent);
+  return static_cast<uint8_t>(exponent + 127);
+}
+
+__device__ __forceinline__ uint8_t
+packed_e3m2_at(const uint8_t *const row, const uint64_t index) noexcept {
+  const uint64_t byte = (index / UINT64_C(4)) * UINT64_C(3);
+  const uint32_t packed = static_cast<uint32_t>(row[byte]) |
+                          (static_cast<uint32_t>(row[byte + 1U]) << 8U) |
+                          (static_cast<uint32_t>(row[byte + 2U]) << 16U);
+  return static_cast<uint8_t>(
+      (packed >> static_cast<uint32_t>((index & UINT64_C(3)) * UINT64_C(6))) &
+      UINT32_C(0x3f));
 }
 
 } // namespace
@@ -580,6 +662,444 @@ __launch_bounds__(256, 1) void sllm_matmul_mxfp4_w4a4_block32_prefill_v1(
   sllm_matmul_mxfp4_w4a4_block32_body(packed_activation,
                                       activation_block_scales, packed_weight,
                                       weight_block_scales, output, m, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(32, 1) void sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1(
+    const uint16_t *const activation, uint8_t *const quantized,
+    uint8_t *const block_scales, const uint64_t m, const uint64_t k) {
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t block_index = blockIdx.x;
+  if (block_index >= m * blocks_per_row) {
+    return;
+  }
+  const uint64_t row = block_index / blocks_per_row;
+  const uint64_t block = block_index - row * blocks_per_row;
+  const uint64_t base = block * UINT64_C(32);
+  const uint32_t lane = threadIdx.x;
+  const float value = bf16_to_float(activation[row * k + base + lane]);
+  uint32_t has_nan = static_cast<uint32_t>(isnan(value));
+  float maximum = has_nan != 0U ? 0.0F : fabsf(value);
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32U));
+    has_nan |= __shfl_down(has_nan, offset, 32U);
+  }
+  uint32_t scale = 0U;
+  if (lane == 0U) {
+    scale = ocp_mx_scale_code(has_nan != 0U ? NAN : maximum, 8);
+    block_scales[block_index] = static_cast<uint8_t>(scale);
+  }
+  scale = __shfl(scale, 0U, 32U);
+  const float decoded_scale = e8m0_to_float(static_cast<uint8_t>(scale));
+  quantized[row * k + base + lane] =
+      isfinite(decoded_scale) && decoded_scale > 0.0F
+          ? float_to_e4m3fn(value / decoded_scale)
+          : 0U;
+}
+
+extern "C" __global__
+__launch_bounds__(32, 1) void sllm_matmul_bf16_to_mxfp6_e3m2_block32_v1(
+    const uint16_t *const activation, uint8_t *const packed_activation,
+    uint8_t *const block_scales, const uint64_t m, const uint64_t k) {
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t block_index = blockIdx.x;
+  if (block_index >= m * blocks_per_row) {
+    return;
+  }
+  const uint64_t row = block_index / blocks_per_row;
+  const uint64_t block = block_index - row * blocks_per_row;
+  const uint64_t base = block * UINT64_C(32);
+  const uint32_t lane = threadIdx.x;
+  const float value = bf16_to_float(activation[row * k + base + lane]);
+  uint32_t has_nan = static_cast<uint32_t>(isnan(value));
+  float maximum = has_nan != 0U ? 0.0F : fabsf(value);
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    maximum = fmaxf(maximum, __shfl_down(maximum, offset, 32U));
+    has_nan |= __shfl_down(has_nan, offset, 32U);
+  }
+  uint32_t scale = 0U;
+  if (lane == 0U) {
+    scale = ocp_mx_scale_code(has_nan != 0U ? NAN : maximum, 4);
+    block_scales[block_index] = static_cast<uint8_t>(scale);
+  }
+  scale = __shfl(scale, 0U, 32U);
+  const float decoded_scale = e8m0_to_float(static_cast<uint8_t>(scale));
+  const uint32_t code =
+      isfinite(decoded_scale) && decoded_scale > 0.0F
+          ? static_cast<uint32_t>(float_to_e3m2(value / decoded_scale))
+          : 0U;
+  const uint32_t group = lane & ~UINT32_C(3);
+  const uint32_t packed =
+      __shfl(code, static_cast<int>(group), 32U) |
+      (__shfl(code, static_cast<int>(group + 1U), 32U) << 6U) |
+      (__shfl(code, static_cast<int>(group + 2U), 32U) << 12U) |
+      (__shfl(code, static_cast<int>(group + 3U), 32U) << 18U);
+  if ((lane & UINT32_C(3)) == 0U) {
+    const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+    const uint64_t destination = row * row_bytes + block * UINT64_C(24) +
+                                 (lane / UINT32_C(4)) * UINT64_C(3);
+    packed_activation[destination] = static_cast<uint8_t>(packed);
+    packed_activation[destination + 1U] = static_cast<uint8_t>(packed >> 8U);
+    packed_activation[destination + 2U] = static_cast<uint8_t>(packed >> 16U);
+  }
+}
+
+__device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_block32_body(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  const uint64_t output_index = blockIdx.x;
+  if (output_index >= m * n) {
+    return;
+  }
+  const uint64_t row = output_index / n;
+  const uint64_t column = output_index - row * n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  float partial = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const uint64_t block = inner / UINT64_C(32);
+    const float a_scale =
+        e8m0_to_float(activation_scales[row * blocks_per_row + block]);
+    const float w_scale =
+        e8m0_to_float(weight_scales[column * blocks_per_row + block]);
+    partial += e4m3fn_to_float(activation[row * k + inner]) * a_scale *
+               e4m3fn_to_float(weight[column * k + inner]) * w_scale;
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial += __shfl_down(partial, offset, 32U);
+  }
+  __shared__ float wave_sums[8];
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave] = partial;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial = lane < 8U ? wave_sums[lane] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial += __shfl_down(partial, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[output_index] = float_to_bf16_rne_bits(partial);
+    }
+  }
+}
+
+__device__ __forceinline__ void sllm_matmul_mxfp6_w6a6_block32_body(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  const uint64_t output_index = blockIdx.x;
+  if (output_index >= m * n) {
+    return;
+  }
+  const uint64_t row = output_index / n;
+  const uint64_t column = output_index - row * n;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+  const uint8_t *const activation_row =
+      activation + (row < m ? row : 0U) * row_bytes;
+  const uint8_t *const weight_row = weight + column * row_bytes;
+  float partial = 0.0F;
+  for (uint64_t inner = threadIdx.x; inner < k; inner += blockDim.x) {
+    const uint64_t block = inner / UINT64_C(32);
+    const float a_scale =
+        e8m0_to_float(activation_scales[row * blocks_per_row + block]);
+    const float w_scale =
+        e8m0_to_float(weight_scales[column * blocks_per_row + block]);
+    partial += e3m2_to_float(packed_e3m2_at(activation_row, inner)) * a_scale *
+               e3m2_to_float(packed_e3m2_at(weight_row, inner)) * w_scale;
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    partial += __shfl_down(partial, offset, 32U);
+  }
+  __shared__ float wave_sums[8];
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  if (lane == 0U) {
+    wave_sums[wave] = partial;
+  }
+  __syncthreads();
+  if (wave == 0U) {
+    partial = lane < 8U ? wave_sums[lane] : 0.0F;
+#pragma unroll
+    for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+      partial += __shfl_down(partial, offset, 32U);
+    }
+    if (lane == 0U) {
+      output[output_index] = float_to_bf16_rne_bits(partial);
+    }
+  }
+}
+
+#define SLLM_DEFINE_MX_WA_KERNEL(symbol, body)                                 \
+  extern "C" __global__ __launch_bounds__(256, 1) void symbol(                 \
+      const uint8_t *const activation, const uint8_t *const activation_scales, \
+      const uint8_t *const weight, const uint8_t *const weight_scales,         \
+      uint16_t *const output, const uint64_t m, const uint64_t k,              \
+      const uint64_t n) {                                                      \
+    body(activation, activation_scales, weight, weight_scales, output, m, k,   \
+         n);                                                                   \
+  }
+
+SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp8_w8a8_e4m3_block32_decode_v1,
+                         sllm_matmul_mxfp8_w8a8_block32_body)
+SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_v1,
+                         sllm_matmul_mxfp8_w8a8_block32_body)
+SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp6_w6a6_e3m2_block32_decode_v1,
+                         sllm_matmul_mxfp6_w6a6_block32_body)
+SLLM_DEFINE_MX_WA_KERNEL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_v1,
+                         sllm_matmul_mxfp6_w6a6_block32_body)
+
+#undef SLLM_DEFINE_MX_WA_KERNEL
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_row8_v2(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  constexpr uint32_t wave_width = 32U;
+  constexpr uint32_t rows_per_workgroup = 8U;
+  constexpr uint32_t tile_k = 256U;
+  constexpr uint32_t blocks_per_tile = tile_k / 32U;
+  __shared__ float weight_tile[tile_k];
+  __shared__ float weight_scale_tile[blocks_per_tile];
+  __shared__ float activation_scale_tile[rows_per_workgroup][blocks_per_tile];
+  const uint64_t column = static_cast<uint64_t>(blockIdx.x) % n;
+  const uint64_t row_base =
+      (static_cast<uint64_t>(blockIdx.x) / n) * rows_per_workgroup;
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  const uint64_t row = row_base + wave;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  float accumulator = 0.0F;
+  for (uint64_t base = 0U; base < k; base += tile_k) {
+    if (threadIdx.x < blocks_per_tile) {
+      const uint64_t block = base / UINT64_C(32) + threadIdx.x;
+      weight_scale_tile[threadIdx.x] =
+          block < blocks_per_row
+              ? e8m0_to_float(weight_scales[column * blocks_per_row + block])
+              : 0.0F;
+    }
+    if (threadIdx.x < rows_per_workgroup * blocks_per_tile) {
+      const uint32_t scale_row = threadIdx.x / blocks_per_tile;
+      const uint32_t scale_block = threadIdx.x % blocks_per_tile;
+      const uint64_t source_row = row_base + scale_row;
+      const uint64_t block = base / UINT64_C(32) + scale_block;
+      activation_scale_tile[scale_row][scale_block] =
+          source_row < m && block < blocks_per_row
+              ? e8m0_to_float(
+                    activation_scales[source_row * blocks_per_row + block])
+              : 0.0F;
+    }
+    const uint64_t global_inner = base + threadIdx.x;
+    weight_tile[threadIdx.x] = global_inner < k
+                                   ? e4m3fn_to_float(__builtin_nontemporal_load(
+                                         weight + column * k + global_inner))
+                                   : 0.0F;
+    __syncthreads();
+    if (row < m) {
+      const uint32_t valid = static_cast<uint32_t>(
+          k - base < tile_k ? k - base : static_cast<uint64_t>(tile_k));
+      for (uint32_t offset = lane; offset < valid; offset += wave_width) {
+        float term = e4m3fn_to_float(activation[row * k + base + offset]) *
+                     activation_scale_tile[wave][offset / 32U];
+        term *= weight_tile[offset];
+        term *= weight_scale_tile[offset / 32U];
+        accumulator += term;
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    accumulator += __shfl_down(accumulator, offset, 32U);
+  }
+  if (lane == 0U && row < m) {
+    output[row * n + column] = float_to_bf16_rne_bits(accumulator);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_row8_v2(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  constexpr uint32_t wave_width = 32U;
+  constexpr uint32_t rows_per_workgroup = 8U;
+  constexpr uint32_t tile_k = 256U;
+  constexpr uint32_t blocks_per_tile = tile_k / 32U;
+  __shared__ float weight_tile[tile_k];
+  __shared__ float weight_scale_tile[blocks_per_tile];
+  __shared__ float activation_scale_tile[rows_per_workgroup][blocks_per_tile];
+  const uint64_t column = static_cast<uint64_t>(blockIdx.x) % n;
+  const uint64_t row_base =
+      (static_cast<uint64_t>(blockIdx.x) / n) * rows_per_workgroup;
+  const uint32_t lane = threadIdx.x & UINT32_C(31);
+  const uint32_t wave = threadIdx.x >> 5U;
+  const uint64_t row = row_base + wave;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+  const uint8_t *const weight_row = weight + column * row_bytes;
+  const uint8_t *const activation_row =
+      activation + (row < m ? row : 0U) * row_bytes;
+  float accumulator = 0.0F;
+  for (uint64_t base = 0U; base < k; base += tile_k) {
+    if (threadIdx.x < blocks_per_tile) {
+      const uint64_t block = base / UINT64_C(32) + threadIdx.x;
+      weight_scale_tile[threadIdx.x] =
+          block < blocks_per_row
+              ? e8m0_to_float(weight_scales[column * blocks_per_row + block])
+              : 0.0F;
+    }
+    if (threadIdx.x < rows_per_workgroup * blocks_per_tile) {
+      const uint32_t scale_row = threadIdx.x / blocks_per_tile;
+      const uint32_t scale_block = threadIdx.x % blocks_per_tile;
+      const uint64_t source_row = row_base + scale_row;
+      const uint64_t block = base / UINT64_C(32) + scale_block;
+      activation_scale_tile[scale_row][scale_block] =
+          source_row < m && block < blocks_per_row
+              ? e8m0_to_float(
+                    activation_scales[source_row * blocks_per_row + block])
+              : 0.0F;
+    }
+    const uint64_t global_inner = base + threadIdx.x;
+    weight_tile[threadIdx.x] =
+        global_inner < k
+            ? e3m2_to_float(packed_e3m2_at(weight_row, global_inner))
+            : 0.0F;
+    __syncthreads();
+    if (row < m) {
+      const uint32_t valid = static_cast<uint32_t>(
+          k - base < tile_k ? k - base : static_cast<uint64_t>(tile_k));
+      for (uint32_t offset = lane; offset < valid; offset += wave_width) {
+        float term =
+            e3m2_to_float(packed_e3m2_at(activation_row, base + offset)) *
+            activation_scale_tile[wave][offset / 32U];
+        term *= weight_tile[offset];
+        term *= weight_scale_tile[offset / 32U];
+        accumulator += term;
+      }
+    }
+    __syncthreads();
+  }
+#pragma unroll
+  for (uint32_t offset = 16U; offset != 0U; offset >>= 1U) {
+    accumulator += __shfl_down(accumulator, offset, 32U);
+  }
+  if (lane == 0U && row < m) {
+    output[row * n + column] = float_to_bf16_rne_bits(accumulator);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_tiled16_v3(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  constexpr uint32_t tile = 16U;
+  __shared__ float activation_tile[tile][tile];
+  __shared__ float weight_tile[tile][tile];
+  const uint32_t local_row = threadIdx.y;
+  const uint32_t local_column = threadIdx.x;
+  const uint64_t row = static_cast<uint64_t>(blockIdx.y) * tile + local_row;
+  const uint64_t column =
+      static_cast<uint64_t>(blockIdx.x) * tile + local_column;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  float accumulator = 0.0F;
+  for (uint64_t base = 0U; base < k; base += tile) {
+    const uint64_t activation_inner = base + local_column;
+    const uint64_t weight_inner = base + local_row;
+    if (row < m && activation_inner < k) {
+      activation_tile[local_row][local_column] =
+          e4m3fn_to_float(activation[row * k + activation_inner]) *
+          e8m0_to_float(activation_scales[row * blocks_per_row +
+                                          activation_inner / UINT64_C(32)]);
+    } else {
+      activation_tile[local_row][local_column] = 0.0F;
+    }
+    if (column < n && weight_inner < k) {
+      weight_tile[local_row][local_column] =
+          e4m3fn_to_float(
+              __builtin_nontemporal_load(weight + column * k + weight_inner)) *
+          e8m0_to_float(weight_scales[column * blocks_per_row +
+                                      weight_inner / UINT64_C(32)]);
+    } else {
+      weight_tile[local_row][local_column] = 0.0F;
+    }
+    __syncthreads();
+#pragma unroll
+    for (uint32_t inner = 0U; inner != tile; ++inner) {
+      accumulator +=
+          activation_tile[local_row][inner] * weight_tile[inner][local_column];
+    }
+    __syncthreads();
+  }
+  if (row < m && column < n) {
+    output[row * n + column] = float_to_bf16_rne_bits(accumulator);
+  }
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_tiled16_v3(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  constexpr uint32_t tile = 16U;
+  __shared__ float activation_tile[tile][tile];
+  __shared__ float weight_tile[tile][tile];
+  const uint32_t local_row = threadIdx.y;
+  const uint32_t local_column = threadIdx.x;
+  const uint64_t row = static_cast<uint64_t>(blockIdx.y) * tile + local_row;
+  const uint64_t column =
+      static_cast<uint64_t>(blockIdx.x) * tile + local_column;
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
+  float accumulator = 0.0F;
+  for (uint64_t base = 0U; base < k; base += tile) {
+    const uint64_t activation_inner = base + local_column;
+    const uint64_t weight_inner = base + local_row;
+    if (row < m && activation_inner < k) {
+      activation_tile[local_row][local_column] =
+          e3m2_to_float(
+              packed_e3m2_at(activation + row * row_bytes, activation_inner)) *
+          e8m0_to_float(activation_scales[row * blocks_per_row +
+                                          activation_inner / UINT64_C(32)]);
+    } else {
+      activation_tile[local_row][local_column] = 0.0F;
+    }
+    if (column < n && weight_inner < k) {
+      weight_tile[local_row][local_column] =
+          e3m2_to_float(
+              packed_e3m2_at(weight + column * row_bytes, weight_inner)) *
+          e8m0_to_float(weight_scales[column * blocks_per_row +
+                                      weight_inner / UINT64_C(32)]);
+    } else {
+      weight_tile[local_row][local_column] = 0.0F;
+    }
+    __syncthreads();
+#pragma unroll
+    for (uint32_t inner = 0U; inner != tile; ++inner) {
+      accumulator +=
+          activation_tile[local_row][inner] * weight_tile[inner][local_column];
+    }
+    __syncthreads();
+  }
+  if (row < m && column < n) {
+    output[row * n + column] = float_to_bf16_rne_bits(accumulator);
+  }
 }
 
 #pragma clang fp contract(off)
@@ -1108,6 +1628,100 @@ hipError_t launch_mxfp4_w4a4(const uint8_t *const packed_activation,
                        dim3(static_cast<uint32_t>(m * n)), dim3(kWorkgroupSize),
                        0U, stream, packed_activation, activation_block_scales,
                        packed_weight, weight_block_scales, output, m, k, n);
+  }
+  return hipGetLastError();
+}
+
+hipError_t launch_mxfp8_quantize(const uint16_t *const activation,
+                                 uint8_t *const quantized,
+                                 uint8_t *const block_scales, const uint64_t m,
+                                 const uint64_t k,
+                                 const hipStream_t stream) noexcept {
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  hipLaunchKernelGGL(sllm_matmul_bf16_to_mxfp8_e4m3_block32_v1,
+                     dim3(static_cast<uint32_t>(m * blocks_per_row)), dim3(32U),
+                     0U, stream, activation, quantized, block_scales, m, k);
+  return hipGetLastError();
+}
+
+hipError_t launch_mxfp8_w8a8(const uint8_t *const activation,
+                             const uint8_t *const activation_scales,
+                             const uint8_t *const weight,
+                             const uint8_t *const weight_scales,
+                             uint16_t *const output, const uint64_t m,
+                             const uint64_t k, const uint64_t n,
+                             const hipStream_t stream) noexcept {
+  const KernelVariant variant = select_mxfp8_variant(m);
+  if (variant == KernelVariant::Mxfp8W8A8Decode) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp8_w8a8_e4m3_block32_decode_v1,
+                       dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
+                       stream, activation, activation_scales, weight,
+                       weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8Prefill) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_v1,
+                       dim3(static_cast<uint32_t>(m * n)), dim3(kWorkgroupSize),
+                       0U, stream, activation, activation_scales, weight,
+                       weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillRow8) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_row8_v2,
+                       dim3(static_cast<uint32_t>(((m + 7U) / 8U) * n)),
+                       dim3(kWorkgroupSize), 0U, stream, activation,
+                       activation_scales, weight, weight_scales, output, m, k,
+                       n);
+  } else {
+    hipLaunchKernelGGL(sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_tiled16_v3,
+                       dim3(static_cast<uint32_t>((n + 15U) / 16U),
+                            static_cast<uint32_t>((m + 15U) / 16U)),
+                       dim3(16U, 16U), 0U, stream, activation,
+                       activation_scales, weight, weight_scales, output, m, k,
+                       n);
+  }
+  return hipGetLastError();
+}
+
+hipError_t launch_mxfp6_quantize(const uint16_t *const activation,
+                                 uint8_t *const packed,
+                                 uint8_t *const block_scales, const uint64_t m,
+                                 const uint64_t k,
+                                 const hipStream_t stream) noexcept {
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  hipLaunchKernelGGL(sllm_matmul_bf16_to_mxfp6_e3m2_block32_v1,
+                     dim3(static_cast<uint32_t>(m * blocks_per_row)), dim3(32U),
+                     0U, stream, activation, packed, block_scales, m, k);
+  return hipGetLastError();
+}
+
+hipError_t launch_mxfp6_w6a6(const uint8_t *const activation,
+                             const uint8_t *const activation_scales,
+                             const uint8_t *const weight,
+                             const uint8_t *const weight_scales,
+                             uint16_t *const output, const uint64_t m,
+                             const uint64_t k, const uint64_t n,
+                             const hipStream_t stream) noexcept {
+  const KernelVariant variant = select_mxfp6_variant(m);
+  if (variant == KernelVariant::Mxfp6W6A6Decode) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_decode_v1,
+                       dim3(static_cast<uint32_t>(n)), dim3(kWorkgroupSize), 0U,
+                       stream, activation, activation_scales, weight,
+                       weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6Prefill) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_v1,
+                       dim3(static_cast<uint32_t>(m * n)), dim3(kWorkgroupSize),
+                       0U, stream, activation, activation_scales, weight,
+                       weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6PrefillRow8) {
+    hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_row8_v2,
+                       dim3(static_cast<uint32_t>(((m + 7U) / 8U) * n)),
+                       dim3(kWorkgroupSize), 0U, stream, activation,
+                       activation_scales, weight, weight_scales, output, m, k,
+                       n);
+  } else {
+    hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_tiled16_v3,
+                       dim3(static_cast<uint32_t>((n + 15U) / 16U),
+                            static_cast<uint32_t>((m + 15U) / 16U)),
+                       dim3(16U, 16U), 0U, stream, activation,
+                       activation_scales, weight, weight_scales, output, m, k,
+                       n);
   }
   return hipGetLastError();
 }

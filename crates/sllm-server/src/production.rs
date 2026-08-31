@@ -42,17 +42,18 @@ use sllm_core::{
     build_gemma4_moe_resident_weight_load_plan, build_gemma4_mtp_graph,
     build_gguf_qwen35_moe_weight_load_plan, build_ministral3_weight_load_plan,
     build_qwen35_fp8_fnuz_graph, build_qwen35_fp8_graph, build_qwen35_gguf_fp8_graph,
-    build_qwen35_gguf_moe_execution_graph, build_qwen35_graph_with_kv_cache_encoding,
-    build_qwen35_graph_with_kv_cache_selection, build_qwen35_graph_with_position_payload_mode,
-    build_qwen35_moe_execution_graph, build_qwen35_mtp_graph, build_qwen35_multimodal_graph,
-    build_qwen35_nvfp4_graph, build_verified_gemma4_mtp_weight_load_plan,
-    build_verified_gguf_gemma_weight_load_plan, build_verified_gguf_qwen_weight_load_plan,
-    build_verified_gguf_qwen35_vision_manifest, builtin_reviewed_model_lock,
-    gemma4_mtp_pair_semantic_id, open_and_verify_official_ministral3_gguf,
-    parse_control_vector_lock_v1, parse_gemma4_mtp_model_lock, parse_lora_lock_v1,
-    parse_ministral3_model_lock, qwen_graph_memory_estimate, qwen_prefill_chunk_candidates,
-    qwen35_moe_generation_stop_policy, read_derived_gguf_lock, verify_derived_gguf,
-    verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp, verify_gguf_qwen35_moe,
+    build_qwen35_gguf_moe_execution_graph, build_qwen35_gguf_mx_weight_activation_graph,
+    build_qwen35_graph_with_kv_cache_encoding, build_qwen35_graph_with_kv_cache_selection,
+    build_qwen35_graph_with_position_payload_mode, build_qwen35_moe_execution_graph,
+    build_qwen35_mtp_graph, build_qwen35_multimodal_graph, build_qwen35_nvfp4_graph,
+    build_verified_gemma4_mtp_weight_load_plan, build_verified_gguf_gemma_weight_load_plan,
+    build_verified_gguf_qwen_weight_load_plan, build_verified_gguf_qwen35_vision_manifest,
+    builtin_reviewed_model_lock, gemma4_mtp_pair_semantic_id,
+    open_and_verify_official_ministral3_gguf, parse_control_vector_lock_v1,
+    parse_gemma4_mtp_model_lock, parse_lora_lock_v1, parse_ministral3_model_lock,
+    qwen_graph_memory_estimate, qwen_prefill_chunk_candidates, qwen35_moe_generation_stop_policy,
+    read_derived_gguf_lock, verify_derived_gguf, verify_gguf_gemma4_moe, verify_gguf_gemma4_mtp,
+    verify_gguf_qwen35_moe,
 };
 use sllm_frontend::{
     ApplyTemplateResultV1, DecodeModeV1, Gemma4MoeChatTemplateV1, Gemma4MtpGenerationExecutorV1,
@@ -413,6 +414,23 @@ fn qwen_embedding_graph_for_rows(
         })?;
         build_qwen35_nvfp4_graph(lock, &state.plan, sidecar, target_rows, state_capacity)
             .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
+    } else if let Some(source) = state
+        .gguf_source
+        .as_ref()
+        .filter(|source| source.has_mx_weight_activation_recipe())
+    {
+        let lock = state.lock.as_ref().ok_or_else(|| {
+            BackendErrorV1::new("GGUF MX embedding requires the reviewed dense Qwen lock")
+        })?;
+        build_qwen35_gguf_mx_weight_activation_graph(
+            lock,
+            &state.plan,
+            source,
+            target_rows,
+            state_capacity,
+            state.kv_cache_encoding,
+        )
+        .map_err(|error| BackendErrorV1::new(format!("embedding graph failed: {error}")))
     } else if let Some(source) = state
         .gguf_source
         .as_ref()
@@ -1843,7 +1861,8 @@ fn gemma_quantized_descriptor_resident_bytes_preflight(
                 .ok_or("NVFP4 resident byte count overflowed")
         }
         QuantizedTensorEncoding::Mxfp4E2M1Block32E8M0
-        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0 => {
+        | QuantizedTensorEncoding::Mxfp8E4M3Block32E8M0
+        | QuantizedTensorEncoding::Mxfp6E3M2Block32E8M0 => {
             Err("MX encoding is not part of the reviewed Gemma recipe")
         }
     }
@@ -4317,13 +4336,13 @@ impl QwenChatBackendV1 {
         let adapter_catalog =
             load_qwen_adapter_catalog(config.adapter_catalog.as_ref(), &lock, &plan)?;
         if (config.kv_cache_encoding.is_kv_fp8_block16() || config.kv_cache_encoding.is_kv_mxfp8())
-            && (source.has_fp8_recipe() || adapter_catalog.is_some())
+            && (source.has_quantized_linear_recipe() || adapter_catalog.is_some())
         {
             return Err(BackendErrorV1::new(
                 "block-scaled KV FP8 is currently scoped to the unadapted Qwen3.5-4B BF16 text model",
             ));
         }
-        if source.has_fp8_recipe() && adapter_catalog.is_some() {
+        if source.has_quantized_linear_recipe() && adapter_catalog.is_some() {
             return Err(BackendErrorV1::new(
                 "Qwen adapter catalog requires the dense BF16 GGUF artifact",
             ));
@@ -4340,12 +4359,28 @@ impl QwenChatBackendV1 {
                     "verified chat renderer construction failed: {error}"
                 ))
             })?;
+        if source.has_mx_weight_activation_recipe()
+            && !matches!(config.target.as_str(), "gfx1030" | "gfx1201")
+        {
+            return Err(BackendErrorV1::new(
+                "OCP MXFP8 W8A8/MXFP6 W6A6 currently requires exact target gfx1030 or gfx1201",
+            ));
+        }
         let gguf_fp8_provider = source
             .has_fp8_recipe()
             .then(|| select_gguf_fp8_provider(&config.target))
             .transpose()
             .map_err(BackendErrorV1::new)?;
-        let seed_graph = if source.has_fp8_recipe() {
+        let seed_graph = if source.has_mx_weight_activation_recipe() {
+            build_qwen35_gguf_mx_weight_activation_graph(
+                &lock,
+                &plan,
+                &source,
+                1,
+                u64::from(config.context_length),
+                config.kv_cache_encoding,
+            )
+        } else if source.has_fp8_recipe() {
             build_qwen35_gguf_fp8_graph(
                 &lock,
                 &plan,
@@ -4402,7 +4437,7 @@ impl QwenChatBackendV1 {
         } else {
             None
         };
-        let (mtp_resident, mtp_plan) = if !source.has_fp8_recipe()
+        let (mtp_resident, mtp_plan) = if !source.has_quantized_linear_recipe()
             && config.target == "gfx1201"
             && config.kv_cache_encoding == KvCacheEncoding::Fp16
             && lock.fingerprint() == sllm_core::QWEN35_4B_FINGERPRINT
@@ -4437,7 +4472,10 @@ impl QwenChatBackendV1 {
                 "model-ready allocation accounting is not resident-only",
             ));
         }
-        let fp8_provider = gguf_fp8_provider.map(str::to_owned);
+        let fp8_provider = source
+            .mx_weight_activation_encoding_name()
+            .map(str::to_owned)
+            .or_else(|| gguf_fp8_provider.map(str::to_owned));
         let identity = BackendIdentityV1 {
             target: config.target.clone(),
             model_fingerprint: lock.fingerprint().to_owned(),
@@ -4619,7 +4657,7 @@ impl QwenChatBackendV1 {
             || state
                 .gguf_source
                 .as_ref()
-                .is_none_or(|source| source.has_fp8_recipe())
+                .is_none_or(|source| source.has_quantized_linear_recipe())
             || !matches!(
                 state.phase41.prefix_cache,
                 PrefixCacheStartupConfigV1::Disabled
@@ -5448,7 +5486,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 || state
                     .gguf_source
                     .as_ref()
-                    .is_some_and(|source| source.has_fp8_recipe()))
+                    .is_some_and(|source| source.has_quantized_linear_recipe()))
         {
             return Err(BackendErrorV1::new(
                 "Qwen adapters require the dense BF16 text execution path",
@@ -5631,7 +5669,7 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 || state
                     .gguf_source
                     .as_ref()
-                    .is_some_and(|source| source.has_fp8_recipe())
+                    .is_some_and(|source| source.has_quantized_linear_recipe())
                 || state.sidecar.is_some()
                 || state.nvfp4_sidecar.is_some()
                 || state.kv_cache_encoding != KvCacheEncoding::Fp16
@@ -5753,6 +5791,19 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                     nvfp4_sidecar,
                     target_rows,
                     state_capacity,
+                )
+            } else if let Some(source) = state
+                .gguf_source
+                .as_ref()
+                .filter(|source| source.has_mx_weight_activation_recipe())
+            {
+                build_qwen35_gguf_mx_weight_activation_graph(
+                    state.lock.as_ref().expect("dense Qwen lock"),
+                    &state.plan,
+                    source,
+                    target_rows,
+                    state_capacity,
+                    state.kv_cache_encoding,
                 )
             } else if let Some(source) = state
                 .gguf_source
@@ -6294,6 +6345,8 @@ impl ChatGenerationBackendV1 for QwenChatBackendV1 {
                 Some("native-fnuz") => "e4m3fnuz-converted-from-ocp-e4m3fn-outer-f32".to_owned(),
                 Some("nvfp4-packed-dequant") => "nvfp4-e2m1-block16-e4m3fn-tensor-f32".to_owned(),
                 Some("ocp-mxfp4-w4a4-mixed") => "ocp-mxfp4-e2m1-block32-e8m0-mixed".to_owned(),
+                Some("mxfp8-e4m3-w8a8") => "mxfp8-e4m3-block32-e8m0-w8a8".to_owned(),
+                Some("mxfp6-e3m2-w6a6") => "mxfp6-e3m2-block32-e8m0-w6a6".to_owned(),
                 Some(_) => "ocp-e4m3fn-outer-f32".to_owned(),
             },
             kv_cache_encoding: state.kv_cache_encoding.canonical_name().to_owned(),

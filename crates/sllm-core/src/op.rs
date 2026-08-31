@@ -2614,12 +2614,77 @@ fn validate_matmul(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), 
             } | Encoding::Mxfp4W4A4 {
                 block_size: 32,
                 scale_dtype: DType::U8,
+            } | Encoding::Mxfp6W6A6 {
+                block_size: 32,
+                scale_dtype: DType::U8,
             }
         );
-    if !bf16_weight && !fp8_weight && !low_bit_weight {
+    let mxfp8_weight = weight.dtype() == DType::F8E4M3Fn
+        && weight.encoding()
+            == Encoding::Mxfp8W8A8 {
+                block_size: 32,
+                scale_dtype: DType::U8,
+            };
+    if (mxfp8_weight || matches!(weight.encoding(), Encoding::Mxfp6W6A6 { .. }))
+        && activation_shape[1] % 32 != 0
+    {
+        return Err(OpError::MatmulWeightContract);
+    }
+    if !bf16_weight && !fp8_weight && !low_bit_weight && !mxfp8_weight {
         return Err(OpError::MatmulWeightContract);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mxfp_weight_activation_matmul_tests {
+    use super::*;
+
+    fn descriptor(
+        k: usize,
+        dtype: DType,
+        encoding: Encoding,
+    ) -> Result<SemanticOpDescriptor, OpError> {
+        SemanticOpDescriptor::new(
+            SemanticOpKind::Matmul,
+            vec![
+                TensorView::contiguous(DType::Bf16, &[3, k]).unwrap(),
+                TensorView::with_encoding(dtype, encoding, &[7, k]).unwrap(),
+            ],
+            vec![TensorView::contiguous(DType::Bf16, &[3, 7]).unwrap()],
+        )
+    }
+
+    #[test]
+    fn ocp_mx_weight_activation_matmul_requires_exact_block32_k() {
+        for (dtype, encoding) in [
+            (
+                DType::F8E4M3Fn,
+                Encoding::Mxfp8W8A8 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+            ),
+            (
+                DType::U8,
+                Encoding::Mxfp6W6A6 {
+                    block_size: 32,
+                    scale_dtype: DType::U8,
+                },
+            ),
+        ] {
+            descriptor(32, dtype, encoding).expect("one complete MX block");
+            descriptor(64, dtype, encoding).expect("two complete MX blocks");
+            assert!(matches!(
+                descriptor(31, dtype, encoding),
+                Err(OpError::MatmulWeightContract)
+            ));
+            assert!(matches!(
+                descriptor(33, dtype, encoding),
+                Err(OpError::MatmulWeightContract)
+            ));
+        }
+    }
 }
 
 fn validate_baseline_elementwise(
@@ -3438,7 +3503,7 @@ impl fmt::Display for OpError {
                 "matmul activation and output must be contiguous unquantized BF16",
             ),
             Self::MatmulWeightContract => formatter.write_str(
-                "matmul weight must be BF16 or OCP E4M3FN with outer-dimension FP32 scales",
+                "matmul weight must use a supported BF16, FP8, NVFP4, MXFP4, MXFP6, or MXFP8 resident contract",
             ),
             Self::RmsNormContractRequired => {
                 formatter.write_str("rms_norm requires an explicit contract")

@@ -46,17 +46,31 @@ by `docs/provenance/README.md` before release.
 | OCP MXFP4 E2M1, block 32, E8M0 scale | standard `GGML_TYPE_MXFP4` (`39`), block 32 / 17 bytes | lossless interleave of scale byte and packed codes |
 | NVFP4 E2M1, block 16, E4M3 scale, outer scale | standard `GGML_TYPE_NVFP4` (`40`), super-block 64 / 36 bytes plus named scale tensors | lossless grouping of four source blocks; preserve scale/code bits |
 | FP8 E4M3FN plus channel BF16 scale | no standard type in the pinned source | versioned sLLM extension required in A1; no dequantized substitution |
+| OCP MXFP8 E4M3, block 32, E8M0 scale | no standard GGUF type in the current ggml registry | I8 carrier value tensor plus one I8 carrier E8M0 block-scale tensor, bound by the versioned recipe |
+| OCP MXFP6 E3M2, block 32, E8M0 scale | no standard GGUF type in the current ggml registry | packed four-values-per-three-bytes I8 carrier plus one I8 carrier E8M0 block-scale tensor, bound by the versioned recipe |
 
 `MXFP4` and `NVFP4` are not interchangeable. Their block size, scale encoding,
 packing, and outer-scale rules remain distinct. The converter may move bits into
 the standard block layout but must not run a new quantizer. Source and output
 logical values are checked by independent decode in a later work unit.
 
-The pinned enum has no FP8 tensor type. sLLM therefore stores FP8 value planes as
-standard I8 carrier tensors and binds them to scale tensors with versioned
-`sllm.fp8.*` metadata. Readers unaware of the extension can still inspect the
-GGUF structure; sLLM rejects missing, unknown, or ambiguous extension bindings.
-No dequantized BF16, F16, or Q8_0 substitute is produced.
+The pinned enum has no FP8 tensor type, and the current
+[ggml GGUF type registry](https://github.com/ggml-org/ggml/blob/master/docs/gguf.md?plain=1) does
+not assign MXFP8 or MXFP6 tensor type IDs. sLLM therefore stores these value
+planes as standard I8 carrier tensors and binds them to scale tensors with the
+versioned `sllm.tensor_recipe`. It does not invent GGML type IDs. Readers
+unaware of the extension can still inspect the GGUF structure; sLLM rejects
+missing, unknown, or ambiguous extension bindings. No dequantized BF16, F16,
+or Q8_0 substitute is produced.
+
+The recipe names `mxfp8-e4m3-block32-e8m0` and
+`mxfp6-e3m2-block32-e8m0` require a rank-two logical `[N,K]` tensor with K
+divisible by 32 and exactly one `block` scale binding. MXFP8 has `N*K` value
+bytes. MXFP6 uses sLLM's little-endian 6-bit stream with four values in three
+bytes and therefore has `N*K*3/4` value bytes. Both have exactly `N*K/32`
+E8M0 scale bytes. The OCP MX specification fixes numerical formats and block
+semantics but not a physical memory layout; this split-plane recipe and the
+runtime's value-then-scale resident order are sLLM's canonical layouts.
 
 The same version-1 `sllm.tensor_recipe` contains a `logical_shapes` table for
 source tensors whose rank exceeds the standard four-dimensional tensor table.
@@ -73,7 +87,10 @@ The GGUF reader produces the same internal contracts as the reviewed source
 importers. Container-specific offsets and names do not enter execution planning.
 
 - Qwen3.5 dense: reviewed model identity, 738-tensor catalog, text plan, MTP 15
-  tensors, vision 297 tensors, tokenizer/chat metadata.
+  tensors, vision 297 tensors, tokenizer/chat metadata. A recipe covering the
+  exact text-linear set may lower uniformly to OCP MXFP8 W8A8 or MXFP6 W6A6;
+  embedding, normalization, graph activation, and output boundaries remain
+  BF16.
 - Gemma 4 BF16: reviewed identity, 677 physical tensors, 666 loadable text
   tensors, architecture/frontend metadata.
 - Gemma 4 NVFP4 mixed: 1,389 physical to 677 logical tensors; 144 NVFP4 MLP,
