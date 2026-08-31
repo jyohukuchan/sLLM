@@ -1,6 +1,6 @@
 # Phase 60: Ministral 3 3B text production
 
-> 状態: 一時停止（text production経路は実装済み、参照生成との品質一致は未達）
+> 状態: 完了（公式GGUFのRoPE pairingを修正し、参照生成・実GPU・resident性能を再確認）
 > 作成日: 2026-08-31
 
 ## 目的
@@ -55,17 +55,25 @@ typed contractへ固定し、text-onlyのCLI／API／WebUI production経路ま�
   CPU full-model fallback。
 - Llama 4、Mistral Small／Large／MoE、multi-GPU、性能優位の事前主張。
 
-## 2026-08-31停止時点
+## 2026-08-31完了時点
 
 - 公式GGUFのstrict identity、236 text weightのresident plan、Tekken frontend、499-node／105-alias graph、
   26層FP16 KV executor、通常CLI、OpenAI buffered／SSE、dynamic model library、WebUI alias経路まで実装した。
-- exact `gfx1030`と`gfx1201`で同じ公式GGUFを実行し、HIP-only、fallbackなし、request state／workspace cleanup 0を確認した。
-  `Hello`のgreedy 4-token出力は両targetともtoken `[1307,1278,3950,1044]`（` of the day,`）で一致した。
-- 同じtokenizer入力を固定llama.cppへ与えた参照列は`[1307,1278,4304,1033]`（` of the world!`）である。
-  最初の2 tokenは一致し3 token目からずれる。tokenizer／chat templateはtoken列一致、行列積baseline化でも結果不変、
-  両GPUで誤列が一致するため、target固有Attention差ではなく共有model execution数値境界の未解決問題として残す。
-- production品質の受入条件5、6、8はこの不一致により未達である。architectureを対応済みへ昇格せず、計画はarchiveしない。
-  再開時はhead dim 128のFP16 KV Attention逐次oracleに加え、layer境界とterminal logitsのF32/BF16差を先に比較する。
-- ユーザーの停止指示により、この区切り以降のarchitecture追加を自動開始しない。
+- terminal BF16 logitsを任意取得する診断経路と固定llama.cpp F32 logits比較を追加した。position 0では近い一方、position 1以降で
+  KLDが`0.14`以上へ増えたことから、公式GGUFでQ/Kが既にhead permutation済みなのにsplit-half RoPEを再適用した誤りへ特定した。
+  ABI v1のsplit-halfは互換用に残し、production graphはadjacent-pair v2へ移した。追加workspaceやdtype変更はない。
+- 修正後のexact `gfx1030`／`gfx1201`通常CLIは、ともにraw `Hello`を固定llama.cppと同じ
+  `[1307,1278,4304,1033]`（` of the world!`）として生成した。以前に反復誤生成したchat caseも`4`を返した。
+  両targetともHIP-only、fallbackなし、394／394 dispatchである。
+- common-prefix 3行のtop-1は両targetで固定llama.cppと全一致した。gfx1030のKLDは
+  `0.000234788／0.000271453／0.000188792`、gfx1201 incrementalは
+  `0.000234788／0.000317793／0.000206496`である。full-prefillは両targetでBF16 logitsがbit一致し、
+  gfx1201のM=1 decodeだけprovider／targetの演算順によりbit差を持つがtop-1は維持する。
+- 513-token prefill＋8 decode、2 warmup＋5 measured、resident weight常駐、request allocation／logit readback除外の中央値は、
+  gfx1030が`138.29 tok/s`／`18.34 tok/s`、gfx1201が`1351.30 tok/s`／`19.29 tok/s`だった。
+  gfx1201 baseline強制は`11.66 tok/s`／`6.76 tok/s`へ悪化し、品質も一様に改善しないため採用しない。
+  gfx1030 prefillと両target decodeの性能残差は後続最適化候補であり、Phase 60の品質完了とは分離する。
+- host C ABIとexact `gfx1030`／`gfx1201`の実HIP C ABIは旧split-half v1と新adjacent-pair v2の双方を独立数値oracleでPASSし、
+  full-model evidenceもresident／request cleanup 0を確認した。vision forward、OCR／document Q&A、262K性能保証は引き続き非対象とする。
 
 [対応する履歴](../../../../../history/2026/08/21-31/phase60-ministral3-3b-production.md)

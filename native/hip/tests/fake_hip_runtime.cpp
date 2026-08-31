@@ -648,6 +648,7 @@ hipError_t ministral3_yarn_launch(
     const int32_t *const positions, uint16_t *const query_output,
     uint16_t *const key_output, const uint32_t token_count,
     const uint32_t q_heads, const uint32_t kv_heads,
+    const bool adjacent_pairing,
     const hipStream_t /*stream*/) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   ++state.ministral3_yarn_launch_calls;
@@ -688,11 +689,14 @@ hipError_t ministral3_yarn_launch(
           const float angle = static_cast<float>(position) * inverse;
           const float cosine = std::cos(angle);
           const float sine = std::sin(angle);
-          const float left = bf16_to_f32(input[base + pair]);
-          const float right = bf16_to_f32(input[base + half + pair]);
-          output[base + pair] = f32_to_bf16_rne(
+          const uint32_t left_index = adjacent_pairing ? pair * 2U : pair;
+          const uint32_t right_index =
+              adjacent_pairing ? left_index + 1U : half + pair;
+          const float left = bf16_to_f32(input[base + left_index]);
+          const float right = bf16_to_f32(input[base + right_index]);
+          output[base + left_index] = f32_to_bf16_rne(
               (left * cosine - right * sine) * scale);
-          output[base + half + pair] = f32_to_bf16_rne(
+          output[base + right_index] = f32_to_bf16_rne(
               (right * cosine + left * sine) * scale);
         }
       }

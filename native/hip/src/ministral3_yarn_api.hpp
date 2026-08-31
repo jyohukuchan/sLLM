@@ -29,6 +29,7 @@ struct DescriptorMetadata final {
   sllm_rotary::TensorMetadata key_output;
   uint64_t token_count;
   uint64_t start_position;
+  uint32_t op_version;
   uint32_t position_payload_mode;
 };
 

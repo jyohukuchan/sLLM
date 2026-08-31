@@ -207,7 +207,8 @@ hipError_t rotary_launch(const uint16_t *query, const uint16_t *key,
 hipError_t ministral3_yarn_launch(
     const uint16_t *query, const uint16_t *key, const int32_t *positions,
     uint16_t *query_output, uint16_t *key_output, uint32_t token_count,
-    uint32_t q_heads, uint32_t kv_heads, hipStream_t stream) noexcept;
+    uint32_t q_heads, uint32_t kv_heads, bool adjacent_pairing,
+    hipStream_t stream) noexcept;
 hipError_t windowed_attention_launch(
     const uint16_t *query, const uint16_t *key, const uint16_t *value,
     uint16_t *output, uint32_t query_count, uint64_t start_position,

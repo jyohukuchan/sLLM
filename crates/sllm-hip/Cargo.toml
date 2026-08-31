@@ -108,6 +108,10 @@ required-features = ["phase54-research"]
 name = "sllm-mxfp4-w4a4-evidence"
 path = "src/bin/sllm-mxfp4-w4a4-evidence.rs"
 
+[[bin]]
+name = "sllm-ministral3-logits-evidence"
+path = "src/bin/sllm-ministral3-logits-evidence.rs"
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

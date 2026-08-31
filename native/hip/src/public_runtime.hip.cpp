@@ -314,10 +314,11 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const int32_t *const positions, uint16_t *const query_output,
                   uint16_t *const key_output, const uint32_t token_count,
                   const uint32_t q_heads, const uint32_t kv_heads,
+                  const bool adjacent_pairing,
                   const hipStream_t stream) noexcept {
   return fake_hip::ministral3_yarn_launch(
       query, key, positions, query_output, key_output, token_count, q_heads,
-      kv_heads, stream);
+      kv_heads, adjacent_pairing, stream);
 }
 } // namespace sllm_ministral3_yarn_kernel
 
@@ -3867,7 +3868,11 @@ void initialize_ministral3_yarn_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  info->kernel_id = SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1;
+  const bool adjacent = metadata.op_version ==
+                        SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION;
+  info->kernel_id =
+      adjacent ? SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2
+               : SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1;
   info->workgroup_size_x = SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(
       metadata.token_count * (SLLM_HIP_MINISTRAL3_YARN_Q_HEADS +
@@ -3883,10 +3888,12 @@ void initialize_ministral3_yarn_dispatch_info(
   info->fallback_used = 0U;
   sllm_public_runtime::copy_fixed_string(
       info->kernel_symbol, SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX,
-      ::sllm_ministral3_yarn_kernel::kLogicalKernelId);
+      adjacent ? ::sllm_ministral3_yarn_kernel::kAdjacentLogicalKernelId
+               : ::sllm_ministral3_yarn_kernel::kLogicalKernelId);
   sllm_public_runtime::copy_fixed_string(
       info->device_symbol, SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX,
-      ::sllm_ministral3_yarn_kernel::kDeviceSymbol);
+      adjacent ? ::sllm_ministral3_yarn_kernel::kAdjacentDeviceSymbol
+               : ::sllm_ministral3_yarn_kernel::kDeviceSymbol);
   sllm_public_runtime::copy_fixed_string(info->gcn_arch_name,
                                          SLLM_HIP_MAX_GCN_ARCH_NAME, arch_name);
 }

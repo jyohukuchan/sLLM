@@ -52,7 +52,8 @@ __global__ __launch_bounds__(kWorkgroupSize, 1) void ministral3_yarn_kernel(
     const uint16_t *const query, const uint16_t *const key,
     const int32_t *const positions, uint16_t *const query_output,
     uint16_t *const key_output, const uint32_t token_count,
-    const uint32_t q_heads, const uint32_t kv_heads) {
+    const uint32_t q_heads, const uint32_t kv_heads,
+    const bool adjacent_pairing) {
   const uint64_t q_blocks = static_cast<uint64_t>(token_count) * q_heads;
   const uint64_t block = static_cast<uint64_t>(blockIdx.x);
   const bool is_query = block < q_blocks;
@@ -70,14 +71,21 @@ __global__ __launch_bounds__(kWorkgroupSize, 1) void ministral3_yarn_kernel(
   const float scale = is_query ? query_scale(position) : 1.0F;
   for (uint32_t dimension = threadIdx.x; dimension < kHeadDim;
        dimension += blockDim.x) {
-    const uint32_t pair =
-        dimension < kHalfDim ? dimension : dimension - kHalfDim;
+    const uint32_t pair = adjacent_pairing
+                              ? dimension / 2U
+                              : (dimension < kHalfDim ? dimension
+                                                      : dimension - kHalfDim);
     const float angle = static_cast<float>(position) * inverse_frequency(pair);
     const float cosine = cosf(angle);
     const float sine = sinf(angle);
-    const float left = bf16_to_f32(input[base + pair]);
-    const float right = bf16_to_f32(input[base + kHalfDim + pair]);
-    const float rotated = dimension < kHalfDim
+    const uint32_t left_index = adjacent_pairing ? pair * 2U : pair;
+    const uint32_t right_index =
+        adjacent_pairing ? left_index + 1U : kHalfDim + pair;
+    const float left = bf16_to_f32(input[base + left_index]);
+    const float right = bf16_to_f32(input[base + right_index]);
+    const bool first = adjacent_pairing ? (dimension & 1U) == 0U
+                                        : dimension < kHalfDim;
+    const float rotated = first
                               ? (left * cosine - right * sine) * scale
                               : (right * cosine + left * sine) * scale;
     output[base + dimension] = f32_to_bf16_rne(rotated);
@@ -90,6 +98,7 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const int32_t *const positions, uint16_t *const query_output,
                   uint16_t *const key_output, const uint32_t token_count,
                   const uint32_t q_heads, const uint32_t kv_heads,
+                  const bool adjacent_pairing,
                   const hipStream_t stream) noexcept {
   if (query == nullptr || key == nullptr || positions == nullptr ||
       query_output == nullptr || key_output == nullptr || token_count == 0U ||
@@ -104,7 +113,8 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
   hipLaunchKernelGGL(ministral3_yarn_kernel,
                      dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
                      0U, stream, query, key, positions, query_output,
-                     key_output, token_count, q_heads, kv_heads);
+                     key_output, token_count, q_heads, kv_heads,
+                     adjacent_pairing);
   return hipGetLastError();
 }
 

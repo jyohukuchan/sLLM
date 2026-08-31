@@ -97,8 +97,10 @@ pub fn ministral3_query_scale(position: u32) -> Result<f32, Ministral3SemanticEr
     Ok(scale)
 }
 
-/// Apply split-half YaRN RoPE and the Ministral query-only long-position scale.
-/// Pass `scale_query = false` for K. V is not rotary transformed.
+/// Apply the official-GGUF adjacent-pair YaRN RoPE and the Ministral
+/// query-only long-position scale. The GGUF Q/K weights already contain the
+/// head permutation that converts the source split-half layout to adjacent
+/// pairs. Pass `scale_query = false` for K. V is not rotary transformed.
 pub fn ministral3_apply_yarn_rope(
     head: &[f32],
     position: u32,
@@ -127,14 +129,16 @@ pub fn ministral3_apply_yarn_rope(
         1.0
     };
     let mut output = [0.0_f32; MINISTRAL3_HEAD_DIM];
-    for pair in 0..MINISTRAL3_ROTARY_PAIRS {
-        let angle = (position as f32) * inverse[pair];
+    for (pair, &inverse_frequency) in inverse.iter().enumerate() {
+        let angle = (position as f32) * inverse_frequency;
         let cosine = angle.cos();
         let sine = angle.sin();
-        let first = head[pair];
-        let second = head[pair + MINISTRAL3_ROTARY_PAIRS];
-        output[pair] = (first * cosine - second * sine) * query_scale;
-        output[pair + MINISTRAL3_ROTARY_PAIRS] = (second * cosine + first * sine) * query_scale;
+        let first_index = pair * 2;
+        let second_index = first_index + 1;
+        let first = head[first_index];
+        let second = head[second_index];
+        output[first_index] = (first * cosine - second * sine) * query_scale;
+        output[second_index] = (second * cosine + first * sine) * query_scale;
     }
     if output.iter().any(|value| !value.is_finite()) {
         return Err(Ministral3SemanticError::NonFiniteResult);
@@ -198,15 +202,15 @@ mod tests {
     }
 
     #[test]
-    fn split_half_rotary_query_and_key_are_separate() {
+    fn gguf_adjacent_rotary_query_and_key_are_separate() {
         let mut head = [0.0_f32; MINISTRAL3_HEAD_DIM];
         head[0] = 1.0;
-        head[64] = 2.0;
+        head[1] = 2.0;
         let query = ministral3_apply_yarn_rope(&head, 16_384, true).unwrap();
         let key = ministral3_apply_yarn_rope(&head, 16_384, false).unwrap();
         let scale = ministral3_query_scale(16_384).unwrap();
         close(query[0], key[0] * scale, 2.0e-6);
-        close(query[64], key[64] * scale, 2.0e-6);
+        close(query[1], key[1] * scale, 2.0e-6);
         assert!(ministral3_apply_yarn_rope(&head[..127], 0, true).is_err());
         head[17] = f32::NAN;
         assert!(matches!(

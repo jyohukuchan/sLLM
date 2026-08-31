@@ -184,6 +184,7 @@ pub enum Ministral3NormRole {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Ministral3RotaryPairing {
     SplitHalf,
+    AdjacentAfterGgufHeadPermutation,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -236,7 +237,7 @@ impl Ministral3YarnQueryScaleStage {
             kv_heads: MINISTRAL3_GRAPH_KV_HEADS,
             head_dim: MINISTRAL3_GRAPH_HEAD_DIM,
             rotary_dim: MINISTRAL3_GRAPH_HEAD_DIM,
-            pairing: Ministral3RotaryPairing::SplitHalf,
+            pairing: Ministral3RotaryPairing::AdjacentAfterGgufHeadPermutation,
             theta_bits: MINISTRAL3_GRAPH_ROPE_THETA.to_bits(),
             factor_bits: MINISTRAL3_GRAPH_YARN_FACTOR.to_bits(),
             beta_fast_bits: MINISTRAL3_GRAPH_YARN_BETA_FAST.to_bits(),
@@ -1663,7 +1664,7 @@ fn validate_model_specific_stages(graph: &Ministral3TextGraph) -> Result<(), Min
                     || stage.kv_heads() != MINISTRAL3_GRAPH_KV_HEADS
                     || stage.head_dim() != MINISTRAL3_GRAPH_HEAD_DIM
                     || stage.rotary_dim() != MINISTRAL3_GRAPH_HEAD_DIM
-                    || stage.pairing() != Ministral3RotaryPairing::SplitHalf
+                    || stage.pairing() != Ministral3RotaryPairing::AdjacentAfterGgufHeadPermutation
                     || stage.theta().to_bits() != MINISTRAL3_GRAPH_ROPE_THETA.to_bits()
                     || stage.factor().to_bits() != MINISTRAL3_GRAPH_YARN_FACTOR.to_bits()
                     || stage.beta_fast().to_bits() != MINISTRAL3_GRAPH_YARN_BETA_FAST.to_bits()
@@ -2320,7 +2321,10 @@ mod tests {
             .unwrap();
         assert_eq!(yarn.start_position(), 16_383);
         assert_eq!(yarn.rotary_dim(), 128);
-        assert_eq!(yarn.pairing(), Ministral3RotaryPairing::SplitHalf);
+        assert_eq!(
+            yarn.pairing(),
+            Ministral3RotaryPairing::AdjacentAfterGgufHeadPermutation
+        );
         assert_eq!(yarn.theta().to_bits(), 1_000_000.0_f32.to_bits());
         assert_eq!(yarn.factor().to_bits(), 16.0_f32.to_bits());
         assert_eq!(yarn.beta_fast().to_bits(), 32.0_f64.to_bits());

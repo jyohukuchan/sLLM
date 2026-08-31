@@ -276,13 +276,15 @@ typedef uint32_t sllm_deepseek_v4_moe_route_mode_t;
 #define SLLM_HIP_ROTARY_MAX_M UINT64_C(262144)
 #define SLLM_HIP_ROTARY_MAX_POSITION UINT32_C(4294967295)
 
-/* Ministral 3 3B uses a fixed BF16 split-half YaRN RoPE contract.  This is
- * intentionally a separate versioned ABI: the existing model-neutral rotary
- * operation must not silently interpret a plain theta as the model's YaRN
- * schedule or apply the long-position query scale to K. */
+/* Ministral 3 3B uses a fixed BF16 YaRN RoPE contract. Version 1 preserves
+ * the original source-layout split-half interpretation. Version 2 is the
+ * official-GGUF interpretation: Q/K weights have already received the GGUF
+ * head permutation, so rotary pairs are adjacent. */
 #define SLLM_HIP_MINISTRAL3_YARN_VERSION UINT32_C(1)
+#define SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION UINT32_C(2)
 #define SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION UINT32_C(1)
 #define SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1 UINT32_C(1)
+#define SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2 UINT32_C(2)
 #define SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE UINT32_C(256)

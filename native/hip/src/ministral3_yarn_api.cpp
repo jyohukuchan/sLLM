@@ -148,7 +148,8 @@ validate_descriptor_prefix(const sllm_ministral3_yarn_desc_t *const descriptor,
     return error(sink, SLLM_STATUS_INVALID_ABI_VERSION,
                  "Ministral3 YaRN ABI version is unsupported");
   }
-  if (descriptor->op_version != SLLM_HIP_MINISTRAL3_YARN_VERSION) {
+  if (descriptor->op_version != SLLM_HIP_MINISTRAL3_YARN_VERSION &&
+      descriptor->op_version != SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION) {
     return error(sink, SLLM_STATUS_INVALID_MINISTRAL3_YARN_DESCRIPTOR,
                  "Ministral3 YaRN operation version is unsupported");
   }
@@ -263,6 +264,7 @@ sllm_status_t validate_and_copy_descriptor(
                  "Ministral3 YaRN token range exceeds context");
   }
   copied.start_position = descriptor->start_position;
+  copied.op_version = descriptor->op_version;
   copied.position_payload_mode = descriptor->position_payload_mode;
   *metadata = copied;
   return SLLM_STATUS_OK;

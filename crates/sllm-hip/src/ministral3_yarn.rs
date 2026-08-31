@@ -1,4 +1,4 @@
-//! Safe Rust wrapper for the fixed Ministral 3 BF16 YaRN RoPE ABI.
+//! Safe Rust wrapper for the official-GGUF Ministral 3 BF16 YaRN RoPE ABI.
 
 use std::mem::size_of;
 use std::ptr::NonNull;
@@ -58,7 +58,7 @@ impl Ministral3YarnDescriptor {
         Ok(sys::sllm_ministral3_yarn_desc_t {
             struct_size: size_of::<sys::sllm_ministral3_yarn_desc_t>() as u32,
             abi_version: sys::SLLM_HIP_ABI_VERSION,
-            op_version: sys::SLLM_HIP_MINISTRAL3_YARN_VERSION,
+            op_version: sys::SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION,
             position_payload_mode: match self.position_mode {
                 Ministral3YarnPositionMode::Contiguous => {
                     sys::SLLM_HIP_POSITION_PAYLOAD_MODE_CONTIGUOUS_V1

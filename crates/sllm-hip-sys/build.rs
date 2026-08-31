@@ -1497,8 +1497,10 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_ROTARY_MAX_M={{}}\", bindings::SLLM_HIP_ROTARY_MAX_M);\n\
              println!(\"const SLLM_HIP_ROTARY_MAX_POSITION={{}}\", bindings::SLLM_HIP_ROTARY_MAX_POSITION);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_VERSION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_VERSION);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1);\n\
+             println!(\"const SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE);\n\

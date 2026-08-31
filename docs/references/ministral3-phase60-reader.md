@@ -30,4 +30,4 @@ Phase 60のidentity、semantic、GGUF相互運用を再確認するためのread
   相互運用cross-checkだけに使う。
 - production fileはMistral公式GGUFを直接reviewする。sLLM converter由来、またはllama.cppからのimportとは主張しない。
 
-[対応する計画](../plans/active/2026/08/21-31/phase60-ministral3-3b-production.md)
+[対応する計画](../plans/archive/2026/08/21-31/phase60-ministral3-3b-production.md)

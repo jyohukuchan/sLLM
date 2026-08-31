@@ -766,10 +766,12 @@ execution remains the separately approval-required Phase 47 boundary.
 ## Phase 60 Ministral 3 text runtime boundary
 
 Ministral 3のtext ownerは公式GGUFから236 BF16 weightを常駐させ、26層のrequest-local FP16 KV、
-YaRN split-half RoPE、32:8 GQA、terminal-row logitsとdevice Argmaxを所有する。graphは499 node／105 zero-copy aliasで、
+公式GGUFでhead permutation済みのQ/Kに対するYaRN adjacent-pair RoPE、32:8 GQA、terminal-row logitsとdevice Argmaxを所有する。
+split-half YaRN ABI v1は互換用に残すがproduction graphはadjacent-pair v2を使う。graphは499 node／105 zero-copy aliasで、
 prefillとM=1 decodeは同じowner上でKVを単調commitする。direct起動の既定contextは16,384であり、262,144は
 明示指定時だけadmitする。CLI、OpenAI buffered／SSE、dynamic model library、WebUIは同じexecutor/frontendを使う。
 
-exact `gfx1030`／`gfx1201`でHIP-only実行とcleanup 0までは確認したが、固定llama.cppのgreedy token列とは3 token目から
-一致しない。このためruntime wiringの存在をproduction品質合格へ読み替えない。Phase 60はactive planのまま一時停止し、
-再開時はhead dim 128のFP16 KV Attention逐次oracleと、layer／terminal logitsのF32対BF16境界を先に比較する。
+exact `gfx1030`／`gfx1201`のHIP-only実行は固定llama.cppとraw `Hello`の4生成tokenおよびcommon-prefix top-1が一致し、
+fallback 0、cleanup 0を確認した。terminal logitsの任意読戻しは診断専用で、通常greedy経路はselected tokenだけをD2Hする。
+513-token resident測定ではprefillがgfx1030／gfx1201 `138.29／1351.30 tok/s`、decodeが`18.34／19.29 tok/s`であり、
+性能残差をarchitecture correctnessから分離して保持する。

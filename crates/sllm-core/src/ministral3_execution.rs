@@ -216,6 +216,7 @@ impl DispatchAuditBuilder {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Ministral3ExecutionOutput {
     token_ids: Vec<i32>,
+    last_logits_bf16: Option<Vec<u16>>,
     committed_length: u64,
     audit: Ministral3DispatchAudit,
 }
@@ -223,6 +224,13 @@ pub struct Ministral3ExecutionOutput {
 impl Ministral3ExecutionOutput {
     pub fn token_ids(&self) -> &[i32] {
         &self.token_ids
+    }
+
+    /// Final-token, full-vocabulary logits in their exact graph-boundary
+    /// BF16 representation. The normal greedy path leaves this absent and
+    /// continues to read back only the terminal Argmax result.
+    pub fn last_logits_bf16(&self) -> Option<&[u16]> {
+        self.last_logits_bf16.as_deref()
     }
 
     pub const fn committed_length(&self) -> u64 {
@@ -598,7 +606,26 @@ impl Ministral3ExecutionRequest {
                 "prefill must start at position zero",
             ));
         }
-        self.transition(token_ids)
+        self.transition(token_ids, false)
+    }
+
+    /// Runs prefill and publishes the exact final BF16 vocabulary row in
+    /// addition to the existing device Argmax result.
+    pub fn prefill_with_last_logits(
+        &mut self,
+        token_ids: &[i32],
+    ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
+        if self.poisoned {
+            return Err(Ministral3ExecutionError::invalid(
+                "request is poisoned after a failed transition",
+            ));
+        }
+        if self.committed_length != 0 {
+            return Err(Ministral3ExecutionError::invalid(
+                "prefill must start at position zero",
+            ));
+        }
+        self.transition(token_ids, true)
     }
 
     pub fn decode(
@@ -615,12 +642,32 @@ impl Ministral3ExecutionRequest {
                 "decode requires a committed prefill",
             ));
         }
-        self.transition(&[token_id])
+        self.transition(&[token_id], false)
+    }
+
+    /// Runs one decode transition and publishes the exact final BF16
+    /// vocabulary row in addition to the existing device Argmax result.
+    pub fn decode_with_last_logits(
+        &mut self,
+        token_id: i32,
+    ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
+        if self.poisoned {
+            return Err(Ministral3ExecutionError::invalid(
+                "request is poisoned after a failed transition",
+            ));
+        }
+        if self.committed_length == 0 {
+            return Err(Ministral3ExecutionError::invalid(
+                "decode requires a committed prefill",
+            ));
+        }
+        self.transition(&[token_id], true)
     }
 
     fn transition(
         &mut self,
         token_ids: &[i32],
+        include_last_logits: bool,
     ) -> Result<Ministral3ExecutionOutput, Ministral3ExecutionError> {
         if self.poisoned {
             return Err(Ministral3ExecutionError::invalid(
@@ -672,6 +719,17 @@ impl Ministral3ExecutionRequest {
                 return Err(error);
             }
         };
+        let last_logits_bf16 = if include_last_logits {
+            match self.read_last_logits_bf16(&graph) {
+                Ok(logits) => Some(logits),
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
         if let Err(error) = self.ensure_state_lengths(end) {
             self.poisoned = true;
             return Err(error);
@@ -680,6 +738,7 @@ impl Ministral3ExecutionRequest {
         self.last_audit = Some(audit.clone());
         Ok(Ministral3ExecutionOutput {
             token_ids: selected,
+            last_logits_bf16,
             committed_length: end,
             audit,
         })
@@ -959,6 +1018,86 @@ impl Ministral3ExecutionRequest {
             }
         }
         Ok(())
+    }
+
+    fn read_last_logits_bf16(
+        &self,
+        graph: &Ministral3TextGraph,
+    ) -> Result<Vec<u16>, Ministral3ExecutionError> {
+        let tensor = graph
+            .tensors()
+            .iter()
+            .find(|tensor| tensor.label() == "logits")
+            .ok_or_else(|| Ministral3ExecutionError::invalid("terminal logits are absent"))?;
+        let view = tensor.view();
+        if view.dtype() != DType::Bf16
+            || view.encoding() != Encoding::Unquantized
+            || view.shape() != [1, MINISTRAL3_GRAPH_VOCAB_SIZE]
+        {
+            return Err(Ministral3ExecutionError::invalid(
+                "terminal logits are not exact BF16 [1,131072]",
+            ));
+        }
+        let total_bytes = view.payload_bytes();
+        let maximum = self.resident.session.max_transfer_bytes()?;
+        if maximum == 0 {
+            return Err(Ministral3ExecutionError::invalid(
+                "backend transfer limit must be non-zero",
+            ));
+        }
+        let buffer = self.buffer_for_tensor(graph, tensor)?;
+        let mut bytes = Vec::with_capacity(usize::try_from(total_bytes).map_err(|_| {
+            Ministral3ExecutionError::invalid("logits byte count does not fit usize")
+        })?);
+        let mut relative = 0_u64;
+        while relative < total_bytes {
+            let length = (total_bytes - relative).min(maximum);
+            let offset = view
+                .byte_offset()
+                .checked_add(relative)
+                .ok_or_else(|| Ministral3ExecutionError::invalid("logits offset overflowed"))?;
+            let range = buffer.range(offset, length)?;
+            let mut readback = self
+                .resident
+                .session
+                .readback(&self.resident.queue, range)?;
+            require_success(
+                "last-logits readback",
+                readback.wait(self.resident.completion_timeout)?,
+            )?;
+            let start = bytes.len();
+            bytes.resize(
+                start
+                    .checked_add(usize::try_from(length).map_err(|_| {
+                        Ministral3ExecutionError::invalid(
+                            "logits transfer length does not fit usize",
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        Ministral3ExecutionError::invalid("logits host buffer overflowed")
+                    })?,
+                0,
+            );
+            let copied = readback.read_into(&mut bytes[start..])?;
+            if copied != length {
+                return Err(Ministral3ExecutionError::invalid(
+                    "last-logits readback byte count differs",
+                ));
+            }
+            relative = relative
+                .checked_add(length)
+                .ok_or_else(|| Ministral3ExecutionError::invalid("logits progress overflowed"))?;
+        }
+        let logits = bytes
+            .chunks_exact(2)
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>();
+        if logits.len() != MINISTRAL3_GRAPH_VOCAB_SIZE {
+            return Err(Ministral3ExecutionError::invalid(
+                "last-logits readback is not one vocabulary row",
+            ));
+        }
+        Ok(logits)
     }
 
     fn buffer_for_tensor(
@@ -2063,11 +2202,13 @@ mod tests {
         let (mut request, _adapter) = test_request(17, 32);
         let prefill = request.prefill(&[0; 17]).expect("host contract prefill");
         assert_eq!(prefill.token_ids(), [0]);
+        assert!(prefill.last_logits_bf16().is_none());
         assert_eq!(prefill.committed_length(), 17);
         assert_eq!(prefill.audit().target(), "ministral3-host-test");
 
         let decode = request.decode(1).expect("host contract decode");
         assert_eq!(decode.token_ids(), [0]);
+        assert!(decode.last_logits_bf16().is_none());
         assert_eq!(decode.committed_length(), 18);
 
         let (mut failing, adapter) = test_request(3, 8);
@@ -2079,5 +2220,29 @@ mod tests {
                 if message.contains("poisoned")
         ));
         assert_eq!(failing.committed_length(), 0);
+    }
+
+    #[test]
+    fn optional_last_logits_readback_is_exactly_one_bf16_vocabulary_row() {
+        let (mut request, _adapter) = test_request(3, 8);
+        let prefill = request
+            .prefill_with_last_logits(&[0; 3])
+            .expect("host contract prefill with logits");
+        let logits = prefill
+            .last_logits_bf16()
+            .expect("explicit prefill publishes logits");
+        assert_eq!(logits.len(), MINISTRAL3_GRAPH_VOCAB_SIZE);
+        assert!(logits.iter().all(|&value| value == 0));
+
+        let decode = request
+            .decode_with_last_logits(1)
+            .expect("host contract decode with logits");
+        assert_eq!(
+            decode
+                .last_logits_bf16()
+                .expect("explicit decode publishes logits")
+                .len(),
+            MINISTRAL3_GRAPH_VOCAB_SIZE
+        );
     }
 }

@@ -151,7 +151,8 @@ bool download(const sllm_queue_t *const queue,
 
 std::vector<uint16_t> reference(const std::vector<uint16_t> &input,
                                 const std::vector<int32_t> &positions,
-                                const uint32_t heads, const bool query) {
+                                const uint32_t heads, const bool query,
+                                const bool adjacent_pairing) {
   constexpr uint32_t head_dim = 128U;
   constexpr uint32_t half = 64U;
   constexpr uint32_t low = 20U;
@@ -178,11 +179,14 @@ std::vector<uint16_t> reference(const std::vector<uint16_t> &input,
             (interpolated * ramp + extrapolated * (1.0F - ramp));
         const float cosine = std::cos(angle);
         const float sine = std::sin(angle);
-        const float left = bf16_to_f32(input[base + pair]);
-        const float right = bf16_to_f32(input[base + half + pair]);
-        output[base + pair] =
+        const uint32_t left_index = adjacent_pairing ? pair * 2U : pair;
+        const uint32_t right_index =
+            adjacent_pairing ? left_index + 1U : half + pair;
+        const float left = bf16_to_f32(input[base + left_index]);
+        const float right = bf16_to_f32(input[base + right_index]);
+        output[base + left_index] =
             f32_to_bf16_rne((left * cosine - right * sine) * scale);
-        output[base + half + pair] =
+        output[base + right_index] =
             f32_to_bf16_rne((right * cosine + left * sine) * scale);
       }
     }
@@ -229,11 +233,6 @@ int main() {
     key[index] = f32_to_bf16_rne(
         static_cast<float>(static_cast<int32_t>(index % 23U) - 11) / 16.0F);
   }
-  const std::vector<uint16_t> query_oracle =
-      reference(query, positions, q_heads, true);
-  const std::vector<uint16_t> key_oracle =
-      reference(key, positions, kv_heads, false);
-
   Error error;
   sllm_context_create_info_t context_info{};
   context_info.struct_size = sizeof(context_info);
@@ -267,70 +266,96 @@ int main() {
       upload(queue, buffers[2], positions.data(),
              positions.size() * sizeof(int32_t));
 
-  sllm_ministral3_yarn_plan_t *plan = nullptr;
-  sllm_completion_t *completion = nullptr;
   if (success) {
-    sllm_ministral3_yarn_desc_t descriptor{};
-    descriptor.struct_size = sizeof(descriptor);
-    descriptor.abi_version = SLLM_HIP_ABI_VERSION;
-    descriptor.op_version = SLLM_HIP_MINISTRAL3_YARN_VERSION;
-    descriptor.position_payload_mode =
-        SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1;
-    descriptor.q_heads = q_heads;
-    descriptor.kv_heads = kv_heads;
-    descriptor.head_dim = head_dim;
-    descriptor.rotary_dim = head_dim;
-    descriptor.theta_bits = f32_bits(1'000'000.0F);
-    descriptor.factor_bits = f32_bits(16.0F);
-    descriptor.original_context = SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT;
-    descriptor.max_position = SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION;
-    descriptor.beta_fast_bits = f32_bits(32.0F);
-    descriptor.beta_slow_bits = f32_bits(1.0F);
-    descriptor.query_scale_beta_bits = f32_bits(0.1F);
-    descriptor.query = tensor_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16,
-                                      {token_count, q_heads, head_dim}, 3U);
-    descriptor.key = tensor_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16,
-                                    {token_count, kv_heads, head_dim}, 3U);
-    descriptor.positions = tensor_binding(buffers[2], SLLM_TENSOR_DTYPE_I32,
-                                          {token_count, 0U, 0U}, 1U);
-    descriptor.query_output =
-        tensor_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16,
-                       {token_count, q_heads, head_dim}, 3U);
-    descriptor.key_output =
-        tensor_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16,
-                       {token_count, kv_heads, head_dim}, 3U);
-    success = expect(
-        sllm_ministral3_yarn_prepare(context, &descriptor, &plan, &error.sink),
-        SLLM_STATUS_OK, "sllm_ministral3_yarn_prepare", error);
-    sllm_ministral3_yarn_dispatch_info_t info{};
-    info.struct_size = sizeof(info);
-    info.abi_version = SLLM_HIP_ABI_VERSION;
-    info.info_version = SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION;
-    success =
-        success &&
-        expect(sllm_ministral3_yarn_execute(plan, queue, &completion, &info,
-                                            &error.sink),
-               SLLM_STATUS_OK, "sllm_ministral3_yarn_execute", error) &&
-        wait_and_release(&completion,
-                         "sllm_completion_wait(ministral3_yarn)") &&
-        info.backend == SLLM_BACKEND_HIP && info.dispatch_count == 1U &&
-        info.kernel_id ==
-            SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1 &&
-        info.token_count == token_count && info.q_heads == q_heads &&
-        info.kv_heads == kv_heads && info.head_dim == head_dim &&
-        info.rotary_dim == head_dim && info.fallback_used == 0U;
-    std::vector<uint16_t> query_output(q_count);
-    std::vector<uint16_t> key_output(k_count);
-    success = success && download(queue, buffers[3], &query_output) &&
-              download(queue, buffers[4], &key_output) &&
-              close(query_output, query_oracle, "query") &&
-              close(key_output, key_oracle, "key");
-  }
-  if (plan != nullptr) {
-    success =
-        expect(sllm_ministral3_yarn_plan_release(&plan, &error.sink),
-               SLLM_STATUS_OK, "sllm_ministral3_yarn_plan_release", error) &&
-        success;
+    struct PairingCase final {
+      uint32_t op_version;
+      uint32_t kernel_id;
+      bool adjacent_pairing;
+      const char *name;
+    };
+    const std::array<PairingCase, 2> cases{{
+        {SLLM_HIP_MINISTRAL3_YARN_VERSION,
+         SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1,
+         false, "split-half"},
+        {SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION,
+         SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2, true,
+         "adjacent"},
+    }};
+    for (const PairingCase &test_case : cases) {
+      sllm_ministral3_yarn_plan_t *plan = nullptr;
+      sllm_completion_t *completion = nullptr;
+      sllm_ministral3_yarn_desc_t descriptor{};
+      descriptor.struct_size = sizeof(descriptor);
+      descriptor.abi_version = SLLM_HIP_ABI_VERSION;
+      descriptor.op_version = test_case.op_version;
+      descriptor.position_payload_mode =
+          SLLM_HIP_POSITION_PAYLOAD_MODE_EXPLICIT_V1;
+      descriptor.q_heads = q_heads;
+      descriptor.kv_heads = kv_heads;
+      descriptor.head_dim = head_dim;
+      descriptor.rotary_dim = head_dim;
+      descriptor.theta_bits = f32_bits(1'000'000.0F);
+      descriptor.factor_bits = f32_bits(16.0F);
+      descriptor.original_context = SLLM_HIP_MINISTRAL3_YARN_ORIGINAL_CONTEXT;
+      descriptor.max_position = SLLM_HIP_MINISTRAL3_YARN_MAX_POSITION;
+      descriptor.beta_fast_bits = f32_bits(32.0F);
+      descriptor.beta_slow_bits = f32_bits(1.0F);
+      descriptor.query_scale_beta_bits = f32_bits(0.1F);
+      descriptor.query = tensor_binding(buffers[0], SLLM_TENSOR_DTYPE_BF16,
+                                        {token_count, q_heads, head_dim}, 3U);
+      descriptor.key = tensor_binding(buffers[1], SLLM_TENSOR_DTYPE_BF16,
+                                      {token_count, kv_heads, head_dim}, 3U);
+      descriptor.positions = tensor_binding(buffers[2], SLLM_TENSOR_DTYPE_I32,
+                                            {token_count, 0U, 0U}, 1U);
+      descriptor.query_output =
+          tensor_binding(buffers[3], SLLM_TENSOR_DTYPE_BF16,
+                         {token_count, q_heads, head_dim}, 3U);
+      descriptor.key_output =
+          tensor_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16,
+                         {token_count, kv_heads, head_dim}, 3U);
+      bool case_success = expect(
+          sllm_ministral3_yarn_prepare(context, &descriptor, &plan,
+                                       &error.sink),
+          SLLM_STATUS_OK, "sllm_ministral3_yarn_prepare", error);
+      sllm_ministral3_yarn_dispatch_info_t info{};
+      info.struct_size = sizeof(info);
+      info.abi_version = SLLM_HIP_ABI_VERSION;
+      info.info_version = SLLM_HIP_MINISTRAL3_YARN_DISPATCH_INFO_VERSION;
+      case_success =
+          case_success &&
+          expect(sllm_ministral3_yarn_execute(plan, queue, &completion, &info,
+                                              &error.sink),
+                 SLLM_STATUS_OK, "sllm_ministral3_yarn_execute", error) &&
+          wait_and_release(&completion,
+                           "sllm_completion_wait(ministral3_yarn)") &&
+          info.backend == SLLM_BACKEND_HIP && info.dispatch_count == 1U &&
+          info.kernel_id == test_case.kernel_id &&
+          info.token_count == token_count && info.q_heads == q_heads &&
+          info.kv_heads == kv_heads && info.head_dim == head_dim &&
+          info.rotary_dim == head_dim && info.fallback_used == 0U;
+      std::vector<uint16_t> query_output(q_count);
+      std::vector<uint16_t> key_output(k_count);
+      const std::vector<uint16_t> query_oracle = reference(
+          query, positions, q_heads, true, test_case.adjacent_pairing);
+      const std::vector<uint16_t> key_oracle = reference(
+          key, positions, kv_heads, false, test_case.adjacent_pairing);
+      case_success =
+          case_success && download(queue, buffers[3], &query_output) &&
+          download(queue, buffers[4], &key_output) &&
+          close(query_output, query_oracle, test_case.name) &&
+          close(key_output, key_oracle, test_case.name);
+      if (plan != nullptr) {
+        case_success =
+            expect(sllm_ministral3_yarn_plan_release(&plan, &error.sink),
+                   SLLM_STATUS_OK, "sllm_ministral3_yarn_plan_release",
+                   error) &&
+            case_success;
+      }
+      success = success && case_success;
+      if (!success) {
+        break;
+      }
+    }
   }
   for (auto iterator = buffers.rbegin(); iterator != buffers.rend();
        ++iterator) {

@@ -27,8 +27,9 @@
 
 ## 2026-08-31: YaRN semantic boundary
 
-- 128次元split-half RoPEのYaRN inverse-frequency blendをfactor 16、original context 16,384、theta 1,000,000、
-  beta fast／slow 32／1としてmodel-free FP32 oracleへ固定した。correction rampは20..37である。
+- 初期実装では128次元split-half RoPEとしてYaRN inverse-frequency blendをfactor 16、original context 16,384、theta 1,000,000、
+  beta fast／slow 32／1へ固定した。correction rampは20..37である。このpairing解釈は後の公式GGUF実体比較で誤りと判明し、
+  productionはadjacent-pair v2へ訂正した。周波数、ramp、Q scale自体は変更していない。
 - 通常YaRNとは別に、RoPE後Qだけへ`1 + 0.1 × ln(1 + floor(position / 16384))`を適用する。
   16,383では1、16,384では約1.0693147、262,143では約1.2772589となり、K／Vやplain RoPEへ共有しない。
 - 32 Q head／8 KV headの4:1 GQA mappingと、0／1／16,383／16,384／32,768／262,143／262,144、
@@ -77,7 +78,7 @@
 
 ## 2026-08-31: Ministral YaRN public HIP operator
 
-- plain RoPEへfallbackしないversioned public C ABIとして、BF16 split-half YaRN prepare／execute／releaseを追加した。
+- plain RoPEへfallbackしないversioned public C ABI v1として、BF16 split-half YaRN prepare／execute／releaseを追加した。
   Qは`[M,32,128]`、Kは`[M,8,128]`、theta 1,000,000、factor 16、original context 16,384、
   beta fast／slow 32／1を固定し、RoPE後のQだけへposition-dependent scaleを適用する。
 - host fake-runtime ABIではnull、overflow、alignment、shape、version、unsupported parameterをfail-closeし、M=1／3／17と
@@ -135,4 +136,38 @@
 - production経路は実行可能でも数値品質の受入条件を満たさないため、Phase 60を完了／対応済みへ昇格せずactive planのまま一時停止する。
   ユーザーが戻って停止を指示したため、次architectureの自動追加もここで終了した。
 
-[対応する計画](../../../../plans/active/2026/08/21-31/phase60-ministral3-3b-production.md)
+## 2026-08-31: terminal logits診断とRoPE原因特定
+
+- normal greedy経路へ常時D2Hを加えず、明示要求時だけterminal BF16 logitsをbounded chunkで読み戻す診断APIと
+  `sllm-ministral3-logits-evidence`を追加した。固定llama.cppのF32 logitsを`Hello`、`Hello of`、`Hello of the`の
+  common prefixでteacher-forceし、incremental decodeとfull-prefillを別々に比較した。
+- 修正前gfx1030はposition 0のKLDが`0.000234788`、top-1 1307で一致した一方、position 1／2は
+  `0.1414`／`0.1849`まで増え、3行目はsLLM 3950対参照4304へ反転した。incrementalとfull-prefillが各行bit一致したため、
+  KV保存形式やdecode専用経路ではなく、position 1以降で初めて作用する共有RoPE境界へ絞った。
+- 公式GGUFのQ/K weightはllama.cpp互換のhead permutationを既に含み、llama.cppはその後にadjacent-pairのnormal RoPEを適用する。
+  sLLMはこのweightへsplit-halfを適用して二重にlayout解釈していた。position 0ではRoPEが恒等なので初回だけ近かった。
+- split-half ABI v1を破壊せず、adjacent-pair ABI／kernel ID v2を追加し、production graphだけv2へ移した。
+  fake HIPと実HIPのkernelはpair index以外の周波数、YaRN ramp、Q scale、FP32演算、BF16 RNEを共有する。
+  host、exact V620 `gfx1030`、R9700 `gfx1201`のpublic C ABI testでv1／v2を別oracleに対してPASSした。
+
+## 2026-08-31: 修正後品質・速度・完了判断
+
+- exact `gfx1030`／`gfx1201`の通常CLIはraw `Hello`へ、固定llama.cppと同じ
+  `[1307,1278,4304,1033]`（` of the world!`）を返した。chat template込み545-token case
+  `What is 2+2? Answer briefly.`も`4`＋EOSを返した。両targetはHIP-only、fallback false、394／394 dispatchである。
+- common-prefix logitsのtop-1は両targetの全3行で参照と一致した。gfx1030 KLDは
+  `0.000234788／0.000271453／0.000188792`、gfx1201 incrementalは
+  `0.000234788／0.000317793／0.000206496`だった。gfx1030ではincremental／full-prefillがbit一致し、
+  gfx1201ではfull-prefillがgfx1030とbit一致、M=1 decodeだけtarget別演算順のbit差を持つがtop-1は維持した。
+- resident model上の513-token prefill＋8 decode、2 warmup＋5 measured、request allocationとlogit readback除外の中央値は、
+  gfx1030 `3709.50 ms = 138.29 tok/s`／`54.52 ms = 18.34 tok/s`、gfx1201
+  `379.64 ms = 1351.30 tok/s`／`51.83 ms = 19.29 tok/s`である。gfx1201 baseline強制は
+  `43,992.31 ms = 11.66 tok/s`／`148.00 ms = 6.76 tok/s`となり、KLDも一様に改善しないため棄却した。
+- evidence reportはgfx1030
+  `sha256:95b6e1084bba31e8befbb48d27ca0ec04888164a594857586699d0a8e8e6ecb8`、gfx1201
+  `sha256:f050a812218306782b455703e923e6df1a7e5e91486a3c6ddc349fef620c19c2`、gfx1201 baseline
+  `sha256:bb05878977a20a81aa56f27aee7382ca9417550e36bd07ff79bb38c5428cc9a0`で、いずれもcleanup 0だった。
+- 原因修正、参照top-1、両RDNA実GPU、速度台帳、cleanupを取得したためPhase 60を完了する。gfx1030 prefillと両target decodeの
+  速度は実用上の残差として後続最適化へ渡し、vision／OCR／262K保証はPhase 60の非対象を維持する。
+
+[対応する計画](../../../../plans/archive/2026/08/21-31/phase60-ministral3-3b-production.md)

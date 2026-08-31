@@ -416,6 +416,8 @@ extern "C" sllm_status_t sllm_ministral3_yarn_execute(
         query, key, positions, query_output, key_output,
         static_cast<uint32_t>(plan->metadata.token_count),
         SLLM_HIP_MINISTRAL3_YARN_Q_HEADS, SLLM_HIP_MINISTRAL3_YARN_KV_HEADS,
+        plan->metadata.op_version ==
+            SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION,
         queue->stream);
     if (status != hipSuccess) {
       execute_guard.disarm();
