@@ -19,6 +19,11 @@ default判定だけがPhase 46のfreeze済みKV品質policyに依存する。
 2026-08-30のユーザー決定でPhase 53/54のblock16製品経路を廃止し、reviewed Qwen3.5-4B BF16 dense textでは
 standard OCP `kv-mxfp8-e4`（E4M3FN、block 32、E8M0 scale）を省略時KVへ採用した。明示`fp16`はrollbackとして残す。
 block16のschema、policy、research source、証拠は互換入力やproduction候補ではなく、監査可能な履歴としてだけ保持する。
+Phase 55〜62のモデル機能・MXFP W/A／共通codec統合は完了済みである。2026-08-31のユーザー指示により、Phase 61に残った
+MXFP性能残差を、matmul固有の追加最適化ではなく、KV append／attention／NVFP4等にも再利用できるlow-precision primitiveへ
+分離して改善する作業をPhase 62へ割り当て、両RDNAのbit-exact検証と性能採否まで完了した。
+Phase 63〜65のexact gfx1201 MXFP8 WMMA最適化も完了した。2026-09-01のユーザー指示により、Phase 65後のlinear／attention残差を
+MXFP8で共通providerとして実証し、MXFP6、NVFP4／MXFP4、BF16 attentionへ実候補を移植するPhase 66も完了した。
 
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
@@ -74,6 +79,18 @@ block16のschema、policy、research source、証拠は互換入力やproduction
 | 52 | complete | R9700 `100,000/2`のKV物理コミットOOM解消 | 自動経路4/4 PASS、10,001 regression 13/13 PASS |
 | 53 | complete-superseded | block16 descriptor v2のtarget別評価を完了。2026-08-30の経路廃止により採用候補ではなく履歴化 | Phase 46のfreeze済みpolicyによる当時の評価を保持 |
 | 54 | complete-route-retired | block16精度研究は勝者なしで完了し、製品経路を廃止。standard OCP MXFP8 E4をreviewed scopeの既定KVへ採用 | explicit FP16 rollbackを維持、gfx942実機は一括検証へ延期 |
+| 55 | complete | Gemma 4 26B-A4B MoEのNVFP4 CLI/API/WebUI production統合 | 既存Gemma/Qwen MoE、NVFP4、dynamic model lifecycle |
+| 56 | complete | Gemma 4 12B公式assistantによるMTP統合 | Phase 55 lifecycle、逐次target同値contract |
+| 57 | complete-foundation | DeepSeek V4 Flash identity／semantic／capacity foundation | model lock、GGUF、専用route operator |
+| 58 | complete-foundation | MiniMax M3 identity／MSA／MoE／capacity foundation | model lock、GGUF、専用route operator |
+| 59 | complete-foundation | DiffusionGemma identity／semantic／capacity foundation | Gemma MoE backbone、GGUF parser |
+| 60 | complete | Ministral 3 3B text productionとRoPE修正 | canonical GGUF、両RDNA、固定llama.cpp |
+| 61 | complete-model-evaluated | OCP MXFP8／MXFP6 W/A統合と両RDNA operator、gfx1030 full-model評価 | OCP MX v1.0、GGUF recipe、Qwen dense lowering |
+| 62 | complete-shared | 再利用可能low-precision scalar/block codecとMXFP target別最適化 | 両RDNA bit exact、W/A・KV・attention改善、reuse/fusion棄却 |
+| 63 | complete-scoped-adoption | exact gfx1201 large-M MXFP8 WMMA providerとprepared shape selector | 24 operator case、final ISA、品質、3+10 full-model、profile |
+| 64 | complete-scoped-adoption | exact gfx1201 MXFP8のweight direct-loadとshape selector | 4B／9B full-model、operator、profile、資源 |
+| 65 | complete-scoped-adoption | exact gfx1201 MXFP8のactivation／weight direct-load | model非依存ID36、4B／9B 2,048-token、profile |
+| 66 | complete-scoped-adoption | prepared low-precision provider、MXFP8 ID37限定採用、typed attention棄却、MXFP6／NVFP4／MXFP4・BF16 attention移植 | exact gfx1201 operator、4B／9B full-model、reviewed model route |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
@@ -81,7 +98,7 @@ MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700
 Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠として完了済みである。2026-08-30のユーザー決定により
 block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
-Phase 47〜48は内容と番号を保持する。
+Phase 55〜66は完了済みである。Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice
 state、Phase 41はassistant-prefill/state semantics、Phase 42はFIM/infill execution modeを所有する。Phase 42〜44の後続記述は、
@@ -610,6 +627,52 @@ prototype完了をPhase全体完了へ読み替えない。
   `kv-mxfp8-e4`（E4M3FN value、block 32、E8M0 scale）とする。対象外model/laneはfixed FP16 recipeを維持し、明示`fp16`をrollbackに残す。
 - gfx1030／gfx1201のdirect GPU byte・packed attention oracleはHIP-only、fallback 0、cleanup 0でPASS済みである。
   gfx942のfresh実機証拠は追加のMI300X項目と一括取得し、local RDNA作業をblockしない。
+
+## Phase 62: 再利用可能low-precision block codecとMXFP最適化
+
+- E4M3FN/FNUZ、E5M2、E3M2、E2M1、E8M0のscalar codecと、MX block 32／NV block 16のscale・packed I/Oを
+  model／consumer opから独立したdevice-inline primitiveへ抽出する。runtime descriptorはdispatch境界で解決し、
+  hot loopはcompile-time specialization、gfx固有実装はtarget trait/providerの内側へ置く。
+- Phase 61のMXFP8／MXFP6 matmul、MXFP8 KV append／causal attentionを主要consumerとし、NVFP4も形式差を保持したまま
+  意味が一致するcodec/I/Oを再利用する。matmul tile、softmax、KV配置等の演算固有部分は統合しない。
+- 共通化段階はbefore/after bit exactとし、W/Aは明示FP16 KV、KVはBF16 weight＋standard OCP MXFP8 E4で性能を分離する。
+  persistent FP32 attention/KV planeは追加せず、量子化済みactivationのmaterializeは複数consumerで利益がある範囲だけ採用する。
+- exact `gfx1030`／`gfx1201`でmodel-free operatorと固定Qwen3.5-4Bを測り、shared/scoped/rejectedをcandidateごとに決める。
+  固定改善率は置かず、Phase 61 MXFP W/Aのdefault、MXFP8 E4 KV default、FP16 rollback、block16廃止を変更しない。
+- 固定llama.cpp MXFP4 MMQからQ8_1／int8演算を移さずmulti-column tileだけを参考にしたfollow-upは、両RDNAの固定4B
+  prefillをMXFP8で2倍超、MXFP6で約10〜13%改善した。ただしN／formatでoperator結果が逆転するため、col4/col8は
+  explicit benchmark-onlyとし、安全なshape selectorを固定するまで既定providerを変更しない。
+- 詳細な受入条件、境界値、作業単位、対象外は
+  [Phase 62保存済み計画](../../../../archive/2026/08/21-31/phase62-reusable-low-precision-block-optimization.md)を正本とする。
+
+## Phase 63: gfx1201向け大規模MXFP matrix prefill
+
+- exact R9700 `gfx1201`のOCP MXFP8 E4M3 W8A8へmodel非依存WMMA providerを追加し、追加最適化でcontribution LDSを削除、
+  N64 tileをM>=128、K>=2,048、1,024<=N<=16,384の整列shapeへscoped defaultにした。M=1、N=32／LM head、gfx1030/gfx942/unknownは
+  既存providerを維持する。
+- 最終v2 code objectでFP8xFP8-to-FP32 WMMA 8命令、wave32、WG256、LDS 6,912 byte、spill 0を確認した。operator、special E4M3/E8M0、
+  同一artifact品質10 case／20 row、512〜4,096 full-modelをHIP-only、fallback false、cleanup 0でPASSした。
+- 3 warmup＋10 measuredのprefill中央値は`1,727.595/1,814.619/1,722.844/1,588.366 tok/s`で、v1比約1.75〜1.90倍。
+  profileはWMMA v2 71.96%、scope外row8 1.55%、activation quantization 1.78%。persistent BF16/FP32展開やFP32 attention/KV保存は追加していない。
+- 数値変更は実数式、FP32 accumulator、BF16 RNEを維持する固定tree変更としてN1へ分類した。top-1 `0.95`は観測として記録し、
+  旧KV defaultの`0.99` gateを流用しない。SGLang非copyのclean-room境界も維持した。
+- 詳細は
+  [Phase 63保存済み計画](../../../../archive/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)と
+  [追跡要約](../../../../../../ci/matrix/phase63-gfx1201-mxfp8-wmma-prefill-v2.json)を正本とする。
+
+## Phase 66: gfx1201 reusable low-precision providerとattention移植
+
+- architecture、format/block、activation pack、tile、inner productをprepare時にfreezeするmodel非依存providerを
+  MXFP8／MXFP6／NVFP4／MXFP4へ接続した。MXFP8 ID37 N128 direct-bothはexact `gfx1201`のPhase 65 familyかつ
+  N%128=0へ限定採用し、wide/down operatorをID36比14.45%／6.27%短縮した。
+- typed q4k4／q4k8／q8k8 attentionはFP16／MXFP8 E4 KVでbit一致したが、primary M=128/512/2,048が
+  4.3〜27.3%遅くproduction不採用とした。BF16 weightでも同じselectorの実dispatchを確認した。
+- MXFP6はfull-shapeで必要なtiled16を維持しsmall-N selectorを後続候補、NVFP4／MXFP4 W4A4は既存device kernelへ
+  provider routingを移植した。MXFP4 full MoE productionはscope外で、同期A/B用の別W4A4 kernelを追加したとは主張しない。
+- 3+10の512〜4,096 MXFP8 prefillは4B `3,249.069405〜3,840.804836 tok/s`、9B
+  `1,988.722356〜2,261.647647 tok/s`。persistent BF16/FP32 weight展開やFP32 attention/KVは追加していない。詳細は
+  [Phase 66履歴](../../../../../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
+  [追跡要約](../../../../../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
 
 ## Intentional exclusions and deferred items
 

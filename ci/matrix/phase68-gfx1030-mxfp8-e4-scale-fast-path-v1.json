@@ -1,0 +1,106 @@
+{
+  "schema_version": "phase68-gfx1030-mxfp8-e4-scale-fast-path-v1",
+  "state": "PASS",
+  "date": "2026-09-02",
+  "scope": {
+    "gpu": "Radeon Pro V620",
+    "uuid": "GPU-76a08c022586fed6",
+    "target": "gfx1030",
+    "rocm": "7.14.0",
+    "code_object": "v6",
+    "wavefront": 32,
+    "format": "OCP MXFP8 E4M3 W8A8 block32 E8M0",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "kv_cache": "fp16"
+  },
+  "identities": {
+    "control_cli_sha256": "419c6d3745bc60a763922f5e3517ae81fc17fd0f1031477d7cb1f2787028f787",
+    "candidate_cli_sha256": "af687e0d4562bbf478be537bf6f9582d48a4ef9d2a62a477714063c81ed94c7c",
+    "candidate_operator_runner_sha256": "7775e0bcb03f5709e80454ac4f3bbaf6daa4cc1ebeb483f874587efb04a79b9e",
+    "model_gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "derived_lock_sha256": "6504a6b519f2930b33753790426422c866b6074a1cc58de641e502b981b0270e"
+  },
+  "weight_distribution": {
+    "e4_value_count": 3569090560,
+    "normal_percent": 99.9920294,
+    "subnormal_count": 265431,
+    "subnormal_percent": 0.00743694,
+    "signed_zero_count": 19046,
+    "signed_zero_percent": 0.00053364,
+    "standalone_nan_count": 0,
+    "e8_scale_count": 111534080,
+    "e8_scale_codes": "108-118",
+    "e8_nan_scale_count": 0
+  },
+  "codec_evidence": {
+    "state": "PASS",
+    "decode_codes": 1104,
+    "encode_boundary_sets": 5,
+    "mx_boundaries": [31, 32, 33, 256],
+    "mxfp8_load_scale_codes": [0, 1, 118, 127, 134, 254, 255],
+    "fallback_used": false
+  },
+  "operator_evidence": {
+    "state": "PASS",
+    "case_count": 26,
+    "repeats_per_case": 10,
+    "kernel_id": 27,
+    "all_control_output_digests_equal": true,
+    "special_encoding_contract_validated": true,
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "full_model": {
+    "model": "Qwen/Qwen3.5-4B",
+    "protocol": {
+      "lane": "direct",
+      "warmups": 1,
+      "measured": 3,
+      "max_new_tokens": 4,
+      "greedy": true,
+      "ignore_eos": true
+    },
+    "rows": [
+      {
+        "input_tokens": 512,
+        "control_prefill_tps": [204.6025423421185, 204.15783785365835, 202.99458290638424],
+        "candidate_prefill_tps": [214.69660398908218, 213.04308582993335, 212.79073752242246],
+        "control_median_prefill_tps": 204.15783785365835,
+        "candidate_median_prefill_tps": 213.04308582993335,
+        "throughput_gain_percent": 4.352146393049083,
+        "prefill_time_reduction_percent": 4.170634283511953,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 5409973760
+      },
+      {
+        "input_tokens": 2048,
+        "control_prefill_tps": [205.48534592467934, 207.63761991987428, 206.92120296837308],
+        "candidate_prefill_tps": [215.17712793269263, 211.13128409592147, 213.07591434582085],
+        "control_median_prefill_tps": 206.92120296837308,
+        "candidate_median_prefill_tps": 213.07591434582085,
+        "throughput_gain_percent": 2.9744227701926196,
+        "prefill_time_reduction_percent": 2.8885063787447707,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 6220600832
+      }
+    ],
+    "generated_token_ids_match": true,
+    "fallback_used": false,
+    "all_dispatches_hip": true,
+    "cleanup_zero": true
+  },
+  "decision": {
+    "mx_value_plane_decode": "adopt-for-internal-quantizer-contract",
+    "block_decode_scaled": "adopt-with-reference-fallback",
+    "prescaled_weight_tile": "rejected-performance-regression",
+    "wave_uniform_decode": "rejected-shape-dependent-regression",
+    "production_scope": "exact gfx1030 Phase 67 ID27 selector scope",
+    "rollback": "SLLM_MXFP8_PREFILL_FORCE_ROW8=1"
+  },
+  "limitations": [
+    "The no-standalone-NaN fast path is valid only for value planes produced by the internal MX quantizer; the public scalar codec retains standalone E4M3 NaN semantics.",
+    "Performance evidence is limited to the canonical V620 exact gfx1030 tuple and one fixed Qwen3.5-4B MXFP8 artifact.",
+    "No result is generalized to gfx1031-gfx1036, gfx1201, gfx942, another ROCm tuple, another model, or multi-GPU execution."
+  ]
+}

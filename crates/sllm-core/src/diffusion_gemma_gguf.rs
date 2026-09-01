@@ -1058,8 +1058,8 @@ pub fn build_diffusion_gemma_gguf_foundation_catalog_from_entries(
         *count = count
             .checked_add(1)
             .ok_or_else(|| invalid("artifact family count overflowed"))?;
-        if let Some((layer, projection)) = mapping.tensor_role.packed_experts()
-            && packed
+        if let Some((layer, projection)) = mapping.tensor_role.packed_experts() {
+            if packed
                 .insert(
                     (layer, projection),
                     (
@@ -1068,10 +1068,11 @@ pub fn build_diffusion_gemma_gguf_foundation_catalog_from_entries(
                     ),
                 )
                 .is_some()
-        {
-            return Err(invalid(format!(
-                "duplicate packed expert layer/projection: {source_name}"
-            )));
+            {
+                return Err(invalid(format!(
+                    "duplicate packed expert layer/projection: {source_name}"
+                )));
+            }
         }
         let row = DiffusionGemmaGgufCatalogRow {
             source_name: mapping.source_name,

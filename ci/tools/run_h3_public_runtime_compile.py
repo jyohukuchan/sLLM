@@ -119,6 +119,8 @@ PUBLIC_RUNTIME_DIRECT_INCLUDE_PATHS = (
     "native/hip/src/linear_attention_api.hpp",
     "native/hip/src/linear_attention_kernel_internal.hpp",
     "native/hip/src/linear_attention_runtime.inc",
+    "native/hip/src/low_precision_block_codec.hpp",
+    "native/hip/src/low_precision_matmul_provider.hpp",
     "native/hip/src/matmul_api.hpp",
     "native/hip/src/matmul_kernel_internal.hpp",
     "native/hip/src/matmul_runtime.inc",

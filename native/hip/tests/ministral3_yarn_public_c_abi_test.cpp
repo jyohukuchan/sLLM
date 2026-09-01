@@ -275,8 +275,8 @@ int main() {
     };
     const std::array<PairingCase, 2> cases{{
         {SLLM_HIP_MINISTRAL3_YARN_VERSION,
-         SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1,
-         false, "split-half"},
+         SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1, false,
+         "split-half"},
         {SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION,
          SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2, true,
          "adjacent"},
@@ -313,10 +313,10 @@ int main() {
       descriptor.key_output =
           tensor_binding(buffers[4], SLLM_TENSOR_DTYPE_BF16,
                          {token_count, kv_heads, head_dim}, 3U);
-      bool case_success = expect(
-          sllm_ministral3_yarn_prepare(context, &descriptor, &plan,
-                                       &error.sink),
-          SLLM_STATUS_OK, "sllm_ministral3_yarn_prepare", error);
+      bool case_success =
+          expect(sllm_ministral3_yarn_prepare(context, &descriptor, &plan,
+                                              &error.sink),
+                 SLLM_STATUS_OK, "sllm_ministral3_yarn_prepare", error);
       sllm_ministral3_yarn_dispatch_info_t info{};
       info.struct_size = sizeof(info);
       info.abi_version = SLLM_HIP_ABI_VERSION;
@@ -339,11 +339,11 @@ int main() {
           query, positions, q_heads, true, test_case.adjacent_pairing);
       const std::vector<uint16_t> key_oracle = reference(
           key, positions, kv_heads, false, test_case.adjacent_pairing);
-      case_success =
-          case_success && download(queue, buffers[3], &query_output) &&
-          download(queue, buffers[4], &key_output) &&
-          close(query_output, query_oracle, test_case.name) &&
-          close(key_output, key_oracle, test_case.name);
+      case_success = case_success &&
+                     download(queue, buffers[3], &query_output) &&
+                     download(queue, buffers[4], &key_output) &&
+                     close(query_output, query_oracle, test_case.name) &&
+                     close(key_output, key_oracle, test_case.name);
       if (plan != nullptr) {
         case_success =
             expect(sllm_ministral3_yarn_plan_release(&plan, &error.sink),

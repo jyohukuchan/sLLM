@@ -55,6 +55,92 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-01-P67-GFX1030-MXFP8-MMQ: staged col8 scoped default（N0）
+
+- scope: exact `gfx1030`、OCP MXFP8 E4M3 W8A8 block32/E8M0のprefill matmul。`M>=128, K>=2048, K%32=0`かつ
+  `2560<=N<=16384`または`M>=512 && N==1024`だけ既存ID27 col8を選ぶ。短M、M<512のN=1024、未計測N、語彙head、別target、decode M=1は
+  既存providerを維持する。量子化recipe、KV default、sampling、stop/usageは変更しない。
+- change: gfx1201 ID37のN方向再利用をsoftware-decode gfx1030へ転用し、ID38 col16／ID39 col32を評価した。
+  両候補は既存ID27をfull-modelで上回らず明示benchmark-onlyとし、追加shape sweepで境界を確定したID27だけを限定採用した。
+- classification: **N0**。ID22/27/38/39は各outputのMXFP8 value／E8M0 scale、FP32 accumulator、加算順、wave reduction、
+  BF16 RNE stageを維持する。18 case×10回と追加M=`512/2048` caseのBF16 output digestはprovider間で一致した。
+- oracle/state: K=`31/32/33` admission、M=1、M=`17/127/128/129/512/2048`、N tail、N=`32/1024/2560/4096/8192/9216`、
+  target非選択、override優先順位、prepare-time freezeをhost／exact gfx1030 GPUで確認した。HIP-only、fallback false、cleanup 0である。
+- output/quality: 固定Qwen3.5-4B、FP16 KV、512／2,048 inputの全sampleで生成tokenは
+  `[23066,23066,23066,23066]`だった。operatorでbit一致しておりrecipe不変のN0なので、KV形式変更用top-1 `0.99` gateは起動しない。
+- performance/resource/decision: 同一最終binaryでrow8→scoped defaultは512 inputが
+  `72.1830 -> 207.6111 tok/s`（2.8762x）、2,048 inputが`71.2428 -> 208.2710 tok/s`（2.9234x）。
+  resident／peakは不変。ID27/38/39はLDS `8,704/17,152/34,048` byte、VGPR `46/42/83`、spill 0である。
+- rollback: `SLLM_MXFP8_PREFILL_FORCE_ROW8=1`。scope外は既存row8、ID38/39は明示overrideだけである。
+- details: [Phase 67履歴](../history/2026/09/1-10/phase67-gfx1030-mxfp8-tile-transfer.md)と
+  [追跡要約](../../ci/matrix/phase67-gfx1030-mxfp8-tile-transfer-v1.json)。
+
+### OUT-2026-09-01-P66-GFX1201-LOWP-PROVIDER: N128 matrixとtyped provider移植（N0）
+
+- scope: exact `gfx1201`のMXFP8 E4M3 W8A8 ID37、MXFP6 E3M2 W6A6、NVFP4 W4A16／W4A4、
+  MXFP4 W4A4 prepared routing、およびFP16／MXFP8 E4 KVのtyped causal-attention候補。量子化recipe、GGUF encoding、
+  weight/KV default、sampling、stop/usageは変更しない。
+- change: ID36の各output列と同じFP32 arithmetic treeをN128 tileへ広げるID37を追加し、format/block/layout／activation pack／
+  tile／inner productをprepare時にfreezeする共通providerへ各形式を接続した。attentionはq4k4／q4k8／q8k8のtyped loadを追加した。
+  NVFP4／MXFP4 W4A4は既存device kernelへのprovider routing移植であり、数値式の異なる別candidate kernelではない。
+- classification: **N0**。ID37は独立output列の同時処理数だけを変え、各outputの項、scale、FP32 accumulator、加算tree、
+  BF16 RNE stageを維持する。attention control/candidateの全output digestと最大absolute error 0、matrix ID36/37のBF16 digest、
+  NVFP4／MXFP4 routingのoracleが一致した。provider freeze自体はdevice arithmeticを変更しない。
+- oracle/state: MXFP8はM=`127/128/129`、N=`64/127/128/129/256/512/1024`とproduction shapeを実行し、
+  K31／33は期待どおりhost rejection、K32はGPU受理を確認した。attentionはFP16／MXFP8 KVのM=`128/512/2048`、
+  MXFP6／NVFP4／MXFP4は形式ごとの非整列blockとM>1をexact gfx1201で実行した。
+  全採用evidenceはHIP-only、fallback false、cleanup 0である。
+- output/quality: 同一入力の数値差、token/logit分岐は観測していない。N0かつquantization recipe不変なので旧KV default用
+  top-1 `0.99` gateを起動しない。MXFP8 full-modelの4 outputは全run `[23066,23066,23066,23066]`だった。
+- performance/resource/decision: ID37はwide/down operatorをID36比14.45%／6.27%短縮し、exact gfx1201、Phase 65 family、
+  N%128=0へ限定採用した。LDS 1,024 byte、SGPR/VGPR 40/164、spill 0、wave32、WMMA 16命令である。
+  attention候補は全primary rowで4.3〜27.3%遅くproduction不採用。MXFP6、NVFP4、MXFP4は形式別の既存kernel／fallbackを維持し、
+  MXFP4 full MoE productionはscope外とした。
+- rollback: ID37 scope外はID36／既存provider、attentionは既存q4k1等、各低精度形式は従来device kernelである。
+  persistent BF16/FP32 weight展開、FP32 attention/KV planeは追加しない。
+- details: [Phase 66履歴](../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
+  [追跡要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)。
+
+### OUT-2026-09-01-P63-GFX1201-MXFP8-WMMA: 大規模prefill WMMA provider（N1）
+
+- scope: exact `gfx1201`、OCP MXFP8 E4M3 W8A8 block32/E8M0、M>=128、K>=2,048、1,024<=N<=16,384、
+  K%32=0、N%64=0のprefill matmul。M=1、N=32／LM head、`gfx1030`、`gfx942`、未知targetは既存providerを維持する。
+- change: resident value/scaleを直接読み、従来row8のK32逐次FP32 dotを、N64 tileあたり8個のK16
+  FP8xFP8-to-FP32 WMMA、block scale適用、block間FP32 accumulationへ変更する。入力E4M3/E8M0 byte、実数式、項、scale、
+  FP32 accumulator、BF16 RNE outputは同一である。K32ごとのFP32 contribution LDS store/readは行わない。
+- classification: **N1**。固定K16 treeを2個使う加算依存深さは従来のK32逐次FP32和より増えず、term/scale/dtype/rounding stageを
+  欠落させない。差はmatrix instruction内を含む固定FP32 treeへ局所化でき、race、atomic、未初期化、fallbackではない。
+- oracle: exact gfx1201でcandidate 7 case／21 submissionを3 repeatし、M=`127/128/129`、wide/down/output、N=1,024、
+  N=32／M=1非選択を確認した。最大production相対誤差は`0.0036960265`。special E4M3/E8M0 byteと13 oracle点は
+  非有限4/4一致、mismatch 0、relative `0.0004885198`、repeat digest一致、HIP-only、fallback false、cleanup 0だった。
+- output: 同一MXFP8 artifactのrow8/candidate 10 case／20 rowはtop-1 `19/20=0.95`、KLD mean `0.0029974001`、
+  p99/max `0.0153089212`、perplexity相対差`-0.516618%`。最初のlogit差は`b255` prefill position 254 index 0
+  `6.25→6.21875`、最初のtoken差は`b511` decode position 511 `13→220`だった。旧KV default判定のtop-1 `0.99` gateは適用しない。
+- performance/resource/decision: 3+10の512/1,024/2,048/4,096 prefill中央値は
+  `1,727.595/1,814.619/1,722.844/1,588.366 tok/s`。model residentは従来と同一で、persistent workspaceは追加しない。
+  exact gfx1201の上記shapeだけへscoped default採用し、明示row8およびscope外row8をrollbackとする。
+- details: [Phase 63履歴](../history/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)と
+  [追跡要約](../../ci/matrix/phase63-gfx1201-mxfp8-wmma-prefill-v2.json)。
+
+### OUT-2026-08-31-P62-LOWP-CODEC: 共通low-precision codecと起動境界specialization（N0）
+
+- scope: MXFP8 E4M3／MXFP6 E3M2 W/A matmul、MXFP8 E4/E5 KV append/attention、NVFP4の共通scalar/block read/write、
+  exact `gfx1030`／`gfx1201`。数値recipe、accumulator、丸めstage、public encoding、defaultは変更しない。
+- change: E4M3FN/FNUZ、E5M2、E3M2、E2M1、E8M0とMX block 32／NV block 16を共通device-inline codecへ抽出し、
+  attentionのruntime encoding switchをgeneric、decode wave、GQA shared/qtile、scaled long-prefillのkernel起動境界へ移した。
+- classification: **N0**。W/A value/scale byteとM=`1/3/17`の6 BF16 output hash、KV append byte、29-case attention output hashを
+  beforeとbit exactに維持した。実数式、FP32 accumulation、BF16 RNE、OCP scale/packing、NVFP4 outer scaleは同一である。
+- oracle: 両GPUでdecode 1,104 code、encodeのzero/subnormal/tie/max/Inf/NaN境界、MX `31/32/33/256`、
+  NV `15/16/17/256`を独立host oracleへ照合した。W/A/KV/full-attentionはHIP-only、fallback false、cleanup 0だった。
+- output: 固定Qwen3.5-4Bの3／4および17／4 full-model試行はbefore/afterで生成token列が一致した。
+  数値差、最初の分岐、品質recipe変更はないため追加quality gateを起動しない。
+- performance/decision: 共通codecと起動境界specializationを両targetへshared adoptionした。代表17-token FP16-KV prefillは
+  gfx1030 MXFP8/MXFP6 `47.31/98.23→48.48/99.23 tok/s`、gfx1201 `36.67/32.72→72.87/115.30 tok/s`。
+  MXFP8 KV=8,193 attentionはgfx1030 `5.248→2.462 ms`、gfx1201 `3.515→1.569 ms`だった。
+- rejected: cross-plan activation cacheはbuffer generation/liveness identityがなくstale readをfail-closeできず、単純fusionはN tileごとに
+  activation量子化を重複するため不採用。rollbackはPhase 61までのconsumer-local codecであり、public rollback optionは追加しない。
+- details: [Phase 62履歴](../history/2026/08/21-31/phase62-reusable-low-precision-block-optimization.md)。
+
 ### OUT-2026-08-30-MXFP8-E4-DEFAULT: block16廃止とstandard OCP MXFP8 E4既定化（N2）
 
 - scope: reviewed Qwen3.5-4B BF16 dense text／full attention／single GPU／head dim 256、exact `gfx1030`、`gfx1201`、

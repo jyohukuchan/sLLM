@@ -71,10 +71,10 @@ __global__ __launch_bounds__(kWorkgroupSize, 1) void ministral3_yarn_kernel(
   const float scale = is_query ? query_scale(position) : 1.0F;
   for (uint32_t dimension = threadIdx.x; dimension < kHeadDim;
        dimension += blockDim.x) {
-    const uint32_t pair = adjacent_pairing
-                              ? dimension / 2U
-                              : (dimension < kHalfDim ? dimension
-                                                      : dimension - kHalfDim);
+    const uint32_t pair =
+        adjacent_pairing
+            ? dimension / 2U
+            : (dimension < kHalfDim ? dimension : dimension - kHalfDim);
     const float angle = static_cast<float>(position) * inverse_frequency(pair);
     const float cosine = cosf(angle);
     const float sine = sinf(angle);
@@ -83,11 +83,10 @@ __global__ __launch_bounds__(kWorkgroupSize, 1) void ministral3_yarn_kernel(
         adjacent_pairing ? left_index + 1U : kHalfDim + pair;
     const float left = bf16_to_f32(input[base + left_index]);
     const float right = bf16_to_f32(input[base + right_index]);
-    const bool first = adjacent_pairing ? (dimension & 1U) == 0U
-                                        : dimension < kHalfDim;
-    const float rotated = first
-                              ? (left * cosine - right * sine) * scale
-                              : (right * cosine + left * sine) * scale;
+    const bool first =
+        adjacent_pairing ? (dimension & 1U) == 0U : dimension < kHalfDim;
+    const float rotated = first ? (left * cosine - right * sine) * scale
+                                : (right * cosine + left * sine) * scale;
     output[base + dimension] = f32_to_bf16_rne(rotated);
   }
 }
@@ -110,11 +109,10 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
   if (blocks > std::numeric_limits<uint32_t>::max()) {
     return hipErrorInvalidValue;
   }
-  hipLaunchKernelGGL(ministral3_yarn_kernel,
-                     dim3(static_cast<uint32_t>(blocks)), dim3(kWorkgroupSize),
-                     0U, stream, query, key, positions, query_output,
-                     key_output, token_count, q_heads, kv_heads,
-                     adjacent_pairing);
+  hipLaunchKernelGGL(
+      ministral3_yarn_kernel, dim3(static_cast<uint32_t>(blocks)),
+      dim3(kWorkgroupSize), 0U, stream, query, key, positions, query_output,
+      key_output, token_count, q_heads, kv_heads, adjacent_pairing);
   return hipGetLastError();
 }
 

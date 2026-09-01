@@ -89,6 +89,11 @@ option(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST
     OFF
 )
 
+option(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST
+    "Build the focused real-GPU reusable low-precision codec oracle"
+    OFF
+)
+
 option(SLLM_ENABLE_ROTARY_GPU_TEST
     "Build the focused real-GPU split-half rotary runner"
     OFF
@@ -190,7 +195,8 @@ if(SLLM_SEMANTIC_G1_DISCOVERY_TEST)
 endif()
 
 if(SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
-   SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
+   SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
+   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST)
     if(NOT DEFINED ROCM_PATH OR ROCM_PATH STREQUAL "")
         message(FATAL_ERROR "HIP build requires an explicit ROCM_PATH")
     endif()
@@ -385,7 +391,9 @@ else()
 endif()
 
 if((SLLM_ENABLE_HIP_COMPILE_PROBE OR SLLM_ENABLE_HIP_RUNTIME OR
-   SLLM_ENABLE_PUBLIC_HIP_RUNTIME) AND NOT SLLM_SEMANTIC_G1_AUTHORITY)
+   SLLM_ENABLE_PUBLIC_HIP_RUNTIME OR
+   SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST) AND
+   NOT SLLM_SEMANTIC_G1_AUTHORITY)
     set(CMAKE_HIP_STANDARD 17)
     set(CMAKE_HIP_STANDARD_REQUIRED ON)
 endif()
@@ -546,6 +554,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_SEMANTIC_G1_PUBLIC_OBJECT}"
             DEPENDS src/minimax_m3_moe_route_public_runtime.hip.cpp
                 src/public_runtime.hip.cpp src/matmul_runtime.inc
+                src/low_precision_matmul_provider.hpp
                 src/mlp_gate_up_silu_bundle_runtime.inc
                 src/mlp_gate_up_silu_bundle_kernel_internal.hpp
                 src/argmax_runtime.inc
@@ -625,6 +634,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 "${PROJECT_SOURCE_DIR}/src/matmul_kernel.hip.cpp"
                 -o "${SLLM_MATMUL_G1_KERNEL_OBJECT}"
             DEPENDS src/matmul_kernel.hip.cpp src/matmul_kernel_internal.hpp
+                src/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -725,6 +735,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_KV_STATE_G1_KERNEL_OBJECT}"
             DEPENDS src/kv_state_kernel.hip.cpp
                 src/kv_state_kernel_internal.hpp
+                src/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -736,6 +747,7 @@ if(SLLM_ENABLE_PUBLIC_HIP_RUNTIME)
                 -o "${SLLM_CAUSAL_ATTENTION_G1_KERNEL_OBJECT}"
             DEPENDS src/causal_attention_kernel.hip.cpp
                 src/causal_attention_kernel_internal.hpp
+                src/low_precision_block_codec.hpp
                 "${PROJECT_SOURCE_DIR}/../../include/sllm/hip.h"
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             VERBATIM
@@ -1388,6 +1400,34 @@ if(SLLM_ENABLE_RMSNORM_DIRECT_GPU_TEST)
         -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
     )
     target_link_libraries(sllm_rmsnorm_direct_gpu_test PRIVATE sllm_hip_stub)
+endif()
+
+if(SLLM_ENABLE_LOW_PRECISION_CODEC_GPU_TEST)
+    add_executable(sllm_low_precision_codec_gpu_test
+        tests/low_precision_block_codec_gpu_test.hip.cpp
+    )
+    set_source_files_properties(
+        tests/low_precision_block_codec_gpu_test.hip.cpp
+        PROPERTIES LANGUAGE HIP
+    )
+    target_compile_features(sllm_low_precision_codec_gpu_test PRIVATE cxx_std_17)
+    target_compile_definitions(sllm_low_precision_codec_gpu_test PRIVATE
+        SLLM_TEST_EXPECTED_TARGET="${SLLM_HIP_COMPILE_TARGET}"
+        __HIP_PLATFORM_AMD__=1
+    )
+    target_compile_options(sllm_low_precision_codec_gpu_test PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wshadow -Werror
+        $<$<COMPILE_LANGUAGE:HIP>:-mcode-object-version=6>
+        $<$<COMPILE_LANGUAGE:HIP>:${SLLM_WAVEFRONT_FLAG}>
+        $<$<COMPILE_LANGUAGE:HIP>:-ffp-contract=off>
+    )
+    target_include_directories(sllm_low_precision_codec_gpu_test PRIVATE
+        "${PROJECT_SOURCE_DIR}/src"
+        "${ROCM_PATH}/include"
+    )
+    target_link_libraries(sllm_low_precision_codec_gpu_test PRIVATE
+        "${ROCM_PATH}/lib/libamdhip64.so"
+    )
 endif()
 
 if(SLLM_ENABLE_ROTARY_GPU_TEST)

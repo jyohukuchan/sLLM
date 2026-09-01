@@ -266,6 +266,28 @@ class RunnerIdentityTests(unittest.TestCase):
         )
         self.assertIn("exactly one", warning or "")
 
+    def test_cargo_ignored_tests_are_collected_but_not_selected(self) -> None:
+        output = (
+            "test result: ok. 2 passed; 0 failed; 3 ignored; "
+            "0 measured; 4 filtered out;"
+        )
+        counts, warning, source = host_runner.actual_counts(
+            ["cargo", "+1.97.1", "test", "--workspace"], output, 0, repo=ROOT
+        )
+        self.assertEqual(source, "cargo-harness")
+        self.assertIsNone(warning)
+        self.assertEqual(
+            counts,
+            {
+                "collected": 9,
+                "selected": 2,
+                "passed": 2,
+                "failed": 0,
+                "skipped": 0,
+                "deselected": 7,
+            },
+        )
+
     def test_registered_validator_command_uses_single_validator_count(self) -> None:
         command = [sys.executable, "ci/tools/validate_python.py", "--mode", "compile"]
         counts, warning, source = host_runner.actual_counts(command, "", 0, repo=ROOT)

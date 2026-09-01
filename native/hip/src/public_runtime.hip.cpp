@@ -15,15 +15,16 @@
 #include "kv_state_kernel_internal.hpp"
 #include "linear_attention_api.hpp"
 #include "linear_attention_kernel_internal.hpp"
+#include "low_precision_matmul_provider.hpp"
 #include "matmul_api.hpp"
 #include "matmul_kernel_internal.hpp"
+#include "ministral3_yarn_api.hpp"
+#include "ministral3_yarn_kernel_internal.hpp"
 #include "mlp_gate_up_silu_bundle_kernel_internal.hpp"
 #include "moe_expert_api.hpp"
 #include "moe_expert_kernel_internal.hpp"
 #include "moe_route_api.hpp"
 #include "moe_route_kernel_internal.hpp"
-#include "ministral3_yarn_api.hpp"
-#include "ministral3_yarn_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "residual_rmsnorm_api.hpp"
 #include "rmsnorm_api.hpp"
@@ -59,6 +60,7 @@ extern "C" rocblas_status rocblas_gemm_ex_get_solutions(
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
@@ -226,7 +228,7 @@ hipError_t launch_nvfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
 hipError_t launch_nvfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
                              const uint8_t *, const float *, const float *,
                              uint16_t *, uint64_t, uint64_t, uint64_t,
-                             hipStream_t) noexcept {
+                             KernelVariant, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
 
@@ -237,7 +239,7 @@ hipError_t launch_mxfp4_quantize(const uint16_t *, uint8_t *, uint8_t *,
 
 hipError_t launch_mxfp4_w4a4(const uint8_t *, const uint8_t *, const uint8_t *,
                              const uint8_t *, uint16_t *, uint64_t, uint64_t,
-                             uint64_t, hipStream_t) noexcept {
+                             uint64_t, KernelVariant, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
 
@@ -248,7 +250,8 @@ hipError_t launch_mxfp8_quantize(const uint16_t *, uint8_t *, uint8_t *,
 
 hipError_t launch_mxfp8_w8a8(const uint8_t *, const uint8_t *, const uint8_t *,
                              const uint8_t *, uint16_t *, uint64_t, uint64_t,
-                             uint64_t, hipStream_t) noexcept {
+                             uint64_t, const KernelVariant,
+                             hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
 
@@ -259,7 +262,7 @@ hipError_t launch_mxfp6_quantize(const uint16_t *, uint8_t *, uint8_t *,
 
 hipError_t launch_mxfp6_w6a6(const uint8_t *, const uint8_t *, const uint8_t *,
                              const uint8_t *, uint16_t *, uint64_t, uint64_t,
-                             uint64_t, hipStream_t) noexcept {
+                             uint64_t, KernelVariant, hipStream_t) noexcept {
   return hipErrorInvalidValue;
 }
 } // namespace sllm_matmul_kernel
@@ -338,9 +341,9 @@ hipError_t launch(const uint16_t *const query, const uint16_t *const key,
                   const uint32_t q_heads, const uint32_t kv_heads,
                   const bool adjacent_pairing,
                   const hipStream_t stream) noexcept {
-  return fake_hip::ministral3_yarn_launch(
-      query, key, positions, query_output, key_output, token_count, q_heads,
-      kv_heads, adjacent_pairing, stream);
+  return fake_hip::ministral3_yarn_launch(query, key, positions, query_output,
+                                          key_output, token_count, q_heads,
+                                          kv_heads, adjacent_pairing, stream);
 }
 } // namespace sllm_ministral3_yarn_kernel
 
@@ -532,8 +535,7 @@ launch(const uint16_t *const query, const void *const key,
        const bool use_decode_wave_split,
        const bool use_decode_wave_split_q_preload, const bool use_prefill_gqa4,
        const bool use_prefill_gqa4_qtile4, const uint64_t sliding_window,
-       const float score_scale,
-       const hipStream_t stream) noexcept {
+       const float score_scale, const hipStream_t stream) noexcept {
   (void)key_scales;
   (void)value_scales;
   (void)key_outer_scales;
@@ -1433,9 +1435,9 @@ struct KvState final : QuarantineNode {
                                     ? capacity_value
                                     : storage_capacity_value),
         sliding_window(sliding_window_value), retained_start(0U),
-        head_count(head_count_value),
-        head_dim(head_dim_value), key_buffer(key_value),
-        value_buffer(value_value), key_plane(std::move(key_plane_value)),
+        head_count(head_count_value), head_dim(head_dim_value),
+        key_buffer(key_value), value_buffer(value_value),
+        key_plane(std::move(key_plane_value)),
         value_plane(std::move(value_plane_value)),
         key_scale_plane(std::move(key_scale_plane_value)),
         value_scale_plane(std::move(value_scale_plane_value)),
@@ -1976,6 +1978,9 @@ struct ElementwisePlan final : QuarantineNode {
   bool argmax;
   void *matmul_workspace;
   uint64_t matmul_workspace_bytes;
+  sllm_matmul_kernel::KernelVariant matmul_kernel_variant =
+      sllm_matmul_kernel::KernelVariant::Baseline;
+  std::optional<sllm_lowp::PreparedProviderPlan> matmul_provider_plan;
   Fp8LtPlan *fp8_lt_plan;
   bool release_active;
   bool in_flight;
@@ -3640,6 +3645,7 @@ hipError_t launch_fp8_lt_plan(Fp8LtPlan *const plan,
 void initialize_matmul_dispatch_info(
     sllm_matmul_dispatch_info_t *const info, const uint64_t dispatch_id,
     const sllm_matmul::DescriptorMetadata &metadata,
+    const sllm_matmul_kernel::KernelVariant prepared_variant,
     const char *const arch_name) noexcept {
   const uint32_t struct_size = info->struct_size;
   const uint32_t abi_version = info->abi_version;
@@ -3649,23 +3655,12 @@ void initialize_matmul_dispatch_info(
   info->info_version = SLLM_HIP_MATMUL_DISPATCH_INFO_VERSION;
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
-  const auto variant =
-      metadata.mxfp8_w8a8
-          ? ::sllm_matmul_kernel::select_mxfp8_variant(metadata.m)
-      : metadata.mxfp6_w6a6
-          ? ::sllm_matmul_kernel::select_mxfp6_variant(metadata.m)
-      : metadata.mxfp4_w4a4
-          ? ::sllm_matmul_kernel::select_mxfp4_variant(metadata.m)
-      : metadata.nvfp4_w4a4
-          ? ::sllm_matmul_kernel::KernelVariant::Nvfp4W4A4Packed
-      : metadata.nvfp4 ? ::sllm_matmul_kernel::select_nvfp4_variant(metadata.m)
-      : metadata.fp8_outer
-          ? ((matches_runtime_gcn_arch(arch_name, "gfx1201") ||
-              matches_runtime_gcn_arch(arch_name, "gfx942"))
-                 ? ::sllm_matmul_kernel::KernelVariant::Fp8Native
-                 : ::sllm_matmul_kernel::KernelVariant::Fp8Emulation)
-          : ::sllm_matmul_kernel::select_variant(metadata.m, metadata.k,
-                                                 metadata.n, arch_name);
+  // The caller selects the variant exactly once (during prepare for typed
+  // low-precision providers, or immediately before dispatch for legacy
+  // BF16/FP8 paths).  Dispatch metadata must describe that same frozen
+  // launch; re-running a selector here would make environment changes between
+  // launch and reporting observable and could describe a different kernel.
+  const auto variant = prepared_variant;
   info->dispatch_count =
       metadata.fp8_outer || metadata.nvfp4_w4a4 || metadata.mxfp4_w4a4 ||
               metadata.mxfp8_w8a8 || metadata.mxfp6_w6a6 ||
@@ -3673,7 +3668,7 @@ void initialize_matmul_dispatch_info(
           ? 2U
           : 1U;
   info->kernel_id = static_cast<uint32_t>(variant);
-  info->workgroup_size_x = SLLM_HIP_MATMUL_WORKGROUP_SIZE;
+  info->workgroup_size_x = ::sllm_matmul_kernel::workgroup_size_x(variant);
   info->grid_size_x =
       ::sllm_matmul_kernel::grid_size_x(variant, metadata.m, metadata.n);
   info->fallback_allowed = 0U;
@@ -3895,15 +3890,15 @@ void initialize_ministral3_yarn_dispatch_info(
   info->backend = SLLM_BACKEND_HIP;
   info->dispatch_id = dispatch_id;
   info->dispatch_count = 1U;
-  const bool adjacent = metadata.op_version ==
-                        SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION;
+  const bool adjacent =
+      metadata.op_version == SLLM_HIP_MINISTRAL3_YARN_ADJACENT_VERSION;
   info->kernel_id =
       adjacent ? SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_ADJACENT_QSCALE_V2
                : SLLM_HIP_MINISTRAL3_YARN_KERNEL_ID_BF16_SPLIT_HALF_QSCALE_V1;
   info->workgroup_size_x = SLLM_HIP_MINISTRAL3_YARN_WORKGROUP_SIZE;
   info->grid_size_x = static_cast<uint32_t>(
-      metadata.token_count * (SLLM_HIP_MINISTRAL3_YARN_Q_HEADS +
-                              SLLM_HIP_MINISTRAL3_YARN_KV_HEADS));
+      metadata.token_count *
+      (SLLM_HIP_MINISTRAL3_YARN_Q_HEADS + SLLM_HIP_MINISTRAL3_YARN_KV_HEADS));
   info->token_count = metadata.token_count;
   info->q_heads = SLLM_HIP_MINISTRAL3_YARN_Q_HEADS;
   info->kv_heads = SLLM_HIP_MINISTRAL3_YARN_KV_HEADS;
@@ -4278,11 +4273,10 @@ bool clear_kv_transition_locked(KvState *const state, const uint64_t token,
     state->last_published_end = state->transition_end;
     state->published_length = state->transition_end;
     state->retained_start =
-        state->sliding_window == 0U
-            ? 0U
-            : state->published_length > state->sliding_window
-                  ? state->published_length - state->sliding_window
-                  : 0U;
+        state->sliding_window == 0U ? 0U
+        : state->published_length > state->sliding_window
+            ? state->published_length - state->sliding_window
+            : 0U;
     ++state->generation;
     state->last_published_generation = state->generation;
   }
@@ -4929,9 +4923,10 @@ bool release_completion_child_reference(Completion *const completion) noexcept {
   return released;
 }
 
-sllm_status_t write_completion_semantic_failure(
-    const CompletionValidatorKind kind, const int32_t detail,
-    sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+write_completion_semantic_failure(const CompletionValidatorKind kind,
+                                  const int32_t detail,
+                                  sllm_error_sink_t *const sink) noexcept {
   if (kind == CompletionValidatorKind::MinimaxM3MoeRouteStatus) {
     switch (detail) {
     case SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE:
@@ -4977,8 +4972,8 @@ sllm_status_t write_completion_semantic_failure(
   }
 }
 
-int32_t completion_validator_detail(
-    const Completion *const completion) noexcept {
+int32_t
+completion_validator_detail(const Completion *const completion) noexcept {
   if (completion->validator_kind == CompletionValidatorKind::None) {
     return SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK;
   }
@@ -4994,9 +4989,10 @@ int32_t completion_validator_detail(
   return detail;
 }
 
-sllm_status_t finalize_completion_semantic_failure(
-    Completion *const completion, const int32_t detail,
-    sllm_error_sink_t *const sink) noexcept {
+sllm_status_t
+finalize_completion_semantic_failure(Completion *const completion,
+                                     const int32_t detail,
+                                     sllm_error_sink_t *const sink) noexcept {
   if (!release_submission_references(completion)) {
     completion->terminal = true;
     completion->success = false;
@@ -9643,10 +9639,10 @@ sllm_elementwise_execute(const sllm_elementwise_plan_t *const raw_plan,
 #include "embedding_runtime.inc"
 #include "gdn_projection_bundle_runtime.inc"
 #include "matmul_runtime.inc"
+#include "ministral3_yarn_runtime.inc"
 #include "mlp_gate_up_silu_bundle_runtime.inc"
 #include "moe_expert_runtime.inc"
 #include "moe_route_runtime.inc"
-#include "ministral3_yarn_runtime.inc"
 #include "rotary_runtime.inc"
 #include "token_selector_runtime.inc"
 #include "windowed_attention_runtime.inc"
@@ -9749,8 +9745,7 @@ void fill_kv_view_info(const KvState *const state, const uint64_t length,
     info->reserved[1] =
         static_cast<uint32_t>(state->sliding_window >> UINT32_C(32));
     info->reserved[2] = static_cast<uint32_t>(retained_start);
-    info->reserved[3] =
-        static_cast<uint32_t>(retained_start >> UINT32_C(32));
+    info->reserved[3] = static_cast<uint32_t>(retained_start >> UINT32_C(32));
   }
   info->session_id = state->session_id;
   info->layer_id = state->layer_id;
@@ -11160,8 +11155,7 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
       const uint64_t required_tokens =
           state->sliding_window == 0U
               ? metadata.end_position
-              : std::min(metadata.end_position,
-                         state->storage_capacity_tokens);
+              : std::min(metadata.end_position, state->storage_capacity_tokens);
       const uint64_t required_bytes = required_tokens * bytes_per_token;
       const uint64_t required_mapped_bytes =
           plane.contiguous
@@ -11379,11 +11373,11 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
                  state->value_scale_plane.mapped_bytes) +
         std::min(state->key_outer_scale_plane.mapped_bytes,
                  state->value_outer_scale_plane.mapped_bytes);
-    state->mapped_token_capacity = std::min(
-        state->storage_capacity_tokens,
-        std::min(state->key_plane.mapped_bytes,
-                 state->value_plane.mapped_bytes) /
-            state->value_bytes_per_token);
+    state->mapped_token_capacity =
+        std::min(state->storage_capacity_tokens,
+                 std::min(state->key_plane.mapped_bytes,
+                          state->value_plane.mapped_bytes) /
+                     state->value_bytes_per_token);
     if (state->scale_bytes_per_token != 0U) {
       state->mapped_token_capacity =
           std::min(state->mapped_token_capacity,
@@ -11414,10 +11408,9 @@ sllm_kv_state_append(const sllm_kv_state_t *const raw_state,
         static_cast<float *>(state->key_outer_scale_plane.address),
         static_cast<float *>(state->value_outer_scale_plane.address),
         static_cast<uint32_t>(metadata.token_count),
-        state->storage_capacity_tokens,
-        metadata.start_position, state->head_count, state->head_dim,
-        state->encoding, state->static_key_scale, state->static_value_scale,
-        queue->stream);
+        state->storage_capacity_tokens, metadata.start_position,
+        state->head_count, state->head_dim, state->encoding,
+        state->static_key_scale, state->static_value_scale, queue->stream);
     if (launch_status != hipSuccess) {
       execute_guard.disarm();
       return cleanup_failed_submission(candidate, token, launch_status,
@@ -11523,5 +11516,31 @@ extern "C" void sllm_test_rmsnorm_execute_throw_after_registration(
     const uint32_t occurrences) noexcept {
   rmsnorm_throw_after_registration.store(occurrences,
                                          std::memory_order_release);
+}
+
+extern "C" uint32_t sllm_test_matmul_prepared_kernel_id(
+    const sllm_matmul_plan_t *const raw_plan) noexcept {
+  std::lock_guard<std::mutex> registry_lock(registry_mutex);
+  const ElementwisePlan *const plan =
+      lookup<ElementwisePlan>(raw_plan, HandleKind::MatmulPlan);
+  return plan == nullptr ? 0U
+                         : static_cast<uint32_t>(plan->matmul_kernel_variant);
+}
+
+extern "C" uint32_t sllm_test_matmul_prepared_provider_semantics(
+    const sllm_matmul_plan_t *const raw_plan, uint32_t *const provider,
+    uint32_t *const tile, uint32_t *const inner_product) noexcept {
+  std::lock_guard<std::mutex> registry_lock(registry_mutex);
+  const ElementwisePlan *const plan =
+      lookup<ElementwisePlan>(raw_plan, HandleKind::MatmulPlan);
+  if (plan == nullptr || !plan->matmul_provider_plan.has_value() ||
+      provider == nullptr || tile == nullptr || inner_product == nullptr) {
+    return 0U;
+  }
+  *provider = static_cast<uint32_t>(plan->matmul_provider_plan->provider);
+  *tile = static_cast<uint32_t>(plan->matmul_provider_plan->tile);
+  *inner_product =
+      static_cast<uint32_t>(plan->matmul_provider_plan->inner_product);
+  return 1U;
 }
 #endif

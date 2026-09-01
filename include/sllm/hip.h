@@ -150,6 +150,30 @@ typedef uint32_t sllm_status_t;
 #define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_V1 UINT32_C(19)
 #define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_DECODE_V1 UINT32_C(20)
 #define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_V1 UINT32_C(21)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_ROW8_V2 UINT32_C(22)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_ROW8_V2 UINT32_C(23)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_TILED16_V3 UINT32_C(24)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_TILED16_V3 UINT32_C(25)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL4_V4 UINT32_C(26)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL8_V4 UINT32_C(27)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL4_V4 UINT32_C(28)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL8_V4 UINT32_C(29)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X16X32_V1          \
+  UINT32_C(30)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_V2          \
+  UINT32_C(31)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA64X64X32_4W_V1        \
+  UINT32_C(32)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_LDSPAD_V1   \
+  UINT32_C(33)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_DIRECT_V1   \
+  UINT32_C(34)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_ADIRECT_V1  \
+  UINT32_C(35)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_BDIRECT_V1  \
+  UINT32_C(36)
+#define SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X128X32_BDIRECT_V1 \
+  UINT32_C(37)
 #define SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX UINT32_C(64)
 #define SLLM_HIP_MATMUL_WORKGROUP_SIZE UINT32_C(256)
@@ -1995,8 +2019,8 @@ SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_plan_release(
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_deepseek_v4_moe_route_execute(
-    const sllm_deepseek_v4_moe_route_plan_t *plan,
-    const sllm_queue_t *queue, sllm_completion_t **completion,
+    const sllm_deepseek_v4_moe_route_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
     sllm_deepseek_v4_moe_route_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
@@ -2016,8 +2040,8 @@ SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_plan_release(
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_minimax_m3_moe_route_execute(
-    const sllm_minimax_m3_moe_route_plan_t *plan,
-    const sllm_queue_t *queue, sllm_completion_t **completion,
+    const sllm_minimax_m3_moe_route_plan_t *plan, const sllm_queue_t *queue,
+    sllm_completion_t **completion,
     sllm_minimax_m3_moe_route_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
@@ -2064,11 +2088,11 @@ SLLM_HIP_API sllm_status_t sllm_rotary_execute(
     sllm_completion_t **completion, sllm_rotary_dispatch_info_t *dispatch_info,
     sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
-SLLM_HIP_API sllm_status_t sllm_ministral3_yarn_prepare(
-    const sllm_context_t *context,
-    const sllm_ministral3_yarn_desc_t *descriptor,
-    sllm_ministral3_yarn_plan_t **plan,
-    sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
+SLLM_HIP_API sllm_status_t
+sllm_ministral3_yarn_prepare(const sllm_context_t *context,
+                             const sllm_ministral3_yarn_desc_t *descriptor,
+                             sllm_ministral3_yarn_plan_t **plan,
+                             sllm_error_sink_t *error_sink) SLLM_HIP_NOEXCEPT;
 
 SLLM_HIP_API sllm_status_t sllm_ministral3_yarn_plan_release(
     sllm_ministral3_yarn_plan_t **plan,

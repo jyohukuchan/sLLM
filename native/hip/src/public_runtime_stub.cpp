@@ -2800,10 +2800,11 @@ extern "C" sllm_status_t sllm_mlp_gate_up_silu_bundle_execute(
       "public HIP runtime is unavailable; CPU fallback is disabled");
 }
 
-extern "C" sllm_status_t sllm_ministral3_yarn_prepare(
-    const sllm_context_t *, const sllm_ministral3_yarn_desc_t *,
-    sllm_ministral3_yarn_plan_t **const plan,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_ministral3_yarn_prepare(const sllm_context_t *,
+                             const sllm_ministral3_yarn_desc_t *,
+                             sllm_ministral3_yarn_plan_t **const plan,
+                             sllm_error_sink_t *const error_sink) noexcept {
   if (plan != nullptr) {
     *plan = nullptr;
   }
@@ -2820,11 +2821,12 @@ extern "C" sllm_status_t sllm_ministral3_yarn_plan_release(
       "public HIP runtime is unavailable; CPU fallback is disabled");
 }
 
-extern "C" sllm_status_t sllm_ministral3_yarn_execute(
-    const sllm_ministral3_yarn_plan_t *, const sllm_queue_t *,
-    sllm_completion_t **const completion,
-    sllm_ministral3_yarn_dispatch_info_t *,
-    sllm_error_sink_t *const error_sink) noexcept {
+extern "C" sllm_status_t
+sllm_ministral3_yarn_execute(const sllm_ministral3_yarn_plan_t *,
+                             const sllm_queue_t *,
+                             sllm_completion_t **const completion,
+                             sllm_ministral3_yarn_dispatch_info_t *,
+                             sllm_error_sink_t *const error_sink) noexcept {
   if (completion != nullptr) {
     *completion = nullptr;
   }

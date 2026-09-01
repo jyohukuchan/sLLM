@@ -1,8 +1,8 @@
 # GPU互換性方針
 
-> 最終更新: 2026-08-31
+> 最終更新: 2026-09-01
 >
-> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。Phase 61ではOCP MXFP8 W8A8／MXFP6 W6A6のmodel-free decode/prefill oracleを両target、Qwen3.5-4B短caseをexact `gfx1030`で検証した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
+> この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。Phase 61ではOCP MXFP8 W8A8／MXFP6 W6A6を追加し、Phase 62では共通low-precision codec、両RDNAのbit-exact W/A・KV・attentionと固定Qwen3.5-4B性能を検証した。Phase 63ではexact `gfx1201`のlarge-M MXFP8 WMMA provider、Phase 64／65では同じ演算順のoperand direct-load provider、Phase 66ではN128 ID37とMXFP6／NVFP4／MXFP4へのfrozen provider routingを狭いshape scopeへ採用した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
 ## 二層の識別モデル
 
@@ -430,6 +430,82 @@ caseはCPUのOCP encode/decode＋FP32 dot oracleへ相対誤差`0.02`以内で�
 `41.10%／51.71%`、prefill `48.10／100.16 tok/s`、decode `20.17／20.06 tok/s`を取得した。BF16は
 `284.03／45.68 tok/s`であり、現providerをperformance pathまたはdefaultへ昇格しない。full-model evidenceはこの固定artifact、
 FP16 KV、10品質case、17 input／4 outputだけに限定し、gfx1201／gfx942、長context、別SKU／tupleへ一般化しない。
+
+### 2026-08-31 Phase62 共通low-precision codec
+
+exact `gfx1030`／`gfx1201`のtarget別release code objectで、E4M3FN/FNUZ、E5M2、E3M2、E2M1、E8M0のdecode
+1,104 code、encode特殊値/tie境界、MX `31/32/33/256`、NV `15/16/17/256`を直接GPU testでPASSした。
+MXFP8/MXFP6 W/AのM=`1/3/17` 6 hash、MXFP8 KV append byte、29-case attention outputはbeforeおよび両GPU間で一致し、
+HIP-only、fallback false、cleanup 0だった。
+
+MXFP8 KV attentionのM=1/17/64/KV8193 medianはgfx1030で`29.80/156.92/615.85 us/5.248 ms`から
+`27.28/107.00/463.45 us/2.462 ms`、gfx1201で`12.12/36.00/133.36 us/3.515 ms`から
+`11.64/33.72/105.20 us/1.569 ms`へ短縮した。固定Qwen3.5-4B、FP16 KV、17 input／4 outputのW/A prefillは
+gfx1030 MXFP8/MXFP6 `48.48/99.23 tok/s`、gfx1201 `72.87/115.30 tok/s`だった。
+この結果はOCP MXFP W/Aの品質残差を変えず、W/A default化、KV default変更、gfx942や別GPU familyの対応を意味しない。
+
+### 2026-09-01 Phase63 exact gfx1201 large-M MXFP8 WMMA
+
+R9700 UUID `GPU-a8e9ddefa2d60f55`、exact `gfx1201`、wave32、Code Object V6で、OCP MXFP8 E4M3 W8A8の
+M>=128、K>=2,048、1,024<=N<=16,384、K%32=0、N%64=0を`wmma128x64x32.v2` providerへ限定採用した。
+最終code objectでN64 tileあたりFP8xFP8-to-FP32 WMMAを8命令、WG256、LDS 6,912 byte、spill 0を確認した。M=`127/128/129`、
+production projection、N=1,024、N=32／LM-head-like非選択、special E4M3/E8M0を含むoperator caseはHIP-only、fallback false、cleanup 0でPASSした。
+
+固定Qwen3.5-4B MXFP8、明示FP16 KVの3 warmup＋10 measured prefill中央値は512/1,024/2,048/4,096で
+`1,727.595/1,814.619/1,722.844/1,588.366 tok/s`だった。同一artifactのrow8/candidate品質はtop-1
+`0.95`、KLD p99 `0.0153089212`で、N1の固定FP32加算tree変更として記録した。model residentは不変で、
+persistent BF16/FP32展開はない。これはexact targetかつ上記shapeのevidenceであり、gfx1200、他R9700構成、RDNA4全体、gfx1030、
+gfx942、MXFP6/NVFP4、別software tupleへ一般化しない。
+
+同じmodel非依存selectorを固定Qwen3.5-9B MXFP8でも実行した。1 warmup＋3 measuredの512/1,024/2,048/4,096 prefill中央値は
+`788.346/896.405/912.870/889.445 tok/s`で、同一artifactの強制row8 `55.272/54.919/54.897/54.671 tok/s`に対して
+`14.26〜16.63x`だった。kernel traceはID 31を800 dispatch確認し、resident `11,205,394,944 byte`、HIP-only、fallback false、
+cleanup 0だった。4入力長中1件で4番目の生成tokenが分岐したため、9B包括品質は未検証のまま性能・経路evidenceだけを追加する。
+
+### 2026-09-01 Phase65 exact gfx1201 MXFP8 direct-both
+
+Phase 63のFP32 accumulation／BF16 RNE outputを固定し、ID31両LDS、ID34 weight direct、ID35 activation direct、
+ID36両directを33-case oracleと5反復operatorで比較した。M127／129は既存zero-paddingへ戻し、M128のwide、down、
+K11264境界、N64／256／512／1024で全digestが一致した。ID36をexact gfx1201、M%128=0、K>=2,048、
+64<=N<=16,384、K%32=0、N%64=0へ限定採用した。
+
+2,048-token direct prefillの最終中央値は4B `3,053.502 tok/s`、9B `1,761.989 tok/s`で、Phase 64既定値比
++37.81%／+36.50%だった。resident／peak、生成token、HIP-only、fallback false、cleanup 0は不変で、gfx1030／gfx942は
+current sourceのreal HIP compile-onlyをPASSしただけでGPU性能PASSを主張しない。詳細は
+[Phase 65追跡要約](../../ci/matrix/phase65-gfx1201-mxfp8-direct-both-v1.json)を正本とする。
+
+### 2026-09-01 Phase66 exact gfx1201 reusable low-precision provider
+
+R9700 UUID `GPU-a8e9ddefa2d60f55`、exact `gfx1201`、wave32、Code Object V6で、prepare時にformat contractと
+kernel variantをfreezeするmodel非依存providerをMXFP8、MXFP6、NVFP4 W4A16/W4A4、MXFP4 W4A4へ接続した。
+MXFP8 N128 direct-both ID37はPhase 65 familyのN%128=0かつK>=2,048だけへ採用し、N64、small-K、tail、vocabulary、
+別targetは既存providerへ戻す。ID36→37の同期operatorはwide `181,641/155,402 ns`（14.45%短縮）、down
+`398,403/373,404 ns`（6.27%短縮）でoutput digestが一致した。ID37はLDS 1,024 byte、private 0、
+SGPR/VGPR 40/164、spill 0、wave32、static WMMA 16命令であり、gfx1201 code object SHA-256は
+`4adc1528dddb2c98a564cd3a334c5b36203e45581dc0e89b1ff3a89b9dda8a88`である。
+
+M128/K2,048/N2,048の特殊値oracleは`109,403/127,083/93,282 ns`で、E4M3 subnormal／tie／max／saturation、
+E8M0 minimum／finite／NaN scale、signed zero、Inf/NaNを通過した。期待／実測nonfiniteは4/4、mismatch 0、
+max abs `2016.0`、max relative `0.0004885197849944234`で、weight／scale／output SHA-256は順に
+`28115b7a22433e3157e5528d7671cf1d771d280b202be078841199b521558db9`、
+`a050683b3a1227b0ad4c085acee3ac4bd90259f784b65fe1acc4c6fd1983b910`、
+`dd6ce055b912fb96a003e873cb121a02f80de3e29016fd3efd060494716c137d`だった。
+
+固定MXFP8 4B／9B、FP16 KV、3+10の512/1,024/2,048/4,096 prefill中央値は、4B
+`3,840.804836/3,806.640973/3,767.237995/3,249.069405 tok/s`、9B
+`1,988.722356/2,231.573186/2,261.647647/2,069.842794 tok/s`だった。最大peakは4B
+`7,301,568,000`、9B `14,169,489,920` byte、workspace arena high-waterは`1,080,836,096` byteだった。
+全runはHIP-only、fallback false、allocator after-drop 0で、external HBM/GTTは別途sampleしていない。
+
+FP16／MXFP8 E4 KVのtyped q4k4／q4k8／q8k8 attentionは全oracleでbit一致したが、M=128/512/2,048の
+同期時間が既存providerより4.3〜27.3%長くproduction不採用とした。selectorはQ/K/V dtype、head dim、GQA、KV layout、
+causal、sliding window、明示score scale、M/N/K、alignment、exact targetを入力にし、不明tupleはfail-closeする。
+BF16 weightの512-token実dispatchもPASSし、selectorがweight形式に依存しないことだけを確認した。Gemma q16/kv8と
+Qwen3.5 MoE MXFP4 q16/kv2はtyped candidateとしてreviewしたが明示的に非選択とした。MXFP6、NVFP4、MXFP4も
+operator oracleをPASSし、NVFP4 reviewed Gemma routeまでHIP-only／cleanup 0を確認した。NVFP4／MXFP4 W4A4は既存device kernelへのprovider routing移植であり、
+別candidate kernelのA/Bを主張しない。MXFP4 full MoE production、gfx1030/gfx942のGPU性能、別R9700／tupleは未検証である。
+詳細は[Phase 66履歴](../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
+[追跡要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
 
 ### software.mdとの関係
 

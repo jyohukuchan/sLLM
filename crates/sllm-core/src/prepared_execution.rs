@@ -5,7 +5,7 @@
 //! This module owns cache identity, asynchronous segment ownership, boundary
 //! accounting, and fail-closed request transaction state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -726,6 +726,7 @@ pub struct PreparedExecutionAudit {
     boundary_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
 }
 
 impl PreparedExecutionAudit {
@@ -764,6 +765,10 @@ impl PreparedExecutionAudit {
     pub const fn sparse_moe_active_pair_count(&self) -> u64 {
         self.sparse_moe_active_pair_count
     }
+
+    pub(crate) fn kernel_dispatches_by_identity(&self) -> &BTreeMap<(u32, String), u64> {
+        &self.kernel_dispatches_by_identity
+    }
 }
 
 pub(crate) struct ExecutionAuditAccumulator {
@@ -776,6 +781,7 @@ pub(crate) struct ExecutionAuditAccumulator {
     boundary_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
 }
 
 impl ExecutionAuditAccumulator {
@@ -790,6 +796,7 @@ impl ExecutionAuditAccumulator {
             boundary_count: 0,
             sparse_moe_submission_count: 0,
             sparse_moe_active_pair_count: 0,
+            kernel_dispatches_by_identity: BTreeMap::new(),
         }
     }
 
@@ -859,6 +866,18 @@ impl ExecutionAuditAccumulator {
                     "kernel dispatch count overflowed u64".to_owned(),
                 )
             })?;
+        let identity = (evidence.kernel_id, evidence.kernel_symbol.clone());
+        let count = self
+            .kernel_dispatches_by_identity
+            .entry(identity)
+            .or_insert(0);
+        *count = count
+            .checked_add(u64::from(evidence.dispatch_count))
+            .ok_or_else(|| {
+                PreparedExecutionError::InvalidAudit(
+                    "kernel identity dispatch count overflowed u64".to_owned(),
+                )
+            })?;
         self.fallback_used |= evidence.fallback_used;
         Ok(())
     }
@@ -904,6 +923,7 @@ impl ExecutionAuditAccumulator {
             boundary_count: self.boundary_count,
             sparse_moe_submission_count: self.sparse_moe_submission_count,
             sparse_moe_active_pair_count: self.sparse_moe_active_pair_count,
+            kernel_dispatches_by_identity: self.kernel_dispatches_by_identity.clone(),
         })
     }
 }
@@ -1268,6 +1288,18 @@ mod tests {
         let snapshot = audit.snapshot().unwrap();
         assert_eq!(snapshot.submission_count(), 3);
         assert_eq!(snapshot.kernel_dispatch_count(), 4);
+        assert_eq!(
+            snapshot
+                .kernel_dispatches_by_identity()
+                .get(&(1, "synthetic".to_owned())),
+            Some(&4)
+        );
+        assert_eq!(
+            snapshot
+                .kernel_dispatches_by_identity()
+                .get(&(30, "missing".to_owned())),
+            None
+        );
         assert_eq!(snapshot.segment_count(), 1);
         assert_eq!(snapshot.boundary_count(), 1);
     }

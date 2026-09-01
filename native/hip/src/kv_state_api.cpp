@@ -234,13 +234,11 @@ validate_state_create_info_v2(const sllm_kv_state_create_info_v2_t *const info,
        fp8_static && all_zero(info->reserved + 2U, 2U)) ||
       (info->create_info_version ==
            SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION &&
-       fp8_static && static_key_scale == 1.0F &&
-       static_value_scale == 1.0F &&
+       fp8_static && static_key_scale == 1.0F && static_value_scale == 1.0F &&
        u64_from_words(info->reserved[2], info->reserved[3]) ==
            SLLM_HIP_KV_SLIDING_WINDOW_GEMMA4);
-  const bool sliding =
-      info->create_info_version ==
-      SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
+  const bool sliding = info->create_info_version ==
+                       SLLM_HIP_KV_STATE_CREATE_INFO_SLIDING_STATIC_FP8_VERSION;
   if (!version_matches || info->reserved0 != 0U || info->flags != 0U ||
       info->session_id == 0U || info->capacity_tokens == 0U ||
       info->capacity_tokens > SLLM_HIP_KV_MAX_CAPACITY ||

@@ -1236,10 +1236,10 @@ pub fn build_minimax_m3_gguf_foundation_catalog(
             direct = direct
                 .checked_add(1)
                 .ok_or_else(|| invalid("direct source count overflowed"))?;
-            if let Some(output_name) = row.output_name.as_deref()
-                && !direct_outputs.insert(output_name.to_owned())
-            {
-                return Err(invalid(format!("direct output collision: {output_name}")));
+            if let Some(output_name) = row.output_name.as_deref() {
+                if !direct_outputs.insert(output_name.to_owned()) {
+                    return Err(invalid(format!("direct output collision: {output_name}")));
+                }
             }
             if row.output_name.is_none()
                 && !matches!(

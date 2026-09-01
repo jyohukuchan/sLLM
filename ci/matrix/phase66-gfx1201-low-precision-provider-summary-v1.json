@@ -1,0 +1,790 @@
+{
+  "schema_version": "sllm-phase66-gfx1201-low-precision-provider-summary-v1",
+  "state": "PASS",
+  "date": "2026-09-01",
+  "target": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "logical_device_index": 0,
+    "gcn_arch": "gfx1201",
+    "wavefront_size": 32,
+    "code_object_version": 6,
+    "rocm_version": "7.14.0",
+    "hip_version": "7.14.60850",
+    "compiler": "LLVM 23"
+  },
+  "artifacts": {
+    "qwen35_4b_mxfp8_gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "qwen35_9b_mxfp8_gguf_sha256": "eff9e54d04056f968604301a856bd871454913a24b3fb26cda61ce178d7c4033",
+    "qwen35_4b_mxfp6_gguf_sha256": "d0ff2e1de9d87dddddcde8f85ef305bbf21a06d5f7586d077ba1178580a0264e",
+    "qwen35_4b_bf16_gguf_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "gemma4_nvfp4_gguf_sha256": "4e0410c6afa45daef0a723c5adc7ab89c410c1f106d199b1c3c023c15e902fb5",
+    "gemma4_nvfp4_lock_sha256": "ed99cdd9566b3611998a2571d37021aa3ce63afb3068f1be9efa7b590710d98c",
+    "qwen35_moe_mxfp4_gguf_sha256": "440223026c243ac04d0be36934b0b5ed8791db66fd6c37b198e02f15e7a61fce",
+    "qwen35_moe_mxfp4_lock_sha256": "54ed69972426762e66ceda4ad6d632795d766dee86c178db2cd563a975541bc3",
+    "primary_kv_encoding": "fp16"
+  },
+  "identities": {
+    "sllm_cli_sha256": "55fd3a5e7fd85f9685739964d7128007d64195e5f5983580523138272044dc9c",
+    "matrix_operator_runner_sha256": "030168e04610dc1b6d2ba5c81ac1ad6f07355a1ef145620063fb110d16bd86ea",
+    "attention_operator_runner_sha256": "c4643ccd55cf3ad115c7fd91908fa60f533ea33e9b406412d5fdbaec1744fd47",
+    "matmul_host_object_with_fatbin_sha256": "3ada513d756ac5364896fb776cc655d50cad35752e2b0e2700c9dde434dd4ad5",
+    "matmul_embedded_fatbin_sha256": "78787b13891d2afb6781963524429eb37d84db3dcd8d2d2a8b8f91cd20f91e99",
+    "matmul_gfx1201_code_object_sha256": "4adc1528dddb2c98a564cd3a334c5b36203e45581dc0e89b1ff3a89b9dda8a88",
+    "profile_kernel_trace_csv_sha256": "2bd1efbf56d119239da62ffcede65247650bab683b74636081bd315681df12d9",
+    "profile_kernel_stats_csv_sha256": "d8a3966dc6446781af1bd846f2fd6ed6cc893c1892e17c16a3a7b36c34848f9e"
+  },
+  "provider_contract": {
+    "selection_time": "prepare",
+    "execute_uses_frozen_provider_and_kernel_variant": true,
+    "model_identity_used": false,
+    "selector_inputs": [
+      "exact target and architecture",
+      "weight and activation encoding",
+      "block policy",
+      "layout and alignment",
+      "M, N, and K",
+      "accumulation and output dtype"
+    ],
+    "semantic_parts": [
+      "architecture policy",
+      "format codec",
+      "activation pack",
+      "tile policy",
+      "format-specific inner product"
+    ],
+    "formats": [
+      "MXFP8 E4M3 W8A8 block32 E8M0",
+      "MXFP6 E3M2 W6A6 block32 E8M0",
+      "NVFP4 W4A16 block16 tensor scale",
+      "NVFP4 W4A4 block16 tensor scale",
+      "MXFP4 W4A4 block32 E8M0"
+    ],
+    "persistent_bf16_or_fp32_weight_expansion": false,
+    "persistent_fp32_attention_or_kv_plane": false,
+    "cross_request_activation_cache": false
+  },
+  "mxfp8_matrix": {
+    "control": {
+      "kernel_id": 36,
+      "logical_kernel": "matmul.mxfp8.w8a8.gfx1201.wmma128x64.bdirect.v1",
+      "tile": "128x64x32",
+      "staging": "activation direct, weight direct"
+    },
+    "candidate": {
+      "kernel_id": 37,
+      "logical_kernel": "matmul.mxfp8.w8a8.gfx1201.wmma128x128.bdirect.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1201_wmma128x128_bdirect_v1",
+      "tile": "128x128x32",
+      "staging": "activation direct, weight direct",
+      "numerical_classification": "N0",
+      "output_bf16_digests_equal_to_control": true
+    },
+    "selector": {
+      "decision": "scoped-default",
+      "target": "gfx1201",
+      "scope": "Phase 65 direct-both production family with N multiple of 128: M multiple of 128 and M>=128, K>=2048 and multiple of 32, 128<=N<=16384 and N multiple of 128",
+      "n64_uses_kernel_id": 36,
+      "small_k_tail_vocabulary_and_out_of_scope_use_existing_provider": true,
+      "model_identity_used": false
+    },
+    "operator": {
+      "result": "PASS",
+      "repeat_count": 3,
+      "boundary_shapes": "M=127/128/129, K=31/32/33, N=64/127/128/129/256/512/1024 plus production wide and down projections",
+      "k31_and_k33": "expected host rejection; no GPU PASS claimed",
+      "k32": "accepted and executed",
+      "independent_oracle": true,
+      "repeat_output_digest_equal": true,
+      "fallback_used": false,
+      "cleanup_zero": true,
+      "representative_rows": [
+        {
+          "shape": "m128_k2560_n9216",
+          "id36_median_ns": 181641,
+          "id37_median_ns": 155402,
+          "id37_over_id36_ratio": 0.8555447283,
+          "id37_delta_percent": -14.4455
+        },
+        {
+          "shape": "m128_k9216_n2560",
+          "id36_median_ns": 398403,
+          "id37_median_ns": 373404,
+          "id37_over_id36_ratio": 0.9372519785,
+          "id37_delta_percent": -6.2748
+        },
+        {
+          "shape": "m128_k32_n128",
+          "id36_median_ns": 25920,
+          "id37_median_ns": 28760,
+          "decision": "small-K excluded from production selector"
+        }
+      ],
+      "special_value_case": {
+        "shape": "m128_k2048_n2048",
+        "kernel_id": 37,
+        "kernel_elapsed_ns": [
+          109403,
+          127083,
+          93282
+        ],
+        "weight_value_sha256": "28115b7a22433e3157e5528d7671cf1d771d280b202be078841199b521558db9",
+        "weight_scale_sha256": "a050683b3a1227b0ad4c085acee3ac4bd90259f784b65fe1acc4c6fd1983b910",
+        "output_sha256": "dd6ce055b912fb96a003e873cb121a02f80de3e29016fd3efd060494716c137d",
+        "max_abs_error": 2016.0,
+        "max_relative_error": 0.0004885197849944234,
+        "classes": [
+          "E4M3 subnormal",
+          "E4M3 tie",
+          "E4M3 maximum",
+          "E4M3 saturation",
+          "E8M0 minimum",
+          "E8M0 finite",
+          "E8M0 NaN scale",
+          "signed zero",
+          "Inf",
+          "NaN"
+        ],
+        "special_encoding_contract_validated": true,
+        "expected_nonfinite_count": 4,
+        "actual_nonfinite_count": 4,
+        "nonfinite_position_mismatch_count": 0,
+        "repeat_output_digest_equal": true
+      }
+    },
+    "resources": {
+      "lds_bytes": 1024,
+      "private_segment_bytes": 0,
+      "sgpr_count": 40,
+      "vgpr_count": 164,
+      "spill_count": 0,
+      "wavefront_size": 32,
+      "static_wmma_instructions": 16
+    }
+  },
+  "attention": {
+    "implemented_candidates": [
+      "causal_attention.prefill.typed_q4k4.v1",
+      "causal_attention.prefill.typed_q4k8.v1",
+      "causal_attention.prefill.typed_q8k8.v1"
+    ],
+    "selector_inputs": [
+      "exact target",
+      "query heads",
+      "KV heads",
+      "head dimension",
+      "query count",
+      "committed KV length",
+      "KV encoding",
+      "sliding window semantics",
+      "explicit score scale semantics"
+    ],
+    "model_or_weight_encoding_used": false,
+    "supported_kv_encodings_tested": [
+      "fp16",
+      "mxfp8-e4"
+    ],
+    "numerical_classification": "N0",
+    "oracle": "exact output digest and max_abs_error=0 for all measured control/candidate pairs",
+    "decision": "rejected-for-production; retained as explicit Phase 66 opt-in evidence candidate",
+    "reason": "all primary M=128/512/2048 synchronized rows regressed despite exact output",
+    "timings": [
+      {
+        "kv_encoding": "fp16",
+        "query_count": 128,
+        "control_ns": 197881,
+        "candidate_ns": 209242,
+        "candidate_delta_percent": 5.7
+      },
+      {
+        "kv_encoding": "fp16",
+        "query_count": 512,
+        "control_ns": 1187928,
+        "candidate_ns": 1308208,
+        "candidate_delta_percent": 10.1
+      },
+      {
+        "kv_encoding": "fp16",
+        "query_count": 2048,
+        "control_ns": 12885318,
+        "candidate_ns": 15514969,
+        "candidate_delta_percent": 20.4
+      },
+      {
+        "kv_encoding": "mxfp8-e4",
+        "query_count": 128,
+        "control_ns": 196282,
+        "candidate_ns": 204803,
+        "candidate_delta_percent": 4.3
+      },
+      {
+        "kv_encoding": "mxfp8-e4",
+        "query_count": 512,
+        "control_ns": 1192248,
+        "candidate_ns": 1278049,
+        "candidate_delta_percent": 7.2
+      },
+      {
+        "kv_encoding": "mxfp8-e4",
+        "query_count": 2048,
+        "control_ns": 13181842,
+        "candidate_ns": 16776429,
+        "candidate_delta_percent": 27.3
+      }
+    ],
+    "reconsider_when": "a new load/reduction structure improves synchronized M=128, M=512, and M=2048 rows without persistent FP32 attention/KV storage",
+    "fail_close": {
+      "sliding_window": "typed Phase 66 candidate not selected",
+      "explicit_score_scale": "typed Phase 66 candidate not selected",
+      "unknown_tuple": "existing provider retained"
+    },
+    "explicit_nonselections": [
+      {
+        "model_route": "reviewed Gemma 4 mixed NVFP4/FP8",
+        "geometry": "q16/kv8",
+        "reason": "outside typed q16/kv4 candidate geometry"
+      },
+      {
+        "model_route": "Qwen3.5-35B-A3B MXFP4",
+        "geometry": "q16/kv2",
+        "reason": "outside typed q16/kv4 candidate geometry"
+      }
+    ]
+  },
+  "transfer": {
+    "mxfp6": {
+      "provider_routing": "shared block32/E8M0 contract with E3M2 format specialization",
+      "candidate": "existing tiled16 production kernel connected to the frozen provider plan",
+      "operator": {
+        "shape": "m17_k2560_n32",
+        "production_kernel_id": 25,
+        "production_median_ns": 138641,
+        "baseline_kernel_id": 21,
+        "baseline_median_ns": 37120,
+        "output_digest_equal": true,
+        "decision": "retain tiled16 for full-shape feasibility; small-N needs a future shape selector"
+      },
+      "full_model": {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_tokens": 2048,
+        "warmups": 1,
+        "measured": 3,
+        "samples_tokens_per_second": [
+          300.943,
+          303.996,
+          301.984
+        ],
+        "median_tokens_per_second": 301.984,
+        "mad_tokens_per_second": 1.041,
+        "model_resident_bytes": 4061763072,
+        "peak_bytes": 5261350400,
+        "forced_baseline_result": "invalid launch configuration at full M=2048",
+        "fallback_used": false,
+        "cleanup_zero": true
+      }
+    },
+    "nvfp4": {
+      "w4a16": {
+        "routing": "shared provider plan selects the existing row8 tiled kernel",
+        "device_candidate_differs_from_existing_kernel": false,
+        "operator_rows": [
+          {
+            "shape": "m32_k2048_n6144",
+            "row8_median_ns": 1210092,
+            "baseline_median_ns": 2891391,
+            "row8_delta_percent": -58.2
+          },
+          {
+            "shape": "m32_k6144_n2048",
+            "row8_median_ns": 1199054,
+            "baseline_median_ns": 2629668,
+            "row8_delta_percent": -54.4
+          }
+        ],
+        "maximum_relative_error_below": 0.0039
+      },
+      "w4a4": {
+        "routing": "provider-only transfer to the existing packed device kernel",
+        "device_candidate_differs_from_existing_kernel": false,
+        "operator": "PASS for K=15/16/17/31/32/33 and M>1",
+        "kernel_id": 11,
+        "representative_median_ns": 20641,
+        "representative_shape": "m32_k32_n33",
+        "maximum_relative_error": 0.00380045
+      },
+      "full_model": {
+        "model": "Gemma 4 reviewed mixed NVFP4 W4A4/FP8 W8A8 artifact",
+        "input_tokens": 512,
+        "warmups": 1,
+        "measured": 3,
+        "samples_tokens_per_second": [
+          20.5576,
+          20.4992,
+          20.4858
+        ],
+        "median_tokens_per_second": 20.4992,
+        "mad_tokens_per_second": 0.0134,
+        "model_resident_bytes": 9201218276,
+        "peak_bytes": 15271004900,
+        "fallback_used": false,
+        "cleanup_zero": true
+      },
+      "decision": "provider routing adopted; no claim of a new W4A4 device kernel"
+    },
+    "mxfp4": {
+      "routing": "provider-only transfer to existing decode/prefill device kernels",
+      "device_candidate_differs_from_existing_kernel": false,
+      "operator": "PASS for synthetic K=31/32/33, M=1/3/7 and artifact expert gate/up/down with M>1",
+      "kernel_ids": {
+        "decode": 14,
+        "prefill": 15
+      },
+      "maximum_relative_error_below": 0.00389,
+      "production_full_moe_route": "out-of-scope",
+      "decision": "scoped operator adoption of provider routing",
+      "reconsider_when": "a reviewed full-MoE production benchmark is explicitly in scope and has synchronized baseline/candidate evidence"
+    },
+    "bf16_attention": {
+      "model": "Qwen/Qwen3.5-4B BF16",
+      "input_tokens": 512,
+      "warmups": 1,
+      "measured": 3,
+      "samples_tokens_per_second": [
+        5886.223,
+        5863.158,
+        5875.651
+      ],
+      "median_tokens_per_second": 5875.651,
+      "mad_tokens_per_second": 10.572,
+      "model_resident_bytes": 8411592192,
+      "peak_bytes": 8750220800,
+      "result": "candidate dispatch validated with the same weight-independent attention selector",
+      "production_decision": "attention candidate rejected by the operator timing above",
+      "fallback_used": false,
+      "cleanup_zero": true
+    }
+  },
+  "final_mxfp8_full_model": {
+    "protocol": {
+      "models": [
+        "Qwen/Qwen3.5-4B",
+        "Qwen/Qwen3.5-9B"
+      ],
+      "input_tokens": [
+        512,
+        1024,
+        2048,
+        4096
+      ],
+      "maximum_new_tokens": 4,
+      "warmups": 3,
+      "measured": 10,
+      "input_token_id": 23066,
+      "kv_encoding": "fp16"
+    },
+    "rows": [
+      {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_tokens": 512,
+        "samples_tokens_per_second": [
+          3884.739888894618,
+          3870.6587623077216,
+          3830.9225332843193,
+          3852.283410142999,
+          3828.8595216194494,
+          3852.4958785818503,
+          3840.818939414262,
+          3840.7907323940085,
+          3794.5392474419264,
+          3789.7486809657585
+        ],
+        "median_tokens_per_second": 3840.804836,
+        "mad_tokens_per_second": 11.818178,
+        "model_resident_bytes": 4954035712,
+        "peak_bytes": 5292664320,
+        "prefill_duration_ns": [
+          131797756,
+          132277225,
+          133649270,
+          132908186,
+          133721281,
+          132900856,
+          133304904,
+          133305883,
+          134930743,
+          135101307
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_tokens": 1024,
+        "samples_tokens_per_second": [
+          3830.573638203203,
+          3826.136158241399,
+          3806.240827689073,
+          3806.631350322138,
+          3805.777525588855,
+          3804.9119250394897,
+          3786.1205280486033,
+          3823.325830865362,
+          3821.854593981377,
+          3806.650595538032
+        ],
+        "median_tokens_per_second": 3806.640973,
+        "mad_tokens_per_second": 8.471334,
+        "model_resident_bytes": 4954035712,
+        "peak_bytes": 5579650560,
+        "prefill_duration_ns": [
+          267322886,
+          267632922,
+          269031847,
+          269004247,
+          269064598,
+          269125809,
+          270461543,
+          267829645,
+          267932747,
+          269002887
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_tokens": 2048,
+        "samples_tokens_per_second": [
+          3768.8357018493584,
+          3782.469178075247,
+          3759.0796319354445,
+          3775.51874595201,
+          3761.7915864526144,
+          3765.6402872262724,
+          3771.0566675893665,
+          3771.3290293875584,
+          3749.0602064379364,
+          3756.273145809393
+        ],
+        "median_tokens_per_second": 3767.237995,
+        "mad_tokens_per_second": 6.802385,
+        "model_resident_bytes": 4954035712,
+        "peak_bytes": 6153623040,
+        "prefill_duration_ns": [
+          543403895,
+          541445258,
+          544814210,
+          542442016,
+          544421442,
+          543865012,
+          543083857,
+          543044636,
+          546270235,
+          545221266
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_tokens": 4096,
+        "samples_tokens_per_second": [
+          3262.4750670560093,
+          3261.4667801238807,
+          3255.9483208823717,
+          3247.2771949368866,
+          3245.842308980136,
+          3252.232430677572,
+          3250.861614441784,
+          3243.53156638694,
+          3240.91499208473,
+          3243.276564554358
+        ],
+        "median_tokens_per_second": 3249.069405,
+        "mad_tokens_per_second": 5.665339,
+        "model_resident_bytes": 4954035712,
+        "peak_bytes": 7301568000,
+        "prefill_duration_ns": [
+          1255488522,
+          1255876658,
+          1258005225,
+          1261364446,
+          1261922056,
+          1259442579,
+          1259973658,
+          1262821069,
+          1263840616,
+          1262920358
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-9B",
+        "input_tokens": 512,
+        "samples_tokens_per_second": [
+          1988.9544038729168,
+          1981.9779749213592,
+          1336.8344505391997,
+          1988.4903073991632,
+          1965.0581647237948,
+          1981.0867658505495,
+          1992.9640738876171,
+          1993.9134545603636,
+          1991.3839041541949,
+          1992.3427962443202
+        ],
+        "median_tokens_per_second": 1988.722356,
+        "mad_tokens_per_second": 4.716409,
+        "model_resident_bytes": 11205394944,
+        "peak_bytes": 11621093888,
+        "prefill_duration_ns": [
+          257421688,
+          258327795,
+          382994319,
+          257481768,
+          260552084,
+          258444006,
+          256903778,
+          256781456,
+          257107632,
+          256983889
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-9B",
+        "input_tokens": 1024,
+        "samples_tokens_per_second": [
+          2250.792823088594,
+          2232.0756591863815,
+          2244.214870467983,
+          2251.540331181222,
+          2227.085567165585,
+          2228.525724269609,
+          2232.3791647003545,
+          2231.070712579191,
+          2228.7534565376054,
+          2226.5793693896694
+        ],
+        "median_tokens_per_second": 2231.573186,
+        "mad_tokens_per_second": 3.76754,
+        "model_resident_bytes": 11205394944,
+        "peak_bytes": 11985150464,
+        "prefill_duration_ns": [
+          454950802,
+          458765811,
+          456284295,
+          454799759,
+          459793739,
+          459496603,
+          458703439,
+          458972454,
+          459449652,
+          459898270
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-9B",
+        "input_tokens": 2048,
+        "samples_tokens_per_second": [
+          2276.84948405768,
+          2272.3656742681374,
+          2275.4227416583726,
+          2272.7406400095347,
+          2267.3230592017126,
+          2091.4459603895393,
+          2255.9722351328346,
+          2248.855192702502,
+          2252.160393655115,
+          2244.189624310121
+        ],
+        "median_tokens_per_second": 2261.647647,
+        "mad_tokens_per_second": 11.942724,
+        "model_resident_bytes": 11205394944,
+        "peak_bytes": 12713263616,
+        "prefill_duration_ns": [
+          899488532,
+          901263394,
+          900052532,
+          901114700,
+          903267839,
+          979226831,
+          907812591,
+          910685582,
+          909349088,
+          912578856
+        ]
+      },
+      {
+        "model": "Qwen/Qwen3.5-9B",
+        "input_tokens": 4096,
+        "samples_tokens_per_second": [
+          2091.377950821512,
+          2086.8428611055006,
+          2084.9474846853263,
+          2076.45897071693,
+          2070.213634513323,
+          2069.471954228341,
+          2047.4199526191933,
+          2057.400795041952,
+          2063.0702505797217,
+          2058.538563634946
+        ],
+        "median_tokens_per_second": 2069.842794,
+        "mad_tokens_per_second": 11.873115,
+        "model_resident_bytes": 11205394944,
+        "peak_bytes": 14169489920,
+        "prefill_duration_ns": [
+          1958517349,
+          1962773564,
+          1964557875,
+          1972588940,
+          1978539766,
+          1979248857,
+          2000566613,
+          1990861484,
+          1985390463,
+          1989761121
+        ]
+      }
+    ],
+    "generated_tokens_all_runs": [
+      23066,
+      23066,
+      23066,
+      23066
+    ],
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "cleanup_zero": true,
+    "after_process_drop_bytes": 0,
+    "resources": {
+      "workspace_arena_high_water_bytes": 1080836096,
+      "external_sysfs_hbm_gtt_sampled": false,
+      "external_hbm_gtt_note": "not separately sampled for the final 3+10 series",
+      "allocator_after_process_drop_bytes": 0
+    }
+  },
+  "profile_2048": {
+    "state": "PASS",
+    "tool": "rocprofv3 kernel trace and stats CSV",
+    "binary_sha256": "55fd3a5e7fd85f9685739964d7128007d64195e5f5983580523138272044dc9c",
+    "protocol": {
+      "model": "Qwen/Qwen3.5-4B MXFP8",
+      "input_tokens": 2048,
+      "maximum_new_tokens": 4,
+      "warmups": 1,
+      "measured": 3,
+      "kv_encoding": "fp16"
+    },
+    "trace_prefill_span_ns": [
+      566837287,
+      545405457,
+      543480740,
+      546908478
+    ],
+    "trace_prefill_kernel_sum_ns": [
+      533887823,
+      532097771,
+      530048794,
+      533041778
+    ],
+    "trace_queue_or_host_gap_ns": [
+      32949464,
+      13307686,
+      13431946,
+      13866700
+    ],
+    "trace_profiled_tokens_per_second": [
+      3613.0297829189913,
+      3755.0046001831624,
+      3768.3028105098997,
+      3744.6850476506966
+    ],
+    "measured_profiled_median_tokens_per_second": 3755.0046001831624,
+    "companion_unprofiled_3_plus_10_median_tokens_per_second": 3767.237995,
+    "kernel_total_duration_ns_per_evaluation_mean": 532269041.5,
+    "kernel_total_duration_ns_per_evaluation_median": 532569774.5,
+    "trace_span_ns_per_evaluation_median": 546156967.5,
+    "queue_or_host_gap_ns_per_evaluation_median": 13649323.0,
+    "queue_or_host_gap_note": "trace span minus serialized kernel duration; includes queue idle and profiler/host effects and is not separately attributable to launcher code",
+    "groups": {
+      "mxfp8_kernel_id_37": {
+        "calls_total": 800,
+        "calls_per_evaluation": 200,
+        "duration_ns_per_evaluation_mean": 262157037.75,
+        "kernel_duration_percent": 49.2527
+      },
+      "small_n_or_fallback_matrix_including_lm_head": {
+        "calls_total": 196,
+        "calls_per_evaluation": 49,
+        "duration_ns_per_evaluation_mean": 22436507.0,
+        "kernel_duration_percent": 4.2153
+      },
+      "mxfp8_row8_subset": {
+        "calls_total": 192,
+        "calls_per_evaluation": 48,
+        "duration_ns_per_evaluation_mean": 20438457.75,
+        "kernel_duration_percent": 3.8399
+      },
+      "activation_quantization": {
+        "calls_total": 992,
+        "calls_per_evaluation": 248,
+        "duration_ns_per_evaluation_mean": 21840557.0,
+        "kernel_duration_percent": 4.1033
+      },
+      "causal_attention_prefill": {
+        "calls_total": 32,
+        "calls_per_evaluation": 8,
+        "duration_ns_per_evaluation_mean": 109177940.25,
+        "kernel_duration_percent": 20.5118
+      },
+      "linear_attention_recurrent": {
+        "calls_total": 96,
+        "calls_per_evaluation": 24,
+        "duration_ns_per_evaluation_mean": 66613174.0,
+        "kernel_duration_percent": 12.5149
+      },
+      "elementwise": {
+        "calls_total": 416,
+        "calls_per_evaluation": 104,
+        "duration_ns_per_evaluation_mean": 11617885.75,
+        "kernel_duration_percent": 2.1827
+      }
+    },
+    "resource_observation": {
+      "workspace_arena_high_water_bytes": 1080836096,
+      "external_sysfs_hbm_gtt_sampled": false,
+      "allocator_after_process_drop_bytes": 0
+    },
+    "raw_profile_artifacts_tracked_in_repository": false
+  },
+  "numerical": {
+    "classification": "N0",
+    "reason": "ID37 changes independent output-column tiling while preserving each output's arithmetic tree; attention and provider-routing transfers preserve the existing device arithmetic and measured digests",
+    "quantization_recipe_changed": false,
+    "accumulator_changed": false,
+    "rounding_stage_changed": false,
+    "token_or_logit_divergence_observed": false,
+    "quality_gate_applied": false
+  },
+  "license_boundary": {
+    "third_party_code_reused": false,
+    "llama_cpp_direct_reuse": false,
+    "non_mit_code_reused": false,
+    "comparison_abstractions_only": true,
+    "record": "docs/provenance/phase65-inference-engine-comparison.md"
+  },
+  "verification": {
+    "gfx1201_matrix_operator_oracle": "PASS",
+    "gfx1201_attention_operator_oracle": "PASS",
+    "gfx1201_mxfp8_full_model_4b": "PASS",
+    "gfx1201_mxfp8_full_model_9b": "PASS",
+    "gfx1201_mxfp6_operator_and_full_model": "PASS",
+    "gfx1201_nvfp4_operator_and_reviewed_model": "PASS",
+    "gfx1201_mxfp4_operator": "PASS",
+    "gfx1201_bf16_attention_dispatch": "PASS",
+    "public_runtime_prepared_provider_freeze": "PASS",
+    "gfx1030_release_compile_only": "PASS (compile-only; no GPU PASS claim)",
+    "gfx942_wave64_release_compile_only": "PASS (compile-only; no GPU PASS claim)",
+    "cargo_fmt_check": "PASS",
+    "clang_format_check": "PASS",
+    "git_diff_check": "PASS",
+    "json_parse": "PASS",
+    "markdown_local_links": "PASS after Phase 66 plan archive move",
+    "json_schema_manifest_contracts": "PASS",
+    "h3_g2_p0_build_input_closure": "PASS"
+  }
+}

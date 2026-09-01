@@ -351,6 +351,17 @@ ggml tensor/runtimeやgeneric CUDA dispatchは移植していない。import com
 `bca482251bd21b144d950956af39a769c4211417`、導入時local file SHA-256は
 `cf8e8aafa5e7e64c8fe5bc082912b5b8a328d0a9ed407965d6782cad72b3bc4a`へ固定した。model、binary、raw trace、生成全文はrepositoryへ含めない。
 
+## Phase 66 reusable low-precision provider record
+
+Phase 66はPhase 65で固定したllama.cpp、SGLang、vLLM、LMDeploy、KTransformers、TensorRT-LLM比較から、
+target／format／shape別provider、consumer向けactivation layout、複数tile familyというfacts-only設計点だけを使用した。
+Q8/Q8_1の式、packed layout、tile table、kernel／dispatch source、symbolは移植していない。MXFP8 ID37、prepared provider、
+typed attention、MXFP6／NVFP4／MXFP4 routingはsLLM既存実装、OCP format contract、独立oracleから実装し、
+NVFP4／MXFP4 W4A4は既存sLLM device kernelをfrozen providerへ接続した。
+
+第三者source expressionのcopy、adapt、portはなく、新規import eventと`THIRD_PARTY_NOTICES.md` entryはない。詳細なreference
+identityと境界は[Phase 65/66 inference-engine comparison](phase65-inference-engine-comparison.md)を正とする。
+
 `Co-Authored-By` and similar commit trailers record development participation.
 They are not evidence of copyright ownership, license compatibility, assignment,
 or authority to grant legal rights.

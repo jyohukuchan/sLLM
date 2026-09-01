@@ -1,4 +1,5 @@
 #include "kv_state_kernel_internal.hpp"
+#include "low_precision_block_codec.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -64,178 +65,28 @@ __device__ __forceinline__ float bf16_to_float(const uint16_t value) {
 }
 
 __device__ __forceinline__ float e4m3fn_to_float(const uint8_t bits) {
-  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
-  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
-  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
-  if (exponent == 0U) {
-    return mantissa == 0U
-               ? copysignf(0.0F, sign)
-               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -9);
-  }
-  if (exponent == 0x0fU && mantissa == 0x07U) {
-    return NAN;
-  }
-  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
-         ldexpf(1.0F, static_cast<int>(exponent) - 7);
+  return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode(bits);
 }
 
 __device__ __forceinline__ uint8_t float_to_e4m3fn(float value) {
-  const uint8_t sign = signbit(value) ? UINT8_C(0x80) : 0U;
-  if (isnan(value)) {
-    return UINT8_C(0x7f);
-  }
-  value = fabsf(value);
-  if (value == 0.0F) {
-    return sign;
-  }
-  if (!isfinite(value) || value >= 448.0F) {
-    return static_cast<uint8_t>(sign | UINT8_C(0x7e));
-  }
-  uint32_t low = 0U;
-  uint32_t high = UINT32_C(0x7e);
-  while (low < high) {
-    const uint32_t middle = (low + high) >> 1U;
-    if (e4m3fn_to_float(static_cast<uint8_t>(middle)) < value) {
-      low = middle + 1U;
-    } else {
-      high = middle;
-    }
-  }
-  const uint8_t upper = static_cast<uint8_t>(low);
-  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
-  const float lower_error = value - e4m3fn_to_float(lower);
-  const float upper_error = e4m3fn_to_float(upper) - value;
-  const bool upper_selected =
-      upper_error < lower_error ||
-      (upper_error == lower_error && (upper & 1U) == 0U && (lower & 1U) != 0U);
-  return static_cast<uint8_t>(sign | (upper_selected ? upper : lower));
+  return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::encode(value);
 }
 
 __device__ __forceinline__ uint8_t
 float_to_e4m3fn_fp8_append(const float value) {
-#if defined(__gfx1201__)
-  if (isnan(value)) {
-    return UINT8_C(0x7f);
-  }
-  const uint8_t sign = signbit(value) ? UINT8_C(0x80) : 0U;
-  const float magnitude = fabsf(value);
-  if (magnitude == 0.0F) {
-    return sign;
-  }
-  if (!isfinite(magnitude) || magnitude >= 448.0F) {
-    return static_cast<uint8_t>(sign | UINT8_C(0x7e));
-  }
-  const uint32_t packed = static_cast<uint32_t>(
-      __builtin_amdgcn_cvt_pk_fp8_f32(value, value, 0, false));
-  return static_cast<uint8_t>(packed & UINT32_C(0xff));
-#else
-  return float_to_e4m3fn(value);
-#endif
-}
-
-__device__ __forceinline__ float e4m3fnuz_to_float(const uint8_t bits) {
-  if (bits == UINT8_C(0x80)) {
-    return NAN;
-  }
-  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
-  const uint8_t exponent = static_cast<uint8_t>((bits >> 3U) & 0x0fU);
-  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x07U);
-  if (exponent == 0U) {
-    return sign * static_cast<float>(mantissa) * ldexpf(1.0F, -10);
-  }
-  return sign * (1.0F + static_cast<float>(mantissa) / 8.0F) *
-         ldexpf(1.0F, static_cast<int>(exponent) - 8);
+  return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::encode(value);
 }
 
 __device__ __forceinline__ uint8_t float_to_e4m3fnuz(float value) {
-  if (isnan(value)) {
-    return UINT8_C(0x80);
-  }
-  const bool negative = signbit(value);
-  value = fabsf(value);
-  if (value == 0.0F) {
-    return 0U;
-  }
-  if (!isfinite(value) || value >= 240.0F) {
-    return negative ? UINT8_C(0xff) : UINT8_C(0x7f);
-  }
-  uint32_t low = 0U;
-  uint32_t high = UINT32_C(0x7f);
-  while (low < high) {
-    const uint32_t middle = (low + high) >> 1U;
-    if (e4m3fnuz_to_float(static_cast<uint8_t>(middle)) < value) {
-      low = middle + 1U;
-    } else {
-      high = middle;
-    }
-  }
-  const uint8_t upper = static_cast<uint8_t>(low);
-  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
-  const float lower_error = value - e4m3fnuz_to_float(lower);
-  const float upper_error = e4m3fnuz_to_float(upper) - value;
-  const uint8_t selected =
-      upper_error < lower_error || (upper_error == lower_error &&
-                                    (upper & 1U) == 0U && (lower & 1U) != 0U)
-          ? upper
-          : lower;
-  return negative && selected != 0U ? static_cast<uint8_t>(selected | 0x80U)
-                                    : selected;
-}
-
-__device__ __forceinline__ float e5m2_to_float(const uint8_t bits) {
-  const float sign = (bits & UINT8_C(0x80)) == 0U ? 1.0F : -1.0F;
-  const uint8_t exponent = static_cast<uint8_t>((bits >> 2U) & 0x1fU);
-  const uint8_t mantissa = static_cast<uint8_t>(bits & 0x03U);
-  if (exponent == 0U) {
-    return mantissa == 0U
-               ? copysignf(0.0F, sign)
-               : sign * static_cast<float>(mantissa) * ldexpf(1.0F, -16);
-  }
-  if (exponent == UINT8_C(0x1f)) {
-    return mantissa == 0U ? copysignf(INFINITY, sign) : NAN;
-  }
-  return sign * (1.0F + static_cast<float>(mantissa) / 4.0F) *
-         ldexpf(1.0F, static_cast<int>(exponent) - 15);
+  return sllm_lowp::ScalarCodec<sllm_lowp::E4M3FnuZ>::encode(value);
 }
 
 __device__ __forceinline__ uint8_t float_to_e5m2(float value) {
-  if (isnan(value)) {
-    return UINT8_C(0x7f);
-  }
-  const uint8_t sign = signbit(value) ? UINT8_C(0x80) : 0U;
-  value = fabsf(value);
-  if (value == 0.0F) {
-    return sign;
-  }
-  if (!isfinite(value) || value >= 57344.0F) {
-    return static_cast<uint8_t>(sign | UINT8_C(0x7b));
-  }
-  uint32_t low = 0U;
-  uint32_t high = UINT32_C(0x7b);
-  while (low < high) {
-    const uint32_t middle = (low + high) >> 1U;
-    if (e5m2_to_float(static_cast<uint8_t>(middle)) < value) {
-      low = middle + 1U;
-    } else {
-      high = middle;
-    }
-  }
-  const uint8_t upper = static_cast<uint8_t>(low);
-  const uint8_t lower = upper == 0U ? 0U : static_cast<uint8_t>(upper - 1U);
-  const float lower_error = value - e5m2_to_float(lower);
-  const float upper_error = e5m2_to_float(upper) - value;
-  const bool upper_selected =
-      upper_error < lower_error ||
-      (upper_error == lower_error && (upper & 1U) == 0U && (lower & 1U) != 0U);
-  return static_cast<uint8_t>(sign | (upper_selected ? upper : lower));
+  return sllm_lowp::ScalarCodec<sllm_lowp::E5M2>::encode(value);
 }
 
 __device__ __forceinline__ float e8m0_to_float(const uint8_t bits) {
-  if (bits == UINT8_C(0xff)) {
-    return NAN;
-  }
-  return bits == 0U ? __uint_as_float(UINT32_C(0x00400000))
-                    : __uint_as_float(static_cast<uint32_t>(bits) << 23U);
+  return sllm_lowp::ScalarCodec<sllm_lowp::E8M0>::decode(bits);
 }
 
 // OCP MX uses one E8M0 power-of-two scale for each block.  The exponent is
@@ -246,14 +97,7 @@ __device__ __forceinline__ float e8m0_to_float(const uint8_t bits) {
 // independent of the scale calculation.
 __device__ __forceinline__ uint8_t ocp_mxfp8_e8m0_scale(const float maximum,
                                                         const bool e5) {
-  if (!(maximum > 0.0F) || !isfinite(maximum)) {
-    return UINT8_C(127);
-  }
-  const int32_t floor_exponent = ilogbf(maximum);
-  const int32_t denominator_exponent = e5 ? 15 : 8;
-  const int32_t scale_exponent = floor_exponent - denominator_exponent;
-  const int32_t clamped = max(-127, min(127, scale_exponent));
-  return static_cast<uint8_t>(clamped + 127);
+  return sllm_lowp::ocp_mxfp8_e8m0_scale(maximum, e5);
 }
 
 #if SLLM_ENABLE_PHASE54_KV_RESEARCH
@@ -290,24 +134,7 @@ __device__ __forceinline__ uint8_t phase54_block16_e8m0_scale(
 #endif
 
 __device__ __forceinline__ uint8_t float_to_e2m1(float value) {
-  constexpr float positive[8] = {0.0F, 0.5F, 1.0F, 1.5F,
-                                 2.0F, 3.0F, 4.0F, 6.0F};
-  const uint8_t sign = signbit(value) ? UINT8_C(0x08) : 0U;
-  if (isnan(value)) {
-    return sign;
-  }
-  const float magnitude = fminf(fabsf(value), 6.0F);
-  uint8_t best = 0U;
-  float best_error = INFINITY;
-  for (uint8_t candidate = 0U; candidate != 8U; ++candidate) {
-    const float error = fabsf(positive[candidate] - magnitude);
-    if (error < best_error ||
-        (error == best_error && (candidate & 1U) == 0U && (best & 1U) != 0U)) {
-      best = candidate;
-      best_error = error;
-    }
-  }
-  return static_cast<uint8_t>(sign | best);
+  return sllm_lowp::ScalarCodec<sllm_lowp::E2M1>::encode(value);
 }
 
 } // namespace
@@ -449,7 +276,7 @@ quantize_fp8_block16_row(const uint16_t *const input, uint8_t *const output,
   (void)Key;
 }
 
-template <bool E5>
+template <typename BlockFormat>
 __device__ void
 quantize_mxfp8_pair(const uint16_t *const key_input,
                     const uint16_t *const value_input,
@@ -457,7 +284,7 @@ quantize_mxfp8_pair(const uint16_t *const key_input,
                     uint8_t *const key_scales, uint8_t *const value_scales,
                     const uint64_t input_base, const uint64_t output_row,
                     const uint32_t head_dim) {
-  constexpr uint32_t kBlockSize = 32U;
+  constexpr uint32_t kBlockSize = BlockFormat::kBlockSize;
   constexpr uint32_t kWaveSize = 32U;
   const uint64_t blocks_per_row =
       (static_cast<uint64_t>(head_dim) + kBlockSize - 1U) / kBlockSize;
@@ -465,6 +292,12 @@ quantize_mxfp8_pair(const uint16_t *const key_input,
   const uint32_t lane = threadIdx.x & (kWaveSize - 1U);
   const uint32_t wave = threadIdx.x / kWaveSize;
   const uint32_t wave_count = blockDim.x / kWaveSize;
+  sllm_lowp::MutableBlockScaledView<BlockFormat> key_view{
+      key_output, key_scales,      nullptr,
+      head_dim,   padded_head_dim, blocks_per_row};
+  sllm_lowp::MutableBlockScaledView<BlockFormat> value_view{
+      value_output, value_scales,    nullptr,
+      head_dim,     padded_head_dim, blocks_per_row};
   for (uint64_t block = wave; block < blocks_per_row; block += wave_count) {
     const uint32_t dimension = static_cast<uint32_t>(block * kBlockSize) + lane;
     const bool active = dimension < head_dim;
@@ -476,24 +309,22 @@ quantize_mxfp8_pair(const uint16_t *const key_input,
     float value_maximum = isfinite(value_value) ? fabsf(value_value) : 0.0F;
     uint32_t key_all_zero = !active || key_value == 0.0F ? 1U : 0U;
     uint32_t value_all_zero = !active || value_value == 0.0F ? 1U : 0U;
-    for (uint32_t offset = kWaveSize / 2U; offset != 0U; offset >>= 1U) {
-      key_maximum =
-          fmaxf(key_maximum, __shfl_down(key_maximum, offset, kWaveSize));
-      value_maximum =
-          fmaxf(value_maximum, __shfl_down(value_maximum, offset, kWaveSize));
-      key_all_zero &= __shfl_down(key_all_zero, offset, kWaveSize);
-      value_all_zero &= __shfl_down(value_all_zero, offset, kWaveSize);
-    }
+    key_maximum = sllm_lowp::wave_amax(key_maximum);
+    value_maximum = sllm_lowp::wave_amax(value_maximum);
+    key_all_zero = sllm_lowp::wave_and(key_all_zero);
+    value_all_zero = sllm_lowp::wave_and(value_all_zero);
     uint32_t key_scale_bits = 0U;
     uint32_t value_scale_bits = 0U;
     float key_scale = 1.0F;
     float value_scale = 1.0F;
     if (lane == 0U) {
-      key_scale_bits = ocp_mxfp8_e8m0_scale(key_maximum, E5);
-      value_scale_bits = ocp_mxfp8_e8m0_scale(value_maximum, E5);
-      key_scales[output_row * blocks_per_row + block] =
+      key_scale_bits =
+          sllm_lowp::BlockCodec<BlockFormat>::scale_code(key_maximum);
+      value_scale_bits =
+          sllm_lowp::BlockCodec<BlockFormat>::scale_code(value_maximum);
+      key_view.block_scales[output_row * key_view.scale_stride + block] =
           static_cast<uint8_t>(key_scale_bits);
-      value_scales[output_row * blocks_per_row + block] =
+      value_view.block_scales[output_row * value_view.scale_stride + block] =
           static_cast<uint8_t>(value_scale_bits);
       key_scale = e8m0_to_float(static_cast<uint8_t>(key_scale_bits));
       value_scale = e8m0_to_float(static_cast<uint8_t>(value_scale_bits));
@@ -503,16 +334,16 @@ quantize_mxfp8_pair(const uint16_t *const key_input,
     key_scale = __shfl(key_scale, 0U, kWaveSize);
     value_scale = __shfl(value_scale, 0U, kWaveSize);
     if (dimension < padded_head_dim) {
-      key_output[output_row * padded_head_dim + dimension] =
+      key_view.values[output_row * key_view.value_stride + dimension] =
           !active || key_all_zero != 0U
               ? 0U
-              : (E5 ? float_to_e5m2(key_value / key_scale)
-                    : float_to_e4m3fn_fp8_append(key_value / key_scale));
-      value_output[output_row * padded_head_dim + dimension] =
+              : sllm_lowp::ScalarCodec<typename BlockFormat::Element>::encode(
+                    key_value / key_scale);
+      value_view.values[output_row * value_view.value_stride + dimension] =
           !active || value_all_zero != 0U
               ? 0U
-              : (E5 ? float_to_e5m2(value_value / value_scale)
-                    : float_to_e4m3fn_fp8_append(value_value / value_scale));
+              : sllm_lowp::ScalarCodec<typename BlockFormat::Element>::encode(
+                    value_value / value_scale);
     }
   }
 }
@@ -546,9 +377,9 @@ extern "C" __global__ __launch_bounds__(
   const uint64_t head = row % head_count;
   const uint64_t output_row = (start_position + token) * head_count + head;
   const uint64_t input_base = row * head_dim;
-  quantize_mxfp8_pair<false>(key_input, value_input, key_output, value_output,
-                             key_scales, value_scales, input_base, output_row,
-                             head_dim);
+  quantize_mxfp8_pair<sllm_lowp::Mxfp8E4Block32>(
+      key_input, value_input, key_output, value_output, key_scales,
+      value_scales, input_base, output_row, head_dim);
 }
 
 extern "C" __global__ __launch_bounds__(
@@ -580,9 +411,9 @@ extern "C" __global__ __launch_bounds__(
   const uint64_t head = row % head_count;
   const uint64_t output_row = (start_position + token) * head_count + head;
   const uint64_t input_base = row * head_dim;
-  quantize_mxfp8_pair<true>(key_input, value_input, key_output, value_output,
-                            key_scales, value_scales, input_base, output_row,
-                            head_dim);
+  quantize_mxfp8_pair<sllm_lowp::Mxfp8E5Block32>(
+      key_input, value_input, key_output, value_output, key_scales,
+      value_scales, input_base, output_row, head_dim);
 }
 
 extern "C" __global__ __launch_bounds__(
@@ -827,9 +658,12 @@ quantize_nvfp4_row(const uint16_t *const input, uint8_t *const packed,
     maximum = fmaxf(maximum, isfinite(value) ? fabsf(value) : 0.0F);
   }
   const float outer = maximum == 0.0F ? 1.0F : maximum / (448.0F * 6.0F);
-  outer_scales[output_row] = outer;
   const uint64_t packed_per_row = (static_cast<uint64_t>(head_dim) + 1U) / 2U;
   const uint64_t blocks_per_row = (static_cast<uint64_t>(head_dim) + 15U) / 16U;
+  sllm_lowp::MutableBlockScaledView<sllm_lowp::Nvfp4Block16> view{
+      packed,   block_scales,   outer_scales,
+      head_dim, packed_per_row, blocks_per_row};
+  view.outer_scales[output_row] = outer;
   for (uint64_t block = 0U; block != blocks_per_row; ++block) {
     const uint32_t begin = static_cast<uint32_t>(block * 16U);
     const uint32_t end = min(begin + 16U, head_dim);
@@ -849,7 +683,7 @@ quantize_nvfp4_row(const uint16_t *const input, uint8_t *const packed,
     }
     const uint8_t scale_bits = float_to_e4m3fn((block_maximum / 6.0F) / outer);
     const float decoded_scale = e4m3fn_to_float(scale_bits);
-    block_scales[output_row * blocks_per_row + block] = scale_bits;
+    view.block_scales[output_row * view.scale_stride + block] = scale_bits;
     for (uint32_t dimension = begin; dimension < end; dimension += 2U) {
       const float first = bf16_to_float(input[input_base + dimension]);
       const uint8_t low = decoded_scale == 0.0F
@@ -862,7 +696,7 @@ quantize_nvfp4_row(const uint16_t *const input, uint8_t *const packed,
                    ? 0U
                    : float_to_e2m1(second / (decoded_scale * outer));
       }
-      packed[output_row * packed_per_row + dimension / 2U] =
+      view.values[output_row * view.value_stride + dimension / 2U] =
           static_cast<uint8_t>(low | (high << 4U));
     }
   }
@@ -971,8 +805,8 @@ hipError_t launch(const uint16_t *const key_input,
         key_input, value_input, static_cast<uint8_t *>(key_output),
         static_cast<uint8_t *>(value_output), static_cast<float *>(key_scales),
         static_cast<float *>(value_scales), token_count, capacity_tokens,
-        start_position,
-        head_count, head_dim, static_key_scale, static_value_scale,
+        start_position, head_count, head_dim, static_key_scale,
+        static_value_scale,
         encoding == SLLM_HIP_KV_ENCODING_FP8_STATIC_V1 ? UINT32_C(1)
                                                        : UINT32_C(0));
   } else if (encoding == SLLM_HIP_KV_ENCODING_NVFP4_V1) {

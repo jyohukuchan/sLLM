@@ -156,8 +156,8 @@
       "additionalProperties": false,
       "required": ["canonical_order", "files", "source_set_sha256"],
       "properties": {
-        "canonical_order": {"type": "array", "minItems": 96, "maxItems": 96, "items": {"type": "string"}},
-        "files": {"type": "array", "minItems": 96, "maxItems": 96, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
+        "canonical_order": {"type": "array", "minItems": 98, "maxItems": 98, "items": {"type": "string"}},
+        "files": {"type": "array", "minItems": 98, "maxItems": 98, "uniqueItems": true, "items": {"$ref": "#/$defs/source"}},
         "source_set_sha256": {"$ref": "#/$defs/sha256"}
       }
     },

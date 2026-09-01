@@ -1074,6 +1074,7 @@ pub struct QwenExecutionAudit {
     boundary_count: u64,
     sparse_moe_submission_count: u64,
     sparse_moe_active_pair_count: u64,
+    kernel_dispatches_by_identity: BTreeMap<(u32, String), u64>,
     #[cfg(feature = "phase54-research")]
     phase54_kv_attribution_semantics: Option<&'static str>,
     #[cfg(feature = "phase54-research")]
@@ -1129,6 +1130,15 @@ impl QwenExecutionAudit {
 
     pub const fn sparse_moe_active_pair_count(&self) -> u64 {
         self.sparse_moe_active_pair_count
+    }
+
+    /// Returns the accepted dispatch count for one exact backend kernel
+    /// identity. A missing identity is reported as zero.
+    pub fn kernel_dispatch_count_for(&self, kernel_id: u32, kernel_symbol: &str) -> u64 {
+        self.kernel_dispatches_by_identity
+            .get(&(kernel_id, kernel_symbol.to_owned()))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Returns the research-only surrogate label when it was enabled for the
@@ -8026,6 +8036,7 @@ impl QwenExecutionCore {
             boundary_count: audit.boundary_count(),
             sparse_moe_submission_count: audit.sparse_moe_submission_count(),
             sparse_moe_active_pair_count: audit.sparse_moe_active_pair_count(),
+            kernel_dispatches_by_identity: audit.kernel_dispatches_by_identity().clone(),
             #[cfg(feature = "phase54-research")]
             phase54_kv_attribution_semantics: self
                 .phase54_kv_attribution

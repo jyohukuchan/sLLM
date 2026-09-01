@@ -294,8 +294,11 @@ def actual_counts(
         for passed, failed, ignored, filtered in matches:
             counts["passed"] += int(passed)
             counts["failed"] += int(failed)
-            counts["skipped"] += int(ignored)
-            counts["deselected"] += int(filtered)
+            # Rust's #[ignore] removes a test from the normal Cargo selection;
+            # it is not a runtime skip of a selected host test.  Keep ignored
+            # tests visible in collected/deselected accounting while retaining
+            # the zero-selection fail-closed check below.
+            counts["deselected"] += int(ignored) + int(filtered)
         counts["selected"] = counts["passed"] + counts["failed"] + counts["skipped"]
         counts["collected"] = counts["selected"] + counts["deselected"]
         warning = "Cargo test harnesses reported zero tests selected" if counts["selected"] == 0 else None

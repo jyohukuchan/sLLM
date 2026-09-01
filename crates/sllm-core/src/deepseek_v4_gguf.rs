@@ -1339,10 +1339,10 @@ pub fn build_deepseek_v4_gguf_foundation_catalog(
             }
         } else {
             direct += 1;
-            if let Some(output) = row.output_name.as_deref()
-                && !direct_outputs.insert(output.to_owned())
-            {
-                return Err(invalid(format!("direct target output collision: {output}")));
+            if let Some(output) = row.output_name.as_deref() {
+                if !direct_outputs.insert(output.to_owned()) {
+                    return Err(invalid(format!("direct target output collision: {output}")));
+                }
             }
             if row.plane.is_direct_fp8() {
                 let mask = if row.plane == DeepSeekV4TensorPlane::Fp8E4m3Value {

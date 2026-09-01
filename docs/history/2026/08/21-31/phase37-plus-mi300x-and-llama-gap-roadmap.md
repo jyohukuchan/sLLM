@@ -140,4 +140,64 @@
 - 詳細identity、全反復、HBM/GTT peakは
   [`phase52-r9700-kv-commit-summary-v1.json`](../../../../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)へ固定した。
 
+## 2026-08-31: Phase 62を次のMXFP最適化へ割当て
+
+- ユーザー指示により、Phase 61後の次PhaseをPhase 62とし、MXFP/NVFPのscalar encode/decode、block scale、packed I/Oを
+  matmul、KV append、attention等で再利用できるlow-precision primitiveへ分離する計画を追加した。
+- Phase 62はcommon scalar/block codec、typed block-scaled view、gfx1030/gfx1201 target trait/provider、必要な範囲だけの
+  activation materialize/fusionを扱う。consumer固有のmatmul tile、softmax、KV layoutは各providerへ残す。
+- 共通化はbit exactから開始し、W/AとKVの性能評価を分ける。MXFP W/Aの品質recipe/default、standard OCP MXFP8 E4の
+  KV default、明示FP16 rollback、block16経路廃止は変更しない。
+- 詳細は当初active計画へ固定し、完了後に
+  [Phase 62保存済み計画](../../../../plans/archive/2026/08/21-31/phase62-reusable-low-precision-block-optimization.md)へ移した。
+- この時点では計画文書だけを変更し、production source、GPU実行、モデル成果物、既定値を変更していない。
+
+## 2026-08-31: Phase 62完了
+
+- common scalar/block codec、typed view、起動境界specializationをmatmul、KV append、attentionへ統合した。
+- exact `gfx1030`／`gfx1201`で全scalar code、非整列block、W/A M=`1/3/17`、KV append、29-case attentionを
+  beforeとbit exactにPASSし、固定Qwen3.5-4Bの短／代表prefillとKV性能を分離測定した。
+- unsafeなcross-plan activation cacheとN tileごとの再量子化を招く単純fusionは棄却し、defaultとrollbackを維持した。
+
+## 2026-09-01: Phase 63をgfx1201大規模MXFP matrix prefillへ割当て
+
+- ユーザー指示により、Phase 62後のMXFP prefill性能残差を新しいPhase 63へ割り当てた。
+- exact `gfx1201`、固定Qwen3.5-4B、明示FP16 KVの512／2,048 inputで、MXFP8 col8は
+  `281.991／274.853 tok/s`、同一model BF16 controlは`5,950.932／5,483.034 tok/s`だった。
+- 専用read-only subagentのSGLang比較からは、大規模matrix provider、shape別selector、activation量子化重複等の
+  抽象所見だけを採用し、source、疑似コード、tile値、symbolを実装へ持ち込まないclean-room境界を固定した。
+- exact `gfx1201`のOCP MXFP8 E4M3を一次対象とするmodel非依存providerとprepared selectorを計画した。
+  1,000 tok/sは性能目標であり一律hard gateではなく、この時点でproduction sourceやdefaultは変更していない。
+- 詳細は[Phase 63保存済み計画](../../../../plans/archive/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)と
+  [対応する履歴](../../../../history/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)へ固定した。
+
+## 2026-09-01: Phase 63完了・追加最適化close
+
+- exact `gfx1201`のlarge-M MXFP8 E4M3 W8A8へWMMA providerとprepared selectorを追加し、追加最適化でcontribution LDSを削除、
+  N64 tileをN=1,024までscoped default採用した。M=1、N=32／LM head、gfx1030/gfx942/unknownは既存providerを維持する。
+- 最終ISA、operator、special E4M3/E8M0、同一artifact品質10 case／20 row、512〜4,096 full-model、2,048 profileを
+  HIP-only、fallback false、cleanup 0で完了した。3+10 prefill中央値は`1,727.595/1,814.619/1,722.844/1,588.366 tok/s`。
+- profileはWMMA v2 71.96%、scope外row8 1.55%、activation quantization 1.78%。K二重bufferはshape別回帰で棄却した。
+  数値変更はN1、persistent BF16/FP32展開なし、SGLang非copy境界維持でcloseした。
+- 詳細は[Phase 63保存済み計画](../../../../plans/archive/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)、
+  [Phase 63履歴](../../../../history/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)、
+  [追跡要約](../../../../../ci/matrix/phase63-gfx1201-mxfp8-wmma-prefill-v2.json)を正本とする。
+
+## 2026-09-01: Phase 66完了
+
+- Phase 65後のlinear／attention残差をmodel非依存のprepared providerとして実装し、MXFP8 ID37 N128 direct-bothを
+  exact `gfx1201`のPhase 65 familyかつN%128=0へ限定採用した。wide/down operatorはID36比14.45%／6.27%短く、
+  resourceはLDS 1,024 byte、SGPR/VGPR 40/164、spill 0、wave32、WMMA 16命令だった。
+- FP16／MXFP8 E4 KVのtyped q4k4／q4k8／q8k8 attentionはbit一致したが、M=128〜2,048の同期時間が
+  4.3〜27.3%遅くproduction不採用とした。BF16 weightでも同じselectorの実dispatchを確認した。
+- 同じformat/block/activation/tile/inner-product契約へMXFP6、NVFP4 W4A16/W4A4、MXFP4 W4A4を実接続した。
+  NVFP4／MXFP4 W4A4は既存device kernelへのprovider routing移植で、別kernelの同期A/Bではない。MXFP4 full MoE productionは
+  scope外とした。
+- final 3+10 MXFP8 prefill中央値は、4B 512〜4,096で
+  `3,840.804836/3,806.640973/3,767.237995/3,249.069405 tok/s`、9Bで
+  `1,988.722356/2,231.573186/2,261.647647/2,069.842794 tok/s`だった。persistent BF16/FP32 weight展開、
+  FP32 attention/KV plane、第三者code reuseは追加していない。
+- 詳細は[Phase 66履歴](../../../../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
+  [追跡要約](../../../../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
+
 [対応する計画](../../../../plans/active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md)

@@ -1,0 +1,183 @@
+{
+  "schema_version": "sllm-phase63-gfx1201-mxfp8-wmma-prefill-v2",
+  "state": "PASS",
+  "date": "2026-09-01",
+  "target": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "gcn_arch": "gfx1201",
+    "wavefront_size": 32,
+    "code_object_version": 6
+  },
+  "artifact": {
+    "model": "Qwen/Qwen3.5-4B",
+    "weight_encoding": "mxfp8-e4m3-w8a8",
+    "gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "kv_encoding": "fp16"
+  },
+  "implementation": {
+    "candidate_kernel_id": 31,
+    "candidate_kernel_symbol": "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x64x32.v2",
+    "device_symbol": "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_wmma128x64x32_v2",
+    "control_kernel_id": 30,
+    "control_kernel_symbol": "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x16x32.v1",
+    "scope": {
+      "target": "gfx1201",
+      "m_min": 128,
+      "k_min": 2048,
+      "n_min": 1024,
+      "n_max": 16384,
+      "k_multiple": 32,
+      "n_multiple": 64
+    },
+    "persistent_bf16_or_fp32_expansion": false,
+    "contribution_lds_roundtrip_removed": true,
+    "activation_tile_reused_across_output_column_tiles": 4
+  },
+  "identities": {
+    "sllm_cli_sha256": "0e44f19142814d2b93fc811fee85d394fa2f894c8db87a92ac681cfcc090138a",
+    "operator_runner_sha256": "77dbe38194274078797b4b782bab02e7781ee9a4d687bec402538c1a77336c89",
+    "quality_runner_sha256": "07712265464081ea9d79acffbbcf293e279ea82765de3174d943b81c91376813",
+    "matmul_code_object_sha256": "0acd6d364d4c4d3c0e33a3c479ed4e804cf8f498023079d5ddaf2a65c1f926b7"
+  },
+  "operator": {
+    "report_sha256": "640742935881ea8b42a5bd4e113e152c10c88d31559eedf795a71876c5314077",
+    "candidate_case_count": 7,
+    "candidate_submission_count": 21,
+    "repeat_count": 3,
+    "maximum_relative_error": 0.0036960265,
+    "special_maximum_relative_error": 0.0004885198,
+    "repeat_output_digest_equal": true,
+    "fallback_used": false,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0,
+    "median_kernel_ns": {
+      "m128_k2560_n9216": 554966,
+      "m129_k2560_n9216": 860091,
+      "m128_k2560_n4096": 472646,
+      "m128_k9216_n2560": 1501938,
+      "m128_k4096_n2560": 820730,
+      "m128_k2560_n1024": 575568,
+      "m128_k2048_n2048": 488526
+    }
+  },
+  "quality": {
+    "report_sha256": "362c34e3d007500952fa3be947d7a86007f9f9731d9fa769448ca4ce5d192152",
+    "comparison": "same-mxfp8-artifact-row8-versus-wmma-v2",
+    "case_count": 10,
+    "row_count": 20,
+    "top1_matches": 19,
+    "top1_agreement": 0.95,
+    "kld_mean": 0.0029974001332013973,
+    "kld_p99": 0.015308921179256547,
+    "kld_max": 0.015308921179256547,
+    "maximum_absolute_logit_error": 0.5859375,
+    "perplexity_relative_delta": -0.005166184899492098,
+    "candidate_dispatch_count": 2400,
+    "provider_repeats_bitwise_equal": true,
+    "quality_gate_applied": false,
+    "numerical_classification": "N1",
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "full_model_prefill": {
+    "warmups": 3,
+    "measured": 10,
+    "kv_encoding": "fp16",
+    "rows": [
+      {
+        "input_tokens": 512,
+        "prefill_chunk_tokens": 512,
+        "median_tokens_per_second": 1727.5951497182295,
+        "mad_tokens_per_second": 1.2907082143257185,
+        "report_sha256": "01f334f621018a08204cb92f827149ab2d201610c83a2ec17af3785c1360a266"
+      },
+      {
+        "input_tokens": 1024,
+        "prefill_chunk_tokens": 1024,
+        "median_tokens_per_second": 1814.618584217896,
+        "mad_tokens_per_second": 3.388387734943194,
+        "report_sha256": "17ca45d0cbd9d91b046381629c110a0e9987e43b06d9146c1f2197a0bbb29a73"
+      },
+      {
+        "input_tokens": 2048,
+        "prefill_chunk_tokens": 2048,
+        "median_tokens_per_second": 1722.8442800318371,
+        "mad_tokens_per_second": 6.017570393336996,
+        "report_sha256": "149e067e9731175fe676b436b87bc62f13e3e3b1cc8945009d50b3ff17a058eb"
+      },
+      {
+        "input_tokens": 4096,
+        "prefill_chunk_tokens": 4096,
+        "median_tokens_per_second": 1588.3662773885258,
+        "mad_tokens_per_second": 2.2788414764794425,
+        "report_sha256": "644866619d159b66364bcc651d979270affa87e13f586a8251fbf8ebc01b6b87"
+      },
+      {
+        "input_tokens": 4096,
+        "prefill_chunk_tokens": 2048,
+        "median_tokens_per_second": 1573.875421261619,
+        "mad_tokens_per_second": 5.0516680761960515,
+        "report_sha256": "9271ce62140ada548b649f20cbcef5c3b6278c6db58cd90d3624250df2fd0ad8"
+      }
+    ],
+    "v1_median_tokens_per_second": {
+      "512": 939.105,
+      "1024": 953.913,
+      "2048": 947.248,
+      "4096": 908.266,
+      "4096_chunk2048": 899.118
+    },
+    "all_hip_only": true,
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "profile_2048": {
+    "benchmark_report_sha256": "502504a6b7f87b2063f2a9b64d0d74c1253e5b87c6f082214c788d0f40028584",
+    "kernel_stats_sha256": "e2496c81cd0c464e9c67044d652501e0a83315f51a4b62c772015d2cafe36551",
+    "median_prefill_tokens_per_second": 1743.801503864975,
+    "kernel_duration_percent": {
+      "wmma_v2": 71.96,
+      "row8": 1.55,
+      "activation_quantization": 1.78,
+      "causal_attention_prefill": 8.66,
+      "linear_attention_recurrent": 5.12
+    }
+  },
+  "resources": {
+    "lds_bytes": 6912,
+    "sgpr_count": 33,
+    "vgpr_count": 103,
+    "private_segment_bytes": 0,
+    "static_wmma_instructions": 8,
+    "model_resident_bytes": 4954035712,
+    "persistent_workspace_added": false,
+    "counter_collection": {
+      "attempted": true,
+      "report_sha256": "9ada62578a5a260df19c4cff8cc143a63f28ee5c5294becb16b3b196a094e921",
+      "result": "rocprofv3 returned zero for the requested gfx1201 PMCs; no counter-derived performance claim is made"
+    }
+  },
+  "verification": {
+    "gfx1201_operator_oracle": "PASS",
+    "gfx1201_same_artifact_quality": "PASS",
+    "gfx1030_release_compile_only": "PASS",
+    "gfx942_wave64_release_compile_only": "PASS",
+    "public_runtime_host_selector": "PASS (1/1)",
+    "sllm_hip_focused_bin_tests": "PASS (6/6)",
+    "sllm_core_unit_tests": "PASS (529 passed, 19 ignored)",
+    "cargo_fmt_check": "PASS",
+    "git_diff_check": "PASS",
+    "json_parse": "PASS",
+    "markdown_local_links": "PASS"
+  },
+  "candidate_decisions": {
+    "register_contribution_n16": "retained as explicit control kernel ID 30",
+    "n32": "benchmark-only; slower than n64 in full-model",
+    "n64": "scoped-default",
+    "n1024": "included in n64 scoped-default",
+    "n32_projection": "row8 retained",
+    "vocabulary_projection": "row8 retained",
+    "double_buffered_k_pipeline": "rejected; mixed operator regressions and only 0.4 percent draft full-model gain"
+  }
+}

@@ -5,7 +5,7 @@
   "producer_status": "a5-enabled",
   "dedicated_producer_included": true,
   "a5_enablement_requires": [],
-  "source_order_sha256": "3d2feb78595b15ab5b9473c463c47669aa5c862514d42f050e9b82747f72709e",
+  "source_order_sha256": "e8d35e42a7a352c1d3239abf01c0cfa019d222c24b58ee757618ee7d2910df2c",
   "source_paths": [
     {
       "order": 0,
@@ -289,50 +289,58 @@
     },
     {
       "order": 70,
-      "path": "native/hip/src/matmul_api.cpp"
+      "path": "native/hip/src/low_precision_block_codec.hpp"
     },
     {
       "order": 71,
-      "path": "native/hip/src/matmul_api.hpp"
+      "path": "native/hip/src/low_precision_matmul_provider.hpp"
     },
     {
       "order": 72,
-      "path": "native/hip/src/matmul_kernel.hip.cpp"
+      "path": "native/hip/src/matmul_api.cpp"
     },
     {
       "order": 73,
-      "path": "native/hip/src/matmul_kernel_internal.hpp"
+      "path": "native/hip/src/matmul_api.hpp"
     },
     {
       "order": 74,
-      "path": "native/hip/src/matmul_runtime.inc"
+      "path": "native/hip/src/matmul_kernel.hip.cpp"
     },
     {
       "order": 75,
-      "path": "native/hip/src/public_runtime.hip.cpp"
+      "path": "native/hip/src/matmul_kernel_internal.hpp"
     },
     {
       "order": 76,
-      "path": "native/hip/src/public_runtime_internal.hpp"
+      "path": "native/hip/src/matmul_runtime.inc"
     },
     {
       "order": 77,
-      "path": "native/hip/src/public_runtime_stub.cpp"
+      "path": "native/hip/src/public_runtime.hip.cpp"
     },
     {
       "order": 78,
-      "path": "native/hip/src/rmsnorm_api.cpp"
+      "path": "native/hip/src/public_runtime_internal.hpp"
     },
     {
       "order": 79,
-      "path": "native/hip/src/rmsnorm_api.hpp"
+      "path": "native/hip/src/public_runtime_stub.cpp"
     },
     {
       "order": 80,
-      "path": "native/hip/src/rmsnorm_kernel.hip.cpp"
+      "path": "native/hip/src/rmsnorm_api.cpp"
     },
     {
       "order": 81,
+      "path": "native/hip/src/rmsnorm_api.hpp"
+    },
+    {
+      "order": 82,
+      "path": "native/hip/src/rmsnorm_kernel.hip.cpp"
+    },
+    {
+      "order": 83,
       "path": "native/hip/src/rmsnorm_kernel_internal.hpp"
     }
   ]

@@ -1,0 +1,137 @@
+{
+  "schema_version": "phase63-gfx1201-qwen35-9b-mxfp8-prefill-v1",
+  "date": "2026-09-01",
+  "state": "PASS",
+  "scope": "Qwen3.5-9B OCP MXFP8 E4M3 W8A8, single R9700, direct prefill, FP16 KV, Phase63 WMMA v2 versus forced row8",
+  "target": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "gfx": "gfx1201",
+    "wavefront_size": 32
+  },
+  "identities": {
+    "cli_sha256": "0e44f19142814d2b93fc811fee85d394fa2f894c8db87a92ac681cfcc090138a",
+    "model_repo_id": "Qwen/Qwen3.5-9B",
+    "model_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+    "source_lock_fingerprint": "sha256:2d2bc642540e97d4681f8c66140e09f305f487476bb9fe238ca82a298febf893",
+    "gguf_sha256": "eff9e54d04056f968604301a856bd871454913a24b3fb26cda61ce178d7c4033",
+    "gguf_size_bytes": 12627885248,
+    "derived_lock_fingerprint": "sha256:42b7a1721a6d40416489ba2feaeaf0280549be9ffde970e1f4db37a1ae25e15b",
+    "derived_lock_sha256": "72144aed546f9608e6b5f00190c7373e45ea2961ed0317912018a33ef8104d23",
+    "conversion_manifest_sha256": "1ab5457e46b45eeafa7281f53f70911a87a322bdfe9412c981c70623f5395eb6"
+  },
+  "protocol": {
+    "lane": "direct pretokenized",
+    "warmups": 1,
+    "measured": 3,
+    "max_new_tokens": 4,
+    "ignore_eos": true,
+    "kv_cache_encoding": "fp16",
+    "prefill_chunk_tokens": "equal to input token count",
+    "wmma_provider": "Phase63 scoped default",
+    "row8_provider": "SLLM_MXFP8_PREFILL_FORCE_ROW8=1"
+  },
+  "rows": [
+    {
+      "input_tokens": 512,
+      "wmma_v2": {
+        "median_tokens_per_second": 788.3457383666895,
+        "mad_tokens_per_second": 0.6894132388715661,
+        "median_prefill_ns": 649461239,
+        "report_sha256": "ed73f92fdf03cc5c2061b719fbcf8738ebafb080991b509417088c44023fbb76"
+      },
+      "row8": {
+        "median_tokens_per_second": 55.27172842905888,
+        "mad_tokens_per_second": 0.0908957831333197,
+        "median_prefill_ns": 9263325294,
+        "report_sha256": "45842102fc0953259c8c887ab08320125511c739f65a82dbc51250a7fdf01460"
+      },
+      "wmma_speedup_over_row8": 14.263092
+    },
+    {
+      "input_tokens": 1024,
+      "wmma_v2": {
+        "median_tokens_per_second": 896.4052194191852,
+        "mad_tokens_per_second": 0.8726253642955726,
+        "median_prefill_ns": 1142340515,
+        "report_sha256": "162bb6fe1f8fa4a5d3cfd1418b7449b0e7fd584ec55d45cb23e389b19a364242"
+      },
+      "row8": {
+        "median_tokens_per_second": 54.919444330946796,
+        "mad_tokens_per_second": 0.07414005332185525,
+        "median_prefill_ns": 18645490909,
+        "report_sha256": "d4a8bf3a08a356ea32ce760e9691c77ebde34db1500f881f064cc84f09899607"
+      },
+      "wmma_speedup_over_row8": 16.322183
+    },
+    {
+      "input_tokens": 2048,
+      "wmma_v2": {
+        "median_tokens_per_second": 912.8704639009211,
+        "mad_tokens_per_second": 0.3369383456754349,
+        "median_prefill_ns": 2243472739,
+        "report_sha256": "a9293236a9ee5fd9b30e4b0fcc7e20aa75da02c01b3007a304f11e4965d10a5c"
+      },
+      "row8": {
+        "median_tokens_per_second": 54.89684357310588,
+        "mad_tokens_per_second": 0.03322988322084086,
+        "median_prefill_ns": 37306334330,
+        "report_sha256": "810ce737588513936190ddb1d8eda71992ba6a2db0498cca1bd2d340a3dc8cd4"
+      },
+      "wmma_speedup_over_row8": 16.628833
+    },
+    {
+      "input_tokens": 4096,
+      "wmma_v2": {
+        "median_tokens_per_second": 889.4449861853016,
+        "mad_tokens_per_second": 0.8992346738632477,
+        "median_prefill_ns": 4605118994,
+        "report_sha256": "2f782727e2a5424c937e0af87f162975ee9c2174ee549c361971a929fd0b5d49"
+      },
+      "row8": {
+        "median_tokens_per_second": 54.67115588407706,
+        "mad_tokens_per_second": 0.010142500245954977,
+        "median_prefill_ns": 74920676795,
+        "report_sha256": "4b8826b293ebaf804bcc3cbabbfc5ff0b48872402bdf30d85c974597d822ab9c"
+      },
+      "wmma_speedup_over_row8": 16.268999
+    }
+  ],
+  "dispatch_confirmation": {
+    "input_tokens": 512,
+    "kernel_id": 31,
+    "kernel_symbol": "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_wmma128x64x32_v2",
+    "dispatch_count": 800,
+    "workgroup_size": 256,
+    "static_lds_bytes": 6912,
+    "trace_database_sha256": "20cb0aa0382241b39945a9ed2794ccff2e8795da271342b7547e62cb337fa447",
+    "profiled_benchmark_report_sha256": "8c9dd8c2ccbc5f717d862def8bf51e18c232d974a46d3b793ef94a900954a001"
+  },
+  "numerical_observation": {
+    "repeat_tokens_equal_within_each_provider": true,
+    "provider_token_sequences_equal_for_input_lengths": 3,
+    "provider_token_sequences_compared": 4,
+    "differing_case": "input 1024, fourth generated token: WMMA 16 versus row8 17",
+    "classification_context": "consistent with the Phase63 N1 fixed FP32 accumulation-tree change",
+    "comprehensive_9b_quality_suite_run": false
+  },
+  "resources": {
+    "model_resident_bytes": 11205394944,
+    "peak_bytes_by_input": {
+      "512": 11621093888,
+      "1024": 11985150464,
+      "2048": 12713263616,
+      "4096": 14169489920
+    },
+    "same_resident_and_peak_for_both_providers": true,
+    "after_model_drop_bytes": 0
+  },
+  "execution": {
+    "all_reports_pass": true,
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "all_requests_dropped": true,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  }
+}

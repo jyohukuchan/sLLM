@@ -643,13 +643,13 @@ hipError_t rotary_launch(const uint16_t *const query, const uint16_t *const key,
   return hipSuccess;
 }
 
-hipError_t ministral3_yarn_launch(
-    const uint16_t *const query, const uint16_t *const key,
-    const int32_t *const positions, uint16_t *const query_output,
-    uint16_t *const key_output, const uint32_t token_count,
-    const uint32_t q_heads, const uint32_t kv_heads,
-    const bool adjacent_pairing,
-    const hipStream_t /*stream*/) noexcept {
+hipError_t
+ministral3_yarn_launch(const uint16_t *const query, const uint16_t *const key,
+                       const int32_t *const positions,
+                       uint16_t *const query_output, uint16_t *const key_output,
+                       const uint32_t token_count, const uint32_t q_heads,
+                       const uint32_t kv_heads, const bool adjacent_pairing,
+                       const hipStream_t /*stream*/) noexcept {
   std::lock_guard<std::mutex> lock(state.mutex);
   ++state.ministral3_yarn_launch_calls;
   state.ministral3_yarn_last_token_count = token_count;
@@ -668,24 +668,22 @@ hipError_t ministral3_yarn_launch(
       return hipErrorInvalidValue;
     }
     const uint32_t block = static_cast<uint32_t>(position) / 16384U;
-    const float q_scale =
-        1.0F + 0.1F * std::log1p(static_cast<float>(block));
-    const auto rotate = [&](const uint16_t *const input,
-                            uint16_t *const output, const uint32_t heads,
-                            const float scale) {
+    const float q_scale = 1.0F + 0.1F * std::log1p(static_cast<float>(block));
+    const auto rotate = [&](const uint16_t *const input, uint16_t *const output,
+                            const uint32_t heads, const float scale) {
       for (uint32_t head = 0U; head != heads; ++head) {
         const uint64_t base =
             (static_cast<uint64_t>(token) * heads + head) * head_dim;
         for (uint32_t pair = 0U; pair != half; ++pair) {
-          const float base_frequency = std::pow(
-              1000000.0F, static_cast<float>(pair * 2U) / 128.0F);
+          const float base_frequency =
+              std::pow(1000000.0F, static_cast<float>(pair * 2U) / 128.0F);
           const float extrapolated = 1.0F / base_frequency;
           const float interpolated = 1.0F / (16.0F * base_frequency);
           const float ramp = std::fmin(
               1.0F, std::fmax(0.0F, (static_cast<float>(pair) - low) /
-                                         static_cast<float>(high - low)));
-          const float inverse = interpolated * ramp +
-                                extrapolated * (1.0F - ramp);
+                                        static_cast<float>(high - low)));
+          const float inverse =
+              interpolated * ramp + extrapolated * (1.0F - ramp);
           const float angle = static_cast<float>(position) * inverse;
           const float cosine = std::cos(angle);
           const float sine = std::sin(angle);
@@ -694,10 +692,10 @@ hipError_t ministral3_yarn_launch(
               adjacent_pairing ? left_index + 1U : half + pair;
           const float left = bf16_to_f32(input[base + left_index]);
           const float right = bf16_to_f32(input[base + right_index]);
-          output[base + left_index] = f32_to_bf16_rne(
-              (left * cosine - right * sine) * scale);
-          output[base + right_index] = f32_to_bf16_rne(
-              (right * cosine + left * sine) * scale);
+          output[base + left_index] =
+              f32_to_bf16_rne((left * cosine - right * sine) * scale);
+          output[base + right_index] =
+              f32_to_bf16_rne((right * cosine + left * sine) * scale);
         }
       }
     };

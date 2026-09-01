@@ -271,6 +271,8 @@ fn main() {
     let gemma_attention_kernel = source_dir.join("src/gemma_attention_kernel.hip.cpp");
     let matmul_api_header = source_dir.join("src/matmul_api.hpp");
     let matmul_api = source_dir.join("src/matmul_api.cpp");
+    let low_precision_block_codec = source_dir.join("src/low_precision_block_codec.hpp");
+    let low_precision_matmul_provider = source_dir.join("src/low_precision_matmul_provider.hpp");
     let matmul_kernel_internal = source_dir.join("src/matmul_kernel_internal.hpp");
     let matmul_kernel = source_dir.join("src/matmul_kernel.hip.cpp");
     let matmul_runtime = source_dir.join("src/matmul_runtime.inc");
@@ -432,6 +434,14 @@ fn main() {
     );
     println!("cargo:rerun-if-changed={}", matmul_api_header.display());
     println!("cargo:rerun-if-changed={}", matmul_api.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        low_precision_block_codec.display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        low_precision_matmul_provider.display()
+    );
     println!(
         "cargo:rerun-if-changed={}",
         matmul_kernel_internal.display()
@@ -1401,6 +1411,22 @@ fn verify_checked_in_bindings(
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_DECODE_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_DECODE_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_ROW8_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_ROW8_V2);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_ROW8_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_ROW8_V2);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_TILED16_V3={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_TILED16_V3);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_TILED16_V3={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_TILED16_V3);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL4_V4={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL4_V4);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL8_V4={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_MMQ_COL8_V4);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL4_V4={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL4_V4);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL8_V4={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP6_W6A6_PREFILL_MMQ_COL8_V4);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X16X32_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X16X32_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_V2={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_V2);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA64X64X32_4W_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA64X64X32_4W_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_LDSPAD_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_LDSPAD_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_DIRECT_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_DIRECT_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_ADIRECT_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_ADIRECT_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_BDIRECT_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X64X32_BDIRECT_V1);\n\
+             println!(\"const SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X128X32_BDIRECT_V1={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_ID_MXFP8_W8A8_PREFILL_WMMA128X128X32_BDIRECT_V1);\n\
              println!(\"const SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_KERNEL_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX={{}}\", bindings::SLLM_HIP_MATMUL_DEVICE_SYMBOL_MAX);\n\
              println!(\"const SLLM_HIP_MATMUL_WORKGROUP_SIZE={{}}\", bindings::SLLM_HIP_MATMUL_WORKGROUP_SIZE);\n\

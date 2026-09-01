@@ -1,8 +1,8 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-08-31
+> 最終更新: 2026-09-01
 >
-> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
+> この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32とPhase 67のMXFP8 col8はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32、Phase 63のlarge-M MXFP8 WMMA、Phase 64／65のoperand direct-load、Phase 66のN128 ID37と低精度provider移植はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
 
 共通の状態、resource gate候補、NVIDIAを含む将来例は[GPU互換性方針](gpu.md)を参照する。
 
@@ -663,6 +663,83 @@ admissionはexact `gfx1030`／`gfx1201`だけであり、`gfx1031`–`gfx1036`�
 `41.10%／51.71%`、prefill `48.10／100.16 tok/s`、decode `20.17／20.06 tok/s`を取得した。同じBF16は
 `284.03／45.68 tok/s`であり、現correctness providerをperformance pathへ昇格しない。gfx1201 full-modelは未検証で、
 両targetのlifecycleは`experimental`のままとする。
+
+### 2026-08-31 Phase62 reusable low-precision codec
+
+V620 exact `gfx1030`とR9700 exact `gfx1201`で、共通scalar/block codecを直接実行した。E4M3FN/FNUZ、E5M2、E8M0の
+全256 code、E3M2全64、E2M1全16、encode境界、MX block `31/32/33/256`、NV block `15/16/17/256`は独立host oracleに一致した。
+gfx1201 E4はnative AMD conversion、gfx1030はbit construction/software conversionを使うが、W/A/KV/attention output hashは
+beforeおよび両target間でbit exactだった。runtime formatはgeneric、decode wave、GQA shared/qtile、scaled long-prefillの
+kernel起動境界でspecializationし、element hot loopのformat switchを除いた。
+
+Qwen3.5-4B 17／4、FP16 KVのprefill before→afterはgfx1030 MXFP8 `47.31→48.48`、MXFP6
+`98.23→99.23 tok/s`、gfx1201 `36.67→72.87`、`32.72→115.30 tok/s`だった。MXFP8 KV=8,193 attentionは
+gfx1030 `5.248→2.462 ms`、gfx1201 `3.515→1.569 ms`である。全試行はHIP-only、fallback false、cleanup 0。
+admissionは引き続きexact `gfx1030`／`gfx1201`だけで、RDNA世代全体、gfx942、別software tupleへ一般化しない。
+
+### 2026-09-01 Phase63 gfx1201 MXFP8 matrix provider
+
+canonical R9700のexact `gfx1201`で、Phase 62のE4M3/E8M0 viewをFP8xFP8-to-FP32 WMMA providerへ接続した。
+prepared selectorはM>=128、K>=2,048、1,024<=N<=16,384、K%32=0、N%64=0だけを選び、M=1、M=127、N=32、
+LM head、gfx1030/gfx942/unknownは既存providerへ戻す。最終`wmma128x64x32.v2` code objectはwave32、WG256、
+LDS 6,912 byte、SGPR/VGPR 33/103、spill 0で、対象symbol内にWMMA 8命令を含む。
+
+candidate 7 case／21 submission、同一artifact品質10 case／20 row、512〜4,096 inputのfull-model、2,048 profileをHIP-only、
+fallback false、cleanup 0で完了した。prefill中央値は512〜2,048で`1,722.844〜1,814.619 tok/s`、4,096は`1,588.366`。
+profileはWMMA v2 71.96%、scope外row8 1.55%、activation quantization 1.78%だった。GPU lifecycleは
+`experimental`のまま、evidenceはこのexact target／SKU／tuple／shape scopeだけ`project-verified`とする。
+
+model共通性の実機確認としてQwen3.5-9B MXFP8も同じselectorで実行した。512〜4,096 prefillは
+`788.346〜912.870 tok/s`、強制row8比`14.26〜16.63x`で、kernel ID 31をtrace上800 dispatchした。residentは
+`11,205,394,944 byte`で両provider同一、fallback false、cleanup 0。これは性能と経路のevidenceであり、1/4入力長の
+生成token差を観測したため9B品質全体の検証や別modelへの一般化ではない。
+
+### 2026-09-01 Phase65 gfx1201 MXFP8 direct-both
+
+canonical R9700で同一WMMA演算順の4 staging経路を比較し、activation／weight valueをともにdirect-loadするID36を
+M%128=0、K>=2,048、64<=N<=16,384、K%32=0、N%64=0へ限定採用した。M127／129、N32、LM head、
+gfx1030／gfx942／unknown targetは既存providerを維持する。4B／9B 2,048-token prefillは`3,053.502／1,761.989 tok/s`、
+final profileのID36は800 dispatch、52.99%だった。GPU lifecycleは`experimental`のままで、このexact target／SKU／tuple／
+shape scopeだけ`project-verified`とする。
+
+### 2026-09-01 Phase66 gfx1201 reusable low-precision provider
+
+canonical R9700、exact `gfx1201`で、target、format/block、layout、M/N/K、accumulation/outputだけをkeyにするprepared
+low-precision providerをMXFP8／MXFP6／NVFP4／MXFP4へ接続した。MXFP8 ID37 N128 direct-bothはPhase 65の
+整列production familyかつN%128=0へ限定採用した。ID36/37同期operatorはwide `181,641/155,402 ns`
+（14.45%短縮）、down `398,403/373,404 ns`（6.27%短縮）である。ID37 resourceはLDS 1,024 byte、private 0、
+SGPR/VGPR 40/164、spill 0、wave32、static WMMA 16命令で、gfx1201 code object SHA-256は
+`4adc1528dddb2c98a564cd3a334c5b36203e45581dc0e89b1ff3a89b9dda8a88`である。特殊値oracleは
+E4M3 subnormal／tie／max／saturation、E8M0 minimum／finite／NaN scale、signed zero、Inf/NaNを含み、
+期待／実測nonfinite 4/4、mismatch 0、max abs `2016.0`、max relative `0.0004885197849944234`を確認した。
+
+4B／9B MXFP8、FP16 KV、3+10の512/1,024/2,048/4,096 prefill中央値は
+`3,840.804836/3,806.640973/3,767.237995/3,249.069405`／
+`1,988.722356/2,231.573186/2,261.647647/2,069.842794 tok/s`、最大peakは
+`7,301,568,000`／`14,169,489,920` byteだった。workspace arena high-waterは`1,080,836,096` byteで、
+allocator after-dropは0、external HBM/GTTは別途sampleしていない。MXFP6 Qwen3.5-4B、NVFP4 reviewed Gemma、
+MXFP4 operator、BF16 attentionの実dispatchまでHIP-only、fallback falseで確認した。
+
+typed q4k4／q4k8／q8k8 attentionはFP16／MXFP8 KVの数値をbit一致で維持したが4.3〜27.3%遅く不採用とした。
+selectorはsliding windowと明示score scaleを含むtyped inputsを照合し、不明tupleをfail-closeする。Gemma q16/kv8と
+Qwen3.5 MoE MXFP4 q16/kv2はtyped candidateとしてreviewしたが明示的に非選択とした。
+NVFP4／MXFP4 W4A4は既存device kernelへfrozen provider routingを適用した証拠で、別kernelの同期A/Bではない。
+MXFP4 full MoE productionとgfx1030／gfx942のGPU実行はscope外である。GPU lifecycleは`experimental`のまま、evidenceは
+このexact target／SKU／tuple／format／shapeだけ`project-verified`とする。詳細は
+[Phase 66追跡要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
+
+### 2026-09-01 Phase67 gfx1030 MXFP8 staged MMQ
+
+canonical V620、exact `gfx1030`で、software E4M3 decode＋FP32 accumulationのstaged MMQを評価した。ID38 col16と
+ID39 col32は明示benchmark-onlyに留め、既存ID27 col8を`M>=128, K>=2048, K%32=0`かつ`2560<=N<=16384`または
+`M>=512 && N==1024`へ限定採用した。短M、M<512のN=1024、未計測N、語彙head、別targetはrow8を維持する。
+
+同一最終binaryのQwen3.5-4B MXFP8、FP16 KV、1+3で、512 inputは`72.1830 -> 207.6111 tok/s`、
+2,048 inputは`71.2428 -> 208.2710 tok/s`だった。全sampleの生成token、resident／peak、HIP-only、fallback、cleanupは
+一致し、profileはID27を800 dispatch、kernel time 92.04%で確認した。ID27/38/39のLDSは
+`8,704/17,152/34,048` byte、VGPRは`46/42/83`、全てspill 0だった。GPU lifecycleは`experimental`のまま、
+evidenceはこのexact target／SKU／tuple／format／shapeだけ`project-verified`とする。詳細は
+[Phase 67追跡要約](../../ci/matrix/phase67-gfx1030-mxfp8-tile-transfer-v1.json)を正本とする。
 
 ## 将来AMD候補
 

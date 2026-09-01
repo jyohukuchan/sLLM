@@ -1,6 +1,6 @@
 # ソフトウェア互換性方針
 
-> 最終更新: 2026-08-24
+> 最終更新: 2026-09-01
 
 ## 目的
 
@@ -579,6 +579,77 @@ MXFP8／MXFP6の20-row top-1は`0.80／0.75`、resident削減は`41.10%／51.71%
 `48.10／100.16 tok/s`、decodeは`20.17／20.06 tok/s`で、BF16の`284.03／45.68 tok/s`より遅かった。
 従って形式対応とmemory削減は確認したが、品質または速度を根拠とするdefault採用はしない。full-model claimはこのexact gfx1030短caseに限り、
 長時間安定性、gfx1201／gfx942 full-model、別software tupleへ一般化しない。push/release時のimmutable candidate identityは別途固定する。
+
+### 2026-08-31 Phase62 local RDNA low-precision codec tuple
+
+上記と同じUbuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP
+`7.14.60850`、LLVM 23、Code Object V6、wave32 tupleで、共通codecの直接GPU test、MXFP8/MXFP6 W/A、MXFP8 KV、
+29-case full attentionをexact `gfx1030`／`gfx1201`でPASSした。decode 1,104 scalar code、encode境界、非整列block境界、
+M=`1/3/17`、KV=8,193を含み、beforeとbit exact、HIP-only、fallback false、cleanup 0である。
+
+固定Qwen3.5-4BのFP16-KV 17／4 prefillはgfx1030 MXFP8/MXFP6 `48.48/99.23 tok/s`、gfx1201
+`72.87/115.30 tok/s`だった。BF16 weightでKVだけを分離したFP16→MXFP8 E4比較はgfx1030
+`255.77/44.45→261.99/44.42 tok/s`、gfx1201 `399.25/44.60→398.12/44.81 tok/s`だった。
+software lifecycleは`experimental`のままで、別OS/runtime/compiler、gfx942、長時間安定性、release artifactへ一般化しない。
+
+### 2026-09-01 Phase63 local R9700 MXFP8 WMMA tuple
+
+Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、LLVM 23、
+Code Object V6、wave32、R9700 exact `gfx1201`で、large-M MXFP8 E4M3 W8A8 WMMA providerを検証した。追加最適化後の最終CLIは
+`sha256:0e44f19142814d2b93fc811fee85d394fa2f894c8db87a92ac681cfcc090138a`、抽出matmul code objectは
+`sha256:0acd6d364d4c4d3c0e33a3c479ed4e804cf8f498023079d5ddaf2a65c1f926b7`である。
+
+M=`127/128/129`、N=1,024を含むoperator、同一MXFP8 artifact品質、512〜4,096 full-model、2,048 profileをHIP-only、
+fallback false、cleanup 0でPASSした。production selectorはexact gfx1201の限定shapeだけを採用し、gfx1030/gfx942はcompile／
+host nonselectionに留めてGPU PASSを主張しない。software lifecycleは`experimental`のままで、別OS/kernel/driver/runtime/compiler、
+別R9700構成、gfx1200、長時間安定性へ一般化しない。
+
+同じtuple／CLIで固定Qwen3.5-9B MXFP8 GGUF `sha256:eff9e54d...`を追加実行した。512〜4,096 inputのPhase63既定経路は
+`788.346〜912.870 tok/s`、強制row8比`14.26〜16.63x`で、ID 31の実dispatch、HIP-only、fallback false、cleanup 0を確認した。
+この追加結果は1 warmup＋3 measuredの性能・経路scopeであり、9Bの包括的品質またはsoftware lifecycleを変更しない。
+
+Phase 65の同一tupleでは、最終CLI `sha256:d4472be3d5faff90af4a68256f165a690e9b302e97fee581ab8f554c03e3dffe`、
+operator runner `sha256:0a4c00eba4dc49a37c2278cbb4f81e5913e149ae601734bca6b7e29589dd7c53`でID31／34／35／36を比較した。
+ID36既定時の2,048-token prefillは4B `3,053.502 tok/s`、9B `1,761.989 tok/s`で、resident／peak、HIP-only、
+fallback、cleanupは不変だった。software lifecycleは`experimental`のままで、別ROCm、別R9700構成、別GPU familyへ一般化しない。
+
+Phase 66の同一Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
+LLVM 23、Code Object V6、wave32、R9700 exact `gfx1201` tupleでは、prepared low-precision provider、MXFP8 N128 ID37、
+MXFP6／NVFP4／MXFP4 routing、FP16／MXFP8 KV typed attentionを検証した。final CLI、matrix runner、attention runner、
+matmul object、embedded fatbin、extracted gfx1201 code objectのSHA-256は順に
+`55fd3a5e7fd85f9685739964d7128007d64195e5f5983580523138272044dc9c`、
+`030168e04610dc1b6d2ba5c81ac1ad6f07355a1ef145620063fb110d16bd86ea`、
+`c4643ccd55cf3ad115c7fd91908fa60f533ea33e9b406412d5fdbaec1744fd47`、
+`3ada513d756ac5364896fb776cc655d50cad35752e2b0e2700c9dde434dd4ad5`、
+`78787b13891d2afb6781963524429eb37d84db3dcd8d2d2a8b8f91cd20f91e99`、
+`4adc1528dddb2c98a564cd3a334c5b36203e45581dc0e89b1ff3a89b9dda8a88`である。
+
+MXFP8 4B／9B、FP16 KV、3+10の512/1,024/2,048/4,096 prefill中央値は4B
+`3,840.804836/3,806.640973/3,767.237995/3,249.069405 tok/s`、9B
+`1,988.722356/2,231.573186/2,261.647647/2,069.842794 tok/s`だった。最大peakは4B
+`7,301,568,000`、9B `14,169,489,920` byte、workspace arena high-waterは`1,080,836,096` byte、
+allocator after-dropは0だった。external HBM/GTTは別途sampleしていない。ID37はexact targetかつN128整列shapeだけへ採用し、
+attention候補は同期性能で棄却した。
+MXFP6 Qwen、NVFP4 reviewed Gemma、MXFP4 operator、BF16 attentionはHIP-only、fallback false、cleanup 0で、
+provider transferをcompile-onlyではなく実機実行した。software lifecycleは`experimental`のままで、別OS/kernel/driver/runtime/compiler、
+別R9700構成、gfx1200、gfx1030/gfx942実機、長時間安定性へ一般化しない。詳細は
+[Phase 66追跡要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
+
+Phase 67の同一Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP `7.14.60850`、
+LLVM 23、Code Object V6、wave32、canonical V620 exact `gfx1030` tupleでは、MXFP8 staged MMQのcol16／col32転用と
+既存col8のshape crossoverを検証した。最終CLI、operator runner、matmul host object、embedded fatbin、抽出gfx1030 code objectの
+SHA-256は順に`419c6d3745bc60a763922f5e3517ae81fc17fd0f1031477d7cb1f2787028f787`、
+`c59e0de0ae605ee623d49785229ff37820141d4422f603f693f6e4078dca7ee2`、
+`ff1031399a6bf2dfe792f114d96bfb45a8a2d5b02a0ad053832b57ffb94563c7`、
+`b8c7956e5ab29402c2b5dadcedee0db914bd06b7e1294da89821acbcc3293f90`、
+`47264fda62045863cdf8e6f68d21ed9415f6dc46749ebe1b5fb75ad51c18987c`である。
+
+Qwen3.5-4B MXFP8、FP16 KV、1+3の512／2,048 prefill中央値はscoped defaultで
+`207.6111/208.2710 tok/s`、同一binaryのrow8 rollbackで`72.1830/71.2428 tok/s`だった。生成token、VRAM、
+HIP-only、fallback、cleanupは一致した。ID27はexact targetかつ測定済みshapeだけへ採用し、ID38/39は明示benchmark-onlyである。
+software lifecycleは`experimental`のままで、別OS/kernel/driver/runtime/compiler、別V620構成、gfx1031–gfx1036、
+gfx1201/gfx942、別model、長時間安定性へ一般化しない。詳細は
+[Phase 67追跡要約](../../ci/matrix/phase67-gfx1030-mxfp8-tile-transfer-v1.json)を正本とする。
 
 ## 公式資料
 

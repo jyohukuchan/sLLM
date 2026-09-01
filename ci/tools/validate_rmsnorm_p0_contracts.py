@@ -158,6 +158,8 @@ EXPECTED_SOURCE_PATHS = (
     "native/hip/src/kv_state_api.hpp",
     "native/hip/src/kv_state_kernel.hip.cpp",
     "native/hip/src/kv_state_kernel_internal.hpp",
+    "native/hip/src/low_precision_block_codec.hpp",
+    "native/hip/src/low_precision_matmul_provider.hpp",
     "native/hip/src/matmul_api.cpp",
     "native/hip/src/matmul_api.hpp",
     "native/hip/src/matmul_kernel.hip.cpp",

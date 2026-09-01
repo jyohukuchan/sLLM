@@ -100,6 +100,20 @@
           "doctest": false
         },
         {
+          "name": "broadcast_mul_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "context_window_contract",
           "kind": [
             "test"
@@ -115,6 +129,20 @@
         },
         {
           "name": "gdn_projection_bundle_contract",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
+          "name": "gemma4_moe_semantic_contract",
           "kind": [
             "test"
           ],
@@ -460,6 +488,20 @@
           "doctest": false
         },
         {
+          "name": "phase55_chat_renderer",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
+        {
           "name": "sllm_frontend",
           "kind": [
             "lib"
@@ -549,6 +591,20 @@
       },
       "manifest": "crates/sllm-hip/Cargo.toml",
       "targets": [
+        {
+          "name": "phase55_gemma4_moe_actual_gpu",
+          "kind": [
+            "test"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": false,
+          "doctest": false
+        },
         {
           "name": "sllm-attention-preprocess-g1-evidence",
           "kind": [
@@ -763,6 +819,34 @@
         },
         {
           "name": "sllm-matmul-g1-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-ministral3-logits-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-mxfp-wa-evidence",
           "kind": [
             "bin"
           ],
@@ -1031,6 +1115,20 @@
         },
         {
           "name": "sllm-qwen35-moe-execution-evidence",
+          "kind": [
+            "bin"
+          ],
+          "crate_types": [
+            "bin"
+          ],
+          "edition": "2024",
+          "required_features": [],
+          "test": true,
+          "doc": true,
+          "doctest": false
+        },
+        {
+          "name": "sllm-qwen35-mx-weight-quality",
           "kind": [
             "bin"
           ],

@@ -1,4 +1,5 @@
 #include "evidence_abi.h"
+#include "low_precision_matmul_provider.hpp"
 #include "matmul_kernel_internal.hpp"
 #include "public_runtime_internal.hpp"
 #include "rmsnorm_kernel_internal.hpp"
@@ -35,6 +36,11 @@ extern "C" uint32_t sllm_test_select_causal_attention_providers(
     uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
     uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
     const char *arch_name) noexcept;
+extern "C" uint32_t sllm_test_select_causal_attention_providers_with_semantics(
+    uint64_t expected_kv_length, uint32_t query_count, uint32_t query_heads,
+    uint32_t kv_heads, uint32_t head_dim, uint32_t encoding,
+    uint64_t sliding_window, uint32_t explicit_score_scale,
+    const char *arch_name) noexcept;
 extern "C" uint32_t sllm_test_select_linear_attention_gfx942_wave64_column(
     uint64_t token_count, uint32_t qk_heads, uint32_t value_heads,
     uint32_t head_dim, const char *arch_name) noexcept;
@@ -42,6 +48,12 @@ extern "C" void
 sllm_test_deepseek_v4_moe_route_device_status(int32_t status) noexcept;
 extern "C" void
 sllm_test_minimax_m3_moe_route_device_status(int32_t status) noexcept;
+extern "C" uint32_t sllm_test_matmul_prepared_kernel_id(
+    const sllm_matmul_plan_t *raw_plan) noexcept;
+extern "C" uint32_t
+sllm_test_matmul_prepared_provider_semantics(const sllm_matmul_plan_t *raw_plan,
+                                             uint32_t *provider, uint32_t *tile,
+                                             uint32_t *inner_product) noexcept;
 
 namespace {
 
@@ -267,11 +279,16 @@ bool causal_attention_target_scoped_selector_contract() {
   constexpr uint32_t kDecodeGqa4SplitP32 = 1U << 4U;
   constexpr uint32_t kPrefillGqa4 = 1U << 6U;
   constexpr uint32_t kPrefillGqa4QTile4 = 1U << 7U;
+  constexpr uint32_t kTypedQ4K4 = 1U << 10U;
+  constexpr uint32_t kTypedQ4K8 = 2U << 10U;
+  constexpr uint32_t kTypedQ8K8 = 3U << 10U;
   constexpr const char *const kForceBaseline =
       "SLLM_CAUSAL_ATTENTION_FORCE_BASELINE";
   constexpr const char *const kGfx1201Gqa4SplitP32 =
       "SLLM_CAUSAL_ATTENTION_GFX1201_DECODE_GQA4_SPLIT_P32";
-  constexpr std::array<const char *const, 9> kCandidateVariables = {
+  constexpr const char *const kPhase66TiledPrefill =
+      "SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL";
+  constexpr std::array<const char *const, 10> kCandidateVariables = {
       "SLLM_CAUSAL_ATTENTION_GFX1030_Q_PRELOAD",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT",
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_WAVE_SHORT_Q_PRELOAD",
@@ -280,6 +297,7 @@ bool causal_attention_target_scoped_selector_contract() {
       "SLLM_CAUSAL_ATTENTION_GFX1030_DECODE_GQA4_SPLIT_P32",
       "SLLM_CAUSAL_ATTENTION_GFX1030_SCALED_PREFILL_GEMM",
       "SLLM_CAUSAL_ATTENTION_GFX1030_LONG_PREFILL_V2",
+      kPhase66TiledPrefill,
       kForceBaseline};
   std::array<bool, kCandidateVariables.size()> had_old_value{};
   std::array<std::string, kCandidateVariables.size()> old_values{};
@@ -323,6 +341,13 @@ bool causal_attention_target_scoped_selector_contract() {
     return sllm_test_select_causal_attention_providers(
         expected_kv_length, query_count, query_heads, kv_heads, head_dim,
         encoding, arch_name);
+  };
+  const auto select_with_semantics = [](const uint64_t sliding_window,
+                                        const bool explicit_score_scale,
+                                        const uint32_t encoding) {
+    return sllm_test_select_causal_attention_providers_with_semantics(
+        2048U, 128U, 16U, 4U, 256U, encoding, sliding_window,
+        explicit_score_scale ? 1U : 0U, "gfx1201");
   };
   const auto expect_gfx942_zero =
       [&](const uint64_t expected_kv_length, const uint32_t query_count = 1U,
@@ -416,9 +441,9 @@ bool causal_attention_target_scoped_selector_contract() {
                                  SLLM_HIP_KV_ENCODING_FP8_V1);
     }
   }
-  // The same environment matrix must not expose any gfx1030-only candidate
-  // on gfx1201.  FORCE_BASELINE only removes the qtile4 variant, matching the
-  // existing selector's allow_prefill_provider contract.
+  // The same environment matrix must not expose gfx1030-only candidates on
+  // gfx1201. Phase66 is the one model-independent gfx1201 opt-in in this set;
+  // FORCE_BASELINE removes both it and the qtile4 control.
   for (const char *const variable : kCandidateVariables) {
     for (const char *const value : kEnvironmentValues) {
       clear_environment();
@@ -428,13 +453,20 @@ bool causal_attention_target_scoped_selector_contract() {
       const bool force_baseline = std::strcmp(variable, kForceBaseline) == 0 &&
                                   value != nullptr &&
                                   std::strcmp(value, "1") == 0;
+      const bool phase66 = std::strcmp(variable, kPhase66TiledPrefill) == 0 &&
+                           value != nullptr && std::strcmp(value, "1") == 0;
       valid = valid &&
               expect_gfx1201(4095U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
               expect_gfx1201(4096U, 2U, 0U) &&
-              expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
-              expect_gfx1201(4096U, 128U,
+              expect_gfx1201(4096U, 64U,
                              kGfx1201Wave | kPrefillGqa4 |
-                                 (force_baseline ? 0U : kPrefillGqa4QTile4));
+                                 (phase66 ? kPrefillGqa4QTile4 : 0U)) &&
+              expect_gfx1201(
+                  4096U, 128U,
+                  kGfx1201Wave | kPrefillGqa4 |
+                      (force_baseline
+                           ? 0U
+                           : kPrefillGqa4QTile4 | (phase66 ? kTypedQ8K8 : 0U)));
     }
   }
   clear_environment();
@@ -453,6 +485,70 @@ bool causal_attention_target_scoped_selector_contract() {
           expect_gfx1201(4096U, 1U, kGfx1201Wave | kDecodeWaveSplit) &&
           expect_gfx1201(4096U, 64U, kGfx1201Wave | kPrefillGqa4) &&
           expect_gfx1201(4096U, 128U, kGfx1201Wave | kPrefillGqa4);
+
+  // Phase66 chooses tiles from typed query/context boundaries only. Each
+  // rejected target, encoding or shape falls back to the existing q4k1 path.
+  clear_environment();
+  setenv(kPhase66TiledPrefill, "1", 1);
+  valid = valid &&
+          expect_gfx1201(127U, 127U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
+          expect_gfx1201(127U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4) &&
+          expect_gfx1201(128U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ4K4) &&
+          expect_gfx1201(511U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ4K4) &&
+          expect_gfx1201(512U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ4K8) &&
+          expect_gfx1201(513U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ4K8) &&
+          expect_gfx1201(2047U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ4K8) &&
+          expect_gfx1201(2048U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ8K8) &&
+          expect_gfx1201(2049U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ8K8) &&
+          expect_gfx1201(2048U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4, 16U,
+                         4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E5_V1) &&
+          expect_gfx1201(2048U, 128U,
+                         kGfx1201Wave | kPrefillGqa4 | kPrefillGqa4QTile4 |
+                             kTypedQ8K8,
+                         16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1) &&
+          select(2048U, 128U, 16U, 4U, 256U, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1,
+                 "gfx1030") == (kPrefillGqa4 | kPrefillGqa4QTile4) &&
+          expect_gfx1201(2048U, 128U, kGfx1201Wave, 8U, 4U, 256U) &&
+          expect_gfx1201(2048U, 128U, kGfx1201Wave, 16U, 8U, 256U) &&
+          expect_gfx1201(2048U, 128U, kGfx1201Wave, 16U, 4U, 128U);
+
+  // The typed candidate implements full, implicitly-scaled causal attention
+  // only. Sliding-window and explicit-score-scale semantics must keep the
+  // typed policy bits clear for every accepted candidate KV encoding.
+  constexpr uint32_t kTypedPolicyMask = 3U << 10U;
+  for (const uint32_t encoding :
+       {SLLM_HIP_KV_ENCODING_FP16_V1, SLLM_HIP_KV_ENCODING_MXFP8_E4_V1}) {
+    const uint32_t sliding = select_with_semantics(1024U, false, encoding);
+    const uint32_t explicitly_scaled =
+        select_with_semantics(0U, true, encoding);
+    if ((sliding & kTypedPolicyMask) != 0U ||
+        (explicitly_scaled & kTypedPolicyMask) != 0U) {
+      std::cerr << "Phase66 typed prefill selected unsupported attention "
+                   "semantics for encoding "
+                << encoding << ": sliding mask " << sliding
+                << ", explicit-scale mask " << explicitly_scaled << '\n';
+      valid = false;
+    }
+  }
+  setenv(kForceBaseline, "1", 1);
+  valid = valid && expect_gfx1201(2048U, 128U, kGfx1201Wave | kPrefillGqa4);
 
   restore_environment();
   return valid;
@@ -3724,8 +3820,7 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
   if (!create_context(&context) ||
       !create_buffer_sized(context, m * k * sizeof(uint16_t), &activation) ||
       !create_buffer_sized(context, n * k + blocks, &mxfp8_weight) ||
-      !create_buffer_sized(context, n * k * 3U / 4U + blocks,
-                           &mxfp6_weight) ||
+      !create_buffer_sized(context, n * k * 3U / 4U + blocks, &mxfp6_weight) ||
       !create_buffer_sized(context, m * n * sizeof(uint16_t), &output)) {
     return false;
   }
@@ -3734,8 +3829,7 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
   sllm_matmul_plan_t *plan = nullptr;
   auto prepare_and_release = [&](const uint32_t version,
                                  sllm_buffer_t *const weight,
-                                 const uint32_t dtype,
-                                 const uint32_t encoding,
+                                 const uint32_t dtype, const uint32_t encoding,
                                  const char *const label) {
     auto descriptor =
         matmul_descriptor(activation, 0U, weight, 0U, output, 0U, m, k, n);
@@ -3750,15 +3844,15 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
                          SLLM_STATUS_OK, label, error) &&
            plan == nullptr;
   };
-  bool valid = prepare_and_release(
-      SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION, mxfp8_weight,
-      SLLM_TENSOR_DTYPE_F8_E4M3_FN,
-      SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0, "MXFP8 W8A8 prepare");
-  valid = valid && prepare_and_release(
-                       SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION, mxfp6_weight,
-                       SLLM_TENSOR_DTYPE_U8,
-                       SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0,
-                       "MXFP6 W6A6 prepare");
+  bool valid = prepare_and_release(SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION,
+                                   mxfp8_weight, SLLM_TENSOR_DTYPE_F8_E4M3_FN,
+                                   SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0,
+                                   "MXFP8 W8A8 prepare");
+  valid =
+      valid && prepare_and_release(SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION,
+                                   mxfp6_weight, SLLM_TENSOR_DTYPE_U8,
+                                   SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0,
+                                   "MXFP6 W6A6 prepare");
 
   for (const uint64_t nonaligned_k : {UINT64_C(31), UINT64_C(33)}) {
     auto nonaligned = matmul_descriptor(activation, 0U, mxfp8_weight, 0U,
@@ -3766,21 +3860,21 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
     nonaligned.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
     nonaligned.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
     nonaligned.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
-    valid = valid &&
-            expect_status(
-                sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
-                SLLM_STATUS_SHAPE_MISMATCH, "MXFP8 non-block K rejection",
-                error) &&
-            plan == nullptr;
+    valid =
+        valid &&
+        expect_status(
+            sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
+            SLLM_STATUS_SHAPE_MISMATCH, "MXFP8 non-block K rejection", error) &&
+        plan == nullptr;
     nonaligned.op_version = SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
     nonaligned.weight.dtype = SLLM_TENSOR_DTYPE_U8;
     nonaligned.weight.encoding = SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0;
-    valid = valid &&
-            expect_status(
-                sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
-                SLLM_STATUS_SHAPE_MISMATCH, "MXFP6 non-block K rejection",
-                error) &&
-            plan == nullptr;
+    valid =
+        valid &&
+        expect_status(
+            sllm_matmul_prepare(context, &nonaligned, &plan, &error.sink),
+            SLLM_STATUS_SHAPE_MISMATCH, "MXFP6 non-block K rejection", error) &&
+        plan == nullptr;
   }
 
   valid = release_buffer(&activation) && release_buffer(&mxfp8_weight) &&
@@ -3791,12 +3885,31 @@ bool matmul_mxfp_weight_activation_descriptor_contract() {
 }
 
 bool matmul_mxfp_prefill_selector_contract() {
-  constexpr const char *const baseline =
-      "SLLM_MX_WA_PREFILL_FORCE_BASELINE";
+  constexpr const char *const baseline = "SLLM_MX_WA_PREFILL_FORCE_BASELINE";
   constexpr const char *const mxfp8_tiled16 =
       "SLLM_MXFP8_PREFILL_FORCE_TILED16";
-  constexpr const char *const mxfp6_row8 =
-      "SLLM_MXFP6_PREFILL_FORCE_ROW8";
+  constexpr const char *const mxfp6_row8 = "SLLM_MXFP6_PREFILL_FORCE_ROW8";
+  constexpr const char *const mmq_columns =
+      "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS";
+  constexpr const char *const gfx1030_mmq_columns =
+      "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_COLUMNS";
+  constexpr const char *const mxfp8_row8 = "SLLM_MXFP8_PREFILL_FORCE_ROW8";
+  constexpr const char *const mxfp8_wmma =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_GFX1201";
+  constexpr const char *const mxfp8_wmma_n16 =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_N16_GFX1201";
+  constexpr const char *const mxfp8_wmma_4wave =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_4W_GFX1201";
+  constexpr const char *const mxfp8_wmma_lds_pad =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_LDS_PAD_GFX1201";
+  constexpr const char *const mxfp8_wmma_direct_weight =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_WEIGHT_GFX1201";
+  constexpr const char *const mxfp8_wmma_direct_activation =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_ACTIVATION_GFX1201";
+  constexpr const char *const mxfp8_wmma_direct_both =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_DIRECT_BOTH_GFX1201";
+  constexpr const char *const mxfp8_wmma_n128_direct_both =
+      "SLLM_MXFP8_PREFILL_FORCE_WMMA_N128_DIRECT_BOTH_GFX1201";
   const char *const old_baseline = std::getenv(baseline);
   const bool had_baseline = old_baseline != nullptr;
   const std::string old_baseline_value = had_baseline ? old_baseline : "";
@@ -3806,8 +3919,56 @@ bool matmul_mxfp_prefill_selector_contract() {
       had_mxfp8_tiled16 ? old_mxfp8_tiled16 : "";
   const char *const old_mxfp6_row8 = std::getenv(mxfp6_row8);
   const bool had_mxfp6_row8 = old_mxfp6_row8 != nullptr;
-  const std::string old_mxfp6_row8_value =
-      had_mxfp6_row8 ? old_mxfp6_row8 : "";
+  const std::string old_mxfp6_row8_value = had_mxfp6_row8 ? old_mxfp6_row8 : "";
+  const char *const old_mmq_columns = std::getenv(mmq_columns);
+  const bool had_mmq_columns = old_mmq_columns != nullptr;
+  const std::string old_mmq_columns_value =
+      had_mmq_columns ? old_mmq_columns : "";
+  const char *const old_gfx1030_mmq_columns = std::getenv(gfx1030_mmq_columns);
+  const bool had_gfx1030_mmq_columns = old_gfx1030_mmq_columns != nullptr;
+  const std::string old_gfx1030_mmq_columns_value =
+      had_gfx1030_mmq_columns ? old_gfx1030_mmq_columns : "";
+  const char *const old_mxfp8_row8 = std::getenv(mxfp8_row8);
+  const bool had_mxfp8_row8 = old_mxfp8_row8 != nullptr;
+  const std::string old_mxfp8_row8_value = had_mxfp8_row8 ? old_mxfp8_row8 : "";
+  const char *const old_mxfp8_wmma = std::getenv(mxfp8_wmma);
+  const bool had_mxfp8_wmma = old_mxfp8_wmma != nullptr;
+  const std::string old_mxfp8_wmma_value = had_mxfp8_wmma ? old_mxfp8_wmma : "";
+  const char *const old_mxfp8_wmma_n16 = std::getenv(mxfp8_wmma_n16);
+  const bool had_mxfp8_wmma_n16 = old_mxfp8_wmma_n16 != nullptr;
+  const std::string old_mxfp8_wmma_n16_value =
+      had_mxfp8_wmma_n16 ? old_mxfp8_wmma_n16 : "";
+  const char *const old_mxfp8_wmma_4wave = std::getenv(mxfp8_wmma_4wave);
+  const bool had_mxfp8_wmma_4wave = old_mxfp8_wmma_4wave != nullptr;
+  const std::string old_mxfp8_wmma_4wave_value =
+      had_mxfp8_wmma_4wave ? old_mxfp8_wmma_4wave : "";
+  const char *const old_mxfp8_wmma_lds_pad = std::getenv(mxfp8_wmma_lds_pad);
+  const bool had_mxfp8_wmma_lds_pad = old_mxfp8_wmma_lds_pad != nullptr;
+  const std::string old_mxfp8_wmma_lds_pad_value =
+      had_mxfp8_wmma_lds_pad ? old_mxfp8_wmma_lds_pad : "";
+  const char *const old_mxfp8_wmma_direct_weight =
+      std::getenv(mxfp8_wmma_direct_weight);
+  const bool had_mxfp8_wmma_direct_weight =
+      old_mxfp8_wmma_direct_weight != nullptr;
+  const std::string old_mxfp8_wmma_direct_weight_value =
+      had_mxfp8_wmma_direct_weight ? old_mxfp8_wmma_direct_weight : "";
+  const char *const old_mxfp8_wmma_direct_activation =
+      std::getenv(mxfp8_wmma_direct_activation);
+  const bool had_mxfp8_wmma_direct_activation =
+      old_mxfp8_wmma_direct_activation != nullptr;
+  const std::string old_mxfp8_wmma_direct_activation_value =
+      had_mxfp8_wmma_direct_activation ? old_mxfp8_wmma_direct_activation : "";
+  const char *const old_mxfp8_wmma_direct_both =
+      std::getenv(mxfp8_wmma_direct_both);
+  const bool had_mxfp8_wmma_direct_both = old_mxfp8_wmma_direct_both != nullptr;
+  const std::string old_mxfp8_wmma_direct_both_value =
+      had_mxfp8_wmma_direct_both ? old_mxfp8_wmma_direct_both : "";
+  const char *const old_mxfp8_wmma_n128_direct_both =
+      std::getenv(mxfp8_wmma_n128_direct_both);
+  const bool had_mxfp8_wmma_n128_direct_both =
+      old_mxfp8_wmma_n128_direct_both != nullptr;
+  const std::string old_mxfp8_wmma_n128_direct_both_value =
+      had_mxfp8_wmma_n128_direct_both ? old_mxfp8_wmma_n128_direct_both : "";
   const auto restore_environment = [&]() {
     if (had_baseline) {
       setenv(baseline, old_baseline_value.c_str(), 1);
@@ -3824,11 +3985,81 @@ bool matmul_mxfp_prefill_selector_contract() {
     } else {
       unsetenv(mxfp6_row8);
     }
+    if (had_mmq_columns) {
+      setenv(mmq_columns, old_mmq_columns_value.c_str(), 1);
+    } else {
+      unsetenv(mmq_columns);
+    }
+    if (had_gfx1030_mmq_columns) {
+      setenv(gfx1030_mmq_columns, old_gfx1030_mmq_columns_value.c_str(), 1);
+    } else {
+      unsetenv(gfx1030_mmq_columns);
+    }
+    if (had_mxfp8_row8) {
+      setenv(mxfp8_row8, old_mxfp8_row8_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_row8);
+    }
+    if (had_mxfp8_wmma) {
+      setenv(mxfp8_wmma, old_mxfp8_wmma_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma);
+    }
+    if (had_mxfp8_wmma_n16) {
+      setenv(mxfp8_wmma_n16, old_mxfp8_wmma_n16_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_n16);
+    }
+    if (had_mxfp8_wmma_4wave) {
+      setenv(mxfp8_wmma_4wave, old_mxfp8_wmma_4wave_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_4wave);
+    }
+    if (had_mxfp8_wmma_lds_pad) {
+      setenv(mxfp8_wmma_lds_pad, old_mxfp8_wmma_lds_pad_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_lds_pad);
+    }
+    if (had_mxfp8_wmma_direct_weight) {
+      setenv(mxfp8_wmma_direct_weight,
+             old_mxfp8_wmma_direct_weight_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_direct_weight);
+    }
+    if (had_mxfp8_wmma_direct_activation) {
+      setenv(mxfp8_wmma_direct_activation,
+             old_mxfp8_wmma_direct_activation_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_direct_activation);
+    }
+    if (had_mxfp8_wmma_direct_both) {
+      setenv(mxfp8_wmma_direct_both, old_mxfp8_wmma_direct_both_value.c_str(),
+             1);
+    } else {
+      unsetenv(mxfp8_wmma_direct_both);
+    }
+    if (had_mxfp8_wmma_n128_direct_both) {
+      setenv(mxfp8_wmma_n128_direct_both,
+             old_mxfp8_wmma_n128_direct_both_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp8_wmma_n128_direct_both);
+    }
   };
 
   unsetenv(baseline);
   unsetenv(mxfp8_tiled16);
   unsetenv(mxfp6_row8);
+  unsetenv(mmq_columns);
+  unsetenv(gfx1030_mmq_columns);
+  unsetenv(mxfp8_row8);
+  unsetenv(mxfp8_wmma);
+  unsetenv(mxfp8_wmma_n16);
+  unsetenv(mxfp8_wmma_4wave);
+  unsetenv(mxfp8_wmma_lds_pad);
+  unsetenv(mxfp8_wmma_direct_weight);
+  unsetenv(mxfp8_wmma_direct_activation);
+  unsetenv(mxfp8_wmma_direct_both);
+  unsetenv(mxfp8_wmma_n128_direct_both);
   bool valid =
       sllm_matmul_kernel::select_mxfp8_variant(1U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
@@ -3837,7 +4068,218 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp8_variant(2U) ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp6_variant(17U) ==
-          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp8_variant(127U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(129U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaDirectWeight &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 12288U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 12288U, 4096U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 11264U, 4096U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 512U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 32U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 248320U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+
+  for (const char *const target : {"gfx1200", "gfx942", "gfx9999"}) {
+    valid =
+        valid &&
+        sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, target) ==
+            sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  }
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(127U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2047U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2048U, 2559U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2048U, 2560U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2048U, 9216U, 2560U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(511U, 2560U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 1024U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 1025U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 16384U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 16385U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(512U, 2560U, 248320U,
+                                               "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+
+  setenv(mxfp8_wmma, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(3U, 64U, 7U, "gfx1201") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
+          sllm_matmul_kernel::select_mxfp8_variant(1U, 64U, 7U, "gfx1201") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+          sllm_matmul_kernel::select_mxfp8_variant(3U, 64U, 7U, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  setenv(mxfp8_row8, "1", 1);
+  valid = valid && sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U,
+                                                            "gfx1201") ==
+                       sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  unsetenv(mxfp8_row8);
+  unsetenv(mxfp8_wmma);
+
+  setenv(mxfp8_wmma_n16, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(3U, 64U, 7U, "gfx1201") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN16;
+  unsetenv(mxfp8_wmma_n16);
+
+  setenv(mxfp8_wmma_4wave, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmma4Wave &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9217U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8;
+  unsetenv(mxfp8_wmma_4wave);
+
+  setenv(mxfp8_wmma_lds_pad, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaLdsPad;
+  unsetenv(mxfp8_wmma_lds_pad);
+
+  setenv(mxfp8_wmma_direct_weight, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaDirectWeight;
+  unsetenv(mxfp8_wmma_direct_weight);
+
+  setenv(mxfp8_wmma_direct_activation, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaDirectActivation &&
+      sllm_matmul_kernel::select_mxfp8_variant(127U, 9216U, 2560U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
+      sllm_matmul_kernel::select_mxfp8_variant(129U, 9216U, 2560U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 9216U, 2560U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8;
+  unsetenv(mxfp8_wmma_direct_activation);
+
+  setenv(mxfp8_wmma_direct_both, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaDirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(129U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64;
+  unsetenv(mxfp8_wmma_direct_both);
+
+  setenv(mxfp8_wmma_n128_direct_both, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 128U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 127U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(127U, 2560U, 128U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 128U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  unsetenv(mxfp8_wmma_n128_direct_both);
+
+  setenv(mmq_columns, "4", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol4 &&
+          sllm_matmul_kernel::select_mxfp6_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol4;
+  setenv(mmq_columns, "8", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol8 &&
+          sllm_matmul_kernel::select_mxfp6_variant(17U) ==
+              sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol8;
+
+  unsetenv(mmq_columns);
+  setenv(gfx1030_mmq_columns, "16", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 31U, 17U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col16 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 33U, 17U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(1U, 32U, 17U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Decode &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx942") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(2U, 32U, 17U, "gfx9999") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  setenv(gfx1030_mmq_columns, "32", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32;
+
+  setenv(mmq_columns, "4", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillMmqCol4;
+  unsetenv(mmq_columns);
+  setenv(mxfp8_row8, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+  unsetenv(mxfp8_row8);
+  setenv(mxfp8_tiled16, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillTiled16;
+  unsetenv(mxfp8_tiled16);
+  setenv(baseline, "1", 1);
+  valid = valid &&
+          sllm_matmul_kernel::select_mxfp8_variant(9U, 32U, 33U, "gfx1030") ==
+              sllm_matmul_kernel::KernelVariant::Mxfp8W8A8Prefill;
+  unsetenv(baseline);
+  unsetenv(gfx1030_mmq_columns);
 
   setenv(mxfp8_tiled16, "1", 1);
   setenv(mxfp6_row8, "1", 1);
@@ -3847,6 +4289,7 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::select_mxfp6_variant(17U) ==
               sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillRow8;
 
+  setenv(mmq_columns, "4", 1);
   setenv(baseline, "1", 1);
   valid = valid &&
           sllm_matmul_kernel::select_mxfp8_variant(17U) ==
@@ -3854,8 +4297,279 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::select_mxfp6_variant(17U) ==
               sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Prefill;
 
+  unsetenv(baseline);
+  unsetenv(mmq_columns);
+  unsetenv(mxfp8_tiled16);
+
+  setenv(gfx1030_mmq_columns, "16", 1);
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  {
+    sllm_context_t *gfx1030_context = nullptr;
+    sllm_buffer_t *gfx1030_activation = nullptr;
+    sllm_buffer_t *gfx1030_weight = nullptr;
+    sllm_buffer_t *gfx1030_output = nullptr;
+    sllm_matmul_plan_t *gfx1030_plan = nullptr;
+    constexpr uint64_t gfx1030_m = 9U;
+    constexpr uint64_t gfx1030_k = 32U;
+    constexpr uint64_t gfx1030_n = 33U;
+    constexpr uint64_t gfx1030_weight_blocks =
+        gfx1030_n * gfx1030_k / UINT64_C(32);
+    Error gfx1030_error;
+    if (!create_context_for_arch("gfx1030", &gfx1030_context) ||
+        !create_buffer_sized(gfx1030_context,
+                             gfx1030_m * gfx1030_k * sizeof(uint16_t),
+                             &gfx1030_activation) ||
+        !create_buffer_sized(gfx1030_context,
+                             gfx1030_n * gfx1030_k + gfx1030_weight_blocks,
+                             &gfx1030_weight) ||
+        !create_buffer_sized(gfx1030_context,
+                             gfx1030_m * gfx1030_n * sizeof(uint16_t),
+                             &gfx1030_output)) {
+      valid = false;
+    } else {
+      auto descriptor = matmul_descriptor(gfx1030_activation, 0U,
+                                          gfx1030_weight, 0U, gfx1030_output,
+                                          0U, gfx1030_m, gfx1030_k, gfx1030_n);
+      descriptor.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
+      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
+      valid =
+          valid &&
+          expect_status(sllm_matmul_prepare(gfx1030_context, &descriptor,
+                                            &gfx1030_plan, &gfx1030_error.sink),
+                        SLLM_STATUS_OK, "gfx1030 staged MMQ provider",
+                        gfx1030_error) &&
+          gfx1030_plan != nullptr;
+      uint32_t prepared_provider = 0U;
+      uint32_t prepared_tile = 0U;
+      uint32_t prepared_inner_product = 0U;
+      valid =
+          valid &&
+          sllm_test_matmul_prepared_kernel_id(gfx1030_plan) ==
+              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                        Mxfp8W8A8PrefillMmqGfx1030Col16) &&
+          sllm_test_matmul_prepared_provider_semantics(
+              gfx1030_plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Block32) &&
+          prepared_tile ==
+              static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow8Column16) &&
+          prepared_inner_product ==
+              static_cast<uint32_t>(
+                  sllm_lowp::InnerProduct::DecodedBlockScaledFp32);
+      setenv(gfx1030_mmq_columns, "32", 1);
+      setenv(baseline, "1", 1);
+      valid = valid &&
+              sllm_test_matmul_prepared_kernel_id(gfx1030_plan) ==
+                  static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                            Mxfp8W8A8PrefillMmqGfx1030Col16) &&
+              sllm_test_matmul_prepared_provider_semantics(
+                  gfx1030_plan, &prepared_provider, &prepared_tile,
+                  &prepared_inner_product) == 1U &&
+              prepared_tile == static_cast<uint32_t>(
+                                   sllm_lowp::TilePolicy::BlockRow8Column16);
+    }
+    if (gfx1030_plan != nullptr) {
+      valid = expect_status(
+                  sllm_matmul_plan_release(&gfx1030_plan, &gfx1030_error.sink),
+                  SLLM_STATUS_OK, "gfx1030 staged MMQ provider release",
+                  gfx1030_error) &&
+              valid;
+    }
+    valid = release_buffer(&gfx1030_activation) &&
+            release_buffer(&gfx1030_weight) &&
+            release_buffer(&gfx1030_output) &&
+            release_context(&gfx1030_context) && valid;
+  }
+  unsetenv(baseline);
+  unsetenv(gfx1030_mmq_columns);
+
+  setenv(mxfp8_wmma, "1", 1);
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  sllm_context_t *context = nullptr;
+  sllm_buffer_t *activation = nullptr;
+  sllm_buffer_t *weight = nullptr;
+  sllm_buffer_t *output = nullptr;
+  sllm_matmul_plan_t *plan = nullptr;
+  constexpr uint64_t prepared_m = 3U;
+  constexpr uint64_t prepared_k = 64U;
+  constexpr uint64_t prepared_n = 7U;
+  constexpr uint64_t weight_blocks = prepared_n * prepared_k / 32U;
+  Error error;
+  if (!create_context(&context) ||
+      !create_buffer_sized(context, prepared_m * prepared_k * sizeof(uint16_t),
+                           &activation) ||
+      !create_buffer_sized(context, prepared_n * prepared_k + weight_blocks,
+                           &weight) ||
+      !create_buffer_sized(context, prepared_m * prepared_n * sizeof(uint16_t),
+                           &output)) {
+    valid = false;
+  } else {
+    auto descriptor = matmul_descriptor(activation, 0U, weight, 0U, output, 0U,
+                                        prepared_m, prepared_k, prepared_n);
+    descriptor.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
+    descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+    descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
+    valid = valid &&
+            expect_status(
+                sllm_matmul_prepare(context, &descriptor, &plan, &error.sink),
+                SLLM_STATUS_OK, "MXFP8 prepared provider", error) &&
+            plan != nullptr;
+    uint32_t prepared_provider = 0U;
+    uint32_t prepared_tile = 0U;
+    uint32_t prepared_inner_product = 0U;
+    valid =
+        valid &&
+        sllm_test_matmul_prepared_provider_semantics(
+            plan, &prepared_provider, &prepared_tile,
+            &prepared_inner_product) == 1U &&
+        prepared_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma) &&
+        prepared_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
+        prepared_inner_product ==
+            static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3WmmaFp32);
+    unsetenv(mxfp8_wmma);
+    setenv(baseline, "1", 1);
+    valid =
+        valid &&
+        sllm_test_matmul_prepared_kernel_id(plan) ==
+            static_cast<uint32_t>(
+                sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillWmmaN64) &&
+        sllm_test_matmul_prepared_provider_semantics(
+            plan, &prepared_provider, &prepared_tile,
+            &prepared_inner_product) == 1U &&
+        prepared_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma) &&
+        prepared_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
+        prepared_inner_product ==
+            static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3WmmaFp32);
+  }
+  if (plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                          SLLM_STATUS_OK, "MXFP8 prepared provider release",
+                          error) &&
+            valid;
+  }
+  valid = release_buffer(&activation) && release_buffer(&weight) &&
+          release_buffer(&output) && release_context(&context) && valid;
+
+  unsetenv(baseline);
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  context = nullptr;
+  activation = nullptr;
+  weight = nullptr;
+  output = nullptr;
+  plan = nullptr;
+  constexpr uint64_t large_m = 129U;
+  constexpr uint64_t large_k = 2560U;
+  constexpr uint64_t large_n = 9216U;
+  constexpr uint64_t large_weight_blocks = large_n * large_k / 32U;
+  if (!create_context(&context) ||
+      !create_buffer_sized(context, large_m * large_k * sizeof(uint16_t),
+                           &activation) ||
+      !create_buffer_sized(context, large_n * large_k + large_weight_blocks,
+                           &weight) ||
+      !create_buffer_sized(context, large_m * large_n * sizeof(uint16_t),
+                           &output)) {
+    valid = false;
+  } else {
+    const auto prepare_large = [&](const uint64_t m,
+                                   sllm_matmul_plan_t **const output_plan) {
+      auto descriptor = matmul_descriptor(activation, 0U, weight, 0U, output,
+                                          0U, m, large_k, large_n);
+      descriptor.op_version = SLLM_HIP_MATMUL_MXFP8_W8A8_VERSION;
+      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_F8_E4M3_FN;
+      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0;
+      return sllm_matmul_prepare(context, &descriptor, output_plan,
+                                 &error.sink);
+    };
+    valid = valid &&
+            expect_status(prepare_large(128U, &plan), SLLM_STATUS_OK,
+                          "MXFP8 prepared ID37 provider", error) &&
+            plan != nullptr;
+    uint32_t prepared_provider = 0U;
+    uint32_t prepared_tile = 0U;
+    uint32_t prepared_inner_product = 0U;
+    valid =
+        valid &&
+        sllm_test_matmul_prepared_kernel_id(plan) ==
+            static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                      Mxfp8W8A8PrefillWmmaN128DirectBoth) &&
+        sllm_test_matmul_prepared_provider_semantics(
+            plan, &prepared_provider, &prepared_tile,
+            &prepared_inner_product) == 1U &&
+        prepared_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma) &&
+        prepared_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x128x32) &&
+        prepared_inner_product ==
+            static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3WmmaFp32);
+    setenv(baseline, "1", 1);
+    valid = valid &&
+            sllm_test_matmul_prepared_kernel_id(plan) ==
+                static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                          Mxfp8W8A8PrefillWmmaN128DirectBoth) &&
+            sllm_test_matmul_prepared_provider_semantics(
+                plan, &prepared_provider, &prepared_tile,
+                &prepared_inner_product) == 1U &&
+            prepared_tile ==
+                static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x128x32);
+    unsetenv(baseline);
+    if (plan != nullptr) {
+      valid = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                            SLLM_STATUS_OK,
+                            "MXFP8 prepared ID37 provider release", error) &&
+              valid;
+    }
+
+    valid = valid &&
+            expect_status(prepare_large(large_m, &plan), SLLM_STATUS_OK,
+                          "MXFP8 prepared M129 provider", error) &&
+            plan != nullptr;
+    valid =
+        valid &&
+        sllm_test_matmul_prepared_kernel_id(plan) ==
+            static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                      Mxfp8W8A8PrefillWmmaDirectWeight) &&
+        sllm_test_matmul_prepared_provider_semantics(
+            plan, &prepared_provider, &prepared_tile,
+            &prepared_inner_product) == 1U &&
+        prepared_provider ==
+            static_cast<uint32_t>(sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma) &&
+        prepared_tile ==
+            static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
+        prepared_inner_product ==
+            static_cast<uint32_t>(sllm_lowp::InnerProduct::E4M3WmmaFp32);
+    setenv(mxfp8_row8, "1", 1);
+    valid = valid &&
+            sllm_test_matmul_prepared_kernel_id(plan) ==
+                static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                          Mxfp8W8A8PrefillWmmaDirectWeight) &&
+            sllm_test_matmul_prepared_provider_semantics(
+                plan, &prepared_provider, &prepared_tile,
+                &prepared_inner_product) == 1U &&
+            prepared_tile ==
+                static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32);
+    unsetenv(mxfp8_row8);
+  }
+  if (plan != nullptr) {
+    valid = expect_status(sllm_matmul_plan_release(&plan, &error.sink),
+                          SLLM_STATUS_OK,
+                          "MXFP8 prepared M129 provider release", error) &&
+            valid;
+  }
+  valid = release_buffer(&activation) && release_buffer(&weight) &&
+          release_buffer(&output) && release_context(&context) && valid;
+
   restore_environment();
-  return valid;
+  return valid && fake_hip::live_events() == 0U &&
+         fake_hip::live_streams() == 0U && fake_hip::live_allocations() == 0U;
 }
 
 bool matmul_short_mixed_metadata_dispatch_contract() {
@@ -7790,10 +8504,10 @@ bool sliding_static_fp8_ring_image_fork_and_scale_contract() {
   return released && valid && clean;
 }
 
-sllm_tensor_binding_t deepseek_v4_route_binding(
-    const sllm_buffer_t *const buffer, const uint32_t dtype,
-    const uint32_t rank, const uint64_t first,
-    const uint64_t second = 0U) {
+sllm_tensor_binding_t
+deepseek_v4_route_binding(const sllm_buffer_t *const buffer,
+                          const uint32_t dtype, const uint32_t rank,
+                          const uint64_t first, const uint64_t second = 0U) {
   sllm_tensor_binding_t result{};
   result.struct_size = sizeof(result);
   result.abi_version = SLLM_HIP_ABI_VERSION;
@@ -7812,8 +8526,7 @@ sllm_tensor_binding_t deepseek_v4_route_binding(
 
 bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
   constexpr uint64_t tokens = 3U;
-  constexpr uint64_t experts =
-      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
+  constexpr uint64_t experts = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
   constexpr uint32_t selected =
       SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT;
   constexpr uint64_t pairs = tokens * selected;
@@ -7831,8 +8544,8 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
   descriptor.routed_scale = 1.5F;
   descriptor.logits = deepseek_v4_route_binding(
       sentinel, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
-  descriptor.selection_bias = deepseek_v4_route_binding(
-      sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+  descriptor.selection_bias =
+      deepseek_v4_route_binding(sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
   descriptor.metadata = deepseek_v4_route_binding(
       sentinel, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
   const auto query = [&](const sllm_deepseek_v4_moe_route_desc_t &candidate,
@@ -7862,9 +8575,8 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
         std::numeric_limits<float>::quiet_NaN()}) {
     auto candidate = descriptor;
     candidate.routed_scale = invalid_scale;
-    valid = valid &&
-            query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
-                  "DeepSeek route invalid routed scale");
+    valid = valid && query(candidate, SLLM_STATUS_INVALID_ARGUMENT,
+                           "DeepSeek route invalid routed scale");
   }
   {
     auto candidate = descriptor;
@@ -7901,8 +8613,7 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
     candidate.logits.shape[0] = 0U;
     valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
                            "DeepSeek route zero-token boundary");
-    candidate.logits.shape[0] =
-        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS + 1U;
+    candidate.logits.shape[0] = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_MAX_TOKENS + 1U;
     valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
                            "DeepSeek route maximum-token boundary");
   }
@@ -7948,8 +8659,8 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
     candidate.selection_bias = {};
     candidate.hash_expert_ids = deepseek_v4_route_binding(
         sentinel, SLLM_TENSOR_DTYPE_I32, 2U, tokens, selected);
-    valid = valid &&
-            query(candidate, SLLM_STATUS_OK, "DeepSeek route hash query");
+    valid =
+        valid && query(candidate, SLLM_STATUS_OK, "DeepSeek route hash query");
     candidate.selection_bias = descriptor.selection_bias;
     valid = valid && query(candidate, SLLM_STATUS_INVALID_TENSOR_BINDING,
                            "DeepSeek route hash inactive bias binding");
@@ -7960,30 +8671,26 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
     info.abi_version = SLLM_HIP_ABI_VERSION;
     info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION;
     Error error;
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_query(
-                             &descriptor, &info, &error.sink),
-                         SLLM_STATUS_INVALID_ARGUMENT,
-                         "DeepSeek route query info size", error);
+    valid = valid && expect_status(sllm_deepseek_v4_moe_route_query(
+                                       &descriptor, &info, &error.sink),
+                                   SLLM_STATUS_INVALID_ARGUMENT,
+                                   "DeepSeek route query info size", error);
     info = {};
     info.struct_size = sizeof(info);
     info.abi_version = SLLM_HIP_ABI_VERSION + 1U;
     info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION;
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_query(
-                             &descriptor, &info, &error.sink),
-                         SLLM_STATUS_INVALID_ABI_VERSION,
-                         "DeepSeek route query info ABI", error);
+    valid = valid && expect_status(sllm_deepseek_v4_moe_route_query(
+                                       &descriptor, &info, &error.sink),
+                                   SLLM_STATUS_INVALID_ABI_VERSION,
+                                   "DeepSeek route query info ABI", error);
     info = {};
     info.struct_size = sizeof(info);
     info.abi_version = SLLM_HIP_ABI_VERSION;
-    info.info_version =
-        SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION + 1U;
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_query(
-                             &descriptor, &info, &error.sink),
-                         SLLM_STATUS_INVALID_ARGUMENT,
-                         "DeepSeek route query info version", error);
+    info.info_version = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_QUERY_INFO_VERSION + 1U;
+    valid = valid && expect_status(sllm_deepseek_v4_moe_route_query(
+                                       &descriptor, &info, &error.sink),
+                                   SLLM_STATUS_INVALID_ARGUMENT,
+                                   "DeepSeek route query info version", error);
   }
 
   sllm_context_t *context = nullptr;
@@ -7991,16 +8698,16 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
   sllm_buffer_t *bias = nullptr;
   sllm_buffer_t *output = nullptr;
   sllm_deepseek_v4_moe_route_plan_t *plan = nullptr;
-  valid = valid && create_context(&context) &&
-          create_buffer_sized(context, tokens * experts * UINT64_C(2),
-                              &logits) &&
-          create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
-          create_buffer_sized(context, metadata_bytes, &output);
+  valid =
+      valid && create_context(&context) &&
+      create_buffer_sized(context, tokens * experts * UINT64_C(2), &logits) &&
+      create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
+      create_buffer_sized(context, metadata_bytes, &output);
   if (valid) {
     descriptor.logits = deepseek_v4_route_binding(
         logits, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
-    descriptor.selection_bias = deepseek_v4_route_binding(
-        bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.selection_bias =
+        deepseek_v4_route_binding(bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
     descriptor.metadata = deepseek_v4_route_binding(
         output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
     Error error;
@@ -8016,40 +8723,40 @@ bool deepseek_v4_moe_route_descriptor_abi_and_lifetime_contract() {
     sllm_completion_t *completion = nullptr;
     const auto *const queue_sentinel =
         reinterpret_cast<const sllm_queue_t *>(1U);
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_execute(
-                             plan, queue_sentinel, &completion, &dispatch,
-                             &error.sink),
-                         SLLM_STATUS_INVALID_ARGUMENT,
-                         "DeepSeek route dispatch info size", error) &&
+    valid = valid &&
+            expect_status(
+                sllm_deepseek_v4_moe_route_execute(
+                    plan, queue_sentinel, &completion, &dispatch, &error.sink),
+                SLLM_STATUS_INVALID_ARGUMENT,
+                "DeepSeek route dispatch info size", error) &&
             completion == nullptr;
     dispatch = {};
     dispatch.struct_size = sizeof(dispatch);
     dispatch.abi_version = SLLM_HIP_ABI_VERSION;
     dispatch.info_version =
         SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_execute(
-                             plan, queue_sentinel, &completion, &dispatch,
-                             &error.sink),
-                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-                         "DeepSeek route queue handle rejection", error) &&
+    valid = valid &&
+            expect_status(
+                sllm_deepseek_v4_moe_route_execute(
+                    plan, queue_sentinel, &completion, &dispatch, &error.sink),
+                SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                "DeepSeek route queue handle rejection", error) &&
             completion == nullptr;
     auto *wrong_kind = reinterpret_cast<sllm_moe_route_plan_t *>(plan);
-    valid = valid && expect_status(
-                         sllm_moe_route_plan_release(&wrong_kind, &error.sink),
-                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-                         "DeepSeek route cross-ABI handle rejection", error) &&
+    valid = valid &&
+            expect_status(sllm_moe_route_plan_release(&wrong_kind, &error.sink),
+                          SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                          "DeepSeek route cross-ABI handle rejection", error) &&
             wrong_kind != nullptr;
     valid = valid &&
             expect_status(sllm_buffer_release(&output, &error.sink),
                           SLLM_STATUS_PUBLIC_BUSY,
                           "DeepSeek route retained output", error) &&
             output != nullptr;
-    valid = valid && expect_status(
-                         sllm_deepseek_v4_moe_route_plan_release(
-                             &plan, &error.sink),
-                         SLLM_STATUS_OK, "DeepSeek route plan release", error) &&
+    valid = valid &&
+            expect_status(
+                sllm_deepseek_v4_moe_route_plan_release(&plan, &error.sink),
+                SLLM_STATUS_OK, "DeepSeek route plan release", error) &&
             plan == nullptr;
   }
   Error release_error;
@@ -8077,8 +8784,7 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
   fake_hip::reset();
   sllm_public_runtime::FaultInjector::reset();
   constexpr uint64_t tokens = 3U;
-  constexpr uint64_t experts =
-      SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
+  constexpr uint64_t experts = SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_EXPERT_COUNT;
   constexpr uint32_t selected =
       SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_SELECTED_EXPERT_COUNT;
   constexpr uint64_t pairs = tokens * selected;
@@ -8106,19 +8812,18 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
   descriptor.selected_expert_count = selected;
   descriptor.renormalize = 1U;
   descriptor.routed_scale = 1.5F;
-  descriptor.logits = deepseek_v4_route_binding(
-      logits, SLLM_TENSOR_DTYPE_BF16, 2U, tokens, experts);
-  descriptor.selection_bias = deepseek_v4_route_binding(
-      bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
-  descriptor.metadata = deepseek_v4_route_binding(
-      output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes);
+  descriptor.logits = deepseek_v4_route_binding(logits, SLLM_TENSOR_DTYPE_BF16,
+                                                2U, tokens, experts);
+  descriptor.selection_bias =
+      deepseek_v4_route_binding(bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+  descriptor.metadata = deepseek_v4_route_binding(output, SLLM_TENSOR_DTYPE_U8,
+                                                  1U, metadata_bytes);
   Error prepare_error;
-  bool valid = expect_status(sllm_deepseek_v4_moe_route_prepare(
-                                 context, &descriptor, &plan,
-                                 &prepare_error.sink),
-                             SLLM_STATUS_OK, "DeepSeek status prepare",
-                             prepare_error) &&
-               plan != nullptr;
+  bool valid =
+      expect_status(sllm_deepseek_v4_moe_route_prepare(
+                        context, &descriptor, &plan, &prepare_error.sink),
+                    SLLM_STATUS_OK, "DeepSeek status prepare", prepare_error) &&
+      plan != nullptr;
 
   struct StatusCase final {
     int32_t device_status;
@@ -8150,11 +8855,10 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
         SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
     sllm_completion_t *completion = nullptr;
     Error execute_error;
-    valid = expect_status(sllm_deepseek_v4_moe_route_execute(
-                              plan, queue, &completion, &dispatch,
-                              &execute_error.sink),
-                          SLLM_STATUS_OK, "DeepSeek status execute",
-                          execute_error) &&
+    valid = expect_status(
+                sllm_deepseek_v4_moe_route_execute(
+                    plan, queue, &completion, &dispatch, &execute_error.sink),
+                SLLM_STATUS_OK, "DeepSeek status execute", execute_error) &&
             completion != nullptr && dispatch.fallback_allowed == 0U &&
             dispatch.fallback_used == 0U;
     if (!valid) {
@@ -8164,18 +8868,16 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error wait_error;
-    const bool query_first =
-        test_case.device_status ==
-        SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT;
+    const bool query_first = test_case.device_status ==
+                             SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_DUPLICATE_EXPERT;
     const sllm_status_t wait_status =
         query_first
             ? sllm_completion_query(completion, &result, &wait_error.sink)
             : sllm_completion_wait(completion, 1000U, &result,
                                    &wait_error.sink);
-    const uint32_t expected_state =
-        test_case.expected_status == SLLM_STATUS_OK
-            ? SLLM_COMPLETION_STATE_SUCCESS
-            : SLLM_COMPLETION_STATE_FAILURE;
+    const uint32_t expected_state = test_case.expected_status == SLLM_STATUS_OK
+                                        ? SLLM_COMPLETION_STATE_SUCCESS
+                                        : SLLM_COMPLETION_STATE_FAILURE;
     valid = expect_status(wait_status, test_case.expected_status,
                           query_first ? "DeepSeek first status query"
                                       : "DeepSeek status wait",
@@ -8193,18 +8895,16 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
                                                 &repeated_error.sink),
                           test_case.expected_status,
                           "DeepSeek repeated status query", repeated_error) &&
-            result.state == expected_state &&
-            release_completion(&completion) && completion == nullptr &&
-            fake_hip::live_events() == baseline_events;
+            result.state == expected_state && release_completion(&completion) &&
+            completion == nullptr && fake_hip::live_events() == baseline_events;
   }
 
   if (valid) {
     Error mode_error;
-    valid = expect_status(sllm_queue_set_completion_mode(
-                              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
-                              &mode_error.sink),
-                          SLLM_STATUS_OK, "DeepSeek deferred mode",
-                          mode_error);
+    valid = expect_status(
+        sllm_queue_set_completion_mode(
+            queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED, &mode_error.sink),
+        SLLM_STATUS_OK, "DeepSeek deferred mode", mode_error);
   }
   sllm_completion_t *deferred = nullptr;
   sllm_completion_t *fence = nullptr;
@@ -8217,48 +8917,44 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
     dispatch.info_version =
         SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_DISPATCH_INFO_VERSION;
     Error execute_error;
-    valid = expect_status(sllm_deepseek_v4_moe_route_execute(
-                              plan, queue, &deferred, &dispatch,
-                              &execute_error.sink),
-                          SLLM_STATUS_OK, "DeepSeek deferred execute",
-                          execute_error) &&
-            deferred != nullptr &&
-            fake_hip::live_events() == baseline_events;
+    valid = expect_status(
+                sllm_deepseek_v4_moe_route_execute(
+                    plan, queue, &deferred, &dispatch, &execute_error.sink),
+                SLLM_STATUS_OK, "DeepSeek deferred execute", execute_error) &&
+            deferred != nullptr && fake_hip::live_events() == baseline_events;
   }
   if (valid) {
     Error fence_error;
-    valid = expect_status(sllm_queue_fence(queue, &fence, &fence_error.sink),
-                          SLLM_STATUS_OK, "DeepSeek deferred fence",
-                          fence_error) &&
-            fence != nullptr &&
-            fake_hip::live_events() == baseline_events + 1U;
+    valid =
+        expect_status(sllm_queue_fence(queue, &fence, &fence_error.sink),
+                      SLLM_STATUS_OK, "DeepSeek deferred fence", fence_error) &&
+        fence != nullptr && fake_hip::live_events() == baseline_events + 1U;
   }
   if (valid) {
     sllm_completion_result_t result{};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error wait_error;
-    valid = expect_status(sllm_completion_wait(fence, 1000U, &result,
-                                               &wait_error.sink),
-                          SLLM_STATUS_OK, "DeepSeek deferred fence wait",
-                          wait_error) &&
+    valid = expect_status(
+                sllm_completion_wait(fence, 1000U, &result, &wait_error.sink),
+                SLLM_STATUS_OK, "DeepSeek deferred fence wait", wait_error) &&
             result.state == SLLM_COMPLETION_STATE_SUCCESS;
     result = {};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error finalize_error;
-    valid = valid &&
-            expect_status(sllm_completion_finalize_after(
-                              deferred, fence, &result, &finalize_error.sink),
-                          SLLM_STATUS_INVALID_ARGUMENT,
-                          "DeepSeek deferred semantic failure",
-                          finalize_error) &&
-            result.state == SLLM_COMPLETION_STATE_FAILURE &&
-            std::strstr(finalize_error.message, "duplicate") != nullptr &&
-            release_completion(&deferred) && deferred == nullptr &&
-            fake_hip::live_events() == baseline_events + 1U &&
-            release_completion(&fence) && fence == nullptr &&
-            fake_hip::live_events() == baseline_events;
+    valid =
+        valid &&
+        expect_status(sllm_completion_finalize_after(deferred, fence, &result,
+                                                     &finalize_error.sink),
+                      SLLM_STATUS_INVALID_ARGUMENT,
+                      "DeepSeek deferred semantic failure", finalize_error) &&
+        result.state == SLLM_COMPLETION_STATE_FAILURE &&
+        std::strstr(finalize_error.message, "duplicate") != nullptr &&
+        release_completion(&deferred) && deferred == nullptr &&
+        fake_hip::live_events() == baseline_events + 1U &&
+        release_completion(&fence) && fence == nullptr &&
+        fake_hip::live_events() == baseline_events;
   }
 
   sllm_test_deepseek_v4_moe_route_device_status(
@@ -8268,10 +8964,9 @@ bool deepseek_v4_moe_route_device_status_completion_contract() {
       (deferred == nullptr || release_completion(&deferred)) &&
       (fence == nullptr || release_completion(&fence)) &&
       (plan == nullptr ||
-       expect_status(sllm_deepseek_v4_moe_route_plan_release(
-                         &plan, &release_error.sink),
-                     SLLM_STATUS_OK, "DeepSeek status plan release",
-                     release_error)) &&
+       expect_status(
+           sllm_deepseek_v4_moe_route_plan_release(&plan, &release_error.sink),
+           SLLM_STATUS_OK, "DeepSeek status plan release", release_error)) &&
       release_buffer(&output) && release_buffer(&bias) &&
       release_buffer(&logits) && release_queue(&queue) &&
       release_context(&context);
@@ -8297,8 +8992,8 @@ bool minimax_m3_moe_route_public_contract() {
     descriptor.selected_expert_count = selected;
     descriptor.logits = deepseek_v4_route_binding(
         sentinel, SLLM_TENSOR_DTYPE_F32, 2U, tokens, experts);
-    descriptor.selection_bias = deepseek_v4_route_binding(
-        sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.selection_bias =
+        deepseek_v4_route_binding(sentinel, SLLM_TENSOR_DTYPE_F32, 1U, experts);
     descriptor.metadata = deepseek_v4_route_binding(
         sentinel, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes(tokens));
     return descriptor;
@@ -8314,18 +9009,18 @@ bool minimax_m3_moe_route_public_contract() {
     const bool ok = expect_status(
         sllm_minimax_m3_moe_route_query(&descriptor, &info, &error.sink),
         expected, label, error);
-    return ok &&
-           (expected != SLLM_STATUS_OK ||
-            (info.token_count == descriptor.logits.shape[0] &&
-             info.expert_count == experts &&
-             info.pair_count == descriptor.logits.shape[0] * selected &&
-             info.metadata_bytes == metadata_bytes(descriptor.logits.shape[0]) &&
-             info.selected_expert_count == selected));
+    return ok && (expected != SLLM_STATUS_OK ||
+                  (info.token_count == descriptor.logits.shape[0] &&
+                   info.expert_count == experts &&
+                   info.pair_count == descriptor.logits.shape[0] * selected &&
+                   info.metadata_bytes ==
+                       metadata_bytes(descriptor.logits.shape[0]) &&
+                   info.selected_expert_count == selected));
   };
 
   bool valid = true;
-  for (const uint64_t tokens : {UINT64_C(1), UINT64_C(3), UINT64_C(5),
-                                UINT64_C(17)}) {
+  for (const uint64_t tokens :
+       {UINT64_C(1), UINT64_C(3), UINT64_C(5), UINT64_C(17)}) {
     valid = valid && query(descriptor_for(tokens), SLLM_STATUS_OK,
                            "MiniMax route M query");
   }
@@ -8353,8 +9048,8 @@ bool minimax_m3_moe_route_public_contract() {
                            "MiniMax route logits dtype");
     candidate = descriptor;
     candidate.logits.shape[0] = 0U;
-    valid = valid && query(candidate, SLLM_STATUS_UNSUPPORTED,
-                           "MiniMax route zero M");
+    valid = valid &&
+            query(candidate, SLLM_STATUS_UNSUPPORTED, "MiniMax route zero M");
     candidate = descriptor;
     candidate.logits.shape[1] = experts - 1U;
     candidate.logits.stride_elements[0] = experts - 1U;
@@ -8380,11 +9075,10 @@ bool minimax_m3_moe_route_public_contract() {
     info.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_QUERY_INFO_VERSION;
     info.reserved[7] = 1U;
     Error error;
-    valid = valid && expect_status(
-                         sllm_minimax_m3_moe_route_query(
-                             &descriptor, &info, &error.sink),
-                         SLLM_STATUS_RESERVED_NONZERO,
-                         "MiniMax route query reserved", error);
+    valid = valid && expect_status(sllm_minimax_m3_moe_route_query(
+                                       &descriptor, &info, &error.sink),
+                                   SLLM_STATUS_RESERVED_NONZERO,
+                                   "MiniMax route query reserved", error);
   }
 
   constexpr uint64_t tokens = 3U;
@@ -8394,16 +9088,16 @@ bool minimax_m3_moe_route_public_contract() {
   sllm_buffer_t *bias = nullptr;
   sllm_buffer_t *output = nullptr;
   sllm_minimax_m3_moe_route_plan_t *plan = nullptr;
-  valid = valid && create_context(&context) && create_queue(context, &queue) &&
-          create_buffer_sized(context, tokens * experts * UINT64_C(4),
-                              &logits) &&
-          create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
-          create_buffer_sized(context, metadata_bytes(tokens), &output);
+  valid =
+      valid && create_context(&context) && create_queue(context, &queue) &&
+      create_buffer_sized(context, tokens * experts * UINT64_C(4), &logits) &&
+      create_buffer_sized(context, experts * UINT64_C(4), &bias) &&
+      create_buffer_sized(context, metadata_bytes(tokens), &output);
   if (valid) {
-    descriptor.logits = deepseek_v4_route_binding(
-        logits, SLLM_TENSOR_DTYPE_F32, 2U, tokens, experts);
-    descriptor.selection_bias = deepseek_v4_route_binding(
-        bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
+    descriptor.logits = deepseek_v4_route_binding(logits, SLLM_TENSOR_DTYPE_F32,
+                                                  2U, tokens, experts);
+    descriptor.selection_bias =
+        deepseek_v4_route_binding(bias, SLLM_TENSOR_DTYPE_F32, 1U, experts);
     descriptor.metadata = deepseek_v4_route_binding(
         output, SLLM_TENSOR_DTYPE_U8, 1U, metadata_bytes(tokens));
     Error error;
@@ -8417,12 +9111,12 @@ bool minimax_m3_moe_route_public_contract() {
     invalid_dispatch.info_version =
         SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
     sllm_completion_t *invalid_completion = nullptr;
-    valid = valid && expect_status(
-                         sllm_minimax_m3_moe_route_execute(
-                             plan, queue, &invalid_completion,
-                             &invalid_dispatch, &error.sink),
-                         SLLM_STATUS_INVALID_ARGUMENT,
-                         "MiniMax invalid dispatch size", error) &&
+    valid = valid &&
+            expect_status(sllm_minimax_m3_moe_route_execute(
+                              plan, queue, &invalid_completion,
+                              &invalid_dispatch, &error.sink),
+                          SLLM_STATUS_INVALID_ARGUMENT,
+                          "MiniMax invalid dispatch size", error) &&
             invalid_completion == nullptr;
     invalid_dispatch = {};
     invalid_dispatch.struct_size = sizeof(invalid_dispatch);
@@ -8430,22 +9124,23 @@ bool minimax_m3_moe_route_public_contract() {
     invalid_dispatch.info_version =
         SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
     invalid_dispatch.reserved[0] = 1U;
-    valid = valid && expect_status(
-                         sllm_minimax_m3_moe_route_execute(
-                             plan, queue, &invalid_completion,
-                             &invalid_dispatch, &error.sink),
-                         SLLM_STATUS_RESERVED_NONZERO,
-                         "MiniMax invalid dispatch reserved", error) &&
+    valid = valid &&
+            expect_status(sllm_minimax_m3_moe_route_execute(
+                              plan, queue, &invalid_completion,
+                              &invalid_dispatch, &error.sink),
+                          SLLM_STATUS_RESERVED_NONZERO,
+                          "MiniMax invalid dispatch reserved", error) &&
             invalid_completion == nullptr;
     auto *wrong_kind = reinterpret_cast<sllm_moe_route_plan_t *>(plan);
-    valid = valid && expect_status(
-                         sllm_moe_route_plan_release(&wrong_kind, &error.sink),
-                         SLLM_STATUS_PUBLIC_INVALID_HANDLE,
-                         "MiniMax cross-ABI plan rejection", error) &&
+    valid = valid &&
+            expect_status(sllm_moe_route_plan_release(&wrong_kind, &error.sink),
+                          SLLM_STATUS_PUBLIC_INVALID_HANDLE,
+                          "MiniMax cross-ABI plan rejection", error) &&
             wrong_kind != nullptr;
-    valid = valid && expect_status(sllm_buffer_release(&output, &error.sink),
-                                   SLLM_STATUS_PUBLIC_BUSY,
-                                   "MiniMax retained output", error) &&
+    valid = valid &&
+            expect_status(sllm_buffer_release(&output, &error.sink),
+                          SLLM_STATUS_PUBLIC_BUSY, "MiniMax retained output",
+                          error) &&
             output != nullptr;
   }
 
@@ -8457,12 +9152,11 @@ bool minimax_m3_moe_route_public_contract() {
   };
   constexpr std::array<StatusCase, 4> cases{{
       {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_OK, SLLM_STATUS_OK, nullptr, false},
-      {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE,
-       SLLM_STATUS_INVALID_ARGUMENT, "non-finite", true},
+      {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_NONFINITE, SLLM_STATUS_INVALID_ARGUMENT,
+       "non-finite", true},
       {SLLM_MINIMAX_M3_MOE_ROUTE_STATUS_ZERO_NORMALIZER,
        SLLM_STATUS_INVALID_ARGUMENT, "normalizer", false},
-      {INT32_C(99), SLLM_STATUS_INTERNAL_ERROR, "missing or unsupported",
-       true},
+      {INT32_C(99), SLLM_STATUS_INTERNAL_ERROR, "missing or unsupported", true},
   }};
   const std::size_t baseline_events = fake_hip::live_events();
   for (const auto &test_case : cases) {
@@ -8476,42 +9170,41 @@ bool minimax_m3_moe_route_public_contract() {
     dispatch.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
     sllm_completion_t *completion = nullptr;
     Error execute_error;
-    valid = expect_status(sllm_minimax_m3_moe_route_execute(
-                              plan, queue, &completion, &dispatch,
-                              &execute_error.sink),
-                          SLLM_STATUS_OK, "MiniMax route execute",
-                          execute_error) &&
-            completion != nullptr && dispatch.dispatch_count == 2U &&
-            dispatch.kernel_id ==
-                SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1 &&
-            dispatch.token_count == tokens && dispatch.expert_count == experts &&
-            dispatch.pair_count == tokens * selected &&
-            dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U;
+    valid =
+        expect_status(sllm_minimax_m3_moe_route_execute(plan, queue,
+                                                        &completion, &dispatch,
+                                                        &execute_error.sink),
+                      SLLM_STATUS_OK, "MiniMax route execute", execute_error) &&
+        completion != nullptr && dispatch.dispatch_count == 2U &&
+        dispatch.kernel_id ==
+            SLLM_HIP_MINIMAX_M3_MOE_ROUTE_KERNEL_ID_SIGMOID_TOP4_V1 &&
+        dispatch.token_count == tokens && dispatch.expert_count == experts &&
+        dispatch.pair_count == tokens * selected &&
+        dispatch.fallback_allowed == 0U && dispatch.fallback_used == 0U;
     sllm_completion_result_t result{};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error completion_error;
     const sllm_status_t status =
         test_case.query_first
-            ? sllm_completion_query(completion, &result,
-                                    &completion_error.sink)
+            ? sllm_completion_query(completion, &result, &completion_error.sink)
             : sllm_completion_wait(completion, 1000U, &result,
                                    &completion_error.sink);
-    valid = valid && expect_status(status, test_case.expected_status,
-                                   "MiniMax route completion",
-                                   completion_error) &&
-            (test_case.fragment == nullptr ||
-             std::strstr(completion_error.message, test_case.fragment) !=
-                 nullptr);
+    valid =
+        valid &&
+        expect_status(status, test_case.expected_status,
+                      "MiniMax route completion", completion_error) &&
+        (test_case.fragment == nullptr ||
+         std::strstr(completion_error.message, test_case.fragment) != nullptr);
     result = {};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error cached_error;
-    valid = valid && expect_status(
-                         sllm_completion_query(completion, &result,
-                                               &cached_error.sink),
-                         test_case.expected_status,
-                         "MiniMax cached completion", cached_error) &&
+    valid = valid &&
+            expect_status(
+                sllm_completion_query(completion, &result, &cached_error.sink),
+                test_case.expected_status, "MiniMax cached completion",
+                cached_error) &&
             release_completion(&completion) &&
             fake_hip::live_events() == baseline_events;
   }
@@ -8520,10 +9213,10 @@ bool minimax_m3_moe_route_public_contract() {
   sllm_completion_t *fence = nullptr;
   if (valid) {
     Error mode_error;
-    valid = expect_status(sllm_queue_set_completion_mode(
-                              queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED,
-                              &mode_error.sink),
-                          SLLM_STATUS_OK, "MiniMax deferred mode", mode_error);
+    valid = expect_status(
+        sllm_queue_set_completion_mode(
+            queue, SLLM_QUEUE_COMPLETION_MODE_DEFERRED, &mode_error.sink),
+        SLLM_STATUS_OK, "MiniMax deferred mode", mode_error);
   }
   if (valid) {
     sllm_test_minimax_m3_moe_route_device_status(
@@ -8533,43 +9226,42 @@ bool minimax_m3_moe_route_public_contract() {
     dispatch.abi_version = SLLM_HIP_ABI_VERSION;
     dispatch.info_version = SLLM_HIP_MINIMAX_M3_MOE_ROUTE_DISPATCH_INFO_VERSION;
     Error execute_error;
-    valid = expect_status(sllm_minimax_m3_moe_route_execute(
-                              plan, queue, &deferred, &dispatch,
-                              &execute_error.sink),
-                          SLLM_STATUS_OK, "MiniMax deferred execute",
-                          execute_error) &&
+    valid = expect_status(
+                sllm_minimax_m3_moe_route_execute(
+                    plan, queue, &deferred, &dispatch, &execute_error.sink),
+                SLLM_STATUS_OK, "MiniMax deferred execute", execute_error) &&
             fake_hip::live_events() == baseline_events;
     Error busy_error;
-    valid = valid && expect_status(sllm_minimax_m3_moe_route_plan_release(
-                                       &plan, &busy_error.sink),
-                                   SLLM_STATUS_PUBLIC_BUSY,
-                                   "MiniMax in-flight plan", busy_error) &&
-            plan != nullptr;
+    valid =
+        valid &&
+        expect_status(
+            sllm_minimax_m3_moe_route_plan_release(&plan, &busy_error.sink),
+            SLLM_STATUS_PUBLIC_BUSY, "MiniMax in-flight plan", busy_error) &&
+        plan != nullptr;
     Error fence_error;
-    valid = valid && expect_status(sllm_queue_fence(queue, &fence,
-                                                    &fence_error.sink),
-                                   SLLM_STATUS_OK, "MiniMax deferred fence",
-                                   fence_error);
+    valid = valid && expect_status(
+                         sllm_queue_fence(queue, &fence, &fence_error.sink),
+                         SLLM_STATUS_OK, "MiniMax deferred fence", fence_error);
   }
   if (valid) {
     sllm_completion_result_t result{};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error wait_error;
-    valid = expect_status(sllm_completion_wait(fence, 1000U, &result,
-                                               &wait_error.sink),
-                          SLLM_STATUS_OK, "MiniMax fence wait", wait_error);
+    valid = expect_status(
+        sllm_completion_wait(fence, 1000U, &result, &wait_error.sink),
+        SLLM_STATUS_OK, "MiniMax fence wait", wait_error);
     result = {};
     result.struct_size = sizeof(result);
     result.abi_version = SLLM_HIP_ABI_VERSION;
     Error finalize_error;
-    valid = valid && expect_status(sllm_completion_finalize_after(
-                                       deferred, fence, &result,
-                                       &finalize_error.sink),
-                                   SLLM_STATUS_INVALID_ARGUMENT,
-                                   "MiniMax deferred semantic failure",
-                                   finalize_error) &&
-            std::strstr(finalize_error.message, "normalizer") != nullptr;
+    valid =
+        valid &&
+        expect_status(sllm_completion_finalize_after(deferred, fence, &result,
+                                                     &finalize_error.sink),
+                      SLLM_STATUS_INVALID_ARGUMENT,
+                      "MiniMax deferred semantic failure", finalize_error) &&
+        std::strstr(finalize_error.message, "normalizer") != nullptr;
   }
 
   sllm_test_minimax_m3_moe_route_device_status(
@@ -8579,10 +9271,9 @@ bool minimax_m3_moe_route_public_contract() {
       (deferred == nullptr || release_completion(&deferred)) &&
       (fence == nullptr || release_completion(&fence)) &&
       (plan == nullptr ||
-       expect_status(sllm_minimax_m3_moe_route_plan_release(
-                         &plan, &release_error.sink),
-                     SLLM_STATUS_OK, "MiniMax route plan release",
-                     release_error)) &&
+       expect_status(
+           sllm_minimax_m3_moe_route_plan_release(&plan, &release_error.sink),
+           SLLM_STATUS_OK, "MiniMax route plan release", release_error)) &&
       release_buffer(&output) && release_buffer(&bias) &&
       release_buffer(&logits) && release_queue(&queue) &&
       release_context(&context);
@@ -8620,14 +9311,32 @@ int main() {
     std::cerr << "embedding prepare/execute contract test failed\n";
     return 1;
   }
-  if (!context_device_property_snapshot_contract() ||
-      !matmul_prepare_execute_and_negative_contract() ||
-      !matmul_mxfp_weight_activation_descriptor_contract() ||
-      !matmul_mxfp_prefill_selector_contract() ||
-      !matmul_short_mixed_metadata_dispatch_contract() ||
-      !matmul_short_mixed_rocblas_solution_selector_contract() ||
-      !matmul_async_lifetime_and_cleanup()) {
+  if (!context_device_property_snapshot_contract()) {
+    std::cerr << "context device-property snapshot test failed\n";
+    return 1;
+  }
+  if (!matmul_prepare_execute_and_negative_contract()) {
     std::cerr << "matmul prepare/execute contract test failed\n";
+    return 1;
+  }
+  if (!matmul_mxfp_weight_activation_descriptor_contract()) {
+    std::cerr << "matmul MXFP descriptor contract test failed\n";
+    return 1;
+  }
+  if (!matmul_mxfp_prefill_selector_contract()) {
+    std::cerr << "matmul MXFP provider selector contract test failed\n";
+    return 1;
+  }
+  if (!matmul_short_mixed_metadata_dispatch_contract()) {
+    std::cerr << "matmul short-mixed metadata dispatch test failed\n";
+    return 1;
+  }
+  if (!matmul_short_mixed_rocblas_solution_selector_contract()) {
+    std::cerr << "matmul short-mixed rocBLAS selector test failed\n";
+    return 1;
+  }
+  if (!matmul_async_lifetime_and_cleanup()) {
+    std::cerr << "matmul async lifetime/cleanup test failed\n";
     return 1;
   }
   if (!gdn_projection_bundle_launch_failure_rolls_back_accounting() ||

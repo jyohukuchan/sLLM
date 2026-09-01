@@ -336,6 +336,8 @@
     {"pattern": "native/hip/src/kv_state_api.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/kv_state_kernel.hip.cpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/kv_state_kernel_internal.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
+    {"pattern": "native/hip/src/low_precision_block_codec.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
+    {"pattern": "native/hip/src/low_precision_matmul_provider.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/matmul_api.cpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/matmul_api.hpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},
     {"pattern": "native/hip/src/matmul_kernel.hip.cpp", "suite_ids": ["h3-public-runtime-compile-only", "h3-rmsnorm-compile-only", "h0-rmsnorm-g2-contract", "h0-rmsnorm-p0-contract"]},

@@ -28,11 +28,11 @@ fail_row(int32_t *const expert_ids, float *const expert_weights,
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE,
     1) void sllm_minimax_m3_moe_route_sigmoid_top4_v1(const float *const logits,
-                                                      const float *const
-                                                          selection_bias,
+                                                      const float
+                                                          *const selection_bias,
                                                       int32_t *const expert_ids,
-                                                      float *const
-                                                          expert_weights,
+                                                      float
+                                                          *const expert_weights,
                                                       int32_t *const status) {
   const uint64_t token = blockIdx.x;
   if (threadIdx.x != 0U) {
@@ -104,18 +104,18 @@ extern "C" __global__ __launch_bounds__(
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_MINIMAX_M3_MOE_ROUTE_WORKGROUP_SIZE,
     1) void sllm_minimax_m3_moe_route_stable_group_v1(int32_t *const expert_ids,
-                                                      float *const
-                                                          expert_weights,
-                                                      int32_t *const
-                                                          expert_counts,
-                                                      int32_t *const
-                                                          expert_offsets,
+                                                      float
+                                                          *const expert_weights,
+                                                      int32_t
+                                                          *const expert_counts,
+                                                      int32_t
+                                                          *const expert_offsets,
                                                       int32_t *const
                                                           grouped_token_ids,
                                                       int32_t *const
                                                           grouped_topk_slots,
-                                                      const int32_t *const
-                                                          status,
+                                                      const int32_t
+                                                          *const status,
                                                       const uint64_t
                                                           token_count) {
   constexpr uint32_t expert_count =

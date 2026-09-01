@@ -258,6 +258,55 @@ exact `gfx1030`のQwen3.5-4B実測ではMXFP8／MXFP6 residentをBF16比`41.10%�
 top-1は`0.80／0.75`、prefill／decodeともBF16より遅かった。従って現行経路はformat／correctness／memory foundationであり、
 production defaultやperformance providerへ昇格しない。
 
+Phase 62は低精度形式そのものとconsumer providerの間に共通device境界を置く。E4M3FN/FNUZ、E5M2、E3M2、E2M1、
+E8M0の`ScalarCodec`と、MX block 32／NV block 16のformat policy、immutable/mutable `BlockScaledView`、packed load/store、
+wave amax/flag reductionを`low_precision_block_codec.hpp`へ集約する。value、block-scale、任意のouter-scale planeは既存allocationの
+pointer/stride viewで参照し、共通化のための再配置やpersistent FP32 planeを作らない。
+
+matmulは動的activation quantizeとtile/reduction、KV appendはtoken-major write、attentionはsoftmax/providerを引き続き所有する。
+runtime encodingはkernel起動境界でtemplate specializationへ解決し、要素loadのhot loopにformat switchを残さない。exact gfx1201の
+E4はnative AMD conversion、gfx1030はbit construction/software conversionを同じcodec semanticのtarget別実装として使う。
+cross-plan activation cacheはbuffer generation/liveness契約なしでは安全に再利用できず、単純fusionは出力N tileごとの再量子化を招くため
+Phase 62では採用せず、既存のbounded plan-local workspaceを維持する。
+
+Phase 63はこの共通codec viewをexact `gfx1201`のlarge-M MXFP8 matrix providerへ接続する。providerはmodel identityを受け取らず、
+target、encoding、M/N/K、alignmentからprepare時に一度選ばれる。production scopeはM>=128、K>=2,048、
+1,024<=N<=16,384、K%32=0、N%64=0で、scope外はrow/decode providerを維持する。executeとdispatch監査は同じ保存variantを使い、
+環境変数をhot loopやtoken単位で再評価しない。
+
+既定`wmma128x64x32.v2` providerはresident E4M3 value／E8M0 scaleを6,912-byteのbounded LDS tileへ読み、同じactivation tileを
+4個のN16 WMMAへ再利用する。各K32は8個のFP8xFP8-to-FP32 WMMA K16を実行し、rocWMMA accumulatorを一度だけrow-major lane
+layoutへ変換して、contributionのLDS store/readを行わずblock scale後もFP32でaccumulateする。graph境界だけBF16 RNEとし、
+persistent BF16/FP32 weight展開、FP32 attention/KV plane、cross-request cacheは追加しない。ID 30のN16 providerは明示比較用に保持する。
+2,048 profileではWMMA v2 71.96%、scope外row8 1.55%、activation quantization 1.78%であり、K二重bufferはshape別回帰のため採用しない。
+
+Phase 64／65はarithmetic treeを変えずvalue stagingだけを分離する。ID31はA/BをLDS共有、ID34はBだけdirect、ID35はAだけ
+direct、ID36はA/BをともにglobalからrocWMMA fragmentへdirect-loadし、E8M0 scale tileだけをLDS共有する。ID35／36は
+M%128=0の完全workgroupに限定し、非整列Mはzero-padded既存providerへ戻す。5反復shape sweepと4B／9B実モデルでID36が勝ち、
+exact gfx1201、M>=128、K>=2,048、64<=N<=16,384、M%128=0、K%32=0、N%64=0へmodel名非依存で既定採用する。
+resident weight、persistent workspace、activation／weight format、attention／KV precisionは変更しない。
+
+Phase 66はこのprepared selectorを低精度形式共通の型付きprovider契約へ拡張する。`ProviderRequest`はexact target／architecture、
+weight・activation format、block/scale policy、layout、M/N/K、FP32 accumulation、BF16 RNE outputだけを受け取り、
+`PreparedProviderPlan`へformat contract、activation pack、tile policy、inner productを保存する。public runtimeはprepare時に
+semantic providerと具体kernel variantを一度だけ決め、executeとdispatch metadataはそのfrozen identityを使う。model名、layer、
+prompt、token、測定値はselector keyではなく、prepare後の環境変更もplanを変えない。
+
+共通format contractはMXFP8 E4M3 W8A8 block32/E8M0、MXFP6 E3M2 W6A6 block32/E8M0、NVFP4 W4A16／W4A4
+block16＋tensor scale、MXFP4 W4A4 block32/E8M0を区別する。MXFP4にはE2M1/E8M0 block32 viewを追加し、
+NVFP4と同一packingへ畳み込まない。NVFP4／MXFP4 W4A4は既存device kernelへのroutingをprepared providerへ移したもので、
+同期比較用の別kernelを作らない。MXFP8／MXFP6のK非32倍はfail-closeし、NVFP4／MXFP4は既存masked tail kernelと同じceil-block
+契約を保持する。
+
+MXFP8のID37はID36の独立output列をN128へ広げ、各outputのFP32 treeを変えない。exact gfx1201かつPhase 65 direct-both family、
+N%128=0へ限定採用し、N64、small-K、tail、vocabulary、別targetは既存providerへ戻す。causal attentionはweight形式と分離し、
+Q/K/V、KV encoding、head geometry、query/context長、`sliding_window`、明示`score_scale`からFP16／MXFP8 E4のtyped
+q4k4／q4k8／q8k8候補を選べるが、同期性能で棄却したため明示opt-inだけに保持する。window／scale不一致は既存providerへ
+fail-closeする。reviewed Gemma q16/kv8とQwen3.5 MoE MXFP4 q16/kv2はhead geometryによりtyped candidate非選択、
+BF16 weightのq16/kv4は同じselectorを実dispatchした。request workspace arena high-waterは`1,080,836,096` byte、
+allocator process drop後0で、persistent FP32 attention/KV plane、persistent BF16/FP32 weight展開、cross-request activation cacheは
+追加しない。
+
 Phase 15Qでは同じbindingをGemma 4のMLP gate/up/downへ接続した。`Gemma4ResidentModel::new_nvfp4`はverified Gemma source lockと
 sidecar fingerprintをresident identityへ含め、sidecarに存在するweightだけをpacked NVFP4 allocation/uploadへ置換し、残りを
 exact BF16 cacheからloadする。primary comparisonは144 MLP tensorを要求する。1〜143 tensorのpartial sidecarはlayer単独・累積

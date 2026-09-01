@@ -174,11 +174,11 @@ fn ensure_port_available(port: u16) -> Result<(), String> {
 
 fn resolve_webui_directory() -> Result<PathBuf, String> {
     let mut candidates = Vec::new();
-    if let Ok(executable) = env::current_exe()
-        && let Some(binary_directory) = executable.parent()
-    {
-        candidates.push(binary_directory.join("../share/sllm/webui"));
-        candidates.push(binary_directory.join("../../webui"));
+    if let Ok(executable) = env::current_exe() {
+        if let Some(binary_directory) = executable.parent() {
+            candidates.push(binary_directory.join("../share/sllm/webui"));
+            candidates.push(binary_directory.join("../../webui"));
+        }
     }
     candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../webui"));
     for candidate in candidates {

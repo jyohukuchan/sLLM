@@ -94,8 +94,7 @@ validate_tensor(const sllm_tensor_binding_t &binding,
         sink, SLLM_STATUS_METADATA_OVERFLOW,
         "matmul tensor byte interval overflowed u64");
   }
-  if ((packed_mxfp8 || packed_mxfp6) &&
-      binding.shape[1] % UINT64_C(32) != 0U) {
+  if ((packed_mxfp8 || packed_mxfp6) && binding.shape[1] % UINT64_C(32) != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,
         "MXFP8/MXFP6 matmul K must be padded to a multiple of 32");
@@ -115,8 +114,7 @@ validate_tensor(const sllm_tensor_binding_t &binding,
     }
   } else if (packed_mxfp6) {
     uint64_t packed_row_bytes = 0U;
-    if (multiply_overflows(binding.shape[1], UINT64_C(3),
-                           &packed_row_bytes) ||
+    if (multiply_overflows(binding.shape[1], UINT64_C(3), &packed_row_bytes) ||
         multiply_overflows(binding.shape[0], packed_row_bytes / UINT64_C(4),
                            &payload_bytes)) {
       return sllm_public_runtime::write_error(
@@ -272,11 +270,10 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       descriptor->op_version == SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
   const bool nvfp4 =
       descriptor->op_version == SLLM_HIP_MATMUL_NVFP4_VERSION || nvfp4_w4a4;
-  sllm_status_t status =
-      validate_tensor(descriptor->activation, &metadata->activation,
-                      SLLM_TENSOR_DTYPE_BF16, SLLM_TENSOR_ENCODING_UNQUANTIZED,
-                      UINT64_C(2), false, false, false, false, false, false,
-                      sink);
+  sllm_status_t status = validate_tensor(
+      descriptor->activation, &metadata->activation, SLLM_TENSOR_DTYPE_BF16,
+      SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false, false, false, false,
+      false, false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -289,11 +286,10 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   }
   status = validate_tensor(
       descriptor->weight, &metadata->weight,
-      nvfp4 || mxfp4_w4a4 || mxfp6_w6a6
-          ? SLLM_TENSOR_DTYPE_U8
-          : mxfp8_w8a8 ? SLLM_TENSOR_DTYPE_F8_E4M3_FN
-                          : (fp8_outer ? fp8_dtype : SLLM_TENSOR_DTYPE_BF16),
-      mxfp6_w6a6 ? SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0
+      nvfp4 || mxfp4_w4a4 || mxfp6_w6a6 ? SLLM_TENSOR_DTYPE_U8
+      : mxfp8_w8a8                      ? SLLM_TENSOR_DTYPE_F8_E4M3_FN
+                   : (fp8_outer ? fp8_dtype : SLLM_TENSOR_DTYPE_BF16),
+      mxfp6_w6a6   ? SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0
       : mxfp8_w8a8 ? SLLM_TENSOR_ENCODING_MXFP8_BLOCK32_E8M0
       : mxfp4_w4a4 ? SLLM_TENSOR_ENCODING_MXFP4_W4A4_BLOCK32_E8M0
       : nvfp4 ? (nvfp4_w4a4 ? SLLM_TENSOR_ENCODING_NVFP4_W4A4_BLOCK16_E4M3FN_F32
@@ -303,16 +299,14 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
       fp8_outer || nvfp4 || mxfp4_w4a4 || mxfp8_w8a8 || mxfp6_w6a6
           ? UINT64_C(1)
           : UINT64_C(2),
-      fp8_outer, nvfp4, mxfp4_w4a4, mxfp8_w8a8, mxfp6_w6a6, nvfp4_w4a4,
-      sink);
+      fp8_outer, nvfp4, mxfp4_w4a4, mxfp8_w8a8, mxfp6_w6a6, nvfp4_w4a4, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
-  status =
-      validate_tensor(descriptor->output, &metadata->output,
-                      SLLM_TENSOR_DTYPE_BF16, SLLM_TENSOR_ENCODING_UNQUANTIZED,
-                      UINT64_C(2), false, false, false, false, false, false,
-                      sink);
+  status = validate_tensor(descriptor->output, &metadata->output,
+                           SLLM_TENSOR_DTYPE_BF16,
+                           SLLM_TENSOR_ENCODING_UNQUANTIZED, UINT64_C(2), false,
+                           false, false, false, false, false, sink);
   if (status != SLLM_STATUS_OK) {
     return status;
   }
@@ -340,8 +334,7 @@ validate_and_copy_descriptor(const sllm_matmul_desc_t *const descriptor,
   metadata->mxfp6_w6a6 = mxfp6_w6a6;
   metadata->fp8_dtype = fp8_outer ? fp8_dtype : 0U;
   metadata->weight_value_bytes =
-      mxfp6_w6a6
-          ? metadata->n * (metadata->k * UINT64_C(3) / UINT64_C(4))
+      mxfp6_w6a6   ? metadata->n * (metadata->k * UINT64_C(3) / UINT64_C(4))
       : mxfp8_w8a8 ? metadata->n * metadata->k
       : mxfp4_w4a4 ? metadata->n * ((metadata->k + UINT64_C(1)) / UINT64_C(2))
       : nvfp4

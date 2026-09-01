@@ -1,0 +1,257 @@
+{
+  "schema_version": "sllm-phase63-gfx1201-mxfp8-wmma-prefill-v1",
+  "state": "PASS_SCOPED_ADOPTION",
+  "date": "2026-09-01",
+  "scope": {
+    "target": "gfx1201",
+    "weight_activation": "ocp-mxfp8-e4m3-w8a8-block32-e8m0",
+    "kv_encoding": "fp16",
+    "batch": 1,
+    "candidate_kernel_id": 30,
+    "candidate_kernel_symbol": "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x16x32.v1",
+    "default_selector": {
+      "m_min": 128,
+      "k_min": 2048,
+      "n_min": 2048,
+      "n_max": 16384,
+      "k_multiple": 32,
+      "n_multiple": 16
+    },
+    "excluded": [
+      "M=1 decode",
+      "gfx1030",
+      "gfx942",
+      "unknown targets",
+      "narrow N<2048 projections",
+      "LM head",
+      "MXFP6",
+      "NVFP4"
+    ],
+    "rollback_kernel_id": 22,
+    "rollback_kernel_symbol": "matmul.mxfp8.w8a8.e4m3.block32.prefill.row8.v2"
+  },
+  "identity": {
+    "host": "homelab1-WRX80-Creator",
+    "os": "Ubuntu 24.04.4 LTS",
+    "kernel": "6.17.0-35-generic",
+    "amdgpu": "6.16.13",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "llvm": "23",
+    "code_object": "v6",
+    "wavefront_size": 32,
+    "gpu": "AMD Radeon AI PRO R9700",
+    "gpu_uuid": "GPU-a8e9ddefa2d60f55",
+    "gpu_bdf": "0000:07:00.0",
+    "physical_hip_index": 2,
+    "logical_device_index": 0,
+    "model_repo_id": "Qwen/Qwen3.5-4B",
+    "model_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+    "model_lock": "docs/models/locks/qwen3.5-4b-bf16.json",
+    "mxfp8_artifact_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "bf16_control_artifact_sha256": "c571c54eb8e2c9e935790d885e6d20f29c5fc82cd00ae28ddb5937a77c7fc675",
+    "cli_sha256": "6592831f4569817bb3d274399460eb011d2d977eea4812621b0b5d8d06409e7c",
+    "operator_runner_sha256": "3b97dc53d1777ff9f0ca5d037238490890bd525258b9228e3043c63f9bf33a5f",
+    "quality_runner_sha256": "eaa068866084bc9d02bf285b5f246a1b4a26b5af35bc6cf1352ff38d8c32d6f4"
+  },
+  "clean_room": {
+    "state": "PASS",
+    "non_copy_reference": "local SGLang implementation",
+    "accepted_abstract_findings": [
+      "large-M matrix-instruction provider gap",
+      "prepared target/format/M/N/K/projection-family selector gap",
+      "activation quantization duplication",
+      "wide/narrow/LM-head shape reversal",
+      "launch overhead is secondary to the matrix mainloop"
+    ],
+    "excluded_inputs": [
+      "source code",
+      "pseudocode",
+      "instruction sequences",
+      "tile tables or values",
+      "source-specific symbols"
+    ],
+    "implementation_inputs": [
+      "existing sLLM semantics and low-precision codec",
+      "OCP MX v1.0 format contract",
+      "public AMD HIP/ISA/matrix API documentation",
+      "independent numerical oracle",
+      "sLLM shape sweep and measurements"
+    ]
+  },
+  "selector": {
+    "state": "PASS",
+    "prepared_once": true,
+    "saved_variant_used_for_execute_and_audit": true,
+    "environment_mutation_after_prepare_changes_variant": false,
+    "priority": [
+      "baseline force",
+      "explicit row8 force",
+      "explicit MMQ/tiled16 force",
+      "explicit WMMA force",
+      "scoped production default"
+    ],
+    "boundary_cases": [127, 128, 129],
+    "target_nonselection_host_tests": ["gfx1030", "gfx942", "unknown"],
+    "target_compile_checks": ["gfx1030", "gfx942"]
+  },
+  "isa": {
+    "state": "PASS",
+    "final_cli_code_object_sha256": "ae8b86c90c08d63c7818591e858b2cf193e3eaf0a37ad6df362bbb653d4e95f3",
+    "code_object_bytes": 126920,
+    "target": "gfx1201",
+    "device_symbol": "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_wmma128x16x32_v1",
+    "matrix_instruction": "v_wmma_f32_16x16x16_fp8_fp8",
+    "matrix_instruction_count_in_mainloop": 2,
+    "workgroup_size": 256,
+    "wavefront_size": 32,
+    "sgpr_count": 34,
+    "vgpr_count": 52,
+    "sgpr_spill_count": 0,
+    "vgpr_spill_count": 0,
+    "private_segment_fixed_size": 0,
+    "group_segment_fixed_size": 13376,
+    "disassembly_sha256": "a285c12ec13174c1b0aa0f1622865d7024acd46b616088780765d05b982a9490"
+  },
+  "operator": {
+    "state": "PASS",
+    "report_sha256": "0becfa1d13017c7a4390d4d155ca0cfb9d9046c0705730f67c5ed60aac8ad244",
+    "case_count": 24,
+    "candidate_case_count": 6,
+    "candidate_submission_count": 18,
+    "repeat_count": 3,
+    "fallback_used": false,
+    "absolute_error_limit": 0.5,
+    "relative_error_limit": 0.02,
+    "pass_rule": "absolute OR relative tolerance with exact non-finite classification",
+    "candidate_shapes": [
+      {"id": "wide-boundary", "m": 128, "k": 2560, "n": 9216, "elapsed_ns": 933446, "max_relative_error": 0.0036960265},
+      {"id": "wide-tail", "m": 129, "k": 2560, "n": 9216, "elapsed_ns": 1500211, "max_relative_error": 0.0031502924},
+      {"id": "wide-4096", "m": 128, "k": 2560, "n": 4096, "elapsed_ns": 402564, "max_relative_error": 0.0016450917},
+      {"id": "down", "m": 128, "k": 9216, "n": 2560, "elapsed_ns": 1216208, "max_relative_error": 0.0033875003},
+      {"id": "output", "m": 128, "k": 4096, "n": 2560, "elapsed_ns": 600244, "max_relative_error": 0.003190096}
+    ],
+    "nonselection": [
+      {"id": "wide-below-boundary", "m": 127, "k": 2560, "n": 9216, "kernel_id": 22},
+      {"id": "narrow", "m": 128, "k": 2560, "n": 1024, "kernel_id": 22},
+      {"id": "lm-head-like", "m": 128, "k": 2560, "n": 32, "kernel_id": 22},
+      {"id": "decode", "m": 1, "k": 32, "n": 7, "kernel_id": 18}
+    ],
+    "special_values": {
+      "state": "PASS",
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "exact_encoding_contract": true,
+      "classes": ["E4M3 subnormal", "tie", "max", "saturation", "E8M0 min", "E8M0 finite", "E8M0 NaN", "signed zero", "Inf", "NaN"],
+      "oracle_points": 13,
+      "expected_nonfinite": 4,
+      "actual_nonfinite": 4,
+      "nonfinite_mismatches": 0,
+      "max_relative_error": 0.0004885198,
+      "repeat_output_bitwise_identical": true
+    },
+    "cleanup": {"retryable": 0, "durable_quarantine": 0}
+  },
+  "quality": {
+    "state": "PASS_OBSERVATION_NO_LEGACY_GATE",
+    "report_sha256": "996c3e1f2352c3fbd72473ac81ebc46e91cad1ea4a28b98c32008553bd302bf9",
+    "comparison": "same MXFP8 artifact, legacy row8 versus scoped WMMA default",
+    "case_count": 10,
+    "row_count": 20,
+    "quality_gate_applied": false,
+    "reference_candidate_dispatch_count": [0, 2208],
+    "top1_matches": 19,
+    "top1_agreement": 0.95,
+    "kld_mean": 0.003023902083789931,
+    "kld_p99": 0.013199461876608882,
+    "max_abs_logit_error": 0.625,
+    "perplexity_relative_delta": 0.015172531570622507,
+    "first_logit_divergence": {"case": "b255", "phase": "prefill", "position": 254, "index": 0, "reference": 6.25, "candidate": 6.15625},
+    "first_token_divergence": {"case": "b512", "phase": "decode", "position": 512, "reference_top1": 278, "candidate_top1": 220},
+    "reference_repeat_bitwise_identical": true,
+    "candidate_repeat_bitwise_identical": true,
+    "fallback_used": false,
+    "cleanup_empty": true
+  },
+  "numerical_change": {
+    "ledger_id": "OUT-2026-09-01-P63-GFX1201-MXFP8-WMMA",
+    "classification": "N1",
+    "real_number_equation_changed": false,
+    "input_encoding_changed": false,
+    "accumulator": "fp32",
+    "output_rounding": "bf16-rne",
+    "reason": "Each block32 dot uses two fixed FP8xFP8-to-FP32 WMMA K16 operations followed by one block-scale FP32 accumulation. The dependency depth is no greater than the legacy sequential FP32 row8 sum; no term, scale, dtype, or rounding stage is removed.",
+    "observed_output_change": true,
+    "adoption": "exact-gfx1201-scoped-default",
+    "rollback": "explicit row8 selector or automatic out-of-scope row8"
+  },
+  "full_model_performance": {
+    "candidate_protocol": "3 warmup + 10 measured",
+    "control_protocol": "1 warmup + 3 measured",
+    "candidate": [
+      {"input": 512, "prefill_tps_median": 939.1049870774004, "prefill_tps_mad": 2.0360298939756944, "input_per_ttft_tps_median": 924.9179214991718, "ttft_ms_median": 553.563175, "decode_tps_median": 28.1238887618016, "report_sha256": "2e8adabbc1cdabb82460ef1f046790ee5bf748635d72c06879a763493ad8cba5"},
+      {"input": 1024, "prefill_tps_median": 953.9130949628862, "prefill_tps_mad": 3.9048153765217535, "input_per_ttft_tps_median": 946.6788608505535, "ttft_ms_median": 1081.6769195, "decode_tps_median": 29.060219360171697, "report_sha256": "bb7e7a5b1054fb98cddd6e6d81725a564ad2dbaaf7bdcc437f3ba9bfa4c87c80"},
+      {"input": 2048, "prefill_tps_median": 947.2482386362981, "prefill_tps_mad": 1.2935052496072785, "input_per_ttft_tps_median": 943.3494352100354, "ttft_ms_median": 2170.9877615, "decode_tps_median": 26.90148510002858, "report_sha256": "05cd2ccdcdbebf7ad6b740c232de26f05de75527d60b7ded55ba527240860670"},
+      {"input": 4096, "prefill_tps_median": 908.2655402566664, "prefill_tps_mad": 1.570977509195643, "input_per_ttft_tps_median": 906.5327339932458, "ttft_ms_median": 4518.3146695, "decode_tps_median": 30.021441817261206, "report_sha256": "1b0a9d3691e8ed5cb59bc955dc751e3713632940bba8f520dc72e7a62873b8ec"},
+      {"input": 4096, "chunk": 2048, "prefill_tps_median": 899.117503112948, "prefill_tps_mad": 1.2204960538524574, "input_per_ttft_tps_median": 897.3944657274199, "ttft_ms_median": 4564.3250485, "decode_tps_median": 30.012363613864743, "report_sha256": "971cf4b9ce665773e1455b608e259c8136fb7ef26ae3841301bcea64a111c6d3"}
+    ],
+    "col8_control_prefill_tps_median": {"512": 281.9611884477294, "1024": 277.554104661772, "2048": 272.43260632853503, "4096": 268.357586174862},
+    "bf16_control_prefill_tps_median": {"512": 5929.065311109405, "1024": 6010.537740506913, "2048": 5476.575651060153, "4096": 4387.050499268678},
+    "control_report_sha256": {
+      "col8": {"512": "7317a1b08fa30947855384544b4edabeec2541f437d842f264ef439526bc744d", "1024": "d4f00167fbc68f69861452bc76c4251c9291774c9496c395031e7555ab2145fc", "2048": "1abbc295a622c2e29818d5876c35c1fe1187e5a6836e3f12a11ff4a7992ba61d", "4096": "f5451904387c1448c5b4d705c2754d8cd34c417c8772c227f9554a7fe1b53262"},
+      "bf16": {"512": "5d7f3e25433baa0ce3477d19b505b9a35249ffe4875e2e96dc6d1961932a1751", "1024": "321c7d10ac58999483445edff31fdcecd1d96c2e6a696f14f0d76b61464369da", "2048": "54a6aa30284e6c707c4853358ac723367edbfbd3c6f3bbc5d32d4aa2c1897d7d", "4096": "997f04b4da5f431529a00cffee48a88a7dd80dd557305e069ed64ee5251d0d86"}
+    },
+    "candidate_over_col8_ratio": {"512": 3.330628, "1024": 3.436834, "2048": 3.477003, "4096": 3.384540},
+    "performance_target_tps": 1000,
+    "performance_target_met": false,
+    "highest_measured_candidate_tps": 959.6227932717135,
+    "all_candidate_runs_hip_only": true,
+    "fallback_used": false,
+    "all_candidate_runs_cleanup_empty": true
+  },
+  "profile": {
+    "state": "PASS",
+    "input_tokens": 2048,
+    "protocol": "1 warmup + 3 measured under rocprofv3",
+    "measured_prefill_tps": [967.401027037238, 965.4737006481924, 963.5088328493741],
+    "benchmark_sha256": "df29ace3ac4ef7155d16b33956722fd265f5d9fa4df50a02bbc1eb5ea0cca95a",
+    "kernel_stats_sha256": "e8c1a5ab01dd8b513c05e70b35ef359287450dbfe7da6ae3c565b60a913d2d22",
+    "kernel_trace_sha256": "0bfec4f8ad73cc6237a15d8f03a38206460164130fa2c7811ce34780916c319b",
+    "kernel_duration_sum_ns": 8774834884,
+    "gpu_span_ns": 21044288934,
+    "dispatch_rows": 12635,
+    "kernel_share_percent": {
+      "wmma_matrix_mainloop": 73.021175,
+      "legacy_row8_matrix": 11.729027,
+      "activation_quantization": 1.058253,
+      "attention_combined": 6.5308,
+      "linear_attention_and_gdn": 3.8203,
+      "elementwise_norm_and_other": 3.8404
+    },
+    "conditional_activation_reuse_or_fusion_entered": false,
+    "reason": "Activation quantization is only 1.06% while matrix kernels remain 84.75% of kernel duration. The Phase 63 conditional criterion is not met."
+  },
+  "resources": {
+    "reference_model_resident_bytes": 4954035712,
+    "candidate_model_resident_bytes": 4954035712,
+    "reference_request_state_peak_bytes": 68354048,
+    "candidate_request_state_peak_bytes": 68354048,
+    "reference_workspace_peak_bytes": 270738432,
+    "candidate_workspace_peak_bytes": 270738432,
+    "reference_total_peak_bytes": 5293128192,
+    "candidate_total_peak_bytes": 5293128192,
+    "persistent_bf16_or_fp32_weight_expansion_added": false,
+    "persistent_fp32_attention_or_kv_plane_added": false,
+    "final_gpu_process_count": 0,
+    "final_hbm_baseline_mb": 57,
+    "final_gtt_baseline_mb": 59,
+    "ecc_errors": 0
+  },
+  "review": {
+    "integration_review": "PASS",
+    "correctness_or_security_blockers": 0,
+    "abi_selector_dispatch_or_target_blockers": 0,
+    "notes": "No source or pseudocode from the non-copy reference was returned to the implementation agent."
+  }
+}

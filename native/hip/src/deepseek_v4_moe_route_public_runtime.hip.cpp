@@ -9,8 +9,7 @@
 #if defined(SLLM_PUBLIC_RUNTIME_HOST_TEST)
 namespace sllm_deepseek_v4_moe_route_kernel {
 namespace {
-std::atomic<int32_t> test_device_status{
-    SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK};
+std::atomic<int32_t> test_device_status{SLLM_DEEPSEEK_V4_MOE_ROUTE_STATUS_OK};
 }
 
 hipError_t launch(const uint16_t *, const float *, const int32_t *, int32_t *,
@@ -25,8 +24,8 @@ hipError_t launch(const uint16_t *, const float *, const int32_t *, int32_t *,
 }
 } // namespace sllm_deepseek_v4_moe_route_kernel
 
-extern "C" void sllm_test_deepseek_v4_moe_route_device_status(
-    const int32_t status) noexcept {
+extern "C" void
+sllm_test_deepseek_v4_moe_route_device_status(const int32_t status) noexcept {
   sllm_deepseek_v4_moe_route_kernel::test_device_status.store(
       status, std::memory_order_relaxed);
 }

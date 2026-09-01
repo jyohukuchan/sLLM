@@ -2084,13 +2084,13 @@ impl ModelFrontendBackend for Gemma4MoeProductionBackend {
                     .to_owned(),
             );
         }
-        if let Some(encoding) = request.kv_cache_encoding
-            && encoding != KvCacheEncoding::Fp8E4M3FnStatic
-        {
-            return Err(
-                "Gemma 4 MoE requires its static FP8 E4M3 KV contract; use no KV flag or fp8-static"
-                    .to_owned(),
-            );
+        if let Some(encoding) = request.kv_cache_encoding {
+            if encoding != KvCacheEncoding::Fp8E4M3FnStatic {
+                return Err(
+                    "Gemma 4 MoE requires its static FP8 E4M3 KV contract; use no KV flag or fp8-static"
+                        .to_owned(),
+                );
+            }
         }
         let tokenizer = self.tokenizer()?;
         let renderer = self.renderer()?;

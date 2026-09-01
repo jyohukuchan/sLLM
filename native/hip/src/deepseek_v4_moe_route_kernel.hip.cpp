@@ -30,15 +30,15 @@ fail_row(int32_t *const expert_ids, float *const expert_weights,
 
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE,
-    1) void sllm_deepseek_v4_moe_route_score_hash_v1(const uint16_t *const
-                                                         logits,
-                                                     const float *const
-                                                         selection_bias,
-                                                     const int32_t *const
-                                                         hash_expert_ids,
+    1) void sllm_deepseek_v4_moe_route_score_hash_v1(const uint16_t
+                                                         *const logits,
+                                                     const float
+                                                         *const selection_bias,
+                                                     const int32_t
+                                                         *const hash_expert_ids,
                                                      int32_t *const expert_ids,
-                                                     float *const
-                                                         expert_weights,
+                                                     float
+                                                         *const expert_weights,
                                                      int32_t *const status,
                                                      const uint32_t mode,
                                                      const uint32_t renormalize,
@@ -148,20 +148,20 @@ extern "C" __global__ __launch_bounds__(
 
 extern "C" __global__ __launch_bounds__(
     SLLM_HIP_DEEPSEEK_V4_MOE_ROUTE_WORKGROUP_SIZE,
-    1) void sllm_deepseek_v4_moe_route_stable_group_v1(int32_t *const
-                                                           expert_ids,
+    1) void sllm_deepseek_v4_moe_route_stable_group_v1(int32_t
+                                                           *const expert_ids,
                                                        float *const
                                                            expert_weights,
-                                                       int32_t *const
-                                                           expert_counts,
+                                                       int32_t
+                                                           *const expert_counts,
                                                        int32_t *const
                                                            expert_offsets,
                                                        int32_t *const
                                                            grouped_token_ids,
                                                        int32_t *const
                                                            grouped_topk_slots,
-                                                       const int32_t *const
-                                                           status,
+                                                       const int32_t
+                                                           *const status,
                                                        const uint64_t
                                                            token_count) {
   constexpr uint32_t expert_count =

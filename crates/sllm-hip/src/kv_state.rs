@@ -2191,8 +2191,46 @@ fn validate_causal_attention_info(
         scaled_prefill_opt_in.as_deref(),
         force_baseline,
     ) && !use_long_prefill_v2;
-    let use_prefill_gqa4_qtile4 =
-        use_prefill_gqa4 && query_count >= 128 && !force_baseline && !use_scaled_prefill_gemm;
+    let phase66_prefill_opt_in = std::env::var_os("SLLM_CAUSAL_ATTENTION_PHASE66_TILED_PREFILL");
+    let phase66_prefill_requested = phase66_prefill_opt_in
+        .as_deref()
+        .is_some_and(|value| value == "1");
+    let phase66_encoding = matches!(
+        descriptor.cache_encoding(),
+        KvCacheEncoding::Fp16 | KvCacheEncoding::Mxfp8E4
+    );
+    let phase66_shape = expected_target == Some("gfx1201")
+        && query_heads == 16
+        && descriptor.layout().heads() == 4
+        && descriptor.layout().head_dim() == 256
+        && phase66_encoding;
+    let phase66_q4k1_control =
+        phase66_prefill_requested && phase66_shape && query_count >= 64 && !force_baseline;
+    let phase66_query_tile = if phase66_prefill_requested
+        && phase66_shape
+        && query_count >= 128
+        && committed_kv_length >= query_count
+        && !force_baseline
+    {
+        Some(if committed_kv_length >= 2_048 {
+            8_u64
+        } else {
+            4_u64
+        })
+    } else {
+        None
+    };
+    let phase66_key_tile = phase66_query_tile.map(|_| {
+        if committed_kv_length >= 512 {
+            8_u64
+        } else {
+            4_u64
+        }
+    });
+    let use_prefill_gqa4_qtile4 = use_prefill_gqa4
+        && (query_count >= 128 || phase66_q4k1_control)
+        && !force_baseline
+        && !use_scaled_prefill_gemm;
     let (expected_kernel_id, baseline_kernel, baseline_device) =
         if descriptor.cache_encoding() == KvCacheEncoding::Fp16 {
             (
@@ -2243,6 +2281,21 @@ fn validate_causal_attention_info(
         (
             "causal_attention.prefill.gfx1030_hipblas_scaled_fp16.v1",
             "sllm_causal_attention_prefill_gfx1030_hipblas_scaled_fp16_v1",
+        )
+    } else if phase66_query_tile == Some(4) && phase66_key_tile == Some(4) {
+        (
+            "causal_attention.prefill.typed_q4k4.v1",
+            "sllm_causal_attention_prefill_typed_q4k4_v1",
+        )
+    } else if phase66_query_tile == Some(4) && phase66_key_tile == Some(8) {
+        (
+            "causal_attention.prefill.typed_q4k8.v1",
+            "sllm_causal_attention_prefill_typed_q4k8_v1",
+        )
+    } else if phase66_query_tile == Some(8) && phase66_key_tile == Some(8) {
+        (
+            "causal_attention.prefill.typed_q8k8.v1",
+            "sllm_causal_attention_prefill_typed_q8k8_v1",
         )
     } else if use_prefill_gqa4_qtile4 {
         (
@@ -2305,6 +2358,13 @@ fn validate_causal_attention_info(
                     .and_then(|value| {
                         (value / 8)
                             .checked_mul((descriptor.layout().heads() as u64).checked_mul(16)?)
+                    })
+                    .and_then(|value| u32::try_from(value).ok())
+            } else if let Some(query_tile) = phase66_query_tile {
+                query_count
+                    .checked_add(query_tile - 1)
+                    .and_then(|value| {
+                        (value / query_tile).checked_mul(descriptor.layout().heads() as u64)
                     })
                     .and_then(|value| u32::try_from(value).ok())
             } else if use_prefill_gqa4_qtile4 {

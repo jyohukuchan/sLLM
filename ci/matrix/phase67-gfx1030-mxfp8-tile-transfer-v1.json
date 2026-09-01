@@ -1,0 +1,214 @@
+{
+  "schema_version": "phase67-gfx1030-mxfp8-tile-transfer-v1",
+  "state": "PASS",
+  "date": "2026-09-01",
+  "scope": {
+    "gpu": "Radeon Pro V620",
+    "uuid": "GPU-76a08c022586fed6",
+    "target": "gfx1030",
+    "rocm": "7.14.0",
+    "code_object": "v6",
+    "wavefront": 32,
+    "format": "OCP MXFP8 E4M3 W8A8 block32 E8M0",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "kv_cache": "fp16"
+  },
+  "identities": {
+    "cli_sha256": "419c6d3745bc60a763922f5e3517ae81fc17fd0f1031477d7cb1f2787028f787",
+    "operator_runner_sha256": "c59e0de0ae605ee623d49785229ff37820141d4422f603f693f6e4078dca7ee2",
+    "matmul_host_object_sha256": "ff1031399a6bf2dfe792f114d96bfb45a8a2d5b02a0ad053832b57ffb94563c7",
+    "embedded_fatbin_sha256": "b8c7956e5ab29402c2b5dadcedee0db914bd06b7e1294da89821acbcc3293f90",
+    "extracted_gfx1030_code_object_sha256": "47264fda62045863cdf8e6f68d21ed9415f6dc46749ebe1b5fb75ad51c18987c",
+    "model_gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "derived_lock_sha256": "6504a6b519f2930b33753790426422c866b6074a1cc58de641e502b981b0270e",
+    "input_512_sha256": "58b3ea45f234025f3123bee77ad84e406a98f2712861e05baa29a1f6ed6ff1ef",
+    "input_2048_sha256": "615f388ae5a7511a70e4c30b683b6627ad19e4eb775381a8edc3e5c5f17541a5",
+    "model_fingerprint": "sha256:f143d7b504170d071c77818105f7a07dc0297c6bea0c61a5404b071fed0c1fae",
+    "plan_digest": "sha256:64572a559216fb566ed673661804e0480cfb1056b23cb2cb4ddab2e382701f12"
+  },
+  "providers": [
+    {
+      "kernel_id": 22,
+      "role": "row8-rollback"
+    },
+    {
+      "kernel_id": 27,
+      "logical_kernel": "matmul.mxfp8.w8a8.e4m3.block32.prefill.mmq-col8.v4",
+      "device_symbol": "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_mmq_col8_v4",
+      "role": "scoped-default",
+      "scope": "exact gfx1030; M>=128; K>=2048; K%32=0; 2560<=N<=16384 or (M>=512 and N==1024)"
+    },
+    {
+      "kernel_id": 38,
+      "logical_kernel": "matmul.mxfp8.w8a8.gfx1030.mmq-col16.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1030_mmq_col16_v1",
+      "role": "explicit-benchmark-only"
+    },
+    {
+      "kernel_id": 39,
+      "logical_kernel": "matmul.mxfp8.w8a8.gfx1030.mmq-col32.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1030_mmq_col32_v1",
+      "role": "explicit-benchmark-only"
+    }
+  ],
+  "kernel_resources": {
+    "id27_col8": {
+      "lds_bytes": 8704,
+      "private_bytes": 0,
+      "sgpr": 29,
+      "vgpr": 46,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0
+    },
+    "id38_col16": {
+      "lds_bytes": 17152,
+      "private_bytes": 0,
+      "sgpr": 30,
+      "vgpr": 42,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0
+    },
+    "id39_col32": {
+      "lds_bytes": 34048,
+      "private_bytes": 0,
+      "sgpr": 30,
+      "vgpr": 83,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0
+    }
+  },
+  "operator_evidence": {
+    "state": "PASS",
+    "primary_sweep": {
+      "case_count": 18,
+      "repeats_per_case": 10,
+      "providers": [22, 27, 38, 39],
+      "all_provider_output_digests_equal": true,
+      "fallback_used": false,
+      "cleanup_zero": true
+    },
+    "selected_medians_ns": [
+      {
+        "shape": "M128_K2560_N9216",
+        "id22": 10998829,
+        "id27": 3644210.5,
+        "id38": 3704872.5,
+        "id39": 5946292
+      },
+      {
+        "shape": "M128_K9216_N2560",
+        "id22": 10858668.5,
+        "id27": 3593330.5,
+        "id38": 3750353,
+        "id39": 5753710
+      },
+      {
+        "shape": "M512_K2560_N9216",
+        "id22": 47151148,
+        "id27": 20073311.5,
+        "id38": 19987532.5,
+        "id39": 24213592
+      },
+      {
+        "shape": "M512_K9216_N2560",
+        "id22": 43485081.5,
+        "id27": 14137921,
+        "id38": 14493326.5,
+        "id39": 22570976
+      },
+      {
+        "shape": "M17_K2560_N32",
+        "id22": 114401,
+        "id27": 191142,
+        "id38": 384324.5,
+        "id39": 528965.5
+      },
+      {
+        "shape": "M128_K2560_N1024",
+        "id22": 1179870.5,
+        "id27": 1945577,
+        "id38": 2049698,
+        "id39": 2190389.5
+      }
+    ],
+    "n1024_crossover": [
+      {
+        "m": 128,
+        "row8_median_ns": 1179870.5,
+        "col8_median_ns": 1945577,
+        "col8_time_change_percent": 64.894
+      },
+      {
+        "m": 512,
+        "row8_median_ns": 4973783.5,
+        "col8_median_ns": 1881010.5,
+        "col8_time_change_percent": -62.18149623923116
+      },
+      {
+        "m": 2048,
+        "row8_median_ns": 19786690,
+        "col8_median_ns": 9651305,
+        "col8_time_change_percent": -51.22324653592896
+      }
+    ]
+  },
+  "full_model": {
+    "model": "Qwen/Qwen3.5-4B",
+    "protocol": {
+      "lane": "direct",
+      "warmups": 1,
+      "measured": 3,
+      "max_new_tokens": 4,
+      "greedy": true,
+      "ignore_eos": true
+    },
+    "rows": [
+      {
+        "input_tokens": 512,
+        "row8_prefill_tps": [71.33088478693655, 72.34943949518541, 72.18302115544213],
+        "row8_median_prefill_tps": 72.18302115544213,
+        "default_prefill_tps": [207.94526377689786, 207.61108430972757, 207.52787059884008],
+        "default_median_prefill_tps": 207.61108430972757,
+        "speedup": 2.876176155922438,
+        "prefill_time_reduction_percent": 65.23161497111838,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 5292664320
+      },
+      {
+        "input_tokens": 2048,
+        "row8_prefill_tps": [72.44586964078303, 71.24276148079633, 70.89821771647168],
+        "row8_median_prefill_tps": 71.24276148079633,
+        "default_prefill_tps": [209.49694621283194, 208.2710358995492, 206.66718598659142],
+        "default_median_prefill_tps": 208.2710358995492,
+        "speedup": 2.923399255876531,
+        "prefill_time_reduction_percent": 65.7932457227719,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 6153623040
+      }
+    ],
+    "generated_token_ids_all_samples": [23066, 23066, 23066, 23066],
+    "fallback_used": false,
+    "all_dispatches_hip": true,
+    "cleanup_zero": true
+  },
+  "profile": {
+    "input_tokens": 512,
+    "id27_dispatch_count": 800,
+    "id27_kernel_time_percent": 92.04,
+    "id38_dispatch_count": 0,
+    "id39_dispatch_count": 0
+  },
+  "decision": {
+    "id38_col16": "retain-explicit-benchmark-only",
+    "id39_col32": "retain-explicit-benchmark-only",
+    "direct_weight_candidate": "rejected-before-implementation-because-software-e4m3-decode-would-repeat-per-row-wave",
+    "production": "adopt-existing-id27-col8-on-measured-gfx1030-shape-family",
+    "rollback": "SLLM_MXFP8_PREFILL_FORCE_ROW8=1"
+  },
+  "limitations": [
+    "Evidence is limited to the canonical V620 exact gfx1030 tuple and one fixed Qwen3.5-4B MXFP8 artifact.",
+    "No result is generalized to gfx1031-gfx1036, gfx1201, gfx942, another ROCm tuple, another model, or multi-GPU execution.",
+    "The full-model check covers output-token equality for four greedy tokens; provider arithmetic equality is established separately by the operator digest sweep."
+  ]
+}

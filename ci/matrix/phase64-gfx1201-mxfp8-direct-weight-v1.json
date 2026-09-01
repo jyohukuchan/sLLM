@@ -1,0 +1,226 @@
+{
+  "schema_version": "sllm-phase64-gfx1201-mxfp8-direct-weight-v1",
+  "state": "PASS",
+  "date": "2026-09-01",
+  "target": {
+    "gpu": "AMD Radeon AI PRO R9700",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "gcn_arch": "gfx1201",
+    "wavefront_size": 32,
+    "code_object_version": 6,
+    "rocm_version": "7.14.0"
+  },
+  "artifacts": {
+    "qwen35_4b_mxfp8_gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "qwen35_9b_mxfp8_gguf_sha256": "eff9e54d04056f968604301a856bd871454913a24b3fb26cda61ce178d7c4033",
+    "kv_encoding": "fp16"
+  },
+  "identities": {
+    "sllm_cli_sha256": "7da63d769c2a5d23056bec8e3c4e7abd4be3373b6d21e80756391e681e303a7c",
+    "operator_runner_sha256": "9d3ebadcc0fbb70940c31c3eefaa7beea2cbafab445a937950384343670321cb",
+    "matmul_code_object_sha256": "24c4bee9966c6aa3ea4d240140e8f0eae83514a91702a8a36184032d11a79ce4"
+  },
+  "protocol": {
+    "operator": {
+      "m": 128,
+      "repeat_count": 5,
+      "statistic": "median kernel elapsed nanoseconds",
+      "same_runner_identity": true,
+      "numerical_oracle": "fixed FP32 sampled oracle with BF16 RNE output digest",
+      "absolute_error_limit": 0.5,
+      "relative_error_limit": 0.02,
+      "finite_point_acceptance": "absolute error <= limit OR relative error <= limit"
+    },
+    "full_model": {
+      "input_tokens": 2048,
+      "prefill_chunk_tokens": 2048,
+      "maximum_new_tokens": 4,
+      "warmups": 1,
+      "measured": 3,
+      "input_token_id": 23066,
+      "direct_pretokenized_input": true,
+      "statistic": "median prefill tokens per second"
+    }
+  },
+  "implementation": {
+    "baseline": {
+      "kernel_id": 31,
+      "kernel_symbol": "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x64x32.v2",
+      "workgroup_size": 256
+    },
+    "four_wave": {
+      "kernel_id": 32,
+      "kernel_symbol": "matmul.mxfp8.w8a8.gfx1201.wmma64x64.4w.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1201_wmma64x64_4w_v1",
+      "workgroup_size": 128
+    },
+    "lds_pad": {
+      "kernel_id": 33,
+      "kernel_symbol": "matmul.mxfp8.w8a8.gfx1201.wmma128x64.pad33.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1201_wmma128x64_pad33_v1",
+      "workgroup_size": 256,
+      "note": "A public-rocWMMA-compatible stride-33 bank-mapping probe; arbitrary XOR-addressed fragment loading is not exposed by the public loader."
+    },
+    "direct_weight": {
+      "kernel_id": 34,
+      "kernel_symbol": "matmul.mxfp8.w8a8.gfx1201.wmma128x64.direct.v1",
+      "device_symbol": "sllm_mxfp8_w8a8_gfx1201_wmma128x64_direct_v1",
+      "workgroup_size": 256,
+      "resident_weight_repack": false,
+      "persistent_workspace_added": false
+    },
+    "selector": {
+      "model_identity_used": false,
+      "exact_target": "gfx1201",
+      "base_scope": "M >= 128, K >= 2048, 1024 <= N <= 16384, K multiple of 32, N multiple of 64",
+      "direct_weight_scope": "N / K >= 3 using integer quotient, or exact K=12288/N=4096",
+      "rollback_kernel_id": 31,
+      "adjacent_k11264_n4096_uses_rollback": true,
+      "qwen35_4b_down_k9216_n2560_uses_rollback": true
+    }
+  },
+  "operator": {
+    "wide_shape_rows": [
+      {
+        "shape": "m128_k2560_n9216",
+        "baseline_median_ns": 554517,
+        "four_wave_median_ns": 671158,
+        "four_wave_delta_percent": 21.034702,
+        "lds_pad_median_ns": 787196,
+        "lds_pad_delta_percent": 41.960661,
+        "direct_weight_median_ns": 368599,
+        "direct_weight_delta_percent": -33.527917,
+        "output_bf16_sha256": "752fd067257d4bd6a7a25a9a4fe5b4aa81f400a18a811bbf64b08748fb24a8ab",
+        "maximum_relative_error": 0.0036960265
+      },
+      {
+        "shape": "m128_k4096_n12288",
+        "baseline_median_ns": 1256112,
+        "four_wave_median_ns": 1816232,
+        "four_wave_delta_percent": 44.591565,
+        "lds_pad_median_ns": 1504874,
+        "lds_pad_delta_percent": 19.804126,
+        "direct_weight_median_ns": 866516,
+        "direct_weight_delta_percent": -31.016024,
+        "output_bf16_sha256": "8617ba42f1371e92762232ad33e454a3f28ea795bd89fb3e5d3f89123b4fc686",
+        "maximum_relative_error": 0.0033095016
+      }
+    ],
+    "direct_weight_shape_rows": [
+      {
+        "shape": "m128_k2048_n6144",
+        "baseline_median_ns": 522517,
+        "candidate_median_ns": 481239,
+        "delta_percent": -7.899839,
+        "selector": "direct-weight"
+      },
+      {
+        "shape": "m128_k12288_n4096",
+        "baseline_median_ns": 2150986,
+        "candidate_median_ns": 1438954,
+        "delta_percent": -33.102586,
+        "selector": "direct-weight"
+      },
+      {
+        "shape": "m128_k11264_n4096",
+        "baseline_median_ns": 2035867,
+        "candidate_median_ns": 2363190,
+        "delta_percent": 16.077818,
+        "selector": "kernel-31-rollback"
+      },
+      {
+        "shape": "m128_k9216_n2560",
+        "baseline_median_ns": 1514431,
+        "candidate_median_ns": 1454914,
+        "delta_percent": -3.929991,
+        "selector": "kernel-31-rollback",
+        "note": "The sign varied across independent sweeps, so the candidate was not generalized to this down shape."
+      }
+    ],
+    "all_repeat_output_digests_equal": true,
+    "all_nonfinite_mismatch_count": 0,
+    "fallback_used": false,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  },
+  "resources": {
+    "baseline": {
+      "lds_bytes": 6912,
+      "sgpr_count": 33,
+      "vgpr_count": 103,
+      "private_segment_bytes": 0,
+      "static_wmma_instructions": 8
+    },
+    "four_wave": {
+      "lds_bytes": 4608,
+      "sgpr_count": 32,
+      "vgpr_count": 103,
+      "private_segment_bytes": 0,
+      "static_wmma_instructions": 8
+    },
+    "lds_pad": {
+      "lds_bytes": 7104,
+      "sgpr_count": 33,
+      "vgpr_count": 104,
+      "private_segment_bytes": 0,
+      "static_wmma_instructions": 8
+    },
+    "direct_weight": {
+      "lds_bytes": 4864,
+      "sgpr_count": 40,
+      "vgpr_count": 93,
+      "private_segment_bytes": 0,
+      "static_wmma_instructions": 8
+    }
+  },
+  "full_model_prefill": {
+    "rows": [
+      {
+        "model": "Qwen/Qwen3.5-4B",
+        "baseline_kernel_id": 31,
+        "baseline_samples_tokens_per_second": [1747.1610626866589, 1745.98132240402, 1744.141538857272],
+        "baseline_median_tokens_per_second": 1745.98132240402,
+        "selector_samples_tokens_per_second": [2216.810076220111, 2215.751456207707, 2212.332816072349],
+        "selector_median_tokens_per_second": 2215.751456207707,
+        "speedup_percent": 26.905794,
+        "model_resident_bytes": 4954035712,
+        "peak_bytes": 6153623040
+      },
+      {
+        "model": "Qwen/Qwen3.5-9B",
+        "baseline_kernel_id": 31,
+        "baseline_samples_tokens_per_second": [908.4050693120852, 907.9624582191022, 906.5205398757756],
+        "baseline_median_tokens_per_second": 907.9624582191022,
+        "selector_samples_tokens_per_second": [1291.8042855323329, 1290.8115007122183, 1288.7532588514246],
+        "selector_median_tokens_per_second": 1290.8115007122183,
+        "speedup_percent": 42.165735,
+        "model_resident_bytes": 11205394944,
+        "peak_bytes": 12713263616
+      }
+    ],
+    "generated_tokens_all_runs": [23066, 23066, 23066, 23066],
+    "all_hip_only": true,
+    "fallback_used": false,
+    "cleanup_zero": true,
+    "persistent_memory_delta_bytes": 0
+  },
+  "candidate_decisions": {
+    "four_wave": "rejected; slower on both measured wide shapes",
+    "lds_pad": "rejected; slower on both measured wide shapes",
+    "weight_preshuffle": "not required; global direct-load achieved the candidate objective without a stored-layout or GGUF contract change",
+    "direct_weight": "scoped-default on the model-independent exact-gfx1201 shape selector",
+    "unmeasured_adjacent_down_shapes": "kernel-31 rollback retained"
+  },
+  "verification": {
+    "gfx1201_operator_oracle": "PASS",
+    "gfx1201_full_model_4b": "PASS",
+    "gfx1201_full_model_9b": "PASS",
+    "public_runtime_host_selector": "PASS (1/1)",
+    "sllm_hip_evidence_tests": "PASS (3/3)",
+    "sllm_hip_sys_tests": "PASS",
+    "gfx1030_release_compile_only": "PASS",
+    "gfx942_wave64_release_compile_only": "PASS",
+    "cargo_fmt_check": "PASS",
+    "json_parse": "PASS"
+  }
+}
