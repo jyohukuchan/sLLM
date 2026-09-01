@@ -167,6 +167,17 @@ matmul_lowp_concrete_provider_plan(
     concrete_tile = TilePolicy::BlockRow8Column32;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
     break;
+  case KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale:
+  case KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32:
+  case KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32:
+    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp8Block32;
+    concrete_tile = TilePolicy::BlockRow8Column8;
+    concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
+    break;
   case KernelVariant::Mxfp8W8A8PrefillWmmaN16:
     if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
       return std::nullopt;

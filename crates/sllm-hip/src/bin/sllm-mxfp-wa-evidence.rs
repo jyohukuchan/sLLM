@@ -36,6 +36,19 @@ const PHASE67_COL16_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col16.v
 const PHASE67_COL16_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col16_v1";
 const PHASE67_COL32_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col32.v1";
 const PHASE67_COL32_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col32_v1";
+const PHASE69_CONTROL_KERNEL_ID: u32 = 27;
+const PHASE69_REGSCALE_KERNEL_ID: u32 = 40;
+const PHASE69_VECTOR32_KERNEL_ID: u32 = 41;
+const PHASE69_COMBINED_KERNEL_ID: u32 = 42;
+const PHASE69_CANDIDATE_FORCE_ENV: &str = "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69";
+const PHASE69_REGSCALE_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale.v1";
+const PHASE69_REGSCALE_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1";
+const PHASE69_VECTOR32_KERNEL_SYMBOL: &str = "matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1";
+const PHASE69_VECTOR32_DEVICE_SYMBOL: &str = "sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1";
+const PHASE69_COMBINED_KERNEL_SYMBOL: &str =
+    "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale-vector32.v1";
+const PHASE69_COMBINED_DEVICE_SYMBOL: &str =
+    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1";
 const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
     "SLLM_MXFP8_PREFILL_FORCE_ROW8",
@@ -50,6 +63,7 @@ const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     PHASE66_CONTROL_FORCE_ENV,
     PHASE66_CANDIDATE_FORCE_ENV,
     PHASE67_CANDIDATE_FORCE_ENV,
+    PHASE69_CANDIDATE_FORCE_ENV,
 ];
 const GFX1201_WMMA_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
     (
@@ -100,6 +114,24 @@ const GFX1030_MMQ_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
         PHASE67_COL32_KERNEL_ID,
         PHASE67_COL32_KERNEL_SYMBOL,
         PHASE67_COL32_DEVICE_SYMBOL,
+        256,
+    ),
+    (
+        PHASE69_REGSCALE_KERNEL_ID,
+        PHASE69_REGSCALE_KERNEL_SYMBOL,
+        PHASE69_REGSCALE_DEVICE_SYMBOL,
+        256,
+    ),
+    (
+        PHASE69_VECTOR32_KERNEL_ID,
+        PHASE69_VECTOR32_KERNEL_SYMBOL,
+        PHASE69_VECTOR32_DEVICE_SYMBOL,
+        256,
+    ),
+    (
+        PHASE69_COMBINED_KERNEL_ID,
+        PHASE69_COMBINED_KERNEL_SYMBOL,
+        PHASE69_COMBINED_DEVICE_SYMBOL,
         256,
     ),
 ];
@@ -293,6 +325,17 @@ const PHASE67_M512_N2560_ORACLE_POINTS: &[(usize, usize)] = &[
     (256, 0),
     (510, 2558),
     (511, 2559),
+];
+const PHASE69_M512_N4096_ORACLE_POINTS: &[(usize, usize)] = &[
+    (0, 0),
+    (0, 32),
+    (1, 4095),
+    (127, 2047),
+    (128, 2048),
+    (255, 4094),
+    (256, 0),
+    (510, 4094),
+    (511, 4095),
 ];
 const PHASE67_M512_N8192_ORACLE_POINTS: &[(usize, usize)] = &[
     (0, 0),
@@ -531,6 +574,50 @@ impl Phase67Provider {
 }
 
 #[derive(Clone, Copy)]
+enum Phase69Provider {
+    Control,
+    Regscale,
+    Vector32,
+    Combined,
+}
+
+impl Phase69Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Control => "id27-col8-control",
+            Self::Regscale => "id40-regscale-candidate",
+            Self::Vector32 => "id41-vector32-candidate",
+            Self::Combined => "id42-regscale-vector32-candidate",
+        }
+    }
+
+    fn force_environment(self) -> &'static str {
+        match self {
+            Self::Control => PHASE67_CONTROL_FORCE_ENV,
+            Self::Regscale | Self::Vector32 | Self::Combined => PHASE69_CANDIDATE_FORCE_ENV,
+        }
+    }
+
+    fn force_value(self) -> &'static str {
+        match self {
+            Self::Control => "8",
+            Self::Regscale => "regscale",
+            Self::Vector32 => "vector32",
+            Self::Combined => "combined",
+        }
+    }
+
+    fn kernel_id(self) -> u32 {
+        match self {
+            Self::Control => PHASE69_CONTROL_KERNEL_ID,
+            Self::Regscale => PHASE69_REGSCALE_KERNEL_ID,
+            Self::Vector32 => PHASE69_VECTOR32_KERNEL_ID,
+            Self::Combined => PHASE69_COMBINED_KERNEL_ID,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum EvidenceMode {
     Phase62 {
         production_shape: bool,
@@ -548,6 +635,10 @@ enum EvidenceMode {
         repeats: usize,
         provider: Phase67Provider,
     },
+    Phase69 {
+        repeats: usize,
+        provider: Phase69Provider,
+    },
 }
 
 impl EvidenceMode {
@@ -557,6 +648,7 @@ impl EvidenceMode {
             Self::Phase63 { repeats, .. } => repeats,
             Self::Phase66 { repeats, .. } => repeats,
             Self::Phase67 { repeats, .. } => repeats,
+            Self::Phase69 { repeats, .. } => repeats,
         }
     }
 
@@ -566,6 +658,14 @@ impl EvidenceMode {
             Self::Phase63 { .. } => "sllm-phase63-mxfp8-matrix-operator-gpu-v1",
             Self::Phase66 { .. } => "sllm-phase66-mxfp8-wide-n-provider-gpu-v1",
             Self::Phase67 { .. } => "sllm-phase67-gfx1030-mxfp8-tile-provider-gpu-v1",
+            Self::Phase69 { .. } => "sllm-phase69-gfx1030-mxfp8-software-mmq-provider-gpu-v1",
+        }
+    }
+
+    fn warmup_count(self) -> usize {
+        match self {
+            Self::Phase69 { .. } => 2,
+            _ => 0,
         }
     }
 
@@ -575,6 +675,7 @@ impl EvidenceMode {
             Self::Phase63 { .. } => Some("phase63"),
             Self::Phase66 { .. } => Some("phase66-provider"),
             Self::Phase67 { .. } => Some("phase67-provider"),
+            Self::Phase69 { .. } => Some("phase69-provider"),
         }
     }
 
@@ -588,6 +689,13 @@ impl EvidenceMode {
     fn phase67_provider(self) -> Option<Phase67Provider> {
         match self {
             Self::Phase67 { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
+
+    fn phase69_provider(self) -> Option<Phase69Provider> {
+        match self {
+            Self::Phase69 { provider, .. } => Some(provider),
             _ => None,
         }
     }
@@ -647,6 +755,10 @@ struct CaseReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     phase67_candidate: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    phase69_provider: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase69_candidate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     actual_dispatch_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     workgroup_size_x: Option<u32>,
@@ -674,6 +786,8 @@ struct Report {
     fallback_used: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     repeat_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warmup_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     candidate_kernel_id: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -851,7 +965,7 @@ fn validate_actual_dispatch(
         (Format::Mxfp6, 1) => dispatch.kernel_id == 20,
         (Format::Mxfp8, _) => matches!(
             dispatch.kernel_id,
-            19 | 22 | 24 | 26 | 27 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39
+            19 | 22 | 24 | 26 | 27 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 40 | 41 | 42
         ),
         (Format::Mxfp6, _) => matches!(dispatch.kernel_id, 21 | 23 | 25 | 28 | 29),
     };
@@ -1134,6 +1248,15 @@ fn run_case(
     let mut output_digests = Vec::with_capacity(repeats);
     let mut dispatch_ids = Vec::with_capacity(repeats);
     let mut first_output = None;
+    for warmup in 0..mode.warmup_count() {
+        let mut submission = session
+            .submit(&prepared, queue)
+            .map_err(|error| error.to_string())?;
+        let dispatch = submission.dispatch().clone();
+        wait_ok(submission.wait(WAIT), "Phase 69 warmup")?;
+        validate_actual_dispatch(format, m, k, n, target, &dispatch)
+            .map_err(|error| format!("warmup {warmup}: {error}"))?;
+    }
     for repeat in 0..repeats {
         let mut submission = session
             .submit(&prepared, queue)
@@ -1217,6 +1340,7 @@ fn run_case(
     let phase63 = matches!(mode, EvidenceMode::Phase63 { .. });
     let phase66_provider = mode.phase66_provider();
     let phase67_provider = mode.phase67_provider();
+    let phase69_provider = mode.phase69_provider();
     let sampled_indices = match oracle {
         OracleSelection::Full => None,
         OracleSelection::FixedSample(_) => Some(oracle_indices.clone()),
@@ -1265,6 +1389,8 @@ fn run_case(
             .map(|_| kernel_id == PHASE66_CANDIDATE_KERNEL_ID),
         phase67_provider: phase67_provider.map(Phase67Provider::name),
         phase67_candidate: phase67_provider.map(|provider| kernel_id == provider.kernel_id()),
+        phase69_provider: phase69_provider.map(Phase69Provider::name),
+        phase69_candidate: phase69_provider.map(|provider| kernel_id == provider.kernel_id()),
         actual_dispatch_count: detailed.then_some(dispatch_count),
         workgroup_size_x: detailed.then_some(workgroup_size_x),
         grid_size_x: detailed.then_some(grid_size_x),
@@ -1814,6 +1940,31 @@ fn phase67_cases() -> Vec<CaseSpec> {
     cases
 }
 
+fn phase69_cases() -> Vec<CaseSpec> {
+    let mut cases = phase67_cases();
+    cases.extend([
+        CaseSpec {
+            case_id: Some("phase69-qkv-m512-k2560-n4096"),
+            format: Format::Mxfp8,
+            m: 512,
+            k: 2560,
+            n: 4096,
+            phase: 92,
+            oracle: OracleSelection::FixedSample(PHASE69_M512_N4096_ORACLE_POINTS),
+        },
+        CaseSpec {
+            case_id: Some("phase69-output-m512-k4096-n2560"),
+            format: Format::Mxfp8,
+            m: 512,
+            k: 4096,
+            n: 2560,
+            phase: 93,
+            oracle: OracleSelection::FixedSample(PHASE67_M512_N2560_ORACLE_POINTS),
+        },
+    ]);
+    cases
+}
+
 fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, String> {
     match mode {
         EvidenceMode::Phase62 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
@@ -1831,6 +1982,12 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase67 { provider, .. } if target != "gfx1030" => {
             return Err(format!(
                 "Phase 67 {} mode requires exact gfx1030",
+                provider.name()
+            ));
+        }
+        EvidenceMode::Phase69 { provider, .. } if target != "gfx1030" => {
+            return Err(format!(
+                "Phase 69 {} mode requires exact gfx1030",
                 provider.name()
             ));
         }
@@ -1861,6 +2018,19 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             }
         }
     }
+    if let EvidenceMode::Phase69 { provider, .. } = mode {
+        for environment in MXFP8_FORCE_ENVIRONMENTS {
+            let value = std::env::var(environment).ok();
+            let expected =
+                (*environment == provider.force_environment()).then_some(provider.force_value());
+            if value.as_deref() != expected {
+                return Err(format!(
+                    "Phase 69 {} environment isolation failed for {environment}: expected={expected:?} actual={value:?}",
+                    provider.name()
+                ));
+            }
+        }
+    }
     let device = Context::query_device(device_index).map_err(|error| error.to_string())?;
     if device.gcn_arch_name != target {
         return Err(format!(
@@ -1884,6 +2054,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             } => phase63_cases(production_shape),
             EvidenceMode::Phase66 { .. } => phase66_cases(),
             EvidenceMode::Phase67 { .. } => phase67_cases(),
+            EvidenceMode::Phase69 { .. } => phase69_cases(),
         };
         let mut cases = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -1910,6 +2081,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             ..
         } => Some(PHASE66_CANDIDATE_KERNEL_ID),
         EvidenceMode::Phase67 { provider, .. } => Some(provider.kernel_id()),
+        EvidenceMode::Phase69 { provider, .. } => Some(provider.kernel_id()),
     };
     let candidate_case_count = cases
         .iter()
@@ -1940,6 +2112,12 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             expected_candidate_kernel_id.unwrap_or_default()
         ));
     }
+    if matches!(mode, EvidenceMode::Phase69 { .. }) && candidate_submission_count == 0 {
+        return Err(format!(
+            "Phase 69 expected kernel {} was never dispatched",
+            expected_candidate_kernel_id.unwrap_or_default()
+        ));
+    }
     let detailed = mode.report_mode().is_some();
     let (production_shape_included, candidate_required) = match mode {
         EvidenceMode::Phase62 { .. } => (None, None),
@@ -1950,6 +2128,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         } => (Some(production_shape), Some(require_candidate)),
         EvidenceMode::Phase66 { .. } => (Some(true), Some(true)),
         EvidenceMode::Phase67 { .. } => (Some(true), Some(true)),
+        EvidenceMode::Phase69 { .. } => (Some(true), Some(true)),
     };
     Ok(Report {
         schema_version: mode.schema_version(),
@@ -1958,7 +2137,8 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         provider_role: mode
             .phase66_provider()
             .map(Phase66Provider::name)
-            .or_else(|| mode.phase67_provider().map(Phase67Provider::name)),
+            .or_else(|| mode.phase67_provider().map(Phase67Provider::name))
+            .or_else(|| mode.phase69_provider().map(Phase69Provider::name)),
         target,
         device_index,
         block_size: 32,
@@ -1968,6 +2148,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         fallback_allowed: false,
         fallback_used: false,
         repeat_count: detailed.then_some(mode.repeats()),
+        warmup_count: detailed.then_some(mode.warmup_count()),
         candidate_kernel_id: expected_candidate_kernel_id,
         candidate_case_count: detailed.then_some(candidate_case_count),
         candidate_submission_count: detailed.then_some(candidate_submission_count),
@@ -2399,9 +2580,54 @@ fn main() -> ExitCode {
             }
             RequestedMode::Direct(EvidenceMode::Phase67 { repeats, provider })
         }
+        Some("phase69-provider") => {
+            let provider = match arguments.next().as_deref() {
+                Some("id27-col8-control") => Phase69Provider::Control,
+                Some("id40-regscale-candidate") => Phase69Provider::Regscale,
+                Some("id41-vector32-candidate") => Phase69Provider::Vector32,
+                Some("id42-regscale-vector32-candidate") => Phase69Provider::Combined,
+                Some(value) => {
+                    eprintln!("invalid Phase 69 provider {value}");
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    eprintln!("phase69-provider requires a provider role");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut repeats = 3_usize;
+            let mut repeat_seen = false;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--repeats" if !repeat_seen => {
+                        repeat_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--repeats requires a value");
+                            return ExitCode::FAILURE;
+                        };
+                        repeats = match value.parse::<usize>() {
+                            Ok(value @ 2..=10) => value,
+                            Ok(_) => {
+                                eprintln!("Phase 69 repeats must be between 2 and 10");
+                                return ExitCode::FAILURE;
+                            }
+                            Err(error) => {
+                                eprintln!("invalid Phase 69 repeat count: {error}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    _ => {
+                        eprintln!("invalid Phase 69 argument {argument}; expected --repeats N");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            RequestedMode::Direct(EvidenceMode::Phase69 { repeats, provider })
+        }
         Some(value) => {
             eprintln!(
-                "invalid profile {value}; expected production, phase63, phase66, or phase67-provider"
+                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, or phase69-provider"
             );
             return ExitCode::FAILURE;
         }
@@ -2698,6 +2924,18 @@ mod tests {
     }
 
     #[test]
+    fn phase69_provider_identities_are_stable() {
+        assert_eq!(Phase69Provider::Control.kernel_id(), 27);
+        assert_eq!(Phase69Provider::Control.force_value(), "8");
+        assert_eq!(Phase69Provider::Regscale.kernel_id(), 40);
+        assert_eq!(Phase69Provider::Regscale.force_value(), "regscale");
+        assert_eq!(Phase69Provider::Vector32.kernel_id(), 41);
+        assert_eq!(Phase69Provider::Vector32.force_value(), "vector32");
+        assert_eq!(Phase69Provider::Combined.kernel_id(), 42);
+        assert_eq!(Phase69Provider::Combined.force_value(), "combined");
+    }
+
+    #[test]
     fn phase67_case_matrix_covers_short_intermediate_and_large_m_shapes() {
         let cases = phase67_cases();
         assert_eq!(cases.len(), phase66_cases().len() + 15);
@@ -2718,6 +2956,15 @@ mod tests {
             (2048, 9216, 2560),
             (2048, 2560, 1024),
         ] {
+            assert!(cases.iter().any(|case| (case.m, case.k, case.n) == shape));
+        }
+    }
+
+    #[test]
+    fn phase69_case_matrix_adds_missing_m512_projection_shapes() {
+        let cases = phase69_cases();
+        assert_eq!(cases.len(), phase67_cases().len() + 2);
+        for shape in [(512, 2560, 4096), (512, 4096, 2560)] {
             assert!(cases.iter().any(|case| (case.m, case.k, case.n) == shape));
         }
     }

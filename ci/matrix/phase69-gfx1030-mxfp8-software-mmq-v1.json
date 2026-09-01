@@ -1,0 +1,165 @@
+{
+  "schema_version": "phase69-gfx1030-mxfp8-software-mmq-v1",
+  "state": "PASS",
+  "date": "2026-09-02",
+  "scope": {
+    "gpu": "Radeon Pro V620",
+    "uuid": "GPU-76a08c022586fed6",
+    "target": "gfx1030",
+    "rocm": "7.14.0",
+    "code_object": "v6",
+    "wavefront": 32,
+    "format": "OCP MXFP8 E4M3 W8A8 block32 E8M0",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "kv_cache": "fp16"
+  },
+  "identities": {
+    "control_cli_sha256": "e1ae87f2bb7745f86af666625f80d3dc20d7fe87f51d5e6e7d8408a5c352db3a",
+    "candidate_cli_sha256": "e1ae87f2bb7745f86af666625f80d3dc20d7fe87f51d5e6e7d8408a5c352db3a",
+    "operator_runner_sha256": "f650e0d35cd547674d383a06b266abf28970f302179b016bdb30da58812c0ec2",
+    "gfx1030_code_object_sha256": "91fc43718a59377663bbcaa48a2dfb9d20e3e883e1eee455f87e234a622905d6",
+    "model_gguf_sha256": "f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+    "derived_lock_sha256": "6504a6b519f2930b33753790426422c866b6074a1cc58de641e502b981b0270e",
+    "input_512_sha256": "58b3ea45f234025f3123bee77ad84e406a98f2712861e05baa29a1f6ed6ff1ef",
+    "input_2048_sha256": "615f388ae5a7511a70e4c30b683b6627ad19e4eb775381a8edc3e5c5f17541a5"
+  },
+  "candidates": [
+    {
+      "kernel_id": 27,
+      "role": "control",
+      "symbol": "sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_mmq_col8_v4",
+      "classification": "gfx1030-shape-scoped-control",
+      "resource": {"lds_bytes": 8704, "sgpr": 29, "vgpr": 46, "spill": 0, "wavefront": 32}
+    },
+    {
+      "kernel_id": 40,
+      "role": "register-scale",
+      "symbol": "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1",
+      "classification": "benchmark-only",
+      "resource": {"lds_bytes": 8704, "sgpr": 29, "vgpr": 53, "spill": 0, "wavefront": 32},
+      "reason": "mixed shape performance and higher VGPR count"
+    },
+    {
+      "kernel_id": 41,
+      "role": "vector32-value-ingress",
+      "symbol": "sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1",
+      "classification": "gfx1030-shape-scoped-default",
+      "numeric_class": "N0",
+      "resource": {"lds_bytes": 8704, "sgpr": 31, "vgpr": 46, "spill": 0, "wavefront": 32}
+    },
+    {
+      "kernel_id": 42,
+      "role": "register-scale-vector32",
+      "symbol": "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1",
+      "classification": "benchmark-only",
+      "resource": {"lds_bytes": 8704, "sgpr": 31, "vgpr": 54, "spill": 0, "wavefront": 32},
+      "reason": "no stable advantage over ID41 and higher VGPR count"
+    }
+  ],
+  "profiler": {
+    "protocol": "rocprofv3, 28 cases, 2 warmups plus 2 measured dispatches per case",
+    "dispatches_per_provider": 112,
+    "control": {
+      "alu_stalled_by_lds": 2.271808,
+      "lds_bank_conflict": 0.0,
+      "mem_unit_busy": 83.297127,
+      "occupancy_percent": 78.690876,
+      "valu_insts": 6298.787463
+    },
+    "id41": {
+      "alu_stalled_by_lds": 3.677602,
+      "lds_bank_conflict": 9.464715,
+      "mem_unit_busy": 80.570771,
+      "occupancy_percent": 77.263955,
+      "valu_insts": 5074.33138
+    },
+    "valu_instruction_reduction_percent": 19.439552297845175
+  },
+  "operator_evidence": {
+    "state": "PASS",
+    "schema_version": "sllm-phase69-gfx1030-mxfp8-software-mmq-provider-gpu-v1",
+    "case_count": 28,
+    "warmups_per_case": 2,
+    "repeats_per_case": 10,
+    "paired_order": ["id27-control-a", "id41", "id27-control-b"],
+    "all_control_candidate_output_digests_equal": true,
+    "all_repeat_digests_deterministic": true,
+    "special_encoding_contract_validated": true,
+    "fallback_used": false,
+    "cleanup_zero": true,
+    "faster_than_both_controls": {
+      "all_cases": 25,
+      "all_case_count": 28,
+      "production_scope_cases": 14,
+      "production_scope_case_count": 16
+    },
+    "non_monotonic_cases": [
+      {"m": 17, "k": 2560, "n": 9216, "production_scope": false},
+      {"m": 128, "k": 2560, "n": 4096, "production_scope": true},
+      {"m": 512, "k": 2560, "n": 8192, "production_scope": true}
+    ]
+  },
+  "full_model": {
+    "model": "Qwen/Qwen3.5-4B",
+    "protocol": {
+      "lane": "direct",
+      "warmups": 3,
+      "measured": 10,
+      "max_new_tokens": 4,
+      "greedy": true,
+      "ignore_eos": true
+    },
+    "rows": [
+      {
+        "input_tokens": 512,
+        "control_prefill_tps": [198.8855531159096, 205.44085631600927, 205.85608800792926, 205.5732335398093, 205.15757701903743, 205.0418830704698, 204.71945034807604, 204.5296311352364, 204.95985138546922, 204.55693693796175],
+        "candidate_prefill_tps": [255.59322593685377, 255.56488149410774, 254.08549198867104, 255.35739846925748, 242.49403650211295, 254.59811530861023, 254.44632238475376, 253.97815231320797, 254.44581506420457, 253.83351596506077],
+        "control_median_prefill_tps": 205.0008672279695,
+        "candidate_median_prefill_tps": 254.44606872447918,
+        "throughput_gain_percent": 24.119508451407935,
+        "control_median_prefill_ns": 2497550510,
+        "candidate_median_prefill_ns": 2012214229,
+        "prefill_time_reduction_percent": 19.43249111706654,
+        "e2e_time_reduction_percent": 17.842696915343915,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 5292664320
+      },
+      {
+        "input_tokens": 2048,
+        "control_prefill_tps": [208.8707654363801, 208.37585895351242, 206.52784047622444, 205.16557388801778, 204.32074140729304, 204.16249314202435, 203.79248336383722, 203.8246471289678, 203.48251851334948, 203.50030640424077],
+        "candidate_prefill_tps": [254.05402473672385, 255.25786529260398, 252.95452412652554, 250.99564057265732, 249.54498913441273, 249.14321988481896, 248.6461966419784, 248.5857275502026, 248.02530427399176, 248.1977432634979],
+        "control_median_prefill_tps": 204.2416172746587,
+        "candidate_median_prefill_tps": 249.34410450961585,
+        "throughput_gain_percent": 22.082907409758956,
+        "control_median_prefill_ns": 10027340826.5,
+        "candidate_median_prefill_ns": 8213554250,
+        "prefill_time_reduction_percent": 18.08841055553404,
+        "e2e_time_reduction_percent": 17.64601646736754,
+        "resident_vram_bytes": 4954035712,
+        "peak_vram_bytes": 6153623040
+      }
+    ],
+    "generated_token_ids": [23066, 23066, 23066, 23066],
+    "generated_token_ids_match": true,
+    "dispatch_counts_match": true,
+    "fallback_used": false,
+    "all_dispatches_hip": true,
+    "cleanup_zero": true
+  },
+  "decision": {
+    "id41_vector32_ingress": "adopt-in-existing-phase67-production-scope",
+    "id40_register_scale": "benchmark-only",
+    "id42_combined": "benchmark-only",
+    "double_buffer": "not-implemented-profile-did-not-justify",
+    "block-contribution-then-scale": "not-implemented-n0-candidate-succeeded",
+    "production_scope": "exact gfx1030 and Phase 67 ID27 selector scope",
+    "control_rollback": "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69=control",
+    "row8_rollback": "SLLM_MXFP8_PREFILL_FORCE_ROW8=1"
+  },
+  "limitations": [
+    "Operator timing was non-monotonic for three shapes in the final paired run; full-model primary rows, not universal per-shape speedup, support adoption.",
+    "Performance evidence is limited to the canonical V620 exact gfx1030 tuple and one fixed Qwen3.5-4B MXFP8 artifact.",
+    "No result is generalized to gfx1031-gfx1036, gfx1201, gfx942, MXFP6, NVFP4, another ROCm tuple, another model, or multi-GPU execution."
+  ]
+}

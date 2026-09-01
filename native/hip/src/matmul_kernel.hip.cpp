@@ -819,8 +819,13 @@ struct Mxfp8MmqFormat {
 
   __device__ __forceinline__ static float load_weight(const uint8_t *const row,
                                                       const uint64_t index) {
+    return decode_weight_byte(__builtin_nontemporal_load(row + index));
+  }
+
+  __device__ __forceinline__ static float
+  decode_weight_byte(const uint8_t bits) {
     return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode_mx_value_plane(
-        __builtin_nontemporal_load(row + index));
+        bits);
   }
 };
 
@@ -840,11 +845,44 @@ struct Mxfp6MmqFormat {
   }
 };
 
+// Keep packed-value ingress independent from the MMQ arithmetic schedule.
+// The scalar policy remains the format-generic default used by MXFP8 and
+// MXFP6.  The vector policy is instantiated only for byte-addressed MXFP8;
+// future packed formats can provide their own ingress policy without cloning
+// the row/column/K decomposition.
+struct MmqScalarWeightIngress {
+  static constexpr uint32_t values_per_load = 1U;
+
+  template <typename Format>
+  __device__ __forceinline__ static void
+  stage(const uint8_t *const row, const uint64_t index, float *const output) {
+    output[0] = Format::load_weight(row, index);
+  }
+};
+
+struct Mxfp8MmqVector32WeightIngress {
+  static constexpr uint32_t values_per_load = 4U;
+
+  template <typename Format>
+  __device__ __forceinline__ static void
+  stage(const uint8_t *const row, const uint64_t index, float *const output) {
+    const uint32_t packed = __builtin_nontemporal_load(
+        reinterpret_cast<const uint32_t *>(row + index));
+#pragma unroll
+    for (uint32_t byte = 0U; byte < values_per_load; ++byte) {
+      output[byte] = Format::decode_weight_byte(
+          static_cast<uint8_t>(packed >> (byte * 8U)));
+    }
+  }
+};
+
 // This candidate borrows llama.cpp MMQ's multi-row/multi-column/K-tile
 // decomposition, but intentionally retains sLLM's packed MX values, E8M0
 // scales, FP32 accumulation, and row8 reduction order.  In particular, it
 // does not introduce the llama.cpp Q8_1 activation or integer dot path.
-template <typename Format, uint32_t Columns>
+template <typename Format, uint32_t Columns,
+          typename WeightIngress = MmqScalarWeightIngress,
+          bool RegisterBlockScales = false>
 __device__ __forceinline__ void sllm_matmul_mx_wa_mmq_columns_body(
     const uint8_t *const activation, const uint8_t *const activation_scales,
     const uint8_t *const weight, const uint8_t *const weight_scales,
@@ -854,6 +892,8 @@ __device__ __forceinline__ void sllm_matmul_mx_wa_mmq_columns_body(
   constexpr uint32_t rows_per_workgroup = 8U;
   constexpr uint32_t tile_k = 256U;
   constexpr uint32_t blocks_per_tile = tile_k / 32U;
+  constexpr uint32_t ingress_values = WeightIngress::values_per_load;
+  static_assert(tile_k % ingress_values == 0U);
   __shared__ float weight_tile[Columns][tile_k];
   __shared__ float weight_scale_tile[Columns][blocks_per_tile];
   __shared__ float activation_scale_tile[rows_per_workgroup][blocks_per_tile];
@@ -893,31 +933,64 @@ __device__ __forceinline__ void sllm_matmul_mx_wa_mmq_columns_body(
                     activation_scales[source_row * blocks_per_row + block])
               : 0.0F;
     }
-    for (uint32_t index = threadIdx.x; index < Columns * tile_k;
-         index += blockDim.x) {
-      const uint32_t local_column = index / tile_k;
-      const uint32_t offset = index % tile_k;
+    constexpr uint32_t ingress_groups_per_column = tile_k / ingress_values;
+    for (uint32_t index = threadIdx.x;
+         index < Columns * ingress_groups_per_column; index += blockDim.x) {
+      const uint32_t local_column = index / ingress_groups_per_column;
+      const uint32_t group = index % ingress_groups_per_column;
+      const uint32_t offset = group * ingress_values;
       const uint64_t column = column_base + local_column;
       const uint64_t global_inner = base + offset;
-      weight_tile[local_column][offset] =
-          column < n && global_inner < k
-              ? Format::load_weight(weight + column * row_bytes, global_inner)
-              : 0.0F;
+      if (column < n && global_inner + ingress_values <= k) {
+        WeightIngress::template stage<Format>(
+            weight + column * row_bytes, global_inner,
+            &weight_tile[local_column][offset]);
+      } else {
+#pragma unroll
+        for (uint32_t value = 0U; value < ingress_values; ++value) {
+          weight_tile[local_column][offset + value] = 0.0F;
+        }
+      }
     }
     __syncthreads();
     if (row < m) {
       const uint32_t valid = static_cast<uint32_t>(
           k - base < tile_k ? k - base : static_cast<uint64_t>(tile_k));
-      for (uint32_t offset = lane; offset < valid; offset += wave_width) {
-        const float activation_value =
-            Format::load_activation(activation_row, base + offset) *
-            activation_scale_tile[wave][offset / 32U];
+      if constexpr (RegisterBlockScales) {
 #pragma unroll
-        for (uint32_t local_column = 0U; local_column < Columns;
-             ++local_column) {
-          float term = activation_value * weight_tile[local_column][offset];
-          term *= weight_scale_tile[local_column][offset / 32U];
-          accumulators[local_column] += term;
+        for (uint32_t scale_block = 0U; scale_block < blocks_per_tile;
+             ++scale_block) {
+          const uint32_t offset = scale_block * wave_width + lane;
+          if (offset >= valid) {
+            continue;
+          }
+          const float activation_scale =
+              activation_scale_tile[wave][scale_block];
+          const float activation_value =
+              Format::load_activation(activation_row, base + offset) *
+              activation_scale;
+#pragma unroll
+          for (uint32_t local_column = 0U; local_column < Columns;
+               ++local_column) {
+            const float weight_scale =
+                weight_scale_tile[local_column][scale_block];
+            float term = activation_value * weight_tile[local_column][offset];
+            term *= weight_scale;
+            accumulators[local_column] += term;
+          }
+        }
+      } else {
+        for (uint32_t offset = lane; offset < valid; offset += wave_width) {
+          const float activation_value =
+              Format::load_activation(activation_row, base + offset) *
+              activation_scale_tile[wave][offset / 32U];
+#pragma unroll
+          for (uint32_t local_column = 0U; local_column < Columns;
+               ++local_column) {
+            float term = activation_value * weight_tile[local_column][offset];
+            term *= weight_scale_tile[local_column][offset / 32U];
+            accumulators[local_column] += term;
+          }
         }
       }
     }
@@ -968,6 +1041,30 @@ SLLM_DEFINE_MX_WA_MMQ_COLUMNS_KERNEL(
     sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_mmq_col8_v4, Mxfp6MmqFormat, 8U)
 
 #undef SLLM_DEFINE_MX_WA_MMQ_COLUMNS_KERNEL
+
+#define SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL(symbol, ingress,          \
+                                                     register_scales)          \
+  extern "C" __global__ __launch_bounds__(256, 1) void symbol(                 \
+      const uint8_t *const activation, const uint8_t *const activation_scales, \
+      const uint8_t *const weight, const uint8_t *const weight_scales,         \
+      uint16_t *const output, const uint64_t m, const uint64_t k,              \
+      const uint64_t n) {                                                      \
+    sllm_matmul_mx_wa_mmq_columns_body<Mxfp8MmqFormat, 8U, ingress,            \
+                                       register_scales>(                       \
+        activation, activation_scales, weight, weight_scales, output, m, k,    \
+        n);                                                                    \
+  }
+
+SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL(
+    sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1, MmqScalarWeightIngress, true)
+SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL(
+    sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1, Mxfp8MmqVector32WeightIngress,
+    false)
+SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL(
+    sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1,
+    Mxfp8MmqVector32WeightIngress, true)
+
+#undef SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL
 
 #if defined(SLLM_MATMUL_HAS_GFX12_ROCWMMA)
 static_assert(sizeof(rocwmma::float8_t) == sizeof(uint8_t));
@@ -2166,6 +2263,34 @@ hipError_t launch_mxfp8_w8a8(const uint8_t *const activation,
     hipLaunchKernelGGL(
         sllm_mxfp8_w8a8_gfx1030_mmq_col32_v1,
         dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 31U) / 32U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1,
+        dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1,
+        dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant ==
+             KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1,
+        dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
         dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
         weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16) {

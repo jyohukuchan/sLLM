@@ -346,15 +346,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "90b4e709d905dcf78e7c0e638315e9f1e3f507c5d6a25b6c0355a36b1c576580"
+        "sha256": "337a9500d2481377f3fd26067319ebc863aaa37f161e237d6b6575ef2fb9f75a"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "4bd8d906be49c3053b80df96e11f99f7490276bb05a0d364545a0a80c3d6247c"
+        "sha256": "7769844b78956805231449648b3b1a613ef73b787c86eaf6280a6cce018c3b22"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "e70a62a6d61b349ffb1d73565ff092820de3fe552e8d2b2fc6e5746e70229f78"
+        "sha256": "467f41b6164a719c381f7a9513af247d0c46a8b3607eb20e3e204cbe5f95466a"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -537,7 +537,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "0ea089bf6d879e9d12b40a5a65eb4ef33091266a86c4cf8373fe3ab3b20713d6"
+    "source_set_sha256": "207e8b2a35a6292e8e6748d8be4369ba993382fa2e4409df6438762a6f06ae26"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

@@ -103,6 +103,27 @@ constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Col32LogicalKernelId =
     "matmul.mxfp8.w8a8.gfx1030.mmq-col32.v1";
 constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Col32DeviceSymbol =
     "sllm_mxfp8_w8a8_gfx1030_mmq_col32_v1";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030RegscaleLogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale.v1";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030RegscaleDeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Vector32LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Vector32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1";
+constexpr const char
+    *kMxfp8W8A8PrefillMmqGfx1030RegscaleVector32LogicalKernelId =
+        "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale-vector32.v1";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030RegscaleVector32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1";
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale.v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1") <= 64U);
+static_assert(
+    sizeof("matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale-vector32.v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1") <=
+              64U);
 constexpr const char *kMxfp8W8A8PrefillWmmaN16LogicalKernelId =
     "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x16x32.v1";
 constexpr const char *kMxfp8W8A8PrefillWmmaN16DeviceSymbol =
@@ -168,6 +189,8 @@ constexpr const char *kMxfp8W8A8PrefillRow8Environment =
     "SLLM_MXFP8_PREFILL_FORCE_ROW8";
 constexpr const char *kMxfp8W8A8PrefillMmqGfx1030ColumnsEnvironment =
     "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_COLUMNS";
+constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Phase69Environment =
+    "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69";
 constexpr uint32_t kMxfp8W8A8PrefillWmmaWorkgroupSize = 256U;
 constexpr uint32_t kMxfp8W8A8PrefillWmmaRowsPerWorkgroup = 128U;
 constexpr uint32_t kMxfp8W8A8PrefillWmma4WaveWorkgroupSize = 128U;
@@ -241,6 +264,9 @@ enum class KernelVariant : uint32_t {
   Mxfp8W8A8PrefillWmmaN128DirectBoth = 37U,
   Mxfp8W8A8PrefillMmqGfx1030Col16 = 38U,
   Mxfp8W8A8PrefillMmqGfx1030Col32 = 39U,
+  Mxfp8W8A8PrefillMmqGfx1030Regscale = 40U,
+  Mxfp8W8A8PrefillMmqGfx1030Vector32 = 41U,
+  Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32 = 42U,
 };
 
 inline bool target_is(const char *const target,
@@ -438,7 +464,21 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m, const uint64_t k,
   }
   const char *const force_gfx1030_mmq =
       std::getenv(kMxfp8W8A8PrefillMmqGfx1030ColumnsEnvironment);
+  const char *const force_gfx1030_phase69 =
+      std::getenv(kMxfp8W8A8PrefillMmqGfx1030Phase69Environment);
   if (exact_gfx1030 && phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+    if (force_gfx1030_phase69 != nullptr &&
+        std::strcmp(force_gfx1030_phase69, "regscale") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale;
+    }
+    if (force_gfx1030_phase69 != nullptr &&
+        std::strcmp(force_gfx1030_phase69, "vector32") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32;
+    }
+    if (force_gfx1030_phase69 != nullptr &&
+        std::strcmp(force_gfx1030_phase69, "combined") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32;
+    }
     if (force_gfx1030_mmq != nullptr &&
         std::strcmp(force_gfx1030_mmq, "16") == 0) {
       return KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col16;
@@ -449,7 +489,10 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m, const uint64_t k,
     }
   }
   if (exact_gfx1030 && phase67_gfx1030_mxfp8_mmq_col8_shape(m, k, n)) {
-    return KernelVariant::Mxfp8W8A8PrefillMmqCol8;
+    return force_gfx1030_phase69 != nullptr &&
+                   std::strcmp(force_gfx1030_phase69, "control") == 0
+               ? KernelVariant::Mxfp8W8A8PrefillMmqCol8
+               : KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32;
   }
   const char *const force_wmma = std::getenv(kMxfp8W8A8PrefillWmmaEnvironment);
   const char *const force_wmma_n16 =
@@ -867,6 +910,12 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
              ? kMxfp8W8A8PrefillMmqGfx1030Col16LogicalKernelId
          : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32
              ? kMxfp8W8A8PrefillMmqGfx1030Col32LogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale
+             ? kMxfp8W8A8PrefillMmqGfx1030RegscaleLogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32
+             ? kMxfp8W8A8PrefillMmqGfx1030Vector32LogicalKernelId
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32
+             ? kMxfp8W8A8PrefillMmqGfx1030RegscaleVector32LogicalKernelId
          : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16
              ? kMxfp8W8A8PrefillWmmaN16LogicalKernelId
          : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN64
@@ -943,6 +992,12 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
              ? kMxfp8W8A8PrefillMmqGfx1030Col16DeviceSymbol
          : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32
              ? kMxfp8W8A8PrefillMmqGfx1030Col32DeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale
+             ? kMxfp8W8A8PrefillMmqGfx1030RegscaleDeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32
+             ? kMxfp8W8A8PrefillMmqGfx1030Vector32DeviceSymbol
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32
+             ? kMxfp8W8A8PrefillMmqGfx1030RegscaleVector32DeviceSymbol
          : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16
              ? kMxfp8W8A8PrefillWmmaN16DeviceSymbol
          : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN64
@@ -1016,6 +1071,11 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
              ? static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 15U) / 16U))
          : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32
              ? static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 31U) / 32U))
+         : variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale ||
+                 variant == KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32 ||
+                 variant ==
+                     KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32
+             ? static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))
          : variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16
              ? static_cast<uint32_t>(
                    (n + kMxfp8W8A8PrefillWmmaN16ColumnsPerWorkgroup - 1U) /
@@ -1115,6 +1175,13 @@ static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32, 8U,
                           31U) == 1U);
 static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Col32, 9U,
                           33U) == 4U);
+static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Regscale, 8U,
+                          7U) == 1U);
+static_assert(grid_size_x(KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32, 9U,
+                          9U) == 4U);
+static_assert(
+    grid_size_x(KernelVariant::Mxfp8W8A8PrefillMmqGfx1030RegscaleVector32, 9U,
+                17U) == 6U);
 
 hipError_t launch(const uint16_t *activation, const uint16_t *weight,
                   uint16_t *output, uint64_t m, uint64_t k, uint64_t n,

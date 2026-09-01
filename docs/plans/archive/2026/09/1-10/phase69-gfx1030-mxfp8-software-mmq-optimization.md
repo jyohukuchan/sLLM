@@ -1,6 +1,20 @@
 # Phase 69: gfx1030 MXFP8 software-MMQ次段最適化
 
-状態: `計画済み・未着手`
+状態: `完了・ID41 vector32 ingressを既存Phase 67 scopeへ採用`
+
+## 完了記録（2026-09-02）
+
+- P69-AでID27を再取得し、Code Object resourceとrocprofv3 counterを固定した。ID41はID27と同じLDS 8,704 byte、
+  VGPR 46、spill 0を維持し、VALUInsts平均を19.44%削減した。
+- P69-Bのregister-scale ID40とP69-B/C combined ID42はVGPR 53／54とshape別非単調性によりbenchmark-onlyとした。
+- P69-Cの32-bit E4 value ingress ID41はN0でBF16 digestを維持し、28-case operator oracleをPASSした。
+- P69-Dはprofileが二重bufferを支持せず、P69-EはN0候補がfull-modelを改善したため実装しなかった。
+- 同一最終binary、3 warmup＋10 measuredのQwen3.5-4B primaryは512 inputで
+  `205.0009 -> 254.4461 tok/s`（+24.12%）、2,048 inputで`204.2416 -> 249.3441 tok/s`（+22.08%）。
+  生成token、dispatch件数、resident／peak VRAM、HIP-only、fallback、cleanupは不変だった。
+- ID41をexact `gfx1030`の既存Phase 67 production scopeへ採用した。旧ID27へは
+  `SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69=control`、row8へは
+  `SLLM_MXFP8_PREFILL_FORCE_ROW8=1`で戻せる。
 
 ## 目的
 
@@ -119,4 +133,6 @@ NVFP4は共通のschedule／reduction骨格だけを再利用し、E2M1 value、
 W4A16／W4A4別のloader／scale specializationを持つ。MXFP8／MXFP6のscale policyへ偽装しない。
 
 [全体計画](../../../../main-plan.md) /
-[Phase 68 baseline](../../../../archive/2026/09/1-10/phase68-gfx1030-mxfp8-e4-scale-fast-path.md)
+[Phase 68 baseline](../../../../archive/2026/09/1-10/phase68-gfx1030-mxfp8-e4-scale-fast-path.md) /
+[履歴](../../../../../history/2026/09/1-10/phase69-gfx1030-mxfp8-software-mmq-optimization.md) /
+[追跡要約](../../../../../../ci/matrix/phase69-gfx1030-mxfp8-software-mmq-v1.json)

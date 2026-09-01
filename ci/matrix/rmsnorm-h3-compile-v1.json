@@ -156,7 +156,7 @@
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "d89c4d2469f84fed594d36b13bc443d68d7eae08c5799ad5078da4ff4055c965"
+          "sha256": "3f795c0e38e0f25dfa988ede26e67ca2bf161abfbd28191f4737cc6ac38b7a60"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "ceec9f4090d1c9ce9e1fa8fda0f30a776d8bd31fdb8a7bca25bf822f1aa0b455"
+      "source_set_sha256": "76d294366f9e916745f25c07188a33f64d4794d2a955c3e64a622b1c77b1b8a3"
     }
   },
   "source_symbol_map": [
