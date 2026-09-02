@@ -55,6 +55,35 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-02-P70-RDNA-MXFP6-VIA-E4M3: packed E3M2 ingressとgfx1201 WMMA（N0/N1）
+
+- scope: OCP MXFP6 E3M2 W6A6 block32/E8M0のprefill matmul。exact `gfx1030`のID43は明示benchmark専用、
+  exact `gfx1201`のID45は`M>=17`、`K>=2048`、`K%32=0`、`1024<=N<=16384`へ限定採用する。decode M=1、
+  scope外shape、別target、KV default、量子化recipe、GGUF encoding、sampling、stop/usageは変更しない。
+- baseline/candidate: ID43はID29 col8のrow/column/K分解、E8M0 scale、FP32 accumulation、wave reduction、BF16 RNEを維持し、
+  packed E3M2を実数値exactなE4M3FN bitへ変換して既存E4 decodeへ渡す。gfx1201 ID44/45は同じvalue/scale byteから
+  K32 tileだけをE4M3へmaterializeし、K16 FP8xFP8-to-FP32 WMMAを2回、scale pair、block間FP32 accumulation、BF16 RNEの
+  固定treeで処理する。ID45はID44と同じ算術treeのまま、同じ3-byte groupの4値を一括変換・32-bit LDS storeする。
+- classification: ID43とID44→ID45は**N0**。E3M2→E4M3FNは全64 codeで実数値exactで、ID43はID29とのBF16 digest、
+  ID44/45は相互の演算順と丸めstageを維持する。従来ID29→gfx1201 WMMA familyは**N1**。実数式、入力項、scale、FP32
+  accumulator、BF16 RNEを維持し、差を固定K16 WMMA treeへ局所化できる。逐次K32 dotより加算依存深さを増やさず、race、
+  atomic、未初期化値、silent fallbackを使用しない。
+- oracle/state: 全64 E3M2 code×4 packed laneをexact `gfx1030`／`gfx1201` device oracleでbit exactに確認した。ID43は
+  production 5 shapeでID29 digest一致。ID44/45/46は独立FP32 oracle、非有限位置一致、repeat determinismをPASSし、
+  P70-Fの最大相対誤差は`0.003875792259350419`だった。selector境界、prepare freeze、別target非選択、HIP-only、
+  fallback false、cleanup 0も確認した。
+- output/quality: 固定Qwen3.5-4B MXFP6、FP16 KV、512／2,048 inputのID44／45全sampleで生成tokenは
+  `[23066,23066,23066,23066]`だった。旧providerとWMMA familyのlarge-M operator BF16 digestは異なる。full-model logitの
+  最初の差、top-1、KLD、perplexityは未収集であるが、recipe不変のN1 arithmetic変更なので旧KV default用`0.99` gateは適用しない。
+- performance/resource/decision: exact gfx1201のID44→ID45は3 warmup＋10 measuredで512 input
+  `1276.494→2157.868 tok/s`（1.690倍）、2,048 input`1506.933→2423.308 tok/s`（1.608倍）。ID45はLDS 6,912 byte、
+  SGPR/VGPR 38/115、spill/private 0でshape限定採用した。N128 ID46はVGPR 167かつ両full-model行でID45より遅く
+  benchmark-only。gfx1030 ID43も512／2,048で約22.7%／21.6%遅くbenchmark-onlyとした。
+- rollback: ID44は`SLLM_MXFP6_PREFILL_FORCE_PHASE70=gfx1201-n64`、従来tiled16は
+  `SLLM_MXFP6_PREFILL_FORCE_TILED16=1`。scope外は従来providerを維持する。
+- details: [Phase 70履歴](../history/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)と
+  [追跡要約](../../ci/matrix/phase70-rdna-mxfp6-mxfp8-path-reuse-v1.json)。
+
 ### OUT-2026-09-01-P67-GFX1030-MXFP8-MMQ: staged col8 scoped default（N0）
 
 - scope: exact `gfx1030`、OCP MXFP8 E4M3 W8A8 block32/E8M0のprefill matmul。`M>=128, K>=2048, K%32=0`かつ

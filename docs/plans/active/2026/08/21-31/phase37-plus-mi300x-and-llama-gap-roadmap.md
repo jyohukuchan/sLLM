@@ -24,6 +24,9 @@ MXFP性能残差を、matmul固有の追加最適化ではなく、KV append／a
 分離して改善する作業をPhase 62へ割り当て、両RDNAのbit-exact検証と性能採否まで完了した。
 Phase 63〜65のexact gfx1201 MXFP8 WMMA最適化も完了した。2026-09-01のユーザー指示により、Phase 65後のlinear／attention残差を
 MXFP8で共通providerとして実証し、MXFP6、NVFP4／MXFP4、BF16 attentionへ実候補を移植するPhase 66も完了した。
+Phase 67〜69ではexact gfx1030のMXFP8 software-MMQを段階的に改善し、ID41 vector32 ingressまで限定採用した。
+2026-09-02のユーザー指示によるPhase 70では、両RDNAのMXFP6をpacked residentのままMXFP8 MMQ／WMMA骨格へ接続した。
+追加P70-Fでgfx1201 ID45 packed-group N64をshape限定採用し、ID46 N128とgfx1030 ID43はbenchmark-onlyとして完了した。
 
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
@@ -91,6 +94,10 @@ MXFP8で共通providerとして実証し、MXFP6、NVFP4／MXFP4、BF16 attentio
 | 64 | complete-scoped-adoption | exact gfx1201 MXFP8のweight direct-loadとshape selector | 4B／9B full-model、operator、profile、資源 |
 | 65 | complete-scoped-adoption | exact gfx1201 MXFP8のactivation／weight direct-load | model非依存ID36、4B／9B 2,048-token、profile |
 | 66 | complete-scoped-adoption | prepared low-precision provider、MXFP8 ID37限定採用、typed attention棄却、MXFP6／NVFP4／MXFP4・BF16 attention移植 | exact gfx1201 operator、4B／9B full-model、reviewed model route |
+| 67 | complete-scoped-adoption | exact gfx1030 MXFP8のN方向再利用とID27 col8 selector確定 | 18-case operator、4B 512／2,048、profile |
+| 68 | complete-internal-fast-path | exact gfx1030 MXFP8のE4／scale分離と内部MX normal fast path | E4分布、特殊値、4B paired full-model |
+| 69 | complete-scoped-adoption | exact gfx1030 MXFP8のvectorized E4 ingress ID41 | 28-case operator、resource／counter、4B 3+10 full-model |
+| 70 | complete-gfx1201-scoped-adoption | exact gfx1030／gfx1201 MXFP6のMXFP8 MMQ／WMMA骨格再利用 | gfx1201 ID45限定採用、ID46／gfx1030 ID43 benchmark-only、両target operator／4B full-model |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
@@ -98,7 +105,8 @@ MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700
 Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠として完了済みである。2026-08-30のユーザー決定により
 block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
-Phase 55〜66は完了済みである。Phase 47〜48は内容と番号を保持する。
+Phase 55〜70は完了済みである。次のlow-precision候補は独立NVFP4 specializationで、Phase番号は未割当である。
+Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice
 state、Phase 41はassistant-prefill/state semantics、Phase 42はFIM/infill execution modeを所有する。Phase 42〜44の後続記述は、
@@ -673,6 +681,18 @@ prototype完了をPhase全体完了へ読み替えない。
   `1,988.722356〜2,261.647647 tok/s`。persistent BF16/FP32 weight展開やFP32 attention/KVは追加していない。詳細は
   [Phase 66履歴](../../../../../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
   [追跡要約](../../../../../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
+
+## Phase 70: 両RDNA MXFP6のMXFP8実行骨格再利用
+
+- packed E3M2（4 value／3 byte）とblock 32／E8M0 scaleをresident表現のまま維持し、tile ingressでだけ
+  E3M2→E4M3 exact変換を行う共通primitiveとtarget別providerを実装した。whole-model E4M3／BF16／FP32展開は追加していない。
+- exact `gfx1030` ID43はcol8 MMQを共有しoperator digest一致を確認したが、固定4B prefillが約22%退行したためbenchmark-only。
+  exact `gfx1201`はN64 WMMA ID44を初期採用し、追加P70-Fで3-byte groupを一度だけ読むID45へ置換した。ID44比で
+  512／2,048-token prefillを1.690／1.608倍へ改善したため同じshapeへ限定採用し、N128 ID46はbenchmark-onlyとした。
+- 全64 E3M2 code×4 lane、selector境界、独立FP32 oracle、両target full-model、MXFP8 regression、gfx942 compile-onlyをPASSした。
+  詳細は[Phase 70保存済み計画](../../../../archive/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)、
+  [Phase 70履歴](../../../../../history/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)、
+  [追跡要約](../../../../../../ci/matrix/phase70-rdna-mxfp6-mxfp8-path-reuse-v1.json)を正本とする。
 
 ## Intentional exclusions and deferred items
 

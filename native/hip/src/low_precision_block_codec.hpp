@@ -17,6 +17,45 @@ struct E3M2 {};
 struct E2M1 {};
 struct E8M0 {};
 
+// Every finite OCP E3M2 value has an exact OCP E4M3FN representation.  Keep
+// this as a code-to-code transform so packed MXFP6 tensors remain resident and
+// callers can expand only the tile currently consumed by an MXFP8 arithmetic
+// path.  The two formats use sign bits 5/7 and exponent biases 3/7;
+// E3M2's three non-zero subnormals need the explicit normal E4M3 encodings
+// below, while all normal values are a bias adjustment plus one mantissa bit.
+__host__ __device__ constexpr uint8_t
+e3m2_to_e4m3fn_exact_bits(const uint8_t raw) noexcept {
+  const uint8_t bits = raw & UINT8_C(0x3f);
+  const uint8_t sign = static_cast<uint8_t>((bits & UINT8_C(0x20)) << 2U);
+  const uint8_t magnitude = bits & UINT8_C(0x1f);
+  const uint8_t exponent = magnitude >> 2U;
+  const uint8_t mantissa = magnitude & UINT8_C(0x03);
+  if (exponent == 0U) {
+    constexpr uint8_t subnormal_map[4] = {UINT8_C(0x00), UINT8_C(0x18),
+                                          UINT8_C(0x20), UINT8_C(0x24)};
+    return static_cast<uint8_t>(sign | subnormal_map[mantissa]);
+  }
+  return static_cast<uint8_t>(
+      sign | static_cast<uint8_t>((exponent + UINT8_C(4)) << 3U) |
+      static_cast<uint8_t>(mantissa << 1U));
+}
+
+// Convert one native MXFP6 packing group (four E3M2 values in the low 24
+// bits) into four byte-addressable E4M3FN values.  Consumers that materialize
+// a tile for FP8 arithmetic can load the three source bytes once instead of
+// repeating the same 24-bit load for every scalar lane.
+__host__ __device__ constexpr uint32_t
+e3m2x4_to_e4m3fn_exact_bits(const uint32_t packed) noexcept {
+  uint32_t converted = 0U;
+  for (uint32_t lane = 0U; lane < 4U; ++lane) {
+    const uint8_t code = static_cast<uint8_t>(
+        (packed >> (lane * 6U)) & UINT32_C(0x3f));
+    converted |= static_cast<uint32_t>(e3m2_to_e4m3fn_exact_bits(code))
+                 << (lane * 8U);
+  }
+  return converted;
+}
+
 template <typename Format> struct ScalarCodec;
 
 template <> struct ScalarCodec<E4M3Fn> {
@@ -441,6 +480,15 @@ packed_e3m2_at(const uint8_t *const row, const uint64_t index) noexcept {
   return static_cast<uint8_t>(
       (packed >> static_cast<uint32_t>((index & UINT64_C(3)) * UINT64_C(6))) &
       UINT32_C(0x3f));
+}
+
+__device__ __forceinline__ uint32_t
+packed_e3m2x4_at(const uint8_t *const row,
+                 const uint64_t first_index) noexcept {
+  const uint64_t byte = (first_index / UINT64_C(4)) * UINT64_C(3);
+  return static_cast<uint32_t>(row[byte]) |
+         (static_cast<uint32_t>(row[byte + 1U]) << 8U) |
+         (static_cast<uint32_t>(row[byte + 2U]) << 16U);
 }
 
 __device__ __forceinline__ uint8_t

@@ -3889,6 +3889,10 @@ bool matmul_mxfp_prefill_selector_contract() {
   constexpr const char *const mxfp8_tiled16 =
       "SLLM_MXFP8_PREFILL_FORCE_TILED16";
   constexpr const char *const mxfp6_row8 = "SLLM_MXFP6_PREFILL_FORCE_ROW8";
+  constexpr const char *const mxfp6_tiled16 =
+      "SLLM_MXFP6_PREFILL_FORCE_TILED16";
+  constexpr const char *const mxfp6_phase70 =
+      "SLLM_MXFP6_PREFILL_FORCE_PHASE70";
   constexpr const char *const mmq_columns =
       "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS";
   constexpr const char *const gfx1030_mmq_columns =
@@ -3922,6 +3926,14 @@ bool matmul_mxfp_prefill_selector_contract() {
   const char *const old_mxfp6_row8 = std::getenv(mxfp6_row8);
   const bool had_mxfp6_row8 = old_mxfp6_row8 != nullptr;
   const std::string old_mxfp6_row8_value = had_mxfp6_row8 ? old_mxfp6_row8 : "";
+  const char *const old_mxfp6_tiled16 = std::getenv(mxfp6_tiled16);
+  const bool had_mxfp6_tiled16 = old_mxfp6_tiled16 != nullptr;
+  const std::string old_mxfp6_tiled16_value =
+      had_mxfp6_tiled16 ? old_mxfp6_tiled16 : "";
+  const char *const old_mxfp6_phase70 = std::getenv(mxfp6_phase70);
+  const bool had_mxfp6_phase70 = old_mxfp6_phase70 != nullptr;
+  const std::string old_mxfp6_phase70_value =
+      had_mxfp6_phase70 ? old_mxfp6_phase70 : "";
   const char *const old_mmq_columns = std::getenv(mmq_columns);
   const bool had_mmq_columns = old_mmq_columns != nullptr;
   const std::string old_mmq_columns_value =
@@ -3990,6 +4002,16 @@ bool matmul_mxfp_prefill_selector_contract() {
       setenv(mxfp6_row8, old_mxfp6_row8_value.c_str(), 1);
     } else {
       unsetenv(mxfp6_row8);
+    }
+    if (had_mxfp6_tiled16) {
+      setenv(mxfp6_tiled16, old_mxfp6_tiled16_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp6_tiled16);
+    }
+    if (had_mxfp6_phase70) {
+      setenv(mxfp6_phase70, old_mxfp6_phase70_value.c_str(), 1);
+    } else {
+      unsetenv(mxfp6_phase70);
     }
     if (had_mmq_columns) {
       setenv(mmq_columns, old_mmq_columns_value.c_str(), 1);
@@ -4060,6 +4082,8 @@ bool matmul_mxfp_prefill_selector_contract() {
   unsetenv(baseline);
   unsetenv(mxfp8_tiled16);
   unsetenv(mxfp6_row8);
+  unsetenv(mxfp6_tiled16);
+  unsetenv(mxfp6_phase70);
   unsetenv(mmq_columns);
   unsetenv(gfx1030_mmq_columns);
   unsetenv(mxfp8_row8);
@@ -4110,6 +4134,133 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 248320U,
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8;
+
+  setenv(mxfp6_phase70, "gfx1030", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillMmqGfx1030ViaE4M3 &&
+      sllm_matmul_kernel::select_mxfp6_variant(1U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2559U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+  setenv(mxfp6_phase70, "gfx1201-n64", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+  setenv(mxfp6_phase70, "gfx1201-n64-pack4", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+  setenv(mxfp6_phase70, "gfx1201-n128-pack4", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N128 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 1025U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+  unsetenv(mxfp6_phase70);
+
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(16U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(17U, 2048U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 &&
+      sllm_matmul_kernel::select_mxfp6_variant(17U, 2016U, 1024U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(17U, 2048U, 1023U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(2048U, 9216U, 16384U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 &&
+      sllm_matmul_kernel::select_mxfp6_variant(2048U, 9216U, 16385U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx942") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx9999") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+
+  constexpr uint64_t phase70_m_boundaries[] = {
+      1U, 17U, 127U, 128U, 129U, 511U,
+      512U, 513U, 2047U, 2048U, 2049U};
+  for (const uint64_t m : phase70_m_boundaries) {
+    const auto expected =
+        m == 1U
+            ? sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode
+            : sllm_matmul_kernel::KernelVariant::
+                  Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+    valid = valid && sllm_matmul_kernel::select_mxfp6_variant(
+                         m, 2048U, 1024U, "gfx1201") == expected;
+  }
+  constexpr uint64_t phase70_k_boundaries[] = {31U,   32U,   33U, 2048U,
+                                                2560U, 4096U, 9216U};
+  for (const uint64_t k : phase70_k_boundaries) {
+    const auto expected =
+        k >= 2048U && (k % 32U) == 0U
+            ? sllm_matmul_kernel::KernelVariant::
+                  Mxfp6W6A6PrefillWmmaGfx1201Pack4N64
+            : sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+    valid = valid && sllm_matmul_kernel::select_mxfp6_variant(
+                         17U, k, 1024U, "gfx1201") == expected;
+  }
+  constexpr uint64_t phase70_n_boundaries[] = {
+      31U,  32U,  33U,   63U,   64U,   65U, 127U, 128U,
+      129U, 1023U, 1024U, 1025U, 2559U, 2560U, 2561U};
+  for (const uint64_t n : phase70_n_boundaries) {
+    const auto expected =
+        n >= 1024U
+            ? sllm_matmul_kernel::KernelVariant::
+                  Mxfp6W6A6PrefillWmmaGfx1201Pack4N64
+            : sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+    valid = valid && sllm_matmul_kernel::select_mxfp6_variant(
+                         17U, 2048U, n, "gfx1201") == expected;
+  }
+  for (const char *const target : {"gfx1030", "gfx1200", "gfx942",
+                                   "gfx9999"}) {
+    valid = valid &&
+            sllm_matmul_kernel::select_mxfp6_variant(
+                17U, 2048U, 1024U, target) ==
+                sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+  }
+
+  setenv(mmq_columns, "8", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillMmqCol8;
+  unsetenv(mmq_columns);
+  setenv(mxfp6_row8, "1", 1);
+  valid = valid && sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
+                                                            "gfx1201") ==
+                       sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillRow8;
+  unsetenv(mxfp6_row8);
+  setenv(mxfp6_tiled16, "1", 1);
+  valid =
+      valid &&
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+  unsetenv(mxfp6_tiled16);
 
   for (const char *const target : {"gfx1200", "gfx942", "gfx9999"}) {
     valid =
@@ -4468,6 +4619,186 @@ bool matmul_mxfp_prefill_selector_contract() {
   }
   unsetenv(baseline);
   unsetenv(gfx1030_mmq_columns);
+
+  unsetenv(mxfp6_row8);
+  setenv(mxfp6_phase70, "gfx1030", 1);
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1030");
+  {
+    sllm_context_t *phase70_context = nullptr;
+    sllm_buffer_t *phase70_activation = nullptr;
+    sllm_buffer_t *phase70_weight = nullptr;
+    sllm_buffer_t *phase70_output = nullptr;
+    sllm_matmul_plan_t *phase70_plan = nullptr;
+    constexpr uint64_t phase70_m = 3U;
+    constexpr uint64_t phase70_k = 64U;
+    constexpr uint64_t phase70_n = 7U;
+    constexpr uint64_t phase70_weight_values =
+        phase70_n * phase70_k * UINT64_C(3) / UINT64_C(4);
+    constexpr uint64_t phase70_weight_blocks =
+        phase70_n * phase70_k / UINT64_C(32);
+    Error phase70_error;
+    if (!create_context_for_arch("gfx1030", &phase70_context) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_m * phase70_k * sizeof(uint16_t),
+                             &phase70_activation) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_weight_values + phase70_weight_blocks,
+                             &phase70_weight) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_m * phase70_n * sizeof(uint16_t),
+                             &phase70_output)) {
+      valid = false;
+    } else {
+      auto descriptor = matmul_descriptor(phase70_activation, 0U,
+                                          phase70_weight, 0U, phase70_output,
+                                          0U, phase70_m, phase70_k, phase70_n);
+      descriptor.op_version = SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
+      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0;
+      valid =
+          valid &&
+          expect_status(sllm_matmul_prepare(phase70_context, &descriptor,
+                                            &phase70_plan, &phase70_error.sink),
+                        SLLM_STATUS_OK, "gfx1030 Phase 70 prepared provider",
+                        phase70_error) &&
+          phase70_plan != nullptr;
+      uint32_t prepared_provider = 0U;
+      uint32_t prepared_tile = 0U;
+      uint32_t prepared_inner_product = 0U;
+      valid =
+          valid &&
+          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                        Mxfp6W6A6PrefillMmqGfx1030ViaE4M3) &&
+          sllm_test_matmul_prepared_provider_semantics(
+              phase70_plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Mxfp6Gfx1030MmqViaE4M3) &&
+          prepared_tile ==
+              static_cast<uint32_t>(sllm_lowp::TilePolicy::BlockRow8Column8) &&
+          prepared_inner_product ==
+              static_cast<uint32_t>(
+                  sllm_lowp::InnerProduct::E3M2ViaE4M3DecodedFp32);
+      unsetenv(mxfp6_phase70);
+      setenv(baseline, "1", 1);
+      valid =
+          valid &&
+          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                        Mxfp6W6A6PrefillMmqGfx1030ViaE4M3) &&
+          sllm_test_matmul_prepared_provider_semantics(
+              phase70_plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Mxfp6Gfx1030MmqViaE4M3);
+    }
+    if (phase70_plan != nullptr) {
+      valid = expect_status(
+                  sllm_matmul_plan_release(&phase70_plan, &phase70_error.sink),
+                  SLLM_STATUS_OK, "gfx1030 Phase 70 prepared provider release",
+                  phase70_error) &&
+              valid;
+    }
+    valid = release_buffer(&phase70_activation) &&
+            release_buffer(&phase70_weight) &&
+            release_buffer(&phase70_output) &&
+            release_context(&phase70_context) && valid;
+  }
+  unsetenv(baseline);
+  unsetenv(mxfp6_phase70);
+
+  fake_hip::reset();
+  fake_hip::set_gcn_arch_name("gfx1201");
+  {
+    sllm_context_t *phase70_context = nullptr;
+    sllm_buffer_t *phase70_activation = nullptr;
+    sllm_buffer_t *phase70_weight = nullptr;
+    sllm_buffer_t *phase70_output = nullptr;
+    sllm_matmul_plan_t *phase70_plan = nullptr;
+    constexpr uint64_t phase70_m = 17U;
+    constexpr uint64_t phase70_k = 2048U;
+    constexpr uint64_t phase70_n = 1024U;
+    constexpr uint64_t phase70_weight_values =
+        phase70_n * phase70_k * UINT64_C(3) / UINT64_C(4);
+    constexpr uint64_t phase70_weight_blocks =
+        phase70_n * phase70_k / UINT64_C(32);
+    Error phase70_error;
+    if (!create_context_for_arch("gfx1201", &phase70_context) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_m * phase70_k * sizeof(uint16_t),
+                             &phase70_activation) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_weight_values + phase70_weight_blocks,
+                             &phase70_weight) ||
+        !create_buffer_sized(phase70_context,
+                             phase70_m * phase70_n * sizeof(uint16_t),
+                             &phase70_output)) {
+      valid = false;
+    } else {
+      auto descriptor = matmul_descriptor(phase70_activation, 0U,
+                                          phase70_weight, 0U, phase70_output,
+                                          0U, phase70_m, phase70_k, phase70_n);
+      descriptor.op_version = SLLM_HIP_MATMUL_MXFP6_W6A6_VERSION;
+      descriptor.weight.dtype = SLLM_TENSOR_DTYPE_U8;
+      descriptor.weight.encoding = SLLM_TENSOR_ENCODING_MXFP6_E3M2_BLOCK32_E8M0;
+      valid =
+          valid &&
+          expect_status(sllm_matmul_prepare(phase70_context, &descriptor,
+                                            &phase70_plan, &phase70_error.sink),
+                        SLLM_STATUS_OK, "gfx1201 Phase 70 prepared provider",
+                        phase70_error) &&
+          phase70_plan != nullptr;
+      uint32_t prepared_provider = 0U;
+      uint32_t prepared_tile = 0U;
+      uint32_t prepared_inner_product = 0U;
+      valid = valid &&
+              sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+                  static_cast<uint32_t>(
+                      sllm_matmul_kernel::KernelVariant::
+                          Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
+              sllm_test_matmul_prepared_provider_semantics(
+                  phase70_plan, &prepared_provider, &prepared_tile,
+                  &prepared_inner_product) == 1U &&
+              prepared_provider ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3) &&
+              prepared_tile ==
+                  static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
+              prepared_inner_product ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::InnerProduct::E3M2ViaE4M3WmmaFp32);
+      setenv(baseline, "1", 1);
+      setenv(mxfp6_row8, "1", 1);
+      valid = valid &&
+              sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+                  static_cast<uint32_t>(
+                      sllm_matmul_kernel::KernelVariant::
+                          Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
+              sllm_test_matmul_prepared_provider_semantics(
+                  phase70_plan, &prepared_provider, &prepared_tile,
+                  &prepared_inner_product) == 1U &&
+              prepared_provider ==
+                  static_cast<uint32_t>(
+                      sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3);
+    }
+    if (phase70_plan != nullptr) {
+      valid = expect_status(
+                  sllm_matmul_plan_release(&phase70_plan, &phase70_error.sink),
+                  SLLM_STATUS_OK, "gfx1201 Phase 70 prepared provider release",
+                  phase70_error) &&
+              valid;
+    }
+    valid = release_buffer(&phase70_activation) &&
+            release_buffer(&phase70_weight) &&
+            release_buffer(&phase70_output) &&
+            release_context(&phase70_context) && valid;
+  }
+  unsetenv(baseline);
+  unsetenv(mxfp6_row8);
 
   setenv(mxfp8_wmma, "1", 1);
   fake_hip::reset();

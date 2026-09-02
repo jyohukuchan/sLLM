@@ -416,7 +416,8 @@
 | 完了・ID37限定採用／attention棄却 | 66 | 共通prepared low-precision providerをMXFP8で実証し、ID37 N128をgfx1201の測定済みshapeへ採用。MXFP6、NVFP4／MXFP4、BF16 attentionまで実移植・採否を完了 |
 | 完了・ID27 shape限定採用 | 67 | gfx1201のN方向再利用をgfx1030へ転用評価。ID38/39はbenchmark-only、既存ID27 col8を測定済みlarge projectionへ限定採用し、4B prefillを約2.88〜2.92倍へ改善 |
 | 完了・内部MX fast path採用 | 68 | gfx1030 E4／scaleを分離測定。内部MX value planeのnormal common pathと安全なcombined-exponent block decodeを採用し、4B prefillをさらに約2.97〜4.35%改善 |
-| 計画済み・未着手 | 69 | exact gfx1030 MXFP8 software-MMQのscale register化、vectorized E4 ingress、staging／barrier scheduleを評価し、後続MXFP6 tile変換へ再利用できるcompile-time loader境界を整理 |
+| 完了・ID41限定採用 | 69 | exact gfx1030 MXFP8 software-MMQで32-bit E4 ingressを既存ID27 scopeへ採用し、4B prefillを22〜24%改善。scale register化／combined候補はbenchmark-only |
+| 完了・gfx1201 ID45 shape限定採用／ID46・gfx1030 ID43 benchmark-only | 70 | packed E3M2→E4M3 exact ingressでMXFP8 MMQ／WMMA骨格を再利用。P70-Fで4-value ingressのID45をID44比1.61〜1.69倍へ改善して既定化 |
 | 完了 | X | llama.cpp HIPのQ5_1 Flash Attention構成を修正し、ローカルQwen補助エージェントへ反映 |
 | 完了 | XA | host-required／通常H3／public-runtime H3 CIを修正し、Phase 52候補のpush後workflow完了まで確認 |
 
@@ -836,10 +837,18 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
   dispatch件数、VRAM、HIP-only、fallback、cleanupは不変だった。ID40／42はbenchmark-only、二重bufferと演算順を変える
   block後scaleは不採用である。詳細は[Phase 69履歴](../history/2026/09/1-10/phase69-gfx1030-mxfp8-software-mmq-optimization.md)と
   [追跡済み要約](../../ci/matrix/phase69-gfx1030-mxfp8-software-mmq-v1.json)を正本とする。
-- Phase 69後の順序は、MXFP6 E3M2をpacked residentのままtile単位でE4M3へexact変換して同じMMQ骨格を再利用し、
-  その後にNVFP4をblock 16／E4M3 block scale／FP32 tensor scale／W4A16・W4A4固有の独立specializationとして扱う。
-  MXFP6のnormalは主にbit shiftとexponent bias補正、subnormalは固定mapで変換し、whole-model E4／FP32展開は行わない。
-  この2段階は順序決定だけで未着手であり、Phase 69のprofileとloader境界を受けて別Phaseへ詳細化する。
+- Phase 70はMXFP6 E3M2をpacked residentのままtile単位でE4M3へexact変換し、exact `gfx1030`ではcol8 software-MMQ、
+  exact `gfx1201`ではN64 FP8 WMMA／scale／accumulator／output骨格を再利用して完了した。gfx1030 ID43はoperator digestが
+  current ID29と一致したが固定4B 512／2,048-tokenで約22.7%／21.6%遅く、benchmark-onlyとした。gfx1201ではID44を
+  `M>=17、K>=2048、1024<=N<=16384`へ初期採用し、P70-Fで3-byte groupを一度だけ読むID45 N64へ置換した。
+  同一最終binaryの3+10中央値は512-tokenが`1276.494→2157.868 tok/s`（1.690倍）、2,048-tokenが
+  `1506.933→2423.308 tok/s`（1.608倍）。N128 ID46は両full-model行でID45より遅くbenchmark-onlyとした。
+  persistent E4／BF16／FP32 weightは追加せず、生成token、dispatch、VRAM、MXFP8経路を維持した。
+  詳細は[Phase 70保存済み計画](archive/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)、
+  [Phase 70履歴](../history/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)、
+  [追跡済み要約](../../ci/matrix/phase70-rdna-mxfp6-mxfp8-path-reuse-v1.json)を正本とする。
+- Phase 70後のlow-precision候補はNVFP4独立specializationとする。block 16／E4M3 block scale／FP32 tensor scale／
+  W4A16・W4A4固有のloader／scale policyを保ち、MXFP8／MXFP6のformat identityへ偽装しない。
 - 機能経路はフェーズ45まで完了している。現在の`main`には、構造化生成、状態再利用、追加推論API、
   Responses/Anthropic、汎用template、対話CLI、LoRA/control vector、動的モデル管理までが統合済みである。
 - MI300Xの既存`gfx942`経路はフェーズ36で実機確認済みである。対象は99演算子、Qwen3.5-4B BF16/FNUZ FP8、
@@ -881,54 +890,56 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
 
 ### 次のlow-precision実行順
 
-1. **MXFP6 tile変換とMMQ骨格再利用（次候補・未計画）**:
-   packed E3M2をresident表現のまま保ち、tile load時にE4M3へexact変換してPhase 69のsoftware-MMQを再利用する。
-   block 32／E8M0 scaleは維持し、whole-modelのE4／FP32展開は作らない。
-2. **NVFP4独立specialization（順序決定・未計画）**:
+1. **NVFP4独立specialization（順序決定・未計画）**:
    schedule／reduction骨格は共有できるが、E2M1、block 16、E4M3 block scale、FP32 tensor scale、W4A16／W4A4は
    MXFP8／MXFP6と異なるため専用loader／scale policyとして設計する。
 
 ### 完了済みの独立経路
 
-1. **Phase 69・gfx1030 MXFP8 software-MMQ次段最適化（完了・ID41限定採用）**:
+1. **Phase 70・両RDNA MXFP6のMXFP8実行骨格再利用（完了・gfx1201 ID45限定採用）**:
+   exact E3M2→E4M3 tile ingressを共有し、gfx1201はpacked 4-value N64 ID45をshape限定採用、N128 ID46とgfx1030 ID43は
+   benchmark-onlyとした。
+   [保存済み計画](archive/2026/09/1-10/phase70-rdna-mxfp6-mxfp8-path-reuse.md)と
+   [追跡済み要約](../../ci/matrix/phase70-rdna-mxfp6-mxfp8-path-reuse-v1.json)を正本とする。
+2. **Phase 69・gfx1030 MXFP8 software-MMQ次段最適化（完了・ID41限定採用）**:
    packed-value ingressをMMQ scheduleから分離し、32-bit E4 ingressを既存Phase 67 scopeへ採用した。primary full-model
    prefillは512 inputで+24.12%、2,048 inputで+22.08%。詳細は
    [保存済み計画](archive/2026/09/1-10/phase69-gfx1030-mxfp8-software-mmq-optimization.md)と
    [追跡済み要約](../../ci/matrix/phase69-gfx1030-mxfp8-software-mmq-v1.json)を正本とする。
-2. **フェーズ66・gfx1201 reusable low-precision providerとattention移植（完了・ID37限定採用／attention棄却）**:
+3. **フェーズ66・gfx1201 reusable low-precision providerとattention移植（完了・ID37限定採用／attention棄却）**:
    model非依存のfrozen providerへMXFP8／MXFP6／NVFP4／MXFP4を接続し、exact gfx1201のN128 ID37を限定採用した。
    typed attentionはFP16／MXFP8 KVとBF16 weightまで実行したがprimary operator全行で遅くproduction不採用とした。
    request arena high-waterは`1,080,836,096` byte、allocator process drop後0だった。詳細は
    [Phase 66履歴](../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
    [追跡済み要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
-3. **フェーズ65・gfx1201 MXFP8 asymmetric staging（完了・direct-both採用）**: license分離済みno-copy比較から
+4. **フェーズ65・gfx1201 MXFP8 asymmetric staging（完了・direct-both採用）**: license分離済みno-copy比較から
    ID31両LDS、ID34 weight direct、ID35 activation direct、ID36両directを同一演算順で比較した。整列M・測定済みshapeへ
    model名非依存でID36を採用し、2,048-token prefillはPhase 64既定値から4B +37.81%の`3,053.502 tok/s`、
    9B +36.50%の`1,761.989 tok/s`となった。resident／peak、生成token、HIP-only、fallback、cleanupは不変である。
    詳細は[フェーズ65保存済み計画](archive/2026/09/1-10/phase65-gfx1201-mxfp8-asymmetric-staging.md)、
    [追跡済み要約](../../ci/matrix/phase65-gfx1201-mxfp8-direct-both-v1.json)、
    [比較・provenance境界](../provenance/phase65-inference-engine-comparison.md)を正本とする。
-4. **フェーズ64・gfx1201 MXFP8 direct-weight（完了・shape限定採用）**: Phase 63の演算順を維持したままB-value LDS stagingを
+5. **フェーズ64・gfx1201 MXFP8 direct-weight（完了・shape限定採用）**: Phase 63の演算順を維持したままB-value LDS stagingを
    除き、exact gfx1201のinteger N/K>=3またはexact K=12,288/N=4,096へmodel名非依存でscoped default採用した。
    4-waveとstride-33 LDS padは棄却し、非単調なdown shapeはID 31へ戻す。詳細は
    [フェーズ64保存済み計画](archive/2026/09/1-10/phase64-gfx1201-mxfp8-wmma-followup.md)と
    [追跡済み要約](../../ci/matrix/phase64-gfx1201-mxfp8-direct-weight-v1.json)を正本とする。基盤となるPhase 63の詳細は
    [フェーズ63保存済み計画](archive/2026/09/1-10/phase63-gfx1201-mxfp-matrix-prefill.md)を正本とする。
-5. **フェーズ62・再利用可能low-precision block codecとMXFP最適化（完了・共通採用／MMQ候補評価済み）**: scalar codec、MX/NV block policy、
+6. **フェーズ62・再利用可能low-precision block codecとMXFP最適化（完了・共通採用／MMQ候補評価済み）**: scalar codec、MX/NV block policy、
    packed I/O、typed view、起動境界specializationをMXFP8／MXFP6 matmulとMXFP8 KV append／attentionへ適用した。
    両RDNAでbit exactと性能改善を確認し、unsafeなcross-plan cacheと単純fusionは棄却した。llama.cpp由来のmulti-column構造は
    実モデルprefillを改善したがshape別逆転があるためbenchmark-onlyとした。詳細は
    [フェーズ62保存済み計画](archive/2026/08/21-31/phase62-reusable-low-precision-block-optimization.md)を正本とする。
-6. **フェーズ52・R9700 100k OOM解消（完了）**: exact gfx1201長capacity限定resident provider、VMM transactional
+7. **フェーズ52・R9700 100k OOM解消（完了）**: exact gfx1201長capacity限定resident provider、VMM transactional
    rollback、bounded cleanup、selector/KV physical evidenceを採用した。詳細は
    [フェーズ52保存済み計画](archive/2026/08/21-31/phase52-r9700-100k-kv-commit-oom.md)と
    [追跡summary](../../ci/matrix/phase52-r9700-kv-commit-summary-v1.json)を正本とする。
-6. **フェーズ51・MI300X適用（完了）**: exact `gfx942`の7行、fresh profile、GDN wave64候補のtarget分離、
+8. **フェーズ51・MI300X適用（完了）**: exact `gfx942`の7行、fresh profile、GDN wave64候補のtarget分離、
    全3 target追跡要約までを完了した。Full Attention以下は新しい残差順の後続候補として保持する。
-7. **フェーズ46・tool／品質評価基盤（完了）**: converter、quantization、benchmark、quality/debug toolと、
+9. **フェーズ46・tool／品質評価基盤（完了）**: converter、quantization、benchmark、quality/debug toolと、
    FP16 baselineだけからfreezeしたKV default判定policyを実装した。詳細は
    [フェーズ46保存済み計画](archive/2026/08/21-31/phase46-conversion-quantization-benchmark-quality-tools.md)を正本とする。
-8. **フェーズ53・KV FP8 block16実装とdefault採用（完了・後に経路廃止）**: block16をdescriptor v2／
+10. **フェーズ53・KV FP8 block16実装とdefault採用（完了・後に経路廃止）**: block16をdescriptor v2／
    `StandardMxFloorPowerV1`へ更新した。descriptor v1のgfx1201／gfx1030 correctness・品質・非採用判定はsupersededで、
    v2のfresh correctnessは両targetでPASS、品質はthreshold未達で両方`retain-fp16`とした。gfx942は今後の一括実機検証へ延期し、
    当時は空mappingとFP16 safety defaultを維持したが、2026-08-30のMXFP8 E4既定化でsupersededとなった。詳細は
@@ -936,7 +947,7 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
    E5M2限定のscale selector診断ではlocal MSEとparent32-guard付きMSEがともにKLD p99 `0.04063529273873547`で、
    production v2 `0.03659844555378746`とMXFP8 block32 `0.03218873133110086`に未達だったため棄却した。詳細は
    [保存済み診断計画](archive/2026/08/21-31/phase53-e5-block16-scale-selector-experiment.md)を正本とする。
-9. **フェーズ54・KV FP8 block16精度改善研究（完了・経路廃止）**: exact gfx1030／E5M2でK/V・layer attribution、
+11. **フェーズ54・KV FP8 block16精度改善研究（完了・経路廃止）**: exact gfx1030／E5M2でK/V・layer attribution、
    scale recipe、Q/K固定変換、V/O layer 19／layers 19+31を段階評価した。V/O layers 19+31はKLD p99を
    `0.03337377972334127`へ改善したがMXFP8 `0.03218873133110086`未達かつtop-1 `0.8`へ悪化し、layer 19単独も
    `0.033918254226008415`でMXFP8未達だった。finalistなしのため3-repeat／gfx1201 transfer／MI300Xは実行せず、
@@ -951,7 +962,7 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
    short 6 caseの幾何平均で`5.259%`、long 6 caseで`11.870%`高速だった。attention単体でappend／全model throughputと
    同一V620品質は未比較なのでE5へのproduction mapping変更は行わない。現行defaultはユーザー決定によるstandard OCP MXFP8 E4であり、
    E5を再検討する場合だけfull-model品質とend-to-end A/Bを新しい判断単位とする。
-10. **フェーズ47〜48・残る機能経路**: 承認制の組込みtool/MCPは予約済みのまま保持する。フェーズ47は
+12. **フェーズ47〜48・残る機能経路**: 承認制の組込みtool/MCPは予約済みのまま保持する。フェーズ47は
    引き続き明示承認を必要とする。フェーズ48はGPU／throughput dashboardを主画面、chatをsecondary viewとして実装した。
    追加承認によりloopback dynamic serverへmodel sourceなし起動と`/admin/model-library*`を追加し、server側folder選択の永続化、
    direct GGUF走査、architecture／derived lock／reviewed identity／weight-plan／resident capacity検証、対応aliasのlive登録、非対応理由表示を

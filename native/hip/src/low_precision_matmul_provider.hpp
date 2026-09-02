@@ -84,6 +84,8 @@ enum class InnerProduct : uint8_t {
   None,
   DecodedBlockScaledFp32,
   E4M3WmmaFp32,
+  E3M2ViaE4M3DecodedFp32,
+  E3M2ViaE4M3WmmaFp32,
   E2M1Bf16Fp32,
   E2M1BlockScaledFp32,
 };
@@ -104,6 +106,8 @@ enum class ProviderKind : uint8_t {
   Mxfp8Block32,
   Mxfp8Gfx1201Wmma,
   Mxfp6Block32,
+  Mxfp6Gfx1030MmqViaE4M3,
+  Mxfp6Gfx1201WmmaViaE4M3,
   Nvfp4W4A16Block16,
   Nvfp4W4A4Block16,
   Mxfp4W4A4Block32,
@@ -380,6 +384,12 @@ gfx1201_mxfp8_wmma_n128_shape(const ProviderRequest &request) noexcept {
          (request.n % 128U) == 0U;
 }
 
+constexpr bool
+gfx1201_mxfp6_wmma_via_e4m3_shape(const ProviderRequest &request) noexcept {
+  return request.target == ExactTarget::Gfx1201 && request.m >= 17U &&
+         request.k >= 2048U && request.n >= 1024U && request.n <= 16384U;
+}
+
 constexpr PreparedProviderPlan
 prepare_provider_plan(const ProviderRequest &request) noexcept {
   const FormatContract contract = format_contract(request.format);
@@ -471,6 +481,24 @@ prepare_provider_plan(const ProviderRequest &request) noexcept {
             request.accumulation,
             request.output};
   case MatmulFormat::Mxfp6E3M2W6A6:
+    if (gfx1201_mxfp6_wmma_via_e4m3_shape(request)) {
+      return {ProviderKind::Mxfp6Gfx1201WmmaViaE4M3,
+              ProviderRejection::None,
+              request.format,
+              contract,
+              request.weight_layout,
+              request.activation_layout,
+              target_architecture(request.target),
+              request.target,
+              TilePolicy::Wmma128x64x32,
+              ActivationPack::Mxfp6E3M2Block32,
+              InnerProduct::E3M2ViaE4M3WmmaFp32,
+              request.m,
+              request.n,
+              request.k,
+              request.accumulation,
+              request.output};
+    }
     return {ProviderKind::Mxfp6Block32,
             ProviderRejection::None,
             request.format,

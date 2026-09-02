@@ -1,0 +1,381 @@
+{
+  "schema_version": "phase70-rdna-mxfp6-mxfp8-path-reuse-v1",
+  "state": "PASS",
+  "date": "2026-09-02",
+  "scope": {
+    "targets": ["gfx1030", "gfx1201"],
+    "rocm": "7.14.0",
+    "compiler": "AMD clang 23",
+    "code_object": "v6",
+    "wavefront": 32,
+    "format": "OCP MXFP6 E3M2 W6A6 block32 E8M0",
+    "resident_layout": "packed 4 values per 3 bytes",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "kv_cache": "fp16"
+  },
+  "identities": {
+    "starting_git_head": "8e7ca87e2127da610cd765c9e29559a745448c45",
+    "starting_git_identity_note": "dirty working source; not an immutable semantic identity",
+    "model_gguf_sha256": "d0ff2e1de9d87dddddcde8f85ef305bbf21a06d5f7586d077ba1178580a0264e",
+    "gfx1030_cli_sha256": "9f511b3354a47bc5aae58fa14e7d103d26a402728148d953416e98c20ec8ed2e",
+    "gfx1201_cli_sha256": "6a5de12e02f4e328785105a27b701af6b2a9e585ce691285dccd35602582bfce",
+    "gfx1030_operator_runner_sha256": "a23fc25e8e19cab9d79ef32a90a3d450268ef3ac1b50856edf2060d9594f5efd",
+    "gfx1201_operator_runner_sha256": "0ed859b675791dd5fbd14db9d23ab343fcf677d686164e96057fa9df58f1717a",
+    "gfx1030_matmul_code_object_sha256": "fd665233fba20d5138242a94f51e7e44612e5dafdc5ba079257bf2f38d1d8f8e",
+    "gfx1201_matmul_code_object_sha256": "2acacc40208fa1917f4d9da0977018a823722fc58254120f8bdbde61dacae654",
+    "p70f_gfx1201_cli_sha256": "8234358a64db92d7932481ae1f892360842b5b83e58ecaa525c6200927c3dd99",
+    "p70f_gfx1201_operator_runner_sha256": "0752705a58b1cdc30d2c91d6c4102ef25938f196863dad7f8d1aff6501f8fd46",
+    "p70f_gfx1201_matmul_code_object_sha256": "2a773926e1d5a014c7e89cbc093736be98fbc042cf423522b1e572e92292eb8c",
+    "p70f_device_uuid": "GPU-a8e9ddefa2d60f55",
+    "p70f_device_bdf": "0000:07:00.0"
+  },
+  "codec": {
+    "state": "PASS",
+    "conversion": "E3M2 bits to numerically exact E4M3FN bits",
+    "e3m2_code_count": 64,
+    "packed_lane_count": 4,
+    "gfx1030_device_exact": true,
+    "gfx1201_device_exact": true,
+    "provider_contract": true,
+    "fallback_used": false
+  },
+  "providers": [
+    {
+      "kernel_id": 43,
+      "target": "gfx1030",
+      "symbol": "sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1",
+      "logical_name": "matmul.mxfp6.w6a6.gfx1030.mmq-col8.via-e4m3.v1",
+      "classification": "benchmark-only",
+      "numeric_class": "N0",
+      "default_selected": false,
+      "resource": {
+        "workgroup_size": 256,
+        "waves_per_workgroup": 8,
+        "wavefront": 32,
+        "lds_bytes": 8704,
+        "sgpr": 34,
+        "vgpr": 45,
+        "spill_bytes": 0,
+        "private_segment_bytes": 0
+      },
+      "reason": "operator output matched ID29, but fixed full-model prefill regressed by about 22 percent"
+    },
+    {
+      "kernel_id": 44,
+      "target": "gfx1201",
+      "symbol": "sllm_mxfp6_w6a6_gfx1201_wmma128x64_via_e4m3_v1",
+      "logical_name": "matmul.mxfp6.w6a6.gfx1201.wmma128x64.via-e4m3.v1",
+      "classification": "rollback-control",
+      "numeric_class": "N1",
+      "default_selected": false,
+      "scope": {
+        "exact_target": "gfx1201",
+        "m_min": 17,
+        "k_min": 2048,
+        "n_min": 1024,
+        "n_max": 16384
+      },
+      "resource": {
+        "workgroup_size": 256,
+        "waves_per_workgroup": 8,
+        "wavefront": 32,
+        "lds_bytes": 6912,
+        "sgpr": 34,
+        "vgpr": 114,
+        "spill_bytes": 0,
+        "private_segment_bytes": 0,
+        "static_wmma_instructions": 8
+      },
+      "force": "SLLM_MXFP6_PREFILL_FORCE_PHASE70=gfx1201-n64",
+      "reason": "superseded by ID45 packed-group ingress on the same scope"
+    },
+    {
+      "kernel_id": 45,
+      "target": "gfx1201",
+      "symbol": "sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_v2",
+      "logical_name": "matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4.v2",
+      "classification": "shape-scoped-default",
+      "numeric_class": "N1",
+      "default_selected": true,
+      "scope": {
+        "exact_target": "gfx1201",
+        "m_min": 17,
+        "k_min": 2048,
+        "n_min": 1024,
+        "n_max": 16384
+      },
+      "resource": {
+        "workgroup_size": 256,
+        "waves_per_workgroup": 8,
+        "wavefront": 32,
+        "lds_bytes": 6912,
+        "sgpr": 38,
+        "vgpr": 115,
+        "spill_bytes": 0,
+        "private_segment_bytes": 0,
+        "static_wmma_instructions": 8
+      },
+      "rollback": "SLLM_MXFP6_PREFILL_FORCE_PHASE70=gfx1201-n64 or SLLM_MXFP6_PREFILL_FORCE_TILED16=1"
+    },
+    {
+      "kernel_id": 46,
+      "target": "gfx1201",
+      "symbol": "sllm_mxfp6_w6a6_gfx1201_wmma128x128_pack4_v1",
+      "logical_name": "matmul.mxfp6.w6a6.gfx1201.wmma128x128.pack4.v1",
+      "classification": "benchmark-only",
+      "numeric_class": "N1",
+      "default_selected": false,
+      "scope": {
+        "exact_target": "gfx1201",
+        "m_min": 17,
+        "k_min": 2048,
+        "n_min": 1024,
+        "n_max": 16384,
+        "n_multiple": 128
+      },
+      "resource": {
+        "workgroup_size": 256,
+        "waves_per_workgroup": 8,
+        "wavefront": 32,
+        "lds_bytes": 9216,
+        "sgpr": 34,
+        "vgpr": 167,
+        "spill_bytes": 0,
+        "private_segment_bytes": 0,
+        "static_wmma_instructions": 16
+      },
+      "reason": "only M=2048 operator improved over ID45; both fixed full-model rows regressed"
+    }
+  ],
+  "operator_evidence": {
+    "state": "PASS",
+    "protocol": {
+      "warmups_per_case": 1,
+      "measured_repeats_per_case": 3,
+      "oracle": "independent fp32",
+      "deterministic": true,
+      "nonfinite_positions_match": true,
+      "maximum_observed_relative_error": 0.00294194
+    },
+    "gfx1030_production_shapes": [
+      {"m": 17, "k": 2560, "n": 9216, "id29_median_ns": 3590899, "id43_median_ns": 3308496, "digest_equal": true},
+      {"m": 127, "k": 2560, "n": 9216, "id29_median_ns": 4763960, "id43_median_ns": 5569854, "digest_equal": true},
+      {"m": 128, "k": 2560, "n": 9216, "id29_median_ns": 5426181, "id43_median_ns": 4626479, "digest_equal": true},
+      {"m": 512, "k": 2560, "n": 9216, "id29_median_ns": 29081486, "id43_median_ns": 29711573, "digest_equal": true},
+      {"m": 2048, "k": 2560, "n": 9216, "id29_median_ns": 80933930, "id43_median_ns": 79126435, "digest_equal": true}
+    ],
+    "gfx1201_production_shapes": [
+      {"m": 17, "k": 2560, "n": 9216, "id29_median_ns": 756169, "id44_median_ns": 480447, "digest_equal": true},
+      {"m": 127, "k": 2560, "n": 9216, "id29_median_ns": 4062524, "id44_median_ns": 860370, "digest_equal": true},
+      {"m": 128, "k": 2560, "n": 9216, "id29_median_ns": 4080084, "id44_median_ns": 734689, "digest_equal": true},
+      {"m": 512, "k": 2560, "n": 9216, "id29_median_ns": 15867774, "id44_median_ns": 2289187, "digest_equal": false},
+      {"m": 2048, "k": 2560, "n": 9216, "id29_median_ns": 61865796, "id44_median_ns": 7998136, "digest_equal": false}
+    ],
+    "all_repeat_digests_deterministic": true,
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "full_model": {
+    "model": "Qwen/Qwen3.5-4B",
+    "protocol": {
+      "lane": "direct pretokenized input",
+      "input_tokens": [512, 2048],
+      "max_new_tokens": 4,
+      "greedy": true,
+      "ignore_eos": true,
+      "gfx1030_warmups": 1,
+      "gfx1030_measured": 3,
+      "gfx1201_warmups": 3,
+      "gfx1201_measured": 10
+    },
+    "gfx1030": [
+      {
+        "input_tokens": 512,
+        "control_prefill_tps": [248.0540785, 247.6875436, 246.5175173],
+        "candidate_prefill_tps": [191.3444635, 191.3726861, 191.3944483],
+        "control_median_prefill_tps": 247.6875436,
+        "candidate_median_prefill_tps": 191.3726861,
+        "candidate_classification": "benchmark-only",
+        "resident_vram_bytes": 4061763072,
+        "peak_vram_bytes": 4400391680
+      },
+      {
+        "input_tokens": 2048,
+        "control_prefill_tps": [245.4807429, 244.2354966, 239.8579239],
+        "candidate_prefill_tps": [191.9769627, 191.3746168, 190.0772759],
+        "control_median_prefill_tps": 244.2354966,
+        "candidate_median_prefill_tps": 191.3746168,
+        "candidate_classification": "benchmark-only",
+        "resident_vram_bytes": 4061763072,
+        "peak_vram_bytes": 5261350400
+      }
+    ],
+    "gfx1201": [
+      {
+        "input_tokens": 512,
+        "control_prefill_tps": [296.3556909160174, 309.9738956997281, 309.80690946121615, 309.14130482119214, 308.68814864551746, 307.839314284849, 307.33692978928536, 306.91288029964636, 305.74995357228755, 305.4875801437791],
+        "candidate_prefill_tps": [1300.468294823, 1298.6938802287482, 1300.286147775865, 1299.4979037055657, 1301.3903446957784, 1303.293815988445, 1303.3285846183003, 1305.4710322556293, 1303.299754392143, 1304.7251682055764],
+        "control_median_prefill_tps": 307.5881220370672,
+        "candidate_median_prefill_tps": 1302.3420803421118,
+        "throughput_ratio": 4.23405,
+        "control_mad_prefill_tps": 1.69567562445,
+        "candidate_mad_prefill_tps": 1.964859,
+        "prefill_time_reduction_percent": 76.38,
+        "e2e_time_reduction_percent": 69.98,
+        "resident_vram_bytes": 4061763072,
+        "peak_vram_bytes": 4400391680
+      },
+      {
+        "input_tokens": 2048,
+        "control_prefill_tps": [300.55762972158107, 298.6017718048769, 300.17347777179816, 300.1898575965627, 300.1673397743382, 299.80387993963825, 299.9664858049694, 299.88244002143495, 299.891258770629, 299.683988618948],
+        "candidate_prefill_tps": [1516.8511486141645, 1515.8581631264367, 1513.512028283963, 1511.7928482562074, 1510.7511272473594, 1457.473568631434, 1506.6332600658118, 1504.9621106609193, 1505.3250771701814, 1503.1503649949643],
+        "control_median_prefill_tps": 299.9288722877992,
+        "candidate_median_prefill_tps": 1508.6921936565855,
+        "throughput_ratio": 5.030166,
+        "control_mad_prefill_tps": 0.2415365,
+        "candidate_mad_prefill_tps": 4.2749588,
+        "prefill_time_reduction_percent": 80.12,
+        "e2e_time_reduction_percent": 78.19,
+        "resident_vram_bytes": 4061763072,
+        "peak_vram_bytes": 5261350400
+      }
+    ],
+    "generated_token_ids": [23066, 23066, 23066, 23066],
+    "generated_token_ids_match": true,
+    "dispatch_count": 3008,
+    "dispatch_counts_match": true,
+    "memory_matches": true,
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "followup_p70_f": {
+    "state": "PASS",
+    "scope": "exact gfx1201 packed-group ingress and N128 comparison",
+    "diagnosis": {
+      "id44_issue": "each scalar lane reloaded the same packed 3-byte E3M2 group",
+      "implementation": "load one 4-value/3-byte group, convert four exact E4M3FN bytes, and store one 32-bit LDS word",
+      "persistent_expansion_used": false
+    },
+    "operator": {
+      "protocol": {"warmups_per_case": 1, "measured_repeats_per_case": 3, "oracle": "independent fp32"},
+      "maximum_observed_relative_error": 0.003875792259350419,
+      "nonfinite_mismatch_count": 0,
+      "repeat_deterministic": true,
+      "production_shapes": [
+        {"m": 17, "k": 2560, "n": 9216, "id44_median_ns": 449762, "id45_median_ns": 292922, "id46_median_ns": 470123, "id45_over_id44": 1.535433, "id46_over_id45": 0.623075},
+        {"m": 127, "k": 2560, "n": 9216, "id44_median_ns": 717363, "id45_median_ns": 390362, "id46_median_ns": 816764, "id45_over_id44": 1.837687, "id46_over_id45": 0.477937},
+        {"m": 128, "k": 2560, "n": 9216, "id44_median_ns": 721045, "id45_median_ns": 392242, "id46_median_ns": 783044, "id45_over_id44": 1.838266, "id46_over_id45": 0.500919},
+        {"m": 512, "k": 2560, "n": 9216, "id44_median_ns": 2170172, "id45_median_ns": 1227487, "id46_median_ns": 2162332, "id45_over_id44": 1.767980, "id46_over_id45": 0.567668},
+        {"m": 2048, "k": 2560, "n": 9216, "id44_median_ns": 7927199, "id45_median_ns": 4554584, "id46_median_ns": 4294222, "id45_over_id44": 1.740488, "id46_over_id45": 1.060631}
+      ]
+    },
+    "draft_full_model": {
+      "protocol": {"warmups": 1, "measured": 3},
+      "id45_median_prefill_tps": {"512": 2133.7264724358797, "2048": 2458.2620119264216},
+      "id46_median_prefill_tps": {"512": 1931.884069372674, "2048": 2348.2757482610973}
+    },
+    "final_full_model": {
+      "protocol": {
+        "model": "Qwen/Qwen3.5-4B",
+        "input_pattern": "token 23066 repeated to exact input length",
+        "input_tokens": [512, 2048],
+        "max_new_tokens": 4,
+        "kv_cache": "fp16",
+        "greedy": true,
+        "ignore_eos": true,
+        "warmups": 3,
+        "measured": 10
+      },
+      "rows": [
+        {
+          "input_tokens": 512,
+          "id44_prefill_tps": [1266.5612218167803, 1271.664746254202, 1272.4825389983278, 1275.307283670958, 1273.7345697070125, 1286.3753114187123, 1280.5379187648803, 1277.6809866498133, 1282.5964883309773, 1280.3623361393159],
+          "id45_prefill_tps": [2161.528819613091, 2147.0438003896397, 2156.8100943834843, 2160.7121217616987, 2141.6368878750022, 2146.402392940184, 2158.9266167687, 2161.3898486458897, 2162.8824440314775, 2150.8362653040404],
+          "id44_median_prefill_tps": 1276.4941351603857,
+          "id45_median_prefill_tps": 2157.868355576092,
+          "throughput_ratio": 1.690465,
+          "prefill_time_reduction_percent": 40.8447,
+          "e2e_time_reduction_percent": 29.3030,
+          "resident_vram_bytes": 4061763072,
+          "peak_vram_bytes": 4400391680
+        },
+        {
+          "input_tokens": 2048,
+          "id44_prefill_tps": [1518.3377024723993, 1515.941759009874, 1513.440013887231, 1511.2703607006233, 1507.9217894422466, 1505.943350290731, 1501.9791773234094, 1499.2689486275547, 1495.1186616913692, 1493.468873567663],
+          "id45_prefill_tps": [2436.608303679366, 2432.772155952417, 2430.8439957296337, 2426.8605321859145, 2425.2078424140204, 2421.4088570881972, 2421.150072789548, 2416.601877428735, 2414.7134356634024, 2407.9891898498736],
+          "id44_median_prefill_tps": 1506.9325698664888,
+          "id45_median_prefill_tps": 2423.308349751109,
+          "throughput_ratio": 1.608107,
+          "prefill_time_reduction_percent": 37.8151,
+          "e2e_time_reduction_percent": 33.6819,
+          "resident_vram_bytes": 4061763072,
+          "peak_vram_bytes": 5261350400
+        }
+      ],
+      "generated_token_ids": [23066, 23066, 23066, 23066],
+      "generated_token_ids_match": true,
+      "dispatch_count": 3008,
+      "dispatch_counts_match": true,
+      "memory_matches": true,
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "cleanup_zero": true
+    },
+    "decision": {
+      "id45": "adopt-same-shape-scope-as-id44",
+      "id44": "retain-explicit-rollback-control",
+      "id46": "benchmark-only"
+    }
+  },
+  "mxfp8_shared_path_regression": {
+    "state": "PASS",
+    "gfx1030_512_prefill_tps": [249.3229924, 249.316666, 248.9876134],
+    "gfx1030_2048_prefill_tps": [253.405201, 249.1955632, 252.2500024],
+    "gfx1201_512_prefill_tps": [3884.20835, 3872.09209, 3849.83499],
+    "gfx1201_2048_prefill_tps": [3777.98446, 3777.09308, 3770.64452],
+    "p70f_gfx1201_512_prefill_tps": [3869.523360425892, 3850.234336767319, 3872.2813899759763],
+    "p70f_gfx1201_2048_prefill_tps": [3775.148025065597, 3766.22520806399, 3779.7727094954803],
+    "gfx1030_id41_operator_pass": true,
+    "gfx1201_id37_operator_pass": true,
+    "generated_tokens_match": true,
+    "dispatch_counts_match": true,
+    "fallback_used": false,
+    "cleanup_zero": true
+  },
+  "compatibility": {
+    "host_selector_boundaries_pass": true,
+    "prepared_provider_freeze_pass": true,
+    "gfx942_candidate_selected": false,
+    "unknown_target_candidate_selected": false,
+    "gfx942_release_compile_only_pass": true,
+    "gfx942_gpu_execution_claimed": false
+  },
+  "profiler": {
+    "raw_sq_waves_per_single_workgroup": 8,
+    "derived_metrics_valid": false,
+    "invalid_zero_metrics": ["VALUInsts", "MemUnitBusy", "LDSBankConflict", "OccupancyPercent"],
+    "decision_basis": "code object resources and static instruction classification",
+    "gfx1201_id44_static": {"vector_instructions": 934, "lds_instructions": 13, "vmem_instructions": 40, "wmma_instructions": 8},
+    "p70f_final_gfx1201_id44_static": {"vector_instructions": 981, "lds_instructions": 18, "vmem_instructions": 42, "wmma_instructions": 8, "barrier_instructions": 4},
+    "p70f_gfx1201_id45_static": {"vector_instructions": 1082, "lds_instructions": 18, "vmem_instructions": 48, "wmma_instructions": 8, "barrier_instructions": 4},
+    "p70f_gfx1201_id46_static": {"vector_instructions": 1904, "lds_instructions": 28, "vmem_instructions": 80, "wmma_instructions": 16, "barrier_instructions": 4},
+    "gfx1030_id43_static": {"vector_instructions": 468, "lds_instructions": 56, "barrier_instructions": 2, "vmem_instructions": 19}
+  },
+  "decision": {
+    "gfx1030_id43": "benchmark-only",
+    "gfx1201_id44": "superseded-by-id45-retained-as-explicit-control",
+    "gfx1201_id45": "adopt-shape-scoped-default",
+    "gfx1201_id46_n128": "benchmark-only-high-vgpr-and-full-model-regression",
+    "persistent_e4m3_weight_expansion": "not-implemented",
+    "persistent_bf16_or_fp32_weight_expansion": "not-implemented",
+    "nvfp4": "deferred-to-independent-specialization"
+  },
+  "limitations": [
+    "Performance evidence is limited to canonical exact gfx1030 and exact gfx1201 tuples and one fixed Qwen3.5-4B MXFP6 artifact.",
+    "gfx1201 ID44, ID45, and ID46 are N1 providers because their WMMA reduction tree can change BF16 operator digests even though E3M2 to E4M3 conversion is exact.",
+    "gfx942 evidence is compile-only and selector nonselection; no Phase 70 gfx942 GPU execution is claimed.",
+    "Invalid zero rocprofv3 derived metrics were recorded as a tool limitation and were not used to support adoption."
+  ]
+}

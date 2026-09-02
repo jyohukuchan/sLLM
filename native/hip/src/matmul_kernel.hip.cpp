@@ -845,6 +845,30 @@ struct Mxfp6MmqFormat {
   }
 };
 
+// Phase 70 keeps the resident 6-bit stream unchanged and converts only the
+// value consumed by the established MXFP8-style MMQ tile.  Both activation
+// and weight ingress use the same exact code transform.
+struct Mxfp6ViaE4MmqFormat {
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k * UINT64_C(3) / UINT64_C(4);
+  }
+
+  __device__ __forceinline__ static float decode_e3m2_code(const uint8_t code) {
+    return sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode_mx_value_plane(
+        sllm_lowp::e3m2_to_e4m3fn_exact_bits(code));
+  }
+
+  __device__ __forceinline__ static float
+  load_activation(const uint8_t *const row, const uint64_t index) {
+    return decode_e3m2_code(packed_e3m2_at(row, index));
+  }
+
+  __device__ __forceinline__ static float load_weight(const uint8_t *const row,
+                                                      const uint64_t index) {
+    return decode_e3m2_code(packed_e3m2_at(row, index));
+  }
+};
+
 // Keep packed-value ingress independent from the MMQ arithmetic schedule.
 // The scalar policy remains the format-generic default used by MXFP8 and
 // MXFP6.  The vector policy is instantiated only for byte-addressed MXFP8;
@@ -872,6 +896,29 @@ struct Mxfp8MmqVector32WeightIngress {
     for (uint32_t byte = 0U; byte < values_per_load; ++byte) {
       output[byte] = Format::decode_weight_byte(
           static_cast<uint8_t>(packed >> (byte * 8U)));
+    }
+  }
+};
+
+struct Mxfp6MmqPacked24ViaE4WeightIngress {
+  static constexpr uint32_t values_per_load = 4U;
+
+  template <typename Format>
+  __device__ __forceinline__ static void
+  stage(const uint8_t *const row, const uint64_t index, float *const output) {
+    const uint64_t byte_index = (index >> 2U) * UINT64_C(3);
+    const uint32_t packed =
+        static_cast<uint32_t>(__builtin_nontemporal_load(row + byte_index)) |
+        (static_cast<uint32_t>(
+             __builtin_nontemporal_load(row + byte_index + UINT64_C(1)))
+         << 8U) |
+        (static_cast<uint32_t>(
+             __builtin_nontemporal_load(row + byte_index + UINT64_C(2)))
+         << 16U);
+#pragma unroll
+    for (uint32_t value = 0U; value < values_per_load; ++value) {
+      output[value] = Format::decode_e3m2_code(
+          static_cast<uint8_t>(packed >> (value * 6U)) & UINT8_C(0x3f));
     }
   }
 };
@@ -1066,6 +1113,17 @@ SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL(
 
 #undef SLLM_DEFINE_MXFP8_GFX1030_MMQ_PHASE69_KERNEL
 
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_mx_wa_mmq_columns_body<Mxfp6ViaE4MmqFormat, 8U,
+                                     Mxfp6MmqPacked24ViaE4WeightIngress, false>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
 #if defined(SLLM_MATMUL_HAS_GFX12_ROCWMMA)
 static_assert(sizeof(rocwmma::float8_t) == sizeof(uint8_t));
 #endif
@@ -1077,8 +1135,59 @@ static_assert(sizeof(rocwmma::float8_t) == sizeof(uint8_t));
 // per K block, and applies the row/column scale pair while accumulating. No
 // whole-tensor BF16/FP32 expansion or contribution scratch tile is created;
 // zero-padded LDS tiles make both M and N tails fail-safe.
-template <uint32_t ColumnTiles>
-__device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body(
+struct Mxfp8WmmaTileIngress {
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k;
+  }
+
+  __device__ __forceinline__ static uint8_t
+  load_activation(const uint8_t *const row, const uint64_t index) {
+    return row[index];
+  }
+
+  __device__ __forceinline__ static uint8_t
+  load_weight(const uint8_t *const row, const uint64_t index) {
+    return __builtin_nontemporal_load(row + index);
+  }
+};
+
+struct Mxfp6ViaE4WmmaTileIngress {
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k * UINT64_C(3) / UINT64_C(4);
+  }
+
+  __device__ __forceinline__ static uint8_t
+  load_activation(const uint8_t *const row, const uint64_t index) {
+    return sllm_lowp::e3m2_to_e4m3fn_exact_bits(packed_e3m2_at(row, index));
+  }
+
+  __device__ __forceinline__ static uint8_t
+  load_weight(const uint8_t *const row, const uint64_t index) {
+    return sllm_lowp::e3m2_to_e4m3fn_exact_bits(packed_e3m2_at(row, index));
+  }
+};
+
+struct Mxfp6ViaE4WmmaPacked4Ingress {
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k * UINT64_C(3) / UINT64_C(4);
+  }
+
+  __device__ __forceinline__ static uint32_t
+  load_activation4(const uint8_t *const row, const uint64_t first_index) {
+    return sllm_lowp::e3m2x4_to_e4m3fn_exact_bits(
+        sllm_lowp::packed_e3m2x4_at(row, first_index));
+  }
+
+  __device__ __forceinline__ static uint32_t
+  load_weight4(const uint8_t *const row, const uint64_t first_index) {
+    return sllm_lowp::e3m2x4_to_e4m3fn_exact_bits(
+        sllm_lowp::packed_e3m2x4_at(row, first_index));
+  }
+};
+
+template <typename ValueIngress, uint32_t ColumnTiles,
+          bool PackedGroupIngress = false>
+__device__ __forceinline__ void sllm_matmul_mx_via_e4_gfx1201_wmma_body(
     const uint8_t *const activation, const uint8_t *const activation_scales,
     const uint8_t *const weight, const uint8_t *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
@@ -1092,9 +1201,10 @@ __device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body(
   constexpr uint32_t block_k = 32U;
   constexpr uint32_t tile_values = tile_m * block_k;
   constexpr uint32_t output_values = tile_m * tile_n;
-  __shared__ rocwmma::float8_t activation_tile[waves_per_workgroup]
-                                              [tile_values];
-  __shared__ rocwmma::float8_t weight_tile[column_tiles][tile_values];
+  __shared__ __align__(4) rocwmma::float8_t
+      activation_tile[waves_per_workgroup][tile_values];
+  __shared__ __align__(4) rocwmma::float8_t
+      weight_tile[column_tiles][tile_values];
   __shared__ float activation_scale_tile[waves_per_workgroup][tile_m];
   __shared__ float weight_scale_tile[column_tiles * tile_n];
 
@@ -1116,6 +1226,7 @@ __device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body(
   const uint64_t column_base =
       static_cast<uint64_t>(blockIdx.x) * column_tiles * tile_n;
   const uint64_t blocks_per_row = k / block_k;
+  const uint64_t value_row_bytes = ValueIngress::row_bytes(k);
   float accumulators[column_tiles][output_values / wave_width] = {};
 
   for (uint64_t block = 0U; block < blocks_per_row; ++block) {
@@ -1123,29 +1234,77 @@ __device__ __forceinline__ void sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body(
     auto *const activation_raw = reinterpret_cast<uint8_t *>(activation_tile);
     auto *const weight_raw = reinterpret_cast<uint8_t *>(weight_tile);
 
-    for (uint32_t index = thread; index < waves_per_workgroup * tile_values;
-         index += blockDim.x) {
-      const uint32_t source_wave = index / tile_values;
-      const uint32_t wave_index = index - source_wave * tile_values;
-      const uint32_t local_row = wave_index / block_k;
-      const uint32_t local_inner = wave_index - local_row * block_k;
-      const uint64_t row = row_group_base +
-                           static_cast<uint64_t>(source_wave) * tile_m +
-                           local_row;
-      activation_raw[index] =
-          row < m ? activation[row * k + inner_base + local_inner] : 0U;
-    }
-    for (uint32_t index = thread; index < column_tiles * tile_values;
-         index += blockDim.x) {
-      const uint32_t column_tile = index / tile_values;
-      const uint32_t tile_index = index - column_tile * tile_values;
-      const uint32_t local_column = tile_index / block_k;
-      const uint32_t local_inner = tile_index - local_column * block_k;
-      const uint64_t column = column_base + column_tile * tile_n + local_column;
-      weight_raw[index] =
-          column < n ? __builtin_nontemporal_load(weight + column * k +
-                                                  inner_base + local_inner)
-                     : 0U;
+    if constexpr (PackedGroupIngress) {
+      constexpr uint32_t values_per_group = 4U;
+      constexpr uint32_t groups_per_tile = tile_values / values_per_group;
+      auto *const activation_groups =
+          reinterpret_cast<uint32_t *>(activation_raw);
+      auto *const weight_groups = reinterpret_cast<uint32_t *>(weight_raw);
+      for (uint32_t group = thread;
+           group < waves_per_workgroup * groups_per_tile;
+           group += blockDim.x) {
+        const uint32_t source_wave = group / groups_per_tile;
+        const uint32_t wave_group = group - source_wave * groups_per_tile;
+        const uint32_t local_row = wave_group / (block_k / values_per_group);
+        const uint32_t local_group =
+            wave_group - local_row * (block_k / values_per_group);
+        const uint64_t row = row_group_base +
+                             static_cast<uint64_t>(source_wave) * tile_m +
+                             local_row;
+        activation_groups[group] =
+            row < m ? ValueIngress::load_activation4(
+                          activation + row * value_row_bytes,
+                          inner_base + local_group * values_per_group)
+                    : 0U;
+      }
+      for (uint32_t group = thread; group < column_tiles * groups_per_tile;
+           group += blockDim.x) {
+        const uint32_t column_tile = group / groups_per_tile;
+        const uint32_t tile_group = group - column_tile * groups_per_tile;
+        const uint32_t local_column =
+            tile_group / (block_k / values_per_group);
+        const uint32_t local_group =
+            tile_group - local_column * (block_k / values_per_group);
+        const uint64_t column =
+            column_base + column_tile * tile_n + local_column;
+        weight_groups[group] =
+            column < n
+                ? ValueIngress::load_weight4(
+                      weight + column * value_row_bytes,
+                      inner_base + local_group * values_per_group)
+                : 0U;
+      }
+    } else {
+      for (uint32_t index = thread; index < waves_per_workgroup * tile_values;
+           index += blockDim.x) {
+        const uint32_t source_wave = index / tile_values;
+        const uint32_t wave_index = index - source_wave * tile_values;
+        const uint32_t local_row = wave_index / block_k;
+        const uint32_t local_inner = wave_index - local_row * block_k;
+        const uint64_t row = row_group_base +
+                             static_cast<uint64_t>(source_wave) * tile_m +
+                             local_row;
+        activation_raw[index] =
+            row < m ? ValueIngress::load_activation(
+                          activation + row * value_row_bytes,
+                          inner_base + local_inner)
+                    : 0U;
+      }
+      for (uint32_t index = thread; index < column_tiles * tile_values;
+           index += blockDim.x) {
+        const uint32_t column_tile = index / tile_values;
+        const uint32_t tile_index = index - column_tile * tile_values;
+        const uint32_t local_column = tile_index / block_k;
+        const uint32_t local_inner = tile_index - local_column * block_k;
+        const uint64_t column =
+            column_base + column_tile * tile_n + local_column;
+        weight_raw[index] =
+            column < n
+                ? ValueIngress::load_weight(
+                      weight + column * value_row_bytes,
+                      inner_base + local_inner)
+                : 0U;
+      }
     }
     if (thread < waves_per_workgroup * tile_m) {
       const uint32_t source_wave = thread / tile_m;
@@ -1474,7 +1633,7 @@ __launch_bounds__(256, 1) void sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_wmma1
     const uint8_t *const weight, const uint8_t *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
     const uint64_t n) {
-  sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body<1U>(
+  sllm_matmul_mx_via_e4_gfx1201_wmma_body<Mxfp8WmmaTileIngress, 1U>(
       activation, activation_scales, weight, weight_scales, output, m, k, n);
 }
 
@@ -1484,7 +1643,39 @@ __launch_bounds__(256, 1) void sllm_matmul_mxfp8_w8a8_e4m3_block32_prefill_wmma1
     const uint8_t *const weight, const uint8_t *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
     const uint64_t n) {
-  sllm_matmul_mxfp8_w8a8_gfx1201_wmma_body<4U>(
+  sllm_matmul_mx_via_e4_gfx1201_wmma_body<Mxfp8WmmaTileIngress, 4U>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1201_wmma128x64_via_e4m3_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_mx_via_e4_gfx1201_wmma_body<Mxfp6ViaE4WmmaTileIngress, 4U>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_v2(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_mx_via_e4_gfx1201_wmma_body<
+      Mxfp6ViaE4WmmaPacked4Ingress, 4U, true>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1201_wmma128x128_pack4_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_mx_via_e4_gfx1201_wmma_body<
+      Mxfp6ViaE4WmmaPacked4Ingress, 8U, true>(
       activation, activation_scales, weight, weight_scales, output, m, k, n);
 }
 
@@ -2454,6 +2645,57 @@ hipError_t launch_mxfp6_w6a6(const uint8_t *const activation,
         dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
         dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
         weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6PrefillMmqGfx1030ViaE4M3) {
+    if (!phase70_mxfp6_via_e4m3_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1,
+        dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64) {
+    if (!phase70_mxfp6_via_e4m3_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1201_wmma128x64_via_e4m3_v1,
+        dim3(static_cast<uint32_t>(
+                 (n + kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup),
+             static_cast<uint32_t>(
+                 (m + kMxfp8W8A8PrefillWmmaRowsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaRowsPerWorkgroup)),
+        dim3(kMxfp8W8A8PrefillWmmaWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) {
+    if (!phase70_mxfp6_via_e4m3_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_v2,
+        dim3(static_cast<uint32_t>(
+                 (n + kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup),
+             static_cast<uint32_t>(
+                 (m + kMxfp8W8A8PrefillWmmaRowsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaRowsPerWorkgroup)),
+        dim3(kMxfp8W8A8PrefillWmmaWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N128) {
+    if (!phase70_gfx1201_mxfp6_wmma_pack4_n128_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1201_wmma128x128_pack4_v1,
+        dim3(static_cast<uint32_t>(
+                 (n + kMxfp8W8A8PrefillWmmaN128ColumnsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaN128ColumnsPerWorkgroup),
+             static_cast<uint32_t>(
+                 (m + kMxfp8W8A8PrefillWmmaRowsPerWorkgroup - 1U) /
+                 kMxfp8W8A8PrefillWmmaRowsPerWorkgroup)),
+        dim3(kMxfp8W8A8PrefillWmmaWorkgroupSize), 0U, stream, activation,
+        activation_scales, weight, weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp6W6A6PrefillTiled16) {
     hipLaunchKernelGGL(sllm_matmul_mxfp6_w6a6_e3m2_block32_prefill_tiled16_v3,
                        dim3(static_cast<uint32_t>((n + 15U) / 16U),
