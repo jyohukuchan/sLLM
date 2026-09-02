@@ -381,6 +381,28 @@ __global__ void e3m2x4_to_e4m3_exact_kernel(const uint8_t *const packed_input,
       sllm_lowp::packed_e3m2x4_at(packed_input, group * 4U));
 }
 
+__global__ void
+e3m2x4_to_e4m3_swar_exact_kernel(const uint8_t *const packed_input,
+                                 uint32_t *const converted_groups,
+                                 const uint32_t group_count) {
+  const uint32_t group = blockIdx.x * blockDim.x + threadIdx.x;
+  if (group >= group_count) {
+    return;
+  }
+  converted_groups[group] = sllm_lowp::e3m2x4_to_e4m3fn_exact_bits_swar(
+      sllm_lowp::packed_e3m2x4_at(packed_input, group * 4U));
+}
+
+__global__ void e3m2_to_fp16_bits_kernel(const uint8_t *const packed_input,
+                                         uint16_t *const converted) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= 64U * 4U) {
+    return;
+  }
+  converted[index] = sllm_lowp::e3m2_to_fp16_bits(
+      sllm_lowp::packed_e3m2_at(packed_input, index));
+}
+
 template <typename BlockFormat>
 __global__ void block_load_kernel(const uint8_t *const values,
                                   const uint8_t *const scales,
@@ -412,7 +434,9 @@ bool run_e3m2_to_e4m3_exact_conversion() {
   constexpr uint32_t value_count = code_count * packed_lanes;
   std::vector<uint8_t> packed(value_count * 3U / 4U, 0U);
   for (uint32_t index = 0U; index < value_count; ++index) {
-    const uint32_t code = index / packed_lanes;
+    const uint32_t group = index / packed_lanes;
+    const uint32_t lane = index % packed_lanes;
+    const uint32_t code = (group + lane * 17U) & (code_count - 1U);
     const uint32_t bit = index * 6U;
     const uint32_t byte = bit / 8U;
     const uint32_t shift = bit % 8U;
@@ -426,10 +450,14 @@ bool run_e3m2_to_e4m3_exact_conversion() {
 
   std::vector<uint8_t> converted(value_count, 0U);
   std::vector<uint32_t> converted_groups(value_count / packed_lanes, 0U);
+  std::vector<uint32_t> converted_swar_groups(value_count / packed_lanes, 0U);
+  std::vector<uint16_t> converted_fp16(value_count, 0U);
   std::vector<float> decoded(value_count, 0.0F);
   uint8_t *device_packed = nullptr;
   uint8_t *device_converted = nullptr;
   uint32_t *device_converted_groups = nullptr;
+  uint32_t *device_converted_swar_groups = nullptr;
+  uint16_t *device_converted_fp16 = nullptr;
   float *device_decoded = nullptr;
   bool ok =
       hip_ok(
@@ -441,6 +469,12 @@ bool run_e3m2_to_e4m3_exact_conversion() {
       hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted_groups),
                        converted_groups.size() * sizeof(uint32_t)),
              "hipMalloc exact packed-group converted output") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted_swar_groups),
+                       converted_swar_groups.size() * sizeof(uint32_t)),
+             "hipMalloc exact SWAR packed-group converted output") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted_fp16),
+                       converted_fp16.size() * sizeof(uint16_t)),
+             "hipMalloc exact FP16 converted output") &&
       hip_ok(hipMalloc(reinterpret_cast<void **>(&device_decoded),
                        decoded.size() * sizeof(float)),
              "hipMalloc exact decoded output") &&
@@ -455,6 +489,12 @@ bool run_e3m2_to_e4m3_exact_conversion() {
                        dim3(value_count / packed_lanes), 0U, nullptr,
                        device_packed, device_converted_groups,
                        value_count / packed_lanes);
+    hipLaunchKernelGGL(e3m2x4_to_e4m3_swar_exact_kernel, dim3(1U),
+                       dim3(value_count / packed_lanes), 0U, nullptr,
+                       device_packed, device_converted_swar_groups,
+                       value_count / packed_lanes);
+    hipLaunchKernelGGL(e3m2_to_fp16_bits_kernel, dim3(1U), dim3(value_count),
+                       0U, nullptr, device_packed, device_converted_fp16);
     ok =
         hip_ok(hipGetLastError(), "exact E3M2 to E4M3 kernel") &&
         hip_ok(hipMemcpy(converted.data(), device_converted, converted.size(),
@@ -464,20 +504,33 @@ bool run_e3m2_to_e4m3_exact_conversion() {
                          converted_groups.size() * sizeof(uint32_t),
                          hipMemcpyDeviceToHost),
                "hipMemcpy exact packed-group converted output") &&
+        hip_ok(hipMemcpy(converted_swar_groups.data(),
+                         device_converted_swar_groups,
+                         converted_swar_groups.size() * sizeof(uint32_t),
+                         hipMemcpyDeviceToHost),
+               "hipMemcpy exact SWAR packed-group converted output") &&
+        hip_ok(hipMemcpy(converted_fp16.data(), device_converted_fp16,
+                         converted_fp16.size() * sizeof(uint16_t),
+                         hipMemcpyDeviceToHost),
+               "hipMemcpy exact FP16 converted output") &&
         hip_ok(hipMemcpy(decoded.data(), device_decoded,
                          decoded.size() * sizeof(float), hipMemcpyDeviceToHost),
                "hipMemcpy exact decoded output");
   }
   if (ok) {
     for (uint32_t index = 0U; index < value_count; ++index) {
-      const uint32_t code = index / packed_lanes;
+      const uint32_t group = index / packed_lanes;
+      const uint32_t lane = index % packed_lanes;
+      const uint32_t code = (group + lane * 17U) & (code_count - 1U);
       const uint8_t expected_bits =
           sllm_lowp::e3m2_to_e4m3fn_exact_bits(static_cast<uint8_t>(code));
       const float expected =
           host_decode(ScalarFormat::E3M2, static_cast<uint8_t>(code));
       if (converted[index] != expected_bits ||
+          converted_fp16[index] !=
+              sllm_lowp::e3m2_to_fp16_bits(static_cast<uint8_t>(code)) ||
           !compare_float(decoded[index], expected)) {
-        std::cerr << "exact E3M2 to E4M3 mismatch code=" << code
+        std::cerr << "exact E3M2 conversion mismatch code=" << code
                   << " lane=" << (index % packed_lanes) << '\n';
         ok = false;
         break;
@@ -498,9 +551,17 @@ bool run_e3m2_to_e4m3_exact_conversion() {
         ok = false;
         break;
       }
+      if (converted_swar_groups[group] != converted_groups[group]) {
+        std::cerr << "SWAR packed-group E3M2 to E4M3 mismatch group=" << group
+                  << '\n';
+        ok = false;
+        break;
+      }
     }
   }
   for (void *allocation : {static_cast<void *>(device_decoded),
+                           static_cast<void *>(device_converted_fp16),
+                           static_cast<void *>(device_converted_swar_groups),
                            static_cast<void *>(device_converted_groups),
                            static_cast<void *>(device_converted),
                            static_cast<void *>(device_packed)}) {
@@ -872,6 +933,7 @@ int main() {
             << properties.gcnArchName
             << "\",\"decode_codes\":1104,"
                "\"exact_e3m2_to_e4m3_codes\":64,"
+               "\"exact_e3m2_to_fp16_bits_codes\":64,"
                "\"exact_e3m2_packed_lanes\":4,"
                "\"encode_boundary_sets\":5,"
                "\"mx_boundaries\":[31,32,33,256],"

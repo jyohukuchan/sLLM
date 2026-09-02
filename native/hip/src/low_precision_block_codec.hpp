@@ -56,6 +56,40 @@ e3m2x4_to_e4m3fn_exact_bits(const uint32_t packed) noexcept {
   return converted;
 }
 
+// Expand the four six-bit E3M2 lanes into byte lanes, then apply the exact
+// E4M3 mapping with lane-wise integer operations. The exponent-zero path is
+// selected with a full-byte mask so signed zero, subnormal, and normal lanes
+// may be mixed in one packed group without scalar branches or a lookup table.
+__host__ __device__ constexpr uint32_t
+e3m2x4_to_e4m3fn_exact_bits_swar(const uint32_t packed) noexcept {
+  const uint32_t lanes = (packed & UINT32_C(0x0000003f)) |
+                         ((packed & UINT32_C(0x00000fc0)) << 2U) |
+                         ((packed & UINT32_C(0x0003f000)) << 4U) |
+                         ((packed & UINT32_C(0x00fc0000)) << 6U);
+  const uint32_t sign = (lanes & UINT32_C(0x20202020)) << 2U;
+  const uint32_t exponent = (lanes >> 2U) & UINT32_C(0x07070707);
+  const uint32_t mantissa = lanes & UINT32_C(0x03030303);
+  const uint32_t normal =
+      sign | ((exponent + UINT32_C(0x04040404)) << 3U) | (mantissa << 1U);
+
+  const uint32_t mantissa_low = mantissa & UINT32_C(0x01010101);
+  const uint32_t mantissa_high = (mantissa & UINT32_C(0x02020202)) >> 1U;
+  const uint32_t both_mantissa_bits = mantissa_low & mantissa_high;
+  const uint32_t high_only = mantissa_high & ~mantissa_low;
+  const uint32_t subnormal = sign + mantissa_low * UINT32_C(0x18) +
+                             high_only * UINT32_C(0x20) +
+                             both_mantissa_bits * UINT32_C(0x0c);
+
+  // exponent is restricted to three bits per byte, so collapsing those bits
+  // into each lane's low bit does not allow neighboring lanes to interact.
+  const uint32_t exponent_any = (exponent & UINT32_C(0x01010101)) |
+                                ((exponent >> 1U) & UINT32_C(0x01010101)) |
+                                ((exponent >> 2U) & UINT32_C(0x01010101));
+  const uint32_t exponent_zero_mask =
+      ((~exponent_any) & UINT32_C(0x01010101)) * UINT32_C(0xff);
+  return (subnormal & exponent_zero_mask) | (normal & ~exponent_zero_mask);
+}
+
 template <typename Format> struct ScalarCodec;
 
 template <> struct ScalarCodec<E4M3Fn> {
@@ -336,6 +370,38 @@ template <> struct ScalarCodec<E3M2> {
         sign | static_cast<uint8_t>(min(code, UINT32_C(0x1f))));
   }
 };
+
+// All finite E3M2 values are exactly representable by IEEE FP16.  Returning
+// the half encoding directly lets packed MXFP6 kernels form half2 operands
+// without routing each value through an FP32 temporary.
+__host__ __device__ constexpr uint16_t
+e3m2_to_fp16_bits(const uint8_t raw) noexcept {
+  const uint8_t bits = raw & UINT8_C(0x3f);
+  const uint16_t sign =
+      static_cast<uint16_t>(static_cast<uint16_t>(bits & UINT8_C(0x20)) << 10U);
+  const uint8_t magnitude = bits & UINT8_C(0x1f);
+  const uint8_t exponent = magnitude >> 2U;
+  const uint8_t mantissa = magnitude & UINT8_C(0x03);
+  if (exponent == 0U) {
+    constexpr uint16_t subnormal_map[4] = {UINT16_C(0x0000), UINT16_C(0x2c00),
+                                           UINT16_C(0x3000), UINT16_C(0x3200)};
+    return static_cast<uint16_t>(sign | subnormal_map[mantissa]);
+  }
+  return static_cast<uint16_t>(
+      sign | static_cast<uint16_t>(exponent + UINT8_C(12)) << 10U |
+      static_cast<uint16_t>(mantissa) << 8U);
+}
+
+__device__ __forceinline__ __half e3m2_to_half(const uint8_t raw) noexcept {
+  __half_raw bits{};
+  bits.x = e3m2_to_fp16_bits(raw);
+  return __half{bits};
+}
+
+__device__ __forceinline__ __half2
+e3m2x2_to_half2(const uint8_t first, const uint8_t second) noexcept {
+  return __halves2half2(e3m2_to_half(first), e3m2_to_half(second));
+}
 
 template <> struct ScalarCodec<E2M1> {
   __device__ __forceinline__ static float decode(const uint8_t bits) noexcept {

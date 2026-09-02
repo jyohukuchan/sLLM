@@ -70,6 +70,7 @@ enum class TilePolicy : uint8_t {
   Wmma128x128x32,
   BlockRow8Column16,
   BlockRow8Column32,
+  BlockRow32Column32,
 };
 
 enum class ActivationPack : uint8_t {
@@ -86,6 +87,7 @@ enum class InnerProduct : uint8_t {
   E4M3WmmaFp32,
   E3M2ViaE4M3DecodedFp32,
   E3M2ViaE4M3WmmaFp32,
+  E3M2Fp16Dot2Fp32,
   E2M1Bf16Fp32,
   E2M1BlockScaledFp32,
 };
@@ -107,6 +109,7 @@ enum class ProviderKind : uint8_t {
   Mxfp8Gfx1201Wmma,
   Mxfp6Block32,
   Mxfp6Gfx1030MmqViaE4M3,
+  Mxfp6Gfx1030Half2Dot2,
   Mxfp6Gfx1201WmmaViaE4M3,
   Nvfp4W4A16Block16,
   Nvfp4W4A4Block16,
