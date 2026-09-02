@@ -874,7 +874,22 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
   [Phase 73保存済み計画](archive/2026/09/1-10/phase73-gfx1201-mxfp8-wide-n-selector.md)、
   [Phase 73履歴](../history/2026/09/1-10/phase73-gfx1201-mxfp8-wide-n-selector.md)、
   [追跡済み要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)を正本とする。
-- Phase 70後のlow-precision候補はNVFP4独立specializationとする。block 16／E4M3 block scale／FP32 tensor scale／
+- Phase 74は両RDNAのMXFP6 prefillに限定したfixed llama.cpp Q6_K比較ループを3回実施して完了した。exact `gfx1030`には
+  ID47 half2 dot2 32x32を限定採用し、4B 512／2,048入力を旧ID25比`1.636倍／1.601倍`へ改善した。exact `gfx1201`には
+  ID48 packed E3M2x4→E4M3x4 SWAR ingressを限定採用し、旧ID45比`1.315倍／1.192倍`へ改善した。共通activation
+  quantizer packed-store候補は両target全行で約0.35〜0.84%退行したため棄却・source除去した。最終既定値は4Bで
+  `gfx1030=411.82／393.60 tok/s`、`gfx1201=2,843.97／2,959.30 tok/s`、27B 512で`57.22／475.51 tok/s`。
+  decode、KV、他format、attention／GDN実装は変更していない。詳細は
+  [Phase 74保存済み計画](archive/2026/09/1-10/phase74-mxfp6-prefill-llama-optimization-loop.md)、
+  [Phase 74履歴](../history/2026/09/1-10/phase74-mxfp6-prefill-llama-optimization-loop.md)、
+  [追跡済み要約](../../ci/matrix/phase74-mxfp6-prefill-llama-optimization-loop-v1.json)を正本とする。
+- Phase 75は2026-09-03のユーザー指示により、exact `gfx1030`の共通half2 software-MMQをMXFP8で先行評価し、
+  共通tile／K stagingをMXFP6へ移植して別採否した後、MXFP6固有packed E3M2x4 ingressを追加評価する次Phaseとして計画した。
+  primaryは固定Qwen3.5-4Bの512／2,048 prefill、最終補助行はQwen3.5-27B MXFP6の512 inputとし、各段階の
+  control／candidate、resource、profile、採用／benchmark-only／棄却を同じ結果表へ分離する。gfx1201、decode、KV、attention、
+  GDN、quantization recipeは変更しない。詳細は
+  [Phase 75進行中計画](active/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)を正本とする。
+- Phase 75後のlow-precision候補はNVFP4独立specializationとする。block 16／E4M3 block scale／FP32 tensor scale／
   W4A16・W4A4固有のloader／scale policyを保ち、MXFP8／MXFP6のformat identityへ偽装しない。
 - 機能経路はフェーズ45まで完了している。現在の`main`には、構造化生成、状態再利用、追加推論API、
   Responses/Anthropic、汎用template、対話CLI、LoRA/control vector、動的モデル管理までが統合済みである。
@@ -917,7 +932,12 @@ KV／会話／モデル固定のstateless prompt checkpointはフェーズ41、R
 
 ### 次のlow-precision実行順
 
-1. **NVFP4独立specialization（順序決定・未計画）**:
+1. **Phase 75・gfx1030 MXFP8先行／MXFP6共通half2最適化（計画済み・未着手）**:
+   byte-aligned E4M3で64x64／128x32／128x64 tile、K64〜256 staging、half2 dotの共通部分を先に判定し、
+   correct候補をMXFP6へ移植して別採否する。その後にだけpacked E3M2x4→FP16 pair ingressを追加し、4B 512／2,048と
+   27B 512の結果を段階別に整理する。詳細は
+   [Phase 75進行中計画](active/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)を正本とする。
+2. **NVFP4独立specialization（Phase 75後候補・未計画）**:
    schedule／reduction骨格は共有できるが、E2M1、block 16、E4M3 block scale、FP32 tensor scale、W4A16／W4A4は
    MXFP8／MXFP6と異なるため専用loader／scale policyとして設計する。
 
