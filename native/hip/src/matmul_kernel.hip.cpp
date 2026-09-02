@@ -1124,127 +1124,470 @@ __launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1(
       activation, activation_scales, weight, weight_scales, output, m, k, n);
 }
 
-// Phase 74 gfx1030 candidate: a 16x16 thread tile computes four outputs
-// (rows y/y+16 and columns x/x+16), giving a 32x32 output tile per 256-thread
-// workgroup. Each K block is expanded into two small FP16 LDS tiles and
-// consumed as exact E3M2 half2 pairs by AMD's mixed dot2 instruction. E8M0
-// block scales remain FP32 and are applied per block, preserving the MXFP6
-// storage contract and avoiding a resident FP32 expansion.
-template <uint32_t RowsPerThread = 2U, uint32_t ColumnsPerThread = 2U>
-__device__ __forceinline__ void sllm_matmul_mxfp6_gfx1030_half2_dot2_body(
+// Phase 75 separates the block-format ingress from the gfx1030 half2 tile.
+// Both MXFP8 and MXFP6 therefore share the same 16x16-thread output mapping,
+// K-stage policy, scale handling, dot2 tree, FP32 accumulation, and BF16 RNE
+// store.  Only the resident value-plane load/expansion differs by format.
+struct Mxfp8E4M3Half2Ingress {
+  static constexpr uint32_t values_per_load = 4U;
+
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k;
+  }
+
+  __device__ __forceinline__ static void stage(const uint8_t *const row,
+                                               const uint64_t index,
+                                               uint16_t *const output) {
+    const uint32_t packed = __builtin_nontemporal_load(
+        reinterpret_cast<const uint32_t *>(row + index));
+#pragma unroll
+    for (uint32_t lane = 0U; lane < values_per_load; ++lane) {
+      output[lane] = sllm_lowp::e4m3fn_to_fp16_bits(
+          static_cast<uint8_t>(packed >> (lane * 8U)));
+    }
+  }
+};
+
+struct Mxfp6E3M2ScalarHalf2Ingress {
+  static constexpr uint32_t values_per_load = 1U;
+
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k * UINT64_C(3) / UINT64_C(4);
+  }
+
+  __device__ __forceinline__ static void stage(const uint8_t *const row,
+                                               const uint64_t index,
+                                               uint16_t *const output) {
+    output[0] = sllm_lowp::e3m2_to_fp16_bits(packed_e3m2_at(row, index));
+  }
+};
+
+struct Mxfp6E3M2Packed4Half2Ingress {
+  static constexpr uint32_t values_per_load = 4U;
+
+  __device__ __forceinline__ static uint64_t row_bytes(const uint64_t k) {
+    return k * UINT64_C(3) / UINT64_C(4);
+  }
+
+  __device__ __forceinline__ static void stage(const uint8_t *const row,
+                                               const uint64_t index,
+                                               uint16_t *const output) {
+    const uint32_t packed = sllm_lowp::packed_e3m2x4_at(row, index);
+#pragma unroll
+    for (uint32_t lane = 0U; lane < values_per_load; ++lane) {
+      output[lane] = sllm_lowp::e3m2_to_fp16_bits(
+          static_cast<uint8_t>(packed >> (lane * 6U)));
+    }
+  }
+};
+
+template <typename FormatIngress, uint32_t RowsPerWorkgroup,
+          uint32_t ColumnsPerWorkgroup, uint32_t BlocksPerStage>
+__device__ __forceinline__ void sllm_matmul_gfx1030_half2_dot2_body(
     const uint8_t *const activation, const uint8_t *const activation_scales,
     const uint8_t *const weight, const uint8_t *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
     const uint64_t n) {
-  constexpr uint32_t tile = 32U;
-  constexpr uint32_t tile_k = 32U;
-  constexpr uint32_t rows_per_workgroup = tile;
-  constexpr uint32_t columns_per_workgroup = tile;
-  static_assert(RowsPerThread == 2U && ColumnsPerThread == 2U);
-  __shared__ uint16_t activation_tile[tile][tile];
-  __shared__ uint16_t weight_tile[tile][tile];
-  __shared__ float activation_scale_tile[tile];
-  __shared__ float weight_scale_tile[tile];
+  constexpr uint32_t thread_rows = 16U;
+  constexpr uint32_t thread_columns = 16U;
+  constexpr uint32_t block_k = 32U;
+  constexpr uint32_t tile_k = block_k * BlocksPerStage;
+  constexpr uint32_t rows_per_thread = RowsPerWorkgroup / thread_rows;
+  constexpr uint32_t columns_per_thread = ColumnsPerWorkgroup / thread_columns;
+  constexpr uint32_t ingress_values = FormatIngress::values_per_load;
+  constexpr uint32_t ingress_groups_per_row = tile_k / ingress_values;
+  static_assert(RowsPerWorkgroup >= thread_rows &&
+                RowsPerWorkgroup % thread_rows == 0U);
+  static_assert(ColumnsPerWorkgroup >= thread_columns &&
+                ColumnsPerWorkgroup % thread_columns == 0U);
+  static_assert(BlocksPerStage > 0U && tile_k % ingress_values == 0U);
+  __shared__ uint16_t activation_tile[RowsPerWorkgroup][tile_k];
+  __shared__ uint16_t weight_tile[ColumnsPerWorkgroup][tile_k];
+  __shared__ float activation_scale_tile[RowsPerWorkgroup][BlocksPerStage];
+  __shared__ float weight_scale_tile[ColumnsPerWorkgroup][BlocksPerStage];
 
   const uint64_t column_tiles =
-      (n + static_cast<uint64_t>(columns_per_workgroup) - 1U) /
-      columns_per_workgroup;
+      (n + static_cast<uint64_t>(ColumnsPerWorkgroup) - 1U) /
+      ColumnsPerWorkgroup;
   const uint64_t tile_index = static_cast<uint64_t>(blockIdx.x);
   const uint64_t column_base =
-      (tile_index % column_tiles) * columns_per_workgroup;
-  const uint64_t row_base = (tile_index / column_tiles) * rows_per_workgroup;
+      (tile_index % column_tiles) * ColumnsPerWorkgroup;
+  const uint64_t row_base = (tile_index / column_tiles) * RowsPerWorkgroup;
   const uint32_t thread = threadIdx.x;
   const uint32_t local_column = thread & UINT32_C(15);
   const uint32_t local_row = thread >> UINT32_C(4);
   const uint64_t blocks_per_row = k / UINT64_C(32);
-  const uint64_t row_bytes = k * UINT64_C(3) / UINT64_C(4);
-  const uint64_t rows[RowsPerThread] = {row_base + local_row,
-                                        row_base + local_row + 16U};
-  const uint64_t columns[ColumnsPerThread] = {column_base + local_column,
-                                              column_base + local_column + 16U};
-  float accumulators[RowsPerThread][ColumnsPerThread] = {};
+  const uint64_t row_bytes = FormatIngress::row_bytes(k);
+  float accumulators[rows_per_thread][columns_per_thread] = {};
 
   for (uint64_t base = 0U; base < k; base += tile_k) {
-    const uint64_t block = base / UINT64_C(32);
-    if (thread < tile) {
-      const uint64_t row = row_base + thread;
-      const uint64_t column = column_base + thread;
-      activation_scale_tile[thread] =
-          row < m && block < blocks_per_row
-              ? e8m0_to_float(activation_scales[row * blocks_per_row + block])
-              : 0.0F;
-      weight_scale_tile[thread] =
-          column < n && block < blocks_per_row
-              ? e8m0_to_float(weight_scales[column * blocks_per_row + block])
+    const uint64_t stage_block = base / UINT64_C(32);
+    for (uint32_t index = thread; index < RowsPerWorkgroup * BlocksPerStage;
+         index += sllm_matmul_kernel::kWorkgroupSize) {
+      const uint32_t row = index / BlocksPerStage;
+      const uint32_t local_block = index % BlocksPerStage;
+      const uint64_t source_row = row_base + row;
+      const uint64_t block = stage_block + local_block;
+      activation_scale_tile[row][local_block] =
+          source_row < m && block < blocks_per_row
+              ? e8m0_to_float(
+                    activation_scales[source_row * blocks_per_row + block])
               : 0.0F;
     }
-    for (uint32_t index = thread; index < tile * tile;
+    for (uint32_t index = thread; index < ColumnsPerWorkgroup * BlocksPerStage;
          index += sllm_matmul_kernel::kWorkgroupSize) {
-      const uint32_t row = index / tile;
-      const uint32_t inner = index % tile;
+      const uint32_t column = index / BlocksPerStage;
+      const uint32_t local_block = index % BlocksPerStage;
+      const uint64_t source_column = column_base + column;
+      const uint64_t block = stage_block + local_block;
+      weight_scale_tile[column][local_block] =
+          source_column < n && block < blocks_per_row
+              ? e8m0_to_float(
+                    weight_scales[source_column * blocks_per_row + block])
+              : 0.0F;
+    }
+    for (uint32_t index = thread;
+         index < RowsPerWorkgroup * ingress_groups_per_row;
+         index += sllm_matmul_kernel::kWorkgroupSize) {
+      const uint32_t row = index / ingress_groups_per_row;
+      const uint32_t offset = (index % ingress_groups_per_row) * ingress_values;
       const uint64_t source_row = row_base + row;
-      const uint64_t global_inner = base + inner;
-      activation_tile[row][inner] =
-          source_row < m && global_inner < k
-              ? sllm_lowp::e3m2_to_fp16_bits(packed_e3m2_at(
-                    activation + source_row * row_bytes, global_inner))
-              : UINT16_C(0);
-      const uint64_t column = column_base + row;
-      weight_tile[row][inner] =
-          column < n && global_inner < k
-              ? sllm_lowp::e3m2_to_fp16_bits(
-                    packed_e3m2_at(weight + column * row_bytes, global_inner))
-              : UINT16_C(0);
+      const uint64_t global_inner = base + offset;
+      if (source_row < m && global_inner + ingress_values <= k) {
+        FormatIngress::stage(activation + source_row * row_bytes, global_inner,
+                             &activation_tile[row][offset]);
+      } else {
+#pragma unroll
+        for (uint32_t lane = 0U; lane < ingress_values; ++lane) {
+          activation_tile[row][offset + lane] = UINT16_C(0);
+        }
+      }
+    }
+    for (uint32_t index = thread;
+         index < ColumnsPerWorkgroup * ingress_groups_per_row;
+         index += sllm_matmul_kernel::kWorkgroupSize) {
+      const uint32_t column = index / ingress_groups_per_row;
+      const uint32_t offset = (index % ingress_groups_per_row) * ingress_values;
+      const uint64_t source_column = column_base + column;
+      const uint64_t global_inner = base + offset;
+      if (source_column < n && global_inner + ingress_values <= k) {
+        FormatIngress::stage(weight + source_column * row_bytes, global_inner,
+                             &weight_tile[column][offset]);
+      } else {
+#pragma unroll
+        for (uint32_t lane = 0U; lane < ingress_values; ++lane) {
+          weight_tile[column][offset + lane] = UINT16_C(0);
+        }
+      }
     }
     __syncthreads();
 
-    float block_sums[RowsPerThread][ColumnsPerThread] = {};
+    const uint32_t valid_blocks =
+        static_cast<uint32_t>(min(static_cast<uint64_t>(BlocksPerStage),
+                                  (k - base) / static_cast<uint64_t>(block_k)));
 #pragma unroll
-    for (uint32_t inner = 0U; inner < tile_k; inner += 2U) {
-      const __half2 a0 = *reinterpret_cast<const __half2 *>(
-          &activation_tile[local_row][inner]);
-      const __half2 a1 = *reinterpret_cast<const __half2 *>(
-          &activation_tile[local_row + 16U][inner]);
-      const __half2 w0 =
-          *reinterpret_cast<const __half2 *>(&weight_tile[local_column][inner]);
-      const __half2 w1 = *reinterpret_cast<const __half2 *>(
-          &weight_tile[local_column + 16U][inner]);
-      block_sums[0][0] = amd_mixed_dot(a0, w0, block_sums[0][0], false);
-      block_sums[0][1] = amd_mixed_dot(a0, w1, block_sums[0][1], false);
-      block_sums[1][0] = amd_mixed_dot(a1, w0, block_sums[1][0], false);
-      block_sums[1][1] = amd_mixed_dot(a1, w1, block_sums[1][1], false);
+    for (uint32_t local_block = 0U; local_block < BlocksPerStage;
+         ++local_block) {
+      if (local_block >= valid_blocks) {
+        continue;
+      }
+      float block_sums[rows_per_thread][columns_per_thread] = {};
+#pragma unroll
+      for (uint32_t inner = local_block * block_k;
+           inner < (local_block + 1U) * block_k; inner += 2U) {
+        __half2 activation_pairs[rows_per_thread];
+        __half2 weight_pairs[columns_per_thread];
+#pragma unroll
+        for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+          activation_pairs[row] = *reinterpret_cast<const __half2 *>(
+              &activation_tile[local_row + row * thread_rows][inner]);
+        }
+#pragma unroll
+        for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+          weight_pairs[column] = *reinterpret_cast<const __half2 *>(
+              &weight_tile[local_column + column * thread_columns][inner]);
+        }
+#pragma unroll
+        for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+#pragma unroll
+          for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+            block_sums[row][column] =
+                amd_mixed_dot(activation_pairs[row], weight_pairs[column],
+                              block_sums[row][column], false);
+          }
+        }
+      }
+#pragma unroll
+      for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+        const float activation_scale =
+            activation_scale_tile[local_row + row * thread_rows][local_block];
+#pragma unroll
+        for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+          const float weight_scale =
+              weight_scale_tile[local_column + column * thread_columns]
+                               [local_block];
+          accumulators[row][column] +=
+              block_sums[row][column] * activation_scale * weight_scale;
+        }
+      }
     }
-    const float a0_scale = activation_scale_tile[local_row];
-    const float a1_scale = activation_scale_tile[local_row + 16U];
-    const float w0_scale = weight_scale_tile[local_column];
-    const float w1_scale = weight_scale_tile[local_column + 16U];
-    accumulators[0][0] += block_sums[0][0] * a0_scale * w0_scale;
-    accumulators[0][1] += block_sums[0][1] * a0_scale * w1_scale;
-    accumulators[1][0] += block_sums[1][0] * a1_scale * w0_scale;
-    accumulators[1][1] += block_sums[1][1] * a1_scale * w1_scale;
     __syncthreads();
   }
 #pragma unroll
-  for (uint32_t row = 0U; row < RowsPerThread; ++row) {
+  for (uint32_t row = 0U; row < rows_per_thread; ++row) {
 #pragma unroll
-    for (uint32_t column = 0U; column < ColumnsPerThread; ++column) {
-      if (rows[row] < m && columns[column] < n) {
-        output[rows[row] * n + columns[column]] =
+    for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+      const uint64_t output_row = row_base + local_row + row * thread_rows;
+      const uint64_t output_column =
+          column_base + local_column + column * thread_columns;
+      if (output_row < m && output_column < n) {
+        output[output_row * n + output_column] =
             float_to_bf16_rne_bits(accumulators[row][column]);
       }
     }
   }
 }
 
-extern "C" __global__
-__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1030_half2_32x32_v1(
+template <typename FormatIngress, uint32_t RowsPerWorkgroup,
+          uint32_t ColumnsPerWorkgroup>
+__device__ __forceinline__ void sllm_stage_gfx1030_half2_k32(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    const uint64_t m, const uint64_t k, const uint64_t n,
+    const uint64_t row_base, const uint64_t column_base, const uint64_t base,
+    uint16_t *const activation_tile, uint16_t *const weight_tile,
+    float *const activation_scale_tile, float *const weight_scale_tile) {
+  constexpr uint32_t block_k = 32U;
+  constexpr uint32_t ingress_values = FormatIngress::values_per_load;
+  constexpr uint32_t ingress_groups_per_row = block_k / ingress_values;
+  static_assert(block_k % ingress_values == 0U);
+  const uint32_t thread = threadIdx.x;
+  const uint64_t block = base / UINT64_C(32);
+  const uint64_t blocks_per_row = k / UINT64_C(32);
+  const uint64_t row_bytes = FormatIngress::row_bytes(k);
+  for (uint32_t row = thread; row < RowsPerWorkgroup;
+       row += sllm_matmul_kernel::kWorkgroupSize) {
+    const uint64_t source_row = row_base + row;
+    activation_scale_tile[row] =
+        source_row < m && block < blocks_per_row
+            ? e8m0_to_float(
+                  activation_scales[source_row * blocks_per_row + block])
+            : 0.0F;
+  }
+  for (uint32_t column = thread; column < ColumnsPerWorkgroup;
+       column += sllm_matmul_kernel::kWorkgroupSize) {
+    const uint64_t source_column = column_base + column;
+    weight_scale_tile[column] =
+        source_column < n && block < blocks_per_row
+            ? e8m0_to_float(
+                  weight_scales[source_column * blocks_per_row + block])
+            : 0.0F;
+  }
+  for (uint32_t index = thread;
+       index < RowsPerWorkgroup * ingress_groups_per_row;
+       index += sllm_matmul_kernel::kWorkgroupSize) {
+    const uint32_t row = index / ingress_groups_per_row;
+    const uint32_t offset = (index % ingress_groups_per_row) * ingress_values;
+    const uint64_t source_row = row_base + row;
+    if (source_row < m && base + offset + ingress_values <= k) {
+      FormatIngress::stage(activation + source_row * row_bytes, base + offset,
+                           activation_tile + row * block_k + offset);
+    } else {
+#pragma unroll
+      for (uint32_t lane = 0U; lane < ingress_values; ++lane) {
+        activation_tile[row * block_k + offset + lane] = UINT16_C(0);
+      }
+    }
+  }
+  for (uint32_t index = thread;
+       index < ColumnsPerWorkgroup * ingress_groups_per_row;
+       index += sllm_matmul_kernel::kWorkgroupSize) {
+    const uint32_t column = index / ingress_groups_per_row;
+    const uint32_t offset = (index % ingress_groups_per_row) * ingress_values;
+    const uint64_t source_column = column_base + column;
+    if (source_column < n && base + offset + ingress_values <= k) {
+      FormatIngress::stage(weight + source_column * row_bytes, base + offset,
+                           weight_tile + column * block_k + offset);
+    } else {
+#pragma unroll
+      for (uint32_t lane = 0U; lane < ingress_values; ++lane) {
+        weight_tile[column * block_k + offset + lane] = UINT16_C(0);
+      }
+    }
+  }
+}
+
+template <typename FormatIngress, uint32_t RowsPerWorkgroup,
+          uint32_t ColumnsPerWorkgroup>
+__device__ __forceinline__ void sllm_matmul_gfx1030_half2_dot2_k32_double_body(
     const uint8_t *const activation, const uint8_t *const activation_scales,
     const uint8_t *const weight, const uint8_t *const weight_scales,
     uint16_t *const output, const uint64_t m, const uint64_t k,
     const uint64_t n) {
-  sllm_matmul_mxfp6_gfx1030_half2_dot2_body(
+  constexpr uint32_t thread_rows = 16U;
+  constexpr uint32_t thread_columns = 16U;
+  constexpr uint32_t block_k = 32U;
+  constexpr uint32_t rows_per_thread = RowsPerWorkgroup / thread_rows;
+  constexpr uint32_t columns_per_thread = ColumnsPerWorkgroup / thread_columns;
+  static_assert(RowsPerWorkgroup % thread_rows == 0U);
+  static_assert(ColumnsPerWorkgroup % thread_columns == 0U);
+  __shared__ uint16_t activation_tiles[2][RowsPerWorkgroup][block_k];
+  __shared__ uint16_t weight_tiles[2][ColumnsPerWorkgroup][block_k];
+  __shared__ float activation_scale_tiles[2][RowsPerWorkgroup];
+  __shared__ float weight_scale_tiles[2][ColumnsPerWorkgroup];
+
+  const uint64_t column_tiles =
+      (n + static_cast<uint64_t>(ColumnsPerWorkgroup) - 1U) /
+      ColumnsPerWorkgroup;
+  const uint64_t tile_index = static_cast<uint64_t>(blockIdx.x);
+  const uint64_t column_base =
+      (tile_index % column_tiles) * ColumnsPerWorkgroup;
+  const uint64_t row_base = (tile_index / column_tiles) * RowsPerWorkgroup;
+  const uint32_t local_column = threadIdx.x & UINT32_C(15);
+  const uint32_t local_row = threadIdx.x >> UINT32_C(4);
+  float accumulators[rows_per_thread][columns_per_thread] = {};
+
+  sllm_stage_gfx1030_half2_k32<FormatIngress, RowsPerWorkgroup,
+                               ColumnsPerWorkgroup>(
+      activation, activation_scales, weight, weight_scales, m, k, n, row_base,
+      column_base, 0U, &activation_tiles[0][0][0], &weight_tiles[0][0][0],
+      &activation_scale_tiles[0][0], &weight_scale_tiles[0][0]);
+  __syncthreads();
+
+  uint32_t current_buffer = 0U;
+  for (uint64_t base = 0U; base < k; base += block_k) {
+    const uint64_t next_base = base + block_k;
+    const uint32_t next_buffer = current_buffer ^ 1U;
+    if (next_base < k) {
+      sllm_stage_gfx1030_half2_k32<FormatIngress, RowsPerWorkgroup,
+                                   ColumnsPerWorkgroup>(
+          activation, activation_scales, weight, weight_scales, m, k, n,
+          row_base, column_base, next_base,
+          &activation_tiles[next_buffer][0][0],
+          &weight_tiles[next_buffer][0][0],
+          &activation_scale_tiles[next_buffer][0],
+          &weight_scale_tiles[next_buffer][0]);
+    }
+    float block_sums[rows_per_thread][columns_per_thread] = {};
+#pragma unroll
+    for (uint32_t inner = 0U; inner < block_k; inner += 2U) {
+      __half2 activation_pairs[rows_per_thread];
+      __half2 weight_pairs[columns_per_thread];
+#pragma unroll
+      for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+        activation_pairs[row] = *reinterpret_cast<const __half2 *>(
+            &activation_tiles[current_buffer][local_row + row * thread_rows]
+                             [inner]);
+      }
+#pragma unroll
+      for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+        weight_pairs[column] = *reinterpret_cast<const __half2 *>(
+            &weight_tiles[current_buffer]
+                         [local_column + column * thread_columns][inner]);
+      }
+#pragma unroll
+      for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+#pragma unroll
+        for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+          block_sums[row][column] =
+              amd_mixed_dot(activation_pairs[row], weight_pairs[column],
+                            block_sums[row][column], false);
+        }
+      }
+    }
+#pragma unroll
+    for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+      const float activation_scale =
+          activation_scale_tiles[current_buffer][local_row + row * thread_rows];
+#pragma unroll
+      for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+        const float weight_scale =
+            weight_scale_tiles[current_buffer]
+                              [local_column + column * thread_columns];
+        accumulators[row][column] +=
+            block_sums[row][column] * activation_scale * weight_scale;
+      }
+    }
+    __syncthreads();
+    current_buffer = next_buffer;
+  }
+
+#pragma unroll
+  for (uint32_t row = 0U; row < rows_per_thread; ++row) {
+#pragma unroll
+    for (uint32_t column = 0U; column < columns_per_thread; ++column) {
+      const uint64_t output_row = row_base + local_row + row * thread_rows;
+      const uint64_t output_column =
+          column_base + local_column + column * thread_columns;
+      if (output_row < m && output_column < n) {
+        output[output_row * n + output_column] =
+            float_to_bf16_rne_bits(accumulators[row][column]);
+      }
+    }
+  }
+}
+
+#define SLLM_DEFINE_GFX1030_HALF2_KERNEL(symbol, ingress, rows, columns,       \
+                                         blocks)                               \
+  extern "C" __global__ __launch_bounds__(256, 1) void symbol(                 \
+      const uint8_t *const activation, const uint8_t *const activation_scales, \
+      const uint8_t *const weight, const uint8_t *const weight_scales,         \
+      uint16_t *const output, const uint64_t m, const uint64_t k,              \
+      const uint64_t n) {                                                      \
+    sllm_matmul_gfx1030_half2_dot2_body<ingress, rows, columns, blocks>(       \
+        activation, activation_scales, weight, weight_scales, output, m, k,    \
+        n);                                                                    \
+  }
+
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp6_w6a6_gfx1030_half2_32x32_v1,
+                                 Mxfp6E3M2ScalarHalf2Ingress, 32U, 32U, 1U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1,
+                                 Mxfp8E4M3Half2Ingress, 32U, 32U, 1U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1,
+                                 Mxfp8E4M3Half2Ingress, 64U, 64U, 1U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1,
+                                 Mxfp8E4M3Half2Ingress, 128U, 32U, 1U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1,
+                                 Mxfp8E4M3Half2Ingress, 128U, 64U, 1U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1,
+                                 Mxfp8E4M3Half2Ingress, 128U, 64U, 2U)
+SLLM_DEFINE_GFX1030_HALF2_KERNEL(sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1,
+                                 Mxfp8E4M3Half2Ingress, 128U, 64U, 4U)
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_gfx1030_half2_dot2_k32_double_body<Mxfp8E4M3Half2Ingress, 128U,
+                                                 64U>(
       activation, activation_scales, weight, weight_scales, output, m, k, n);
 }
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_gfx1030_half2_dot2_k32_double_body<Mxfp6E3M2ScalarHalf2Ingress,
+                                                 128U, 64U>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
+extern "C" __global__
+__launch_bounds__(256, 1) void sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1(
+    const uint8_t *const activation, const uint8_t *const activation_scales,
+    const uint8_t *const weight, const uint8_t *const weight_scales,
+    uint16_t *const output, const uint64_t m, const uint64_t k,
+    const uint64_t n) {
+  sllm_matmul_gfx1030_half2_dot2_k32_double_body<Mxfp6E3M2Packed4Half2Ingress,
+                                                 128U, 64U>(
+      activation, activation_scales, weight, weight_scales, output, m, k, n);
+}
+
+#undef SLLM_DEFINE_GFX1030_HALF2_KERNEL
 
 #if defined(SLLM_MATMUL_HAS_GFX12_ROCWMMA)
 static_assert(sizeof(rocwmma::float8_t) == sizeof(uint8_t));
@@ -2634,6 +2977,71 @@ hipError_t launch_mxfp8_w8a8(const uint8_t *const activation,
         dim3(static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))),
         dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
         weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1,
+        dim3(static_cast<uint32_t>(((m + 31U) / 32U) * ((n + 31U) / 32U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1,
+        dim3(static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 31U) / 32U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant ==
+             KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant ==
+             KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
+    if (!phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp8W8A8PrefillWmmaN16) {
     if (!phase63_mxfp8_wmma_supported_shape(m, k, n)) {
       return hipErrorInvalidValue;
@@ -2811,6 +3219,27 @@ hipError_t launch_mxfp6_w6a6(const uint8_t *const activation,
     hipLaunchKernelGGL(
         sllm_mxfp6_w6a6_gfx1030_half2_32x32_v1,
         dim3(static_cast<uint32_t>(((m + 31U) / 32U) * ((n + 31U) / 32U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant ==
+             KernelVariant::
+                 Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar) {
+    if (!phase74_gfx1030_mxfp6_half2_dot2_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
+        dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
+        weight_scales, output, m, k, n);
+  } else if (variant ==
+             KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4) {
+    if (!phase74_gfx1030_mxfp6_half2_dot2_shape(m, k, n)) {
+      return hipErrorInvalidValue;
+    }
+    hipLaunchKernelGGL(
+        sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1,
+        dim3(static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U))),
         dim3(kWorkgroupSize), 0U, stream, activation, activation_scales, weight,
         weight_scales, output, m, k, n);
   } else if (variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64) {

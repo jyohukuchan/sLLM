@@ -663,6 +663,19 @@ fallback false、cleanup 0である。gfx1201の2,048入力／単一2,048 chunk�
 software lifecycleは`experimental`のまま、別OS/kernel/driver/runtime/compiler、別GPU構成、別model、長時間安定性へ
 一般化しない。詳細は[Phase 71追跡要約](../../ci/matrix/phase71-qwen35-27b-mxfp6-compatibility-v1.json)を正本とする。
 
+Phase 75の同じcanonical V620 tupleでは、exact `gfx1030`のMXFP8／MXFP6 shared-half2 software-MMQを検証した。
+最終CLI SHA-256は`d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8`、operator runnerは
+`688a54ebb2e4f5a6066af65082c2a9ee403ca50e8efccd479821283e9fe5c13d`、抽出gfx1030 matmul code objectは
+`2b67fc2a1f535a2887dbf4fe243b072ac3c6c0e25b114709842604d67cdfea35`である。
+
+Qwen3.5-4B、FP16 KV、3+10 control/candidate/controlの512／2,048 prefill中央値はMXFP8 ID55で
+`993.6765 / 1,104.1643 tok/s`、MXFP6 ID57で`1,008.7235 / 1,095.3894 tok/s`。Qwen3.5-27B MXFP6
+512 defaultも`157.7535 tok/s`をPASSした。全256 E4M3FN code、全64 E3M2 code、operator、full-model、
+HIP-only、fallback false、cleanup 0を確認した。gfx1201 wave32とgfx942 wave64はtarget別compile-onlyをPASSしたが、
+runtime evidenceへ昇格しない。software lifecycleは`experimental`のまま、別OS/kernel/driver/runtime/compiler、別V620構成、
+別target、長時間安定性へ一般化しない。詳細は
+[Phase 75追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

@@ -403,6 +403,16 @@ __global__ void e3m2_to_fp16_bits_kernel(const uint8_t *const packed_input,
       sllm_lowp::packed_e3m2_at(packed_input, index));
 }
 
+__global__ void e4m3fn_to_fp16_bits_x4_kernel(const uint8_t *const input,
+                                              uint16_t *const converted,
+                                              const uint32_t value_count) {
+  const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= value_count) {
+    return;
+  }
+  converted[index] = sllm_lowp::e4m3fn_to_fp16_bits(input[index]);
+}
+
 template <typename BlockFormat>
 __global__ void block_load_kernel(const uint8_t *const values,
                                   const uint8_t *const scales,
@@ -426,6 +436,92 @@ bool compare_float(const float actual, const float expected) {
   std::memcpy(&actual_bits, &actual, sizeof(actual_bits));
   std::memcpy(&expected_bits, &expected, sizeof(expected_bits));
   return actual_bits == expected_bits;
+}
+
+uint16_t host_float_to_fp16_bits(const float value) {
+  const _Float16 half = static_cast<_Float16>(value);
+  uint16_t bits = 0U;
+  static_assert(sizeof(half) == sizeof(bits));
+  std::memcpy(&bits, &half, sizeof(bits));
+  return bits;
+}
+
+bool run_e4m3fn_to_fp16_exact_conversion() {
+  constexpr uint32_t code_count = 256U;
+  constexpr uint32_t lanes = 4U;
+  constexpr uint32_t operand_count = 2U;
+  constexpr uint32_t values_per_operand = code_count * lanes;
+  constexpr uint32_t value_count = values_per_operand * operand_count;
+  std::vector<uint8_t> input(value_count, 0U);
+  for (uint32_t code = 0U; code < code_count; ++code) {
+    for (uint32_t lane = 0U; lane < lanes; ++lane) {
+      input[code * lanes + lane] = static_cast<uint8_t>(code);
+      input[values_per_operand + code * lanes + lane] =
+          static_cast<uint8_t>(code_count - 1U - code);
+    }
+  }
+
+  std::vector<uint16_t> converted(value_count, 0U);
+  uint8_t *device_input = nullptr;
+  uint16_t *device_converted = nullptr;
+  bool ok =
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_input), input.size()),
+             "hipMalloc exact E4M3 input") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted),
+                       converted.size() * sizeof(uint16_t)),
+             "hipMalloc exact E4M3 FP16 output") &&
+      hip_ok(hipMemcpy(device_input, input.data(), input.size(),
+                       hipMemcpyHostToDevice),
+             "hipMemcpy exact E4M3 input");
+  if (ok) {
+    hipLaunchKernelGGL(e4m3fn_to_fp16_bits_x4_kernel,
+                       dim3((value_count + 255U) / 256U), dim3(256U), 0U,
+                       nullptr, device_input, device_converted, value_count);
+    ok = hip_ok(hipGetLastError(), "exact E4M3 to FP16 kernel") &&
+         hip_ok(hipMemcpy(converted.data(), device_converted,
+                          converted.size() * sizeof(uint16_t),
+                          hipMemcpyDeviceToHost),
+                "hipMemcpy exact E4M3 FP16 output");
+  }
+  if (ok) {
+    for (uint32_t index = 0U; index < value_count; ++index) {
+      const uint8_t code = input[index];
+      const uint16_t actual = converted[index];
+      const uint8_t magnitude = code & UINT8_C(0x7f);
+      if (magnitude == UINT8_C(0x7f)) {
+        const bool is_nan = (actual & UINT16_C(0x7c00)) == UINT16_C(0x7c00) &&
+                            (actual & UINT16_C(0x03ff)) != 0U;
+        const bool sign_matches =
+            (actual & UINT16_C(0x8000)) ==
+            (static_cast<uint16_t>(code & UINT8_C(0x80)) << 8U);
+        if (!is_nan || !sign_matches) {
+          std::cerr << "E4M3 NaN-class FP16 mismatch code="
+                    << static_cast<uint32_t>(code) << " lane=" << index % lanes
+                    << " operand=" << index / values_per_operand << '\n';
+          ok = false;
+          break;
+        }
+        continue;
+      }
+      const uint16_t expected =
+          host_float_to_fp16_bits(host_decode(ScalarFormat::E4M3Fn, code));
+      if (actual != expected) {
+        std::cerr << "exact E4M3 to FP16 mismatch code="
+                  << static_cast<uint32_t>(code) << " lane=" << index % lanes
+                  << " operand=" << index / values_per_operand << '\n';
+        ok = false;
+        break;
+      }
+    }
+  }
+  if (device_converted != nullptr) {
+    ok = hip_ok(hipFree(device_converted), "hipFree exact E4M3 FP16 output") &&
+         ok;
+  }
+  if (device_input != nullptr) {
+    ok = hip_ok(hipFree(device_input), "hipFree exact E4M3 input") && ok;
+  }
+  return ok;
 }
 
 bool run_e3m2_to_e4m3_exact_conversion() {
@@ -906,6 +1002,7 @@ int main() {
   }
   bool ok = true;
   ok = run_provider_contract() && ok;
+  ok = run_e4m3fn_to_fp16_exact_conversion() && ok;
   ok = run_e3m2_to_e4m3_exact_conversion() && ok;
   ok = run_scalar_decode(ScalarFormat::E4M3Fn, 256U) && ok;
   ok = run_scalar_decode(ScalarFormat::E4M3FnuZ, 256U) && ok;
@@ -935,6 +1032,9 @@ int main() {
                "\"exact_e3m2_to_e4m3_codes\":64,"
                "\"exact_e3m2_to_fp16_bits_codes\":64,"
                "\"exact_e3m2_packed_lanes\":4,"
+               "\"exact_e4m3_to_fp16_bits_codes\":256,"
+               "\"exact_e4m3_fp16_lanes\":4,"
+               "\"exact_e4m3_fp16_operands\":2,"
                "\"encode_boundary_sets\":5,"
                "\"mx_boundaries\":[31,32,33,256],"
                "\"mxfp4_boundaries\":[31,32,33,256],"

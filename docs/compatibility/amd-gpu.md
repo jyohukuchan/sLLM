@@ -783,6 +783,21 @@ host／provider contractはPASSした。新規N範囲のGPU operator oracleとfu
 この追加範囲を`project-verified`へ昇格せず、既存の狭い実機evidenceと区別する。詳細は
 [Phase 73追跡要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)を正本とする。
 
+### 2026-09-03 Phase75 gfx1030 MXFP8／MXFP6 shared half2
+
+canonical V620 exact `gfx1030`で、MXFP8 E4M3FNとMXFP6 E3M2に共通のhalf2 dot／tile／K-stage／scale／
+output bodyを実機評価した。MXFP8 ID55 128x64／K32／double-bufferを既存Phase 67 scopeへ、同scheduleと
+bounded 24-bit E3M2x4 ingressを持つMXFP6 ID57を既存Phase 74 scopeへ限定採用した。MXFP6 ID56はscalar ingressの
+transfer evidence、ID41／47はrollbackとして維持する。selectorはmodel名を使わずexact target、format、M/N/K、alignmentだけを見る。
+
+4Bの512／2,048-token final 3+10 prefillはMXFP8 `993.6765 / 1,104.1643 tok/s`、MXFP6
+`1,008.7235 / 1,095.3894 tok/s`。27B MXFP6 512 defaultは`157.7535 tok/s`だった。ID55はLDS 26,112 B、
+SGPR/VGPR 38/156、ID57は26,112 B、40/151で、両方private/spill 0、WG256、wave32である。全256 E4M3FN code、
+全64 E3M2 code、operator、full-model、HIP-only、fallback／cleanup 0をPASSした。gfx1201／gfx942はcompile-onlyであり、
+別RDNA2 SKU、RDNA4、CDNA、別tupleへ性能結果を一般化しない。詳細は
+[Phase 75履歴](../history/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)と
+[追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
+
 ## 将来AMD候補
 
 初期範囲外であっても将来対応の意図があるものは`unsupported`ではなく`lifecycle=planned, evidence=[unverified]`とする。

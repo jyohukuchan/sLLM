@@ -71,6 +71,9 @@ enum class TilePolicy : uint8_t {
   BlockRow8Column16,
   BlockRow8Column32,
   BlockRow32Column32,
+  BlockRow64Column64,
+  BlockRow128Column32,
+  BlockRow128Column64,
 };
 
 enum class ActivationPack : uint8_t {
@@ -88,6 +91,7 @@ enum class InnerProduct : uint8_t {
   E3M2ViaE4M3DecodedFp32,
   E3M2ViaE4M3WmmaFp32,
   E3M2Fp16Dot2Fp32,
+  E4M3Fp16Dot2Fp32,
   E2M1Bf16Fp32,
   E2M1BlockScaledFp32,
 };

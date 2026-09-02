@@ -1,0 +1,237 @@
+{
+  "schema_version": "phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1",
+  "state": "PASS",
+  "date": "2026-09-03",
+  "decision": "adopt MXFP8 ID55 and MXFP6 ID57 as exact-gfx1030 scoped defaults; retain ID56 as the measured shared-schedule transfer and ID41/ID47 as explicit rollbacks",
+  "scope": {
+    "target": "canonical Radeon Pro V620 exact gfx1030",
+    "workload": "single-request dense-model prefill matmul",
+    "formats": [
+      "OCP MXFP8 E4M3FN W8A8 block32 E8M0",
+      "OCP MXFP6 E3M2 W6A6 block32 E8M0"
+    ],
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "excluded": [
+      "decode",
+      "attention",
+      "GDN",
+      "KV format or default changes",
+      "gfx1201 performance changes",
+      "gfx942 performance changes",
+      "MoE",
+      "persistent expanded weights or activations"
+    ]
+  },
+  "identities": {
+    "starting_git_head": "097245a9d1841ddd039a20fbdc0caa0caa1db87b",
+    "source_identity": "dirty draft working tree; not release provenance",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "compiler": "AMD clang 23",
+    "code_object": "v6",
+    "wavefront": 32,
+    "gfx1030": {
+      "product": "Radeon Pro V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "bdf": "0000:03:00.0"
+    },
+    "artifacts": {
+      "cli_sha256": "d67a8f3742ed705cee60adb8f5f8dc4e3f8797f17e87e4aa91665b01ccfc69b8",
+      "operator_runner_sha256": "688a54ebb2e4f5a6066af65082c2a9ee403ca50e8efccd479821283e9fe5c13d",
+      "extracted_gfx1030_matmul_code_object_sha256": "2b67fc2a1f535a2887dbf4fe243b072ac3c6c0e25b114709842604d67cdfea35"
+    },
+    "qwen35_4b": {
+      "revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+      "mxfp8_lock_fingerprint": "sha256:f253d9f47603d84718b4fdb898b434e493d732b52838ba9abfdfafe73a5d076f",
+      "mxfp6_lock_fingerprint": "sha256:d0ff2e1de9d87dddddcde8f85ef305bbf21a06d5f7586d077ba1178580a0264e"
+    },
+    "qwen35_27b": {
+      "revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+      "source_lock_fingerprint": "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f",
+      "derived_mxfp6_lock_fingerprint": "sha256:d1142468252af487d52ebf72a29a4bb62487a635c174e709bebd73b0c337a82c"
+    }
+  },
+  "implementation": {
+    "shared_body": [
+      "compile-time FormatIngress, TilePolicy, and KStagePolicy",
+      "half2 dot2 with fp32 per-output accumulation",
+      "per-block E8M0 scale application before cross-block accumulation",
+      "zero-padded M/N tails and bf16 RNE output"
+    ],
+    "mxfp8_ingress": "exact constexpr E4M3FN-to-FP16 bit expansion for all 256 encodings and four lanes",
+    "mxfp6_scalar_transfer": "existing scalar packed E3M2 extraction instantiated with the selected shared schedule",
+    "mxfp6_packed_ingress": "one bounded 24-bit group load per four E3M2 values followed by exact FP16 pair expansion",
+    "persistent_expansion_added": false
+  },
+  "stage_b_mxfp8": {
+    "decision": "ADOPT_ID55_SCOPED_DEFAULT",
+    "tile_sweep_aggregate_median_ns": [
+      {"kernel_id": 41, "tile": "legacy-col8-control", "value": 305836907},
+      {"kernel_id": 49, "tile": "32x32-k32", "value": 226947773},
+      {"kernel_id": 50, "tile": "64x64-k32", "value": 177030683},
+      {"kernel_id": 51, "tile": "128x32-k32", "value": 179486191},
+      {"kernel_id": 52, "tile": "128x64-k32", "value": 165793648}
+    ],
+    "k_stage_sweep_aggregate_median_ns": [
+      {"kernel_id": 52, "k_stage": 32, "value": 165793648},
+      {"kernel_id": 53, "k_stage": 64, "value": 192662763},
+      {"kernel_id": 54, "k_stage": 128, "value": 202643492}
+    ],
+    "k256_decision": "REJECT_BEFORE_INSTANTIATION: estimated 104448-byte LDS exceeds the device workgroup limit",
+    "buffering_sweep_aggregate_median_ns": [
+      {"kernel_id": 52, "buffering": "single", "value": 165793648},
+      {"kernel_id": 55, "buffering": "double", "value": 164974585}
+    ],
+    "adopted_kernel": {
+      "kernel_id": 55,
+      "logical_name": "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1",
+      "device_name": "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1",
+      "selector": "exact gfx1030 and the existing Phase67 dimension-only scope: M>=128, K>=2048, K%32=0, and either 2560<=N<=16384 or M>=512 and N==1024",
+      "rollback": "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69=vector32",
+      "lds_bytes": 26112,
+      "sgpr": 38,
+      "vgpr": 156,
+      "private_bytes": 0,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0,
+      "workgroup_size": 256,
+      "static_v_dot2_f32_f16": 512
+    },
+    "numerical_class": "N1"
+  },
+  "stage_c_mxfp6_shared_schedule": {
+    "decision": "TRANSFER_ACCEPTED; continue to packed-ingress evaluation",
+    "kernel_id": 56,
+    "logical_name": "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.scalar.v1",
+    "device_name": "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1",
+    "selector_under_test": "same exact-gfx1030 Phase74 MXFP6 dimension scope as ID47",
+    "operator_aggregate_median_ns": 52677669,
+    "control_id47_operator_aggregate_median_ns": 73872054,
+    "operator_speedup": 1.402341,
+    "draft_4b_1_plus_3": [
+      {"input_tokens": 512, "id47_median_tps": 387.905441, "id56_median_tps": 715.119610, "speedup": 1.843541},
+      {"input_tokens": 2048, "id47_median_tps": 373.079953, "id56_median_tps": 777.557769, "speedup": 2.084159}
+    ],
+    "resource": {
+      "lds_bytes": 26112,
+      "sgpr": 38,
+      "vgpr": 151,
+      "private_bytes": 0,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0,
+      "workgroup_size": 256,
+      "static_v_dot2_f32_f16": 512
+    },
+    "numerical_class": "N1"
+  },
+  "stage_d_mxfp6_packed_ingress": {
+    "decision": "ADOPT_ID57_SCOPED_DEFAULT",
+    "kernel_id": 57,
+    "logical_name": "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1",
+    "device_name": "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1",
+    "selector": "exact gfx1030, M>=128, K>=2048, K%32=0, 1024<=N<=32768",
+    "rollback": "SLLM_MXFP6_PREFILL_FORCE_PHASE74=gfx1030-half2-32x32",
+    "operator_aggregate_median_ns": 45985831,
+    "operator_speedup_over_id56": 1.145520,
+    "draft_4b_1_plus_3": [
+      {"input_tokens": 512, "id56_median_tps": 715.119610, "id57_median_tps": 1009.086332, "speedup": 1.411074},
+      {"input_tokens": 2048, "id56_median_tps": 777.557769, "id57_median_tps": 1100.491877, "speedup": 1.415318}
+    ],
+    "resource": {
+      "lds_bytes": 26112,
+      "sgpr": 40,
+      "vgpr": 151,
+      "private_bytes": 0,
+      "sgpr_spills": 0,
+      "vgpr_spills": 0,
+      "workgroup_size": 256,
+      "static_v_dot2_f32_f16": 512
+    },
+    "all_id56_id57_operator_output_digests_equal": true,
+    "numerical_class": "N0 relative to ID56"
+  },
+  "final_operator_10_repeats": [
+    {"kernel_id": 41, "format": "mxfp8", "case_count": 28, "aggregate_median_ns": 301622480, "max_relative_error": 0.003891051, "nonfinite_mismatch_count": 0},
+    {"kernel_id": 55, "format": "mxfp8", "case_count": 28, "aggregate_median_ns": 155490441, "speedup_over_control": 1.939814, "max_relative_error": 0.003891051, "nonfinite_mismatch_count": 0},
+    {"kernel_id": 47, "format": "mxfp6", "case_count": 10, "aggregate_median_ns": 73872054, "max_relative_error": 0.003875792, "nonfinite_mismatch_count": 0},
+    {"kernel_id": 56, "format": "mxfp6", "case_count": 10, "aggregate_median_ns": 52677669, "speedup_over_control": 1.402341, "max_relative_error": 0.003875792, "nonfinite_mismatch_count": 0},
+    {"kernel_id": 57, "format": "mxfp6", "case_count": 10, "aggregate_median_ns": 45985831, "speedup_over_id47": 1.606409, "max_relative_error": 0.003875792, "nonfinite_mismatch_count": 0}
+  ],
+  "final_full_model_4b_control_candidate_control_3_plus_10": {
+    "mxfp8": [
+      {"input_tokens": 512, "control_a_median_tps": 261.147202, "candidate_median_tps": 993.676549, "control_b_median_tps": 256.429210, "candidate_mad_tps": 0.658515, "speedup_range": [3.805044, 3.875052], "candidate_prefill_ns": 515300543, "candidate_e2e_ns": 745708984, "resident_vram_bytes": 4954035712, "peak_vram_bytes": 5292664320},
+      {"input_tokens": 2048, "control_a_median_tps": 252.117777, "candidate_median_tps": 1104.164340, "control_b_median_tps": 250.752669, "candidate_mad_tps": 1.054236, "speedup_range": [4.379558, 4.403400], "candidate_prefill_ns": 1856568980, "candidate_e2e_ns": 2099585281, "resident_vram_bytes": 4954035712, "peak_vram_bytes": 6153623040}
+    ],
+    "mxfp6": [
+      {"input_tokens": 512, "control_a_median_tps": 384.695393, "candidate_median_tps": 1008.723486, "control_b_median_tps": 384.728499, "candidate_mad_tps": 0.367609, "speedup_range": [2.621910, 2.622136], "candidate_prefill_ns": 507675331, "candidate_e2e_ns": 678295620, "resident_vram_bytes": 4061763072, "peak_vram_bytes": 4400391680},
+      {"input_tokens": 2048, "control_a_median_tps": 369.914972, "candidate_median_tps": 1095.389388, "control_b_median_tps": 369.991371, "candidate_mad_tps": 0.274844, "speedup_range": [2.960581, 2.961192], "candidate_prefill_ns": 1869700137, "candidate_e2e_ns": 2056465396, "resident_vram_bytes": 4061763072, "peak_vram_bytes": 5261350400}
+    ],
+    "common_invariants": {
+      "generated_token_ids": [23066, 23066, 23066, 23066],
+      "submission_count_per_process": 24336,
+      "kernel_dispatch_count_per_process": 39104,
+      "segment_count_per_process": 468,
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0
+    }
+  },
+  "profile_512": {
+    "mxfp8": {
+      "control_id41_prefill_matrix_percent": 88.70,
+      "candidate_id55_prefill_matrix_percent": 62.91,
+      "candidate_decode_matrix_percent": 25.37,
+      "candidate_linear_attention_column_state_percent": 3.17,
+      "candidate_prefill_attention_percent": 1.79,
+      "candidate_activation_quantizer_percent": 1.06
+    },
+    "mxfp6": {
+      "control_id47_prefill_matrix_percent": 87.16,
+      "candidate_id57_prefill_matrix_percent": 71.76,
+      "candidate_decode_matrix_percent": 16.22,
+      "candidate_linear_attention_column_state_percent": 3.69,
+      "candidate_prefill_attention_percent": 2.05,
+      "candidate_activation_quantizer_percent": 1.28
+    }
+  },
+  "qwen35_27b_mxfp6_default_1_plus_3": {
+    "input_tokens": 512,
+    "prefill_chunk_tokens": 512,
+    "median_prefill_tps": 157.753458,
+    "mad_prefill_tps": 0.018965,
+    "median_prefill_ns": 3245570703,
+    "resident_vram_bytes": 24115002880,
+    "peak_vram_bytes": 24777018880,
+    "speedup_over_phase71_gfx1030_default": 4.599373,
+    "generated_token_ids": [23066, 23066, 23066, 23066],
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0
+  },
+  "compile_only_regression": {
+    "gfx1201_wave32": "PASS",
+    "gfx942_sramecc_on_xnack_off_wave64": "PASS",
+    "runtime_performance_claimed": false
+  },
+  "verification": {
+    "cargo_fmt": "PASS",
+    "rust_runner_tests": "PASS 16/16",
+    "host_ctest": "PASS 5/5",
+    "gfx1030_codec_gpu_test": "PASS: all 256 E4M3FN codes x 4 lanes x both operands, all 64 E3M2 codes and packed lanes",
+    "operator_oracles": "PASS",
+    "full_model_4b_and_27b": "PASS",
+    "target_compile_regression": "PASS gfx1201 and gfx942",
+    "git_diff_check": "PASS"
+  },
+  "evidence_root": "/home/homelab1/.local/share/sllm-evidence/phase75",
+  "limitations": [
+    "The production selectors remain exact-gfx1030 and dimension scoped; results do not generalize to other RDNA2 SKUs or targets.",
+    "MXFP8 ID55 and MXFP6 ID56 change the accumulation tree and are N1 relative to their controls; independent FP32/BF16 numerical oracles passed.",
+    "The packed MXFP6 ID57 ingress is N0 relative to ID56 and preserved all operator BF16 digests.",
+    "Prefill matrix work remains the largest candidate-side kernel share, so this phase does not imply the remaining bottleneck moved to attention or KV.",
+    "No decode, attention, GDN, KV, NVFP4, MXFP4, batching, MoE, or persistent expanded-storage optimization is claimed."
+  ]
+}

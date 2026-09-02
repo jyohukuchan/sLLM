@@ -116,6 +116,36 @@ constexpr const char
         "matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale-vector32.v1";
 constexpr const char *kMxfp8W8A8PrefillMmqGfx1030RegscaleVector32DeviceSymbol =
     "sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_32x32K32LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.32x32.k32.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_32x32K32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_64x64K32LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.64x64.k32.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_64x64K32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x32K32LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.128x32.k32.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x32K32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K32LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K32DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K64LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k64.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K64DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K128LogicalKernelId =
+    "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k128.v1";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Half2_128x64K128DeviceSymbol =
+    "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1";
+constexpr const char
+    *kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleLogicalKernelId =
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1";
+constexpr const char
+    *kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleDeviceSymbol =
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1";
 static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.mmq-col8.regscale.v1") <= 64U);
 static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.mmq-col8.vector32.v1") <= 64U);
 static_assert(
@@ -123,6 +153,22 @@ static_assert(
 static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_v1") <= 64U);
 static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_vector32_v1") <= 64U);
 static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_mmq_col8_regscale_vector32_v1") <=
+              64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.32x32.k32.v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.64x64.k32.v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.128x32.k32.v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.128x64.k64.v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.128x64.k128.v1") <= 64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1") <= 64U);
+static_assert(sizeof("matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1") <=
+              64U);
+static_assert(sizeof("sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1") <=
               64U);
 constexpr const char *kMxfp8W8A8PrefillWmmaN16LogicalKernelId =
     "matmul.mxfp8.w8a8.e4m3.block32.prefill.wmma128x16x32.v1";
@@ -191,6 +237,8 @@ constexpr const char *kMxfp8W8A8PrefillMmqGfx1030ColumnsEnvironment =
     "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_COLUMNS";
 constexpr const char *kMxfp8W8A8PrefillMmqGfx1030Phase69Environment =
     "SLLM_MXFP8_PREFILL_FORCE_MMQ_GFX1030_PHASE69";
+constexpr const char *kMxfp8W8A8PrefillGfx1030Phase75Environment =
+    "SLLM_MXFP8_PREFILL_FORCE_PHASE75";
 constexpr uint32_t kMxfp8W8A8PrefillWmmaWorkgroupSize = 256U;
 constexpr uint32_t kMxfp8W8A8PrefillWmmaRowsPerWorkgroup = 128U;
 constexpr uint32_t kMxfp8W8A8PrefillWmma4WaveWorkgroupSize = 128U;
@@ -231,6 +279,18 @@ constexpr const char *kMxfp6W6A6PrefillGfx1030Half2Dot2LogicalKernelId =
     "matmul.mxfp6.w6a6.gfx1030.half2.32x32.v1";
 constexpr const char *kMxfp6W6A6PrefillGfx1030Half2Dot2DeviceSymbol =
     "sllm_mxfp6_w6a6_gfx1030_half2_32x32_v1";
+constexpr const char
+    *kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalarLogicalKernelId =
+        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.scalar.v1";
+constexpr const char
+    *kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalarDeviceSymbol =
+        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1";
+constexpr const char
+    *kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4LogicalKernelId =
+        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1";
+constexpr const char
+    *kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4DeviceSymbol =
+        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1";
 constexpr const char *kMxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64LogicalKernelId =
     "matmul.mxfp6.w6a6.gfx1201.wmma128x64.via-e4m3.v1";
 constexpr const char *kMxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64DeviceSymbol =
@@ -251,6 +311,8 @@ constexpr const char *kMxfp6W6A6PrefillPhase70Environment =
     "SLLM_MXFP6_PREFILL_FORCE_PHASE70";
 constexpr const char *kMxfp6W6A6PrefillPhase74Environment =
     "SLLM_MXFP6_PREFILL_FORCE_PHASE74";
+constexpr const char *kMxfp6W6A6PrefillPhase75Environment =
+    "SLLM_MXFP6_PREFILL_FORCE_PHASE75";
 constexpr const char *kMxfp6W6A6PrefillTiled16Environment =
     "SLLM_MXFP6_PREFILL_FORCE_TILED16";
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1030.mmq-col8.via-e4m3.v1") <= 64U);
@@ -259,6 +321,14 @@ static_assert(sizeof("matmul.mxfp6.w6a6.gfx1201.wmma128x64.via-e4m3.v1") <=
 static_assert(sizeof("sllm_mxfp6_w6a6_gfx1030_mmq_col8_via_e4m3_v1") <= 64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1030.half2.32x32.v1") <= 64U);
 static_assert(sizeof("sllm_mxfp6_w6a6_gfx1030_half2_32x32_v1") <= 64U);
+static_assert(sizeof("matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.scalar.v1") <=
+              64U);
+static_assert(sizeof("sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1") <=
+              64U);
+static_assert(sizeof("matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1") <=
+              64U);
+static_assert(sizeof("sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1") <=
+              64U);
 static_assert(sizeof("sllm_mxfp6_w6a6_gfx1201_wmma128x64_via_e4m3_v1") <= 64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4.v2") <= 64U);
 static_assert(sizeof("matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4-swar.v1") <=
@@ -318,6 +388,15 @@ enum class KernelVariant : uint32_t {
   Mxfp6W6A6PrefillWmmaGfx1201Pack4N128 = 46U,
   Mxfp6W6A6PrefillGfx1030Half2Dot2 = 47U,
   Mxfp6W6A6PrefillWmmaGfx1201Pack4Swar = 48U,
+  Mxfp8W8A8PrefillGfx1030Half2_32x32K32 = 49U,
+  Mxfp8W8A8PrefillGfx1030Half2_64x64K32 = 50U,
+  Mxfp8W8A8PrefillGfx1030Half2_128x32K32 = 51U,
+  Mxfp8W8A8PrefillGfx1030Half2_128x64K32 = 52U,
+  Mxfp8W8A8PrefillGfx1030Half2_128x64K64 = 53U,
+  Mxfp8W8A8PrefillGfx1030Half2_128x64K128 = 54U,
+  Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double = 55U,
+  Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar = 56U,
+  Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4 = 57U,
 };
 
 inline bool target_is(const char *const target,
@@ -513,6 +592,32 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m, const uint64_t k,
       (force_tiled16 != nullptr && std::strcmp(force_tiled16, "1") == 0)) {
     return fallback;
   }
+  const char *const force_gfx1030_phase75 =
+      std::getenv(kMxfp8W8A8PrefillGfx1030Phase75Environment);
+  if (exact_gfx1030 && phase67_mxfp8_mmq_gfx1030_supported_shape(m, k, n) &&
+      force_gfx1030_phase75 != nullptr) {
+    if (std::strcmp(force_gfx1030_phase75, "half2-32x32-k32") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-64x64-k32") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-128x32-k32") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-128x64-k32") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-128x64-k64") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-128x64-k128") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128;
+    }
+    if (std::strcmp(force_gfx1030_phase75, "half2-128x64-k32-double") == 0) {
+      return KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double;
+    }
+  }
   const char *const force_gfx1030_mmq =
       std::getenv(kMxfp8W8A8PrefillMmqGfx1030ColumnsEnvironment);
   const char *const force_gfx1030_phase69 =
@@ -543,7 +648,7 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m, const uint64_t k,
     return force_gfx1030_phase69 != nullptr &&
                    std::strcmp(force_gfx1030_phase69, "control") == 0
                ? KernelVariant::Mxfp8W8A8PrefillMmqCol8
-               : KernelVariant::Mxfp8W8A8PrefillMmqGfx1030Vector32;
+               : KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double;
   }
   const char *const force_wmma = std::getenv(kMxfp8W8A8PrefillWmmaEnvironment);
   const char *const force_wmma_n16 =
@@ -782,6 +887,16 @@ inline KernelVariant select_mxfp6_variant(const uint64_t m, const uint64_t k,
   }
   const char *const phase70 = std::getenv(kMxfp6W6A6PrefillPhase70Environment);
   const char *const phase74 = std::getenv(kMxfp6W6A6PrefillPhase74Environment);
+  const char *const phase75 = std::getenv(kMxfp6W6A6PrefillPhase75Environment);
+  if (phase74_gfx1030_mxfp6_half2_dot2_shape(m, k, n) &&
+      target_is(target, "gfx1030") && phase75 != nullptr) {
+    if (std::strcmp(phase75, "half2-128x64-k32-double-scalar") == 0) {
+      return KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar;
+    }
+    if (std::strcmp(phase75, "half2-128x64-k32-double-pack4") == 0) {
+      return KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4;
+    }
+  }
   if (phase74_gfx1030_mxfp6_half2_dot2_shape(m, k, n) &&
       target_is(target, "gfx1030") && phase74 != nullptr &&
       std::strcmp(phase74, "gfx1030-half2-32x32") == 0) {
@@ -826,7 +941,7 @@ inline KernelVariant select_mxfp6_variant(const uint64_t m, const uint64_t k,
   }
   if (target_is(target, "gfx1030") &&
       phase74_gfx1030_mxfp6_half2_dot2_default_shape(m, k, n)) {
-    return KernelVariant::Mxfp6W6A6PrefillGfx1030Half2Dot2;
+    return KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4;
   }
   if (target_is(target, "gfx1201") &&
       phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(m, k, n)) {
@@ -1049,6 +1164,35 @@ inline KernelVariant select_variant(const uint64_t m, const uint64_t k,
 }
 
 constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_32x32K32LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_64x64K32LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x32K32LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K32LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K64LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K128LogicalKernelId;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleLogicalKernelId;
+  }
+  if (variant ==
+      KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar) {
+    return kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalarLogicalKernelId;
+  }
+  if (variant ==
+      KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4) {
+    return kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4LogicalKernelId;
+  }
   return variant == KernelVariant::Fp8Native      ? kFp8NativeLogicalKernelId
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationLogicalKernelId
          : variant == KernelVariant::Nvfp4DecodePackedDequant
@@ -1143,6 +1287,35 @@ constexpr const char *logical_kernel_id(const KernelVariant variant) noexcept {
 }
 
 constexpr const char *device_symbol(const KernelVariant variant) noexcept {
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_32x32K32DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_64x64K32DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x32K32DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K64DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K128DeviceSymbol;
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double) {
+    return kMxfp8W8A8PrefillGfx1030Half2_128x64K32DoubleDeviceSymbol;
+  }
+  if (variant ==
+      KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar) {
+    return kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalarDeviceSymbol;
+  }
+  if (variant ==
+      KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4) {
+    return kMxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4DeviceSymbol;
+  }
   return variant == KernelVariant::Fp8Native      ? kFp8NativeDeviceSymbol
          : variant == KernelVariant::Fp8Emulation ? kFp8EmulationDeviceSymbol
          : variant == KernelVariant::Nvfp4DecodePackedDequant
@@ -1236,6 +1409,25 @@ constexpr const char *device_symbol(const KernelVariant variant) noexcept {
 
 constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
                                const uint64_t n) noexcept {
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32) {
+    return static_cast<uint32_t>(((m + 31U) / 32U) * ((n + 31U) / 32U));
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32) {
+    return static_cast<uint32_t>(((m + 63U) / 64U) * ((n + 63U) / 64U));
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32) {
+    return static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 31U) / 32U));
+  }
+  if (variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32 ||
+      variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64 ||
+      variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128 ||
+      variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double ||
+      variant ==
+          KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar ||
+      variant ==
+          KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4) {
+    return static_cast<uint32_t>(((m + 127U) / 128U) * ((n + 63U) / 64U));
+  }
   return variant == KernelVariant::Fp8Native ? static_cast<uint32_t>(n)
          : variant == KernelVariant::Nvfp4DecodePackedDequant
              ? static_cast<uint32_t>(n)

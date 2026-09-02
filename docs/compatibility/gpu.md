@@ -546,6 +546,21 @@ HIP-only、cleanupをすべてPASSした。`N=32768`はID45、`N=32769`は従来
 [Phase 73履歴](../history/2026/09/1-10/phase73-gfx1201-mxfp8-wide-n-selector.md)と
 [追跡要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)を正本とする。
 
+### 2026-09-03 Phase75 exact gfx1030 MXFP8／MXFP6 shared half2
+
+canonical V620 UUID `GPU-76a08c022586fed6`、exact `gfx1030`、wave32、ROCm 7.14 tupleで、共通half2
+software-MMQ bodyをMXFP8で先行評価してID55 128x64／K32／double-bufferを既存Phase 67 shapeへ限定採用した。
+同じscheduleをMXFP6 scalar-ingress ID56へ移植してからpacked E3M2x4 ingress ID57を評価し、ID57を既存Phase 74
+shapeへ限定採用した。ID41／47は明示rollbackとして維持する。
+
+Qwen3.5-4B、FP16 KV、3+10 control/candidate/controlの512／2,048-token prefill中央値はMXFP8
+`993.6765 / 1,104.1643 tok/s`、MXFP6 `1,008.7235 / 1,095.3894 tok/s`で、各候補は両controlより速かった。
+Qwen3.5-27B MXFP6 512 defaultも`157.7535 tok/s`をPASSした。全行はHIP-only、fallback／cleanup 0、生成token一致で、
+resident／peakは同formatのcontrolから増えていない。gfx1201とgfx942はtarget別compile-onlyをPASSしたが、新しい実機性能を
+主張しない。lifecycleは`experimental`のまま、evidenceはこのexact target／SKU／tuple／format／selector shapeへ限定する。
+詳細は[Phase 75履歴](../history/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)と
+[追跡要約](../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
+
 ### software.mdとの関係
 
 [ソフトウェア互換性方針](software.md)も完全なsoftware tupleのlifecycleを`supported`、`experimental`、`planned`、`unsupported`の四値に統一する。実機検証はsoftware lifecycleではなく、完全なtuple、日時、結果、対象機能を残す検証history/evidenceである。対象GPU機能まで同じtupleで検証した履歴は`evidence=project-verified`を支え、lifecycleを`supported`へ変更する根拠になり得る。

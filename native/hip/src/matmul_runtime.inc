@@ -182,6 +182,28 @@ matmul_lowp_concrete_provider_plan(
     concrete_tile = TilePolicy::BlockRow8Column8;
     concrete_inner_product = InnerProduct::DecodedBlockScaledFp32;
     break;
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K64:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K128:
+  case KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x64K32Double:
+    if (provider.format != MatmulFormat::Mxfp8E4M3W8A8 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp8Block32;
+    concrete_tile =
+        variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_32x32K32
+            ? TilePolicy::BlockRow32Column32
+        : variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_64x64K32
+            ? TilePolicy::BlockRow64Column64
+        : variant == KernelVariant::Mxfp8W8A8PrefillGfx1030Half2_128x32K32
+            ? TilePolicy::BlockRow128Column32
+            : TilePolicy::BlockRow128Column64;
+    concrete_inner_product = InnerProduct::E4M3Fp16Dot2Fp32;
+    break;
   case KernelVariant::Mxfp8W8A8PrefillWmmaN16:
     if (provider.format != MatmulFormat::Mxfp8E4M3W8A8) {
       return std::nullopt;
@@ -282,6 +304,16 @@ matmul_lowp_concrete_provider_plan(
     }
     concrete_provider = ProviderKind::Mxfp6Gfx1030Half2Dot2;
     concrete_tile = TilePolicy::BlockRow32Column32;
+    concrete_inner_product = InnerProduct::E3M2Fp16Dot2Fp32;
+    break;
+  case KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoubleScalar:
+  case KernelVariant::Mxfp6W6A6PrefillGfx1030Half2_128x64K32DoublePack4:
+    if (provider.format != MatmulFormat::Mxfp6E3M2W6A6 ||
+        provider.target != sllm_lowp::ExactTarget::Gfx1030) {
+      return std::nullopt;
+    }
+    concrete_provider = ProviderKind::Mxfp6Gfx1030Half2Dot2;
+    concrete_tile = TilePolicy::BlockRow128Column64;
     concrete_inner_product = InnerProduct::E3M2Fp16Dot2Fp32;
     break;
   case KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64:

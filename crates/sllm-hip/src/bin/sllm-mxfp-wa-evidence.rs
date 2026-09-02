@@ -87,6 +87,84 @@ const PHASE74_GFX1201_CANDIDATE_KERNEL_SYMBOL: &str =
     "matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4-swar.v1";
 const PHASE74_GFX1201_CANDIDATE_DEVICE_SYMBOL: &str =
     "sllm_mxfp6_w6a6_gfx1201_wmma128x64_pack4_swar_v1";
+const PHASE75_MXFP8_FORCE_ENV: &str = "SLLM_MXFP8_PREFILL_FORCE_PHASE75";
+const PHASE75_MXFP6_FORCE_ENV: &str = "SLLM_MXFP6_PREFILL_FORCE_PHASE75";
+const PHASE75_MXFP8_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[
+    (
+        49,
+        "id49-mxfp8-half2-32x32-k32",
+        "matmul.mxfp8.w8a8.gfx1030.half2.32x32.k32.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_32x32_k32_v1",
+        32,
+        32,
+    ),
+    (
+        50,
+        "id50-mxfp8-half2-64x64-k32",
+        "matmul.mxfp8.w8a8.gfx1030.half2.64x64.k32.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_64x64_k32_v1",
+        64,
+        64,
+    ),
+    (
+        51,
+        "id51-mxfp8-half2-128x32-k32",
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x32.k32.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x32_k32_v1",
+        128,
+        32,
+    ),
+    (
+        52,
+        "id52-mxfp8-half2-128x64-k32",
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_v1",
+        128,
+        64,
+    ),
+    (
+        53,
+        "id53-mxfp8-half2-128x64-k64",
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k64.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k64_v1",
+        128,
+        64,
+    ),
+    (
+        54,
+        "id54-mxfp8-half2-128x64-k128",
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k128.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k128_v1",
+        128,
+        64,
+    ),
+    (
+        55,
+        "id55-mxfp8-half2-128x64-k32-double",
+        "matmul.mxfp8.w8a8.gfx1030.half2.128x64.k32.double.v1",
+        "sllm_mxfp8_w8a8_gfx1030_half2_128x64_k32_double_v1",
+        128,
+        64,
+    ),
+];
+const PHASE75_MXFP6_HALF2_IDENTITIES: &[(u32, &str, &str, &str, usize, usize)] = &[
+    (
+        56,
+        "id56-mxfp6-half2-128x64-k32-double-scalar",
+        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.scalar.v1",
+        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_scalar_v1",
+        128,
+        64,
+    ),
+    (
+        57,
+        "id57-mxfp6-half2-128x64-k32-double-pack4",
+        "matmul.mxfp6.w6a6.gfx1030.half2.128x64.k32d.pack4.v1",
+        "sllm_mxfp6_w6a6_gfx1030_half2_128x64_k32d_pack4_v1",
+        128,
+        64,
+    ),
+];
 const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
     "SLLM_MXFP8_PREFILL_FORCE_ROW8",
@@ -102,6 +180,7 @@ const MXFP8_FORCE_ENVIRONMENTS: &[&str] = &[
     PHASE66_CANDIDATE_FORCE_ENV,
     PHASE67_CANDIDATE_FORCE_ENV,
     PHASE69_CANDIDATE_FORCE_ENV,
+    PHASE75_MXFP8_FORCE_ENV,
 ];
 const MXFP6_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_BASELINE",
@@ -110,6 +189,7 @@ const MXFP6_FORCE_ENVIRONMENTS: &[&str] = &[
     "SLLM_MX_WA_PREFILL_FORCE_MMQ_COLUMNS",
     PHASE70_CANDIDATE_FORCE_ENV,
     PHASE74_CANDIDATE_FORCE_ENV,
+    PHASE75_MXFP6_FORCE_ENV,
 ];
 const GFX1201_WMMA_CANDIDATE_IDENTITIES: &[(u32, &str, &str, u32)] = &[
     (
@@ -821,6 +901,126 @@ impl Phase74Provider {
 }
 
 #[derive(Clone, Copy)]
+enum Phase75Provider {
+    Mxfp8Id41Control,
+    Mxfp8Half2_32x32K32,
+    Mxfp8Half2_64x64K32,
+    Mxfp8Half2_128x32K32,
+    Mxfp8Half2_128x64K32,
+    Mxfp8Half2_128x64K64,
+    Mxfp8Half2_128x64K128,
+    Mxfp8Half2_128x64K32Double,
+    Mxfp6Id47Control,
+    Mxfp6Half2_128x64K32DoubleScalar,
+    Mxfp6Half2_128x64K32DoublePack4,
+}
+
+impl Phase75Provider {
+    fn identity(self) -> (u32, &'static str, &'static str, &'static str, usize, usize) {
+        match self {
+            Self::Mxfp8Id41Control => (
+                PHASE69_VECTOR32_KERNEL_ID,
+                "id41-mxfp8-vector32-control",
+                PHASE69_VECTOR32_KERNEL_SYMBOL,
+                PHASE69_VECTOR32_DEVICE_SYMBOL,
+                8,
+                8,
+            ),
+            Self::Mxfp8Half2_32x32K32 => PHASE75_MXFP8_HALF2_IDENTITIES[0],
+            Self::Mxfp8Half2_64x64K32 => PHASE75_MXFP8_HALF2_IDENTITIES[1],
+            Self::Mxfp8Half2_128x32K32 => PHASE75_MXFP8_HALF2_IDENTITIES[2],
+            Self::Mxfp8Half2_128x64K32 => PHASE75_MXFP8_HALF2_IDENTITIES[3],
+            Self::Mxfp8Half2_128x64K64 => PHASE75_MXFP8_HALF2_IDENTITIES[4],
+            Self::Mxfp8Half2_128x64K128 => PHASE75_MXFP8_HALF2_IDENTITIES[5],
+            Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_HALF2_IDENTITIES[6],
+            Self::Mxfp6Id47Control => (
+                PHASE74_CANDIDATE_KERNEL_ID,
+                "id47-mxfp6-half2-32x32-control",
+                PHASE74_CANDIDATE_KERNEL_SYMBOL,
+                PHASE74_CANDIDATE_DEVICE_SYMBOL,
+                32,
+                32,
+            ),
+            Self::Mxfp6Half2_128x64K32DoubleScalar => PHASE75_MXFP6_HALF2_IDENTITIES[0],
+            Self::Mxfp6Half2_128x64K32DoublePack4 => PHASE75_MXFP6_HALF2_IDENTITIES[1],
+        }
+    }
+
+    fn format(self) -> Format {
+        match self {
+            Self::Mxfp8Id41Control
+            | Self::Mxfp8Half2_32x32K32
+            | Self::Mxfp8Half2_64x64K32
+            | Self::Mxfp8Half2_128x32K32
+            | Self::Mxfp8Half2_128x64K32
+            | Self::Mxfp8Half2_128x64K64
+            | Self::Mxfp8Half2_128x64K128
+            | Self::Mxfp8Half2_128x64K32Double => Format::Mxfp8,
+            Self::Mxfp6Id47Control
+            | Self::Mxfp6Half2_128x64K32DoubleScalar
+            | Self::Mxfp6Half2_128x64K32DoublePack4 => Format::Mxfp6,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        self.identity().1
+    }
+
+    fn kernel_id(self) -> u32 {
+        self.identity().0
+    }
+
+    fn kernel_symbol(self) -> &'static str {
+        self.identity().2
+    }
+
+    fn device_symbol(self) -> &'static str {
+        self.identity().3
+    }
+
+    fn rows(self) -> usize {
+        self.identity().4
+    }
+
+    fn columns(self) -> usize {
+        self.identity().5
+    }
+
+    fn force_environment(self) -> &'static str {
+        match self {
+            Self::Mxfp8Id41Control => PHASE69_CANDIDATE_FORCE_ENV,
+            Self::Mxfp8Half2_32x32K32
+            | Self::Mxfp8Half2_64x64K32
+            | Self::Mxfp8Half2_128x32K32
+            | Self::Mxfp8Half2_128x64K32
+            | Self::Mxfp8Half2_128x64K64
+            | Self::Mxfp8Half2_128x64K128
+            | Self::Mxfp8Half2_128x64K32Double => PHASE75_MXFP8_FORCE_ENV,
+            Self::Mxfp6Id47Control => PHASE74_CANDIDATE_FORCE_ENV,
+            Self::Mxfp6Half2_128x64K32DoubleScalar | Self::Mxfp6Half2_128x64K32DoublePack4 => {
+                PHASE75_MXFP6_FORCE_ENV
+            }
+        }
+    }
+
+    fn force_value(self) -> &'static str {
+        match self {
+            Self::Mxfp8Id41Control => "vector32",
+            Self::Mxfp8Half2_32x32K32 => "half2-32x32-k32",
+            Self::Mxfp8Half2_64x64K32 => "half2-64x64-k32",
+            Self::Mxfp8Half2_128x32K32 => "half2-128x32-k32",
+            Self::Mxfp8Half2_128x64K32 => "half2-128x64-k32",
+            Self::Mxfp8Half2_128x64K64 => "half2-128x64-k64",
+            Self::Mxfp8Half2_128x64K128 => "half2-128x64-k128",
+            Self::Mxfp8Half2_128x64K32Double => "half2-128x64-k32-double",
+            Self::Mxfp6Id47Control => PHASE74_CANDIDATE_FORCE_VALUE,
+            Self::Mxfp6Half2_128x64K32DoubleScalar => "half2-128x64-k32-double-scalar",
+            Self::Mxfp6Half2_128x64K32DoublePack4 => "half2-128x64-k32-double-pack4",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 enum EvidenceMode {
     Phase62 {
         production_shape: bool,
@@ -853,6 +1053,11 @@ enum EvidenceMode {
         provider: Phase74Provider,
         production_shape: bool,
     },
+    Phase75 {
+        repeats: usize,
+        provider: Phase75Provider,
+        production_shape: bool,
+    },
 }
 
 impl EvidenceMode {
@@ -865,6 +1070,7 @@ impl EvidenceMode {
             Self::Phase69 { repeats, .. } => repeats,
             Self::Phase70 { repeats, .. } => repeats,
             Self::Phase74 { repeats, .. } => repeats,
+            Self::Phase75 { repeats, .. } => repeats,
         }
     }
 
@@ -877,6 +1083,7 @@ impl EvidenceMode {
             Self::Phase69 { .. } => "sllm-phase69-gfx1030-mxfp8-software-mmq-provider-gpu-v1",
             Self::Phase70 { .. } => "sllm-phase70-rdna-mxfp6-via-e4m3-provider-gpu-v1",
             Self::Phase74 { .. } => "sllm-phase74-rdna-mxfp6-provider-gpu-v1",
+            Self::Phase75 { .. } => "sllm-phase75-gfx1030-shared-half2-provider-gpu-v1",
         }
     }
 
@@ -885,6 +1092,7 @@ impl EvidenceMode {
             Self::Phase69 { .. } => 2,
             Self::Phase70 { .. } => 1,
             Self::Phase74 { .. } => 1,
+            Self::Phase75 { .. } => 1,
             _ => 0,
         }
     }
@@ -898,6 +1106,7 @@ impl EvidenceMode {
             Self::Phase69 { .. } => Some("phase69-provider"),
             Self::Phase70 { .. } => Some("phase70-provider"),
             Self::Phase74 { .. } => Some("phase74-provider"),
+            Self::Phase75 { .. } => Some("phase75-provider"),
         }
     }
 
@@ -932,6 +1141,13 @@ impl EvidenceMode {
     fn phase74_provider(self) -> Option<Phase74Provider> {
         match self {
             Self::Phase74 { provider, .. } => Some(provider),
+            _ => None,
+        }
+    }
+
+    fn phase75_provider(self) -> Option<Phase75Provider> {
+        match self {
+            Self::Phase75 { provider, .. } => Some(provider),
             _ => None,
         }
     }
@@ -1004,6 +1220,10 @@ struct CaseReport {
     phase74_provider: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     phase74_candidate: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase75_provider: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase75_candidate: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     actual_dispatch_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1234,11 +1454,34 @@ fn validate_actual_dispatch(
         (Format::Mxfp6, 1) => dispatch.kernel_id == 20,
         (Format::Mxfp8, _) => matches!(
             dispatch.kernel_id,
-            19 | 22 | 24 | 26 | 27 | 30 | 31 | 32 | 33 | 34 | 35 | 36 | 37 | 38 | 39 | 40 | 41 | 42
+            19 | 22
+                | 24
+                | 26
+                | 27
+                | 30
+                | 31
+                | 32
+                | 33
+                | 34
+                | 35
+                | 36
+                | 37
+                | 38
+                | 39
+                | 40
+                | 41
+                | 42
+                | 49
+                | 50
+                | 51
+                | 52
+                | 53
+                | 54
+                | 55
         ),
         (Format::Mxfp6, _) => matches!(
             dispatch.kernel_id,
-            21 | 23 | 25 | 28 | 29 | 43 | 44 | 45 | 46 | 47 | 48
+            21 | 23 | 25 | 28 | 29 | 43 | 44 | 45 | 46 | 47 | 48 | 56 | 57
         ),
     };
     let format_fragment = match format {
@@ -1420,6 +1663,62 @@ fn validate_actual_dispatch(
             ));
         }
     }
+    if let Some((_, _, kernel_symbol, device_symbol, rows, columns)) =
+        PHASE75_MXFP8_HALF2_IDENTITIES
+            .iter()
+            .find(|(kernel_id, _, _, _, _, _)| *kernel_id == dispatch.kernel_id)
+    {
+        let expected_grid_size_x = m
+            .div_ceil(*rows)
+            .checked_mul(n.div_ceil(*columns))
+            .ok_or_else(|| "Phase 75 candidate grid size overflowed usize".to_owned())?;
+        let expected_grid_size_x = u32::try_from(expected_grid_size_x)
+            .map_err(|_| "Phase 75 candidate grid size exceeds u32".to_owned())?;
+        if format != Format::Mxfp8
+            || target != "gfx1030"
+            || m <= 1
+            || k == 0
+            || k % 32 != 0
+            || n == 0
+            || dispatch.kernel_symbol != *kernel_symbol
+            || dispatch.device_symbol != *device_symbol
+            || dispatch.workgroup_size_x != 256
+            || dispatch.grid_size_x != expected_grid_size_x
+        {
+            return Err(format!(
+                "Phase 75 candidate kernel {} escaped its exact gfx1030 MXFP8 half2 scope",
+                dispatch.kernel_id
+            ));
+        }
+    }
+    if let Some((_, _, kernel_symbol, device_symbol, rows, columns)) =
+        PHASE75_MXFP6_HALF2_IDENTITIES
+            .iter()
+            .find(|(kernel_id, _, _, _, _, _)| *kernel_id == dispatch.kernel_id)
+    {
+        let expected_grid_size_x = m
+            .div_ceil(*rows)
+            .checked_mul(n.div_ceil(*columns))
+            .ok_or_else(|| "Phase 75 MXFP6 candidate grid size overflowed usize".to_owned())?;
+        let expected_grid_size_x = u32::try_from(expected_grid_size_x)
+            .map_err(|_| "Phase 75 MXFP6 candidate grid size exceeds u32".to_owned())?;
+        if format != Format::Mxfp6
+            || target != "gfx1030"
+            || m <= 1
+            || k == 0
+            || k % 32 != 0
+            || n == 0
+            || dispatch.kernel_symbol != *kernel_symbol
+            || dispatch.device_symbol != *device_symbol
+            || dispatch.workgroup_size_x != 256
+            || dispatch.grid_size_x != expected_grid_size_x
+        {
+            return Err(format!(
+                "Phase 75 candidate kernel {} escaped its exact gfx1030 MXFP6 half2 scope",
+                dispatch.kernel_id
+            ));
+        }
+    }
     if let Some((_, kernel_symbol, device_symbol, workgroup_size)) =
         GFX1030_MMQ_CANDIDATE_IDENTITIES
             .iter()
@@ -1471,6 +1770,41 @@ fn validate_phase74_provider_dispatch(
     {
         return Err(format!(
             "Phase 74 {} expected kernel {} dispatch but observed {dispatch:?}",
+            provider.name(),
+            provider.kernel_id()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_phase75_provider_dispatch(
+    provider: Phase75Provider,
+    m: usize,
+    n: usize,
+    target: &str,
+    dispatch: &DispatchEvidence,
+) -> Result<(), String> {
+    let expected_grid_size_x = if matches!(provider, Phase75Provider::Mxfp8Id41Control) {
+        m.div_ceil(8)
+            .checked_mul(n.div_ceil(8))
+            .ok_or_else(|| "Phase 75 control grid size overflowed usize".to_owned())?
+    } else {
+        m.div_ceil(provider.rows())
+            .checked_mul(n.div_ceil(provider.columns()))
+            .ok_or_else(|| "Phase 75 candidate grid size overflowed usize".to_owned())?
+    };
+    let expected_grid_size_x = u32::try_from(expected_grid_size_x)
+        .map_err(|_| "Phase 75 provider grid size exceeds u32".to_owned())?;
+    if target != "gfx1030"
+        || dispatch.target != "gfx1030"
+        || dispatch.kernel_id != provider.kernel_id()
+        || dispatch.kernel_symbol != provider.kernel_symbol()
+        || dispatch.device_symbol != provider.device_symbol()
+        || dispatch.workgroup_size_x != 256
+        || dispatch.grid_size_x != expected_grid_size_x
+    {
+        return Err(format!(
+            "Phase 75 {} expected kernel {} dispatch but observed {dispatch:?}",
             provider.name(),
             provider.kernel_id()
         ));
@@ -1699,7 +2033,9 @@ fn run_case(
             .submit(&prepared, queue)
             .map_err(|error| error.to_string())?;
         let dispatch = submission.dispatch().clone();
-        let warmup_label = if matches!(mode, EvidenceMode::Phase74 { .. }) {
+        let warmup_label = if matches!(mode, EvidenceMode::Phase75 { .. }) {
+            "Phase 75 warmup"
+        } else if matches!(mode, EvidenceMode::Phase74 { .. }) {
             "Phase 74 warmup"
         } else {
             "Phase 69 warmup"
@@ -1709,6 +2045,10 @@ fn run_case(
             .map_err(|error| format!("warmup {warmup}: {error}"))?;
         if let EvidenceMode::Phase74 { provider, .. } = mode {
             validate_phase74_provider_dispatch(provider, m, n, target, &dispatch)
+                .map_err(|error| format!("warmup {warmup}: {error}"))?;
+        }
+        if let EvidenceMode::Phase75 { provider, .. } = mode {
+            validate_phase75_provider_dispatch(provider, m, n, target, &dispatch)
                 .map_err(|error| format!("warmup {warmup}: {error}"))?;
         }
     }
@@ -1721,6 +2061,9 @@ fn run_case(
         validate_actual_dispatch(format, m, k, n, target, &dispatch)?;
         if let EvidenceMode::Phase74 { provider, .. } = mode {
             validate_phase74_provider_dispatch(provider, m, n, target, &dispatch)?;
+        }
+        if let EvidenceMode::Phase75 { provider, .. } = mode {
+            validate_phase75_provider_dispatch(provider, m, n, target, &dispatch)?;
         }
         if dispatch.workgroup_size_x == 0 || dispatch.grid_size_x == 0 {
             return Err(format!(
@@ -1801,6 +2144,7 @@ fn run_case(
     let phase69_provider = mode.phase69_provider();
     let phase70_provider = mode.phase70_provider();
     let phase74_provider = mode.phase74_provider();
+    let phase75_provider = mode.phase75_provider();
     let phase74_candidate = phase74_provider.map(|provider| {
         kernel_id == provider.kernel_id()
             && kernel_symbol == provider.kernel_symbol()
@@ -1865,6 +2209,8 @@ fn run_case(
         phase70_candidate: phase70_provider.map(|provider| kernel_id == provider.kernel_id()),
         phase74_provider: phase74_provider.map(Phase74Provider::name),
         phase74_candidate,
+        phase75_provider: phase75_provider.map(Phase75Provider::name),
+        phase75_candidate: phase75_provider.map(|provider| kernel_id == provider.kernel_id()),
         actual_dispatch_count: detailed.then_some(dispatch_count),
         workgroup_size_x: detailed.then_some(workgroup_size_x),
         grid_size_x: detailed.then_some(grid_size_x),
@@ -2571,6 +2917,14 @@ fn phase74_cases(production_shape: bool) -> Vec<CaseSpec> {
     phase70_cases(production_shape, false)
 }
 
+fn phase75_cases(production_shape: bool, provider: Phase75Provider) -> Vec<CaseSpec> {
+    match (provider.format(), production_shape) {
+        (Format::Mxfp8, true) => phase69_cases(),
+        (Format::Mxfp8, false) => phase66_cases(),
+        (Format::Mxfp6, _) => phase74_cases(production_shape),
+    }
+}
+
 fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, String> {
     match mode {
         EvidenceMode::Phase62 { .. } if !matches!(target.as_str(), "gfx1030" | "gfx1201") => {
@@ -2622,6 +2976,12 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
                 "Phase 74 {} mode requires exact {}",
                 provider.name(),
                 provider.target()
+            ));
+        }
+        EvidenceMode::Phase75 { provider, .. } if target != "gfx1030" => {
+            return Err(format!(
+                "Phase 75 {} mode requires exact gfx1030",
+                provider.name()
             ));
         }
         _ => {}
@@ -2692,6 +3052,23 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             }
         }
     }
+    if let EvidenceMode::Phase75 { provider, .. } = mode {
+        let force_environments = match provider.format() {
+            Format::Mxfp8 => MXFP8_FORCE_ENVIRONMENTS,
+            Format::Mxfp6 => MXFP6_FORCE_ENVIRONMENTS,
+        };
+        for environment in force_environments {
+            let value = std::env::var(environment).ok();
+            let expected =
+                (*environment == provider.force_environment()).then_some(provider.force_value());
+            if value.as_deref() != expected {
+                return Err(format!(
+                    "Phase 75 {} environment isolation failed for {environment}: expected={expected:?} actual={value:?}",
+                    provider.name()
+                ));
+            }
+        }
+    }
     let device = Context::query_device(device_index).map_err(|error| error.to_string())?;
     if device.gcn_arch_name != target {
         return Err(format!(
@@ -2724,6 +3101,11 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             EvidenceMode::Phase74 {
                 production_shape, ..
             } => phase74_cases(production_shape),
+            EvidenceMode::Phase75 {
+                production_shape,
+                provider,
+                ..
+            } => phase75_cases(production_shape, provider),
         };
         let mut cases = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -2753,6 +3135,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase69 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase70 { provider, .. } => Some(provider.kernel_id()),
         EvidenceMode::Phase74 { provider, .. } => Some(provider.kernel_id()),
+        EvidenceMode::Phase75 { provider, .. } => Some(provider.kernel_id()),
     };
     let candidate_case_count = cases
         .iter()
@@ -2801,6 +3184,12 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             expected_candidate_kernel_id.unwrap_or_default()
         ));
     }
+    if matches!(mode, EvidenceMode::Phase75 { .. }) && candidate_submission_count == 0 {
+        return Err(format!(
+            "Phase 75 expected kernel {} was never dispatched",
+            expected_candidate_kernel_id.unwrap_or_default()
+        ));
+    }
     let detailed = mode.report_mode().is_some();
     let (production_shape_included, wide_n_shape_included, candidate_required) = match mode {
         EvidenceMode::Phase62 { .. } => (None, None, None),
@@ -2820,6 +3209,9 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase74 {
             production_shape, ..
         } => (Some(production_shape), None, Some(true)),
+        EvidenceMode::Phase75 {
+            production_shape, ..
+        } => (Some(production_shape), None, Some(true)),
     };
     Ok(Report {
         schema_version: mode.schema_version(),
@@ -2831,7 +3223,8 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             .or_else(|| mode.phase67_provider().map(Phase67Provider::name))
             .or_else(|| mode.phase69_provider().map(Phase69Provider::name))
             .or_else(|| mode.phase70_provider().map(Phase70Provider::name))
-            .or_else(|| mode.phase74_provider().map(Phase74Provider::name)),
+            .or_else(|| mode.phase74_provider().map(Phase74Provider::name))
+            .or_else(|| mode.phase75_provider().map(Phase75Provider::name)),
         target,
         device_index,
         block_size: 32,
@@ -3372,6 +3765,72 @@ fn main() -> ExitCode {
                 production_shape,
             })
         }
+        Some("phase75-provider") => {
+            let provider = match arguments.next().as_deref() {
+                Some("id41-mxfp8-vector32-control") => Phase75Provider::Mxfp8Id41Control,
+                Some("id49-mxfp8-half2-32x32-k32") => Phase75Provider::Mxfp8Half2_32x32K32,
+                Some("id50-mxfp8-half2-64x64-k32") => Phase75Provider::Mxfp8Half2_64x64K32,
+                Some("id51-mxfp8-half2-128x32-k32") => Phase75Provider::Mxfp8Half2_128x32K32,
+                Some("id52-mxfp8-half2-128x64-k32") => Phase75Provider::Mxfp8Half2_128x64K32,
+                Some("id53-mxfp8-half2-128x64-k64") => Phase75Provider::Mxfp8Half2_128x64K64,
+                Some("id54-mxfp8-half2-128x64-k128") => Phase75Provider::Mxfp8Half2_128x64K128,
+                Some("id55-mxfp8-half2-128x64-k32-double") => {
+                    Phase75Provider::Mxfp8Half2_128x64K32Double
+                }
+                Some("id47-mxfp6-half2-32x32-control") => Phase75Provider::Mxfp6Id47Control,
+                Some("id56-mxfp6-half2-128x64-k32-double-scalar") => {
+                    Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar
+                }
+                Some("id57-mxfp6-half2-128x64-k32-double-pack4") => {
+                    Phase75Provider::Mxfp6Half2_128x64K32DoublePack4
+                }
+                Some(value) => {
+                    eprintln!("invalid Phase 75 provider {value}");
+                    return ExitCode::FAILURE;
+                }
+                None => {
+                    eprintln!("phase75-provider requires a provider role");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let mut repeats = 3_usize;
+            let mut repeat_seen = false;
+            let mut production_shape = false;
+            while let Some(argument) = arguments.next() {
+                match argument.as_str() {
+                    "--repeats" if !repeat_seen => {
+                        repeat_seen = true;
+                        let Some(value) = arguments.next() else {
+                            eprintln!("--repeats requires a value");
+                            return ExitCode::FAILURE;
+                        };
+                        repeats = match value.parse::<usize>() {
+                            Ok(value @ 2..=10) => value,
+                            Ok(_) => {
+                                eprintln!("Phase 75 repeats must be between 2 and 10");
+                                return ExitCode::FAILURE;
+                            }
+                            Err(error) => {
+                                eprintln!("invalid Phase 75 repeat count: {error}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                    }
+                    "--production-shape" if !production_shape => production_shape = true,
+                    _ => {
+                        eprintln!(
+                            "invalid Phase 75 argument {argument}; expected --repeats N or --production-shape"
+                        );
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            RequestedMode::Direct(EvidenceMode::Phase75 {
+                repeats,
+                provider,
+                production_shape,
+            })
+        }
         Some("phase70-provider") => {
             let provider = match arguments.next().as_deref() {
                 Some("id45-gfx1201-pack4-n64-default") => Phase70Provider::Gfx1201Default,
@@ -3437,7 +3896,7 @@ fn main() -> ExitCode {
         }
         Some(value) => {
             eprintln!(
-                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, or phase74-provider"
+                "invalid profile {value}; expected production, phase63, phase66, phase67-provider, phase69-provider, phase70-provider, phase74-provider, or phase75-provider"
             );
             return ExitCode::FAILURE;
         }
@@ -4006,6 +4465,88 @@ mod tests {
         assert_eq!(cases.len(), phase67_cases().len() + 2);
         for shape in [(512, 2560, 4096), (512, 4096, 2560)] {
             assert!(cases.iter().any(|case| (case.m, case.k, case.n) == shape));
+        }
+    }
+
+    #[test]
+    fn phase75_provider_identities_and_case_formats_are_stable() {
+        let providers = [
+            Phase75Provider::Mxfp8Id41Control,
+            Phase75Provider::Mxfp8Half2_32x32K32,
+            Phase75Provider::Mxfp8Half2_64x64K32,
+            Phase75Provider::Mxfp8Half2_128x32K32,
+            Phase75Provider::Mxfp8Half2_128x64K32,
+            Phase75Provider::Mxfp8Half2_128x64K64,
+            Phase75Provider::Mxfp8Half2_128x64K128,
+            Phase75Provider::Mxfp8Half2_128x64K32Double,
+            Phase75Provider::Mxfp6Id47Control,
+            Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar,
+            Phase75Provider::Mxfp6Half2_128x64K32DoublePack4,
+        ];
+        assert_eq!(
+            providers.map(Phase75Provider::kernel_id),
+            [41, 49, 50, 51, 52, 53, 54, 55, 47, 56, 57]
+        );
+        for provider in providers {
+            assert_eq!(
+                provider.force_environment(),
+                match provider.format() {
+                    Format::Mxfp8 if provider.kernel_id() == 41 => PHASE69_CANDIDATE_FORCE_ENV,
+                    Format::Mxfp8 => PHASE75_MXFP8_FORCE_ENV,
+                    Format::Mxfp6 if provider.kernel_id() == 47 => PHASE74_CANDIDATE_FORCE_ENV,
+                    Format::Mxfp6 => PHASE75_MXFP6_FORCE_ENV,
+                }
+            );
+            let cases = phase75_cases(true, provider);
+            assert!(!cases.is_empty());
+            assert!(cases.iter().all(|case| case.format == provider.format()));
+        }
+    }
+
+    #[test]
+    fn phase75_mxfp6_candidate_dispatch_identity_is_exact() {
+        for provider in [
+            Phase75Provider::Mxfp6Half2_128x64K32DoubleScalar,
+            Phase75Provider::Mxfp6Half2_128x64K32DoublePack4,
+        ] {
+            let dispatch = DispatchEvidence {
+                abi_version: 1,
+                info_version: 1,
+                dispatch_id: 1,
+                dispatch_count: 2,
+                kernel_id: provider.kernel_id(),
+                workgroup_size_x: 256,
+                grid_size_x: u32::try_from(129_usize.div_ceil(128) * 65_usize.div_ceil(64))
+                    .unwrap(),
+                row_count: 129,
+                normalized_size: 129 * 65,
+                backend: 1,
+                fallback_allowed: false,
+                fallback_used: false,
+                kernel_symbol: provider.kernel_symbol().to_owned(),
+                device_symbol: provider.device_symbol().to_owned(),
+                target: "gfx1030".to_owned(),
+            };
+            assert!(
+                validate_actual_dispatch(Format::Mxfp6, 129, 2080, 65, "gfx1030", &dispatch)
+                    .is_ok()
+            );
+            assert!(
+                validate_phase75_provider_dispatch(provider, 129, 65, "gfx1030", &dispatch).is_ok()
+            );
+            for (format, m, k, n, target) in [
+                (Format::Mxfp6, 1, 2080, 65, "gfx1030"),
+                (Format::Mxfp6, 129, 2079, 65, "gfx1030"),
+                (Format::Mxfp6, 129, 2080, 0, "gfx1030"),
+                (Format::Mxfp6, 129, 2080, 65, "gfx1201"),
+                (Format::Mxfp8, 129, 2080, 65, "gfx1030"),
+            ] {
+                let mut invalid = dispatch.clone();
+                invalid.row_count = m as u64;
+                invalid.normalized_size = (m * n) as u64;
+                invalid.target = target.to_owned();
+                assert!(validate_actual_dispatch(format, m, k, n, target, &invalid).is_err());
+            }
         }
     }
 }

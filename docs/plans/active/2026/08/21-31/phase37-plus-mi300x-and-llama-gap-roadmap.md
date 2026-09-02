@@ -30,9 +30,9 @@ Phase 67〜69ではexact gfx1030のMXFP8 software-MMQを段階的に改善し、
 Phase 71〜73はQwen3.5-27B MXFP6対応とgfx1201 MXFP6／MXFP8 wide-N selectorを完了した。2026-09-03の
 ユーザー指示によるPhase 74ではMXFP6 prefillに限定し、fixed llama.cpp Q6_Kとの比較から実装・benchmark・残差再比較へ
 戻るループを3回完了した。exact gfx1030のID47とexact gfx1201のID48を限定採用し、共通quantizer候補は退行により棄却した。
-decode、KV、他formatは変更していない。2026-09-03のユーザー指示により、Phase 75はexact gfx1030の共通half2経路を
-MXFP8で先行判定し、MXFP6へ適用・別判定した後、MXFP6固有packed E3M2x4 ingressを追加して最終benchmarkを整理する
-次Phaseとして計画した。
+decode、KV、他formatは変更していない。Phase 75ではexact gfx1030の共通half2経路をMXFP8で先行判定し、MXFP6へ
+適用・別判定した後、MXFP6固有packed E3M2x4 ingressを追加した。MXFP8 ID55／MXFP6 ID57を限定採用し、4B／27Bの
+最終benchmarkとprofileまで完了した。
 
 この計画はユーザー指示によりPhase番号と順序を割り当てる。Phase 36以前の完了条件を遡及変更せず、
 角括弧で将来項目だったResponses APIとWebUIも後続Phaseへ割り当てる。各Phaseのcorrectness/security条件は必須とする。
@@ -108,7 +108,7 @@ MXFP8で先行判定し、MXFP6へ適用・別判定した後、MXFP6固有packe
 | 72 | complete-scoped-adoption | gfx1201 MXFP6 ID45 wide-N selector | N<=32768 operator／27B default route |
 | 73 | complete-user-directed | gfx1201 MXFP8 wide-N selector | N<=32768 host／provider contract、追加GPU検証なし |
 | 74 | complete-two-target-scoped-adoption | MXFP6 prefillのllama.cpp比較→実装→benchmarkを3回完了 | gfx1030 ID47／gfx1201 ID48採用、quantizer候補棄却、4B／27B PASS |
-| 75 | planned | gfx1030 MXFP8先行・MXFP6共通half2最適化 | MXFP8判定→MXFP6移植判定→packed E3M2x4判定→4B／27B結果整理 |
+| 75 | completed | gfx1030 MXFP8先行・MXFP6共通half2最適化 | ID55／57限定採用、4B／27B結果整理完了 |
 
 直近の性能laneの番号上の既定順はPhase 49→50→51→52である。Phase 49の3候補判定と採用経路の退行確認、Phase 50のR9700採否と
 MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700限定のPhase 52を先に完了し、2026-08-25のユーザー指示で再開して完了した。Phase 49では候補routeをexact `gfx1030`へ、Phase 50では
@@ -116,7 +116,7 @@ MI300X wave64引継ぎ準備は完了した。Phase 51は一時保留中にR9700
 Phase 53のdescriptor v1／v2評価とPhase 54の改善研究は当時の証拠として完了済みである。2026-08-30のユーザー決定により
 block16製品経路は廃止し、両local targetを含むreviewed Qwen3.5-4B BF16 dense textの省略時KVをstandard OCP
 `kv-mxfp8-e4`へ変更した。gfx942のfresh実機証拠は追加のMI300X検証項目がまとまった時点の一括実行候補へ延期する。
-Phase 55〜74は完了済みである。次は計画済みPhase 75を実行し、その後のlow-precision候補を独立NVFP4 specializationとする。
+Phase 55〜75は完了済みである。次のlow-precision候補は未計画の独立NVFP4 specializationとする。
 Phase 47〜48は内容と番号を保持する。
 
 複数surfaceへ現れる機能の所有権は一つに固定する。Phase 39はresumable transport/replay、Phase 40はsamplerと`n` choice
@@ -721,14 +721,16 @@ prototype完了をPhase全体完了へ読み替えない。
 
 ## Phase 75: gfx1030 MXFP8先行・MXFP6共通half2最適化
 
-- exact `gfx1030`のdense prefillに限定し、共通Tile／KStage／half2 bodyをbyte-aligned MXFP8 E4M3で先に実装・検証する。
-  32x32 controlから64x64／128x32／128x64を比較し、最良geometryでK64／128／256とbufferingを一変数ずつ判定する。
-- MXFP8でcorrectness／resourceを満たした候補をMXFP6へ接続し、ID47とpaired比較して形式別に採否する。同じtileを
-  両形式へ強制せず、MXFP8で勝たないcorrect候補は最大一つだけtransfer-only benchmarkとして切り分けられる。
-- 共通scheduleの判断後にだけ、activation／weightの3 byteを一度読むpacked E3M2x4→FP16 pair ingressを追加し、
-  MXFP6固有効果を別に判定する。4B 512／2,048をprimary、27B MXFP6 512を最終補助行として段階別結果を整理する。
-- gfx1201 ID48、decode、KV、attention、GDN、resident形式、quantization recipe、public ABIは変更しない。詳細は
-  [Phase 75進行中計画](../../../../active/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)を正本とする。
+- exact `gfx1030`のdense prefillに限定し、共通Tile／KStage／half2 bodyをMXFP8 E4M3で先行評価した。128x64／K32／
+  double-buffer ID55を既存Phase 67 scopeへ限定採用した。
+- 同scheduleをscalar E3M2 ingressのMXFP6 ID56へ移植して共通効果を分離し、packed E3M2x4 ingress ID57を既存
+  Phase 74 scopeへ限定採用した。ID41／47はrollback、ID56はtransfer evidenceとして維持した。
+- 4B 3+10の512／2,048 prefillはMXFP8 `993.6765 / 1,104.1643 tok/s`、MXFP6
+  `1,008.7235 / 1,095.3894 tok/s`。27B MXFP6 512 defaultも`157.7535 tok/s`をPASSした。
+- gfx1201 ID48、decode、KV、attention、GDN、resident形式、quantization recipe、public ABIは変更していない。詳細は
+  [Phase 75保存済み計画](../../../../archive/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)、
+  [Phase 75履歴](../../../../../history/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md)、
+  [追跡要約](../../../../../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)を正本とする。
 
 ## Intentional exclusions and deferred items
 

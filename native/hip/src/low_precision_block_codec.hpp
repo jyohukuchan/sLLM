@@ -92,6 +92,43 @@ e3m2x4_to_e4m3fn_exact_bits_swar(const uint32_t packed) noexcept {
 
 template <typename Format> struct ScalarCodec;
 
+// Every finite OCP E4M3FN value is exactly representable by IEEE FP16.  The
+// only non-finite E4M3FN encodings are 0x7f/0xff; preserve their sign and NaN
+// class while mapping the remaining 254 encodings bit-exactly.  Returning the
+// half encoding directly keeps gfx1030 half2 ingress integer-only and avoids
+// an E4M3 -> FP32 -> FP16 conversion sequence for every staged value.
+__host__ __device__ constexpr uint16_t
+e4m3fn_to_fp16_bits(const uint8_t bits) noexcept {
+  const uint16_t sign =
+      static_cast<uint16_t>(static_cast<uint16_t>(bits & UINT8_C(0x80)) << 8U);
+  const uint8_t magnitude = bits & UINT8_C(0x7f);
+  const uint8_t exponent = magnitude >> 3U;
+  const uint8_t mantissa = magnitude & UINT8_C(0x07);
+  if (exponent == 0U) {
+    constexpr uint16_t subnormal_map[8] = {
+        UINT16_C(0x0000), UINT16_C(0x1800), UINT16_C(0x1c00), UINT16_C(0x1e00),
+        UINT16_C(0x2000), UINT16_C(0x2100), UINT16_C(0x2200), UINT16_C(0x2300)};
+    return static_cast<uint16_t>(sign | subnormal_map[mantissa]);
+  }
+  if (magnitude == UINT8_C(0x7f)) {
+    return static_cast<uint16_t>(sign | UINT16_C(0x7e00));
+  }
+  return static_cast<uint16_t>(
+      sign | static_cast<uint16_t>(exponent + UINT8_C(8)) << 10U |
+      static_cast<uint16_t>(mantissa) << 7U);
+}
+
+__device__ __forceinline__ __half e4m3fn_to_half(const uint8_t bits) noexcept {
+  __half_raw half_bits{};
+  half_bits.x = e4m3fn_to_fp16_bits(bits);
+  return __half{half_bits};
+}
+
+__device__ __forceinline__ __half2
+e4m3fnx2_to_half2(const uint8_t first, const uint8_t second) noexcept {
+  return __halves2half2(e4m3fn_to_half(first), e4m3fn_to_half(second));
+}
+
 template <> struct ScalarCodec<E4M3Fn> {
   // Decode an E4M3 value plane produced by the internal MX quantizer.  The
   // caller must retain the paired E8M0 scale: NaN-containing blocks use scale

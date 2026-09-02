@@ -1,6 +1,6 @@
 # Phase 75: gfx1030 MXFP8先行・MXFP6共通half2最適化
 
-状態: `計画済み・未着手`
+状態: `完了`
 
 ## ユーザー決定と目的
 
@@ -164,6 +164,27 @@ correctness failure、不正なglobal read、launch不能、fallback発生はそ
 - model architecture追加、MoE、batching、multi-GPU、Infinity Fabric、RDMA、WebUI/API変更。
 - MXFP8／MXFP6 quantization recipe、GGUF encoding、public ABI、default KV、quality policyの変更。
 
+## 完了結果
+
+2026-09-03にP75-A〜Eを完了した。canonical V620 exact `gfx1030`で、MXFP8は128x64／K32／double-buffer
+half2 ID55、MXFP6は同じscheduleとpacked E3M2x4 ingressを持つID57を既存のdimension-only scopeへ限定採用した。
+MXFP6 scalar-ingress ID56は共通scheduleの効果を分離したbenchmark candidateとして保持し、MXFP8 ID41／MXFP6
+ID47は明示rollbackとして維持した。
+
+同一最終binaryのQwen3.5-4B、3+10 control/candidate/controlで、MXFP8 ID55は512／2,048入力を
+`993.6765 / 1,104.1643 tok/s`、MXFP6 ID57は`1,008.7235 / 1,095.3894 tok/s`とし、各候補は両controlより
+安定して速かった。27B MXFP6 512入力も強制指定なしで`157.7535 tok/s`をPASSした。全行で生成token、VRAM、
+dispatch、HIP-only、fallbackなし、cleanupを維持した。
+
+全256 E4M3FN code／全64 E3M2 code、lane、特殊値、tail、独立FP32 oracle、10-repeat operatorをPASSした。
+ID55／56はaccumulation treeを変更するN1、ID57はID56と全operator digestが一致するN0である。最終resourceは
+ID55がLDS 26,112 B／SGPR 38／VGPR 156、ID57が26,112 B／40／151で、private／spillは0だった。
+gfx1201 wave32とgfx942 wave64はtarget別compile-onlyをPASSし、別GPUのperformance claimは追加していない。
+
+詳細な候補表、最終benchmark、profile、artifact identity、制約はmatching historyと追跡要約を正本とする。
+
 [全体計画](../../../../main-plan.md) /
 [Phase 37以降のロードマップ](../../../../active/2026/08/21-31/phase37-plus-mi300x-and-llama-gap-roadmap.md) /
-[Phase 74保存済み計画](../../../../archive/2026/09/1-10/phase74-mxfp6-prefill-llama-optimization-loop.md)
+[Phase 74保存済み計画](../../../../archive/2026/09/1-10/phase74-mxfp6-prefill-llama-optimization-loop.md) /
+[履歴](../../../../../history/2026/09/1-10/phase75-gfx1030-mxfp8-first-shared-half2-optimization.md) /
+[追跡要約](../../../../../../ci/matrix/phase75-gfx1030-mxfp8-mxfp6-shared-half2-v1.json)
