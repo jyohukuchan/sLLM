@@ -103,6 +103,20 @@ slice hash or cache path never substitutes for the source model lock.
 Qwen3.5-2B/9BのPhase 4で固定したraw非保存のrange recipeとhashは
 [Qwen3.5 Phase 4 real-weight slice identities](qwen3.5-phase4-slices.md)を正とする。
 
+Phase 71は公式`Qwen/Qwen3.5-27B` revision `fc05daec18b0a78c049392ed2e771dde82bdf654`を
+`model-lock-v1` fingerprint
+`sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f`へ追加した。23 fileには11 weight shard、
+index、config、generation config、tokenizer／chat／vision support file、README、Apache-2.0 licenseを含む。upstream READMEに
+base model宣言がないため`base_models`は空のまま固定し、既存2B／4B／9Bの宣言を27Bへ推測適用しない。reviewed inventoryは
+1,199 indexed tensor、851 loadable text weight、348 known-unconsumed vision／MTP tensorである。repository外のMXFP6 GGUFは
+source fingerprintを`derived-gguf-lock-v1`へ結合し、25,909,762,816 byte、SHA-256
+`3b7151e5c601f3efee524e4998e403b800699fbf6e9097918f983e3c72876ddd`、derived fingerprint
+`sha256:d1142468252af487d52ebf72a29a4bb62487a635c174e709bebd73b0c337a82c`として検証した。これはdraft local artifactであり、
+model binaryをrepositoryへ追加せず、release provenanceを主張しない。
+`model-lock-v1`の`generation_config`は`present: false`と`path: null`、または`present: true`とlocked safe pathの
+いずれかを明示し、後者のpathが`files`に含まれないlockは拒否する。4Bは前者、27Bは
+`generation_config.json`を指す後者として固定する。
+
 Phase 14の`model-lock-v2`はreviewed `google/gemma-4-12B` direct-safetensors sourceだけに限定する。単一
 `model.safetensors`の8-byte header length、完全header hash、derived tensor catalog hash、全tensorの
 name/shape/dtype/absolute rangeを固定し、index fileが存在するかのように補わない。base sourceにはchat templateがないため

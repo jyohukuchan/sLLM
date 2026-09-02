@@ -296,8 +296,8 @@ sllm_status_t validate_and_copy_descriptor(
   const uint64_t mrope_position_shape[] = {m, 3U};
   const uint64_t q_output_shape[] = {m, q_heads, head_dim};
   if (m == 0U || m > SLLM_HIP_ATTENTION_PREPROCESS_MAX_M ||
-      (q_heads != 8U && q_heads != 16U) || (k_heads != 2U && k_heads != 4U) ||
-      q_heads % k_heads != 0U ||
+      (q_heads != 8U && q_heads != 16U && q_heads != 24U) ||
+      (k_heads != 2U && k_heads != 4U) || q_heads % k_heads != 0U ||
       head_dim != SLLM_HIP_ATTENTION_PREPROCESS_Q_HEAD_DIM ||
       static_cast<uint64_t>(descriptor->start_position) + m >
           SLLM_HIP_ATTENTION_PREPROCESS_MAX_POSITION ||

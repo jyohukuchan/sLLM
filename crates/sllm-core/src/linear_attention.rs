@@ -11,7 +11,7 @@ use std::num::NonZeroU64;
 use crate::execution::{ExecutionSessionId, LinearAttentionStateId};
 use crate::{DType, Encoding};
 
-/// The only Phase 3 Qwen3.5 linear-attention layout.
+/// A reviewed Qwen3.5 linear-attention layout.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct LinearAttentionLayout {
     qk_heads: usize,
@@ -339,6 +339,21 @@ mod tests {
         assert_eq!(layout.scalar_head_shape(257), [257, 32]);
         assert_eq!(LinearAttentionLayout::QK_REPEAT_FACTOR, 2);
         assert_eq!(LinearAttentionLayout::EPSILON_BITS, 1.0e-6_f32.to_bits());
+    }
+
+    #[test]
+    fn reviewed_27b_layout_uses_three_value_heads_per_qk_head() {
+        let layout = LinearAttentionLayout::new(16, 48, 128, 4).unwrap();
+        assert_eq!(layout.qk_repeat_factor(), 3);
+        assert_eq!(layout.conv_state_shape(), [3, 10_240]);
+        assert_eq!(layout.recurrent_state_shape(), [48, 128, 128]);
+        assert_eq!(layout.qkv_shape(3), [3, 10_240]);
+        assert_eq!(layout.output_shape(3), [3, 6_144]);
+        assert_eq!(layout.scalar_head_shape(3), [3, 48]);
+        assert_eq!(
+            LinearAttentionLayout::new(16, 47, 128, 4),
+            Err(LinearAttentionError::InvalidLayout)
+        );
     }
 
     #[test]

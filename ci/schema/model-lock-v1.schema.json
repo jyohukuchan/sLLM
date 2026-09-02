@@ -313,9 +313,28 @@
       "additionalProperties": false,
       "required": ["present", "path"],
       "properties": {
-        "present": {"const": false},
-        "path": {"type": "null"}
-      }
+        "present": {"type": "boolean"},
+        "path": {
+          "anyOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/safe_path"}
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "present": {"const": false},
+            "path": {"type": "null"}
+          }
+        },
+        {
+          "properties": {
+            "present": {"const": true},
+            "path": {"$ref": "#/$defs/safe_path"}
+          }
+        }
+      ]
     },
     "model": {
       "type": "object",

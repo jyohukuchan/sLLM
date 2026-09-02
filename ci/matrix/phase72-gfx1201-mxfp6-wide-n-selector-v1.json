@@ -1,0 +1,99 @@
+{
+  "schema_version": "phase72-gfx1201-mxfp6-wide-n-selector-v1",
+  "state": "PASS",
+  "date": "2026-09-02",
+  "decision": "adopt N <= 32768 for the exact gfx1201 MXFP6 ID45 selector",
+  "scope": {
+    "target": "gfx1201",
+    "product": "Radeon AI PRO R9700",
+    "uuid": "GPU-a8e9ddefa2d60f55",
+    "format": "OCP MXFP6 E3M2 W6A6 block32 E8M0",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "selector": "M >= 17, K >= 2048, K % 32 == 0, 1024 <= N <= 32768",
+    "kernel_id": 45,
+    "kernel_name": "matmul.mxfp6.w6a6.gfx1201.wmma128x64.pack4.v2",
+    "model_independent": true
+  },
+  "build": {
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "compiler": "AMD clang 23",
+    "code_object": "v6",
+    "wavefront": 32,
+    "operator_runner_sha256": "01d3ca1168ab763fa13c6ce4c2009f15151299937b3f718950b2d64c8bfd8182",
+    "cli_sha256": "588fe3b700f50a83a201acd5df33fdbc5590bd32cb5184ba83e50bd71f14b96d",
+    "source_identity": "dirty draft working tree; not release provenance"
+  },
+  "oracle": {
+    "case_count": 8,
+    "sampled_points_per_case": 45,
+    "sampled_top1_rows_per_case": 5,
+    "absolute_error_limit": 0.5,
+    "relative_error_limit": 0.02,
+    "max_observed_absolute_error": 1.95782470703125,
+    "max_observed_relative_error": 0.0036457597743719816,
+    "nonfinite_mismatch_count": 0,
+    "candidate_control_digest_mismatch_count": 0,
+    "candidate_control_top1_mismatch_count": 0,
+    "repeat_mismatch_count": 0
+  },
+  "operator_rows": [
+    {"m": 17, "k": 2048, "n": 16384, "id45_median_ns": 330362, "id25_median_ns": 1058406, "speedup_vs_id25": 3.2037764633947003, "id29_median_ns": 1060087, "speedup_vs_id29": 3.2088648210145236},
+    {"m": 17, "k": 2048, "n": 16385, "id45_median_ns": 344723, "id25_median_ns": 1059366, "speedup_vs_id25": 3.073093469249223, "id29_median_ns": 1051646, "speedup_vs_id29": 3.0506986769087066},
+    {"m": 128, "k": 5120, "n": 17408, "id45_median_ns": 1137566, "id25_median_ns": 9521695, "speedup_vs_id25": 8.370235221516818, "id29_median_ns": 15027528, "speedup_vs_id29": 13.210247141704306},
+    {"m": 129, "k": 5120, "n": 17409, "id45_median_ns": 1705531, "id25_median_ns": 11227785, "speedup_vs_id25": 6.583160904140705, "id29_median_ns": 16169735, "speedup_vs_id29": 9.48076288264476},
+    {"m": 512, "k": 4096, "n": 24576, "id45_median_ns": 4221863, "id25_median_ns": 44831810, "speedup_vs_id25": 10.618963713412775, "id29_median_ns": 70636055, "speedup_vs_id29": 16.731015430865472},
+    {"m": 128, "k": 4096, "n": 32000, "id45_median_ns": 1528129, "id25_median_ns": 14727323, "speedup_vs_id25": 9.637486756680882, "id29_median_ns": 22714495, "speedup_vs_id29": 14.864252298071694},
+    {"m": 17, "k": 2048, "n": 32767, "id45_median_ns": 546204, "id25_median_ns": 1995052, "speedup_vs_id25": 3.65257669295721, "id29_median_ns": 2041812, "speedup_vs_id29": 3.7381857328031285},
+    {"m": 128, "k": 4096, "n": 32768, "id45_median_ns": 1506130, "id25_median_ns": 15190127, "speedup_vs_id25": 10.085535113170842, "id29_median_ns": 23151738, "speedup_vs_id29": 15.371673095947893}
+  ],
+  "selector_boundaries": {
+    "n_32768": "ID45",
+    "n_32769": "ID25 tiled16 fallback",
+    "host_test": "PASS",
+    "prepared_provider_compile_time_contract": "PASS"
+  },
+  "full_model": {
+    "model": "Qwen/Qwen3.5-27B",
+    "resolved_revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+    "derived_model_sha256": "3b7151e5c601f3efee524e4998e403b800699fbf6e9097918f983e3c72876ddd",
+    "force_environment": "unset",
+    "input_tokens": 512,
+    "prefill_chunk_tokens": 512,
+    "warmups": 1,
+    "measured": 3,
+    "prefill_tps": [384.14964876094683, 383.17016473411877, 371.4760398890217],
+    "median_prefill_tps": 383.17016473411877,
+    "mad_prefill_tps": 0.9794840268280609,
+    "phase71_default_median_prefill_tps": 81.74651744101567,
+    "speedup_vs_phase71_default": 4.687296495665345,
+    "generated_token_ids": [23066, 23066, 23066, 23066],
+    "submission_count": 14912,
+    "kernel_dispatch_count": 24000,
+    "segment_count": 272,
+    "boundary_count": 272,
+    "all_dispatches_hip": true,
+    "fallback_used": false,
+    "model_load_count": 1,
+    "request_model_load_count": 0,
+    "resident_vram_bytes": 24115002880,
+    "peak_vram_bytes": 24777018880,
+    "allocator_after_model_drop_bytes": 0,
+    "retryable_cleanup": 0,
+    "durable_quarantine": 0,
+    "external_gpu_use_after_process_percent": 0,
+    "external_vram_after_process_percent": 0
+  },
+  "verification": {
+    "rust_runner_unit_tests": "PASS 11/11",
+    "public_runtime_host_test": "PASS 1/1",
+    "gfx1201_low_precision_codec_provider_gpu_test": "PASS",
+    "default_wide_n_gpu_cases": "PASS 8/8"
+  },
+  "limitations": [
+    "This does not add architecture support for arbitrary unofficial models.",
+    "N > 32768 remains on the existing fallback provider.",
+    "gfx1030, gfx1200, gfx942, other formats, decode, batching, and long-duration stability are unchanged."
+  ]
+}

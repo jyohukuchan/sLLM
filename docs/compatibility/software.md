@@ -651,6 +651,18 @@ software lifecycleは`experimental`のままで、別OS/kernel/driver/runtime/co
 gfx1201/gfx942、別model、長時間安定性へ一般化しない。詳細は
 [Phase 67追跡要約](../../ci/matrix/phase67-gfx1030-mxfp8-tile-transfer-v1.json)を正本とする。
 
+Phase 71の同一Ubuntu 24.04.4、kernel `6.17.0-35-generic`、amdgpu `6.16.13`、ROCm 7.14.0、HIP
+`7.14.60850`、LLVM 23、Code Object V6、wave32 tupleでは、reviewed Qwen3.5-27B MXFP6をcanonical V620 exact
+`gfx1030`とR9700 exact `gfx1201`で実行した。target別CLI SHA-256は
+`3df29f1af4feab36c23a79f4bb040947c2edbab0400813b9dcb046fd0e108732` /
+`957aa9ae037dfd60701a364e1faeca58d040bd87f295a52a33ba21a306a9e13b`である。
+
+512入力／chunk 512／3+10のprefill中央値は`34.298907 / 81.746517 tok/s`、2,048入力／chunk 1,024／1+3は
+`33.448016 / 77.409011 tok/s`で、最大allocator peakは`25,351,937,536` byteだった。全PASS行はHIP-only、
+fallback false、cleanup 0である。gfx1201の2,048入力／単一2,048 chunkは一時workspace OOMでありPASSへ昇格しない。
+software lifecycleは`experimental`のまま、別OS/kernel/driver/runtime/compiler、別GPU構成、別model、長時間安定性へ
+一般化しない。詳細は[Phase 71追跡要約](../../ci/matrix/phase71-qwen35-27b-mxfp6-compatibility-v1.json)を正本とする。
+
 ## 公式資料
 
 - [Ubuntu releases](https://releases.ubuntu.com/) — Ubuntu 24.04 LTS および 26.04 LTS の公式 release 情報

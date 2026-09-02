@@ -48,8 +48,8 @@ __host__ __device__ constexpr uint32_t
 e3m2x4_to_e4m3fn_exact_bits(const uint32_t packed) noexcept {
   uint32_t converted = 0U;
   for (uint32_t lane = 0U; lane < 4U; ++lane) {
-    const uint8_t code = static_cast<uint8_t>(
-        (packed >> (lane * 6U)) & UINT32_C(0x3f));
+    const uint8_t code =
+        static_cast<uint8_t>((packed >> (lane * 6U)) & UINT32_C(0x3f));
     converted |= static_cast<uint32_t>(e3m2_to_e4m3fn_exact_bits(code))
                  << (lane * 8U);
   }
@@ -482,9 +482,8 @@ packed_e3m2_at(const uint8_t *const row, const uint64_t index) noexcept {
       UINT32_C(0x3f));
 }
 
-__device__ __forceinline__ uint32_t
-packed_e3m2x4_at(const uint8_t *const row,
-                 const uint64_t first_index) noexcept {
+__device__ __forceinline__ uint32_t packed_e3m2x4_at(
+    const uint8_t *const row, const uint64_t first_index) noexcept {
   const uint64_t byte = (first_index / UINT64_C(4)) * UINT64_C(3);
   return static_cast<uint32_t>(row[byte]) |
          (static_cast<uint32_t>(row[byte + 1U]) << 8U) |

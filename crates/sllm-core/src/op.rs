@@ -2763,11 +2763,38 @@ fn validate_baseline_elementwise(
     }
     if kind == SemanticOpKind::SigmoidMul {
         let shape = inputs[0].shape();
-        if shape.len() != 3 || !matches!(shape[1], 8 | 16) || shape[2] != 256 {
+        if shape.len() != 3 || !matches!(shape[1], 8 | 16 | 24) || shape[2] != 256 {
             return Err(OpError::SigmoidMulShapeMismatch);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod qwen35_sigmoid_mul_tests {
+    use super::*;
+
+    fn descriptor(heads: usize) -> Result<SemanticOpDescriptor, OpError> {
+        let view = TensorView::contiguous(DType::Bf16, &[3, heads, 256]).unwrap();
+        SemanticOpDescriptor::new(
+            SemanticOpKind::SigmoidMul,
+            vec![view.clone(), view.clone()],
+            vec![view],
+        )
+    }
+
+    #[test]
+    fn reviewed_qwen35_head_counts_include_27b() {
+        for heads in [8, 16, 24] {
+            descriptor(heads).expect("reviewed Qwen3.5 sigmoid-mul head count");
+        }
+        for heads in [23, 25] {
+            assert!(matches!(
+                descriptor(heads),
+                Err(OpError::SigmoidMulShapeMismatch)
+            ));
+        }
+    }
 }
 
 fn validate_broadcast_add(inputs: &[TensorView], outputs: &[TensorView]) -> Result<(), OpError> {

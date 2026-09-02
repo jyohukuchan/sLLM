@@ -361,13 +361,13 @@ inline KernelVariant select_mxfp8_variant(const uint64_t m) noexcept {
 }
 
 // Phase 63's production candidate is intentionally a shape-family rule rather
-// than a model-name table.  It starts with large-M, wide dense projections and
-// excludes narrow auxiliary projections and vocabulary heads until the shape
-// sweep establishes their own stable crossover.
+// than a model-name table. It starts with large-M, wide projections; the
+// user-approved upper bound includes model-independent shapes through N=32768
+// while preserving the existing alignment and M/K admission conditions.
 constexpr bool phase63_gfx1201_mxfp8_wmma_shape(const uint64_t m,
                                                 const uint64_t k,
                                                 const uint64_t n) noexcept {
-  return m >= 128U && k >= 2048U && n >= 1024U && n <= 16384U &&
+  return m >= 128U && k >= 2048U && n >= 1024U && n <= 32768U &&
          (k % kMxfp8W8A8PrefillWmmaBlockK) == 0U &&
          (n % kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup) == 0U;
 }
@@ -443,19 +443,19 @@ constexpr bool phase66_mxfp8_wmma_n128_direct_both_supported_shape(
 }
 
 // The Phase 65 sweep covers the dense Qwen projection family, including the
-// small GQA projections down to N=64. Keep the production rule dimension-only
-// and bounded to the measured family; vocabulary heads remain on row8.
+// small GQA projections down to N=64. Keep the production rule dimension-only;
+// irregular or wider-than-32768 vocabulary heads remain on row8.
 constexpr bool
 phase65_gfx1201_mxfp8_wmma_direct_both_shape(const uint64_t m, const uint64_t k,
                                              const uint64_t n) noexcept {
   return phase65_mxfp8_wmma_direct_activation_supported_shape(m, k, n) &&
-         m >= 128U && k >= 2048U && n >= 64U && n <= 16384U;
+         m >= 128U && k >= 2048U && n >= 64U && n <= 32768U;
 }
 
 // Phase 66 adopts the wider output tile only inside the measured Phase 65
 // production family. This excludes the short-K operator boundary where N128
 // was slower, preserves N=64 on the established provider, and leaves tails
-// and vocabulary heads on their existing fail-closed routes.
+// and shapes wider than N=32768 on their existing fail-closed routes.
 constexpr bool phase66_gfx1201_mxfp8_wmma_n128_direct_both_shape(
     const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
   return phase65_gfx1201_mxfp8_wmma_direct_both_shape(m, k, n) &&
@@ -621,6 +621,8 @@ static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 9216U));
 static_assert(phase63_gfx1201_mxfp8_wmma_shape(129U, 9216U, 2560U));
 static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 2559U, 9216U));
 static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 1024U));
+static_assert(phase63_gfx1201_mxfp8_wmma_shape(128U, 4096U, 32768U));
+static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 4096U, 32832U));
 static_assert(!phase63_gfx1201_mxfp8_wmma_shape(128U, 2560U, 248320U));
 static_assert(!phase63_mxfp8_wmma_supported_shape(1U, 2560U, 9216U));
 static_assert(phase63_mxfp8_wmma_supported_shape(3U, 2560U, 9217U));
@@ -664,6 +666,10 @@ static_assert(!phase66_gfx1201_mxfp8_wmma_n128_direct_both_shape(129U, 2560U,
 static_assert(phase65_gfx1201_mxfp8_wmma_direct_both_shape(128U, 2560U, 64U));
 static_assert(phase65_gfx1201_mxfp8_wmma_direct_both_shape(2048U, 4096U,
                                                            12288U));
+static_assert(phase65_gfx1201_mxfp8_wmma_direct_both_shape(128U, 4096U,
+                                                           32768U));
+static_assert(!phase65_gfx1201_mxfp8_wmma_direct_both_shape(128U, 4096U,
+                                                            32832U));
 static_assert(!phase65_gfx1201_mxfp8_wmma_direct_both_shape(129U, 2560U,
                                                             9216U));
 static_assert(!phase65_gfx1201_mxfp8_wmma_direct_both_shape(128U, 2560U, 32U));
@@ -694,11 +700,12 @@ constexpr bool
 phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(const uint64_t m, const uint64_t k,
                                           const uint64_t n) noexcept {
   return phase70_mxfp6_via_e4m3_supported_shape(m, k, n) && m >= 17U &&
-         k >= 2048U && n >= 1024U && n <= 16384U;
+         k >= 2048U && n >= 1024U && n <= 32768U;
 }
 
-constexpr bool phase70_gfx1201_mxfp6_wmma_pack4_n128_shape(
-    const uint64_t m, const uint64_t k, const uint64_t n) noexcept {
+constexpr bool
+phase70_gfx1201_mxfp6_wmma_pack4_n128_shape(const uint64_t m, const uint64_t k,
+                                            const uint64_t n) noexcept {
   return phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(m, k, n) &&
          (n % kMxfp8W8A8PrefillWmmaN128ColumnsPerWorkgroup) == 0U;
 }
@@ -707,8 +714,8 @@ static_assert(!phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(16U, 2048U, 1024U));
 static_assert(phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(17U, 2048U, 1024U));
 static_assert(!phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(17U, 2016U, 1024U));
 static_assert(!phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(17U, 2048U, 1023U));
-static_assert(phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(2048U, 9216U, 16384U));
-static_assert(!phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(2048U, 9216U, 16385U));
+static_assert(phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(2048U, 9216U, 32768U));
+static_assert(!phase70_gfx1201_mxfp6_wmma_via_e4m3_shape(2048U, 9216U, 32769U));
 
 inline KernelVariant select_mxfp6_variant(const uint64_t m, const uint64_t k,
                                           const uint64_t n,
@@ -1221,7 +1228,7 @@ constexpr uint32_t grid_size_x(const KernelVariant variant, const uint64_t m,
          : variant == KernelVariant::Mxfp6W6A6PrefillMmqGfx1030ViaE4M3
              ? static_cast<uint32_t>(((m + 7U) / 8U) * ((n + 7U) / 8U))
          : variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64 ||
-                   variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64
+                 variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64
              ? static_cast<uint32_t>(
                    (n + kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup - 1U) /
                    kMxfp8W8A8PrefillWmmaN64ColumnsPerWorkgroup)
@@ -1262,8 +1269,10 @@ constexpr uint32_t workgroup_size_x(const KernelVariant variant) noexcept {
                      KernelVariant::Mxfp8W8A8PrefillWmmaDirectActivation ||
                  variant == KernelVariant::Mxfp8W8A8PrefillWmmaDirectBoth ||
                  variant == KernelVariant::Mxfp8W8A8PrefillWmmaN128DirectBoth ||
-                 variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64 ||
-                 variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 ||
+                 variant ==
+                     KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201ViaE4M3N64 ||
+                 variant ==
+                     KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 ||
                  variant == KernelVariant::Mxfp6W6A6PrefillWmmaGfx1201Pack4N128
              ? kMxfp8W8A8PrefillWmmaWorkgroupSize
              : kWorkgroupSize;

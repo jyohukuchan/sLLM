@@ -159,7 +159,7 @@ sllm_status_t validate_state_create_info(
       info->capacity_tokens == 0U ||
       info->capacity_tokens > SLLM_HIP_LINEAR_ATTENTION_MAX_CAPACITY ||
       qk_heads != SLLM_HIP_LINEAR_ATTENTION_QK_HEADS ||
-      (value_heads != 16U && value_heads != 32U) ||
+      (value_heads != 16U && value_heads != 32U && value_heads != 48U) ||
       head_dim != SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM ||
       conv_kernel_size != SLLM_HIP_LINEAR_ATTENTION_CONV_KERNEL_SIZE) {
     return sllm_public_runtime::write_error(
@@ -229,7 +229,7 @@ sllm_status_t validate_and_copy_descriptor(
 
   const uint64_t value_heads =
       descriptor->z.shape[1] / SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM;
-  if ((value_heads != 16U && value_heads != 32U) ||
+  if ((value_heads != 16U && value_heads != 32U && value_heads != 48U) ||
       descriptor->z.shape[1] % SLLM_HIP_LINEAR_ATTENTION_HEAD_DIM != 0U) {
     return sllm_public_runtime::write_error(
         sink, SLLM_STATUS_SHAPE_MISMATCH,

@@ -1,6 +1,6 @@
 # GPU互換性方針
 
-> 最終更新: 2026-09-01
+> 最終更新: 2026-09-02
 >
 > この文書はGPU対応を判定・表記する共通規則である。専用local hostのcanonical exact `gfx1030`/`gfx1201`ではformal G0/model-free G1、Phase 6のHIP VMM/production vAttention、Phase 8のBF16 Matmul/FA2-style optimized path、Phase 9のcompletion/segment・MMVF・GDN・prefill provider、Phase 15のweight NVFP4、Phase 15Oのmodel量子化最適化、Phase 15Qのmatched品質attribution、Phase 16のFP8/NVFP4 KV cacheを検証済みである。Phase 30ではexact `gfx1201`のnative FP8 readとwave-tiled causal attention、Phase 31では両targetの10,001-token chunk/arenaと明示FP8 KV経路を追加検証した。Phase 49ではGQA P32をexact `gfx1030`だけへ限定採用し、Phase 50ではexact `gfx1201`のResidual/GDN/MLP/P32候補を狭い実機scopeで検証した。Phase 61ではOCP MXFP8 W8A8／MXFP6 W6A6を追加し、Phase 62では共通low-precision codec、両RDNAのbit-exact W/A・KV・attentionと固定Qwen3.5-4B性能を検証した。Phase 63ではexact `gfx1201`のlarge-M MXFP8 WMMA provider、Phase 64／65では同じ演算順のoperand direct-load provider、Phase 66ではN128 ID37とMXFP6／NVFP4／MXFP4へのfrozen provider routingを狭いshape scopeへ採用した。各evidenceは検証した機能範囲に限定し、target全体、別SKU・別tupleへ一般化しない。
 
@@ -506,6 +506,45 @@ operator oracleをPASSし、NVFP4 reviewed Gemma routeまでHIP-only／cleanup 0
 別candidate kernelのA/Bを主張しない。MXFP4 full MoE production、gfx1030/gfx942のGPU性能、別R9700／tupleは未検証である。
 詳細は[Phase 66履歴](../history/2026/09/1-10/phase66-gfx1201-reusable-low-precision-attention-transfer.md)と
 [追跡要約](../../ci/matrix/phase66-gfx1201-low-precision-provider-summary-v1.json)を正本とする。
+
+### 2026-09-02 Phase71 Qwen3.5-27B MXFP6 bounded-VRAM実行
+
+公式`Qwen/Qwen3.5-27B` revision `fc05daec18b0a78c049392ed2e771dde82bdf654`をreviewed modelへ追加し、
+Phase 70のmodel非依存OCP MXFP6 E3M2 W6A6 providerでcanonical V620 exact `gfx1030`とR9700 exact `gfx1201`を
+実行した。追加shapeはhidden 5,120、intermediate 17,408、64 layers、q24／kv4／GQA比6、linear qk16／value48である。
+27B専用matmul kernelやmodel名selectorはなく、未一致shapeは既存汎用providerを使う。
+
+明示FP16 KV、direct greedy、最大4 outputの512入力／chunk 512／3+10 prefill中央値はgfx1030
+`34.298907 tok/s`、gfx1201 `81.746517 tok/s`、resident／peakは両方`24,115,002,880 / 24,777,018,880` byteだった。
+2,048入力／chunk 1,024／1+3は`33.448016 / 77.409011 tok/s`、peak `25,351,937,536` byteでPASSした。
+全PASS行はHIP-only、fallback 0、cleanup 0、生成`[23066,23066,23066,23066]`一致である。
+
+gfx1201の2,048入力／単一2,048 chunkはlayer 56 MLP down workspaceの`hipMalloc` OOMとなり、GPU PASSに数えない。
+従って32 GiB classで実証済みの2,048入力条件はchunk 1,024までである。lifecycleは`experimental`のまま、evidenceは固定model、
+exact target／SKU／software tuple、single request、FP16 KV、測定済みchunkへ限定し、別Qwen、別GPU、batch、長時間安定性へ
+一般化しない。詳細は[Phase 71履歴](../history/2026/09/1-10/phase71-qwen35-27b-mxfp6-compatibility.md)と
+[追跡要約](../../ci/matrix/phase71-qwen35-27b-mxfp6-compatibility-v1.json)を正本とする。
+
+### 2026-09-02 Phase72 gfx1201 MXFP6 wide-N selector
+
+exact `gfx1201`のOCP MXFP6 E3M2 W6A6 ID45を、従来のM>=17、K>=2048、K%32=0、N>=1024を維持したまま
+`N<=32768`へ広げた。selectorはmodel名を入力にしないため、公式／非公式modelを区別しない。ただしmodel全体のarchitecture、
+metadata、他operator、VRAM収容は別の互換性条件であり、このshape採用だけから任意model対応を推論しない。
+
+N=16,384〜32,768の8 operator caseは独立FP32 oracle、ID25／ID29 control、digest、sampled row top-1、repeat、
+HIP-only、cleanupをすべてPASSした。`N=32768`はID45、`N=32769`は従来ID25へ戻る。Qwen3.5-27Bを強制指定なしで
+再実行した512-token prefill中央値は`383.170165 tok/s`で、Phase 71の旧既定`81.746517 tok/s`比4.6873倍だった。
+生成token、resident／peak、fallback、cleanupは維持した。詳細は
+[Phase 72履歴](../history/2026/09/1-10/phase72-gfx1201-mxfp6-wide-n-selector.md)と
+[追跡要約](../../ci/matrix/phase72-gfx1201-mxfp6-wide-n-selector-v1.json)を正本とする。
+
+### 2026-09-02 Phase73 gfx1201 MXFP8 wide-N selector
+
+ユーザー指示により、exact `gfx1201` MXFP8 ID31／34／36／37のN上限を32,768へ緩和した。M/K、64／128列alignment、
+他target／format／decodeは維持し、32,769以上はrow8／block32へ戻る。host selectorと既存provider contractはPASSしたが、
+新規wide-Nの数値oracle／性能／full-model GPU evidenceは省略したため、その範囲はunverifiedのままとする。詳細は
+[Phase 73履歴](../history/2026/09/1-10/phase73-gfx1201-mxfp8-wide-n-selector.md)と
+[追跡要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)を正本とする。
 
 ### software.mdとの関係
 

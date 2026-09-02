@@ -46,6 +46,10 @@ pub const QWEN35_9B_REPO_ID: &str = "Qwen/Qwen3.5-9B";
 pub const QWEN35_9B_REVISION: &str = "c202236235762e1c871ad0ccb60c8ee5ba337b9a";
 pub const QWEN35_9B_FINGERPRINT: &str =
     "sha256:2d2bc642540e97d4681f8c66140e09f305f487476bb9fe238ca82a298febf893";
+pub const QWEN35_27B_REPO_ID: &str = "Qwen/Qwen3.5-27B";
+pub const QWEN35_27B_REVISION: &str = "fc05daec18b0a78c049392ed2e771dde82bdf654";
+pub const QWEN35_27B_FINGERPRINT: &str =
+    "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Qwen35ReviewedSpec {
@@ -53,7 +57,8 @@ pub struct Qwen35ReviewedSpec {
     pub revision: &'static str,
     pub fingerprint: &'static str,
     pub alias: &'static str,
-    pub base_repo_id: &'static str,
+    pub base_repo_id: Option<&'static str>,
+    pub generation_config_path: Option<&'static str>,
     pub hidden_size: u64,
     pub layer_count: u64,
     pub attention_heads: u64,
@@ -74,13 +79,14 @@ pub struct Qwen35ReviewedSpec {
     pub tied_embeddings: bool,
 }
 
-const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 3] = [
+const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 4] = [
     Qwen35ReviewedSpec {
         repo_id: QWEN35_2B_REPO_ID,
         revision: QWEN35_2B_REVISION,
         fingerprint: QWEN35_2B_FINGERPRINT,
         alias: "qwen3.5-2b-bf16",
-        base_repo_id: "Qwen/Qwen3.5-2B-Base",
+        base_repo_id: Some("Qwen/Qwen3.5-2B-Base"),
+        generation_config_path: None,
         hidden_size: 2048,
         layer_count: 24,
         attention_heads: 8,
@@ -105,7 +111,8 @@ const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 3] = [
         revision: QWEN35_4B_REVISION,
         fingerprint: QWEN35_4B_FINGERPRINT,
         alias: "qwen3.5-4b-bf16",
-        base_repo_id: "Qwen/Qwen3.5-4B-Base",
+        base_repo_id: Some("Qwen/Qwen3.5-4B-Base"),
+        generation_config_path: None,
         hidden_size: 2560,
         layer_count: 32,
         attention_heads: 16,
@@ -130,7 +137,8 @@ const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 3] = [
         revision: QWEN35_9B_REVISION,
         fingerprint: QWEN35_9B_FINGERPRINT,
         alias: "qwen3.5-9b-bf16",
-        base_repo_id: "Qwen/Qwen3.5-9B-Base",
+        base_repo_id: Some("Qwen/Qwen3.5-9B-Base"),
+        generation_config_path: None,
         hidden_size: 4096,
         layer_count: 32,
         attention_heads: 16,
@@ -148,6 +156,32 @@ const QWEN35_REVIEWED_SPECS: [Qwen35ReviewedSpec; 3] = [
         text_tensor_count: 427,
         indexed_tensor_count: 775,
         shard_count: 4,
+        tied_embeddings: false,
+    },
+    Qwen35ReviewedSpec {
+        repo_id: QWEN35_27B_REPO_ID,
+        revision: QWEN35_27B_REVISION,
+        fingerprint: QWEN35_27B_FINGERPRINT,
+        alias: "qwen3.5-27b-bf16",
+        base_repo_id: None,
+        generation_config_path: Some("generation_config.json"),
+        hidden_size: 5120,
+        layer_count: 64,
+        attention_heads: 24,
+        kv_heads: 4,
+        head_dim: 256,
+        intermediate_size: 17408,
+        linear_qk_heads: 16,
+        linear_value_heads: 48,
+        linear_head_dim: 128,
+        vision_depth: 27,
+        vision_hidden_size: 1152,
+        vision_intermediate_size: 4304,
+        vision_output_size: 5120,
+        vision_tensor_count: 333,
+        text_tensor_count: 851,
+        indexed_tensor_count: 1199,
+        shard_count: 11,
         tied_embeddings: false,
     },
 ];
@@ -763,6 +797,7 @@ pub fn builtin_reviewed_model_lock(
         include_bytes!("../../../docs/models/locks/qwen3.5-2b-bf16.json"),
         include_bytes!("../../../docs/models/locks/qwen3.5-4b-bf16.json"),
         include_bytes!("../../../docs/models/locks/qwen3.5-9b-bf16.json"),
+        include_bytes!("../../../docs/models/locks/qwen3.5-27b-bf16.json"),
         include_bytes!("../../../docs/models/locks/gemma4-12b-bf16.json"),
         include_bytes!("../../../docs/models/locks/gemma4-12b-it-bf16.json"),
     ];
@@ -919,14 +954,18 @@ fn validate_qwen_lock_contract(
     spec: Qwen35ReviewedSpec,
 ) -> Result<(), ModelError> {
     let model = &document.model;
+    let expected_base_models = spec
+        .base_repo_id
+        .map(|repo_id| BaseModel {
+            repo_id: repo_id.to_owned(),
+            revision: None,
+            evidence_path: "README.md".to_owned(),
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
     if model.license.id.as_deref() != Some("Apache-2.0")
         || model.license.statement != "Apache-2.0"
-        || model.base_models
-            != [BaseModel {
-                repo_id: spec.base_repo_id.to_owned(),
-                revision: None,
-                evidence_path: "README.md".to_owned(),
-            }]
+        || model.base_models != expected_base_models
     {
         return Err(invalid(
             "Qwen reviewed evidence or license contract differs",
@@ -1116,13 +1155,12 @@ fn validate_qwen_lock_contract(
             "Qwen reviewed tokenizer/stop identity contract differs",
         ));
     }
-    if model.generation_config
-        != (GenerationConfig {
-            present: false,
-            path: None,
-        })
-    {
-        return Err(invalid("Qwen generation_config must be explicitly absent"));
+    let expected_generation_config = GenerationConfig {
+        present: spec.generation_config_path.is_some(),
+        path: spec.generation_config_path.map(str::to_owned),
+    };
+    if model.generation_config != expected_generation_config {
+        return Err(invalid("Qwen generation_config contract differs"));
     }
     Ok(())
 }

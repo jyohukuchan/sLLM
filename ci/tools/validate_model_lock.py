@@ -1063,6 +1063,12 @@ def _validate_generic_contract(document: dict[str, Any]) -> None:
         raise ContractError("config EOS source is not present in files")
     if not set(stop_identity["tokenizer_eos"]["source_files"]).issubset(paths):
         raise ContractError("tokenizer EOS source is not present in files")
+    generation_config = model["generation_config"]
+    generation_config_path = generation_config["path"]
+    if generation_config["present"] != (generation_config_path is not None):
+        raise ContractError("generation_config present/path disagree")
+    if generation_config_path is not None and generation_config_path not in paths:
+        raise ContractError("generation_config path is not present in files")
     if any(entry["path"] in paths for entry in model["excluded_files"]):
         raise ContractError("excluded repository metadata is also locked as a runtime file")
 

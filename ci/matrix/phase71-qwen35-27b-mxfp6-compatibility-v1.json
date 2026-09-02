@@ -1,0 +1,290 @@
+{
+  "schema_version": "phase71-qwen35-27b-mxfp6-compatibility-v1",
+  "state": "PASS",
+  "date": "2026-09-02",
+  "scope": {
+    "model": "Qwen/Qwen3.5-27B",
+    "targets": [
+      "gfx1030",
+      "gfx1201"
+    ],
+    "weight_activation": "OCP MXFP6 E3M2 W6A6 block32 E8M0",
+    "accumulation": "fp32",
+    "output": "bf16-rne",
+    "kv_cache": "fp16",
+    "lane": "direct pretokenized single request"
+  },
+  "source": {
+    "repo_id": "Qwen/Qwen3.5-27B",
+    "resolved_revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+    "model_lock_fingerprint": "sha256:a4a0a6192babfdb7b1fc3ac75cc340e96df87fe2b0e629cc1510085bfeced97f",
+    "model_lock_sha256": "f83e96e531291c3a988c2be6fe0638ef347effbf66c219b54fddf945470c1071",
+    "locked_file_count": 23,
+    "indexed_tensor_count": 1199,
+    "loadable_text_weight_count": 851,
+    "known_unconsumed_tensor_count": 348,
+    "plan_digest": "sha256:6dad09edb6866241f32ac52f07a7e1cc494111177fa3d30645eb6187d5d7f05f"
+  },
+  "reviewed_shape": {
+    "hidden_size": 5120,
+    "intermediate_size": 17408,
+    "layer_count": 64,
+    "query_heads": 24,
+    "kv_heads": 4,
+    "gqa_ratio": 6,
+    "attention_head_dim": 256,
+    "linear_qk_heads": 16,
+    "linear_value_heads": 48,
+    "linear_head_dim": 128,
+    "linear_attention_layers": 48,
+    "full_attention_layers": 16,
+    "tied_embeddings": false
+  },
+  "derived_artifact": {
+    "derived_lock_fingerprint": "sha256:d1142468252af487d52ebf72a29a4bb62487a635c174e709bebd73b0c337a82c",
+    "gguf_size_bytes": 25909762816,
+    "gguf_sha256": "3b7151e5c601f3efee524e4998e403b800699fbf6e9097918f983e3c72876ddd",
+    "metadata_sha256": "1bdf89db9b872d5d517323012eaa88e77bd9de6897a1d2d2b88b0b84fa010522",
+    "tensor_catalog_sha256": "8df1dd979d8c729b7d01afc7a3fcbc43fd46272c8facd1c8ef0617b72373e355",
+    "gguf_tensor_count": 1695,
+    "total_destination_bytes": 53792013824,
+    "derived_lock_sha256": "a78b734c3fdf7357e471a37357c9a75ddca1ff9c9db67f2f79e84db157db6404",
+    "run_manifest_sha256": "a4be2db6398f898c1b7594212cf057372b66180ea7ba52a850e2985a556bb3de",
+    "classification": "draft-local-artifact",
+    "identity_note": "converter commit records the starting clean HEAD, while the converter binary and run manifest bind the actual draft executable; this is not release provenance"
+  },
+  "build": {
+    "starting_git_head": "b1bd42d5d3b4349054c35511f386546e2316b971",
+    "source_identity_note": "working source contains the Phase 71 changes and is not an immutable release identity",
+    "rocm": "7.14.0",
+    "hip": "7.14.60850",
+    "compiler": "AMD clang 23",
+    "code_object": "v6",
+    "wavefront": 32,
+    "gfx1030_cli_sha256": "3df29f1af4feab36c23a79f4bb040947c2edbab0400813b9dcb046fd0e108732",
+    "gfx1201_cli_sha256": "957aa9ae037dfd60701a364e1faeca58d040bd87f295a52a33ba21a306a9e13b"
+  },
+  "devices": {
+    "gfx1030": {
+      "product": "V620",
+      "uuid": "GPU-76a08c022586fed6",
+      "total_memory_bytes": 34342961152
+    },
+    "gfx1201": {
+      "product": "Radeon AI PRO R9700",
+      "uuid": "GPU-a8e9ddefa2d60f55",
+      "total_memory_bytes": 34208743424
+    }
+  },
+  "protocol": {
+    "input_token_id": 23066,
+    "max_new_tokens": 4,
+    "greedy": true,
+    "ignore_eos": true,
+    "context_length_rule": "input_tokens + 4",
+    "primary_512": {
+      "prefill_chunk_tokens": 512,
+      "warmups": 3,
+      "measured": 10
+    },
+    "bounded_2048": {
+      "prefill_chunk_tokens": 1024,
+      "warmups": 1,
+      "measured": 3
+    }
+  },
+  "rows": [
+    {
+      "target": "gfx1030",
+      "input_tokens": 512,
+      "prefill_chunk_tokens": 512,
+      "state": "PASS",
+      "prefill_tps": [
+        35.295976512257134,
+        35.03555951596638,
+        34.70102913159285,
+        34.41607386629656,
+        34.32836213484134,
+        34.269451189076825,
+        34.187176168897146,
+        34.134647972408914,
+        34.148631724560445,
+        34.03897603911858
+      ],
+      "median_prefill_tps": 34.29890666195908,
+      "mad_prefill_tps": 0.15726681347440064,
+      "resident_vram_bytes": 24115002880,
+      "peak_vram_bytes": 24777018880,
+      "placement_required_bytes": 26494166937,
+      "workspace_arena_bytes": 474255360,
+      "model_load_ns": 81666409330,
+      "submission_count": 48464,
+      "kernel_dispatch_count": 78000,
+      "segment_count": 884,
+      "boundary_count": 884,
+      "sample_count": 13,
+      "generated_token_ids": [
+        23066,
+        23066,
+        23066,
+        23066
+      ],
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0,
+      "raw_evidence_sha256": "e2d3395a7a14795863faf2adaff60de1e798dcec878a2445574230c1bbf6a866"
+    },
+    {
+      "target": "gfx1201",
+      "input_tokens": 512,
+      "prefill_chunk_tokens": 512,
+      "state": "PASS",
+      "prefill_tps": [
+        81.53175912122812,
+        81.7392223578125,
+        81.60761914336713,
+        81.66403496657983,
+        81.79512699169459,
+        81.76253949058996,
+        81.83503090999743,
+        81.77073778857162,
+        81.75381252421884,
+        81.64813629203432
+      ],
+      "median_prefill_tps": 81.74651744101567,
+      "mad_prefill_tps": 0.0655460125573768,
+      "resident_vram_bytes": 24115002880,
+      "peak_vram_bytes": 24777018880,
+      "placement_required_bytes": 26487456051,
+      "workspace_arena_bytes": 474255360,
+      "model_load_ns": 81166198124,
+      "submission_count": 48464,
+      "kernel_dispatch_count": 78000,
+      "segment_count": 884,
+      "boundary_count": 884,
+      "sample_count": 13,
+      "generated_token_ids": [
+        23066,
+        23066,
+        23066,
+        23066
+      ],
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0,
+      "raw_evidence_sha256": "d00f9710febd5a0dcbb7a76c1fb089af10657de9634199d014c1035fcfd58157"
+    },
+    {
+      "target": "gfx1030",
+      "input_tokens": 2048,
+      "prefill_chunk_tokens": 1024,
+      "state": "PASS",
+      "prefill_tps": [
+        34.04143872763566,
+        33.448016483756234,
+        33.299536738680594
+      ],
+      "median_prefill_tps": 33.448016483756234,
+      "mad_prefill_tps": 0.14847974507564032,
+      "resident_vram_bytes": 24115002880,
+      "peak_vram_bytes": 25351937536,
+      "placement_required_bytes": 27069085593,
+      "workspace_arena_bytes": 948510720,
+      "sampled_external_vram_bytes": 26990432256,
+      "model_load_ns": 82414953497,
+      "submission_count": 18632,
+      "kernel_dispatch_count": 30280,
+      "segment_count": 340,
+      "boundary_count": 340,
+      "sample_count": 4,
+      "generated_token_ids": [
+        23066,
+        23066,
+        23066,
+        23066
+      ],
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0,
+      "raw_evidence_sha256": "fe7c43a3b8dd6ded697e7e019c8120f67c372529bf2bdd8d1434b675421fff26"
+    },
+    {
+      "target": "gfx1201",
+      "input_tokens": 2048,
+      "prefill_chunk_tokens": 1024,
+      "state": "PASS",
+      "prefill_tps": [
+        77.17944323089047,
+        77.42779514158045,
+        77.40901078457628
+      ],
+      "median_prefill_tps": 77.40901078457628,
+      "mad_prefill_tps": 0.01878435700416503,
+      "resident_vram_bytes": 24115002880,
+      "peak_vram_bytes": 25351937536,
+      "placement_required_bytes": 27062374707,
+      "workspace_arena_bytes": 948510720,
+      "model_load_ns": 82112627077,
+      "submission_count": 18632,
+      "kernel_dispatch_count": 30280,
+      "segment_count": 340,
+      "boundary_count": 340,
+      "sample_count": 4,
+      "generated_token_ids": [
+        23066,
+        23066,
+        23066,
+        23066
+      ],
+      "all_dispatches_hip": true,
+      "fallback_used": false,
+      "retryable_cleanup": 0,
+      "durable_quarantine": 0,
+      "raw_evidence_sha256": "eda83158ebeba15f3449b64e1e3b4b782ed2e7fca9fd3174c714f711c7617788"
+    }
+  ],
+  "failed_attempts": [
+    {
+      "target": "gfx1201",
+      "input_tokens": 2048,
+      "prefill_chunk_tokens": 2048,
+      "state": "FAIL",
+      "classification": "out-of-memory",
+      "failure": "layer.56.mlp_down_matmul hipMalloc low-precision matmul prepared workspace returned status 260",
+      "placement_required_bytes": 28010885427,
+      "model_resident_bytes": 24115002880,
+      "request_state_bytes": 288423936,
+      "workspace_arena_bytes": 1897021440,
+      "workspace_separate_allocation_bytes": 28851033344,
+      "safety_reserve_bytes": 1710437171,
+      "raw_evidence_sha256": "8326e41ab2efd7b099c889451d722da51046654eae22cc428a17409a6807d481",
+      "pass_credit": false
+    }
+  ],
+  "validation": {
+    "model_cache_full_hash": "PASS",
+    "derived_artifact_verify_model": "PASS",
+    "graph_token_counts": [
+      1,
+      3,
+      17,
+      255,
+      256,
+      257
+    ],
+    "host_public_runtime": "PASS",
+    "focused_rust_tests": "PASS",
+    "gpu_pass_count": 4,
+    "gpu_fail_count": 1,
+    "gpu_pass_rule": "only completed HIP-only runs without fallback, cleanup failure, timeout, crash, or OOM receive PASS"
+  },
+  "limits": [
+    "The 27B compatibility evidence is limited to the locked model, exact targets, FP16 KV, direct greedy lane, and measured chunk sizes.",
+    "The existing Phase 70 model-independent provider was reused; no 27B-specific matmul kernel or selector was added.",
+    "The 2048-token single-chunk attempt is an OOM failure and is not evidence that the configuration fits.",
+    "The local derived artifact and dirty-source binaries are draft evidence and do not establish release provenance or redistribution readiness."
+  ]
+}

@@ -503,6 +503,7 @@ impl Format {
 enum OracleSelection {
     Full,
     FixedSample(&'static [(usize, usize)]),
+    BoundarySample,
 }
 
 impl OracleSelection {
@@ -510,6 +511,7 @@ impl OracleSelection {
         match self {
             Self::Full => "full",
             Self::FixedSample(_) => "fixed-sample",
+            Self::BoundarySample => "boundary-sample",
         }
     }
 
@@ -525,6 +527,29 @@ impl OracleSelection {
                         ));
                     }
                     indices.push(row * n + column);
+                }
+                indices.sort_unstable();
+                indices.dedup();
+                Ok(indices)
+            }
+            Self::BoundarySample => {
+                let rows = [0, 1, m / 2, m.saturating_sub(2), m.saturating_sub(1)];
+                let columns = [
+                    0,
+                    1,
+                    31,
+                    32,
+                    63,
+                    64,
+                    n / 2,
+                    n.saturating_sub(2),
+                    n.saturating_sub(1),
+                ];
+                let mut indices = Vec::with_capacity(rows.len() * columns.len());
+                for row in rows.into_iter().filter(|row| *row < m) {
+                    for column in columns.into_iter().filter(|column| *column < n) {
+                        indices.push(row * n + column);
+                    }
                 }
                 indices.sort_unstable();
                 indices.dedup();
@@ -647,6 +672,8 @@ impl Phase69Provider {
 
 #[derive(Clone, Copy)]
 enum Phase70Provider {
+    Gfx1201Default,
+    Tiled16,
     Control,
     Gfx1030Candidate,
     Gfx1201Candidate,
@@ -657,6 +684,8 @@ enum Phase70Provider {
 impl Phase70Provider {
     fn name(self) -> &'static str {
         match self {
+            Self::Gfx1201Default => "id45-gfx1201-pack4-n64-default",
+            Self::Tiled16 => "id25-tiled16-control",
             Self::Control => "id29-col8-control",
             Self::Gfx1030Candidate => "id43-gfx1030-via-e4m3-candidate",
             Self::Gfx1201Candidate => "id44-gfx1201-via-e4m3-n64-candidate",
@@ -665,18 +694,22 @@ impl Phase70Provider {
         }
     }
 
-    fn force_environment(self) -> &'static str {
+    fn force_environment(self) -> Option<&'static str> {
         match self {
-            Self::Control => PHASE67_CONTROL_FORCE_ENV,
+            Self::Gfx1201Default => None,
+            Self::Tiled16 => Some("SLLM_MXFP6_PREFILL_FORCE_TILED16"),
+            Self::Control => Some(PHASE67_CONTROL_FORCE_ENV),
             Self::Gfx1030Candidate
             | Self::Gfx1201Candidate
             | Self::Gfx1201Pack4N64
-            | Self::Gfx1201Pack4N128 => PHASE70_CANDIDATE_FORCE_ENV,
+            | Self::Gfx1201Pack4N128 => Some(PHASE70_CANDIDATE_FORCE_ENV),
         }
     }
 
     fn force_value(self) -> &'static str {
         match self {
+            Self::Gfx1201Default => "",
+            Self::Tiled16 => "1",
             Self::Control => "8",
             Self::Gfx1030Candidate => "gfx1030",
             Self::Gfx1201Candidate => "gfx1201-n64",
@@ -687,6 +720,8 @@ impl Phase70Provider {
 
     fn kernel_id(self) -> u32 {
         match self {
+            Self::Gfx1201Default => PHASE70_GFX1201_PACK4_N64_KERNEL_ID,
+            Self::Tiled16 => 25,
             Self::Control => PHASE70_CONTROL_KERNEL_ID,
             Self::Gfx1030Candidate => PHASE70_GFX1030_CANDIDATE_KERNEL_ID,
             Self::Gfx1201Candidate => PHASE70_GFX1201_CANDIDATE_KERNEL_ID,
@@ -722,6 +757,7 @@ enum EvidenceMode {
         repeats: usize,
         provider: Phase70Provider,
         production_shape: bool,
+        wide_n_shape: bool,
     },
 }
 
@@ -824,6 +860,8 @@ struct CaseReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     oracle_sampled_output_indices: Option<Vec<usize>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    sampled_row_top1: Option<Vec<RowTop1>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_abs_error_output_index: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_relative_error_output_index: Option<usize>,
@@ -868,6 +906,14 @@ struct CaseReport {
 }
 
 #[derive(Serialize)]
+struct RowTop1 {
+    row: usize,
+    column: usize,
+    value: f32,
+    margin_to_second: f32,
+}
+
+#[derive(Serialize)]
 struct Report {
     schema_version: &'static str,
     state: &'static str,
@@ -898,6 +944,8 @@ struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     production_shape_included: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    wide_n_shape_included: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     absolute_error_limit: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     relative_error_limit: Option<f32>,
@@ -920,6 +968,19 @@ fn from_bf16(value: u16) -> f32 {
 fn matrix(rows: usize, columns: usize, phase: usize) -> Vec<u16> {
     if matches!(phase, 100 | 111) {
         return special_matrix(rows, columns, phase);
+    }
+    if phase >= 120 {
+        return (0..rows * columns)
+            .map(|index| {
+                let mut bits =
+                    (index as u64).wrapping_add((phase as u64).wrapping_mul(0x9e3779b97f4a7c15));
+                bits = (bits ^ (bits >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                bits = (bits ^ (bits >> 27)).wrapping_mul(0x94d049bb133111eb);
+                bits ^= bits >> 31;
+                let unit = ((bits >> 40) as u32) as f32 / 16_777_215.0;
+                bf16((unit * 2.0 - 1.0) * 4.0)
+            })
+            .collect();
     }
     (0..rows * columns)
         .map(|index| {
@@ -1292,6 +1353,37 @@ fn compare_oracle(
     Ok((stats, indices))
 }
 
+fn sampled_row_top1(output: &[u8], n: usize, indices: &[usize]) -> Vec<RowTop1> {
+    let mut rows: Vec<_> = indices.iter().map(|index| index / n).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    rows.into_iter()
+        .map(|row| {
+            let mut best = (usize::MAX, f32::NEG_INFINITY);
+            let mut second = f32::NEG_INFINITY;
+            for column in 0..n {
+                let byte_index = (row * n + column) * 2;
+                let value = from_bf16(u16::from_le_bytes([
+                    output[byte_index],
+                    output[byte_index + 1],
+                ]));
+                if value > best.1 {
+                    second = best.1;
+                    best = (column, value);
+                } else if value > second {
+                    second = value;
+                }
+            }
+            RowTop1 {
+                row,
+                column: best.0,
+                value: best.1,
+                margin_to_second: best.1 - second,
+            }
+        })
+        .collect()
+}
+
 fn run_case(
     session: &sllm_core::ExecutionSession,
     queue: &sllm_core::ExecutionQueue,
@@ -1511,8 +1603,12 @@ fn run_case(
     let phase70_provider = mode.phase70_provider();
     let sampled_indices = match oracle {
         OracleSelection::Full => None,
-        OracleSelection::FixedSample(_) => Some(oracle_indices.clone()),
+        OracleSelection::FixedSample(_) | OracleSelection::BoundarySample => {
+            Some(oracle_indices.clone())
+        }
     };
+    let sampled_row_top1 = matches!(oracle, OracleSelection::BoundarySample)
+        .then(|| sampled_row_top1(&output, n, &oracle_indices));
     Ok(CaseReport {
         case_id,
         format: format.name(),
@@ -1539,6 +1635,7 @@ fn run_case(
         oracle_mode: detailed.then_some(oracle.name()),
         oracle_point_count: detailed.then_some(oracle_indices.len()),
         oracle_sampled_output_indices: detailed.then_some(sampled_indices).flatten(),
+        sampled_row_top1: detailed.then_some(sampled_row_top1).flatten(),
         max_abs_error_output_index: detailed
             .then_some(oracle_stats.max_abs_error_output_index)
             .flatten(),
@@ -2135,7 +2232,35 @@ fn phase69_cases() -> Vec<CaseSpec> {
     cases
 }
 
-fn phase70_cases(production_shape: bool) -> Vec<CaseSpec> {
+fn phase70_wide_n_cases() -> Vec<CaseSpec> {
+    [
+        ("phase72-lower-control-m17-k2048-n16384", 17, 2048, 16384),
+        ("phase72-lower-tail-m17-k2048-n16385", 17, 2048, 16385),
+        ("phase72-qwen27b-m128-k5120-n17408", 128, 5120, 17408),
+        ("phase72-qwen27b-tail-m129-k5120-n17409", 129, 5120, 17409),
+        ("phase72-wide-m512-k4096-n24576", 512, 4096, 24576),
+        ("phase72-vocab-m128-k4096-n32000", 128, 4096, 32000),
+        ("phase72-upper-tail-m17-k2048-n32767", 17, 2048, 32767),
+        ("phase72-upper-m128-k4096-n32768", 128, 4096, 32768),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (case_id, m, k, n))| CaseSpec {
+        case_id: Some(case_id),
+        format: Format::Mxfp6,
+        m,
+        k,
+        n,
+        phase: 120 + index,
+        oracle: OracleSelection::BoundarySample,
+    })
+    .collect()
+}
+
+fn phase70_cases(production_shape: bool, wide_n_shape: bool) -> Vec<CaseSpec> {
+    if wide_n_shape {
+        return phase70_wide_n_cases();
+    }
     let mut cases = vec![
         CaseSpec {
             case_id: Some("phase70-odd-tail-m3-k64-n5"),
@@ -2270,7 +2395,8 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         EvidenceMode::Phase70 { provider, .. }
             if matches!(
                 provider,
-                Phase70Provider::Gfx1201Candidate
+                Phase70Provider::Gfx1201Default
+                    | Phase70Provider::Gfx1201Candidate
                     | Phase70Provider::Gfx1201Pack4N64
                     | Phase70Provider::Gfx1201Pack4N128
             ) && target != "gfx1201" =>
@@ -2323,8 +2449,10 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
     if let EvidenceMode::Phase70 { provider, .. } = mode {
         for environment in MXFP6_FORCE_ENVIRONMENTS {
             let value = std::env::var(environment).ok();
-            let expected =
-                (*environment == provider.force_environment()).then_some(provider.force_value());
+            let expected = provider
+                .force_environment()
+                .filter(|expected| *expected == *environment)
+                .map(|_| provider.force_value());
             if value.as_deref() != expected {
                 return Err(format!(
                     "Phase 70 {} environment isolation failed for {environment}: expected={expected:?} actual={value:?}",
@@ -2358,8 +2486,10 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
             EvidenceMode::Phase67 { .. } => phase67_cases(),
             EvidenceMode::Phase69 { .. } => phase69_cases(),
             EvidenceMode::Phase70 {
-                production_shape, ..
-            } => phase70_cases(production_shape),
+                production_shape,
+                wide_n_shape,
+                ..
+            } => phase70_cases(production_shape, wide_n_shape),
         };
         let mut cases = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -2431,19 +2561,21 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         ));
     }
     let detailed = mode.report_mode().is_some();
-    let (production_shape_included, candidate_required) = match mode {
-        EvidenceMode::Phase62 { .. } => (None, None),
+    let (production_shape_included, wide_n_shape_included, candidate_required) = match mode {
+        EvidenceMode::Phase62 { .. } => (None, None, None),
         EvidenceMode::Phase63 {
             production_shape,
             require_candidate,
             ..
-        } => (Some(production_shape), Some(require_candidate)),
-        EvidenceMode::Phase66 { .. } => (Some(true), Some(true)),
-        EvidenceMode::Phase67 { .. } => (Some(true), Some(true)),
-        EvidenceMode::Phase69 { .. } => (Some(true), Some(true)),
+        } => (Some(production_shape), None, Some(require_candidate)),
+        EvidenceMode::Phase66 { .. } => (Some(true), None, Some(true)),
+        EvidenceMode::Phase67 { .. } => (Some(true), None, Some(true)),
+        EvidenceMode::Phase69 { .. } => (Some(true), None, Some(true)),
         EvidenceMode::Phase70 {
-            production_shape, ..
-        } => (Some(production_shape), Some(true)),
+            production_shape,
+            wide_n_shape,
+            ..
+        } => (Some(production_shape), Some(wide_n_shape), Some(true)),
     };
     Ok(Report {
         schema_version: mode.schema_version(),
@@ -2470,6 +2602,7 @@ fn run(device_index: u32, target: String, mode: EvidenceMode) -> Result<Report, 
         candidate_submission_count: detailed.then_some(candidate_submission_count),
         candidate_required,
         production_shape_included,
+        wide_n_shape_included,
         absolute_error_limit: detailed.then_some(MAX_ABSOLUTE_ERROR),
         relative_error_limit: detailed.then_some(MAX_RELATIVE_ERROR),
         cases,
@@ -2943,6 +3076,8 @@ fn main() -> ExitCode {
         }
         Some("phase70-provider") => {
             let provider = match arguments.next().as_deref() {
+                Some("id45-gfx1201-pack4-n64-default") => Phase70Provider::Gfx1201Default,
+                Some("id25-tiled16-control") => Phase70Provider::Tiled16,
                 Some("id29-col8-control") => Phase70Provider::Control,
                 Some("id43-gfx1030-via-e4m3-candidate") => Phase70Provider::Gfx1030Candidate,
                 Some("id44-gfx1201-via-e4m3-n64-candidate") => Phase70Provider::Gfx1201Candidate,
@@ -2960,6 +3095,7 @@ fn main() -> ExitCode {
             let mut repeats = 3_usize;
             let mut repeat_seen = false;
             let mut production_shape = false;
+            let mut wide_n_shape = false;
             while let Some(argument) = arguments.next() {
                 match argument.as_str() {
                     "--repeats" if !repeat_seen => {
@@ -2981,18 +3117,24 @@ fn main() -> ExitCode {
                         };
                     }
                     "--production-shape" if !production_shape => production_shape = true,
+                    "--wide-n" if !wide_n_shape => wide_n_shape = true,
                     _ => {
                         eprintln!(
-                            "invalid Phase 70 argument {argument}; expected --repeats N or --production-shape"
+                            "invalid Phase 70 argument {argument}; expected --repeats N, --production-shape, or --wide-n"
                         );
                         return ExitCode::FAILURE;
                     }
                 }
             }
+            if production_shape && wide_n_shape {
+                eprintln!("--production-shape and --wide-n are mutually exclusive");
+                return ExitCode::FAILURE;
+            }
             RequestedMode::Direct(EvidenceMode::Phase70 {
                 repeats,
                 provider,
                 production_shape,
+                wide_n_shape,
             })
         }
         Some(value) => {
@@ -3103,6 +3245,34 @@ mod tests {
                     11
                 }
             );
+        }
+    }
+
+    #[test]
+    fn phase70_wide_n_matrix_covers_selector_and_vocabulary_boundaries() {
+        let cases = phase70_wide_n_cases();
+        assert_eq!(cases.len(), 8);
+        assert_eq!(
+            cases
+                .iter()
+                .map(|case| (case.m, case.k, case.n))
+                .collect::<Vec<_>>(),
+            vec![
+                (17, 2048, 16384),
+                (17, 2048, 16385),
+                (128, 5120, 17408),
+                (129, 5120, 17409),
+                (512, 4096, 24576),
+                (128, 4096, 32000),
+                (17, 2048, 32767),
+                (128, 4096, 32768),
+            ]
+        );
+        for case in cases {
+            assert!(matches!(case.oracle, OracleSelection::BoundarySample));
+            let indices = case.oracle.output_indices(case.m, case.n).unwrap();
+            assert!(indices.contains(&(case.n - 1)));
+            assert!(indices.contains(&((case.m - 1) * case.n + case.n - 1)));
         }
     }
 

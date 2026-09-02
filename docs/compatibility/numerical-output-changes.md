@@ -55,6 +55,38 @@ N1の自動承認は数値互換性gateだけに適用する。性能採用条�
 
 ## 変更履歴
 
+### OUT-2026-09-02-P73-GFX1201-MXFP8-WIDE-N: production selectorのN<=32768拡張（N1）
+
+- scope: exact `gfx1201`、OCP MXFP8 E4M3 W8A8 block32/E8M0 prefill。ID31／34／36／37のN上限だけを
+  16,384から32,768へ広げ、既存M/K、64／128列alignment、他target／format／decodeを維持する。
+- arithmetic/classification: kernel、量子化recipe、E4M3 value、E8M0 scale、FP32 accumulation、BF16 RNEは変更しない。
+  row8から既存WMMA treeへ選択が変わり得るため、Phase 63と同じ**N1**として扱う。
+- verification/decision: N=17,408／32,000／32,768のhost selection、32,769／32,832のfallback、prepared providerと
+  既存gfx1201 codec/provider testをPASSした。ユーザー指示により新規範囲のGPU数値oracle、生成token、性能測定は省略し、
+  未実施を明記したうえでselector scopeを採用する。
+- rollback: 3 predicateの上限を16,384へ戻す。
+- details: [Phase 73履歴](../history/2026/09/1-10/phase73-gfx1201-mxfp8-wide-n-selector.md)と
+  [追跡要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)。
+
+### OUT-2026-09-02-P72-GFX1201-MXFP6-WIDE-N: ID45のN<=32768拡張（N1）
+
+- scope: exact `gfx1201`、OCP MXFP6 E3M2 W6A6 block32/E8M0 prefill matmul。Phase 70 ID45のN上限だけを
+  16,384から32,768へ広げる。M>=17、K>=2048、K%32=0、N>=1024、他target／format／decodeのcomplementは維持する。
+- baseline/candidate: baselineはN>16,384をID25 tiled16へ戻す。candidateは既存ID45のE3M2→E4M3 exact ingress、
+  K16 FP8 WMMA×2、E8M0 scale、block間FP32 accumulation、BF16 RNEをそのまま広幅Nへ選ぶ。量子化recipeやkernel算術は変更しない。
+- classification: **N1**。Phase 70と同じ固定WMMA treeへのprovider切替であり、real-number equation、入力集合、dtype、
+  scale、accumulator、丸めstageを維持する。測定8 shapeではID25／ID29とBF16 digestまで一致したが、全入力bit一致とは主張しない。
+- correctness/output: N=16,384/16,385/17,408/17,409/24,576/32,000/32,767/32,768の各45 sampled pointを
+  独立FP32 oracleでPASSした。最大相対誤差`0.0036457598`、非有限不一致0、各5 row top-1とoutput digestは両controlに一致、
+  repeat不一致0。Qwen3.5-27Bの4 sampleも生成`[23066,23066,23066,23066]`で一致した。
+- performance/resource/decision: ID45はID25比`3.0731〜10.6190x`。強制指定なしのQwen3.5-27B 512-token prefillは
+  旧既定`81.746517`から`383.170165 tok/s`へ4.6873倍となり、resident／peakは`24,115,002,880 / 24,777,018,880` byte、
+  HIP-only、fallback／cleanup 0だった。検証結果に基づきN<=32,768を採用した。
+- rollback: selector上限を16,384へ戻す。運用上のcontrolは`SLLM_MXFP6_PREFILL_FORCE_TILED16=1`。N=32,769以上は
+  現状もID25へfail closedに戻る。
+- details: [Phase 72履歴](../history/2026/09/1-10/phase72-gfx1201-mxfp6-wide-n-selector.md)と
+  [追跡要約](../../ci/matrix/phase72-gfx1201-mxfp6-wide-n-selector-v1.json)。
+
 ### OUT-2026-09-02-P70-RDNA-MXFP6-VIA-E4M3: packed E3M2 ingressとgfx1201 WMMA（N0/N1）
 
 - scope: OCP MXFP6 E3M2 W6A6 block32/E8M0のprefill matmul。exact `gfx1030`のID43は明示benchmark専用、

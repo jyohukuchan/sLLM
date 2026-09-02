@@ -1,6 +1,6 @@
 # AMD GPU互換性方針
 
-> 最終更新: 2026-09-01
+> 最終更新: 2026-09-02
 >
 > この文書はAMD向けの識別規則と初期候補を記録する。現時点の初期targetはすべて`lifecycle=experimental`である。計画targetのevidenceは`unverified`、canonical local実機のformal model-free G0/G1とPhase 6 A0 HIP VMM PoCは検証した限定範囲だけ`project-verified`とする。Phase 49のGQA P32とPhase 67のMXFP8 col8はexact `gfx1030`限定、Phase 50のResidual/GDN/MLP/P32、Phase 63のlarge-M MXFP8 WMMA、Phase 64／65のoperand direct-load、Phase 66のN128 ID37と低精度provider移植はexact `gfx1201`の狭いscope限定であり、target全体やSKU全体の昇格ではない。
 
@@ -740,6 +740,48 @@ ID39 col32は明示benchmark-onlyに留め、既存ID27 col8を`M>=128, K>=2048,
 `8,704/17,152/34,048` byte、VGPRは`46/42/83`、全てspill 0だった。GPU lifecycleは`experimental`のまま、
 evidenceはこのexact target／SKU／tuple／format／shapeだけ`project-verified`とする。詳細は
 [Phase 67追跡要約](../../ci/matrix/phase67-gfx1030-mxfp8-tile-transfer-v1.json)を正本とする。
+
+### 2026-09-02 Phase71 Qwen3.5-27B MXFP6実機scope
+
+Qwen3.5-27Bの24 query heads／4 KV heads／GQA比6、linear-attention value heads 48、hidden 5,120、
+intermediate 17,408をreviewed汎用経路へ追加した。canonical V620 UUID `GPU-76a08c022586fed6` exact `gfx1030`と
+R9700 UUID `GPU-a8e9ddefa2d60f55` exact `gfx1201`で、Phase 70のmodel非依存MXFP6 E3M2 W6A6 provider、
+明示FP16 KV、single direct requestを実行した。既存のtarget／shape限定selectorを27B向けに広げず、27B専用kernelも追加していない。
+
+512入力／chunk 512／3+10のprefill中央値はgfx1030 `34.298907 tok/s`、gfx1201 `81.746517 tok/s`、peakは
+両方`24,777,018,880` byteだった。2,048入力／chunk 1,024／1+3は`33.448016 / 77.409011 tok/s`、peak
+`25,351,937,536` byteでPASSした。全PASS行はHIP-only、fallback 0、cleanup 0である。gfx1201の2,048入力／
+単一2,048 chunkはlayer 56 MLP downの一時workspace OOMとなったためPASSに数えない。確認済みの32 GiB class
+capacityは2,048入力かつchunk 1,024までとする。
+
+| target / Phase 71 scope | lifecycle | evidence | status |
+| --- | --- | --- | --- |
+| V620 exact `gfx1030` Qwen3.5-27B MXFP6、512／2,048 input | `experimental` | `project-verified`（固定model／chunk scope） | HIP-only、fallback／cleanup 0、最大内部peak 25,351,937,536 B |
+| R9700 exact `gfx1201` Qwen3.5-27B MXFP6、512／2,048 input | `experimental` | `project-verified`（固定model／chunk scope） | chunk 1,024はPASS、chunk 2,048はOOM FAIL |
+
+この証拠をRDNA2／RDNA4全体、別SKU／tuple、別model、MXFP8／NVFP4、batch、長時間安定性へ一般化しない。詳細は
+[Phase 71追跡要約](../../ci/matrix/phase71-qwen35-27b-mxfp6-compatibility-v1.json)を正本とする。
+
+### 2026-09-02 Phase72 gfx1201 MXFP6 wide-N selector
+
+canonical R9700 exact `gfx1201`でPhase 70 ID45のN上限を16,384から32,768へ拡張した。既存のexact target、
+MXFP6 E3M2 W6A6、M>=17、K>=2048、K%32=0、N>=1024という条件を維持し、model名はselectorへ追加していない。
+公式／非公式modelのどちらもshape一致で同じ経路を使えるが、未reviewed architectureの他operatorまで対応済みとは扱わない。
+
+8 operator caseはID25／ID29 controlとのBF16 digestとsampled top-1が一致し、ID45はID25比`3.0731〜10.6190x`、
+ID29比`3.0507〜16.7310x`だった。N=32,768はID45、N=32,769はID25 fallbackをhost／prepared provider contractで
+固定した。Qwen3.5-27Bの強制指定なし512-token prefill中央値は`383.170165 tok/s`、peak `24,777,018,880` byte、
+HIP-only、fallback／cleanup 0だった。このevidenceはexact target／SKU／software tuple／format／測定shapeだけを
+`project-verified`とし、RDNA4全体、別SKU、別format、N>32,768へ一般化しない。詳細は
+[Phase 72追跡要約](../../ci/matrix/phase72-gfx1201-mxfp6-wide-n-selector-v1.json)を正本とする。
+
+### 2026-09-02 Phase73 gfx1201 MXFP8 wide-N selector
+
+exact `gfx1201` MXFP8 ID31／34／36／37のproduction N上限を、ユーザー指定により16,384から32,768へ緩和した。
+N=17,408／32,000／32,768の整列shapeはID37、N=32,769およびalignment済みN=32,832は既存fallbackを選ぶ。
+host／provider contractはPASSした。新規N範囲のGPU operator oracleとfull-model benchmarkは実施していないため、
+この追加範囲を`project-verified`へ昇格せず、既存の狭い実機evidenceと区別する。詳細は
+[Phase 73追跡要約](../../ci/matrix/phase73-gfx1201-mxfp8-wide-n-selector-v1.json)を正本とする。
 
 ## 将来AMD候補
 

@@ -200,7 +200,7 @@ sllm_status_t validate_and_copy_descriptor(
         "causal attention range is outside the bounded KV capacity");
   }
   if ((metadata->query.q_heads != 8U && metadata->query.q_heads != 16U &&
-       metadata->query.q_heads != 32U) ||
+       metadata->query.q_heads != 24U && metadata->query.q_heads != 32U) ||
       (metadata->query.head_dim != 128U &&
        metadata->query.head_dim != SLLM_HIP_CAUSAL_ATTENTION_HEAD_DIM &&
        metadata->query.head_dim != SLLM_HIP_KV_MAX_HEAD_DIM) ||

@@ -25,7 +25,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "870c190c0a729a909bd71a8696c8f79ac00a75b7210863e6629f5fc4df510d93"
+        "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
       },
       {
         "path": "native/hip/src/hip_compile_probe.hip.cpp",
@@ -40,7 +40,7 @@
         "sha256": "f937004e7c768dca3eb590572bbc0917d183531753c7e03c35de2841ddc2b901"
       }
     ],
-    "source_set_sha256": "61d063ce5f19ee120ad23d146fca6f471972c6a0a17e273c5706ade6a439b04d"
+    "source_set_sha256": "6a14c8b05a1acf5c1dc07c823f994a5f56d9ceb5e6b4fc12418ee3b323b9672c"
   },
   "direct_compile_sources": {
     "canonical_order": [
@@ -146,7 +146,7 @@
     "files": [
       {
         "path": "include/sllm/hip.h",
-        "sha256": "870c190c0a729a909bd71a8696c8f79ac00a75b7210863e6629f5fc4df510d93"
+        "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
       },
       {
         "path": "native/hip/src/argmax_api.cpp",
@@ -170,7 +170,7 @@
       },
       {
         "path": "native/hip/src/attention_preprocess_api.cpp",
-        "sha256": "71bdd23ff8e887f5105c02544891847e7d8736b75823ad097758eb1038b88bee"
+        "sha256": "f1cebb953af35d7677e370cdca90183533861e1a3cd9f2a80cde444596fdaa02"
       },
       {
         "path": "native/hip/src/attention_preprocess_api.hpp",
@@ -190,7 +190,7 @@
       },
       {
         "path": "native/hip/src/causal_attention_api.cpp",
-        "sha256": "e0c92f9d454bedb067bc0d0ef4ea7bf4f0fffee1a71380d6108dd4f8221a1cb0"
+        "sha256": "dd5e450038ef932bf6822c38e305f8d356a53922236f7a962d33dfc13c507fb3"
       },
       {
         "path": "native/hip/src/causal_attention_api.hpp",
@@ -206,7 +206,7 @@
       },
       {
         "path": "native/hip/src/causal_attention_runtime.inc",
-        "sha256": "4cef5fb0db50375a4002f43d2588543a9660890c20f900898ef1633d9aba42ef"
+        "sha256": "92f8f3b558ed227948b54fe83448bba636c4379274d71dbb3516a72633228c38"
       },
       {
         "path": "native/hip/src/deepseek_v4_moe_route_api.cpp",
@@ -230,7 +230,7 @@
       },
       {
         "path": "native/hip/src/elementwise_api.cpp",
-        "sha256": "be2d8d90743403674edd565cfab48f3d4b6e646819b417d305d56d09ead0b0a9"
+        "sha256": "83267967e9f3a4f523e588c00bdea2bcf9d50ffb17e4a95b0fbdb32f4ef3d04a"
       },
       {
         "path": "native/hip/src/elementwise_api.hpp",
@@ -310,7 +310,7 @@
       },
       {
         "path": "native/hip/src/linear_attention_api.cpp",
-        "sha256": "533b239508d45b78a85cb2ddf5e967eca6b2557d868cfe46b62a403e588c3531"
+        "sha256": "00147b492eb13ed08d1407272ed4eae4ad4b39af623385c59edd0e4518d0882b"
       },
       {
         "path": "native/hip/src/linear_attention_api.hpp",
@@ -330,11 +330,11 @@
       },
       {
         "path": "native/hip/src/low_precision_block_codec.hpp",
-        "sha256": "c23205dd356ba15a24b84748e01b0b8e506608ec5504a476bfe2645cf106ebdc"
+        "sha256": "e62e8721ff65ec009d31cf5d0aa00f6743a7f5ac77e9b8afd9dcd4f442642c85"
       },
       {
         "path": "native/hip/src/low_precision_matmul_provider.hpp",
-        "sha256": "a2ab744782bcc05dc683463740f0c582c4a7114ea06d607317598134ee03d6d6"
+        "sha256": "f16f54ab61273103bfbda092768093db53b2b4e7ccaf275db538d5101f898330"
       },
       {
         "path": "native/hip/src/matmul_api.cpp",
@@ -346,15 +346,15 @@
       },
       {
         "path": "native/hip/src/matmul_kernel.hip.cpp",
-        "sha256": "337a9500d2481377f3fd26067319ebc863aaa37f161e237d6b6575ef2fb9f75a"
+        "sha256": "b9f06f86839f4cc1aa61fa6c5d2fcdcc96231cf44f68be3baef19acde37d584e"
       },
       {
         "path": "native/hip/src/matmul_kernel_internal.hpp",
-        "sha256": "7769844b78956805231449648b3b1a613ef73b787c86eaf6280a6cce018c3b22"
+        "sha256": "68bf1a52834be63c9359b8955338f86bf3286937e1c7e2453f31dea795688a37"
       },
       {
         "path": "native/hip/src/matmul_runtime.inc",
-        "sha256": "467f41b6164a719c381f7a9513af247d0c46a8b3607eb20e3e204cbe5f95466a"
+        "sha256": "2f82af7a33b91b92d2accf2e93c872b79c447d41da144b87976150d069453c2e"
       },
       {
         "path": "native/hip/src/minimax_m3_moe_route_api.cpp",
@@ -537,7 +537,7 @@
         "sha256": "e6d480204c7f49f0385ca511cdb2080372e114d2befa5f345a97b7d5bd0eb8f1"
       }
     ],
-    "source_set_sha256": "207e8b2a35a6292e8e6748d8be4369ba993382fa2e4409df6438762a6f06ae26"
+    "source_set_sha256": "73af5d964af1a9a6f136da1a0052537d43849350ae7ef385ee82de3c8c424b55"
   },
   "public_abi_symbols": [
     "sllm_argmax_execute",

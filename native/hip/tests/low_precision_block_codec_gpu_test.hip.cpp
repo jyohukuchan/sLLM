@@ -47,6 +47,40 @@ static_assert(kMxfp8M129Provider.tile == sllm_lowp::TilePolicy::Wmma128x64x32);
 static_assert(kMxfp8M129Provider.inner_product ==
               sllm_lowp::InnerProduct::E4M3WmmaFp32);
 
+constexpr auto kMxfp8WideNUpperProvider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,
+        128U, 32768U, 4096U));
+static_assert(kMxfp8WideNUpperProvider.supported());
+static_assert(kMxfp8WideNUpperProvider.provider ==
+              sllm_lowp::ProviderKind::Mxfp8Gfx1201Wmma);
+static_assert(kMxfp8WideNUpperProvider.tile ==
+              sllm_lowp::TilePolicy::Wmma128x128x32);
+constexpr auto kMxfp8WideNAboveProvider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp8E4M3W8A8, sllm_lowp::ExactTarget::Gfx1201,
+        128U, 32832U, 4096U));
+static_assert(kMxfp8WideNAboveProvider.supported());
+static_assert(kMxfp8WideNAboveProvider.provider ==
+              sllm_lowp::ProviderKind::Mxfp8Block32);
+
+constexpr auto kMxfp6WideNUpperProvider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6, sllm_lowp::ExactTarget::Gfx1201,
+        17U, 32768U, 2048U));
+static_assert(kMxfp6WideNUpperProvider.supported());
+static_assert(kMxfp6WideNUpperProvider.provider ==
+              sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3);
+static_assert(kMxfp6WideNUpperProvider.tile ==
+              sllm_lowp::TilePolicy::Wmma128x64x32);
+constexpr auto kMxfp6WideNAboveProvider =
+    sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
+        sllm_lowp::MatmulFormat::Mxfp6E3M2W6A6, sllm_lowp::ExactTarget::Gfx1201,
+        17U, 32769U, 2048U));
+static_assert(kMxfp6WideNAboveProvider.supported());
+static_assert(kMxfp6WideNAboveProvider.provider ==
+              sllm_lowp::ProviderKind::Mxfp6Block32);
+
 constexpr auto kUnalignedProvider =
     sllm_lowp::prepare_provider_plan(sllm_lowp::make_provider_request(
         sllm_lowp::MatmulFormat::Mxfp4W4A4, sllm_lowp::ExactTarget::Gfx1201,
@@ -336,10 +370,9 @@ __global__ void e3m2_to_e4m3_exact_kernel(const uint8_t *const packed_input,
       sllm_lowp::ScalarCodec<sllm_lowp::E4M3Fn>::decode_mx_value_plane(e4m3);
 }
 
-__global__ void
-e3m2x4_to_e4m3_exact_kernel(const uint8_t *const packed_input,
-                             uint32_t *const converted_groups,
-                             const uint32_t group_count) {
+__global__ void e3m2x4_to_e4m3_exact_kernel(const uint8_t *const packed_input,
+                                            uint32_t *const converted_groups,
+                                            const uint32_t group_count) {
   const uint32_t group = blockIdx.x * blockDim.x + threadIdx.x;
   if (group >= group_count) {
     return;
@@ -398,25 +431,25 @@ bool run_e3m2_to_e4m3_exact_conversion() {
   uint8_t *device_converted = nullptr;
   uint32_t *device_converted_groups = nullptr;
   float *device_decoded = nullptr;
-  bool ok = hip_ok(hipMalloc(reinterpret_cast<void **>(&device_packed),
-                             packed.size()),
-                   "hipMalloc exact packed input") &&
-            hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted),
-                             converted.size()),
-                   "hipMalloc exact converted output") &&
-            hip_ok(hipMalloc(
-                       reinterpret_cast<void **>(&device_converted_groups),
+  bool ok =
+      hip_ok(
+          hipMalloc(reinterpret_cast<void **>(&device_packed), packed.size()),
+          "hipMalloc exact packed input") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted),
+                       converted.size()),
+             "hipMalloc exact converted output") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_converted_groups),
                        converted_groups.size() * sizeof(uint32_t)),
-                   "hipMalloc exact packed-group converted output") &&
-            hip_ok(hipMalloc(reinterpret_cast<void **>(&device_decoded),
-                             decoded.size() * sizeof(float)),
-                   "hipMalloc exact decoded output") &&
-            hip_ok(hipMemcpy(device_packed, packed.data(), packed.size(),
-                             hipMemcpyHostToDevice),
-                   "hipMemcpy exact packed input");
+             "hipMalloc exact packed-group converted output") &&
+      hip_ok(hipMalloc(reinterpret_cast<void **>(&device_decoded),
+                       decoded.size() * sizeof(float)),
+             "hipMalloc exact decoded output") &&
+      hip_ok(hipMemcpy(device_packed, packed.data(), packed.size(),
+                       hipMemcpyHostToDevice),
+             "hipMemcpy exact packed input");
   if (ok) {
-    hipLaunchKernelGGL(e3m2_to_e4m3_exact_kernel, dim3(1U), dim3(value_count), 0U,
-                       nullptr, device_packed, device_converted,
+    hipLaunchKernelGGL(e3m2_to_e4m3_exact_kernel, dim3(1U), dim3(value_count),
+                       0U, nullptr, device_packed, device_converted,
                        device_decoded);
     hipLaunchKernelGGL(e3m2x4_to_e4m3_exact_kernel, dim3(1U),
                        dim3(value_count / packed_lanes), 0U, nullptr,
@@ -455,8 +488,9 @@ bool run_e3m2_to_e4m3_exact_conversion() {
     for (uint32_t group = 0U; group < converted_groups.size(); ++group) {
       uint32_t expected = 0U;
       for (uint32_t lane = 0U; lane < packed_lanes; ++lane) {
-        expected |= static_cast<uint32_t>(converted[group * packed_lanes + lane])
-                    << (lane * 8U);
+        expected |=
+            static_cast<uint32_t>(converted[group * packed_lanes + lane])
+            << (lane * 8U);
       }
       if (converted_groups[group] != expected) {
         std::cerr << "packed-group E3M2 to E4M3 mismatch group=" << group
@@ -772,11 +806,9 @@ bool run_provider_contract() {
       mxfp8_m129.tile == TilePolicy::Wmma128x64x32 &&
       mxfp8_m129.inner_product == InnerProduct::E4M3WmmaFp32 &&
       mxfp6_gfx1201.supported() &&
-      mxfp6_gfx1201.provider ==
-          ProviderKind::Mxfp6Gfx1201WmmaViaE4M3 &&
+      mxfp6_gfx1201.provider == ProviderKind::Mxfp6Gfx1201WmmaViaE4M3 &&
       mxfp6_gfx1201.tile == TilePolicy::Wmma128x64x32 &&
-      mxfp6_gfx1201.inner_product ==
-          InnerProduct::E3M2ViaE4M3WmmaFp32 &&
+      mxfp6_gfx1201.inner_product == InnerProduct::E3M2ViaE4M3WmmaFp32 &&
       mxfp6_gfx1030.supported() &&
       mxfp6_gfx1030.provider == ProviderKind::Mxfp6Block32 &&
       mxfp6_below_scope.supported() &&

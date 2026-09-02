@@ -31,7 +31,7 @@
       "files": [
         {
           "path": "include/sllm/hip.h",
-          "sha256": "870c190c0a729a909bd71a8696c8f79ac00a75b7210863e6629f5fc4df510d93"
+          "sha256": "f2eb4fb380a3d69e128ebabd384cb86c01fb44c58e329c3ada206c6fe3e938ee"
         },
         {
           "path": "native/hip/src/rmsnorm_kernel.hip.cpp",
@@ -42,7 +42,7 @@
           "sha256": "dc9d910305791097ae32463ba134da4c4aa398fdc55d40e59e4eb2b70f0c84d6"
         }
       ],
-      "source_set_sha256": "d67b456e6a2e13af71519f02b7974babd06f7ff5506d5425d9208492679382f1"
+      "source_set_sha256": "60720dd5d06354c96d54c86e038b2d77273cfc74b45570a9453c8793a03c6f37"
     },
     "host_abi": {
       "canonical_order": [
@@ -91,7 +91,7 @@
         },
         {
           "path": "crates/sllm-hip-sys/src/bindings.rs",
-          "sha256": "4c8d750640db7d52137f0dd808517ca6c9b940420a88e84cb987eb8e04e14460"
+          "sha256": "979fbfd2418dee23a79727dc3e6701523f371e4c67d278691200d3c63c154202"
         },
         {
           "path": "crates/sllm-hip/src/rmsnorm.rs",
@@ -99,14 +99,14 @@
         },
         {
           "path": "crates/sllm-core/src/op.rs",
-          "sha256": "1bc84976441e57d075ca42066ed1ecac7eb4d52328187fa4ef1d3e5177bcccb0"
+          "sha256": "cee637fa890c817e8894c886ea2c632ffc0f8476486cd6de37719e9ffaecdcac"
         },
         {
           "path": "native/hip/CMakeLists.txt",
           "sha256": "4d2add813a6f1fba56787eb3b61867e9cdcab1ebfc8d9559a5c386021cf008f4"
         }
       ],
-      "source_set_sha256": "5ee31d62e4146d9e6137d32f23170407fc20fff8d0dc0fc13b47a7dd901ec7f4"
+      "source_set_sha256": "9d0612092e91617c46c2d8564e1e1287b77a11ee4fcbb9d69069391a2f55c754"
     },
     "ci_contract": {
       "canonical_order": [
@@ -156,7 +156,7 @@
         },
         {
           "path": "ci/matrix/hip-runtime-compile-v1.json",
-          "sha256": "3f795c0e38e0f25dfa988ede26e67ca2bf161abfbd28191f4737cc6ac38b7a60"
+          "sha256": "7246138c50b5e34f98080176916148a3475ad5bd39419a8e241bee0c300b580c"
         },
         {
           "path": "ci/requirements-host.txt",
@@ -183,7 +183,7 @@
           "sha256": "aa9391e6d114fa52a82c142193453084729a0225f0d3b4c9551686d23effeb9f"
         }
       ],
-      "source_set_sha256": "76d294366f9e916745f25c07188a33f64d4794d2a955c3e64a622b1c77b1b8a3"
+      "source_set_sha256": "fbec4a9abdf21ec30f4b3bac1455319421e40b83c7fc97b2add2923be5e88c63"
     }
   },
   "source_symbol_map": [

@@ -1,0 +1,29 @@
+{
+  "schema_version": "phase73-gfx1201-mxfp8-wide-n-selector-v1",
+  "state": "HOST_AND_PROVIDER_CONTRACT_PASS",
+  "date": "2026-09-02",
+  "decision": "adopt N <= 32768 for exact gfx1201 MXFP8 production WMMA selectors",
+  "scope": {
+    "target": "gfx1201",
+    "format": "OCP MXFP8 E4M3 W8A8 block32 E8M0",
+    "previous_upper_n": 16384,
+    "new_upper_n": 32768,
+    "affected_kernel_ids": [31, 34, 36, 37],
+    "unchanged_conditions": "model-independent M/K and 64/128-column alignment contracts"
+  },
+  "selector_contract": {
+    "n_17408": "ID37 for the tested M128/K5120 aligned shape",
+    "n_32000": "ID37 for the tested M128/K4096 aligned shape",
+    "n_32768": "ID37 for the tested M128/K4096 aligned shape",
+    "n_32769": "row8 fallback",
+    "n_32832": "row8 fallback despite 64-column alignment"
+  },
+  "verification": {
+    "public_runtime_host_test": "PASS 1/1",
+    "gfx1201_low_precision_codec_provider_gpu_test": "PASS",
+    "gpu_wide_n_numerical_oracle": "not run by user direction",
+    "full_model_wide_n_benchmark": "not run by user direction"
+  },
+  "evidence_classification": "selector contract adopted; newly added wide-N runtime range remains unverified",
+  "rollback": "restore the three gfx1201 MXFP8 production predicate upper bounds to 16384"
+}

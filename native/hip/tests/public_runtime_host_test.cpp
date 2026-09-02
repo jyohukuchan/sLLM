@@ -1645,6 +1645,25 @@ bool elementwise_prepare_execute_and_negative_contract() {
   }
   descriptor = elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL,
                                       input0, input1, output, 3U);
+  descriptor.input0.shape[0] = 1U;
+  descriptor.input0.shape[1] = 24U;
+  descriptor.input0.stride_elements[0] = 6144U;
+  descriptor.input1 = descriptor.input0;
+  descriptor.input1.buffer = input1;
+  descriptor.output = descriptor.input0;
+  descriptor.output.buffer = output;
+  if (!expect_status(
+          sllm_elementwise_prepare(context, &descriptor, &plan, &error.sink),
+          SLLM_STATUS_OK, "Qwen3.5-27B sigmoid head layout", error) ||
+      plan == nullptr ||
+      !expect_status(sllm_elementwise_plan_release(&plan, &error.sink),
+                     SLLM_STATUS_OK, "Qwen3.5-27B sigmoid plan release",
+                     error) ||
+      plan != nullptr) {
+    return false;
+  }
+  descriptor = elementwise_descriptor(SLLM_ELEMENTWISE_OPERATION_SIGMOID_MUL,
+                                      input0, input1, output, 3U);
   descriptor.input0.shape[1] = 4U;
   descriptor.input0.stride_elements[0] = 1024U;
   descriptor.input1 = descriptor.input0;
@@ -2660,8 +2679,9 @@ bool rmsnorm_direct_scale_numerical_contract() {
 }
 
 bool rmsnorm_execute_boundaries_and_failures() {
-  constexpr uint64_t columns[] = {1U,   3U,    17U,   255U,  256U,
-                                  257U, 2560U, 4095U, 4096U, 4097U};
+  constexpr uint64_t columns[] = {1U,    3U,    17U,   255U,  256U,
+                                  257U,  2560U, 4095U, 4096U, 4097U,
+                                  5119U, 5120U, 5121U};
   constexpr uint64_t rows[] = {1U, 2U, 3U};
   for (const uint64_t row_count : rows) {
     for (const uint64_t column_count : columns) {
@@ -2691,7 +2711,7 @@ bool rmsnorm_execute_boundaries_and_failures() {
       sllm_completion_t *completion = nullptr;
       sllm_rmsnorm_dispatch_info_t info = rmsnorm_dispatch_info();
       const sllm_status_t expected =
-          column_count == 4097U ? SLLM_STATUS_UNSUPPORTED : SLLM_STATUS_OK;
+          column_count == 5121U ? SLLM_STATUS_UNSUPPORTED : SLLM_STATUS_OK;
       if (!expect_status(sllm_rmsnorm_execute(plan, queue, &completion, &info,
                                               &error.sink),
                          expected, "boundary execute", error) ||
@@ -4129,6 +4149,24 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 512U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::
               Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 5120U, 17408U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32000U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32768U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp8W8A8PrefillWmmaN128DirectBoth &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32769U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
+      sllm_matmul_kernel::select_mxfp8_variant(128U, 4096U, 32832U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 32U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp8W8A8PrefillRow8 &&
       sllm_matmul_kernel::select_mxfp8_variant(128U, 2560U, 248320U,
@@ -4157,21 +4195,17 @@ bool matmul_mxfp_prefill_selector_contract() {
       sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
           sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
   setenv(mxfp6_phase70, "gfx1201-n64-pack4", 1);
-  valid =
-      valid &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
-                                               "gfx1201") ==
-          sllm_matmul_kernel::KernelVariant::
-              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+  valid = valid && sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
+                                                            "gfx1201") ==
+                       sllm_matmul_kernel::KernelVariant::
+                           Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
   setenv(mxfp6_phase70, "gfx1201-n128-pack4", 1);
   valid =
       valid &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U,
-                                               "gfx1201") ==
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::
               Mxfp6W6A6PrefillWmmaGfx1201Pack4N128 &&
-      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 1025U,
-                                               "gfx1201") ==
+      sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 1025U, "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::
               Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
   unsetenv(mxfp6_phase70);
@@ -4191,7 +4225,11 @@ bool matmul_mxfp_prefill_selector_contract() {
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::
               Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 &&
-      sllm_matmul_kernel::select_mxfp6_variant(2048U, 9216U, 16385U,
+      sllm_matmul_kernel::select_mxfp6_variant(2048U, 9216U, 32768U,
+                                               "gfx1201") ==
+          sllm_matmul_kernel::KernelVariant::
+              Mxfp6W6A6PrefillWmmaGfx1201Pack4N64 &&
+      sllm_matmul_kernel::select_mxfp6_variant(2048U, 9216U, 32769U,
                                                "gfx1201") ==
           sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16 &&
       sllm_matmul_kernel::select_mxfp6_variant(128U, 2560U, 9216U, "gfx1030") ==
@@ -4202,19 +4240,17 @@ bool matmul_mxfp_prefill_selector_contract() {
           sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
 
   constexpr uint64_t phase70_m_boundaries[] = {
-      1U, 17U, 127U, 128U, 129U, 511U,
-      512U, 513U, 2047U, 2048U, 2049U};
+      1U, 17U, 127U, 128U, 129U, 511U, 512U, 513U, 2047U, 2048U, 2049U};
   for (const uint64_t m : phase70_m_boundaries) {
     const auto expected =
-        m == 1U
-            ? sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode
-            : sllm_matmul_kernel::KernelVariant::
-                  Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
+        m == 1U ? sllm_matmul_kernel::KernelVariant::Mxfp6W6A6Decode
+                : sllm_matmul_kernel::KernelVariant::
+                      Mxfp6W6A6PrefillWmmaGfx1201Pack4N64;
     valid = valid && sllm_matmul_kernel::select_mxfp6_variant(
                          m, 2048U, 1024U, "gfx1201") == expected;
   }
-  constexpr uint64_t phase70_k_boundaries[] = {31U,   32U,   33U, 2048U,
-                                                2560U, 4096U, 9216U};
+  constexpr uint64_t phase70_k_boundaries[] = {31U,   32U,   33U,  2048U,
+                                               2560U, 4096U, 9216U};
   for (const uint64_t k : phase70_k_boundaries) {
     const auto expected =
         k >= 2048U && (k % 32U) == 0U
@@ -4225,23 +4261,23 @@ bool matmul_mxfp_prefill_selector_contract() {
                          17U, k, 1024U, "gfx1201") == expected;
   }
   constexpr uint64_t phase70_n_boundaries[] = {
-      31U,  32U,  33U,   63U,   64U,   65U, 127U, 128U,
-      129U, 1023U, 1024U, 1025U, 2559U, 2560U, 2561U};
+      31U,    32U,    33U,    63U,    64U,    65U,    127U,   128U,   129U,
+      1023U,  1024U,  1025U,  2559U,  2560U,  2561U,  16383U, 16384U, 16385U,
+      17407U, 17408U, 17409U, 31999U, 32000U, 32001U, 32767U, 32768U, 32769U};
   for (const uint64_t n : phase70_n_boundaries) {
     const auto expected =
-        n >= 1024U
+        n >= 1024U && n <= 32768U
             ? sllm_matmul_kernel::KernelVariant::
                   Mxfp6W6A6PrefillWmmaGfx1201Pack4N64
             : sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
     valid = valid && sllm_matmul_kernel::select_mxfp6_variant(
                          17U, 2048U, n, "gfx1201") == expected;
   }
-  for (const char *const target : {"gfx1030", "gfx1200", "gfx942",
-                                   "gfx9999"}) {
-    valid = valid &&
-            sllm_matmul_kernel::select_mxfp6_variant(
-                17U, 2048U, 1024U, target) ==
-                sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
+  for (const char *const target : {"gfx1030", "gfx1200", "gfx942", "gfx9999"}) {
+    valid =
+        valid &&
+        sllm_matmul_kernel::select_mxfp6_variant(17U, 2048U, 1024U, target) ==
+            sllm_matmul_kernel::KernelVariant::Mxfp6W6A6PrefillTiled16;
   }
 
   setenv(mmq_columns, "8", 1);
@@ -4755,35 +4791,35 @@ bool matmul_mxfp_prefill_selector_contract() {
       uint32_t prepared_provider = 0U;
       uint32_t prepared_tile = 0U;
       uint32_t prepared_inner_product = 0U;
-      valid = valid &&
-              sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
-                  static_cast<uint32_t>(
-                      sllm_matmul_kernel::KernelVariant::
-                          Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
-              sllm_test_matmul_prepared_provider_semantics(
-                  phase70_plan, &prepared_provider, &prepared_tile,
-                  &prepared_inner_product) == 1U &&
-              prepared_provider ==
-                  static_cast<uint32_t>(
-                      sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3) &&
-              prepared_tile ==
-                  static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
-              prepared_inner_product ==
-                  static_cast<uint32_t>(
-                      sllm_lowp::InnerProduct::E3M2ViaE4M3WmmaFp32);
+      valid =
+          valid &&
+          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                        Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
+          sllm_test_matmul_prepared_provider_semantics(
+              phase70_plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3) &&
+          prepared_tile ==
+              static_cast<uint32_t>(sllm_lowp::TilePolicy::Wmma128x64x32) &&
+          prepared_inner_product ==
+              static_cast<uint32_t>(
+                  sllm_lowp::InnerProduct::E3M2ViaE4M3WmmaFp32);
       setenv(baseline, "1", 1);
       setenv(mxfp6_row8, "1", 1);
-      valid = valid &&
-              sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
-                  static_cast<uint32_t>(
-                      sllm_matmul_kernel::KernelVariant::
-                          Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
-              sllm_test_matmul_prepared_provider_semantics(
-                  phase70_plan, &prepared_provider, &prepared_tile,
-                  &prepared_inner_product) == 1U &&
-              prepared_provider ==
-                  static_cast<uint32_t>(
-                      sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3);
+      valid =
+          valid &&
+          sllm_test_matmul_prepared_kernel_id(phase70_plan) ==
+              static_cast<uint32_t>(sllm_matmul_kernel::KernelVariant::
+                                        Mxfp6W6A6PrefillWmmaGfx1201Pack4N64) &&
+          sllm_test_matmul_prepared_provider_semantics(
+              phase70_plan, &prepared_provider, &prepared_tile,
+              &prepared_inner_product) == 1U &&
+          prepared_provider ==
+              static_cast<uint32_t>(
+                  sllm_lowp::ProviderKind::Mxfp6Gfx1201WmmaViaE4M3);
     }
     if (phase70_plan != nullptr) {
       valid = expect_status(
@@ -7767,6 +7803,52 @@ bool linear_attention_transaction_and_lifetime_contract() {
     return success;
   };
   if (!create_context(&context) || !create_queue(context, &queue)) {
+    return false;
+  }
+  sllm_linear_attention_state_create_info_t reviewed_27b_create{};
+  reviewed_27b_create.struct_size = sizeof(reviewed_27b_create);
+  reviewed_27b_create.abi_version = SLLM_HIP_ABI_VERSION;
+  reviewed_27b_create.session_id = 0x27bU;
+  reviewed_27b_create.layer_id = 1U;
+  reviewed_27b_create.capacity_tokens = capacity;
+  reviewed_27b_create.qk_heads = 16U;
+  reviewed_27b_create.value_heads = 48U;
+  reviewed_27b_create.head_dim = 128U;
+  reviewed_27b_create.conv_kernel_size = 4U;
+  sllm_linear_attention_state_t *reviewed_27b_state = nullptr;
+  Error reviewed_27b_error;
+  if (!expect_status(sllm_linear_attention_state_create(
+                         context, &reviewed_27b_create, &reviewed_27b_state,
+                         &reviewed_27b_error.sink),
+                     SLLM_STATUS_OK, "Qwen3.5-27B linear state create",
+                     reviewed_27b_error) ||
+      reviewed_27b_state == nullptr) {
+    release_queue(&queue);
+    release_context(&context);
+    return false;
+  }
+  sllm_linear_attention_view_info_t reviewed_27b_view{};
+  reviewed_27b_view.struct_size = sizeof(reviewed_27b_view);
+  reviewed_27b_view.abi_version = SLLM_HIP_ABI_VERSION;
+  reviewed_27b_view.info_version = SLLM_HIP_LINEAR_ATTENTION_VIEW_INFO_VERSION;
+  const bool reviewed_27b_valid =
+      expect_status(sllm_linear_attention_state_query(reviewed_27b_state,
+                                                      &reviewed_27b_view,
+                                                      &reviewed_27b_error.sink),
+                    SLLM_STATUS_OK, "Qwen3.5-27B linear state query",
+                    reviewed_27b_error) &&
+      reviewed_27b_view.conv_state_shape[0] == 3U &&
+      reviewed_27b_view.conv_state_shape[1] == 10240U &&
+      reviewed_27b_view.recurrent_state_shape[0] == 48U &&
+      reviewed_27b_view.recurrent_state_shape[1] == 128U &&
+      reviewed_27b_view.recurrent_state_shape[2] == 128U;
+  const bool reviewed_27b_released = expect_status(
+      sllm_linear_attention_state_release(&reviewed_27b_state,
+                                          &reviewed_27b_error.sink),
+      SLLM_STATUS_OK, "Qwen3.5-27B linear state release", reviewed_27b_error);
+  if (!reviewed_27b_valid || !reviewed_27b_released) {
+    release_queue(&queue);
+    release_context(&context);
     return false;
   }
   for (std::size_t index = 0U; index != buffers.size(); ++index) {

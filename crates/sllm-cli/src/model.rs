@@ -5516,6 +5516,7 @@ impl ModelFrontendBackend for ProductionBackend {
             "Qwen/Qwen3.5-2B" => "2B",
             "Qwen/Qwen3.5-4B" => "4B",
             "Qwen/Qwen3.5-9B" => "9B",
+            "Qwen/Qwen3.5-27B" => "27B",
             _ => return Err("benchmark model is outside the fixed Qwen size contract".to_owned()),
         };
         if request.model_size != expected_model_size {
@@ -6852,8 +6853,11 @@ fn parse(command: &str, arguments: impl Iterator<Item = String>) -> Result<Reque
             }
             "--model-size" if command == "benchmark" => {
                 let value = take_value(&mut arguments, "--model-size")?;
-                if !matches!(value.as_str(), "2B" | "4B" | "9B" | "12B" | "26B-A4B") {
-                    return Err("--model-size must be 2B, 4B, 9B, 12B, or 26B-A4B".to_owned());
+                if !matches!(
+                    value.as_str(),
+                    "2B" | "4B" | "9B" | "12B" | "26B-A4B" | "27B"
+                ) {
+                    return Err("--model-size must be 2B, 4B, 9B, 12B, 26B-A4B, or 27B".to_owned());
                 }
                 set_once(&mut benchmark_model_size, value, "--model-size")?;
             }
@@ -9214,6 +9218,37 @@ mod tests {
                 input: BenchmarkInput::TokenIds(ref ids),
                 ..
             }) if ids.as_slice() == [23_066, 23_066, 23_066]
+        ));
+    }
+
+    #[test]
+    fn benchmark_direct_lane_accepts_reviewed_27b_identity() {
+        let request = parse_args(
+            "benchmark",
+            &[
+                "--gguf",
+                "model.gguf",
+                "--derived-lock",
+                "model.lock.json",
+                "--lane",
+                "direct",
+                "--model-size",
+                "27B",
+                "--input-token-ids",
+                "23066",
+                "--max-new-tokens",
+                "2",
+                "--device-index",
+                "0",
+                "--target",
+                "gfx1201",
+                "--greedy",
+            ],
+        )
+        .unwrap();
+        assert!(matches!(
+            request.operation,
+            Operation::Benchmark(BenchmarkRequest { model_size, .. }) if model_size == "27B"
         ));
     }
 

@@ -374,7 +374,7 @@ gfx1201_mxfp8_wmma_n64_shape(const ProviderRequest &request) noexcept {
   const bool phase65_complete_row_family =
       (request.m % 128U) == 0U && request.n >= 64U;
   return request.target == ExactTarget::Gfx1201 && request.m >= 128U &&
-         request.k >= 2048U && request.n <= 16384U && (request.n % 64U) == 0U &&
+         request.k >= 2048U && request.n <= 32768U && (request.n % 64U) == 0U &&
          (phase63_wide_family || phase65_complete_row_family);
 }
 
@@ -387,7 +387,7 @@ gfx1201_mxfp8_wmma_n128_shape(const ProviderRequest &request) noexcept {
 constexpr bool
 gfx1201_mxfp6_wmma_via_e4m3_shape(const ProviderRequest &request) noexcept {
   return request.target == ExactTarget::Gfx1201 && request.m >= 17U &&
-         request.k >= 2048U && request.n >= 1024U && request.n <= 16384U;
+         request.k >= 2048U && request.n >= 1024U && request.n <= 32768U;
 }
 
 constexpr PreparedProviderPlan

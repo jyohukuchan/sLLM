@@ -36,6 +36,7 @@ from validate_model_lock import (  # noqa: E402
 
 
 LOCK_PATH = ROOT / "docs/models/locks/qwen3.5-4b-bf16.json"
+QWEN_27B_LOCK_PATH = ROOT / "docs/models/locks/qwen3.5-27b-bf16.json"
 SCHEMA_PATH = ROOT / "ci/schema/model-lock-v1.schema.json"
 FIXTURE_LOCK = ROOT / "ci/fixtures/model-lock-v1/lock.json"
 FIXTURE_CACHE = ROOT / "ci/fixtures/model-lock-v1/cache"
@@ -110,6 +111,21 @@ class ModelLockContractTests(unittest.TestCase):
             },
         )
         self.assertEqual(model["generation_config"], {"present": False, "path": None})
+
+    def test_qwen_27b_lock_accepts_bound_generation_config(self) -> None:
+        lock = validate_lock_file(QWEN_27B_LOCK_PATH, schema_path=SCHEMA_PATH)
+        model = lock["model"]
+        self.assertEqual(model["repo_id"], "Qwen/Qwen3.5-27B")
+        self.assertEqual(
+            model["generation_config"],
+            {"present": True, "path": "generation_config.json"},
+        )
+        self.assertIn("generation_config.json", {entry["path"] for entry in model["files"]})
+
+        missing = copy.deepcopy(lock)
+        missing["model"]["generation_config"]["path"] = "missing-generation-config.json"
+        missing["fingerprint"] = fingerprint_for_document(missing)
+        self.assert_rejected(missing)
 
     def test_qwen_typed_full_attention_config_is_explicit_and_fail_closed(self) -> None:
         text = self.lock["model"]["architecture"]["text_config"]

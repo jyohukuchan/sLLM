@@ -3994,7 +3994,7 @@ fn validate_causal_attention_bindings(
     }
     let query_heads = query_shape[1];
     let group_size = query_heads / layout.heads();
-    if !matches!(group_size, 2 | 4 | 8 | 16) {
+    if !matches!(group_size, 2 | 4 | 6 | 8 | 16) {
         return Err(ExecutionError::InvalidRequest {
             reason: "causal attention GQA group size is not reviewed".to_owned(),
         });
@@ -7890,6 +7890,40 @@ mod tests {
         let state = session
             .create_kv_state(crate::KvStateDescriptor::new(0, 3).unwrap())
             .unwrap();
+        for query_heads in [24, 20, 28] {
+            let query = kv_binding(
+                &session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[1, query_heads, 256],
+                &[query_heads * 256, 256, 1],
+                AccessMode::Read,
+            );
+            let output = kv_binding(
+                &session,
+                crate::DType::Bf16,
+                crate::Encoding::Unquantized,
+                &[1, query_heads, 256],
+                &[query_heads * 256, 256, 1],
+                AccessMode::Write,
+            );
+            let result = validate_causal_attention_bindings(
+                &session,
+                &query,
+                &output,
+                CausalAttentionDescriptor::new(0, 1, 1).unwrap(),
+                crate::KvStateLayout::default(),
+            );
+            if query_heads == 24 {
+                result.expect("Qwen3.5-27B GQA ratio 6 must be reviewed");
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(ExecutionError::InvalidRequest { reason })
+                        if reason.contains("GQA group size")
+                ));
+            }
+        }
         let query = kv_binding(
             &session,
             crate::DType::Bf16,

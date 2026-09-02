@@ -1594,7 +1594,7 @@ fn validate_causal_attention_binding(
         || view.shape().len() != 3
         || q_heads == 0
         || q_heads % layout.heads() != 0
-        || !matches!(q_heads / layout.heads(), 2 | 4 | 8 | 16)
+        || !matches!(q_heads / layout.heads(), 2 | 4 | 6 | 8 | 16)
         || view.shape()[2] != layout.head_dim()
         || view.strides() != [q_heads * layout.head_dim(), layout.head_dim(), 1]
         || view.shape()[0] == 0

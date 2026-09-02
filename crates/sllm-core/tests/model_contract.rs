@@ -103,6 +103,16 @@ fn reviewed_qwen35_family_locks_preserve_shape_and_output_contracts() {
         ("qwen3.5-2b-bf16.json", 2_048, 24, 8, 2, 6_144, true, 632),
         ("qwen3.5-4b-bf16.json", 2_560, 32, 16, 4, 9_216, true, 738),
         ("qwen3.5-9b-bf16.json", 4_096, 32, 16, 4, 12_288, false, 775),
+        (
+            "qwen3.5-27b-bf16.json",
+            5_120,
+            64,
+            24,
+            4,
+            17_408,
+            false,
+            1_199,
+        ),
     ];
     for (file, hidden, layers, heads, kv_heads, intermediate, tied, tensors) in cases {
         let lock = read_model_lock(repository_path(&format!("docs/models/locks/{file}")))
@@ -129,6 +139,7 @@ fn reviewed_qwen35_external_caches_build_load_plans_and_graphs() {
     let cases = [
         ("qwen3.5-2b-bf16.json", "SLLM_QWEN35_2B_CACHE", 320, true),
         ("qwen3.5-9b-bf16.json", "SLLM_QWEN35_9B_CACHE", 427, false),
+        ("qwen3.5-27b-bf16.json", "SLLM_QWEN35_27B_CACHE", 851, false),
     ];
     for (file, variable, required_count, tied) in cases {
         let cache_path = std::env::var_os(variable)
