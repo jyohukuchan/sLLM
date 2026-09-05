@@ -98,9 +98,9 @@ check_host() {
     fi
     "$TEMP_DIR/cxx17-smoke" || fail 'C++17 probe returned a failure'
 
-    require_command clang-format
-    clang_format_version="$(clang-format --version)"
-    [[ -n "$clang_format_version" ]] || fail 'clang-format returned an empty version'
+    require_command clang-format-18
+    clang_format_version="$(clang-format-18 --version)"
+    [[ -n "$clang_format_version" ]] || fail 'clang-format-18 returned an empty version'
 
     require_command shellcheck
     shellcheck_version="$(shellcheck --version | sed -n 's/^version: //p')"
@@ -137,7 +137,7 @@ check_host() {
     note "Rust=$EXPECTED_RUST_VERSION MSRV=$EXPECTED_MSRV_VERSION"
     note "rustfmt=$rustfmt_version clippy=$clippy_version"
     note "CMake=$cmake_version Ninja=$ninja_version CXX=$cxx_command"
-    note "clang-format=$clang_format_version ShellCheck=$shellcheck_version"
+    note "clang-format-18=$clang_format_version ShellCheck=$shellcheck_version"
     note "ROCm=$EXPECTED_ROCM_VERSION LLVM=$EXPECTED_LLVM_MAJOR root=$ROCM_PATH"
     note 'host checks passed'
 }
