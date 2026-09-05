@@ -70,5 +70,6 @@
     "Publication smoke uses zero warmups and one measured run, not a performance comparison.",
     "Hardware counters belong to the earlier r25 binary; final rebuild is validated separately and is not asserted byte-identical.",
     "Physical DRAM utilization is not directly measured."
-  ]
+  ],
+  "validated_source_commit": "9ba9959ee14bc27193b7bafed0939a1142e17383"
 }

@@ -219,7 +219,7 @@ reuse:
     - Returned two signed int8x4 packs in an sLLM-local type and applied the block scale outside the integer dot product.
     - Kept only the AMD byte-permute route and removed CUDA, MUSA, ggml tensor, and quant-type dependencies.
 import:
-  commit: pending-phase78-import-commit
+  commit: 9ba9959ee14bc27193b7bafed0939a1142e17383
 ```
 
 ## llama-cpp-profile-v1-sampling-tests-001
